@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import os
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 import requests
 from flask import session, url_for
@@ -42,9 +43,19 @@ def build_google_flow(settings: Settings) -> Flow:
     return flow
 
 
+def _allow_localhost_oauth_http(redirect_uri: str) -> None:
+    parsed = urlparse(redirect_uri)
+    if parsed.scheme != "http":
+        return
+    if parsed.hostname not in {"127.0.0.1", "localhost"}:
+        return
+    os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
+
+
 def create_google_authorization_url(settings: Settings) -> str:
     flow = build_google_flow(settings)
     redirect_uri = _resolve_google_redirect_uri(settings)
+    _allow_localhost_oauth_http(redirect_uri)
     flow.redirect_uri = redirect_uri
     authorization_url, state = flow.authorization_url(
         access_type="offline",
@@ -62,6 +73,7 @@ def finish_google_oauth(settings: Settings, authorization_response: str) -> None
 
     flow = build_google_flow(settings)
     flow.redirect_uri = _resolve_google_redirect_uri(settings)
+    _allow_localhost_oauth_http(flow.redirect_uri)
     flow.fetch_token(authorization_response=authorization_response)
     session["google_credentials"] = credentials_to_dict(flow.credentials)
     session["google_profile"] = fetch_google_profile(flow.credentials)
