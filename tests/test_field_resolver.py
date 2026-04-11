@@ -68,6 +68,24 @@ class FieldResolverTests(unittest.TestCase):
 
         self.assertEqual(resolved["Component"], "DBP-Anti-fraud|Anti-fraud|Fraud")
 
+    def test_skips_optional_prd_links_when_missing(self):
+        row = InputRow(
+            row_number=2,
+            values={"Market Header": "ID", "Summary Header": "Fraud Appeal"},
+            ordered_values=("231685", "Fraud Appeal", "ID"),
+        )
+        mappings = [
+            FieldMapping("Market", "column:Market Header"),
+            FieldMapping("Summary", "column:Summary Header"),
+            FieldMapping("PRD Link/s", "column:Missing PRD Header"),
+        ]
+
+        resolved = resolve_fields(mappings, row)
+
+        self.assertEqual(resolved["Market"], "ID")
+        self.assertEqual(resolved["Summary"], "Fraud Appeal")
+        self.assertNotIn("PRD Link/s", resolved)
+
 
 if __name__ == "__main__":
     unittest.main()

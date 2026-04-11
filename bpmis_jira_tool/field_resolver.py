@@ -10,6 +10,7 @@ from bpmis_jira_tool.models import FieldMapping, InputRow
 TEMPLATE_PATTERN = re.compile(r"{{\s*(?P<header>[^}]+?)\s*}}")
 INPUT_COLUMN_PATTERN = re.compile(r'^follow input tab column (?P<column>[a-z]+)$', re.I)
 QUOTED_OPTION_PATTERN = re.compile(r'"([^"]+)"')
+OPTIONAL_FIELDS = {"PRD Link/s", "Biz PIC"}
 
 
 def _resolve_template(template: str, row: InputRow) -> str:
@@ -109,6 +110,8 @@ def resolve_fields(
             value = row._get_first(mapping.jira_field)
 
         if not value:
+            if mapping.jira_field.strip() in OPTIONAL_FIELDS:
+                continue
             raise FieldResolutionError(
                 f"Could not resolve Jira field '{mapping.jira_field}' for sheet row {row.row_number}."
             )
