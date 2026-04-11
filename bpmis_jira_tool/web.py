@@ -512,21 +512,16 @@ def _run_self_check(settings: Settings, config_data: dict[str, Any]) -> dict[str
     try:
         response = requests.get(f"{helper_base_url.rstrip('/')}/diagnostics", timeout=8)
         payload = response.json()
-        helper_ok = response.ok and payload.get("status") == "ok"
-        bpmis_ok = bool(payload.get("checks", {}).get("bpmis_tab", {}).get("ok"))
+        helper_ok = response.ok
         checks.append(
             {
                 "name": "Local Helper",
                 "status": "pass" if helper_ok else "fail",
-                "detail": payload.get("message") or ("Helper is online." if helper_ok else "Helper is not responding."),
-            }
-        )
-        checks.append(
-            {
-                "name": "BPMIS in Chrome",
-                "status": "pass" if bpmis_ok else "warn",
-                "detail": payload.get("checks", {}).get("bpmis_tab", {}).get("detail")
-                or "Open BPMIS in Chrome and make sure you are still logged in.",
+                "detail": (
+                    "Helper is online. BPMIS tabs will be checked again when you preview or run."
+                    if helper_ok
+                    else payload.get("message") or "Helper is not responding."
+                ),
             }
         )
     except Exception:  # noqa: BLE001
@@ -535,13 +530,6 @@ def _run_self_check(settings: Settings, config_data: dict[str, Any]) -> dict[str
                 "name": "Local Helper",
                 "status": "fail",
                 "detail": f"Could not reach helper at {helper_base_url}. Start the helper first.",
-            }
-        )
-        checks.append(
-            {
-                "name": "BPMIS in Chrome",
-                "status": "warn",
-                "detail": "Could not check BPMIS because the local helper is offline.",
             }
         )
 
