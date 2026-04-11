@@ -100,20 +100,20 @@
   <section class="panel panel-wide quick-launch-panel">
     <div class="panel-head">
       <div>
-        <h2>Fastest Start On Mac</h2>
+        <h2>Simple Start On Mac</h2>
         <p class="step-copy">
-          If you prefer a simpler launch flow, use the Mac launcher file instead of typing commands every time.
+          For teammates, the most reliable way to start the tool is still through Terminal.
         </p>
       </div>
     </div>
     <div class="quick-launch-grid">
       <div class="quick-launch-card">
-        <h3>One-click launcher</h3>
-        <p>Double-click <code>Start Jira Tool.command</code> in the project folder. It starts the local helper, starts the portal, then opens the tool in your browser.</p>
+        <h3>Recommended</h3>
+        <p>Open Terminal in the project folder and run <code>./scripts/run_team_stack.sh start</code>. This starts the helper and the local portal in one step.</p>
       </div>
       <div class="quick-launch-card">
-        <h3>Manual fallback</h3>
-        <p>If the launcher is blocked by macOS, open Terminal in the project folder and run <code>./scripts/run_team_stack.sh start</code>.</p>
+        <h3>Why Terminal is better</h3>
+        <p>Terminal avoids macOS permission and quarantine prompts that sometimes block <code>.command</code> files on first use.</p>
       </div>
     </div>
   </section>
