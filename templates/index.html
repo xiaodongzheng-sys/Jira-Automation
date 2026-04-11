@@ -1,520 +1,534 @@
 {% extends "base.html" %}
 
 {% block body %}
-  <section class="hero">
-    <div>
-      <p class="eyebrow">Guided Internal Tool</p>
-      <h1>Jira Creation Automation Tool</h1>
-      <p class="lede">
-        This tool helps you turn rows in Google Sheets into Jira tickets through BPMIS.
-        If this is your first time, just follow the steps from top to bottom:
-        connect Google Sheets, confirm your local helper is online, save your mapping, then preview before running.
-      </p>
-      <div class="callout-list">
-        <div class="callout">
-          <strong>What this tool reads</strong>
-          <span>Your configured Spreadsheet, one Input tab, and the columns you map below.</span>
+  <section class="showcase-shell">
+    <div class="showcase-backdrop"></div>
+    <div class="showcase-grid">
+      <div class="showcase-copy">
+        <p class="showcase-kicker">Internal Workflow Suite</p>
+        <h1>Jira Creation Automation Tool</h1>
+        <p class="showcase-lede">
+          Turn spreadsheet rows into BPMIS-backed Jira tickets through a guided, auditable flow.
+          The homepage is now your executive overview; the detailed setup lives in its own workspace tab.
+        </p>
+        <div class="showcase-badges">
+          <span>Google Sheets connected workflow</span>
+          <span>User-scoped configuration</span>
+          <span>BPMIS-assisted Jira creation</span>
         </div>
-        <div class="callout">
-          <strong>What this tool creates</strong>
-          <span>A Jira ticket in BPMIS for each eligible row whose Jira link cell is still blank.</span>
+        <div class="showcase-metrics">
+          <article class="metric-card">
+            <strong>01</strong>
+            <span>Connect your Google account once, then reuse your saved configuration.</span>
+          </article>
+          <article class="metric-card">
+            <strong>02</strong>
+            <span>Preview candidate rows before running any real Jira creation.</span>
+          </article>
+          <article class="metric-card">
+            <strong>03</strong>
+            <span>Write the final Jira browse URL straight back into your chosen sheet column.</span>
+          </article>
         </div>
-        <div class="callout">
-          <strong>What this tool writes back</strong>
-          <span>The full Jira ticket URL into your configured Jira Ticket Link column.</span>
+      </div>
+
+      <aside class="executive-card">
+        <div class="executive-card-head">
+          <div>
+            <p class="executive-eyebrow">Live Session</p>
+            <h2>Operational Snapshot</h2>
+          </div>
+          <span class="executive-pill">Local mode</span>
+        </div>
+        <ul class="executive-list">
+          <li>
+            <span>Portal User</span>
+            <strong>{{ user_identity.display_name }}</strong>
+          </li>
+          <li>
+            <span>Google Sheets</span>
+            <strong>{{ "Connected" if google_connected else "Not connected" }}</strong>
+          </li>
+          <li>
+            <span>Local Helper</span>
+            <strong data-helper-status data-helper-url="{{ mapping_config.helper_base_url }}">Checking…</strong>
+          </li>
+          <li>
+            <span>Spreadsheet</span>
+            <strong>{{ mapping_config.spreadsheet_link or settings.spreadsheet_id }}</strong>
+          </li>
+        </ul>
+        <div class="executive-note">
+          <p>Use the workspace below to configure, validate, and run. The top panel is designed for demos and high-level status at a glance.</p>
+        </div>
+      </aside>
+    </div>
+  </section>
+
+  <section class="workspace-shell">
+    <div class="workspace-head">
+      <div>
+        <p class="eyebrow">Workspace</p>
+        <h2>Automation Console</h2>
+        <p class="step-copy">
+          Move between tabs depending on whether you want to present, configure, run, or troubleshoot the tool.
+        </p>
+      </div>
+      <div class="workspace-rail">
+        <span>Designed for first-time teammates</span>
+        <span>Configuration separated from execution</span>
+      </div>
+    </div>
+
+    <div class="workspace-tabs" role="tablist" aria-label="Workspace sections">
+      <button class="workspace-tab is-active" type="button" role="tab" aria-selected="true" data-tab-trigger="overview">Overview</button>
+      <button class="workspace-tab" type="button" role="tab" aria-selected="false" data-tab-trigger="run-center">Run Center</button>
+      <button class="workspace-tab" type="button" role="tab" aria-selected="false" data-tab-trigger="configuration">Configuration</button>
+      <button class="workspace-tab" type="button" role="tab" aria-selected="false" data-tab-trigger="support">Support</button>
+    </div>
+
+    <section class="workspace-panel is-active" data-tab-panel="overview">
+      <div class="panel panel-wide glass-panel">
+        <div class="panel-head">
+          <div>
+            <h2>First-Time Flow</h2>
+            <p class="step-copy">This is the recommended order for a teammate using the tool for the first time.</p>
+          </div>
+        </div>
+        <div class="showcase-steps">
+          <article class="showcase-step-card">
+            <p class="checklist-step">Step 1</p>
+            <h3>Connect Google Sheets</h3>
+            <p>Grant access so the tool can read your spreadsheet rows and write the created Jira link back.</p>
+            <p class="checklist-outcome">Expected status: <strong>Google Sheets = Connected</strong></p>
+            <div class="button-row">
+              {% if google_connected %}
+                <form method="post" action="{{ url_for('google_logout') }}">
+                  <button class="button button-secondary" type="submit">Disconnect Google</button>
+                </form>
+              {% else %}
+                <a class="button" href="{{ url_for('google_login') }}">Connect Google</a>
+              {% endif %}
+            </div>
+          </article>
+          <article class="showcase-step-card">
+            <p class="checklist-step">Step 2</p>
+            <h3>Start Your Local Helper</h3>
+            <p>Your helper bridges your local BPMIS session. Run <code>./scripts/run_team_stack.sh start</code> in Terminal.</p>
+            <p class="checklist-outcome">Expected status: <strong>Local Helper = Connected</strong></p>
+          </article>
+          <article class="showcase-step-card">
+            <p class="checklist-step">Step 3</p>
+            <h3>Save Configuration</h3>
+            <p>Use the Configuration tab to map your sheet headers and define the Jira field values used for creation.</p>
+            <p class="checklist-outcome">You usually only update this when your sheet or mapping changes.</p>
+          </article>
+          <article class="showcase-step-card">
+            <p class="checklist-step">Step 4</p>
+            <h3>Preview, Then Run</h3>
+            <p>The Run Center lets you preview eligible rows first, then create Jira tickets only when the list looks correct.</p>
+            <p class="checklist-outcome">Safe habit: <strong>Preview first, Run second</strong></p>
+          </article>
         </div>
       </div>
-    </div>
-    <div class="status-card">
-      <h2>Session Status</h2>
-      <p class="microcopy">Use this box as your quick pre-flight check before running anything.</p>
-      <ul class="status-list">
-        <li>
-          <span>Portal User</span>
-          <strong>{{ user_identity.display_name }}</strong>
-        </li>
-        <li>
-          <span>Google Sheets</span>
-          <strong>{{ "Connected" if google_connected else "Not connected" }}</strong>
-        </li>
-        <li>
-          <span>Local Helper</span>
-          <strong data-helper-status data-helper-url="{{ mapping_config.helper_base_url }}">Checking…</strong>
-        </li>
-        <li>
-          <span>Jira Mapping</span>
-          <strong>User-scoped config</strong>
-        </li>
-        <li>
-          <span>Current Mode</span>
-          <strong>Local user mode</strong>
-        </li>
-        <li>
-          <span>Spreadsheet</span>
-          <strong>{{ mapping_config.spreadsheet_link or settings.spreadsheet_id }}</strong>
-        </li>
-      </ul>
-    </div>
-  </section>
 
-  <section class="panel panel-wide onboarding-panel">
-    <div class="panel-head">
-      <div>
-        <h2>First Time Here? Follow These 4 Steps</h2>
-        <p class="step-copy">
-          If you are using this tool for the first time, do these four things in order.
-        </p>
-        <p class="help-text">
-          You only need to set most of this up once. After that, you will usually just update your Spreadsheet and run Preview or Run.
-        </p>
-      </div>
-    </div>
-    <div class="checklist-grid">
-      <article class="checklist-card">
-        <p class="checklist-step">Step 1</p>
-        <h3>Connect Google</h3>
-        <p>Sign in so the portal can read your Spreadsheet and write Jira links back after creation.</p>
-        <p class="checklist-outcome">You should see: <strong>Google Sheets = Connected</strong></p>
-      </article>
-      <article class="checklist-card">
-        <p class="checklist-step">Step 2</p>
-        <h3>Start Local Helper</h3>
-        <p>Keep your own BPMIS login on your own machine. The helper bridges your local BPMIS session to the local portal running on your Mac.</p>
-        <p class="checklist-outcome">You should see: <strong>Local Helper = Connected</strong></p>
-      </article>
-      <article class="checklist-card">
-        <p class="checklist-step">Step 3</p>
-        <h3>Save Your Mapping</h3>
-        <p>Tell the tool which Spreadsheet and Input tab to read, and how Jira fields should be filled.</p>
-        <p class="checklist-outcome">You should do this whenever your Spreadsheet columns or mapping rules change.</p>
-      </article>
-      <article class="checklist-card">
-        <p class="checklist-step">Step 4</p>
-        <h3>Preview Before Run</h3>
-        <p>Preview shows which rows will be processed and what summary will be used. Run creates real Jira tickets.</p>
-        <p class="checklist-outcome">Safe habit: <strong>Preview first, Run second</strong></p>
-      </article>
-    </div>
-  </section>
-
-  <section class="panel panel-wide quick-launch-panel">
-    <div class="panel-head">
-      <div>
-        <h2>Simple Start On Mac</h2>
-        <p class="step-copy">
-          For teammates, the most reliable way to start the tool is still through Terminal.
-        </p>
-      </div>
-    </div>
-    <div class="quick-launch-grid">
-      <div class="quick-launch-card">
-        <h3>Recommended</h3>
-        <p>Open Terminal in the project folder and run <code>./scripts/run_team_stack.sh start</code>. This starts the helper and the local portal in one step.</p>
-      </div>
-      <div class="quick-launch-card">
-        <h3>Why Terminal is better</h3>
-        <p>Terminal avoids macOS permission and quarantine prompts that sometimes block <code>.command</code> files on first use.</p>
-      </div>
-    </div>
-  </section>
-
-  <section class="grid">
-    <article class="panel">
-      <h2>1. Connect Google Sheets</h2>
-      <p class="step-copy">
-        Sign in with Google so this tool can read your Spreadsheet and write Jira links back after creation.
-      </p>
-      <p class="help-text">
-        Why this is needed: without Google access, the tool cannot read rows, detect which ones still need Jira,
-        or write the final Jira URL back to your sheet.
-      </p>
-      <div class="button-row">
-        {% if google_connected %}
-          <form method="post" action="{{ url_for('google_logout') }}">
-            <button class="button button-secondary" type="submit">Disconnect Google</button>
-          </form>
-        {% else %}
-          <a class="button" href="{{ url_for('google_login') }}">Connect Google</a>
-        {% endif %}
-      </div>
-    </article>
-
-    <article class="panel">
-      <h2>2. Local BPMIS Helper</h2>
-      <p class="step-copy">
-        This helper talks to your own locally logged-in BPMIS session.
-      </p>
-      <p class="help-text">
-        Why this is needed: the tool should not directly use a shared BPMIS login. Instead, each person keeps
-        their own BPMIS session on their own machine, and the helper bridges that safely to their local portal.
-      </p>
-      <p class="help-text">
-        What “Connected” means: your helper is reachable at the URL below and is ready to receive Jira creation requests.
-      </p>
-      <p class="help-text">
-        If Local Helper shows <strong>Offline</strong>, start your local helper first. If BPMIS requests still fail, log in to BPMIS again in Chrome.
-      </p>
-    </article>
-  </section>
-
-  <section class="panel panel-wide support-panel">
-    <div class="panel-head">
-      <div>
-        <h2>Quick Troubleshooting</h2>
-        <p class="step-copy">Use these quick checks before asking the maintainer for help.</p>
-      </div>
-    </div>
-    <div class="checklist-grid">
-      <article class="checklist-card">
-        <h3>Portal does not open</h3>
-        <p>Check whether your local portal is running on your own Mac and whether you can still open <code>http://127.0.0.1:5000</code>.</p>
-      </article>
-      <article class="checklist-card">
-        <h3>Google is not connected</h3>
-        <p>Use the Connect Google button again. If your account is rejected, the maintainer may need to add your email to the team whitelist.</p>
-      </article>
-      <article class="checklist-card">
-        <h3>Local Helper is Offline</h3>
-        <p>Start your helper on your own Mac, then confirm <code>http://127.0.0.1:8787/health</code> returns a healthy response.</p>
-      </article>
-      <article class="checklist-card">
-        <h3>BPMIS still fails</h3>
-        <p>If BPMIS still fails during Preview or Run, open BPMIS in Chrome and confirm you are still logged in.</p>
-      </article>
-    </div>
-  </section>
-
-  <section class="panel panel-wide self-check-panel">
-    <div class="panel-head">
-      <div>
-        <h2>Self-Check</h2>
-        <p class="step-copy">Run this before Preview or Run if you want a quick health check.</p>
-        <p class="help-text">
-          This check verifies Google connection, local helper reachability, and Spreadsheet access using your current saved config.
-        </p>
-      </div>
-      <div class="button-row">
-        <button class="button button-secondary" type="button" data-self-check-trigger>Run Self-Check</button>
-      </div>
-    </div>
-    <div class="self-check-results" data-self-check-results>
-      <div class="empty-state">
-        <p>No self-check has been run yet.</p>
-      </div>
-    </div>
-  </section>
-
-  <section class="panel panel-wide" id="results" data-results-panel>
-    <div class="panel-head">
-      <div>
-        <h2>3. Jira Mapping Config</h2>
-        <p class="step-copy">
-          Tell the tool where your data is and how each Jira field should be filled.
-        </p>
-        <p class="help-text">
-          This configuration is saved for the current portal user. After you save it once, the tool will keep using it
-          for Preview and Run until you change it.
-        </p>
-      </div>
-    </div>
-
-    <form method="post" action="{{ url_for('save_mapping_config') }}" class="stack">
-      <div class="config-grid">
-        <div class="config-card">
-          <h3>Source Config</h3>
-          <p class="card-help">
-            These settings tell the tool which Spreadsheet and tab to read, which column identifies the BPMIS item,
-            which column stores the final Jira URL, and where your local helper is listening.
-          </p>
-          <div class="field-stack">
-            <div class="field-group">
-              <div class="field-label-row">
-                <label for="spreadsheet_link">Spreadsheet Link or ID</label>
-                <span class="field-badge field-badge-required">Required</span>
-              </div>
-              <p class="field-help">Paste the full Google Sheets link or just the spreadsheet ID.</p>
-              <input id="spreadsheet_link" name="spreadsheet_link" value="{{ mapping_config.spreadsheet_link }}" placeholder="https://docs.google.com/spreadsheets/d/...">
+      <div class="workspace-grid">
+        <section class="panel glass-panel">
+          <h2>What This Tool Reads</h2>
+          <p class="help-text">Your configured spreadsheet, one input tab, and the mapped columns that drive BPMIS issue lookup and Jira creation.</p>
+          <div class="premium-list">
+            <div class="premium-list-item">
+              <strong>Spreadsheet source</strong>
+              <span>The Google Sheet and tab defined in your saved configuration.</span>
             </div>
-
-            <div class="field-group">
-              <div class="field-label-row">
-                <label for="input_tab_name">Input Tab Name</label>
-                <span class="field-badge field-badge-required">Required</span>
-              </div>
-              <p class="field-help">The exact worksheet tab name that contains the rows you want to process.</p>
-              <input id="input_tab_name" name="input_tab_name" value="{{ mapping_config.input_tab_name }}" placeholder="Input">
+            <div class="premium-list-item">
+              <strong>Eligibility logic</strong>
+              <span>Rows are considered eligible when the configured Jira link column is still blank.</span>
             </div>
-
-            <div class="field-group">
-              <div class="field-label-row">
-                <label for="issue_id_header">Issue ID Header</label>
-                <span class="field-badge field-badge-required">Required</span>
-              </div>
-              <p class="field-help">The header name of the column that contains the BPMIS Issue ID.</p>
-              <input id="issue_id_header" name="issue_id_header" list="input-header-options" value="{{ mapping_config.issue_id_header }}" placeholder="Issue ID">
+            <div class="premium-list-item">
+              <strong>Mapping model</strong>
+              <span>Market, summary, optional PRD link, market-specific options, and fixed Jira values.</span>
             </div>
+          </div>
+        </section>
 
-            <div class="field-group">
-              <div class="field-label-row">
-                <label for="jira_ticket_link_header">Jira Ticket Link Header</label>
-                <span class="field-badge field-badge-required">Required</span>
-              </div>
-              <p class="field-help">The header name of the column where the created Jira URL should be written back.</p>
-              <input id="jira_ticket_link_header" name="jira_ticket_link_header" list="input-header-options" value="{{ mapping_config.jira_ticket_link_header }}" placeholder="Jira Ticket Link">
+        <section class="panel glass-panel">
+          <h2>What This Tool Produces</h2>
+          <p class="help-text">A full Jira browse URL written back to the spreadsheet after BPMIS accepts the ticket creation request.</p>
+          <div class="premium-list">
+            <div class="premium-list-item">
+              <strong>Jira creation</strong>
+              <span>Creates a Jira ticket through BPMIS for each eligible row.</span>
             </div>
+            <div class="premium-list-item">
+              <strong>Write-back</strong>
+              <span>Stores the final URL in your configured Jira Ticket Link header.</span>
+            </div>
+            <div class="premium-list-item">
+              <strong>User-scoped settings</strong>
+              <span>Each teammate’s spreadsheet and mapping configuration stays under their own local profile.</span>
+            </div>
+          </div>
+        </section>
+      </div>
+    </section>
 
-            <div class="field-group">
-              <div class="field-label-row">
-                <label for="helper_base_url">Local Helper URL</label>
-                <span class="field-badge field-badge-recommended">Recommended</span>
-              </div>
-              <p class="field-help">Usually keep this as <code>http://127.0.0.1:8787</code> unless your helper runs on another port.</p>
-              <input id="helper_base_url" name="helper_base_url" value="{{ mapping_config.helper_base_url }}" placeholder="http://127.0.0.1:8787">
+    <section class="workspace-panel" data-tab-panel="run-center">
+      <section class="panel panel-wide self-check-panel glass-panel">
+        <div class="panel-head">
+          <div>
+            <h2>Self-Check</h2>
+            <p class="step-copy">Validate the essentials before creating any Jira tickets.</p>
+            <p class="help-text">
+              This check confirms Google connectivity, local helper reachability, and spreadsheet readability using your saved config.
+            </p>
+          </div>
+          <div class="button-row">
+            <button class="button button-secondary" type="button" data-self-check-trigger>Run Self-Check</button>
+          </div>
+        </div>
+        <div class="self-check-results" data-self-check-results>
+          <div class="empty-state">
+            <p>No self-check has been run yet.</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel panel-wide glass-panel" id="results" data-results-panel>
+        <div class="panel-head">
+          <div>
+            <h2>Preview or Run</h2>
+            <p class="step-copy">Start with Preview. Only run ticket creation after the preview list looks correct.</p>
+            <p class="help-text">
+              Preview shows which rows are eligible and what project summary each row will use. Run creates real Jira tickets and writes the result back to Google Sheets.
+            </p>
+            <div class="result-tips">
+              <span>Preview never creates Jira.</span>
+              <span>Run only touches rows whose Jira link cell is blank.</span>
+              <span>Project column shows the resolved summary used for creation.</span>
             </div>
+          </div>
+          <div class="button-row">
+            <form method="post" action="{{ url_for('preview') }}" data-job-form data-job-url="{{ url_for('create_preview_job') }}" data-job-label="Preview Eligible Rows">
+              <button class="button button-secondary" type="submit">Preview Eligible Rows</button>
+            </form>
+            <form method="post" action="{{ url_for('run') }}" class="run-form" data-job-form data-job-url="{{ url_for('create_run_job') }}" data-job-label="Run Ticket Creation">
+              <button class="button" type="submit">Run Ticket Creation</button>
+            </form>
           </div>
         </div>
 
-        <div class="config-card">
-          <h3>Input Header Rules</h3>
-          <p class="card-help">
-            These fields map Jira values from headers inside your Input tab.
-          </p>
-          <div class="field-stack">
-            <div class="field-group">
-              <div class="field-label-row">
-                <label for="market_header">Market Header</label>
-                <span class="field-badge field-badge-required">Required</span>
-              </div>
-              <p class="field-help">Which Input column contains the market value, such as ID, SG, PH, or Regional.</p>
-              <input id="market_header" name="market_header" list="input-header-options" value="{{ mapping_config.market_header }}">
-            </div>
-
-            <div class="field-group">
-              <div class="field-label-row">
-                <label for="summary_header">Summary Header</label>
-                <span class="field-badge field-badge-required">Required</span>
-              </div>
-              <p class="field-help">Which Input column contains the business summary that should appear in Jira.</p>
-              <input id="summary_header" name="summary_header" list="input-header-options" value="{{ mapping_config.summary_header }}">
-            </div>
-
-            <div class="field-group">
-              <div class="field-label-row">
-                <label for="prd_links_header">PRD Link/s Header</label>
-                <span class="field-badge field-badge-recommended">Recommended</span>
-              </div>
-              <p class="field-help">Which Input column contains the PRD or supporting document link to send into Jira.</p>
-              <input id="prd_links_header" name="prd_links_header" list="input-header-options" value="{{ mapping_config.prd_links_header }}">
-            </div>
+        <div class="run-progress" data-run-progress hidden>
+          <div class="run-progress-head">
+            <strong data-run-progress-title>Working…</strong>
+            <span data-run-progress-count></span>
+          </div>
+          <p class="run-progress-message" data-run-progress-message>Please wait.</p>
+          <div class="run-progress-bar">
+            <div class="run-progress-fill" data-run-progress-fill></div>
           </div>
         </div>
 
-        <div class="config-card">
-          <h3>Market Mapping Rules</h3>
-          <p class="card-help">
-            These values depend on Market. For each market, enter the exact BPMIS option text that should be selected.
-          </p>
-          <div class="field-grid">
-            <div class="field-group">
-              <label>Component / ID</label>
-              <p class="field-help">Used when the row's market is ID.</p>
-              <input name="component_ID" value="{{ mapping_config.component_by_market['ID'] }}" placeholder="Value for ID">
-            </div>
+        <div data-results-table-wrap {% if not results %}hidden{% endif %}>
+          <div class="table-wrap premium-table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Row</th>
+                  <th>Issue ID</th>
+                  <th>Status</th>
+                  <th>Project</th>
+                  <th>Ticket</th>
+                  <th>Message</th>
+                </tr>
+              </thead>
+              <tbody data-results-body>
+                {% for result in results %}
+                  <tr>
+                    <td>{{ result.row_number }}</td>
+                    <td>{{ result.issue_id or "-" }}</td>
+                    <td><span class="badge badge-{{ result.status }}">{{ result.status }}</span></td>
+                    <td>{{ result.project_label or result.matched_project_id or "-" }}</td>
+                    <td>
+                      {% if result.ticket_link %}
+                        <a href="{{ result.ticket_link }}" target="_blank" rel="noreferrer">{{ result.ticket_key or result.ticket_link }}</a>
+                      {% elif result.ticket_key %}
+                        {{ result.ticket_key }}
+                      {% else %}
+                        -
+                      {% endif %}
+                    </td>
+                    <td>{{ result.message }}</td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <div class="empty-state" data-results-empty {% if results %}hidden{% endif %}>
+          <p>No preview or run results yet.</p>
+        </div>
+      </section>
+    </section>
 
-            <div class="field-group">
-              <label>Component / SG</label>
-              <p class="field-help">Used when the row's market is SG.</p>
-              <input name="component_SG" value="{{ mapping_config.component_by_market['SG'] }}" placeholder="Value for SG">
-            </div>
-
-            <div class="field-group">
-              <label>Component / PH</label>
-              <p class="field-help">Used when the row's market is PH.</p>
-              <input name="component_PH" value="{{ mapping_config.component_by_market['PH'] }}" placeholder="Value for PH">
-            </div>
-
-            <div class="field-group">
-              <label>Component / Regional</label>
-              <p class="field-help">Used when the row's market is Regional.</p>
-              <input name="component_Regional" value="{{ mapping_config.component_by_market['Regional'] }}" placeholder="Value for Regional">
-            </div>
-
-            <div class="field-group">
-              <label>Need UAT / ID</label>
-              <p class="field-help">The Need UAT option to use for ID rows.</p>
-              <input name="need_uat_ID" value="{{ mapping_config.need_uat_by_market['ID'] }}" placeholder="Value for ID">
-            </div>
-
-            <div class="field-group">
-              <label>Need UAT / SG</label>
-              <p class="field-help">The Need UAT option to use for SG rows.</p>
-              <input name="need_uat_SG" value="{{ mapping_config.need_uat_by_market['SG'] }}" placeholder="Value for SG">
-            </div>
-
-            <div class="field-group">
-              <label>Need UAT / PH</label>
-              <p class="field-help">The Need UAT option to use for PH rows.</p>
-              <input name="need_uat_PH" value="{{ mapping_config.need_uat_by_market['PH'] }}" placeholder="Value for PH">
-            </div>
-
-            <div class="field-group">
-              <label>Need UAT / Regional</label>
-              <p class="field-help">The Need UAT option to use for Regional rows.</p>
-              <input name="need_uat_Regional" value="{{ mapping_config.need_uat_by_market['Regional'] }}" placeholder="Value for Regional">
-            </div>
+    <section class="workspace-panel" data-tab-panel="configuration">
+      <section class="panel panel-wide glass-panel">
+        <div class="panel-head">
+          <div>
+            <h2>Configuration Studio</h2>
+            <p class="step-copy">All setup lives here, separate from the presentation-focused homepage and the execution workspace.</p>
+            <p class="help-text">
+              Save once, then reuse. These settings are stored for the current portal user and drive both Preview and Run.
+            </p>
           </div>
         </div>
 
-        <div class="config-card config-card-wide">
-          <h3>Direct Value Rules</h3>
-          <p class="card-help">
-            These values are fixed and reused for every Jira ticket created by this configuration.
-          </p>
-          <div class="field-grid field-grid-wide">
-            <div class="field-group">
-              <label for="task_type_value">Task Type</label>
-              <p class="field-help">Usually keep this aligned with your Jira creation process, for example <code>Feature</code>.</p>
-              <input id="task_type_value" name="task_type_value" value="{{ mapping_config.task_type_value }}">
+        <form method="post" action="{{ url_for('save_mapping_config') }}" class="stack">
+          <div class="config-grid">
+            <div class="config-card">
+              <h3>Source Config</h3>
+              <p class="card-help">
+                Tell the tool which spreadsheet to read, which tab contains input rows, which column holds the Issue ID, and which column stores the final Jira URL.
+              </p>
+              <div class="field-stack">
+                <div class="field-group">
+                  <div class="field-label-row">
+                    <label for="spreadsheet_link">Spreadsheet Link or ID</label>
+                    <span class="field-badge field-badge-required">Required</span>
+                  </div>
+                  <p class="field-help">Paste the full Google Sheets link or just the spreadsheet ID.</p>
+                  <input id="spreadsheet_link" name="spreadsheet_link" value="{{ mapping_config.spreadsheet_link }}" placeholder="https://docs.google.com/spreadsheets/d/...">
+                </div>
+
+                <div class="field-group">
+                  <div class="field-label-row">
+                    <label for="input_tab_name">Input Tab Name</label>
+                    <span class="field-badge field-badge-required">Required</span>
+                  </div>
+                  <p class="field-help">The exact worksheet tab name that contains the rows you want to process.</p>
+                  <input id="input_tab_name" name="input_tab_name" value="{{ mapping_config.input_tab_name }}" placeholder="Input">
+                </div>
+
+                <div class="field-group">
+                  <div class="field-label-row">
+                    <label for="issue_id_header">Issue ID Header</label>
+                    <span class="field-badge field-badge-required">Required</span>
+                  </div>
+                  <p class="field-help">The header of the column that contains the BPMIS Issue ID.</p>
+                  <input id="issue_id_header" name="issue_id_header" list="input-header-options" value="{{ mapping_config.issue_id_header }}" placeholder="Issue ID">
+                </div>
+
+                <div class="field-group">
+                  <div class="field-label-row">
+                    <label for="jira_ticket_link_header">Jira Ticket Link Header</label>
+                    <span class="field-badge field-badge-required">Required</span>
+                  </div>
+                  <p class="field-help">The header of the column where the created Jira URL will be written back.</p>
+                  <input id="jira_ticket_link_header" name="jira_ticket_link_header" list="input-header-options" value="{{ mapping_config.jira_ticket_link_header }}" placeholder="Jira Ticket Link">
+                </div>
+
+                <div class="field-group">
+                  <div class="field-label-row">
+                    <label for="helper_base_url">Local Helper URL</label>
+                    <span class="field-badge field-badge-recommended">Recommended</span>
+                  </div>
+                  <p class="field-help">Normally keep this as <code>http://127.0.0.1:8787</code>.</p>
+                  <input id="helper_base_url" name="helper_base_url" value="{{ mapping_config.helper_base_url }}" placeholder="http://127.0.0.1:8787">
+                </div>
+              </div>
             </div>
 
-            <div class="field-group">
-              <label for="fix_version_value">Fix Version</label>
-              <p class="field-help">The target fix version text that BPMIS should resolve to an internal ID.</p>
-              <input id="fix_version_value" name="fix_version_value" value="{{ mapping_config.fix_version_value }}">
+            <div class="config-card">
+              <h3>Input Header Rules</h3>
+              <p class="card-help">
+                These fields tell the tool which input headers should populate the key Jira values.
+              </p>
+              <div class="field-stack">
+                <div class="field-group">
+                  <div class="field-label-row">
+                    <label for="market_header">Market Header</label>
+                    <span class="field-badge field-badge-required">Required</span>
+                  </div>
+                  <p class="field-help">The input column that contains values such as ID, SG, PH, or Regional.</p>
+                  <input id="market_header" name="market_header" list="input-header-options" value="{{ mapping_config.market_header }}">
+                </div>
+
+                <div class="field-group">
+                  <div class="field-label-row">
+                    <label for="summary_header">Summary Header</label>
+                    <span class="field-badge field-badge-required">Required</span>
+                  </div>
+                  <p class="field-help">The input column containing the business summary used to build the Jira title.</p>
+                  <input id="summary_header" name="summary_header" list="input-header-options" value="{{ mapping_config.summary_header }}">
+                </div>
+
+                <div class="field-group">
+                  <div class="field-label-row">
+                    <label for="prd_links_header">PRD Link/s Header</label>
+                    <span class="field-badge field-badge-recommended">Optional</span>
+                  </div>
+                  <p class="field-help">Optional. If provided, the matching PRD link will be sent into Jira. If blank, creation still continues.</p>
+                  <input id="prd_links_header" name="prd_links_header" list="input-header-options" value="{{ mapping_config.prd_links_header }}">
+                </div>
+              </div>
             </div>
 
-            <div class="field-group">
-              <label for="priority_value">Priority</label>
-              <p class="field-help">The Jira business priority that should be applied to all created rows.</p>
-              <input id="priority_value" name="priority_value" value="{{ mapping_config.priority_value }}">
+            <div class="config-card">
+              <h3>Market Mapping Rules</h3>
+              <p class="card-help">
+                These BPMIS option texts vary by market. Enter the exact option label used for each market.
+              </p>
+              <div class="field-grid">
+                <div class="field-group">
+                  <label>Component / ID</label>
+                  <p class="field-help">Used when the row's market is ID.</p>
+                  <input name="component_ID" value="{{ mapping_config.component_by_market['ID'] }}" placeholder="Value for ID">
+                </div>
+                <div class="field-group">
+                  <label>Component / SG</label>
+                  <p class="field-help">Used when the row's market is SG.</p>
+                  <input name="component_SG" value="{{ mapping_config.component_by_market['SG'] }}" placeholder="Value for SG">
+                </div>
+                <div class="field-group">
+                  <label>Component / PH</label>
+                  <p class="field-help">Used when the row's market is PH.</p>
+                  <input name="component_PH" value="{{ mapping_config.component_by_market['PH'] }}" placeholder="Value for PH">
+                </div>
+                <div class="field-group">
+                  <label>Component / Regional</label>
+                  <p class="field-help">Used when the row's market is Regional.</p>
+                  <input name="component_Regional" value="{{ mapping_config.component_by_market['Regional'] }}" placeholder="Value for Regional">
+                </div>
+                <div class="field-group">
+                  <label>Need UAT / ID</label>
+                  <p class="field-help">Used when the row's market is ID.</p>
+                  <input name="need_uat_ID" value="{{ mapping_config.need_uat_by_market['ID'] }}" placeholder="Value for ID">
+                </div>
+                <div class="field-group">
+                  <label>Need UAT / SG</label>
+                  <p class="field-help">Used when the row's market is SG.</p>
+                  <input name="need_uat_SG" value="{{ mapping_config.need_uat_by_market['SG'] }}" placeholder="Value for SG">
+                </div>
+                <div class="field-group">
+                  <label>Need UAT / PH</label>
+                  <p class="field-help">Used when the row's market is PH.</p>
+                  <input name="need_uat_PH" value="{{ mapping_config.need_uat_by_market['PH'] }}" placeholder="Value for PH">
+                </div>
+                <div class="field-group">
+                  <label>Need UAT / Regional</label>
+                  <p class="field-help">Used when the row's market is Regional.</p>
+                  <input name="need_uat_Regional" value="{{ mapping_config.need_uat_by_market['Regional'] }}" placeholder="Value for Regional">
+                </div>
+              </div>
             </div>
 
-            <div class="field-group">
-              <label for="assignee_value">Assignee</label>
-              <p class="field-help">The default assignee email for the created Jira ticket.</p>
-              <input id="assignee_value" name="assignee_value" value="{{ mapping_config.assignee_value }}">
-            </div>
-
-            <div class="field-group">
-              <label for="product_manager_value">Product Manager</label>
-              <p class="field-help">The default Product Manager email to send to BPMIS.</p>
-              <input id="product_manager_value" name="product_manager_value" value="{{ mapping_config.product_manager_value }}">
-            </div>
-
-            <div class="field-group">
-              <label for="dev_pic_value">Dev PIC</label>
-              <p class="field-help">The default development owner email.</p>
-              <input id="dev_pic_value" name="dev_pic_value" value="{{ mapping_config.dev_pic_value }}">
-            </div>
-
-            <div class="field-group">
-              <label for="qa_pic_value">QA PIC</label>
-              <p class="field-help">The default QA owner email.</p>
-              <input id="qa_pic_value" name="qa_pic_value" value="{{ mapping_config.qa_pic_value }}">
-            </div>
-
-            <div class="field-group">
-              <label for="reporter_value">Reporter</label>
-              <p class="field-help">The Jira reporter email.</p>
-              <input id="reporter_value" name="reporter_value" value="{{ mapping_config.reporter_value }}">
-            </div>
-
-            <div class="field-group">
-              <label for="biz_pic_value">Biz PIC</label>
-              <p class="field-help">Optional default business PIC email if your BPMIS flow needs it.</p>
-              <input id="biz_pic_value" name="biz_pic_value" value="{{ mapping_config.biz_pic_value }}">
+            <div class="config-card config-card-wide">
+              <h3>Direct Value Rules</h3>
+              <p class="card-help">
+                These fixed values apply to every Jira ticket created by this saved configuration.
+              </p>
+              <div class="field-grid field-grid-wide">
+                <div class="field-group">
+                  <label for="task_type_value">Task Type</label>
+                  <p class="field-help">Usually <code>Feature</code>.</p>
+                  <input id="task_type_value" name="task_type_value" value="{{ mapping_config.task_type_value }}">
+                </div>
+                <div class="field-group">
+                  <label for="fix_version_value">Fix Version</label>
+                  <p class="field-help">The fix version text BPMIS should resolve to an internal ID.</p>
+                  <input id="fix_version_value" name="fix_version_value" value="{{ mapping_config.fix_version_value }}">
+                </div>
+                <div class="field-group">
+                  <label for="priority_value">Priority</label>
+                  <p class="field-help">The Jira business priority applied to all created rows.</p>
+                  <input id="priority_value" name="priority_value" value="{{ mapping_config.priority_value }}">
+                </div>
+                <div class="field-group">
+                  <label for="assignee_value">Assignee</label>
+                  <p class="field-help">The default assignee email for the created Jira ticket.</p>
+                  <input id="assignee_value" name="assignee_value" value="{{ mapping_config.assignee_value }}">
+                </div>
+                <div class="field-group">
+                  <label for="product_manager_value">Product Manager</label>
+                  <p class="field-help">The default Product Manager email to send to BPMIS.</p>
+                  <input id="product_manager_value" name="product_manager_value" value="{{ mapping_config.product_manager_value }}">
+                </div>
+                <div class="field-group">
+                  <label for="dev_pic_value">Dev PIC</label>
+                  <p class="field-help">The default development owner email.</p>
+                  <input id="dev_pic_value" name="dev_pic_value" value="{{ mapping_config.dev_pic_value }}">
+                </div>
+                <div class="field-group">
+                  <label for="qa_pic_value">QA PIC</label>
+                  <p class="field-help">The default QA owner email.</p>
+                  <input id="qa_pic_value" name="qa_pic_value" value="{{ mapping_config.qa_pic_value }}">
+                </div>
+                <div class="field-group">
+                  <label for="reporter_value">Reporter</label>
+                  <p class="field-help">The Jira reporter email.</p>
+                  <input id="reporter_value" name="reporter_value" value="{{ mapping_config.reporter_value }}">
+                </div>
+                <div class="field-group">
+                  <label for="biz_pic_value">Biz PIC</label>
+                  <p class="field-help">Optional default business PIC email if your BPMIS flow needs it.</p>
+                  <input id="biz_pic_value" name="biz_pic_value" value="{{ mapping_config.biz_pic_value }}">
+                </div>
+              </div>
             </div>
           </div>
-        </div>
-      </div>
 
-      <div class="button-row">
-        <button class="button" type="submit">Save Web Config</button>
-      </div>
-    </form>
-
-    <datalist id="input-header-options">
-      {% for header in input_headers %}
-        <option value="{{ header }}"></option>
-      {% endfor %}
-    </datalist>
-  </section>
-
-  <section class="panel panel-wide">
-    <div class="panel-head">
-      <div>
-        <h2>4. Preview or Run</h2>
-        <p class="step-copy">
-          Start with Preview. Only run ticket creation after the preview list looks correct.
-        </p>
-        <p class="help-text">
-          Preview shows which rows are eligible and what project summary each row will use.
-          Run creates real Jira tickets and writes the result back to Google Sheets.
-        </p>
-        <div class="result-tips">
-          <span>Preview is safe and does not create Jira.</span>
-          <span>Run only creates Jira for rows whose Jira link cell is still blank.</span>
-        </div>
-      </div>
-      <div class="button-row">
-        <form method="post" action="{{ url_for('preview') }}" data-job-form data-job-url="{{ url_for('create_preview_job') }}" data-job-label="Preview Eligible Rows">
-          <button class="button button-secondary" type="submit">Preview Eligible Rows</button>
+          <div class="button-row">
+            <button class="button" type="submit">Save Web Config</button>
+          </div>
         </form>
-        <form method="post" action="{{ url_for('run') }}" class="run-form" data-job-form data-job-url="{{ url_for('create_run_job') }}" data-job-label="Run Ticket Creation">
-          <button class="button" type="submit">Run Ticket Creation</button>
-        </form>
-      </div>
-    </div>
 
-    <div class="run-progress" data-run-progress hidden>
-      <div class="run-progress-head">
-        <strong data-run-progress-title>Working…</strong>
-        <span data-run-progress-count></span>
-      </div>
-      <p class="run-progress-message" data-run-progress-message>Please wait.</p>
-      <div class="run-progress-bar">
-        <div class="run-progress-fill" data-run-progress-fill></div>
-      </div>
-    </div>
+        <datalist id="input-header-options">
+          {% for header in input_headers %}
+            <option value="{{ header }}"></option>
+          {% endfor %}
+        </datalist>
+      </section>
+    </section>
 
-    <div data-results-table-wrap {% if not results %}hidden{% endif %}>
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Row</th>
-              <th>Issue ID</th>
-              <th>Status</th>
-              <th>Project</th>
-              <th>Ticket</th>
-              <th>Message</th>
-            </tr>
-          </thead>
-          <tbody data-results-body>
-            {% for result in results %}
-              <tr>
-                <td>{{ result.row_number }}</td>
-                <td>{{ result.issue_id or "-" }}</td>
-                <td><span class="badge badge-{{ result.status }}">{{ result.status }}</span></td>
-                <td>{{ result.project_label or result.matched_project_id or "-" }}</td>
-                <td>
-                  {% if result.ticket_link %}
-                    <a href="{{ result.ticket_link }}" target="_blank" rel="noreferrer">{{ result.ticket_key or result.ticket_link }}</a>
-                  {% elif result.ticket_key %}
-                    {{ result.ticket_key }}
-                  {% else %}
-                    -
-                  {% endif %}
-                </td>
-                <td>{{ result.message }}</td>
-              </tr>
-            {% endfor %}
-          </tbody>
-        </table>
+    <section class="workspace-panel" data-tab-panel="support">
+      <div class="workspace-grid">
+        <section class="panel glass-panel">
+          <h2>Simple Start On Mac</h2>
+          <p class="step-copy">For teammates, the most reliable startup path is still Terminal.</p>
+          <div class="premium-list">
+            <div class="premium-list-item">
+              <strong>Recommended command</strong>
+              <span><code>./scripts/run_team_stack.sh start</code></span>
+            </div>
+            <div class="premium-list-item">
+              <strong>What it does</strong>
+              <span>Starts the local helper, starts the local portal, and prepares the dedicated BPMIS Chrome session.</span>
+            </div>
+            <div class="premium-list-item">
+              <strong>Daily routine</strong>
+              <span>Start the stack, open the portal, preview your rows, then run ticket creation.</span>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel glass-panel">
+          <h2>Quick Troubleshooting</h2>
+          <div class="premium-list">
+            <div class="premium-list-item">
+              <strong>Portal does not open</strong>
+              <span>Run <code>./scripts/run_team_stack.sh restart</code>, then reopen <code>http://127.0.0.1:5000</code>.</span>
+            </div>
+            <div class="premium-list-item">
+              <strong>Google is not connected</strong>
+              <span>Use the Connect Google button again and make sure your account can open the target spreadsheet.</span>
+            </div>
+            <div class="premium-list-item">
+              <strong>BPMIS requests fail</strong>
+              <span>Log in to BPMIS in the Chrome window opened for the tool, then retry Preview or Run.</span>
+            </div>
+          </div>
+        </section>
       </div>
-    </div>
-    <div class="empty-state" data-results-empty {% if results %}hidden{% endif %}>
-      <p>No preview or run results yet.</p>
-    </div>
+    </section>
   </section>
 {% endblock %}
