@@ -42,6 +42,7 @@
     <script>
       (() => {
         const SCROLL_KEY = 'bpmis-jira-scroll-y';
+        const helperStatusNode = document.querySelector('[data-helper-status]');
         const forms = document.querySelectorAll('form[action$="/preview"], form[action$="/run"]');
         forms.forEach((form) => {
           form.addEventListener('submit', () => {
@@ -60,18 +61,39 @@
           });
         }
 
+        if (helperStatusNode) {
+          const helperUrl = helperStatusNode.dataset.helperUrl;
+          const healthUrl = helperUrl ? `${helperUrl.replace(/\/$/, '')}/health` : '';
+          if (!healthUrl) {
+            helperStatusNode.textContent = 'Not configured';
+          } else {
+            fetch(healthUrl, { method: 'GET' })
+              .then((response) => {
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                return response.json();
+              })
+              .then((payload) => {
+                helperStatusNode.textContent = payload.status === 'ok' ? 'Connected' : 'Unavailable';
+              })
+              .catch(() => {
+                helperStatusNode.textContent = 'Offline';
+              });
+          }
+        }
+
         const backdrop = document.querySelector('[data-run-notice-backdrop]');
-        if (!backdrop) return;
-        const close = () => backdrop.remove();
-        backdrop.querySelectorAll('[data-run-notice-close]').forEach((node) => {
-          node.addEventListener('click', close);
-        });
-        backdrop.addEventListener('click', (event) => {
-          if (event.target === backdrop) close();
-        });
-        window.addEventListener('keydown', (event) => {
-          if (event.key === 'Escape') close();
-        }, { once: true });
+        if (backdrop) {
+          const close = () => backdrop.remove();
+          backdrop.querySelectorAll('[data-run-notice-close]').forEach((node) => {
+            node.addEventListener('click', close);
+          });
+          backdrop.addEventListener('click', (event) => {
+            if (event.target === backdrop) close();
+          });
+          window.addEventListener('keydown', (event) => {
+            if (event.key === 'Escape') close();
+          }, { once: true });
+        }
       })();
     </script>
   </body>

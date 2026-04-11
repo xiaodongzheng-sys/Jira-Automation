@@ -40,6 +40,41 @@ class BPMISClient(ABC):
         raise NotImplementedError
 
 
+class BPMISHelperClient(BPMISClient):
+    def __init__(self, helper_base_url: str):
+        self.helper_base_url = helper_base_url.rstrip("/")
+
+    def find_project(self, issue_id: str) -> ProjectMatch:
+        return ProjectMatch(project_id=issue_id, raw={"issueId": issue_id, "source": "team-helper"})
+
+    def create_jira_ticket(self, project: ProjectMatch, fields: dict[str, str]) -> CreatedTicket:
+        try:
+            response = requests.post(
+                f"{self.helper_base_url}/bpmis/create-jira",
+                json={"issue_id": project.project_id, "fields": fields},
+                timeout=120,
+            )
+        except requests.RequestException as error:
+            raise BPMISError(
+                f"Could not reach local helper at {self.helper_base_url}. Please start the helper and try again."
+            ) from error
+
+        try:
+            payload = response.json()
+        except ValueError as error:
+            raise BPMISError("Local helper returned a non-JSON response.") from error
+
+        if response.status_code >= 400 or payload.get("status") == "error":
+            raise BPMISError(payload.get("message") or "Local helper could not create the Jira ticket.")
+
+        ticket_key = payload.get("ticket_key")
+        ticket_link = payload.get("ticket_link")
+        if not ticket_key and not ticket_link:
+            raise BPMISError("Local helper did not return a Jira ticket key.")
+
+        return CreatedTicket(ticket_key=ticket_key, ticket_link=ticket_link, raw=payload)
+
+
 class BPMISPageApiClient(BPMISClient):
     TASK_TYPE_ID = 4
     SUPPORTED_COUNTRIES_ALL_VALUE = 49007

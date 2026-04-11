@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import re
+import secrets
 
 from flask import Flask, flash, redirect, render_template, request, session, url_for
 from dotenv import load_dotenv
@@ -15,6 +16,7 @@ from bpmis_jira_tool.google_auth import (
 )
 from bpmis_jira_tool.google_sheets import GoogleSheetsService
 from bpmis_jira_tool.service import JiraCreationService
+from bpmis_jira_tool.bpmis import BPMISHelperClient
 from bpmis_jira_tool.user_config import CONFIGURED_FIELDS, WebConfigStore
 
 
@@ -40,7 +42,8 @@ def create_app() -> Flask:
     def index():
         results = session.pop("last_results", None)
         run_notice = session.pop("run_notice", None)
-        config_data = CONFIG_STORE.load() or CONFIG_STORE._normalize({})
+        user_identity = _get_user_identity()
+        config_data = CONFIG_STORE.load(user_identity["config_key"]) or CONFIG_STORE._normalize({})
         input_headers: list[str] = []
 
         if "google_credentials" in session:
@@ -55,6 +58,7 @@ def create_app() -> Flask:
             "index.html",
             settings=settings,
             google_connected="google_credentials" in session,
+            user_identity=user_identity,
             results=results,
             run_notice=run_notice,
             mapping_fields=CONFIGURED_FIELDS,
@@ -74,7 +78,10 @@ def create_app() -> Flask:
     @app.get("/auth/google/callback")
     def google_callback():
         try:
+            previous_identity = _get_user_identity()
             finish_google_oauth(settings, request.url)
+            current_identity = _get_user_identity()
+            CONFIG_STORE.migrate(previous_identity["config_key"], current_identity["config_key"])
             flash("Google Sheets connected successfully.", "success")
         except ToolError as error:
             flash(str(error), "error")
@@ -83,17 +90,20 @@ def create_app() -> Flask:
     @app.post("/auth/google/logout")
     def google_logout():
         session.pop("google_credentials", None)
+        session.pop("google_profile", None)
         flash("Google session cleared.", "success")
         return redirect(url_for("index"))
 
     @app.post("/config/save")
     def save_mapping_config():
         try:
+            user_identity = _get_user_identity()
             config = {
                 "spreadsheet_link": request.form.get("spreadsheet_link", ""),
                 "input_tab_name": request.form.get("input_tab_name", ""),
                 "issue_id_header": request.form.get("issue_id_header", ""),
                 "jira_ticket_link_header": request.form.get("jira_ticket_link_header", ""),
+                "helper_base_url": request.form.get("helper_base_url", ""),
                 "market_header": request.form.get("market_header", ""),
                 "summary_header": request.form.get("summary_header", ""),
                 "prd_links_header": request.form.get("prd_links_header", ""),
@@ -115,8 +125,8 @@ def create_app() -> Flask:
                     for market in MARKET_KEYS
                 },
             }
-            CONFIG_STORE.save(config)
-            flash("Web Jira config saved and will be used for preview/run.", "success")
+            CONFIG_STORE.save(config, user_identity["config_key"])
+            flash("Your web Jira config was saved for this user and will be used for preview/run.", "success")
         except ToolError as error:
             flash(str(error), "error")
         return redirect(url_for("index"))
@@ -151,10 +161,18 @@ def create_app() -> Flask:
 
 
 def _build_service(settings: Settings) -> JiraCreationService:
-    config_data = CONFIG_STORE.load() or CONFIG_STORE._normalize({})
+    user_identity = _get_user_identity()
+    config_data = CONFIG_STORE.load(user_identity["config_key"]) or CONFIG_STORE._normalize({})
     sheets = _build_sheets_service(settings, config_data)
     field_mappings_override = CONFIG_STORE.build_field_mappings(config_data)
-    return JiraCreationService(settings, sheets, field_mappings_override=field_mappings_override)
+    helper_base_url = str(config_data.get("helper_base_url", "")).strip()
+    bpmis_client = BPMISHelperClient(helper_base_url) if helper_base_url else None
+    return JiraCreationService(
+        settings,
+        sheets,
+        field_mappings_override=field_mappings_override,
+        bpmis_client=bpmis_client,
+    )
 
 
 def _build_sheets_service(settings: Settings, config_data: dict[str, object] | None = None) -> GoogleSheetsService:
@@ -214,4 +232,30 @@ def _build_run_notice(results: list[object], dry_run: bool) -> dict[str, object]
         "tone": tone,
         "summary": summary,
         "details": details,
+    }
+
+
+def _get_user_identity() -> dict[str, str | None]:
+    profile = session.get("google_profile") or {}
+    email = str(profile.get("email") or "").strip().lower()
+    name = str(profile.get("name") or "").strip()
+
+    if email:
+        return {
+            "config_key": f"google:{email}",
+            "display_name": name or email,
+            "email": email,
+            "mode": "google",
+        }
+
+    anonymous_key = session.get("anonymous_user_key")
+    if not anonymous_key:
+        anonymous_key = secrets.token_hex(8)
+        session["anonymous_user_key"] = anonymous_key
+
+    return {
+        "config_key": f"anon:{anonymous_key}",
+        "display_name": f"Anonymous Session {anonymous_key[:6]}",
+        "email": None,
+        "mode": "anonymous",
     }

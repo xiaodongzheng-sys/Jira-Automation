@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import requests
 from flask import session, url_for
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
@@ -10,7 +11,12 @@ from bpmis_jira_tool.config import Settings
 from bpmis_jira_tool.errors import AuthenticationError, ConfigError
 
 
-GOOGLE_SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
+GOOGLE_SCOPES = [
+    "openid",
+    "https://www.googleapis.com/auth/userinfo.email",
+    "https://www.googleapis.com/auth/userinfo.profile",
+    "https://www.googleapis.com/auth/spreadsheets",
+]
 
 
 def build_google_flow(settings: Settings) -> Flow:
@@ -49,6 +55,7 @@ def finish_google_oauth(settings: Settings, authorization_response: str) -> None
     flow.redirect_uri = settings.google_oauth_redirect_uri or url_for("google_callback", _external=True)
     flow.fetch_token(authorization_response=authorization_response)
     session["google_credentials"] = credentials_to_dict(flow.credentials)
+    session["google_profile"] = fetch_google_profile(flow.credentials)
 
 
 def get_google_credentials() -> Credentials:
@@ -68,3 +75,21 @@ def credentials_to_dict(credentials: Credentials) -> dict[str, Any]:
         "scopes": credentials.scopes,
     }
 
+
+def fetch_google_profile(credentials: Credentials) -> dict[str, Any]:
+    try:
+        response = requests.get(
+            "https://www.googleapis.com/oauth2/v3/userinfo",
+            headers={"Authorization": f"Bearer {credentials.token}"},
+            timeout=20,
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except requests.RequestException as error:
+        raise AuthenticationError("Google sign-in succeeded, but user profile lookup failed. Please try again.") from error
+    return {
+        "sub": payload.get("sub"),
+        "email": payload.get("email"),
+        "name": payload.get("name"),
+        "picture": payload.get("picture"),
+    }

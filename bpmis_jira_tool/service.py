@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from bpmis_jira_tool.bpmis import (
     BPMISClient,
+    BPMISHelperClient,
     BPMISPageApiClient,
 )
 from bpmis_jira_tool.config import Settings
@@ -23,10 +24,11 @@ class JiraCreationService:
         sheets_service: GoogleSheetsService,
         access_token: str | None = None,
         field_mappings_override: list[FieldMapping] | None = None,
+        bpmis_client: BPMISClient | None = None,
     ):
         self.settings = settings
         self.sheets_service = sheets_service
-        self.bpmis_client = build_bpmis_client(settings, access_token)
+        self.bpmis_client = bpmis_client or build_bpmis_client(settings, access_token)
         self.field_mappings_override = field_mappings_override
 
     def preview(self) -> tuple[list[RunResult], list[str]]:

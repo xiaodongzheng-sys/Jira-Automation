@@ -28,6 +28,13 @@ So the team edition needs:
 The central portal handles spreadsheet access and orchestration.
 The local helper handles BPMIS access with the user's own local browser session.
 
+The current prototype on this branch now includes:
+
+- user-scoped config persistence on the portal side
+- a configurable local helper URL per user
+- browser-visible helper health status
+- a first helper create endpoint that reuses the local BPMIS API client
+
 ## First-Phase Scope
 
 Phase 1 is a proof-of-path, not a full production release.

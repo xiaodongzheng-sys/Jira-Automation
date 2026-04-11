@@ -14,16 +14,20 @@
       <h2>Session Status</h2>
       <ul class="status-list">
         <li>
+          <span>Portal User</span>
+          <strong>{{ user_identity.display_name }}</strong>
+        </li>
+        <li>
           <span>Google Sheets</span>
           <strong>{{ "Connected" if google_connected else "Not connected" }}</strong>
         </li>
         <li>
-          <span>BPMIS Browser</span>
-          <strong>Chrome Session</strong>
+          <span>Local Helper</span>
+          <strong data-helper-status data-helper-url="{{ mapping_config.helper_base_url }}">Checking…</strong>
         </li>
         <li>
           <span>Jira Mapping</span>
-          <strong>Saved Web Config</strong>
+          <strong>User-scoped config</strong>
         </li>
         <li>
           <span>Spreadsheet</span>
@@ -77,6 +81,9 @@
 
           <label for="jira_ticket_link_header">Jira Ticket Link Header</label>
           <input id="jira_ticket_link_header" name="jira_ticket_link_header" list="input-header-options" value="{{ mapping_config.jira_ticket_link_header }}" placeholder="Jira Ticket Link">
+
+          <label for="helper_base_url">Local Helper URL</label>
+          <input id="helper_base_url" name="helper_base_url" value="{{ mapping_config.helper_base_url }}" placeholder="http://127.0.0.1:8787">
         </div>
 
         <div class="config-card">

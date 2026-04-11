@@ -11,3 +11,4 @@ test-results/
 tmp/
 *.jsonl
 jira_web_config.json
+team_portal.db

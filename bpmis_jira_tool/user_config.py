@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import json
 import re
+import sqlite3
 from pathlib import Path
 
 from bpmis_jira_tool.models import FieldMapping
 
 
 CONFIG_FILE = "jira_web_config.json"
+DB_FILE = "team_portal.db"
 CONFIGURED_FIELDS = [
     "Market",
     "Task Type",
@@ -30,6 +32,7 @@ SOURCE_FIELDS = {
     "input_tab_name": "Input",
     "issue_id_header": "Issue ID",
     "jira_ticket_link_header": "Jira Ticket Link",
+    "helper_base_url": "http://127.0.0.1:8787",
 }
 HEADER_FIELDS = {
     "Market": "market_header",
@@ -54,25 +57,47 @@ DIRECT_FIELDS = {
 DEFAULT_DIRECT_VALUES = {
     "task_type_value": "Feature",
 }
-QUOTED_OPTION_PATTERN = re.compile(r'"([^"]+)"')
 
 
 class WebConfigStore:
     def __init__(self, project_root: Path):
         self.path = project_root / CONFIG_FILE
+        self.db_path = project_root / DB_FILE
+        self._ensure_db()
 
-    def load(self) -> dict[str, object] | None:
+    def load(self, user_key: str | None = None) -> dict[str, object] | None:
+        if user_key:
+            row = self._fetch_row(user_key)
+            if row is not None:
+                return self._normalize(json.loads(row))
         if not self.path.exists():
             return None
         data = json.loads(self.path.read_text(encoding="utf-8"))
         return self._normalize(data)
 
-    def save(self, data: dict[str, object]) -> dict[str, object]:
+    def save(self, data: dict[str, object], user_key: str | None = None) -> dict[str, object]:
         normalized = self._normalize(data)
-        self.path.write_text(json.dumps(normalized, indent=2), encoding="utf-8")
+        if user_key:
+            self._upsert_row(user_key, normalized)
+        else:
+            self.path.write_text(json.dumps(normalized, indent=2), encoding="utf-8")
         return normalized
 
-    def clear(self) -> None:
+    def migrate(self, from_user_key: str, to_user_key: str) -> None:
+        if from_user_key == to_user_key:
+            return
+        source = self._fetch_row(from_user_key)
+        if source is None:
+            return
+        if self._fetch_row(to_user_key) is None:
+            self._upsert_row(to_user_key, self._normalize(json.loads(source)))
+
+    def clear(self, user_key: str | None = None) -> None:
+        if user_key:
+            with sqlite3.connect(self.db_path) as connection:
+                connection.execute("DELETE FROM user_configs WHERE user_key = ?", (user_key,))
+                connection.commit()
+            return
         if self.path.exists():
             self.path.unlink()
 
@@ -118,7 +143,6 @@ class WebConfigStore:
         for mapping in mappings:
             field = mapping.jira_field.strip()
             source = mapping.source.strip()
-            lowered = source.lower()
 
             if field in HEADER_FIELDS:
                 header = ""
@@ -167,8 +191,43 @@ class WebConfigStore:
 
         return normalized
 
+    def _ensure_db(self) -> None:
+        with sqlite3.connect(self.db_path) as connection:
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS user_configs (
+                    user_key TEXT PRIMARY KEY,
+                    config_json TEXT NOT NULL,
+                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            connection.commit()
+
+    def _fetch_row(self, user_key: str) -> str | None:
+        with sqlite3.connect(self.db_path) as connection:
+            row = connection.execute(
+                "SELECT config_json FROM user_configs WHERE user_key = ?",
+                (user_key,),
+            ).fetchone()
+        return row[0] if row else None
+
+    def _upsert_row(self, user_key: str, config: dict[str, object]) -> None:
+        with sqlite3.connect(self.db_path) as connection:
+            connection.execute(
+                """
+                INSERT INTO user_configs (user_key, config_json, updated_at)
+                VALUES (?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(user_key) DO UPDATE SET
+                    config_json = excluded.config_json,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (user_key, json.dumps(config, ensure_ascii=False)),
+            )
+            connection.commit()
+
     @staticmethod
-    def _normalize_market_choice_map(data: object) -> dict[str, list[str]]:
+    def _normalize_market_choice_map(data: object) -> dict[str, str]:
         normalized: dict[str, str] = {}
         raw_map = data if isinstance(data, dict) else {}
         for market in MARKET_KEYS:
