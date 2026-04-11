@@ -90,6 +90,60 @@ h1 {
   line-height: 1.5;
 }
 
+.quick-launch-panel,
+.self-check-panel {
+  margin-bottom: 24px;
+}
+
+.quick-launch-grid,
+.diagnostic-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.quick-launch-card,
+.diagnostic-card {
+  display: grid;
+  gap: 10px;
+  padding: 18px;
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.55);
+  border: 1px solid var(--line);
+}
+
+.quick-launch-card h3,
+.diagnostic-card strong {
+  margin: 0;
+  font-family: Georgia, "Times New Roman", serif;
+}
+
+.quick-launch-card p,
+.diagnostic-card p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+.diagnostic-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.diagnostic-pass {
+  border-color: rgba(27, 107, 92, 0.24);
+}
+
+.diagnostic-warn {
+  border-color: rgba(138, 97, 22, 0.24);
+}
+
+.diagnostic-fail {
+  border-color: rgba(164, 52, 45, 0.24);
+}
+
 .onboarding-panel {
   margin-bottom: 24px;
 }
@@ -519,6 +573,44 @@ th {
   font-size: 0.9rem;
 }
 
+.run-progress {
+  display: grid;
+  gap: 10px;
+  margin: 0 0 18px;
+  padding: 16px 18px;
+  border-radius: 18px;
+  background: rgba(27, 107, 92, 0.08);
+  border: 1px solid rgba(27, 107, 92, 0.16);
+}
+
+.run-progress-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+
+.run-progress-message {
+  margin: 0;
+  color: var(--muted);
+}
+
+.run-progress-bar {
+  width: 100%;
+  height: 10px;
+  border-radius: 999px;
+  background: rgba(27, 107, 92, 0.12);
+  overflow: hidden;
+}
+
+.run-progress-fill {
+  width: 0;
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #1b6b5c 0%, #57a78f 100%);
+  transition: width 0.3s ease;
+}
+
 @media (max-width: 860px) {
   .hero,
   .grid,
@@ -529,6 +621,8 @@ th {
 
   .config-grid,
   .checklist-grid,
+  .quick-launch-grid,
+  .diagnostic-grid,
   .field-grid,
   .field-grid-wide {
     grid-template-columns: 1fr;

@@ -97,6 +97,27 @@
     </div>
   </section>
 
+  <section class="panel panel-wide quick-launch-panel">
+    <div class="panel-head">
+      <div>
+        <h2>Fastest Start On Mac</h2>
+        <p class="step-copy">
+          If you prefer a simpler launch flow, use the Mac launcher file instead of typing commands every time.
+        </p>
+      </div>
+    </div>
+    <div class="quick-launch-grid">
+      <div class="quick-launch-card">
+        <h3>One-click launcher</h3>
+        <p>Double-click <code>Start Jira Tool.command</code> in the project folder. It starts the local helper, starts the portal, then opens the tool in your browser.</p>
+      </div>
+      <div class="quick-launch-card">
+        <h3>Manual fallback</h3>
+        <p>If the launcher is blocked by macOS, open Terminal in the project folder and run <code>./scripts/run_team_stack.sh start</code>.</p>
+      </div>
+    </div>
+  </section>
+
   <section class="grid">
     <article class="panel">
       <h2>1. Connect Google Sheets</h2>
@@ -163,7 +184,27 @@
     </div>
   </section>
 
-  <section class="panel panel-wide" id="results">
+  <section class="panel panel-wide self-check-panel">
+    <div class="panel-head">
+      <div>
+        <h2>Self-Check</h2>
+        <p class="step-copy">Run this before Preview or Run if you want a quick health check.</p>
+        <p class="help-text">
+          This check verifies Google connection, local helper reachability, BPMIS tab readiness, and Spreadsheet access using your current saved config.
+        </p>
+      </div>
+      <div class="button-row">
+        <button class="button button-secondary" type="button" data-self-check-trigger>Run Self-Check</button>
+      </div>
+    </div>
+    <div class="self-check-results" data-self-check-results>
+      <div class="empty-state">
+        <p>No self-check has been run yet.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel panel-wide" id="results" data-results-panel>
     <div class="panel-head">
       <div>
         <h2>3. Jira Mapping Config</h2>
@@ -416,16 +457,27 @@
         </div>
       </div>
       <div class="button-row">
-        <form method="post" action="{{ url_for('preview') }}">
+        <form method="post" action="{{ url_for('preview') }}" data-job-form data-job-url="{{ url_for('create_preview_job') }}" data-job-label="Preview Eligible Rows">
           <button class="button button-secondary" type="submit">Preview Eligible Rows</button>
         </form>
-        <form method="post" action="{{ url_for('run') }}" class="run-form">
+        <form method="post" action="{{ url_for('run') }}" class="run-form" data-job-form data-job-url="{{ url_for('create_run_job') }}" data-job-label="Run Ticket Creation">
           <button class="button" type="submit">Run Ticket Creation</button>
         </form>
       </div>
     </div>
 
-    {% if results %}
+    <div class="run-progress" data-run-progress hidden>
+      <div class="run-progress-head">
+        <strong data-run-progress-title>Working…</strong>
+        <span data-run-progress-count></span>
+      </div>
+      <p class="run-progress-message" data-run-progress-message>Please wait.</p>
+      <div class="run-progress-bar">
+        <div class="run-progress-fill" data-run-progress-fill></div>
+      </div>
+    </div>
+
+    <div data-results-table-wrap {% if not results %}hidden{% endif %}>
       <div class="table-wrap">
         <table>
           <thead>
@@ -438,7 +490,7 @@
               <th>Message</th>
             </tr>
           </thead>
-          <tbody>
+          <tbody data-results-body>
             {% for result in results %}
               <tr>
                 <td>{{ result.row_number }}</td>
@@ -460,10 +512,9 @@
           </tbody>
         </table>
       </div>
-    {% else %}
-      <div class="empty-state">
-        <p>No preview or run results yet.</p>
-      </div>
-    {% endif %}
+    </div>
+    <div class="empty-state" data-results-empty {% if results %}hidden{% endif %}>
+      <p>No preview or run results yet.</p>
+    </div>
   </section>
 {% endblock %}

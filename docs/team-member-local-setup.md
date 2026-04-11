@@ -36,6 +36,12 @@ This downloads the latest team version of the tool to your Mac.
 
 ## Step 2: Start the Tool
 
+最简单的方法：直接双击项目目录里的 `Start Jira Tool.command`。  
+The simplest option: double-click `Start Jira Tool.command` in the project folder.
+
+如果你更习惯 Terminal，也可以在同一个 Terminal 窗口里运行下面这些命令。  
+If you prefer Terminal, you can run the following commands in the same Terminal window.
+
 在同一个 Terminal 窗口里运行：
 
 In the same Terminal window, run:
@@ -133,7 +139,7 @@ Each time you use the tool:
 1. 打开 Chrome 并登录 BPMIS
 2. Go to the project folder in Terminal
 2. 在 Terminal 里进入项目目录
-3. Run:
+3. Double-click `Start Jira Tool.command`, or run:
 
 ```bash
 ./scripts/run_team_helper.sh start

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from flask import Flask, jsonify, request
+from playwright.sync_api import sync_playwright
 
 from bpmis_jira_tool.bpmis import BPMISPageApiClient
 from bpmis_jira_tool.config import Settings
@@ -27,6 +28,60 @@ def create_app() -> Flask:
                 "status": "ok",
                 "service": "team-helper",
                 "mode": "prototype",
+            }
+        )
+
+    @app.route("/diagnostics", methods=["GET", "OPTIONS"])
+    def diagnostics():
+        if request.method == "OPTIONS":
+            return ("", 204)
+
+        settings = Settings.from_env()
+        client = BPMISPageApiClient(settings)
+        checks = {
+            "cdp": {"ok": False, "detail": ""},
+            "bpmis_tab": {"ok": False, "detail": ""},
+        }
+        try:
+            with sync_playwright() as playwright:
+                browser = client._connect_browser(playwright)
+                checks["cdp"] = {"ok": True, "detail": "Chrome remote session is reachable."}
+
+                context = browser.contexts[0] if browser.contexts else browser.new_context()
+                bpmis_page = None
+                for existing in context.pages:
+                    if "bpmis-uat1.uat.npt.seabank.io" in (existing.url or ""):
+                        bpmis_page = existing
+                        break
+
+                if bpmis_page is None:
+                    checks["bpmis_tab"] = {
+                        "ok": False,
+                        "detail": "No open BPMIS tab was found in Chrome. Open BPMIS and log in first.",
+                    }
+                else:
+                    try:
+                        client._api_request(bpmis_page, "/api/v1/issueField/list")
+                        checks["bpmis_tab"] = {
+                            "ok": True,
+                            "detail": "BPMIS tab is open and the session looks usable.",
+                        }
+                    except BPMISError as error:
+                        checks["bpmis_tab"] = {
+                            "ok": False,
+                            "detail": f"BPMIS tab was found, but the session is not ready: {error}",
+                        }
+        except BPMISError as error:
+            checks["cdp"] = {"ok": False, "detail": str(error)}
+
+        overall_ok = all(check["ok"] for check in checks.values())
+        return jsonify(
+            {
+                "status": "ok" if overall_ok else "warn",
+                "service": "team-helper",
+                "mode": "prototype",
+                "message": "All local checks passed." if overall_ok else "Some local checks still need attention.",
+                "checks": checks,
             }
         )
 

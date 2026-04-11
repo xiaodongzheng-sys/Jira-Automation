@@ -16,7 +16,7 @@ If this is your first time using the tool, use the full setup guide here:
    打开 Chrome，确认 BPMIS 已登录
 2. Open Terminal in the project folder  
    在项目目录打开 Terminal
-3. Run:
+3. Double-click `Start Jira Tool.command`, or run:
 
 ```bash
 ./scripts/run_team_helper.sh start
