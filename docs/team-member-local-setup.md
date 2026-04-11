@@ -56,6 +56,8 @@ In the same Terminal window, run:
 - 启动和 BPMIS 通信的 helper
 - start the local web portal
 - 启动本地网页工具
+- open a dedicated Chrome window for BPMIS automation if needed
+- 如有需要，会自动打开一个专门给 BPMIS 自动化使用的 Chrome 窗口
 
 如果脚本提示 `GOOGLE_OAUTH_CLIENT_SECRET_FILE` 未配置，请先打开项目目录里的 `.env` 文件，填上你本机上的 Google OAuth client secret JSON 路径。  
 If the script says `GOOGLE_OAUTH_CLIENT_SECRET_FILE` is not configured, open the `.env` file in the project folder and set it to the Google OAuth client secret JSON path on your Mac.
@@ -70,8 +72,8 @@ Open this address in Chrome:
 
 ## Step 4: Log In To BPMIS
 
-请确认 Chrome 里已经打开 BPMIS，并且处于登录状态。  
-Make sure BPMIS is already open and logged in in Chrome.
+请确认工具自动打开的那个 Chrome 窗口里已经登录 BPMIS。第一次使用时，你可能需要在那个新窗口里手动登录一次。  
+Make sure BPMIS is logged in inside the Chrome window opened for the tool. On first use, you may need to log in there once.
 
 如果没有登录，工具就无法创建 Jira。  
 If you are not logged in, the tool will not be able to create Jira tickets.

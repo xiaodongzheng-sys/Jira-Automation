@@ -98,7 +98,7 @@ class Settings:
             bpmis_browser_fix_version_selector=os.getenv("BPMIS_BROWSER_FIX_VERSION_SELECTOR"),
             bpmis_browser_submit_selector=os.getenv("BPMIS_BROWSER_SUBMIT_SELECTOR"),
             bpmis_browser_executable_path=os.getenv("BPMIS_BROWSER_EXECUTABLE_PATH"),
-            bpmis_browser_cdp_url=os.getenv("BPMIS_BROWSER_CDP_URL"),
+            bpmis_browser_cdp_url=os.getenv("BPMIS_BROWSER_CDP_URL", "http://127.0.0.1:9222"),
             bpmis_browser_token_storage_key=os.getenv("BPMIS_BROWSER_TOKEN_STORAGE_KEY", "access_token"),
             bpmis_browser_headless=_env_bool("BPMIS_BROWSER_HEADLESS", False),
             bpmis_browser_ticket_url_regex=os.getenv("BPMIS_BROWSER_TICKET_URL_REGEX"),

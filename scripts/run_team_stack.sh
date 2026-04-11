@@ -7,9 +7,48 @@ TMP_DIR="$ROOT_DIR/tmp"
 HELPER_PID_FILE="$TMP_DIR/team_helper.pid"
 HELPER_LOG_FILE="$TMP_DIR/team_helper.log"
 HELPER_PORT="${HELPER_PORT:-8787}"
+CDP_PORT="${CDP_PORT:-9222}"
+CHROME_BIN="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+CHROME_PROFILE_DIR="$TMP_DIR/chrome-cdp-profile"
+DEFAULT_BPMIS_URL="https://bpmis-uat1.uat.npt.seabank.io/me"
 PYTHON_BIN="$ROOT_DIR/.venv/bin/python"
 
 mkdir -p "$TMP_DIR"
+
+find_cdp_pid() {
+  lsof -tiTCP:"$CDP_PORT" -sTCP:LISTEN -n -P 2>/dev/null | head -n 1
+}
+
+ensure_remote_debug_chrome() {
+  if [[ -n "$(find_cdp_pid || true)" ]]; then
+    return 0
+  fi
+
+  if [[ ! -x "$CHROME_BIN" ]]; then
+    echo "Google Chrome was not found at $CHROME_BIN"
+    echo "Please install Chrome first."
+    return 1
+  fi
+
+  mkdir -p "$CHROME_PROFILE_DIR"
+
+  nohup "$CHROME_BIN" \
+    --remote-debugging-port="$CDP_PORT" \
+    --user-data-dir="$CHROME_PROFILE_DIR" \
+    "$DEFAULT_BPMIS_URL" >/dev/null 2>&1 &
+
+  for _ in {1..20}; do
+    if [[ -n "$(find_cdp_pid || true)" ]]; then
+      echo "Dedicated BPMIS Chrome started on port $CDP_PORT."
+      echo "If this is your first run, log in to BPMIS in that Chrome window once."
+      return 0
+    fi
+    sleep 1
+  done
+
+  echo "Could not start the dedicated BPMIS Chrome window."
+  return 1
+}
 
 find_helper_pid() {
   lsof -tiTCP:"$HELPER_PORT" -sTCP:LISTEN -n -P 2>/dev/null | head -n 1
@@ -83,6 +122,7 @@ logs() {
 
 start() {
   "$ROOT_DIR/scripts/run_team_portal.sh" start
+  ensure_remote_debug_chrome
   start_helper
 }
 
