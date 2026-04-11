@@ -4,7 +4,7 @@ from pathlib import Path
 import re
 import secrets
 
-from flask import Flask, flash, redirect, render_template, request, session, url_for
+from flask import Flask, current_app, flash, redirect, render_template, request, session, url_for
 from dotenv import load_dotenv
 
 from bpmis_jira_tool.config import Settings
@@ -22,7 +22,6 @@ from bpmis_jira_tool.user_config import CONFIGURED_FIELDS, WebConfigStore
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(PROJECT_ROOT / ".env")
-CONFIG_STORE = WebConfigStore(PROJECT_ROOT)
 MARKET_KEYS = ["ID", "SG", "PH", "Regional"]
 
 
@@ -30,6 +29,10 @@ def create_app() -> Flask:
     settings = Settings.from_env()
     package_dir = Path(__file__).resolve().parent
     project_root = package_dir.parent
+    data_root = settings.team_portal_data_dir
+    if not data_root.is_absolute():
+        data_root = (project_root / data_root).resolve()
+    config_store = WebConfigStore(data_root, legacy_root=project_root)
     app = Flask(
         __name__,
         template_folder=str(project_root / "templates"),
@@ -37,22 +40,41 @@ def create_app() -> Flask:
     )
     app.config["SECRET_KEY"] = settings.flask_secret_key
     app.config["SETTINGS"] = settings
+    app.config["CONFIG_STORE"] = config_store
+
+    @app.before_request
+    def enforce_team_access():
+        if request.endpoint in {None, "static", "index", "google_login", "google_callback", "google_logout"}:
+            return None
+        if _current_google_user_is_blocked(settings):
+            session.pop("google_credentials", None)
+            session.pop("google_profile", None)
+            flash("This Google account is not authorized for the team portal. Please contact the maintainer.", "error")
+            return redirect(url_for("index"))
+        return None
 
     @app.get("/")
     def index():
         results = session.pop("last_results", None)
         run_notice = session.pop("run_notice", None)
+        blocked_google_user = _current_google_user_is_blocked(settings)
+        if blocked_google_user:
+            session.pop("google_credentials", None)
+            session.pop("google_profile", None)
+            flash("This Google account is not authorized for the team portal. Please contact the maintainer.", "error")
         user_identity = _get_user_identity()
-        config_data = CONFIG_STORE.load(user_identity["config_key"]) or CONFIG_STORE._normalize({})
+        config_data = config_store.load(user_identity["config_key"]) or config_store._normalize({})
         input_headers: list[str] = []
 
-        if "google_credentials" in session:
+        if "google_credentials" in session and not blocked_google_user:
             try:
                 sheets = _build_sheets_service(settings, config_data)
                 snapshot = sheets.read_snapshot()
                 input_headers = snapshot.headers
             except ToolError as error:
                 flash(str(error), "error")
+            except Exception:
+                flash("Google Sheets is connected, but the current sheet could not be read. Please reconnect Google or verify your Spreadsheet settings.", "error")
 
         return render_template(
             "index.html",
@@ -64,6 +86,7 @@ def create_app() -> Flask:
             mapping_fields=CONFIGURED_FIELDS,
             mapping_config=config_data,
             input_headers=input_headers,
+            google_authorized=not blocked_google_user,
         )
 
     @app.get("/auth/google/login")
@@ -80,8 +103,13 @@ def create_app() -> Flask:
         try:
             previous_identity = _get_user_identity()
             finish_google_oauth(settings, request.url)
+            if _current_google_user_is_blocked(settings):
+                session.pop("google_credentials", None)
+                session.pop("google_profile", None)
+                flash("This Google account is not authorized for the team portal. Please contact the maintainer.", "error")
+                return redirect(url_for("index"))
             current_identity = _get_user_identity()
-            CONFIG_STORE.migrate(previous_identity["config_key"], current_identity["config_key"])
+            config_store.migrate(previous_identity["config_key"], current_identity["config_key"])
             flash("Google Sheets connected successfully.", "success")
         except ToolError as error:
             flash(str(error), "error")
@@ -125,7 +153,7 @@ def create_app() -> Flask:
                     for market in MARKET_KEYS
                 },
             }
-            CONFIG_STORE.save(config, user_identity["config_key"])
+            config_store.save(config, user_identity["config_key"])
             flash("Your web Jira config was saved for this user and will be used for preview/run.", "success")
         except ToolError as error:
             flash(str(error), "error")
@@ -162,9 +190,10 @@ def create_app() -> Flask:
 
 def _build_service(settings: Settings) -> JiraCreationService:
     user_identity = _get_user_identity()
-    config_data = CONFIG_STORE.load(user_identity["config_key"]) or CONFIG_STORE._normalize({})
+    config_store = _get_config_store()
+    config_data = config_store.load(user_identity["config_key"]) or config_store._normalize({})
     sheets = _build_sheets_service(settings, config_data)
-    field_mappings_override = CONFIG_STORE.build_field_mappings(config_data)
+    field_mappings_override = config_store.build_field_mappings(config_data)
     helper_base_url = str(config_data.get("helper_base_url", "")).strip()
     bpmis_client = BPMISHelperClient(helper_base_url) if helper_base_url else None
     return JiraCreationService(
@@ -190,6 +219,26 @@ def _build_sheets_service(settings: Settings, config_data: dict[str, object] | N
         issue_id_header=issue_id_header,
         jira_ticket_link_header=jira_ticket_link_header,
     )
+
+
+def _get_config_store() -> WebConfigStore:
+    return current_app.config["CONFIG_STORE"]
+
+
+def _current_google_user_is_blocked(settings: Settings) -> bool:
+    if not settings.team_allowed_emails and not settings.team_allowed_email_domains:
+        return False
+    profile = session.get("google_profile") or {}
+    email = str(profile.get("email") or "").strip().lower()
+    if not email:
+        return False
+    if email in settings.team_allowed_emails:
+        return False
+    if "@" in email:
+        domain = email.rsplit("@", 1)[1]
+        if domain in settings.team_allowed_email_domains:
+            return False
+    return True
 
 
 def _resolve_spreadsheet_id(value: str) -> str | None:

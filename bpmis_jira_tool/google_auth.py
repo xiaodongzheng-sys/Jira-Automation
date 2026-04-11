@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import urljoin
 
 import requests
 from flask import session, url_for
@@ -19,6 +20,14 @@ GOOGLE_SCOPES = [
 ]
 
 
+def _resolve_google_redirect_uri(settings: Settings) -> str:
+    if settings.google_oauth_redirect_uri:
+        return settings.google_oauth_redirect_uri
+    if settings.team_portal_base_url:
+        return urljoin(settings.team_portal_base_url.rstrip("/") + "/", "auth/google/callback")
+    return url_for("google_callback", _external=True)
+
+
 def build_google_flow(settings: Settings) -> Flow:
     if not settings.google_oauth_client_secret_file.exists():
         raise ConfigError(
@@ -35,7 +44,7 @@ def build_google_flow(settings: Settings) -> Flow:
 
 def create_google_authorization_url(settings: Settings) -> str:
     flow = build_google_flow(settings)
-    redirect_uri = settings.google_oauth_redirect_uri or url_for("google_callback", _external=True)
+    redirect_uri = _resolve_google_redirect_uri(settings)
     flow.redirect_uri = redirect_uri
     authorization_url, state = flow.authorization_url(
         access_type="offline",
@@ -52,7 +61,7 @@ def finish_google_oauth(settings: Settings, authorization_response: str) -> None
         raise AuthenticationError("Missing OAuth state. Start the Google sign-in flow again.")
 
     flow = build_google_flow(settings)
-    flow.redirect_uri = settings.google_oauth_redirect_uri or url_for("google_callback", _external=True)
+    flow.redirect_uri = _resolve_google_redirect_uri(settings)
     flow.fetch_token(authorization_response=authorization_response)
     session["google_credentials"] = credentials_to_dict(flow.credentials)
     session["google_profile"] = fetch_google_profile(flow.credentials)

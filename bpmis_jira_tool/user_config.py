@@ -60,9 +60,12 @@ DEFAULT_DIRECT_VALUES = {
 
 
 class WebConfigStore:
-    def __init__(self, project_root: Path):
-        self.path = project_root / CONFIG_FILE
-        self.db_path = project_root / DB_FILE
+    def __init__(self, data_root: Path, legacy_root: Path | None = None):
+        self.root = data_root
+        self.root.mkdir(parents=True, exist_ok=True)
+        self.path = self.root / CONFIG_FILE
+        self.db_path = self.root / DB_FILE
+        self.legacy_path = (legacy_root / CONFIG_FILE) if legacy_root else None
         self._ensure_db()
 
     def load(self, user_key: str | None = None) -> dict[str, object] | None:
@@ -71,6 +74,9 @@ class WebConfigStore:
             if row is not None:
                 return self._normalize(json.loads(row))
         if not self.path.exists():
+            if self.legacy_path and self.legacy_path.exists():
+                data = json.loads(self.legacy_path.read_text(encoding="utf-8"))
+                return self._normalize(data)
             return None
         data = json.loads(self.path.read_text(encoding="utf-8"))
         return self._normalize(data)

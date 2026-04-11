@@ -21,3 +21,18 @@ The current prototype now:
 ```bash
 ./scripts/run_team_helper.sh
 ```
+
+Useful commands:
+
+```bash
+./scripts/run_team_helper.sh start
+./scripts/run_team_helper.sh status
+./scripts/run_team_helper.sh logs
+./scripts/run_team_helper.sh stop
+```
+
+First-time teammate setup:
+
+```bash
+./scripts/install_team_helper_local.sh
+```

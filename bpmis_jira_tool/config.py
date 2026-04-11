@@ -15,11 +15,28 @@ def _env_bool(name: str, default: bool) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _env_csv(name: str) -> tuple[str, ...]:
+    value = os.getenv(name, "").strip()
+    if not value:
+        return ()
+    return tuple(
+        item.strip().lower()
+        for item in value.split(",")
+        if item.strip()
+    )
+
+
 @dataclass(frozen=True)
 class Settings:
     flask_secret_key: str
     google_oauth_client_secret_file: Path
     google_oauth_redirect_uri: str | None
+    team_portal_host: str
+    team_portal_port: int
+    team_portal_base_url: str | None
+    team_allowed_emails: tuple[str, ...]
+    team_allowed_email_domains: tuple[str, ...]
+    team_portal_data_dir: Path
     spreadsheet_id: str
     common_tab_name: str
     input_tab_name: str
@@ -55,6 +72,12 @@ class Settings:
             flask_secret_key=os.getenv("FLASK_SECRET_KEY", "dev-secret-key"),
             google_oauth_client_secret_file=Path(client_secret),
             google_oauth_redirect_uri=os.getenv("GOOGLE_OAUTH_REDIRECT_URI"),
+            team_portal_host=os.getenv("TEAM_PORTAL_HOST", "127.0.0.1"),
+            team_portal_port=int(os.getenv("TEAM_PORTAL_PORT", "5000")),
+            team_portal_base_url=os.getenv("TEAM_PORTAL_BASE_URL"),
+            team_allowed_emails=_env_csv("TEAM_ALLOWED_EMAILS"),
+            team_allowed_email_domains=_env_csv("TEAM_ALLOWED_EMAIL_DOMAINS"),
+            team_portal_data_dir=Path(os.getenv("TEAM_PORTAL_DATA_DIR", ".")),
             spreadsheet_id=os.getenv("SPREADSHEET_ID", DEFAULT_SPREADSHEET_ID),
             common_tab_name=os.getenv("COMMON_TAB_NAME", "Common"),
             input_tab_name=os.getenv("INPUT_TAB_NAME", "Input"),

@@ -8,6 +8,12 @@ Support a fixed team of around 10-15 users through one internal web portal witho
 
 ## Chosen Direction
 
+Current rollout mode:
+
+- local-first per user
+
+Future rollout mode:
+
 - Internal shared web app
 - Per-user Google OAuth
 - Per-user saved config
@@ -34,6 +40,9 @@ The current prototype on this branch now includes:
 - a configurable local helper URL per user
 - browser-visible helper health status
 - a first helper create endpoint that reuses the local BPMIS API client
+- a production-oriented portal startup script for an internal Mac host
+- a launchd installation script for auto-start on the host Mac
+- a teammate quickstart and deployment guide
 
 ## First-Phase Scope
 
@@ -73,6 +82,34 @@ Suggested initial endpoints:
 
 - `GET /health`
 - `POST /bpmis/create-jira`
+
+## Current Recommended Run Commands
+
+Start the full team-edition prototype locally:
+
+```bash
+./scripts/run_team_stack.sh start
+```
+
+Useful commands:
+
+```bash
+./scripts/run_team_stack.sh status
+./scripts/run_team_stack.sh restart
+./scripts/run_team_stack.sh stop
+./scripts/run_team_stack.sh logs
+```
+
+If needed, the web portal can also be managed separately:
+
+```bash
+./scripts/run_team_portal.sh start
+```
+
+For the low-cost shared deployment shape, see:
+
+- [docs/team-deployment.md](/Users/NPTSG0388/Documents/New%20project/docs/team-deployment.md)
+- [docs/team-member-quickstart.md](/Users/NPTSG0388/Documents/New%20project/docs/team-member-quickstart.md)
 
 ## First-Phase Non-Goals
 
