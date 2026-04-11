@@ -36,11 +36,8 @@ This downloads the latest team version of the tool to your Mac.
 
 ## Step 2: Start the Tool
 
-最简单的方法：直接双击项目目录里的 `Start Jira Tool.command`。  
-The simplest option: double-click `Start Jira Tool.command` in the project folder.
-
-如果你更习惯 Terminal，也可以在同一个 Terminal 窗口里运行下面这些命令。  
-If you prefer Terminal, you can run the following commands in the same Terminal window.
+推荐方式：直接在 Terminal 里运行下面这些命令。  
+Recommended: run the following commands in Terminal.
 
 在同一个 Terminal 窗口里运行：
 
@@ -48,8 +45,7 @@ In the same Terminal window, run:
 
 ```bash
 ./scripts/install_team_helper_local.sh
-./scripts/run_team_helper.sh start
-./scripts/run_server.sh start
+./scripts/run_team_stack.sh start
 ```
 
 这些命令会：
@@ -139,11 +135,10 @@ Each time you use the tool:
 1. 打开 Chrome 并登录 BPMIS
 2. Go to the project folder in Terminal
 2. 在 Terminal 里进入项目目录
-3. Double-click `Start Jira Tool.command`, or run:
+3. Run:
 
 ```bash
-./scripts/run_team_helper.sh start
-./scripts/run_server.sh start
+./scripts/run_team_stack.sh start
 ```
 
 4. Open [http://127.0.0.1:5000](http://127.0.0.1:5000)
@@ -160,8 +155,7 @@ Each time you use the tool:
 如果网页打不开，运行：
 
 ```bash
-./scripts/run_server.sh restart
-./scripts/run_team_helper.sh restart
+./scripts/run_team_stack.sh restart
 ```
 
 Then reopen:  
@@ -174,7 +168,7 @@ Then reopen:
 如果 `Local Helper` 显示 `Offline`，运行：
 
 ```bash
-./scripts/run_team_helper.sh restart
+./scripts/run_team_stack.sh restart
 ```
 
 ### BPMIS error

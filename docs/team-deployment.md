@@ -141,7 +141,7 @@ Check:
 
 Check:
 
-- teammate has started `./scripts/run_team_helper.sh start`
+- teammate has started `./scripts/run_team_stack.sh start`
 - teammate can open `http://127.0.0.1:8787/health`
 - teammate is still logged into BPMIS in Chrome
 
