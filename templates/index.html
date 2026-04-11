@@ -1,0 +1,225 @@
+{% extends "base.html" %}
+
+{% block body %}
+  <section class="hero">
+    <div>
+      <p class="eyebrow">Local automation console</p>
+      <h1>Jira Creation Automation Tool</h1>
+      <p class="lede">
+        Reads the <strong>{{ settings.input_tab_name }}</strong>
+        tab, applies your saved web mapping config, creates Jira tickets through BPMIS, and writes the result back to Google Sheets.
+      </p>
+    </div>
+    <div class="status-card">
+      <h2>Session Status</h2>
+      <ul class="status-list">
+        <li>
+          <span>Google Sheets</span>
+          <strong>{{ "Connected" if google_connected else "Not connected" }}</strong>
+        </li>
+        <li>
+          <span>BPMIS Browser</span>
+          <strong>Chrome Session</strong>
+        </li>
+        <li>
+          <span>Jira Mapping</span>
+          <strong>Saved Web Config</strong>
+        </li>
+        <li>
+          <span>Spreadsheet</span>
+          <strong>{{ mapping_config.spreadsheet_link or settings.spreadsheet_id }}</strong>
+        </li>
+      </ul>
+    </div>
+  </section>
+
+  <section class="grid">
+    <article class="panel">
+      <h2>1. Connect Google Sheets</h2>
+      <p>Use Google OAuth to grant read/write access to the spreadsheet.</p>
+      <div class="button-row">
+        {% if google_connected %}
+          <form method="post" action="{{ url_for('google_logout') }}">
+            <button class="button button-secondary" type="submit">Disconnect Google</button>
+          </form>
+        {% else %}
+          <a class="button" href="{{ url_for('google_login') }}">Connect Google</a>
+        {% endif %}
+      </div>
+    </article>
+
+    <article class="panel">
+      <h2>2. BPMIS Browser</h2>
+      <p>Uses your existing logged-in Chrome session, so no BPMIS token is required here.</p>
+    </article>
+  </section>
+
+  <section class="panel panel-wide" id="results">
+    <div class="panel-head">
+      <div>
+        <h2>3. Jira Mapping Config</h2>
+        <p>Web config is remembered locally and is the only mapping source used for preview and run.</p>
+      </div>
+    </div>
+
+    <form method="post" action="{{ url_for('save_mapping_config') }}" class="stack">
+      <div class="config-grid">
+        <div class="config-card">
+          <h3>Source Config</h3>
+          <label for="spreadsheet_link">Spreadsheet Link or ID</label>
+          <input id="spreadsheet_link" name="spreadsheet_link" value="{{ mapping_config.spreadsheet_link }}" placeholder="https://docs.google.com/spreadsheets/d/...">
+
+          <label for="input_tab_name">Input Tab Name</label>
+          <input id="input_tab_name" name="input_tab_name" value="{{ mapping_config.input_tab_name }}" placeholder="Input">
+
+          <label for="issue_id_header">Issue ID Header</label>
+          <input id="issue_id_header" name="issue_id_header" list="input-header-options" value="{{ mapping_config.issue_id_header }}" placeholder="Issue ID">
+
+          <label for="jira_ticket_link_header">Jira Ticket Link Header</label>
+          <input id="jira_ticket_link_header" name="jira_ticket_link_header" list="input-header-options" value="{{ mapping_config.jira_ticket_link_header }}" placeholder="Jira Ticket Link">
+        </div>
+
+        <div class="config-card">
+          <h3>Input Header Rules</h3>
+          <label for="market_header">Market Header</label>
+          <input id="market_header" name="market_header" list="input-header-options" value="{{ mapping_config.market_header }}">
+
+          <label for="summary_header">Summary Header</label>
+          <input id="summary_header" name="summary_header" list="input-header-options" value="{{ mapping_config.summary_header }}">
+
+          <label for="prd_links_header">PRD Link/s Header</label>
+          <input id="prd_links_header" name="prd_links_header" list="input-header-options" value="{{ mapping_config.prd_links_header }}">
+        </div>
+
+        <div class="config-card">
+          <h3>Market Mapping Rules</h3>
+          <div class="config-form-grid">
+            <label>Component / ID</label>
+            <input name="component_ID" value="{{ mapping_config.component_by_market['ID'] }}" placeholder="Value for ID">
+
+            <label>Component / SG</label>
+            <input name="component_SG" value="{{ mapping_config.component_by_market['SG'] }}" placeholder="Value for SG">
+
+            <label>Component / PH</label>
+            <input name="component_PH" value="{{ mapping_config.component_by_market['PH'] }}" placeholder="Value for PH">
+
+            <label>Component / Regional</label>
+            <input name="component_Regional" value="{{ mapping_config.component_by_market['Regional'] }}" placeholder="Value for Regional">
+
+            <label>Need UAT / ID</label>
+            <input name="need_uat_ID" value="{{ mapping_config.need_uat_by_market['ID'] }}" placeholder="Value for ID">
+
+            <label>Need UAT / SG</label>
+            <input name="need_uat_SG" value="{{ mapping_config.need_uat_by_market['SG'] }}" placeholder="Value for SG">
+
+            <label>Need UAT / PH</label>
+            <input name="need_uat_PH" value="{{ mapping_config.need_uat_by_market['PH'] }}" placeholder="Value for PH">
+
+            <label>Need UAT / Regional</label>
+            <input name="need_uat_Regional" value="{{ mapping_config.need_uat_by_market['Regional'] }}" placeholder="Value for Regional">
+          </div>
+        </div>
+
+        <div class="config-card config-card-wide">
+          <h3>Direct Value Rules</h3>
+          <div class="config-form-grid">
+            <label for="task_type_value">Task Type</label>
+            <input id="task_type_value" name="task_type_value" value="{{ mapping_config.task_type_value }}">
+
+            <label for="fix_version_value">Fix Version</label>
+            <input id="fix_version_value" name="fix_version_value" value="{{ mapping_config.fix_version_value }}">
+
+            <label for="priority_value">Priority</label>
+            <input id="priority_value" name="priority_value" value="{{ mapping_config.priority_value }}">
+
+            <label for="assignee_value">Assignee</label>
+            <input id="assignee_value" name="assignee_value" value="{{ mapping_config.assignee_value }}">
+
+            <label for="product_manager_value">Product Manager</label>
+            <input id="product_manager_value" name="product_manager_value" value="{{ mapping_config.product_manager_value }}">
+
+            <label for="dev_pic_value">Dev PIC</label>
+            <input id="dev_pic_value" name="dev_pic_value" value="{{ mapping_config.dev_pic_value }}">
+
+            <label for="qa_pic_value">QA PIC</label>
+            <input id="qa_pic_value" name="qa_pic_value" value="{{ mapping_config.qa_pic_value }}">
+
+            <label for="reporter_value">Reporter</label>
+            <input id="reporter_value" name="reporter_value" value="{{ mapping_config.reporter_value }}">
+
+            <label for="biz_pic_value">Biz PIC</label>
+            <input id="biz_pic_value" name="biz_pic_value" value="{{ mapping_config.biz_pic_value }}">
+          </div>
+        </div>
+      </div>
+
+      <div class="button-row">
+        <button class="button" type="submit">Save Web Config</button>
+      </div>
+    </form>
+
+    <datalist id="input-header-options">
+      {% for header in input_headers %}
+        <option value="{{ header }}"></option>
+      {% endfor %}
+    </datalist>
+  </section>
+
+  <section class="panel panel-wide">
+    <div class="panel-head">
+      <div>
+        <h2>4. Preview or Run</h2>
+        <p>Preview checks which rows are eligible. Run creates tickets and writes results back to the sheet.</p>
+      </div>
+      <div class="button-row">
+        <form method="post" action="{{ url_for('preview') }}">
+          <button class="button button-secondary" type="submit">Preview Eligible Rows</button>
+        </form>
+        <form method="post" action="{{ url_for('run') }}" class="run-form">
+          <button class="button" type="submit">Run Ticket Creation</button>
+        </form>
+      </div>
+    </div>
+
+    {% if results %}
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Row</th>
+              <th>Issue ID</th>
+              <th>Status</th>
+              <th>Project</th>
+              <th>Ticket</th>
+              <th>Message</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for result in results %}
+              <tr>
+                <td>{{ result.row_number }}</td>
+                <td>{{ result.issue_id or "-" }}</td>
+                <td><span class="badge badge-{{ result.status }}">{{ result.status }}</span></td>
+                <td>{{ result.project_label or result.matched_project_id or "-" }}</td>
+                <td>
+                  {% if result.ticket_link %}
+                    <a href="{{ result.ticket_link }}" target="_blank" rel="noreferrer">{{ result.ticket_key or result.ticket_link }}</a>
+                  {% elif result.ticket_key %}
+                    {{ result.ticket_key }}
+                  {% else %}
+                    -
+                  {% endif %}
+                </td>
+                <td>{{ result.message }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      <div class="empty-state">
+        <p>No preview or run results yet.</p>
+      </div>
+    {% endif %}
+  </section>
+{% endblock %}

@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+*.pyc
+.env
+playwright-report/
+test-results/
+*.log
+.chrome-cdp-profile/
+tmp/
+*.jsonl
+jira_web_config.json
