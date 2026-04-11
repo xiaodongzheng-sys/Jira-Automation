@@ -57,6 +57,9 @@ In the same Terminal window, run:
 - start the local web portal
 - 启动本地网页工具
 
+如果脚本提示 `GOOGLE_OAUTH_CLIENT_SECRET_FILE` 未配置，请先打开项目目录里的 `.env` 文件，填上你本机上的 Google OAuth client secret JSON 路径。  
+If the script says `GOOGLE_OAUTH_CLIENT_SECRET_FILE` is not configured, open the `.env` file in the project folder and set it to the Google OAuth client secret JSON path on your Mac.
+
 ## Step 3: Open the Tool
 
 在 Chrome 打开下面这个地址：
