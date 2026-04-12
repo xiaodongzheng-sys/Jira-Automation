@@ -227,6 +227,8 @@ def create_app() -> Flask:
                 "input_tab_name": request.form.get("input_tab_name", ""),
                 "issue_id_header": request.form.get("issue_id_header", ""),
                 "jira_ticket_link_header": request.form.get("jira_ticket_link_header", ""),
+                "sdlc_approval_status_header": request.form.get("sdlc_approval_status_header", ""),
+                "business_lead_header": request.form.get("business_lead_header", ""),
                 "helper_base_url": request.form.get("helper_base_url", ""),
                 "market_header": request.form.get("market_header", ""),
                 "summary_header": request.form.get("summary_header", ""),
@@ -293,11 +295,19 @@ def create_app() -> Flask:
 
     @app.post("/api/jobs/preview")
     def create_preview_job():
-        return _start_job("preview", dry_run=True)
+        return _start_job("preview-jira")
 
     @app.post("/api/jobs/run")
     def create_run_job():
-        return _start_job("run", dry_run=False)
+        return _start_job("run-jira")
+
+    @app.post("/api/jobs/preview-sdlc")
+    def create_preview_sdlc_job():
+        return _start_job("preview-sdlc")
+
+    @app.post("/api/jobs/run-sdlc")
+    def create_run_sdlc_job():
+        return _start_job("run-sdlc")
 
     @app.get("/api/jobs/<job_id>")
     def get_job(job_id: str):
@@ -306,20 +316,20 @@ def create_app() -> Flask:
             return jsonify({"status": "error", "message": "Job not found."}), 404
         return jsonify(snapshot)
 
-    def _start_job(action: str, *, dry_run: bool):
+    def _start_job(action: str):
         if "google_credentials" not in session:
             return jsonify({"status": "error", "message": "Please connect Google Sheets first."}), 400
 
         user_identity = _get_user_identity()
         config_data = config_store.load(user_identity["config_key"]) or config_store._normalize({})
         job_store: JobStore = current_app.config["JOB_STORE"]
-        title = "Preview Eligible Rows" if dry_run else "Run Ticket Creation"
+        title = _job_title(action)
         job = job_store.create(action, title=title)
         credentials_payload = dict(session.get("google_credentials") or {})
 
         thread = threading.Thread(
             target=_run_background_job,
-            args=(app, job.job_id, settings, config_data, credentials_payload, dry_run),
+            args=(app, job.job_id, settings, config_data, credentials_payload, action),
             daemon=True,
         )
         thread.start()
@@ -377,6 +387,8 @@ def _build_sheets_service_with_credentials(
     input_tab_name = str(config_data.get("input_tab_name", "")).strip() or settings.input_tab_name
     issue_id_header = str(config_data.get("issue_id_header", "")).strip() or "Issue ID"
     jira_ticket_link_header = str(config_data.get("jira_ticket_link_header", "")).strip() or "Jira Ticket Link"
+    sdlc_approval_status_header = str(config_data.get("sdlc_approval_status_header", "")).strip() or "SDLC Approval Status"
+    business_lead_header = str(config_data.get("business_lead_header", "")).strip() or "Business Lead"
     return GoogleSheetsService(
         credentials=credentials,
         spreadsheet_id=spreadsheet_id,
@@ -384,6 +396,8 @@ def _build_sheets_service_with_credentials(
         input_tab=input_tab_name,
         issue_id_header=issue_id_header,
         jira_ticket_link_header=jira_ticket_link_header,
+        sdlc_approval_status_header=sdlc_approval_status_header,
+        business_lead_header=business_lead_header,
     )
 
 
@@ -418,24 +432,39 @@ def _resolve_spreadsheet_id(value: str) -> str | None:
     return None
 
 
-def _build_run_notice(results: list[object], dry_run: bool) -> dict[str, object]:
+def _job_title(action: str) -> str:
+    return {
+        "preview-jira": "Preview Eligible Rows",
+        "run-jira": "Run Ticket Creation",
+        "preview-sdlc": "Preview SDLC Approval",
+        "run-sdlc": "Submit SDLC Approval",
+    }.get(action, "Run Job")
+
+
+def _build_run_notice(results: list[object], action: str) -> dict[str, object]:
     created = [result for result in results if getattr(result, "status", "") == "created"]
     errors = [result for result in results if getattr(result, "status", "") == "error"]
     skipped = [result for result in results if getattr(result, "status", "") == "skipped"]
     previews = [result for result in results if getattr(result, "status", "") == "preview"]
 
-    title = "Dry Run Ready" if dry_run else ("Run Completed" if not errors else "Run Completed With Issues")
+    is_preview = action.startswith("preview")
+    subject = "SDLC Approval" if action.endswith("sdlc") else "Jira Creation"
+    if is_preview:
+        title = f"{subject} Preview Ready" if not errors else f"{subject} Preview With Issues"
+    else:
+        title = f"{subject} Completed" if not errors else f"{subject} Completed With Issues"
     tone = "success" if not errors else "warning"
     summary = (
         f"{len(previews)} ready, {len(errors)} error, {len(skipped)} skipped."
-        if dry_run
+        if is_preview
         else f"{len(created)} created, {len(errors)} error, {len(skipped)} skipped."
     )
 
     details: list[str] = []
     for result in created[:3]:
         ticket = getattr(result, "ticket_key", None) or getattr(result, "ticket_link", None) or "-"
-        details.append(f"Created row {result.row_number}: {ticket}")
+        verb = "Submitted row" if action.endswith("sdlc") else "Created row"
+        details.append(f"{verb} {result.row_number}: {ticket}")
     for result in errors[:3]:
         details.append(f"Row {result.row_number}: {result.message}")
     if not details:
@@ -460,7 +489,7 @@ def _run_background_job(
     settings: Settings,
     config_data: dict[str, Any],
     credentials_payload: dict[str, Any],
-    dry_run: bool,
+    action: str,
 ) -> None:
     with app.app_context():
         job_store: JobStore = app.config["JOB_STORE"]
@@ -485,11 +514,17 @@ def _run_background_job(
 
         try:
             service = _build_service_from_config(settings, config_data, credentials_payload)
-            if dry_run:
+            if action == "preview-jira":
                 results, _headers = service.preview(progress_callback=progress_callback)
-            else:
+            elif action == "run-jira":
                 results = service.run(dry_run=False, progress_callback=progress_callback)
-            notice = _build_run_notice(results, dry_run=dry_run)
+            elif action == "preview-sdlc":
+                results, _headers = service.preview_sdlc_approval(progress_callback=progress_callback)
+            elif action == "run-sdlc":
+                results = service.run_sdlc_approval(progress_callback=progress_callback)
+            else:
+                raise ToolError(f"Unsupported job action: {action}")
+            notice = _build_run_notice(results, action=action)
             job_store.complete(job_id, results=_serialize_results(results), notice=notice)
         except ToolError as error:
             job_store.fail(job_id, str(error))

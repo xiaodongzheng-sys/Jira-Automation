@@ -53,6 +53,14 @@ class InputRow:
     def jira_ticket_link(self) -> str:
         return self._get_first("Jira Ticket Link")
 
+    @property
+    def sdlc_approval_status(self) -> str:
+        return self._get_first("SDLC Approval Status")
+
+    @property
+    def business_lead(self) -> str:
+        return self._get_first("Business Lead")
+
 
 @dataclass(frozen=True)
 class ProjectMatch:

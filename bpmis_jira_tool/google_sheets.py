@@ -46,12 +46,16 @@ class GoogleSheetsService:
         input_tab: str,
         issue_id_header: str = "Issue ID",
         jira_ticket_link_header: str = "Jira Ticket Link",
+        sdlc_approval_status_header: str = "SDLC Approval Status",
+        business_lead_header: str = "Business Lead",
     ):
         self.spreadsheet_id = spreadsheet_id
         self.common_tab = common_tab
         self.input_tab = input_tab
         self.issue_id_header = issue_id_header
         self.jira_ticket_link_header = jira_ticket_link_header
+        self.sdlc_approval_status_header = sdlc_approval_status_header
+        self.business_lead_header = business_lead_header
         self.service = build("sheets", "v4", credentials=credentials, cache_discovery=False)
 
     def read_snapshot(self) -> SheetSnapshot:
@@ -60,6 +64,8 @@ class GoogleSheetsService:
             input_values,
             issue_id_header=self.issue_id_header,
             jira_ticket_link_header=self.jira_ticket_link_header,
+            sdlc_approval_status_header=self.sdlc_approval_status_header,
+            business_lead_header=self.business_lead_header,
         )
         return SheetSnapshot(field_mappings=[], rows=rows, headers=headers)
 
@@ -67,14 +73,37 @@ class GoogleSheetsService:
         jira_ticket_link_col = _column_letter(
             self._find_header_index(headers, self.jira_ticket_link_header, "Jira Ticket Link") + 1
         )
-        body = {
-            "valueInputOption": "USER_ENTERED",
-            "data": [
+        self._batch_update_cells(
+            [
                 {
                     "range": f"{self.input_tab}!{jira_ticket_link_col}{row_number}",
                     "values": [[ticket_value]],
                 },
-            ],
+            ]
+        )
+
+    def update_sdlc_status(self, row_number: int, headers: list[str], status_value: str) -> None:
+        sdlc_status_col = _column_letter(
+            self._find_header_index(
+                headers,
+                self.sdlc_approval_status_header,
+                "SDLC Approval Status",
+            )
+            + 1
+        )
+        self._batch_update_cells(
+            [
+                {
+                    "range": f"{self.input_tab}!{sdlc_status_col}{row_number}",
+                    "values": [[status_value]],
+                },
+            ]
+        )
+
+    def _batch_update_cells(self, data: list[dict[str, object]]) -> None:
+        body = {
+            "valueInputOption": "USER_ENTERED",
+            "data": data,
         }
         self.service.spreadsheets().values().batchUpdate(
             spreadsheetId=self.spreadsheet_id,
@@ -138,6 +167,8 @@ class GoogleSheetsService:
         values: list[list[str]],
         issue_id_header: str = "Issue ID",
         jira_ticket_link_header: str = "Jira Ticket Link",
+        sdlc_approval_status_header: str = "SDLC Approval Status",
+        business_lead_header: str = "Business Lead",
     ) -> tuple[list[InputRow], list[str]]:
         if not values:
             return [], []
@@ -152,6 +183,10 @@ class GoogleSheetsService:
                 row_dict.setdefault("Issue ID", row_dict[issue_id_header])
             if jira_ticket_link_header and jira_ticket_link_header in row_dict:
                 row_dict.setdefault("Jira Ticket Link", row_dict[jira_ticket_link_header])
+            if sdlc_approval_status_header and sdlc_approval_status_header in row_dict:
+                row_dict.setdefault("SDLC Approval Status", row_dict[sdlc_approval_status_header])
+            if business_lead_header and business_lead_header in row_dict:
+                row_dict.setdefault("Business Lead", row_dict[business_lead_header])
             rows.append(InputRow(row_number=offset, values=row_dict, ordered_values=tuple(padded_row)))
 
         return rows, headers

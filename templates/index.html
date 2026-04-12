@@ -200,11 +200,12 @@
             <h2>Preview or Run</h2>
             <p class="step-copy">Start with Preview. Only run ticket creation after the preview list looks correct.</p>
             <p class="help-text">
-              Preview shows which rows are eligible and what project summary each row will use. Run creates real Jira tickets and writes the result back to Google Sheets.
+              Preview shows which rows are eligible and what project summary each row will use. Run creates real Jira tickets or submits SDLC approvals, then writes the result back to Google Sheets.
             </p>
             <div class="result-tips">
               <span>Preview never creates Jira.</span>
               <span>Run only touches rows whose Jira link cell is blank.</span>
+              <span>SDLC run only touches rows whose Jira link exists and SDLC status cell is blank.</span>
               <span>Project column shows the resolved summary used for creation.</span>
             </div>
           </div>
@@ -214,6 +215,12 @@
             </form>
             <form method="post" action="{{ url_for('run') }}" class="run-form" data-job-form data-job-url="{{ url_for('create_run_job') }}" data-job-label="Run Ticket Creation">
               <button class="button" type="submit">Run Ticket Creation</button>
+            </form>
+            <form method="post" action="#" data-job-form data-job-url="{{ url_for('create_preview_sdlc_job') }}" data-job-label="Preview SDLC Approval">
+              <button class="button button-secondary" type="submit">Preview SDLC Approval</button>
+            </form>
+            <form method="post" action="#" data-job-form data-job-url="{{ url_for('create_run_sdlc_job') }}" data-job-label="Submit SDLC Approval">
+              <button class="button" type="submit">Submit SDLC Approval</button>
             </form>
           </div>
         </div>
@@ -329,6 +336,15 @@
 
                 <div class="field-group">
                   <div class="field-label-row">
+                    <label for="sdlc_approval_status_header">SDLC Approval Status Header</label>
+                    <span class="field-badge field-badge-required">Required for SDLC</span>
+                  </div>
+                  <p class="field-help">The column used to track SDLC approval. A blank cell means the row is eligible for SDLC submission.</p>
+                  <input id="sdlc_approval_status_header" name="sdlc_approval_status_header" list="input-header-options" value="{{ mapping_config.sdlc_approval_status_header }}" placeholder="SDLC Approval Status">
+                </div>
+
+                <div class="field-group">
+                  <div class="field-label-row">
                     <label for="helper_base_url">Local Helper URL</label>
                     <span class="field-badge field-badge-recommended">Recommended</span>
                   </div>
@@ -369,6 +385,15 @@
                   </div>
                   <p class="field-help">Optional. If provided, the matching PRD link will be sent into Jira. If blank, creation still continues.</p>
                   <input id="prd_links_header" name="prd_links_header" list="input-header-options" value="{{ mapping_config.prd_links_header }}">
+                </div>
+
+                <div class="field-group">
+                  <div class="field-label-row">
+                    <label for="business_lead_header">Business Lead Header</label>
+                    <span class="field-badge field-badge-required">Required for SDLC</span>
+                  </div>
+                  <p class="field-help">The input column whose value will be sent as the SDLC Business Lead. You can provide the approver email or user value from the sheet and the tool will resolve the SDLC approver automatically. SDLC title and content both reuse the Summary header.</p>
+                  <input id="business_lead_header" name="business_lead_header" list="input-header-options" value="{{ mapping_config.business_lead_header }}" placeholder="Business Lead">
                 </div>
               </div>
             </div>
