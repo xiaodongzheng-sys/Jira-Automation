@@ -39,10 +39,6 @@ class BPMISClient(ABC):
     def create_jira_ticket(self, project: ProjectMatch, fields: dict[str, str]) -> CreatedTicket:
         raise NotImplementedError
 
-    @abstractmethod
-    def submit_sdlc_approval(self, approval: dict[str, str]) -> dict[str, Any]:
-        raise NotImplementedError
-
 
 class BPMISHelperClient(BPMISClient):
     def __init__(self, helper_base_url: str):
@@ -78,39 +74,11 @@ class BPMISHelperClient(BPMISClient):
 
         return CreatedTicket(ticket_key=ticket_key, ticket_link=ticket_link, raw=payload)
 
-    def submit_sdlc_approval(self, approval: dict[str, str]) -> dict[str, Any]:
-        try:
-            response = requests.post(
-                f"{self.helper_base_url}/sdlc/submit-approval",
-                json=approval,
-                timeout=120,
-            )
-        except requests.RequestException as error:
-            raise BPMISError(
-                f"Could not reach local helper at {self.helper_base_url}. Please start the helper and try again."
-            ) from error
-
-        try:
-            payload = response.json()
-        except ValueError as error:
-            raise BPMISError("Local helper returned a non-JSON response.") from error
-
-        if response.status_code >= 400 or payload.get("status") == "error":
-            raise BPMISError(payload.get("message") or "Local helper could not submit SDLC approval.")
-
-        return payload
-
 
 class BPMISPageApiClient(BPMISClient):
     TASK_TYPE_ID = 4
     SUPPORTED_COUNTRIES_ALL_VALUE = 49007
     JIRA_BROWSE_BASE_URL = "https://jira.shopee.io/browse/"
-    SDLC_MANAGEMENT_URLS = {
-        "ID": "https://sdlc.npt.seabank.io/workflow/id/management",
-        "SG": "https://sdlc.npt.seabank.io/workflow/sg/management",
-        "PH": "https://sdlc.npt.seabank.io/workflow/ph/management",
-        "REGIONAL": "https://sdlc.npt.seabank.io/workflow/prod/management",
-    }
     TASK_TYPE_PREFIX = {
         "feature": "[Feature]",
         "tech": "[Tech]",
@@ -181,84 +149,6 @@ class BPMISPageApiClient(BPMISClient):
                 )
             finally:
                 pass
-
-    def submit_sdlc_approval(self, approval: dict[str, str]) -> dict[str, Any]:
-        self._require_cdp()
-        market = str(approval.get("market") or "").strip().upper()
-        if not market:
-            raise BPMISError("SDLC approval requires Market.")
-
-        capture_template_path = Path(__file__).resolve().parent.parent / "tmp" / "last_sdlc_api_template.json"
-        if not capture_template_path.exists():
-            raise BPMISError(
-                "SDLC API template has not been captured yet. "
-                "Please run one manual SDLC submission capture first."
-            )
-
-        template = json.loads(capture_template_path.read_text(encoding="utf-8"))
-        endpoint = str(template.get("url") or "").strip()
-        method = str(template.get("method") or "POST").strip().upper()
-        request_headers = dict(template.get("headers") or {})
-        body = template.get("body")
-        if not endpoint or body is None:
-            raise BPMISError("Captured SDLC API template is incomplete. Please capture again.")
-
-        body_text = json.dumps(body, ensure_ascii=False)
-        replacements = {
-            "__TITLE__": approval.get("title", ""),
-            "__CONTENT__": approval.get("content", ""),
-            "__BUSINESS_LEAD__": approval.get("business_lead", ""),
-            "__JIRA_TICKET_LINK__": approval.get("jira_ticket_link", ""),
-            "__JIRA_TICKET_KEY__": approval.get("jira_ticket_key", ""),
-            "__ISSUE_ID__": approval.get("issue_id", ""),
-            "__MARKET__": market,
-        }
-        for placeholder, value in replacements.items():
-            body_text = body_text.replace(placeholder, str(value))
-
-        try:
-            request_body = json.loads(body_text)
-        except json.JSONDecodeError as error:
-            raise BPMISError("Captured SDLC API template could not be rendered into valid JSON.") from error
-
-        from playwright.sync_api import sync_playwright
-
-        with sync_playwright() as playwright:
-            browser = self._connect_browser(playwright)
-            context = browser.contexts[0] if browser.contexts else browser.new_context()
-            page = self._pick_existing_sdlc_page(context, market)
-            approval_name = str(request_body.get("name") or "").strip()
-            if not approval_name:
-                raise BPMISError("Captured SDLC API template is missing approval name.")
-
-            business_lead_id = self._resolve_sdlc_business_lead_id(
-                page,
-                market=market,
-                approval_name=approval_name,
-                lead_value=str(approval.get("business_lead") or "").strip(),
-                request_headers=request_headers,
-            )
-            node_array = request_body.get("nodeArray")
-            if isinstance(node_array, dict):
-                for key, value in node_array.items():
-                    if isinstance(value, list):
-                        node_array[key] = [business_lead_id]
-
-            response = self._api_request(
-                page,
-                endpoint,
-                method=method,
-                body=request_body,
-                headers=request_headers,
-            )
-            self._write_sdlc_debug_capture(request_body, response)
-            return response
-
-    @staticmethod
-    def _coerce_numeric_id(value):
-        if isinstance(value, str) and value.isdigit():
-            return int(value)
-        return value
 
     def _build_create_payload(
         self,
@@ -339,14 +229,6 @@ class BPMISPageApiClient(BPMISClient):
 
     def _write_debug_capture(self, payload: dict[str, Any], response: dict[str, Any]) -> None:
         debug_path = Path(__file__).resolve().parent.parent / "tmp" / "last_bpmis_api_result.json"
-        debug_path.parent.mkdir(parents=True, exist_ok=True)
-        debug_path.write_text(
-            json.dumps({"payload": payload, "response": response}, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
-
-    def _write_sdlc_debug_capture(self, payload: dict[str, Any], response: dict[str, Any]) -> None:
-        debug_path = Path(__file__).resolve().parent.parent / "tmp" / "last_sdlc_api_result.json"
         debug_path.parent.mkdir(parents=True, exist_ok=True)
         debug_path.write_text(
             json.dumps({"payload": payload, "response": response}, indent=2, ensure_ascii=False),
@@ -508,150 +390,6 @@ class BPMISPageApiClient(BPMISClient):
             options.extend(self._group_options_cache.get(group, []))
         return options
 
-    def _resolve_sdlc_business_lead_id(
-        self,
-        page,
-        market: str,
-        approval_name: str,
-        lead_value: str,
-        request_headers: dict[str, Any] | None = None,
-    ) -> int:
-        normalized_lead = lead_value.strip()
-        if not normalized_lead:
-            raise BPMISError("Business Lead is required for SDLC approval.")
-        if normalized_lead.isdigit():
-            return int(normalized_lead)
-
-        request_headers = request_headers or {}
-        role_ids = self._fetch_sdlc_role_ids(page, approval_name, request_headers)
-        if not role_ids:
-            raise BPMISError("Could not discover SDLC approval roles for Business Lead mapping.")
-
-        users: list[dict[str, Any]] = []
-        for role_id in role_ids:
-            users.extend(self._fetch_sdlc_role_users(page, role_id, request_headers))
-
-        matched_user_id = self._match_sdlc_user(users, normalized_lead)
-        if matched_user_id is None:
-            raise BPMISError(
-                f"Could not resolve SDLC Business Lead '{normalized_lead}' for market {market}."
-            )
-        return matched_user_id
-
-    def _fetch_sdlc_role_ids(self, page, approval_name: str, request_headers: dict[str, Any]) -> list[int]:
-        paths = (
-            "/api/v1/sdlc/sdlc-manage/get-node-info",
-            "/api/sdlc-manage/get-node-info",
-        )
-        bodies = (
-            {"name": approval_name},
-            {"approvalName": approval_name},
-            {"approvalType": approval_name},
-            {"key": approval_name},
-            {"workflowName": approval_name},
-        )
-        for path in paths:
-            for body in bodies:
-                try:
-                    response = self._api_request(
-                        page,
-                        path,
-                        method="POST",
-                        body=body,
-                        headers=request_headers,
-                    )
-                except BPMISError:
-                    continue
-                role_ids = self._extract_sdlc_role_ids(response)
-                if role_ids:
-                    return role_ids
-        return []
-
-    def _extract_sdlc_role_ids(self, payload: Any) -> list[int]:
-        role_ids: set[int] = set()
-
-        def walk(node: Any) -> None:
-            if isinstance(node, dict):
-                role_type = str(node.get("type") or "").strip().lower()
-                role_id = node.get("roleId")
-                if role_type == "role" and role_id is not None:
-                    try:
-                        role_ids.add(int(role_id))
-                    except (TypeError, ValueError):
-                        pass
-                for value in node.values():
-                    walk(value)
-            elif isinstance(node, list):
-                for item in node:
-                    walk(item)
-
-        walk(payload)
-        return sorted(role_ids)
-
-    def _fetch_sdlc_role_users(self, page, role_id: int, request_headers: dict[str, Any]) -> list[dict[str, Any]]:
-        users: list[dict[str, Any]] = []
-        for path in (
-            f"/api/v1/sdlc/rule/getUsersByRoleId/{role_id}",
-            f"/api/v1/sdlc/rule/get-role-master-list/{role_id}",
-        ):
-            try:
-                response = self._api_request(page, path, headers=request_headers)
-            except BPMISError:
-                continue
-            users.extend(self._extract_candidate_users(response))
-        return users
-
-    def _extract_candidate_users(self, payload: Any) -> list[dict[str, Any]]:
-        users: list[dict[str, Any]] = []
-
-        def walk(node: Any) -> None:
-            if isinstance(node, dict):
-                normalized_keys = {str(key).lower() for key in node.keys()}
-                if "id" in normalized_keys and (
-                    "email" in normalized_keys
-                    or "emailaddress" in normalized_keys
-                    or "displayname" in normalized_keys
-                    or "name" in normalized_keys
-                    or "label" in normalized_keys
-                ):
-                    users.append(node)
-                for value in node.values():
-                    walk(value)
-            elif isinstance(node, list):
-                for item in node:
-                    walk(item)
-
-        walk(payload)
-        return users
-
-    def _match_sdlc_user(self, users: list[dict[str, Any]], lead_value: str) -> int | None:
-        normalized = lead_value.strip().lower()
-        if not normalized:
-            return None
-
-        def candidate_strings(user: dict[str, Any]) -> list[str]:
-            values = (
-                user.get("email"),
-                user.get("emailAddress"),
-                user.get("displayName"),
-                user.get("name"),
-                user.get("label"),
-                user.get("userName"),
-                user.get("username"),
-                user.get("loginName"),
-            )
-            return [str(value).strip().lower() for value in values if str(value).strip()]
-
-        for user in users:
-            if normalized in candidate_strings(user):
-                return int(user["id"])
-        for user in users:
-            if any(normalized in value for value in candidate_strings(user)):
-                return int(user["id"])
-        if users:
-            return int(users[0]["id"])
-        return None
-
     def _api_request(
         self,
         page,
@@ -659,11 +397,10 @@ class BPMISPageApiClient(BPMISClient):
         method: str = "GET",
         params: dict[str, Any] | None = None,
         body: Any | None = None,
-        headers: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         response = page.evaluate(
             """
-            async ({path, method, params, body, headers}) => {
+            async ({path, method, params, body}) => {
               const url = new URL(path, window.location.origin);
               for (const [key, value] of Object.entries(params || {})) {
                 url.searchParams.set(key, String(value));
@@ -671,12 +408,10 @@ class BPMISPageApiClient(BPMISClient):
               const options = {
                 method,
                 credentials: 'include',
-                headers: { 'Accept': 'application/json', ...(headers || {}) }
+                headers: { 'Accept': 'application/json' }
               };
               if (body !== null && body !== undefined) {
-                if (!options.headers['Content-Type']) {
-                  options.headers['Content-Type'] = 'application/json';
-                }
+                options.headers['Content-Type'] = 'application/json';
                 options.body = JSON.stringify(body);
               }
               const resp = await fetch(url.toString(), options);
@@ -689,7 +424,6 @@ class BPMISPageApiClient(BPMISClient):
                 "method": method,
                 "params": params or {},
                 "body": body,
-                "headers": headers or {},
             },
         )
 
@@ -769,30 +503,6 @@ class BPMISPageApiClient(BPMISClient):
                 "Please make sure your Chrome session is still logged in."
             ) from error
 
-    def _pick_existing_sdlc_page(self, context, market: str):
-        for existing in context.pages:
-            try:
-                if "sdlc.npt.seabank.io/workflow/" in (existing.url or ""):
-                    return existing
-            except Exception:  # noqa: BLE001
-                continue
-        page = context.new_page()
-        try:
-            url = self.SDLC_MANAGEMENT_URLS.get(market.upper())
-            if not url:
-                raise BPMISError(f"Unsupported SDLC market '{market}'.")
-            page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            return page
-        except Exception as error:  # noqa: BLE001
-            try:
-                page.close()
-            except Exception:  # noqa: BLE001
-                pass
-            raise BPMISError(
-                "Could not open an SDLC tab in Chrome automatically. "
-                "Please make sure your Chrome session is still logged in."
-            ) from error
-
     def _require_cdp(self) -> None:
         if not self.settings.bpmis_browser_cdp_url:
             raise BPMISNotConfiguredError("BPMIS Chrome session is not configured.")
@@ -864,9 +574,6 @@ class BPMISApiClient(BPMISClient):
         ticket_link = ticket_payload.get("url") or ticket_payload.get("ticketUrl") or ticket_payload.get("link")
         return CreatedTicket(ticket_key=ticket_key, ticket_link=ticket_link, raw=ticket_payload)
 
-    def submit_sdlc_approval(self, approval: dict[str, str]) -> dict[str, Any]:
-        raise BPMISError("Direct SDLC API client is not implemented for this transport.")
-
 
 class BPMISBrowserClient(BPMISClient):
     def __init__(self, settings: Settings, access_token: str):
@@ -876,9 +583,6 @@ class BPMISBrowserClient(BPMISClient):
     def _pause_after_step(self, seconds: float = 0.5) -> None:
         if not self.settings.bpmis_browser_headless:
             time.sleep(seconds)
-
-    def submit_sdlc_approval(self, approval: dict[str, str]) -> dict[str, Any]:
-        raise BPMISError("Legacy browser SDLC submission is not implemented in this transport.")
 
     def _open_browser_session(self, playwright):
         if self.settings.bpmis_browser_cdp_url:

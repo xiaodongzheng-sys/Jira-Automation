@@ -32,8 +32,6 @@ SOURCE_FIELDS = {
     "input_tab_name": "Input",
     "issue_id_header": "Issue ID",
     "jira_ticket_link_header": "Jira Ticket Link",
-    "sdlc_approval_status_header": "SDLC Approval Status",
-    "business_lead_header": "Business Lead",
     "helper_base_url": "http://127.0.0.1:8787",
 }
 HEADER_FIELDS = {

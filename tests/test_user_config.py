@@ -41,21 +41,6 @@ class UserConfigStoreTests(unittest.TestCase):
             self.assertEqual(store.load()["spreadsheet_link"], "legacy-sheet")
             self.assertTrue((data_root / "team_portal.db").exists())
 
-    def test_new_sdlc_fields_are_persisted(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            store = WebConfigStore(Path(temp_dir))
-            store.save(
-                {
-                    "sdlc_approval_status_header": "SDLC Approval",
-                    "business_lead_header": "Business Lead",
-                },
-                user_key="google:user@example.com",
-            )
-
-            loaded = store.load("google:user@example.com")
-            self.assertEqual(loaded["sdlc_approval_status_header"], "SDLC Approval")
-            self.assertEqual(loaded["business_lead_header"], "Business Lead")
-
 
 if __name__ == "__main__":
     unittest.main()

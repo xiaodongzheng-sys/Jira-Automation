@@ -49,25 +49,6 @@ class GoogleSheetsParsingTests(unittest.TestCase):
         self.assertEqual(rows[0].issue_id, "ISS-9")
         self.assertEqual(rows[0].jira_ticket_link, "")
 
-    def test_parses_rows_with_configured_sdlc_and_business_lead_headers(self):
-        values = [
-            ["Req ID", "Ticket URL", "Approval Flag", "BL"],
-            ["ISS-9", "https://jira/browse/JIRA-9", "", "owner@example.com"],
-        ]
-
-        rows, headers = GoogleSheetsService._parse_input_rows(
-            values,
-            issue_id_header="Req ID",
-            jira_ticket_link_header="Ticket URL",
-            sdlc_approval_status_header="Approval Flag",
-            business_lead_header="BL",
-        )
-
-        self.assertEqual(headers, ["Req ID", "Ticket URL", "Approval Flag", "BL"])
-        self.assertEqual(rows[0].jira_ticket_link, "https://jira/browse/JIRA-9")
-        self.assertEqual(rows[0].sdlc_approval_status, "")
-        self.assertEqual(rows[0].business_lead, "owner@example.com")
-
     def test_get_values_raises_friendly_error_when_tab_name_is_invalid(self):
         class _FakeExecute:
             def execute(self):
