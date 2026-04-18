@@ -24,7 +24,7 @@ class TeamPortalAccessTests(unittest.TestCase):
             with app.test_client() as client:
                 response = client.get("/", follow_redirects=False)
                 self.assertEqual(response.status_code, 200)
-                self.assertIn(b"Sign in to open the BPMIS workspace", response.data)
+                self.assertIn(b"Sign in to open the BPMIS Automation Tool", response.data)
                 self.assertIn(b"Continue with Google", response.data)
 
     def test_shared_mode_redirects_protected_route_to_login_gate(self):

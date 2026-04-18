@@ -48,30 +48,52 @@ class OpenAIAudioTests(unittest.TestCase):
             service = VoiceService(
                 store=store,
                 openai_client=client,
-                openai_default_voice="alloy",
-                openai_english_voice="coral",
                 openai_mandarin_voice="sage",
                 openai_voice_speed=0.96,
                 openai_custom_voice_enabled=False,
+                openai_tts_fallback_enabled=True,
                 elevenlabs_api_key=None,
-                elevenlabs_model_id="eleven_multilingual_v2",
-                elevenlabs_english_model_id="eleven_flash_v2_5",
                 elevenlabs_mandarin_model_id="eleven_multilingual_v2",
-                elevenlabs_default_voice_id="JBFqnCBsd6RMkjVDRZzb",
-                elevenlabs_english_voice_id="21m00Tcm4TlvDq8ikWAM",
                 elevenlabs_mandarin_voice_id="JBFqnCBsd6RMkjVDRZzb",
             )
-
-            service.synthesize(session_id="s1", text="English script", language_code="en", owner_key="anon:test")
-            english_voice = client.synthesize_speech.call_args.kwargs["voice"]
 
             service.synthesize(session_id="s2", text="中文讲解", language_code="zh", owner_key="anon:test")
             mandarin_voice = client.synthesize_speech.call_args.kwargs["voice"]
             mandarin_instructions = client.synthesize_speech.call_args.kwargs["instructions"]
 
-            self.assertEqual(english_voice, "coral")
             self.assertEqual(mandarin_voice, "sage")
             self.assertIn("Mandarin", mandarin_instructions)
+        finally:
+            temp_dir.cleanup()
+
+    def test_voice_service_does_not_use_openai_when_fallback_disabled(self):
+        temp_dir = tempfile.TemporaryDirectory()
+        try:
+            store = BriefingStore(Path(temp_dir.name))
+            client = Mock()
+            client.is_configured.return_value = True
+
+            service = VoiceService(
+                store=store,
+                openai_client=client,
+                openai_mandarin_voice="sage",
+                openai_voice_speed=0.96,
+                openai_custom_voice_enabled=False,
+                openai_tts_fallback_enabled=False,
+                elevenlabs_api_key=None,
+                elevenlabs_mandarin_model_id="eleven_multilingual_v2",
+                elevenlabs_mandarin_voice_id="JBFqnCBsd6RMkjVDRZzb",
+            )
+
+            audio_path = service.synthesize(
+                session_id="s1",
+                text="中文讲解",
+                language_code="zh",
+                owner_key="anon:test",
+            )
+
+            self.assertIsNone(audio_path)
+            client.synthesize_speech.assert_not_called()
         finally:
             temp_dir.cleanup()
 

@@ -98,7 +98,6 @@ class PRDBriefingServiceTests(unittest.TestCase):
         payload = self.service.create_session(
             owner_key="anon:test",
             page_ref="https://example.atlassian.net/wiki/pages/123",
-            audience="developer_zh",
             mode="walkthrough",
         )
 
@@ -117,7 +116,6 @@ class PRDBriefingServiceTests(unittest.TestCase):
         payload = self.service.create_session(
             owner_key="anon:test",
             page_ref="https://example.atlassian.net/wiki/pages/123",
-            audience="business_en",
             mode="walkthrough",
         )
         self.service.upload_kb_document(
@@ -132,7 +130,7 @@ class PRDBriefingServiceTests(unittest.TestCase):
             question="What is the approval workflow?",
         )
 
-        self.assertIn("available source text", answer["answer_text"])
+        self.assertIn("根据目前可用的来源内容", answer["answer_text"])
         self.assertEqual(answer["groundedness"], "grounded")
         self.assertGreaterEqual(len(answer["citations"]), 1)
 
@@ -140,7 +138,6 @@ class PRDBriefingServiceTests(unittest.TestCase):
         payload = self.service.create_session(
             owner_key="anon:test",
             page_ref="https://example.atlassian.net/wiki/pages/123",
-            audience="developer_zh",
             mode="walkthrough",
         )
 
@@ -159,7 +156,6 @@ class PRDBriefingServiceTests(unittest.TestCase):
         payload = self.service.create_session(
             owner_key="anon:test",
             page_ref="https://example.atlassian.net/wiki/pages/123",
-            audience="developer_zh",
             mode="walkthrough",
         )
         self.openai_client.answer_calls = 0
@@ -168,7 +164,6 @@ class PRDBriefingServiceTests(unittest.TestCase):
 
         result = self.service._compose_walkthrough_section(  # noqa: SLF001
             owner_key="anon:prompt-test",
-            audience="developer_zh",
             section=payload["sections"][0],
         )
 
@@ -183,7 +178,6 @@ class PRDBriefingServiceTests(unittest.TestCase):
         payload = self.service.create_session(
             owner_key="anon:test",
             page_ref="https://example.atlassian.net/wiki/pages/123",
-            audience="business_en",
             mode="walkthrough",
         )
         self.openai_client.answer_calls = 0
@@ -205,17 +199,16 @@ class PRDBriefingServiceTests(unittest.TestCase):
 
         self.assertEqual(first["script"], "LLM answer")
         self.assertEqual(second["script"], "LLM answer")
-        self.assertEqual(self.openai_client.answer_calls, 1)
+        self.assertEqual(self.openai_client.answer_calls, 0)
 
     def test_walkthrough_script_requires_text_provider(self):
         payload = self.service.create_session(
             owner_key="anon:test",
             page_ref="https://example.atlassian.net/wiki/pages/123",
-            audience="developer_zh",
             mode="walkthrough",
         )
 
-        with self.assertRaisesRegex(RuntimeError, "configured text model provider"):
+        with self.assertRaisesRegex(RuntimeError, "configured OpenAI text model"):
             self.service.narrate_section(
                 session_id=payload["session"]["session_id"],
                 owner_key="anon:test",
@@ -271,7 +264,6 @@ class PRDBriefingServiceTests(unittest.TestCase):
         payload = self.service.create_session(
             owner_key="anon:test",
             page_ref="https://example.atlassian.net/wiki/pages/123",
-            audience="developer_zh",
             mode="walkthrough",
         )
         self.assertTrue(payload["session_overview"]["overview"])
@@ -317,7 +309,6 @@ class PRDBriefingServiceTests(unittest.TestCase):
         payload = self.service.create_session(
             owner_key="anon:test",
             page_ref="https://example.atlassian.net/wiki/pages/123",
-            audience="developer_zh",
             mode="walkthrough",
         )
 

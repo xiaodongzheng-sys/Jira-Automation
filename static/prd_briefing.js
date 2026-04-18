@@ -26,7 +26,6 @@
     chunks: [],
     messages: [],
     isNarrating: false,
-    audience: 'developer_zh',
     currentAudio: null,
     readerMode: false,
   };
@@ -309,13 +308,10 @@
       }
       const raw = error.message || '当前 section 无法生成讲解。';
       const hasOpenAI = raw.includes('OpenAI');
-      const hasGemini = raw.includes('Gemini');
       const friendly = raw.includes('429') || raw.includes('Too Many Requests')
-        ? (hasOpenAI && hasGemini
-          ? 'Gemini 和 OpenAI 当前都触发了限流，暂时无法生成这一节的讲解，请稍后再试。'
-          : hasGemini
-            ? 'Gemini 当前触发限流，暂时无法生成这一节的讲解，请稍后再试。'
-            : 'OpenAI 当前触发限流，暂时无法生成这一节的讲解，请稍后再试。')
+        ? (hasOpenAI
+            ? 'OpenAI 当前触发限流，暂时无法生成这一节的讲解，请稍后再试。'
+            : '当前文本模型触发限流，暂时无法生成这一节的讲解，请稍后再试。')
         : raw;
       setStatus(friendly, 'error');
       setWalkthroughStatus(friendly, 'error');
@@ -432,7 +428,6 @@
   const applySessionPayload = (payload) => {
     stopNarration();
     state.sessionId = payload.session.session_id;
-    state.audience = payload.session.audience || 'developer_zh';
     state.sections = payload.sections || [];
     state.currentSectionIndex = 0;
     setStatus(`已生成《${payload.session.title}》的中文开发讲解。`, 'success');
@@ -453,7 +448,6 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             page_ref: formData.get('page_ref'),
-            audience: formData.get('audience'),
             mode: formData.get('mode'),
           }),
         });

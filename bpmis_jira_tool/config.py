@@ -61,25 +61,16 @@ class Settings:
     openai_api_key: str | None = None
     openai_api_base_url: str = "https://api.openai.com/v1"
     prd_briefing_text_model: str = "gpt-4.1-mini"
-    gemini_api_key: str | None = None
-    gemini_api_base_url: str = "https://generativelanguage.googleapis.com/v1beta"
-    prd_briefing_gemini_text_model: str = "gemini-2.5-flash"
-    prd_briefing_text_provider_priority: str = "gemini_first"
     prd_briefing_embedding_model: str = "text-embedding-3-large"
     prd_briefing_transcription_model: str = "gpt-4o-mini-transcribe"
     prd_briefing_tts_model: str = "gpt-4o-mini-tts"
-    prd_briefing_openai_default_voice: str = "alloy"
-    prd_briefing_openai_english_voice: str = "coral"
     prd_briefing_openai_mandarin_voice: str = "sage"
     prd_briefing_openai_voice_speed: float = 0.96
     prd_briefing_openai_custom_voice_enabled: bool = False
+    prd_briefing_openai_tts_fallback_enabled: bool = False
     prd_briefing_answer_audio_enabled: bool = False
     elevenlabs_api_key: str | None = None
-    elevenlabs_tts_model_id: str = "eleven_flash_v2_5"
-    elevenlabs_english_model_id: str = "eleven_flash_v2_5"
     elevenlabs_mandarin_model_id: str = "eleven_multilingual_v2"
-    elevenlabs_default_voice_id: str = "JBFqnCBsd6RMkjVDRZzb"
-    elevenlabs_english_voice_id: str = "21m00Tcm4TlvDq8ikWAM"
     elevenlabs_mandarin_voice_id: str = "JBFqnCBsd6RMkjVDRZzb"
 
     @classmethod
@@ -115,24 +106,15 @@ class Settings:
             openai_api_key=_env_str("OPENAI_API_KEY"),
             openai_api_base_url=_env_str("OPENAI_API_BASE_URL", "https://api.openai.com/v1"),
             prd_briefing_text_model=_env_str("PRD_BRIEFING_TEXT_MODEL", "gpt-4.1-mini"),
-            gemini_api_key=_env_str("GEMINI_API_KEY"),
-            gemini_api_base_url=_env_str("GEMINI_API_BASE_URL", "https://generativelanguage.googleapis.com/v1beta"),
-            prd_briefing_gemini_text_model=_env_str("PRD_BRIEFING_GEMINI_TEXT_MODEL", "gemini-2.5-flash"),
-            prd_briefing_text_provider_priority=_env_str("PRD_BRIEFING_TEXT_PROVIDER_PRIORITY", "gemini_first"),
             prd_briefing_embedding_model=_env_str("PRD_BRIEFING_EMBEDDING_MODEL", "text-embedding-3-large"),
             prd_briefing_transcription_model=_env_str("PRD_BRIEFING_TRANSCRIPTION_MODEL", "gpt-4o-mini-transcribe"),
             prd_briefing_tts_model=_env_str("PRD_BRIEFING_TTS_MODEL", "gpt-4o-mini-tts"),
-            prd_briefing_openai_default_voice=_env_str("PRD_BRIEFING_OPENAI_DEFAULT_VOICE", "alloy"),
-            prd_briefing_openai_english_voice=_env_str("PRD_BRIEFING_OPENAI_ENGLISH_VOICE", "coral"),
             prd_briefing_openai_mandarin_voice=_env_str("PRD_BRIEFING_OPENAI_MANDARIN_VOICE", "sage"),
             prd_briefing_openai_voice_speed=float(_env_str("PRD_BRIEFING_OPENAI_VOICE_SPEED", "0.96")),
             prd_briefing_openai_custom_voice_enabled=_env_bool("PRD_BRIEFING_OPENAI_CUSTOM_VOICE_ENABLED", False),
+            prd_briefing_openai_tts_fallback_enabled=_env_bool("PRD_BRIEFING_OPENAI_TTS_FALLBACK_ENABLED", False),
             prd_briefing_answer_audio_enabled=_env_bool("PRD_BRIEFING_ANSWER_AUDIO_ENABLED", False),
             elevenlabs_api_key=_env_str("ELEVENLABS_API_KEY"),
-            elevenlabs_tts_model_id=_env_str("ELEVENLABS_TTS_MODEL_ID", "eleven_flash_v2_5"),
-            elevenlabs_english_model_id=_env_str("ELEVENLABS_ENGLISH_MODEL_ID", _env_str("ELEVENLABS_TTS_MODEL_ID", "eleven_flash_v2_5")),
             elevenlabs_mandarin_model_id=_env_str("ELEVENLABS_MANDARIN_MODEL_ID", "eleven_multilingual_v2"),
-            elevenlabs_default_voice_id=_env_str("ELEVENLABS_DEFAULT_VOICE_ID", "JBFqnCBsd6RMkjVDRZzb"),
-            elevenlabs_english_voice_id=_env_str("ELEVENLABS_ENGLISH_VOICE_ID", "21m00Tcm4TlvDq8ikWAM"),
             elevenlabs_mandarin_voice_id=_env_str("ELEVENLABS_MANDARIN_VOICE_ID", "JBFqnCBsd6RMkjVDRZzb"),
         )

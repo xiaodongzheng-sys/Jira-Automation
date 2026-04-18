@@ -9,7 +9,7 @@ from .confluence import ConfluenceConnector
 from .openai_client import OpenAIClient
 from .service import PRDBriefingService, VoiceService
 from .storage import BriefingStore
-from .text_generation import GeminiClient, TextGenerationClient
+from .text_generation import TextGenerationClient
 
 
 def create_prd_briefing_blueprint() -> Blueprint:
@@ -46,7 +46,6 @@ def create_prd_briefing_blueprint() -> Blueprint:
             data = service.create_session(
                 owner_key=owner_key,
                 page_ref=str(payload.get("page_ref") or ""),
-                audience=str(payload.get("audience") or "developer_zh"),
                 mode=str(payload.get("mode") or "walkthrough"),
             )
             return jsonify(data)
@@ -189,15 +188,8 @@ def _build_service() -> PRDBriefingService:
         transcription_model=settings.prd_briefing_transcription_model,
         tts_model=settings.prd_briefing_tts_model,
     )
-    gemini_client = GeminiClient(
-        api_key=settings.gemini_api_key,
-        base_url=settings.gemini_api_base_url,
-        text_model=settings.prd_briefing_gemini_text_model,
-    )
     text_client = TextGenerationClient(
         primary_openai=openai_client,
-        secondary_gemini=gemini_client,
-        priority=settings.prd_briefing_text_provider_priority,
     )
     confluence = ConfluenceConnector(
         base_url=settings.confluence_base_url,
@@ -209,17 +201,12 @@ def _build_service() -> PRDBriefingService:
     voice_service = VoiceService(
         store=store,
         openai_client=openai_client,
-        openai_default_voice=settings.prd_briefing_openai_default_voice,
-        openai_english_voice=settings.prd_briefing_openai_english_voice,
         openai_mandarin_voice=settings.prd_briefing_openai_mandarin_voice,
         openai_voice_speed=settings.prd_briefing_openai_voice_speed,
         openai_custom_voice_enabled=settings.prd_briefing_openai_custom_voice_enabled,
+        openai_tts_fallback_enabled=settings.prd_briefing_openai_tts_fallback_enabled,
         elevenlabs_api_key=settings.elevenlabs_api_key,
-        elevenlabs_model_id=settings.elevenlabs_tts_model_id,
-        elevenlabs_english_model_id=settings.elevenlabs_english_model_id,
         elevenlabs_mandarin_model_id=settings.elevenlabs_mandarin_model_id,
-        elevenlabs_default_voice_id=settings.elevenlabs_default_voice_id,
-        elevenlabs_english_voice_id=settings.elevenlabs_english_voice_id,
         elevenlabs_mandarin_voice_id=settings.elevenlabs_mandarin_voice_id,
     )
     return PRDBriefingService(

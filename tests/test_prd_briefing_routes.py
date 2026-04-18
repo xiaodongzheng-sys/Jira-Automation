@@ -12,7 +12,7 @@ class FakeBriefingService:
             "session": {
                 "session_id": "session-1",
                 "title": "PRD",
-                "audience": kwargs["audience"],
+                "audience": "developer_zh",
             },
             "session_overview": {
                 "overview": "overview",
@@ -34,12 +34,12 @@ class FakeBriefingService:
         }
 
     def get_session_payload(self, **kwargs):
-        return self.create_session(page_ref="", audience="developer_zh", mode="walkthrough")
+        return self.create_session(page_ref="", mode="walkthrough")
 
     def answer_question(self, **kwargs):
         return {
             "answer_text": "Grounded answer",
-            "answer_language": "en",
+            "answer_language": "zh",
             "groundedness": "grounded",
             "citations": [],
             "audio_url": None,
@@ -96,7 +96,6 @@ class PRDBriefingRouteTests(unittest.TestCase):
                 "/prd-briefing/api/session",
                 json={
                     "page_ref": "https://example.atlassian.net/wiki/pages/123",
-                    "audience": "developer_zh",
                     "mode": "walkthrough",
                 },
             )

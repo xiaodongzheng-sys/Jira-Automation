@@ -18,10 +18,8 @@ from .storage import BriefingStore, citation_from_chunk
 from .text_generation import TextGenerationClient
 
 
-LANGUAGE_BY_AUDIENCE = {
-    "developer_zh": "Mandarin Chinese",
-    "business_en": "English",
-}
+DEVELOPER_AUDIENCE = "developer_zh"
+DEVELOPER_LANGUAGE = "Mandarin Chinese"
 
 WALKTHROUGH_SCRIPT_PROMPT_VERSION = "v1_openai_only_pm_briefing"
 SESSION_BRIEF_PROMPT_VERSION = "v7_two_part_chinese_summary"
@@ -79,32 +77,22 @@ class VoiceService:
         *,
         store: BriefingStore,
         openai_client: OpenAIClient,
-        openai_default_voice: str,
-        openai_english_voice: str,
         openai_mandarin_voice: str,
         openai_voice_speed: float,
         openai_custom_voice_enabled: bool,
+        openai_tts_fallback_enabled: bool,
         elevenlabs_api_key: str | None,
-        elevenlabs_model_id: str,
-        elevenlabs_english_model_id: str,
         elevenlabs_mandarin_model_id: str,
-        elevenlabs_default_voice_id: str | None,
-        elevenlabs_english_voice_id: str | None,
         elevenlabs_mandarin_voice_id: str | None,
     ) -> None:
         self.store = store
         self.openai_client = openai_client
-        self.openai_default_voice = openai_default_voice
-        self.openai_english_voice = openai_english_voice
         self.openai_mandarin_voice = openai_mandarin_voice
         self.openai_voice_speed = openai_voice_speed
         self.openai_custom_voice_enabled = openai_custom_voice_enabled
+        self.openai_tts_fallback_enabled = openai_tts_fallback_enabled
         self.elevenlabs_api_key = (elevenlabs_api_key or "").strip()
-        self.elevenlabs_model_id = elevenlabs_model_id
-        self.elevenlabs_english_model_id = elevenlabs_english_model_id
         self.elevenlabs_mandarin_model_id = elevenlabs_mandarin_model_id
-        self.elevenlabs_default_voice_id = (elevenlabs_default_voice_id or "").strip()
-        self.elevenlabs_english_voice_id = (elevenlabs_english_voice_id or "").strip()
         self.elevenlabs_mandarin_voice_id = (elevenlabs_mandarin_voice_id or "").strip()
 
     def enroll(self, *, owner_key: str, sample_language: str, consent_status: str, sample_path: Path) -> dict[str, Any]:
@@ -132,12 +120,12 @@ class VoiceService:
         elevenlabs_voice_id = (
             profile.provider_voice_id
             if profile and profile.provider == "elevenlabs" and profile.provider_voice_id
-            else self._select_elevenlabs_voice(language_code)
+            else self.elevenlabs_mandarin_voice_id
         )
 
         if self.elevenlabs_api_key and elevenlabs_voice_id:
             provider = "elevenlabs"
-            model_id = self._select_elevenlabs_model(language_code)
+            model_id = self.elevenlabs_mandarin_model_id
             cached = self.store.get_cached_audio(
                 owner_key=owner_key,
                 provider=provider,
@@ -155,11 +143,11 @@ class VoiceService:
                 model_id=model_id,
             )
             suffix = "mp3"
-        elif self.openai_client.is_configured():
+        elif self.openai_tts_fallback_enabled and self.openai_client.is_configured():
             voice_id = (
                 profile.provider_voice_id
                 if profile and profile.provider == "openai" and self.openai_custom_voice_enabled
-                else self._select_openai_voice(language_code)
+                else self.openai_mandarin_voice
             )
             provider = "openai"
             model_id = str(self.openai_client.tts_model)
@@ -177,7 +165,7 @@ class VoiceService:
                 audio_bytes, suffix = self.openai_client.synthesize_speech(
                     text=normalized_text,
                     voice=voice_id,
-                    instructions=self._build_openai_voice_instructions(language_code),
+                    instructions=self._build_openai_voice_instructions(),
                     speed=self.openai_voice_speed,
                 )
             except Exception:  # noqa: BLE001
@@ -201,41 +189,13 @@ class VoiceService:
     def transcribe(self, audio_path: Path) -> str:
         return self.openai_client.transcribe_audio(audio_path)
 
-    def _select_openai_voice(self, language_code: str) -> str:
-        if language_code.startswith("zh"):
-            return self.openai_mandarin_voice or self.openai_default_voice
-        if language_code.startswith("en"):
-            return self.openai_english_voice or self.openai_default_voice
-        return self.openai_default_voice
-
-    def _select_elevenlabs_voice(self, language_code: str) -> str:
-        if language_code.startswith("zh"):
-            return self.elevenlabs_mandarin_voice_id or self.elevenlabs_default_voice_id
-        if language_code.startswith("en"):
-            return self.elevenlabs_english_voice_id or self.elevenlabs_default_voice_id
-        return self.elevenlabs_default_voice_id
-
-    def _select_elevenlabs_model(self, language_code: str) -> str:
-        if language_code.startswith("zh"):
-            return self.elevenlabs_mandarin_model_id or self.elevenlabs_model_id
-        if language_code.startswith("en"):
-            return self.elevenlabs_english_model_id or self.elevenlabs_model_id
-        return self.elevenlabs_model_id
-
-    def _build_openai_voice_instructions(self, language_code: str) -> str:
-        if language_code.startswith("zh"):
-            return (
-                "Speak like an experienced product manager walking software engineers through a requirement in Mandarin. "
-                "Sound natural, grounded, and practical, as if you are in a normal requirement grooming session. "
-                "Use calm confidence, short pauses between ideas, and slightly slower pacing for dense logic. "
-                "Emphasize what the flow is, what needs to be built, and what developers need to pay attention to. "
-                "Do not sound robotic, theatrical, overly polished, or like you are reading bullet points word for word."
-            )
+    def _build_openai_voice_instructions(self) -> str:
         return (
-            "Speak like an experienced product manager presenting a requirements walkthrough in natural business English. "
-            "Sound warm, confident, polished, and conversational. Use short pauses between ideas, slightly slower pacing for dense details, "
-            "and clear emphasis on decisions, risks, dates, and metrics. "
-            "Do not sound robotic, exaggerated, or like you are reading bullet points word for word."
+            "Speak like an experienced product manager walking software engineers through a requirement in Mandarin. "
+            "Sound natural, grounded, and practical, as if you are in a normal requirement grooming session. "
+            "Use calm confidence, short pauses between ideas, and slightly slower pacing for dense logic. "
+            "Emphasize what the flow is, what needs to be built, and what developers need to pay attention to. "
+            "Do not sound robotic, theatrical, overly polished, or like you are reading bullet points word for word."
         )
 
     def _synthesize_with_elevenlabs(self, *, text: str, voice_id: str, language_code: str, model_id: str) -> bytes:
@@ -294,14 +254,14 @@ class PRDBriefingService:
         self.retrieval = RetrievalService(openai_client)
         self.answer_audio_enabled = answer_audio_enabled
 
-    def create_session(self, *, owner_key: str, page_ref: str, audience: str, mode: str) -> dict[str, Any]:
+    def create_session(self, *, owner_key: str, page_ref: str, mode: str) -> dict[str, Any]:
         placeholder_session_id = "pending"
         page = self.confluence.ingest_page(page_ref, placeholder_session_id)
         session_id = self.store.create_session(
             owner_key=owner_key,
             confluence_page_id=page.page_id,
             confluence_page_url=page.source_url,
-            audience=audience,
+            audience=DEVELOPER_AUDIENCE,
             mode=mode,
             title=page.title,
         )
@@ -331,7 +291,6 @@ class PRDBriefingService:
         payload = self.get_session_payload(session_id=session_id, owner_key=owner_key)
         self._prewarm_walkthrough_scripts(
             owner_key=owner_key,
-            audience=audience,
             sections=payload["sections"],
         )
         return payload
@@ -346,7 +305,6 @@ class PRDBriefingService:
         sections = self._build_sections(prd_chunks)
         session_overview = self._build_session_overview(
             owner_key=owner_key,
-            audience=session["audience"],
             session=session,
             sections=sections,
         )
@@ -403,7 +361,6 @@ class PRDBriefingService:
                 groundedness = "inference"
         citations = [citation_from_chunk(chunk) for chunk in ranked[:3]]
         answer = self._compose_answer(
-            audience=session["audience"],
             question=question,
             chunks=ranked[:5],
             groundedness=groundedness,
@@ -411,7 +368,7 @@ class PRDBriefingService:
         )
         payload = AnswerPayload(
             answer_text=answer,
-            answer_language="zh" if session["audience"] == "developer_zh" else "en",
+            answer_language="zh",
             groundedness=groundedness,
             citations=citations,
         )
@@ -442,14 +399,13 @@ class PRDBriefingService:
         if section_index < 0 or section_index >= len(sections):
             raise ValueError("Section index is out of range.")
         section = sections[section_index]
-        audience = session["audience"]
-        script = self._compose_walkthrough_section(owner_key=owner_key, audience=audience, section=section)
+        script = self._compose_walkthrough_section(owner_key=owner_key, section=section)
         audio_path = None
         if include_audio:
             audio_path = self.voice_service.synthesize(
                 session_id=session_id,
                 text=script,
-                language_code="zh" if audience == "developer_zh" else "en",
+                language_code="zh",
                 owner_key=owner_key,
             )
         return {
@@ -526,28 +482,18 @@ class PRDBriefingService:
             for chunk in prd_chunks
         ]
 
-    def _compose_walkthrough_section(self, *, owner_key: str, audience: str, section: dict[str, Any]) -> str:
-        target_language = LANGUAGE_BY_AUDIENCE[audience]
-        if audience == "developer_zh":
-            prompt = (
-                f"You are a product manager briefing a PRD section to software engineers in {target_language}. "
-                "Speak the way PMs normally align requirements with developers during grooming or walkthrough sessions. "
-                "Be direct, practical, and structured. First explain the purpose of this section, then the main flow, "
-                "then what developers need to build or pay attention to. Call out scope, user actions, system behavior, "
-                "validation rules, dependencies, edge cases, and any implementation-sensitive details when present. "
-                "Do not sound like a keynote presenter. Do not read the PRD word for word. "
-                "Do not mechanically read every field, bullet, or table row. Summarize dense tables into what engineering should understand. "
-                "Use spoken PM phrasing that feels normal in a dev sync, for example framing the goal first, then saying what the flow is, "
-                "what changes on the page, what gets triggered, what should be validated, and what cases developers need to pay attention to."
-            )
-        else:
-            prompt = (
-                f"You are briefing a PRD to a {audience}. Turn the section into a concise spoken walkthrough in {target_language}. "
-                "Sound like a skilled human presenter, not like someone reading word by word. "
-                "Start with the main point, group related ideas, preserve names and metrics, and avoid inventing details. "
-                "Use natural transitions and presenter phrasing that sound good aloud. "
-                "Do not mechanically read every field, bullet, or table row."
-            )
+    def _compose_walkthrough_section(self, *, owner_key: str, section: dict[str, Any]) -> str:
+        prompt = (
+            f"You are a product manager briefing a PRD section to software engineers in {DEVELOPER_LANGUAGE}. "
+            "Speak the way PMs normally align requirements with developers during grooming or walkthrough sessions. "
+            "Be direct, practical, and structured. First explain the purpose of this section, then the main flow, "
+            "then what developers need to build or pay attention to. Call out scope, user actions, system behavior, "
+            "validation rules, dependencies, edge cases, and any implementation-sensitive details when present. "
+            "Do not sound like a keynote presenter. Do not read the PRD word for word. "
+            "Do not mechanically read every field, bullet, or table row. Summarize dense tables into what engineering should understand. "
+            "Use spoken PM phrasing that feels normal in a dev sync, for example framing the goal first, then saying what the flow is, "
+            "what changes on the page, what gets triggered, what should be validated, and what cases developers need to pay attention to."
+        )
         notes = section.get("briefing_notes") or []
         body = (
             f"Section: {section['section_path']}\n\n"
@@ -555,29 +501,21 @@ class PRDBriefingService:
             f"Presenter notes:\n- " + "\n- ".join(notes) + "\n\n"
             f"Source:\n{section['content']}\n\n"
         )
-        if audience == "developer_zh":
-            body += (
-                "Write a natural spoken script of around 5 to 9 sentences in Mandarin. "
-                "The first sentence should explain why this section matters to implementation. "
-                "Then explain the intended flow in order. "
-                "After that, highlight the key engineering takeaways, such as important rules, triggers, state changes, "
-                "input or output expectations, and any edge cases or risks implied by the source. "
-                "If the section is mostly UI fields, summarize the pattern and only name the most important fields. "
-                "Make it sound like live PM speech rather than written prose. "
-                "Natural phrasing is encouraged, such as: "
-                "'这一块主要是...', '开发这里重点看...', '实际 flow 是...', '这里需要注意...', "
-                "'这个字段很多，但本质上是为了...', '异常情况主要是...'. "
-                "Do not force all phrases in every answer, but keep the overall tone close to that style."
-            )
-        else:
-            body += (
-                "Write a natural spoken script of around 4 to 8 sentences. "
-                "The first sentence should frame why this section matters. "
-                "If there is a flow, explain it in order. "
-                "If there are too many detailed fields, summarize the pattern instead of reading every field name."
-            )
+        body += (
+            "Write a natural spoken script of around 5 to 9 sentences in Mandarin. "
+            "The first sentence should explain why this section matters to implementation. "
+            "Then explain the intended flow in order. "
+            "After that, highlight the key engineering takeaways, such as important rules, triggers, state changes, "
+            "input or output expectations, and any edge cases or risks implied by the source. "
+            "If the section is mostly UI fields, summarize the pattern and only name the most important fields. "
+            "Make it sound like live PM speech rather than written prose. "
+            "Natural phrasing is encouraged, such as: "
+            "'这一块主要是...', '开发这里重点看...', '实际 flow 是...', '这里需要注意...', "
+            "'这个字段很多，但本质上是为了...', '异常情况主要是...'. "
+            "Do not force all phrases in every answer, but keep the overall tone close to that style."
+        )
         if not self.text_client.is_configured():
-            raise RuntimeError("Walkthrough script generation now requires a configured text model provider (OpenAI or Gemini).")
+            raise RuntimeError("Walkthrough script generation now requires a configured OpenAI text model.")
         model_id = str(getattr(self.text_client, "model_id", getattr(self.openai_client, "chat_model", "text_model")))
         section_payload = json.dumps(
             {
@@ -593,7 +531,7 @@ class PRDBriefingService:
         )
         cached_script = self.store.get_cached_script(
             owner_key=owner_key,
-            audience=audience,
+            audience=DEVELOPER_AUDIENCE,
             model_id=model_id,
             prompt_version=WALKTHROUGH_SCRIPT_PROMPT_VERSION,
             section_payload=section_payload,
@@ -606,7 +544,7 @@ class PRDBriefingService:
             raise RuntimeError(f"Text model could not generate the walkthrough script: {error}") from error
         self.store.cache_script(
             owner_key=owner_key,
-            audience=audience,
+            audience=DEVELOPER_AUDIENCE,
             model_id=model_id,
             prompt_version=WALKTHROUGH_SCRIPT_PROMPT_VERSION,
             section_payload=section_payload,
@@ -618,17 +556,15 @@ class PRDBriefingService:
         self,
         *,
         owner_key: str,
-        audience: str,
         sections: list[dict[str, Any]],
     ) -> None:
-        if not self.text_client.is_configured() or audience != "developer_zh":
+        if not self.text_client.is_configured():
             return
         prioritized_sections = select_sections_for_overview(sections)
         for section in prioritized_sections[:3]:
             try:
                 self._compose_walkthrough_section(
                     owner_key=owner_key,
-                    audience=audience,
                     section=section,
                 )
             except Exception:  # noqa: BLE001
@@ -637,26 +573,20 @@ class PRDBriefingService:
     def _compose_answer(
         self,
         *,
-        audience: str,
         question: str,
         chunks: list[ChunkRecord],
         groundedness: str,
         recent_messages: list[dict[str, Any]],
     ) -> str:
         if groundedness == "unsupported":
-            return (
-                "I could not find that answer in the selected PRD or uploaded team knowledge base."
-                if audience == "business_en"
-                else "我无法在当前选择的 PRD 或已上传的团队知识库中找到这个答案。"
-            )
+            return "我无法在当前选择的 PRD 或已上传的团队知识库中找到这个答案。"
         excerpts = "\n\n".join(
             f"[{index + 1}] {chunk.title} | {chunk.section_path}\n{chunk.content}"
             for index, chunk in enumerate(chunks)
         )
         history = "\n".join(f"{item['role']}: {item['body']}" for item in recent_messages[-4:])
-        target_language = LANGUAGE_BY_AUDIENCE[audience]
         system_prompt = (
-            f"You answer questions about a product requirements document. Respond in {target_language}. "
+            f"You answer questions about a product requirements document. Respond in {DEVELOPER_LANGUAGE}. "
             "Use only the provided excerpts. Start with the direct answer. "
             "If the answer is inferred rather than explicit, say that it is an interpretation."
         )
@@ -670,7 +600,7 @@ class PRDBriefingService:
                 return self.text_client.create_answer(system_prompt=system_prompt, user_prompt=user_prompt)
             except Exception:  # noqa: BLE001
                 pass
-        lead = "Based on the available source text:" if audience == "business_en" else "根据目前可用的来源内容："
+        lead = "根据目前可用的来源内容："
         excerpt = chunks[0].content if chunks else ""
         return f"{lead} {excerpt}"
 
@@ -678,29 +608,14 @@ class PRDBriefingService:
         self,
         *,
         owner_key: str,
-        audience: str,
         session: dict[str, Any],
         sections: list[dict[str, Any]],
     ) -> dict[str, Any]:
-        if audience == "developer_zh":
-            return self._build_developer_chinese_overview(
-                owner_key=owner_key,
-                session=session,
-                sections=sections,
-            )
-        if self.text_client.is_configured():
-            try:
-                overview = self._build_session_overview_with_openai(
-                    owner_key=owner_key,
-                    audience=audience,
-                    session=session,
-                    sections=sections,
-                )
-                if not overview_is_low_signal(overview):
-                    return overview
-            except Exception:  # noqa: BLE001
-                pass
-        return build_heuristic_session_overview(session["title"], sections)
+        return self._build_developer_chinese_overview(
+            owner_key=owner_key,
+            session=session,
+            sections=sections,
+        )
 
     def _build_developer_chinese_overview(
         self,
@@ -730,7 +645,7 @@ class PRDBriefingService:
                 )
                 cached = self.store.get_cached_script(
                     owner_key=owner_key,
-                    audience="developer_zh",
+                    audience=DEVELOPER_AUDIENCE,
                     model_id=model_id,
                     prompt_version=SESSION_BRIEF_PROMPT_VERSION,
                     section_payload=payload,
@@ -767,7 +682,7 @@ class PRDBriefingService:
                     raise RuntimeError("Text model returned an invalid developer overview payload.")
                 self.store.cache_script(
                     owner_key=owner_key,
-                    audience="developer_zh",
+                    audience=DEVELOPER_AUDIENCE,
                     model_id=model_id,
                     prompt_version=SESSION_BRIEF_PROMPT_VERSION,
                     section_payload=payload,
@@ -777,100 +692,6 @@ class PRDBriefingService:
             except Exception:  # noqa: BLE001
                 pass
         return build_two_part_fallback_overview(session["title"], prioritized_sections)
-
-    def _build_session_overview_with_openai(
-        self,
-        *,
-        owner_key: str,
-        audience: str,
-        session: dict[str, Any],
-        sections: list[dict[str, Any]],
-    ) -> dict[str, Any]:
-        model_id = str(getattr(self.text_client, "model_id", getattr(self.openai_client, "chat_model", "text_model")))
-        prioritized_sections = select_sections_for_overview(sections)
-        section_digest = [
-            {
-                "section_path": section["section_path"],
-                "briefing_summary": section.get("briefing_summary", ""),
-                "briefing_notes": section.get("briefing_notes", [])[:4],
-                "content_excerpt": truncate_for_prompt(section.get("content", ""), 900),
-            }
-            for section in prioritized_sections[:18]
-        ]
-        payload = json.dumps(
-            {
-                "title": session["title"],
-                "audience": audience,
-                "section_digest": section_digest,
-            },
-            ensure_ascii=False,
-            sort_keys=True,
-        )
-        cached = self.store.get_cached_script(
-            owner_key=owner_key,
-            audience=audience,
-            model_id=model_id,
-            prompt_version=SESSION_BRIEF_PROMPT_VERSION,
-            section_payload=payload,
-        )
-        if cached:
-            parsed_cached = parse_session_overview(cached)
-            if not overview_is_low_signal(parsed_cached):
-                return parsed_cached
-
-        if audience == "developer_zh":
-            system_prompt = (
-                "You are helping a Singapore PM brief an English PRD to a China-based engineering team. "
-                "Produce a concise Chinese developer-facing overview that helps engineers understand the requirement quickly. "
-                "Your output must be grounded in the actual PRD details, not generic product commentary. "
-                "Focus on implementation intent, main flow, concrete page actions, rules, field behavior, state changes, dependencies, risks, and unclear points. "
-                "Do not summarize the PRD title or section headings only. "
-                "Do not list document metadata such as version, date, owner, PIC, approver, email addresses, or people involved unless they directly affect implementation logic. "
-                "Prefer concrete statements like what users click, what changes on the page, what the system auto-fills, what validations exist, and which state transitions matter. "
-                "Return valid JSON only."
-            )
-            user_prompt = (
-                f"PRD title: {session['title']}\n\n"
-                f"Sections:\n{payload}\n\n"
-                "Return JSON with exactly these keys: "
-                "overview, scope, impacted_modules, developer_focus, frontend_focus, backend_focus, risks, "
-                "unclear_rules, missing_edge_cases, unclear_ownership, open_questions. "
-                "Rules: "
-                "overview should be one short paragraph in Chinese for '3分钟看懂这个需求'; "
-                "scope should be an array of 3 to 5 short Chinese bullets; "
-                "impacted_modules should be an array of 2 to 6 short Chinese bullets naming concrete pages, flows, tabs, forms, search areas, detail areas, reports, or actions touched by this PRD; "
-                "developer_focus, frontend_focus, backend_focus, risks, unclear_rules, missing_edge_cases, unclear_ownership, open_questions "
-                "should each be arrays of 2 to 5 short Chinese bullets. "
-                "Every bullet should be derived from actual PRD details in the supplied sections. "
-                "Every bullet should prefer concrete references like page names, actions, tabs, buttons, fields, states, submit/review/withdraw/reopen flows, or report/download behavior. "
-                "Avoid generic bullets like '先看主流程' unless the source really contains no more specific detail. "
-                "Avoid overusing section headings such as Version Control, People Involved, Background, Objectives, or Target Users unless they directly affect implementation. "
-                "Do not mention that information is missing unless it really is unclear from the source."
-            )
-        else:
-            system_prompt = (
-                "You are summarizing a PRD for quick engineering onboarding. Return valid JSON only."
-            )
-            user_prompt = (
-                f"PRD title: {session['title']}\n\n"
-                f"Sections:\n{payload}\n\n"
-                "Return JSON with exactly these keys: "
-                "overview, scope, impacted_modules, developer_focus, frontend_focus, backend_focus, risks, "
-                "unclear_rules, missing_edge_cases, unclear_ownership, open_questions."
-            )
-        response = self.text_client.create_answer(system_prompt=system_prompt, user_prompt=user_prompt)
-        parsed = parse_session_overview(response)
-        if overview_is_low_signal(parsed):
-            raise RuntimeError("OpenAI returned a low-signal PRD overview.")
-        self.store.cache_script(
-            owner_key=owner_key,
-            audience=audience,
-            model_id=model_id,
-            prompt_version=SESSION_BRIEF_PROMPT_VERSION,
-            section_payload=payload,
-            script=response,
-        )
-        return parsed
 
 
 def cosine_similarity(a: list[float], b: list[float]) -> float:
