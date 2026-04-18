@@ -3,8 +3,9 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Jira Creation Automation Tool</title>
+    <title>{{ page_title or "Jira Creation Automation Tool" }}</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    {% block extra_head %}{% endblock %}
   </head>
   <body>
     <main class="page-shell">
@@ -41,7 +42,6 @@
     {% endif %}
     <script>
       (() => {
-        const helperStatusNode = document.querySelector('[data-helper-status]');
         const forms = document.querySelectorAll('[data-job-form]');
         const resultsBody = document.querySelector('[data-results-body]');
         const resultsTableWrap = document.querySelector('[data-results-table-wrap]');
@@ -53,26 +53,6 @@
         const progressFill = document.querySelector('[data-run-progress-fill]');
         const selfCheckTrigger = document.querySelector('[data-self-check-trigger]');
         const selfCheckResults = document.querySelector('[data-self-check-results]');
-
-        if (helperStatusNode) {
-          const helperUrl = helperStatusNode.dataset.helperUrl;
-          const healthUrl = helperUrl ? `${helperUrl.replace(/\/$/, '')}/health` : '';
-          if (!healthUrl) {
-            helperStatusNode.textContent = 'Not configured';
-          } else {
-            fetch(healthUrl, { method: 'GET' })
-              .then((response) => {
-                if (!response.ok) throw new Error(`HTTP ${response.status}`);
-                return response.json();
-              })
-              .then((payload) => {
-                helperStatusNode.textContent = payload.status === 'ok' ? 'Connected' : 'Unavailable';
-              })
-              .catch(() => {
-                helperStatusNode.textContent = 'Offline';
-              });
-          }
-        }
 
         const escapeHtml = (value) => String(value ?? '')
           .replaceAll('&', '&amp;')
@@ -334,5 +314,6 @@
         }
       })();
     </script>
+    {% block extra_scripts %}{% endblock %}
   </body>
 </html>

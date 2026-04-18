@@ -5,16 +5,29 @@ import re
 import sqlite3
 from pathlib import Path
 
+from bpmis_jira_tool.errors import ToolError
 from bpmis_jira_tool.models import FieldMapping
 
 
 CONFIG_FILE = "jira_web_config.json"
 DB_FILE = "team_portal.db"
+DEFAULT_SHEET_HEADERS = [
+    "BPMIS ID",
+    "Project Name",
+    "Market",
+    "System",
+    "Jira Title",
+    "PRD Link",
+    "Description",
+    "BRD Link",
+    "Jira Ticket Link",
+]
 CONFIGURED_FIELDS = [
     "Market",
     "Task Type",
     "Summary",
     "PRD Link/s",
+    "Description",
     "Fix Version",
     "Component",
     "Priority",
@@ -29,33 +42,45 @@ CONFIGURED_FIELDS = [
 MARKET_KEYS = ["ID", "SG", "PH", "Regional"]
 SOURCE_FIELDS = {
     "spreadsheet_link": "",
-    "input_tab_name": "Input",
-    "issue_id_header": "Issue ID",
+    "input_tab_name": "Projects",
+    "bpmis_api_access_token": "",
+    "issue_id_header": DEFAULT_SHEET_HEADERS[0],
     "jira_ticket_link_header": "Jira Ticket Link",
-    "helper_base_url": "http://127.0.0.1:8787",
+    "sync_pm_email": "",
+    "sync_project_name_header": DEFAULT_SHEET_HEADERS[1],
+    "sync_market_header": DEFAULT_SHEET_HEADERS[2],
+    "sync_brd_link_header": DEFAULT_SHEET_HEADERS[7],
+    "component_route_rules_text": "",
+    "component_default_rules_text": "",
 }
 HEADER_FIELDS = {
-    "Market": "market_header",
-    "Summary": "summary_header",
-    "PRD Link/s": "prd_links_header",
+    "Market": ("market_header", DEFAULT_SHEET_HEADERS[2]),
+    "System": ("system_header", DEFAULT_SHEET_HEADERS[3]),
+    "Summary": ("summary_header", DEFAULT_SHEET_HEADERS[4]),
+    "PRD Link/s": ("prd_links_header", DEFAULT_SHEET_HEADERS[5]),
+    "Description": ("description_header", DEFAULT_SHEET_HEADERS[6]),
 }
 MARKET_CHOICE_FIELDS = {
-    "Component": "component_by_market",
     "Need UAT": "need_uat_by_market",
+}
+LEGACY_MARKET_CHOICE_FIELDS = {
+    "Component": "component_by_market",
 }
 DIRECT_FIELDS = {
     "Task Type": "task_type_value",
-    "Fix Version": "fix_version_value",
     "Priority": "priority_value",
-    "Assignee": "assignee_value",
     "Product Manager": "product_manager_value",
-    "Dev PIC": "dev_pic_value",
-    "QA PIC": "qa_pic_value",
     "Reporter": "reporter_value",
     "Biz PIC": "biz_pic_value",
 }
 DEFAULT_DIRECT_VALUES = {
     "task_type_value": "Feature",
+}
+COMPONENT_ROUTED_DIRECT_FIELDS = {
+    "Fix Version": "fix_version",
+    "Assignee": "assignee",
+    "Dev PIC": "dev_pic",
+    "QA PIC": "qa_pic",
 }
 
 
@@ -111,9 +136,38 @@ class WebConfigStore:
         mappings: list[FieldMapping] = []
 
         for jira_field, key in HEADER_FIELDS.items():
+            if isinstance(key, tuple):
+                key = key[0]
             header = str(data.get(key, "")).strip()
             if header:
                 mappings.append(FieldMapping(jira_field=jira_field, source=f"column:{header}"))
+
+        component_route_rules = self._parse_component_route_rules(str(data.get("component_route_rules_text", "")))
+        if component_route_rules:
+            system_header = str(data.get("system_header", "")).strip()
+            if not system_header:
+                raise ToolError("System Header is required when System + Market -> Component rules are configured.")
+            mappings.append(
+                FieldMapping(
+                    jira_field="Component",
+                    source=f"component_routes:{json.dumps(component_route_rules, ensure_ascii=False)}",
+                )
+            )
+        else:
+            market_choices = data.get(LEGACY_MARKET_CHOICE_FIELDS["Component"], {})
+            normalized_market_choices: dict[str, str] = {}
+            for market in MARKET_KEYS:
+                raw_value = market_choices.get(market, "") if isinstance(market_choices, dict) else ""
+                value = str(raw_value).strip()
+                if value:
+                    normalized_market_choices[market] = value
+            if normalized_market_choices:
+                mappings.append(
+                    FieldMapping(
+                        jira_field="Component",
+                        source=f"market_choices:{json.dumps(normalized_market_choices, ensure_ascii=False)}",
+                    )
+                )
 
         for jira_field, key in MARKET_CHOICE_FIELDS.items():
             market_choices = data.get(key, {})
@@ -128,6 +182,39 @@ class WebConfigStore:
                     FieldMapping(
                         jira_field=jira_field,
                         source=f"market_choices:{json.dumps(normalized_market_choices, ensure_ascii=False)}",
+                    )
+                )
+
+        component_default_rules = self._parse_component_default_rules(str(data.get("component_default_rules_text", "")))
+        if component_route_rules and not component_default_rules:
+            raise ToolError(
+                "Component Defaults are required when System + Market -> Component routing is configured."
+            )
+        if component_route_rules and component_default_rules:
+            routed_components = {rule["component"].strip().lower() for rule in component_route_rules if rule["component"].strip()}
+            default_components = {rule["component"].strip().lower() for rule in component_default_rules if rule["component"].strip()}
+            missing_components = sorted(component for component in routed_components if component not in default_components)
+            if missing_components:
+                raise ToolError(
+                    "Component Defaults are missing these routed components: "
+                    + ", ".join(missing_components)
+                    + "."
+                )
+        for jira_field, field_key in COMPONENT_ROUTED_DIRECT_FIELDS.items():
+            if component_default_rules:
+                mappings.append(
+                    FieldMapping(
+                        jira_field=jira_field,
+                        source=(
+                            "component_defaults:"
+                            + json.dumps(
+                                {
+                                    "field": field_key,
+                                    "rules": component_default_rules,
+                                },
+                                ensure_ascii=False,
+                            )
+                        ),
                     )
                 )
 
@@ -151,6 +238,7 @@ class WebConfigStore:
             source = mapping.source.strip()
 
             if field in HEADER_FIELDS:
+                config_key = HEADER_FIELDS[field][0] if isinstance(HEADER_FIELDS[field], tuple) else HEADER_FIELDS[field]
                 header = ""
                 if source.startswith("column:"):
                     header = source.partition(":")[2].strip()
@@ -159,7 +247,7 @@ class WebConfigStore:
                     if column_match:
                         header = header_lookup.get(column_match.group(1).upper(), "")
                 if header:
-                    result[HEADER_FIELDS[field]] = header
+                    result[config_key] = header
                 continue
 
             if field in MARKET_CHOICE_FIELDS:
@@ -186,13 +274,30 @@ class WebConfigStore:
         for key, default in SOURCE_FIELDS.items():
             normalized[key] = str(data.get(key, default)).strip()
 
-        for key in HEADER_FIELDS.values():
-            normalized[key] = str(data.get(key, "")).strip()
+        if not normalized.get("sync_project_name_header"):
+            normalized["sync_project_name_header"] = "Project Name"
+        if not normalized.get("sync_market_header"):
+            normalized["sync_market_header"] = "Market"
+        if not normalized.get("sync_brd_link_header"):
+            normalized["sync_brd_link_header"] = "BRD Link"
+
+        for field_name, config_meta in HEADER_FIELDS.items():
+            config_key, default_value = config_meta if isinstance(config_meta, tuple) else (config_meta, "")
+            normalized[config_key] = str(data.get(config_key, default_value)).strip()
+
+        if not normalized.get("market_header"):
+            normalized["market_header"] = normalized.get("sync_market_header", "").strip()
+
+        for key in ("component_route_rules_text", "component_default_rules_text"):
+            normalized[key] = self._normalize_multiline_text(data.get(key, ""))
 
         for key in DIRECT_FIELDS.values():
             normalized[key] = str(data.get(key, DEFAULT_DIRECT_VALUES.get(key, ""))).strip()
 
         for key in MARKET_CHOICE_FIELDS.values():
+            normalized[key] = self._normalize_market_choice_map(data.get(key, {}))
+
+        for key in LEGACY_MARKET_CHOICE_FIELDS.values():
             normalized[key] = self._normalize_market_choice_map(data.get(key, {}))
 
         return normalized
@@ -240,6 +345,52 @@ class WebConfigStore:
             raw = raw_map.get(market, "")
             normalized[market] = str(raw).strip()
         return normalized
+
+    @staticmethod
+    def _normalize_multiline_text(data: object) -> str:
+        text = str(data or "").replace("\r\n", "\n").replace("\r", "\n")
+        lines = [line.rstrip() for line in text.split("\n")]
+        return "\n".join(lines).strip()
+
+    @staticmethod
+    def _parse_component_route_rules(text: str) -> list[dict[str, str]]:
+        rules: list[dict[str, str]] = []
+        for line_number, raw_line in enumerate(text.splitlines(), start=1):
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = [part.strip() for part in line.split("|")]
+            if len(parts) != 3 or any(not part for part in parts):
+                raise ToolError(
+                    f"Invalid System + Market -> Component rule on line {line_number}. "
+                    "Use: System | Market | Component"
+                )
+            rules.append({"system": parts[0], "market": parts[1], "component": parts[2]})
+        return rules
+
+    @staticmethod
+    def _parse_component_default_rules(text: str) -> list[dict[str, str]]:
+        rules: list[dict[str, str]] = []
+        for line_number, raw_line in enumerate(text.splitlines(), start=1):
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = [part.strip() for part in line.split("|")]
+            if len(parts) != 5 or any(not part for part in parts):
+                raise ToolError(
+                    f"Invalid Component default rule on line {line_number}. "
+                    "Use: Component | Assignee | Dev PIC | QA PIC | Fix Version"
+                )
+            rules.append(
+                {
+                    "component": parts[0],
+                    "assignee": parts[1],
+                    "dev_pic": parts[2],
+                    "qa_pic": parts[3],
+                    "fix_version": parts[4],
+                }
+            )
+        return rules
 
     @staticmethod
     def _column_letter(index: int) -> str:

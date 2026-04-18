@@ -44,7 +44,6 @@ Recommended: run the following commands in Terminal.
 In the same Terminal window, run:
 
 ```bash
-./scripts/install_team_helper_local.sh
 ./scripts/run_team_stack.sh start
 ```
 
@@ -52,15 +51,13 @@ In the same Terminal window, run:
 
 - prepare the local environment
 - 准备本地运行环境
-- start the helper that talks to BPMIS
-- 启动和 BPMIS 通信的 helper
 - start the local web portal
 - 启动本地网页工具
-- open a dedicated Chrome window for BPMIS automation if needed
-- 如有需要，会自动打开一个专门给 BPMIS 自动化使用的 Chrome 窗口
 
 如果脚本提示 `GOOGLE_OAUTH_CLIENT_SECRET_FILE` 未配置，请先打开项目目录里的 `.env` 文件，填上你本机上的 Google OAuth client secret JSON 路径。  
-If the script says `GOOGLE_OAUTH_CLIENT_SECRET_FILE` is not configured, open the `.env` file in the project folder and set it to the Google OAuth client secret JSON path on your Mac.
+同时请在 `.env` 里配置 `BPMIS_API_ACCESS_TOKEN`。  
+If the script says `GOOGLE_OAUTH_CLIENT_SECRET_FILE` is not configured, open the `.env` file in the project folder and set it to the Google OAuth client secret JSON path on your Mac.  
+Also set `BPMIS_API_ACCESS_TOKEN` in `.env`.
 
 ## Step 3: Open the Tool
 
@@ -72,11 +69,11 @@ Open this address in Chrome:
 
 ## Step 4: Log In To BPMIS
 
-请确认工具自动打开的那个 Chrome 窗口里已经登录 BPMIS。第一次使用时，你可能需要在那个新窗口里手动登录一次。  
-Make sure BPMIS is logged in inside the Chrome window opened for the tool. On first use, you may need to log in there once.
+请先在 BPMIS 里生成一个 access token，并填到项目目录的 `.env` 文件里。  
+Generate a BPMIS access token first, then save it into the project's `.env` file.
 
-如果没有登录，工具就无法创建 Jira。  
-If you are not logged in, the tool will not be able to create Jira tickets.
+如果没有 token，工具就无法直接调用 BPMIS API 创建 Jira。  
+Without a token, the tool cannot call BPMIS APIs directly to create Jira tickets.
 
 ## Step 5: Connect Google
 
@@ -94,7 +91,7 @@ You do not need to set up Google Cloud or configure redirect URLs yourself.
 你应该看到：
 
 - `Google Sheets = Connected`
-- `Local Helper = Connected`
+- `BPMIS API` passes in Self-Check
 
 If both are connected, you can continue.  
 如果这两项都显示已连接，就可以继续。
@@ -168,9 +165,9 @@ Then reopen:
 
 [http://127.0.0.1:5000](http://127.0.0.1:5000)
 
-### Local Helper shows Offline
+### BPMIS API check fails
 
-如果 `Local Helper` 显示 `Offline`，运行：
+如果 Self-Check 里的 `BPMIS API` 失败，运行：
 
 ```bash
 ./scripts/run_team_stack.sh restart
@@ -178,8 +175,8 @@ Then reopen:
 
 ### BPMIS error
 
-如果看到 BPMIS 相关报错，请确认 Chrome 里的 BPMIS 仍然保持登录。  
-Make sure BPMIS is still open and logged in in Chrome.
+如果看到 BPMIS 相关报错，请确认 `.env` 里的 `BPMIS_API_ACCESS_TOKEN` 仍然有效。  
+If you see BPMIS errors, make sure `BPMIS_API_ACCESS_TOKEN` in `.env` is still valid.
 
 ### Google or Spreadsheet error
 

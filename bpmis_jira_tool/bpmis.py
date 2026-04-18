@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import re
-import time
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
@@ -17,21 +16,12 @@ from bpmis_jira_tool.models import CreatedTicket, ProjectMatch
 ISSUE_KEY_PATTERN = re.compile(r"\b([A-Z][A-Z0-9]+-\d+)\b")
 
 
-def _lookup_path(payload: Any, path: str | None) -> Any:
-    if path is None or path == "":
-        return payload
-
-    current = payload
-    for part in path.split("."):
-        if isinstance(current, dict) and part in current:
-            current = current[part]
-            continue
-        raise BPMISError(f"Could not find response path '{path}'.")
-    return current
-
-
 class BPMISClient(ABC):
     @abstractmethod
+    def ping(self) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
     def find_project(self, issue_id: str) -> ProjectMatch:
         raise NotImplementedError
 
@@ -39,128 +29,223 @@ class BPMISClient(ABC):
     def create_jira_ticket(self, project: ProjectMatch, fields: dict[str, str]) -> CreatedTicket:
         raise NotImplementedError
 
+    @abstractmethod
+    def list_biz_projects_for_pm_email(self, email: str) -> list[dict[str, str]]:
+        raise NotImplementedError
 
-class BPMISHelperClient(BPMISClient):
-    def __init__(self, helper_base_url: str):
-        self.helper_base_url = helper_base_url.rstrip("/")
+    @abstractmethod
+    def get_single_brd_doc_link_for_project(self, project_issue_id: str) -> str:
+        raise NotImplementedError
 
-    def find_project(self, issue_id: str) -> ProjectMatch:
-        return ProjectMatch(project_id=issue_id, raw={"issueId": issue_id, "source": "team-helper"})
-
-    def create_jira_ticket(self, project: ProjectMatch, fields: dict[str, str]) -> CreatedTicket:
-        try:
-            response = requests.post(
-                f"{self.helper_base_url}/bpmis/create-jira",
-                json={"issue_id": project.project_id, "fields": fields},
-                timeout=120,
-            )
-        except requests.RequestException as error:
-            raise BPMISError(
-                f"Could not reach local helper at {self.helper_base_url}. Please start the helper and try again."
-            ) from error
-
-        try:
-            payload = response.json()
-        except ValueError as error:
-            raise BPMISError("Local helper returned a non-JSON response.") from error
-
-        if response.status_code >= 400 or payload.get("status") == "error":
-            raise BPMISError(payload.get("message") or "Local helper could not create the Jira ticket.")
-
-        ticket_key = payload.get("ticket_key")
-        ticket_link = payload.get("ticket_link")
-        if not ticket_key and not ticket_link:
-            raise BPMISError("Local helper did not return a Jira ticket key.")
-
-        return CreatedTicket(ticket_key=ticket_key, ticket_link=ticket_link, raw=payload)
+    @abstractmethod
+    def get_single_brd_doc_links_for_projects(self, project_issue_ids: list[str]) -> dict[str, str]:
+        raise NotImplementedError
 
 
-class BPMISPageApiClient(BPMISClient):
+class BPMISDirectApiClient(BPMISClient):
+    BIZ_PROJECT_TYPE_ID = 1
+    BRD_TYPE_ID = 2
     TASK_TYPE_ID = 4
     SUPPORTED_COUNTRIES_ALL_VALUE = 49007
     JIRA_BROWSE_BASE_URL = "https://jira.shopee.io/browse/"
+    SYNC_BIZ_PROJECT_STATUS_IDS = [22, 4, 23, 10, 11, 12]
     TASK_TYPE_PREFIX = {
         "feature": "[Feature]",
         "tech": "[Tech]",
         "support": "[Support]",
     }
 
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, access_token: str | None = None):
         self.settings = settings
+        self.access_token = access_token or self._resolve_access_token()
+        self.session = requests.Session()
+        self.session.headers.update(
+            {
+                "Authorization": f"Bearer {self.access_token}",
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+            }
+        )
         self._field_defs_cache: dict[str, Any] | None = None
         self._group_options_cache: dict[str, list[dict[str, Any]]] = {}
 
+    def ping(self) -> None:
+        self._get_issue_fields()
+
     def find_project(self, issue_id: str) -> ProjectMatch:
-        self._require_cdp()
         return ProjectMatch(
             project_id=issue_id,
             raw={
                 "issueId": issue_id,
-                "url": self._resolve_project_url(issue_id),
+                "url": self._resolve_project_url(),
             },
         )
 
     def create_jira_ticket(self, project: ProjectMatch, fields: dict[str, str]) -> CreatedTicket:
-        self._require_cdp()
-        from playwright.sync_api import sync_playwright
+        payload = self._build_create_payload(project, fields)
+        response = self._api_request(
+            "/api/v1/issues/batchCreateJiraIssue",
+            method="POST",
+            body=[payload],
+        )
+        self._write_debug_capture(payload, response)
+        data = response.get("data") or {}
+        created = (data.get("created") or [{}])[0]
+        add = (data.get("add") or [{}])[0]
+        update = (data.get("update") or [{}])[0]
+        create_errors = created.get("errors") or {}
+        if create_errors:
+            error_text = "; ".join(f"{key}: {value}" for key, value in create_errors.items())
+            raise BPMISError(f"BPMIS API validation failed: {error_text}")
 
-        with sync_playwright() as playwright:
-            browser = self._connect_browser(playwright)
-            context = browser.contexts[0] if browser.contexts else browser.new_context()
-            page = self._pick_existing_bpmis_page(context)
-            try:
-                payload = self._build_create_payload(page, project, fields)
-                response = self._api_request(
-                    page,
-                    "/api/v1/issues/batchCreateJiraIssue",
-                    method="POST",
-                    body=[payload],
-                )
-                self._write_debug_capture(payload, response)
-                data = response.get("data") or {}
-                created = (data.get("created") or [{}])[0]
-                add = (data.get("add") or [{}])[0]
-                update = (data.get("update") or [{}])[0]
-                create_errors = created.get("errors") or {}
-                if create_errors:
-                    error_text = "; ".join(f"{key}: {value}" for key, value in create_errors.items())
-                    raise BPMISError(f"BPMIS API validation failed: {error_text}")
-                ticket_key = (
-                    created.get("key")
-                    or add.get("jiraLink")
-                    or update.get("jiraLink")
-                    or self._extract_issue_key(created.get("self"))
-                )
-                ticket_link = self._normalize_ticket_link(
-                    add.get("jiraLink")
-                    or update.get("jiraLink")
-                    or created.get("self")
-                    or ticket_key
-                )
-                if not ticket_key and not ticket_link:
-                    raise BPMISError(
-                        "BPMIS API did not return a Jira ticket key. "
-                        "Debug saved to tmp/last_bpmis_api_result.json."
+        ticket_key = (
+            created.get("key")
+            or add.get("jiraLink")
+            or update.get("jiraLink")
+            or self._extract_issue_key(created.get("self"))
+        )
+        ticket_link = self._normalize_ticket_link(
+            add.get("jiraLink")
+            or update.get("jiraLink")
+            or created.get("self")
+            or ticket_key
+        )
+        if not ticket_key and not ticket_link:
+            raise BPMISError(
+                "BPMIS API did not return a Jira ticket key. "
+                "Debug saved to tmp/last_bpmis_api_result.json."
+            )
+        return CreatedTicket(ticket_key=ticket_key, ticket_link=ticket_link, raw=response)
+
+    def list_biz_projects_for_pm_email(self, email: str) -> list[dict[str, str]]:
+        normalized_email = email.strip().lower()
+        if not normalized_email:
+            raise BPMISError("PM email is required before syncing BPMIS projects.")
+
+        user_ids = self._resolve_bpmis_user_ids_by_email(normalized_email)
+        if not user_ids:
+            return []
+
+        rows: list[dict[str, Any]] = []
+        page = 1
+        page_size = 200
+        while True:
+            response = self._api_request(
+                "/api/v1/issues/list",
+                params={
+                    "search": json.dumps(
+                        {
+                            "joinType": "and",
+                            "subQueries": [
+                                {"typeId": [self.BIZ_PROJECT_TYPE_ID]},
+                                {"statusId": self.SYNC_BIZ_PROJECT_STATUS_IDS},
+                                {
+                                    "joinType": "or",
+                                    "subQueries": [
+                                        {"regionalPmPicId": user_ids},
+                                        {"involvedPM": user_ids},
+                                    ],
+                                },
+                            ],
+                            "page": page,
+                            "pageSize": page_size,
+                            "mapping": True,
+                        }
                     )
-                return CreatedTicket(
-                    ticket_key=ticket_key,
-                    ticket_link=ticket_link,
-                    raw=response,
-                )
-            finally:
-                pass
+                },
+            )
+            data = response.get("data") or {}
+            page_rows = data.get("rows") or []
+            rows.extend(page_rows)
+            if len(page_rows) < page_size:
+                break
+            page += 1
+
+        deduped: dict[str, dict[str, str]] = {}
+        for row in rows:
+            issue_id = str(row.get("id") or "").strip()
+            if not issue_id or issue_id in deduped:
+                continue
+            summary = str(row.get("summary") or "").strip()
+            market = self._extract_market_label(row.get("marketId"))
+            deduped[issue_id] = {
+                "issue_id": issue_id,
+                "project_name": summary,
+                "market": market,
+            }
+        return list(deduped.values())
+
+    def get_single_brd_doc_link_for_project(self, project_issue_id: str) -> str:
+        return self.get_single_brd_doc_links_for_projects([project_issue_id]).get(str(project_issue_id).strip(), "")
+
+    def get_single_brd_doc_links_for_projects(self, project_issue_ids: list[str]) -> dict[str, str]:
+        normalized_issue_ids = []
+        for issue_id in project_issue_ids:
+            cleaned = str(issue_id).strip()
+            if cleaned and cleaned not in normalized_issue_ids:
+                normalized_issue_ids.append(cleaned)
+        if not normalized_issue_ids:
+            return {}
+
+        parent_issue_ids = [int(issue_id) for issue_id in normalized_issue_ids]
+        rows: list[dict[str, Any]] = []
+        page = 1
+        page_size = 500
+        while True:
+            response = self._api_request(
+                "/api/v1/issues/list",
+                params={
+                    "search": json.dumps(
+                        {
+                            "joinType": "and",
+                            "subQueries": [
+                                {"typeId": [self.BRD_TYPE_ID]},
+                                {"parentIds": parent_issue_ids},
+                            ],
+                            "page": page,
+                            "pageSize": page_size,
+                            "mapping": True,
+                        }
+                    )
+                },
+            )
+            page_rows = (response.get("data") or {}).get("rows") or []
+            rows.extend(page_rows)
+            if len(page_rows) < page_size:
+                break
+            page += 1
+
+        grouped_rows: dict[str, list[dict[str, Any]]] = {issue_id: [] for issue_id in normalized_issue_ids}
+        seen_brd_ids: set[str] = set()
+        for row in rows:
+            brd_id = str(row.get("id") or "").strip()
+            if brd_id and brd_id in seen_brd_ids:
+                continue
+            if brd_id:
+                seen_brd_ids.add(brd_id)
+            parent_ids = [str(parent_id).strip() for parent_id in (row.get("parentIds") or []) if str(parent_id).strip()]
+            for parent_id in parent_ids:
+                if parent_id in grouped_rows:
+                    grouped_rows[parent_id].append(row)
+
+        resolved_links: dict[str, str] = {}
+        for issue_id, brd_rows in grouped_rows.items():
+            if len(brd_rows) == 1:
+                resolved_links[issue_id] = str(brd_rows[0].get("link") or "").strip()
+            else:
+                resolved_links[issue_id] = ""
+        return resolved_links
 
     def _build_create_payload(
         self,
-        page,
         project: ProjectMatch,
         fields: dict[str, str],
     ) -> dict[str, Any]:
-        field_defs = self._get_issue_fields(page)
+        field_defs = self._get_issue_fields()
         market_value = self._required_field(fields, "Market")
-        market_id = self._resolve_option_value(page, field_defs["marketId"], market_value)
+        market_id = self._resolve_option_value(field_defs["marketId"], market_value)
         task_type_label = fields.get("Task Type", "Feature").strip() or "Feature"
-        task_type = self._resolve_option_value(page, field_defs["taskType"], task_type_label)
+        task_type = self._resolve_option_value(field_defs["taskType"], task_type_label)
         summary = self._prefix_summary(task_type_label, self._required_field(fields, "Summary"))
 
         payload: dict[str, Any] = {
@@ -180,16 +265,15 @@ class BPMISPageApiClient(BPMISClient):
 
         fix_version_name = fields.get("Fix Version") or fields.get("Fix Version/s")
         if fix_version_name:
-            payload["fixVersionId"] = self._resolve_fix_versions(page, market_id, fix_version_name)
+            payload["fixVersionId"] = self._resolve_fix_versions(market_id, fix_version_name)
 
         if fields.get("Component"):
             payload["componentId"] = [
-                self._resolve_option_value(page, field_defs["componentId"], fields["Component"], match_value=market_id)
+                self._resolve_option_value(field_defs["componentId"], fields["Component"], match_value=market_id)
             ]
 
         if fields.get("Priority"):
             payload["bizPriorityId"] = self._resolve_option_value(
-                page,
                 field_defs["bizPriorityId"],
                 fields["Priority"],
                 match_value=self.TASK_TYPE_ID,
@@ -207,12 +291,11 @@ class BPMISPageApiClient(BPMISClient):
             raw_value = fields.get(source_name, "").strip()
             if not raw_value:
                 continue
-            user_id = self._resolve_jira_user_id(page, raw_value)
+            user_id = self._resolve_jira_user_id(raw_value)
             payload[target_name] = [user_id] if is_array else user_id
 
         if fields.get("Need UAT"):
             payload["uatRequired"] = self._resolve_option_value(
-                page,
                 field_defs["uatRequired"],
                 fields["Need UAT"],
                 match_value=market_id,
@@ -220,11 +303,10 @@ class BPMISPageApiClient(BPMISClient):
 
         if fields.get("Involved Tracks"):
             payload["involvedProductTrackId"] = [
-                self._resolve_option_value(page, field_defs["involvedProductTrackId"], fields["Involved Tracks"])
+                self._resolve_option_value(field_defs["involvedProductTrackId"], fields["Involved Tracks"])
             ]
 
         payload["supportedCountries"] = [self.SUPPORTED_COUNTRIES_ALL_VALUE]
-
         return payload
 
     def _write_debug_capture(self, payload: dict[str, Any], response: dict[str, Any]) -> None:
@@ -241,12 +323,11 @@ class BPMISPageApiClient(BPMISClient):
             raise BPMISError(f"Missing required Jira mapping value for '{name}'.")
         return value
 
-    def _resolve_fix_versions(self, page, market_id: int, raw_value: str) -> list[int]:
+    def _resolve_fix_versions(self, market_id: int, raw_value: str) -> list[int]:
         values = [item.strip() for item in raw_value.split("|") if item.strip()] or [raw_value.strip()]
         resolved_ids: list[int] = []
         for value in values:
             response = self._api_request(
-                page,
                 "/api/v1/versions/list",
                 params={
                     "search": json.dumps(
@@ -286,9 +367,8 @@ class BPMISPageApiClient(BPMISClient):
             resolved_ids.append(int(match["id"]))
         return resolved_ids
 
-    def _resolve_jira_user_id(self, page, query: str) -> int:
+    def _resolve_jira_user_id(self, query: str) -> int:
         response = self._api_request(
-            page,
             "/api/v1/jira/user",
             params={"query": query, "local": "true"},
         )
@@ -310,14 +390,13 @@ class BPMISPageApiClient(BPMISClient):
 
     def _resolve_option_value(
         self,
-        page,
         field_def: dict[str, Any],
         raw_value: str,
         match_value: int | None = None,
     ) -> int:
         candidates = [item.strip() for item in raw_value.split("|") if item.strip()] or [raw_value.strip()]
         group_names = self._select_option_groups(field_def, match_value)
-        options = self._get_group_options(page, group_names)
+        options = self._get_group_options(group_names)
 
         for candidate in candidates:
             exact = next(
@@ -367,17 +446,16 @@ class BPMISPageApiClient(BPMISClient):
                     return [option_group[index]]
         return [group for group in option_group if group]
 
-    def _get_issue_fields(self, page) -> dict[str, Any]:
+    def _get_issue_fields(self) -> dict[str, Any]:
         if self._field_defs_cache is None:
-            response = self._api_request(page, "/api/v1/issueField/list")
+            response = self._api_request("/api/v1/issueField/list")
             self._field_defs_cache = response.get("data") or {}
         return self._field_defs_cache
 
-    def _get_group_options(self, page, group_names: list[str]) -> list[dict[str, Any]]:
+    def _get_group_options(self, group_names: list[str]) -> list[dict[str, Any]]:
         missing = [group for group in group_names if group not in self._group_options_cache]
         if missing:
             response = self._api_request(
-                page,
                 "/api/v1/options/getGroupOptions",
                 params={"search": json.dumps({"group": missing})},
             )
@@ -392,47 +470,29 @@ class BPMISPageApiClient(BPMISClient):
 
     def _api_request(
         self,
-        page,
         path: str,
         method: str = "GET",
         params: dict[str, Any] | None = None,
         body: Any | None = None,
     ) -> dict[str, Any]:
-        response = page.evaluate(
-            """
-            async ({path, method, params, body}) => {
-              const url = new URL(path, window.location.origin);
-              for (const [key, value] of Object.entries(params || {})) {
-                url.searchParams.set(key, String(value));
-              }
-              const options = {
-                method,
-                credentials: 'include',
-                headers: { 'Accept': 'application/json' }
-              };
-              if (body !== null && body !== undefined) {
-                options.headers['Content-Type'] = 'application/json';
-                options.body = JSON.stringify(body);
-              }
-              const resp = await fetch(url.toString(), options);
-              const text = await resp.text();
-              return { status: resp.status, text };
-            }
-            """,
-            {
-                "path": path,
-                "method": method,
-                "params": params or {},
-                "body": body,
-            },
-        )
+        url = f"{self.settings.bpmis_base_url.rstrip('/')}/{path.lstrip('/')}"
+        try:
+            response = self.session.request(
+                method=method,
+                url=url,
+                params=params,
+                json=body if body is not None else None,
+                timeout=60,
+            )
+        except requests.RequestException as error:
+            raise BPMISError(f"BPMIS API request failed for '{path}'.") from error
 
-        if int(response["status"]) >= 400:
-            raise BPMISError(f"BPMIS API request failed for '{path}' with status {response['status']}.")
+        if response.status_code >= 400:
+            raise BPMISError(f"BPMIS API request failed for '{path}' with status {response.status_code}.")
 
         try:
-            payload = json.loads(response["text"])
-        except json.JSONDecodeError as error:
+            payload = response.json()
+        except ValueError as error:
             raise BPMISError(f"BPMIS API returned non-JSON data for '{path}'.") from error
 
         if payload.get("code") not in {0, None}:
@@ -462,898 +522,28 @@ class BPMISPageApiClient(BPMISClient):
             return None
         return f"{self.JIRA_BROWSE_BASE_URL}{issue_key}"
 
-    def _resolve_project_url(self, issue_id: str) -> str:
-        if self.settings.bpmis_browser_project_url_template:
-            return self.settings.bpmis_browser_project_url_template.format(issue_id=issue_id, project_id=issue_id)
-        return self.settings.bpmis_browser_base_url
-
-    def _connect_browser(self, playwright):
-        last_error: Exception | None = None
-        for timeout_ms in (30000, 60000, 120000):
-            try:
-                return playwright.chromium.connect_over_cdp(
-                    self.settings.bpmis_browser_cdp_url,
-                    timeout=timeout_ms,
-                )
-            except Exception as error:  # noqa: BLE001
-                last_error = error
-        raise BPMISError(
-            "Could not connect to the BPMIS Chrome session on port 9222. "
-            "Please make sure the remote-debug Chrome window is still open."
-        ) from last_error
-
-    def _pick_existing_bpmis_page(self, context):
-        for existing in context.pages:
-            try:
-                if "bpmis-uat1.uat.npt.seabank.io" in existing.url:
-                    return existing
-            except Exception:  # noqa: BLE001
-                continue
-        page = context.new_page()
-        try:
-            page.goto(self.settings.bpmis_browser_base_url, wait_until="domcontentloaded", timeout=30000)
-            return page
-        except Exception as error:  # noqa: BLE001
-            try:
-                page.close()
-            except Exception:  # noqa: BLE001
-                pass
-            raise BPMISError(
-                "Could not open a BPMIS tab in Chrome automatically. "
-                "Please make sure your Chrome session is still logged in."
-            ) from error
-
-    def _require_cdp(self) -> None:
-        if not self.settings.bpmis_browser_cdp_url:
-            raise BPMISNotConfiguredError("BPMIS Chrome session is not configured.")
-
-
-class BPMISApiClient(BPMISClient):
-    def __init__(self, settings: Settings, access_token: str):
-        self.settings = settings
-        self.session = requests.Session()
-        self.session.headers.update(
-            {
-                "Authorization": f"Bearer {access_token}",
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-            }
+    def _resolve_bpmis_user_ids_by_email(self, email: str) -> list[int]:
+        response = self._api_request(
+            "/api/v1/users/listByEmail",
+            params={"search": json.dumps([email])},
         )
-
-    def find_project(self, issue_id: str) -> ProjectMatch:
-        if not self.settings.bpmis_api_search_url_template:
-            raise BPMISNotConfiguredError("BPMIS API search endpoint is not configured.")
-
-        url = self.settings.bpmis_api_search_url_template.format(issue_id=issue_id, project_id=issue_id)
-        response = self.session.request(self.settings.bpmis_api_search_method, url, timeout=30)
-        response.raise_for_status()
-        payload = response.json()
-        project_payload = _lookup_path(payload, self.settings.bpmis_api_search_response_path)
-
-        if isinstance(project_payload, list):
-            if not project_payload:
-                raise BPMISError(f"No BPMIS project found for Issue ID '{issue_id}'.")
-            project_payload = project_payload[0]
-
-        project_id = (
-            project_payload.get("id")
-            or project_payload.get("projectId")
-            or project_payload.get("issueId")
-            or issue_id
-        )
-        return ProjectMatch(project_id=str(project_id), raw=project_payload)
-
-    def create_jira_ticket(self, project: ProjectMatch, fields: dict[str, str]) -> CreatedTicket:
-        if not self.settings.bpmis_api_create_url_template:
-            raise BPMISNotConfiguredError("BPMIS API create endpoint is not configured.")
-
-        url = self.settings.bpmis_api_create_url_template.format(
-            issue_id=project.project_id,
-            project_id=project.project_id,
-        )
-        response = self.session.request(
-            self.settings.bpmis_api_create_method,
-            url,
-            json={"project": project.raw, "fields": fields},
-            timeout=30,
-        )
-        response.raise_for_status()
-        payload = response.json()
-        ticket_payload = _lookup_path(payload, self.settings.bpmis_api_created_ticket_path)
-
-        if isinstance(ticket_payload, str):
-            ticket_link = ticket_payload
-            ticket_key_match = ISSUE_KEY_PATTERN.search(ticket_payload)
-            ticket_key = ticket_key_match.group(1) if ticket_key_match else None
-            return CreatedTicket(ticket_key=ticket_key, ticket_link=ticket_link, raw=payload)
-
-        if not isinstance(ticket_payload, dict):
-            raise BPMISError("BPMIS API ticket response is in an unsupported format.")
-
-        ticket_key = ticket_payload.get("key") or ticket_payload.get("ticketKey")
-        ticket_link = ticket_payload.get("url") or ticket_payload.get("ticketUrl") or ticket_payload.get("link")
-        return CreatedTicket(ticket_key=ticket_key, ticket_link=ticket_link, raw=ticket_payload)
-
-
-class BPMISBrowserClient(BPMISClient):
-    def __init__(self, settings: Settings, access_token: str):
-        self.settings = settings
-        self.access_token = access_token
-
-    def _pause_after_step(self, seconds: float = 0.5) -> None:
-        if not self.settings.bpmis_browser_headless:
-            time.sleep(seconds)
-
-    def _open_browser_session(self, playwright):
-        if self.settings.bpmis_browser_cdp_url:
-            browser = playwright.chromium.connect_over_cdp(self.settings.bpmis_browser_cdp_url)
-            if browser.contexts:
-                context = browser.contexts[0]
-            else:
-                context = browser.new_context()
-            page = context.new_page()
-            return browser, context, page, False
-
-        browser = self._launch_browser(playwright)
-        context = self._new_context(browser)
-        page = context.new_page()
-        return browser, context, page, True
-
-    def _launch_browser(self, playwright):
-        launch_kwargs = {"headless": self.settings.bpmis_browser_headless}
-        if self.settings.bpmis_browser_executable_path:
-            launch_kwargs["executable_path"] = self.settings.bpmis_browser_executable_path
-            return playwright.chromium.launch(**launch_kwargs)
-
-        try:
-            return playwright.chromium.launch(channel="chrome", **launch_kwargs)
-        except Exception:  # noqa: BLE001
-            return playwright.chromium.launch(**launch_kwargs)
-
-    def _new_context(self, browser):
-        context = browser.new_context(
-            extra_http_headers={"Authorization": f"Bearer {self.access_token}"}
-        )
-        context.add_init_script(
-            script=(
-                "window.localStorage.setItem("
-                f"{json.dumps(self.settings.bpmis_browser_token_storage_key)}, "
-                f"{json.dumps(self.access_token)}"
-                ");"
-            )
-        )
-        return context
-
-    def find_project(self, issue_id: str) -> ProjectMatch:
-        if self.settings.bpmis_browser_project_url_template:
-            project_url = self._resolve_project_url(issue_id)
-            return ProjectMatch(project_id=issue_id, raw={"issueId": issue_id, "url": project_url})
-
-        from playwright.sync_api import sync_playwright
-
-        with sync_playwright() as playwright:
-            browser, _context, page, owns_browser = self._open_browser_session(playwright)
-            try:
-                page.set_default_timeout(30000)
-                project_url = self._resolve_project_url(issue_id)
-                page.goto(project_url, wait_until="domcontentloaded")
-
-                row_data = self._search_for_project(page, issue_id)
-
-                project_id = issue_id
-                return ProjectMatch(
-                    project_id=project_id,
-                    raw={"issueId": issue_id, "url": project_url, **row_data},
-                )
-            finally:
-                try:
-                    page.close()
-                except Exception:  # noqa: BLE001
-                    pass
-                if owns_browser:
-                    browser.close()
-
-    def create_jira_ticket(self, project: ProjectMatch, fields: dict[str, str]) -> CreatedTicket:
-        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
-        from playwright.sync_api import sync_playwright
-
-        with sync_playwright() as playwright:
-            browser, _context, page, owns_browser = self._open_browser_session(playwright)
-            try:
-                page.set_default_timeout(30000)
-                page.goto(self._resolve_project_url(project.project_id), wait_until="domcontentloaded")
-
-                self._click_create_jira(page, project.project_id)
-                modal = self._wait_for_jira_modal(page)
-                form_scope = self._wait_for_jira_form_scope(modal)
-
-                for field_name, value in fields.items():
-                    self._fill_field(page, form_scope, field_name, value)
-
-                submit_in_modal = modal.get_by_role("button", name=re.compile(r"^submit$", re.I))
-                if submit_in_modal.count() > 0:
-                    submit_in_modal.first.click(force=True)
-                elif self.settings.bpmis_browser_submit_selector:
-                    page.locator(self.settings.bpmis_browser_submit_selector).first.click(force=True)
-                else:
-                    modal.get_by_role("button", name=re.compile("create|submit", re.I)).click()
-
-                try:
-                    page.wait_for_load_state("networkidle")
-                except PlaywrightTimeoutError:
-                    pass
-
-                ticket_key, ticket_link = self._extract_ticket(page)
-                return CreatedTicket(ticket_key=ticket_key, ticket_link=ticket_link, raw={"project": project.raw})
-            finally:
-                try:
-                    page.close()
-                except Exception:  # noqa: BLE001
-                    pass
-                if owns_browser:
-                    browser.close()
-
-    def _wait_for_jira_modal(self, page):
-        modal_candidates = [
-            page.locator(".ant-modal-wrap:visible"),
-            page.locator(".ant-modal:visible"),
-            page.locator("text=Create New Jira Tickets").locator("xpath=ancestor::*[contains(@class, 'ant-modal') or contains(@class, 'ant-modal-wrap')][1]"),
-        ]
-
-        for locator in modal_candidates:
-            try:
-                if locator.count() == 0:
-                    continue
-                locator.first.wait_for(state="visible", timeout=10000)
-                self._pause_after_step()
-                return locator.first
-            except Exception:  # noqa: BLE001
-                continue
-
-        raise BPMISError("Jira modal opened by BPMIS was not detected.")
-
-    def _wait_for_jira_form_scope(self, modal):
-        scope_candidates = [
-            modal.locator("tr.ant-table-expanded-row form"),
-            modal.locator("form"),
-            modal.locator(".ant-table-expanded-row"),
-            modal.locator(".ant-modal-body"),
-        ]
-
-        for locator in scope_candidates:
-            try:
-                if locator.count() == 0:
-                    continue
-                locator.first.wait_for(state="visible", timeout=5000)
-                return locator.first
-            except Exception:  # noqa: BLE001
-                continue
-
-        raise BPMISError("Jira modal form area was not detected.")
-
-    def _click_create_jira(self, page, issue_id: str) -> None:
-        row_locator = page.locator(f"tr[data-row-key='{issue_id}']").first
-        row_scoped_candidates = [
-            row_locator.locator(
-                "td.ant-table-cell.ant-table-cell-fix-right.ant-table-cell-fix-right-first "
-                "span:nth-child(3) > button"
-            ),
-            row_locator.locator(
-                "td.ant-table-cell.ant-table-cell-fix-right.ant-table-cell-fix-right-first > div > span:nth-child(3) > button"
-            ),
-            row_locator.locator(
-                "td.ant-table-cell.ant-table-cell-fix-right.ant-table-cell-fix-right-first button[aria-describedby]"
-            ).nth(2),
-        ]
-
-        for locator in row_scoped_candidates:
-            try:
-                if locator.count() == 0:
-                    continue
-                locator.first.wait_for(state="visible")
-                locator.first.click(force=True)
-                self._pause_after_step()
-                self._click_task_item(page)
-                return
-            except Exception:  # noqa: BLE001
-                continue
-
-        try:
-            clicked = page.evaluate(
-                """
-                (issueId) => {
-                  const row = document.querySelector(`tr[data-row-key="${issueId}"]`);
-                  if (!row) return false;
-                  const actionCell = row.querySelector(
-                    'td.ant-table-cell.ant-table-cell-fix-right.ant-table-cell-fix-right-first'
-                  );
-                  if (!actionCell) return false;
-                  const buttons = actionCell.querySelectorAll('button');
-                  if (buttons.length < 3) return false;
-                  buttons[2].click();
-                  return true;
-                }
-                """,
-                issue_id,
-            )
-            if clicked:
-                self._pause_after_step()
-                self._click_task_item(page)
-                return
-        except Exception:  # noqa: BLE001
-            pass
-
-        if self.settings.bpmis_browser_create_button_selector:
-            try:
-                page.locator(self.settings.bpmis_browser_create_button_selector).first.click(force=True)
-                self._pause_after_step()
-                self._click_task_item(page)
-                return
-            except Exception as error:  # noqa: BLE001
-                raise BPMISError(
-                    "Configured BPMIS create button selector did not work."
-                ) from error
-
-        candidates = [
-            page.get_by_role("button", name=re.compile("create jira|jira", re.I)),
-            page.get_by_text(re.compile("create jira|jira", re.I)),
-            page.locator("button, a, span").filter(has_text=re.compile("create jira|jira", re.I)),
-        ]
-
-        last_error: Exception | None = None
-        for locator in candidates:
-            try:
-                if locator.count() == 0:
-                    continue
-                locator.first.click()
-                self._pause_after_step()
-                self._click_task_item(page)
-                return
-            except Exception as error:  # noqa: BLE001
-                last_error = error
-
-        raise BPMISError(
-            "Could not find or click the BPMIS Jira creation action. "
-            "Please share a screenshot of the project page action area or the selector."
-        ) from last_error
-
-    def _click_task_item(self, page) -> None:
-        try:
-            page.wait_for_selector(".ant-popover:visible, .ant-dropdown:visible", timeout=3000)
-        except Exception:  # noqa: BLE001
-            pass
-
-        task_candidates = [
-            page.locator(".ant-popover:visible .ant-radio-group > label:nth-child(1)"),
-            page.locator(".ant-popover:visible .ant-radio-group .ant-radio-button-wrapper").first,
-            page.locator(".ant-popover:visible .ant-radio-group .ant-radio-button-wrapper").filter(has_text=re.compile(r"^task$", re.I)),
-            page.locator(".ant-dropdown:visible .ant-radio-group > label:nth-child(1)"),
-            page.locator(".ant-dropdown:visible .ant-radio-group .ant-radio-button-wrapper").first,
-        ]
-
-        if self.settings.bpmis_browser_task_item_selector:
-            task_candidates.insert(0, page.locator(f".ant-popover:visible {self.settings.bpmis_browser_task_item_selector}"))
-
-        last_error: Exception | None = None
-        for locator in task_candidates:
-            try:
-                if locator.count() == 0:
-                    continue
-                locator.first.click(force=True)
-                self._pause_after_step()
-                return
-            except Exception as error:  # noqa: BLE001
-                last_error = error
-
-        try:
-            clicked = page.evaluate(
-                """
-                () => {
-                  const layers = Array.from(document.querySelectorAll('.ant-popover, .ant-dropdown'));
-                  const visibleLayer = layers.find((node) => {
-                    const style = window.getComputedStyle(node);
-                    return style.display !== 'none' && style.visibility !== 'hidden' && node.offsetParent !== null;
-                  });
-                  if (!visibleLayer) return false;
-                  const firstRadio = visibleLayer.querySelector('.ant-radio-group > label:nth-child(1)');
-                  if (firstRadio) {
-                    firstRadio.click();
-                    return true;
-                  }
-                  const taskRadio = Array.from(
-                    visibleLayer.querySelectorAll('.ant-radio-button-wrapper')
-                  ).find((node) => node.textContent.trim().toLowerCase() === 'task');
-                  if (!taskRadio) return false;
-                  taskRadio.click();
-                  return true;
-                }
-                """
-            )
-            if clicked:
-                self._pause_after_step()
-                return
-        except Exception as error:  # noqa: BLE001
-            last_error = error
-
-        raise BPMISError("Could not click the BPMIS Task item in the popup menu.") from last_error
-
-    def _resolve_project_url(self, issue_id: str) -> str:
-        if self.settings.bpmis_browser_project_url_template:
-            return self.settings.bpmis_browser_project_url_template.format(issue_id=issue_id, project_id=issue_id)
-        return self.settings.bpmis_browser_base_url
-
-    def _search_for_project(self, page, issue_id: str) -> dict[str, str]:
-        page.goto(self.settings.bpmis_browser_base_url, wait_until="domcontentloaded")
-        self._apply_search_filter(page, issue_id)
-        return self._extract_project_row_data(page, issue_id)
-
-    def _apply_search_filter(self, page, issue_id: str) -> None:
-        try:
-            if self.settings.bpmis_browser_search_input_selector:
-                input_locator = page.locator(self.settings.bpmis_browser_search_input_selector).first
-            else:
-                input_locator = self._find_search_input(page)
-                if input_locator is None:
-                    self._expand_filters(page)
-                    input_locator = self._find_search_input(page)
-
-            if input_locator is None:
-                # If no obvious search field exists, continue and try to click the row directly.
-                return
-
-            self._fill_issue_id_input(page, input_locator, issue_id)
-        except Exception as error:  # noqa: BLE001
-            raise BPMISError(
-                "Could not use the BPMIS Issue ID filter automatically."
-            ) from error
-
-        if self.settings.bpmis_browser_search_submit_selector:
-            page.locator(self.settings.bpmis_browser_search_submit_selector).first.click()
-        else:
-            clicked = False
-            query_candidates = [
-                page.get_by_role("button", name=re.compile(r"^query$", re.I)),
-                page.locator("button").filter(has_text=re.compile(r"^query$", re.I)),
-                page.get_by_text(re.compile(r"^query$", re.I)),
-            ]
-            for locator in query_candidates:
-                try:
-                    if locator.count() == 0:
-                        continue
-                    locator.first.click()
-                    clicked = True
-                    break
-                except Exception:  # noqa: BLE001
-                    continue
-
-            if not clicked:
-                try:
-                    input_locator.press("Enter")
-                except Exception:  # noqa: BLE001
-                    page.keyboard.press("Enter")
-
-        try:
-            page.wait_for_load_state("networkidle", timeout=5000)
-        except Exception:  # noqa: BLE001
-            pass
-
-    def _expand_filters(self, page) -> None:
-        expand_candidates = [
-            page.get_by_role("button", name=re.compile(r"^expand$", re.I)),
-            page.get_by_text(re.compile(r"^expand$", re.I)),
-            page.locator("button, span, a").filter(has_text=re.compile(r"^expand$", re.I)),
-        ]
-        for locator in expand_candidates:
-            try:
-                if locator.count() == 0:
-                    continue
-                locator.first.click()
-                try:
-                    page.wait_for_timeout(500)
-                except Exception:  # noqa: BLE001
-                    pass
-                return
-            except Exception:  # noqa: BLE001
-                continue
-
-    def _fill_issue_id_input(self, page, input_locator, issue_id: str) -> None:
-        try:
-            if input_locator.is_visible():
-                input_locator.click()
-                input_locator.fill("")
-                input_locator.fill(issue_id)
-                return
-        except Exception:  # noqa: BLE001
-            pass
-
-        container_candidates = [
-            page.locator("xpath=//*[contains(normalize-space(.), 'Issue ID')]/following::*[contains(@class, 'ant-select')][1]"),
-            page.locator("xpath=//*[contains(normalize-space(.), 'Issue ID')]/following::*[contains(@class, 'ant-select-selector')][1]"),
-            page.locator("xpath=//*[contains(normalize-space(.), 'Issue ID')]/ancestor::div[1]"),
-        ]
-        for container in container_candidates:
-            try:
-                if container.count() == 0:
-                    continue
-                container.first.click()
-                visible_input = page.locator("input#id:visible, input[aria-owns='id_list']:visible, input.ant-select-selection-search-input:visible").first
-                visible_input.fill("")
-                visible_input.fill(issue_id)
-                return
-            except Exception:  # noqa: BLE001
-                continue
-
-        input_locator.fill("")
-        input_locator.fill(issue_id)
-
-    def _find_search_input(self, page):
-        selectors = [
-            "input#id:visible",
-            "input[aria-owns='id_list']:visible",
-            "input.ant-select-selection-search-input:visible",
-            "input[type='search']",
-            "input[placeholder*='Search' i]",
-            "input[placeholder*='Issue' i]",
-            "input[placeholder*='ID' i]",
-            "input[name*='search' i]",
-            "input[name*='issue' i]",
-            "input[id*='search' i]",
-            "input[id*='issue' i]",
-        ]
-
-        for selector in selectors:
-            locator = page.locator(selector)
-            if locator.count() > 0:
-                return locator.first
-
-        role_candidates = [
-            page.get_by_role("searchbox"),
-            page.get_by_label(re.compile("search|issue|id", re.I)),
-            page.get_by_placeholder(re.compile("search|issue|id", re.I)),
-        ]
-        for locator in role_candidates:
-            try:
-                if locator.count() > 0:
-                    return locator.first
-            except Exception:  # noqa: BLE001
-                continue
-
-        labeled_input_candidates = [
-            "xpath=//*[contains(normalize-space(.), 'Issue ID')]/following::input[1]",
-            "xpath=//label[contains(normalize-space(.), 'Issue ID')]/following::input[1]",
-            "xpath=//span[contains(normalize-space(.), 'Issue ID')]/following::input[1]",
-            "xpath=//div[contains(normalize-space(.), 'Issue ID')]/following::input[1]",
-        ]
-        for selector in labeled_input_candidates:
-            try:
-                locator = page.locator(selector)
-                if locator.count() > 0:
-                    return locator.first
-            except Exception:  # noqa: BLE001
-                continue
-
-        return None
-
-    def _extract_project_row_data(self, page, issue_id: str) -> dict[str, str]:
-        exact_text_candidates = [
-            page.get_by_role("link", name=re.compile(rf"\b{re.escape(issue_id)}\b")),
-            page.get_by_role("cell", name=re.compile(rf"\b{re.escape(issue_id)}\b")),
-            page.get_by_text(re.compile(rf"\b{re.escape(issue_id)}\b")),
-            page.locator("td").filter(has_text=re.compile(rf"\b{re.escape(issue_id)}\b")),
-        ]
-
-        for locator in exact_text_candidates:
-            try:
-                if locator.count() == 0:
-                    continue
-                target = locator.first
-                tag_name = target.evaluate("(el) => el.tagName.toLowerCase()")
-                if tag_name in {"a", "button"}:
-                    row = target.locator("xpath=ancestor::tr[1]")
-                    if row.count() > 0:
-                        return self._row_to_project_data(row.first)
-                    return {"summary": "", "market": ""}
-
-                row = target.locator("xpath=ancestor::tr[1]")
-                if row.count() > 0:
-                    return self._row_to_project_data(row.first)
-
-                return {"summary": target.inner_text().strip(), "market": ""}
-            except Exception:  # noqa: BLE001
-                continue
-
+        users = response.get("data") or []
+        return [int(user["id"]) for user in users if user.get("id") is not None]
+
+    @staticmethod
+    def _extract_market_label(value: Any) -> str:
+        if isinstance(value, dict):
+            return str(value.get("label") or value.get("name") or value.get("id") or "").strip()
+        return str(value or "").strip()
+
+    def _resolve_project_url(self) -> str:
+        return f"{self.settings.bpmis_base_url.rstrip('/')}/me"
+
+    def _resolve_access_token(self) -> str:
+        token = self.settings.bpmis_api_access_token
+        if token:
+            return token
         raise BPMISNotConfiguredError(
-            "Could not find the BPMIS project row automatically. "
-            "Please provide a direct project URL pattern or the page selectors."
+            "BPMIS API access token is not configured. "
+            "Please set BPMIS_API_ACCESS_TOKEN in .env with a token generated from BPMIS."
         )
-
-    def _row_to_project_data(self, row) -> dict[str, str]:
-        try:
-            cells = row.locator("td")
-            count = cells.count()
-            texts = []
-            for index in range(count):
-                texts.append(cells.nth(index).inner_text().strip())
-
-            summary = texts[3] if len(texts) > 3 else ""
-            market = texts[4] if len(texts) > 4 else ""
-            return {"summary": summary, "market": market}
-        except Exception:  # noqa: BLE001
-            return {"summary": "", "market": ""}
-
-    def _fill_field(self, page, modal, field_name: str, value: str) -> None:
-        if self._is_optional_field(field_name) and not self._field_exists(modal, field_name):
-            return
-
-        if field_name.lower() in {"fix version", "fix version/s"}:
-            self._fill_select_field(page, modal, field_name, value, allow_multiple=True)
-            return
-        if field_name.lower() in {
-            "component",
-            "assignee",
-            "product manager",
-            "dev pic",
-            "qa pic",
-            "reporter",
-            "biz pic",
-            "need uat",
-            "task type",
-            "market",
-            "priority",
-        }:
-            self._fill_select_field(page, modal, field_name, value, allow_multiple=False)
-            return
-
-        container = self._find_field_container(modal, field_name)
-        self._prepare_field_container(container)
-        candidates = [
-            container.locator("textarea"),
-            container.locator("input:not([type='hidden'])"),
-            container.locator("[contenteditable='true']"),
-            modal.get_by_label(field_name, exact=False),
-            modal.get_by_placeholder(field_name, exact=False),
-            modal.locator(f"textarea[name='{field_name}'], input[name='{field_name}'], select[name='{field_name}']"),
-        ]
-
-        last_error: Exception | None = None
-
-        for locator in candidates:
-            try:
-                if locator.count() == 0:
-                    continue
-                target = locator.first
-                tag_name = target.evaluate("(el) => el.tagName.toLowerCase()")
-                if tag_name == "select":
-                    target.select_option(label=value)
-                elif tag_name == "textarea":
-                    target.click(force=True)
-                    target.fill("")
-                    target.type(value, delay=40)
-                elif tag_name == "input":
-                    target.click(force=True)
-                    target.fill("")
-                    target.type(value, delay=40)
-                else:
-                    target.click(force=True)
-                    page.keyboard.press("Meta+A")
-                    target.type(value, delay=40)
-                return
-            except Exception as error:  # noqa: BLE001
-                last_error = error
-
-        raise BPMISError(f"Could not fill BPMIS field '{field_name}'.") from last_error
-
-    def _fill_select_field(self, page, modal, field_name: str, value: str, allow_multiple: bool) -> None:
-        fallbacks = [item.strip() for item in value.split("|") if item.strip()] or [value]
-        last_error: Exception | None = None
-        has_multiple_fallbacks = len(fallbacks) > 1
-
-        for candidate_value in fallbacks:
-            try:
-                control = self._find_select_control(modal, field_name)
-                control.click()
-                self._pause_after_step(1.0)
-                search_input = self._find_select_search_input(control, modal, page)
-                if search_input.count() > 0:
-                    search_input.click(force=True)
-                    search_input.fill("")
-                    search_input.type(candidate_value, delay=80)
-                    self._pause_after_step(1.0)
-                option = page.locator(
-                    ".ant-select-item-option-content, [role='option']"
-                ).filter(has_text=re.compile(re.escape(candidate_value), re.I)).first
-                if option.count() > 0:
-                    option.click(force=True)
-                elif search_input.count() > 0:
-                    if has_multiple_fallbacks:
-                        raise BPMISError(
-                            f"Option '{candidate_value}' was not available for BPMIS field '{field_name}'."
-                        )
-                    search_input.press("Enter")
-                else:
-                    if has_multiple_fallbacks:
-                        raise BPMISError(
-                            f"Option '{candidate_value}' was not available for BPMIS field '{field_name}'."
-                        )
-                    page.keyboard.press("Enter")
-                self._pause_after_step(1.0)
-                if not allow_multiple:
-                    page.keyboard.press("Escape")
-                return
-            except Exception as error:  # noqa: BLE001
-                last_error = error
-                try:
-                    page.keyboard.press("Escape")
-                except Exception:  # noqa: BLE001
-                    pass
-
-        raise BPMISError(f"Could not select BPMIS field '{field_name}'.") from last_error
-
-    def _is_optional_field(self, field_name: str) -> bool:
-        return field_name.strip().lower() in {"biz pic"}
-
-    def _requires_explicit_option_pick(self, field_name: str) -> bool:
-        return field_name.strip().lower() in {
-            "fix version",
-            "fix version/s",
-            "component",
-            "priority",
-            "assignee",
-            "product manager",
-            "dev pic",
-            "qa pic",
-            "reporter",
-            "biz pic",
-            "need uat",
-        }
-
-    def _prepare_field_container(self, container) -> None:
-        try:
-            container.scroll_into_view_if_needed()
-        except Exception:  # noqa: BLE001
-            pass
-        try:
-            container.click(position={"x": 5, "y": 5}, force=False, timeout=1000)
-        except Exception:  # noqa: BLE001
-            pass
-
-    def _field_exists(self, modal, field_name: str) -> bool:
-        try:
-            self._find_field_container(modal, field_name)
-            return True
-        except BPMISError:
-            return False
-
-    def _find_field_container(self, modal, field_name: str):
-        label_patterns = [field_name]
-        if field_name.lower() == "fix version/s":
-            label_patterns.append("Fix Version")
-
-        for label in label_patterns:
-            selectors = [
-                (
-                    "xpath=.//*[contains(@class, 'ant-form-item')][.//*[self::label or self::div or "
-                    f"self::span][contains(normalize-space(.), '{label}')]][1]"
-                ),
-                (
-                    "xpath=.//*[contains(@class, 'ant-row') and contains(@class, 'ant-form-item-row')]"
-                    f"[.//*[self::label or self::div or self::span][contains(normalize-space(.), '{label}')]][1]"
-                ),
-                (
-                    "xpath=.//*[self::label or self::div or self::span][contains(normalize-space(.), "
-                    f"'{label}')]/ancestor::*[contains(@class, 'ant-form-item')][1]"
-                ),
-            ]
-            for selector in selectors:
-                try:
-                    locator = modal.locator(selector)
-                    if locator.count() > 0:
-                        return locator.first
-                except Exception:  # noqa: BLE001
-                    continue
-
-        raise BPMISError(f"Could not locate form container for BPMIS field '{field_name}'.")
-
-    def _find_select_search_input(self, control, modal, page):
-        candidates = [
-            control.locator("input.ant-select-selection-search-input"),
-            control.locator("input[role='combobox']"),
-            control.locator("xpath=.//input[1]"),
-            control.locator("xpath=.//ancestor::*[contains(@class, 'ant-select')][1]//input[contains(@class, 'ant-select-selection-search-input')]"),
-            page.locator(".ant-select-dropdown:visible input.ant-select-selection-search-input"),
-            page.locator(".ant-select-dropdown:visible input[role='combobox']"),
-        ]
-
-        for locator in candidates:
-            try:
-                if locator.count() == 0:
-                    continue
-                return locator.first
-            except Exception:  # noqa: BLE001
-                continue
-
-        return page.locator("__missing__")
-
-    def _find_select_control(self, modal, field_name: str, container=None):
-        if field_name.lower() in {"fix version", "fix version/s"} and self.settings.bpmis_browser_fix_version_selector:
-            locator = modal.locator(self.settings.bpmis_browser_fix_version_selector)
-            if locator.count() > 0:
-                return locator.first
-
-        try:
-            container = container or self._find_field_container(modal, field_name)
-            scoped_candidates = [
-                container.locator(".ant-select-selector").first,
-                container.locator(".ant-select").first,
-                container.locator("input[role='combobox']").first,
-            ]
-            for locator in scoped_candidates:
-                try:
-                    if locator.count() > 0:
-                        return locator
-                except Exception:  # noqa: BLE001
-                    continue
-        except Exception:  # noqa: BLE001
-            pass
-
-        label_patterns = [field_name]
-        if field_name.lower() == "fix version/s":
-            label_patterns.append("Fix Version")
-
-        for label in label_patterns:
-            selectors = [
-                f"xpath=.//*[contains(normalize-space(.), '{label}')]/following::*[contains(@class, 'ant-select')][1]",
-                f"xpath=.//*[contains(normalize-space(.), '{label}')]/following::input[1]",
-                f"xpath=.//*[contains(normalize-space(.), '{label}')]/ancestor::div[1]//*[contains(@class, 'ant-select')][1]",
-            ]
-            for selector in selectors:
-                locator = modal.locator(selector)
-                try:
-                    if locator.count() > 0:
-                        return locator.first
-                except Exception:  # noqa: BLE001
-                    continue
-
-        raise BPMISError(f"Could not locate control for BPMIS field '{field_name}'.")
-
-    def _extract_ticket(self, page) -> tuple[str | None, str | None]:
-        text = page.content()
-        if self.settings.bpmis_browser_ticket_url_regex:
-            url_match = re.search(self.settings.bpmis_browser_ticket_url_regex, text)
-            if url_match:
-                ticket_link = url_match.group(0)
-                key_match = ISSUE_KEY_PATTERN.search(ticket_link)
-                return key_match.group(1) if key_match else None, ticket_link
-
-        key_match = ISSUE_KEY_PATTERN.search(text)
-        ticket_key = key_match.group(1) if key_match else None
-        ticket_link = None
-
-        for anchor in page.locator("a").all():
-            href = anchor.get_attribute("href") or ""
-            if ticket_key and ticket_key in href:
-                ticket_link = href
-                break
-
-        if not ticket_key and not ticket_link:
-            raise BPMISError("Could not extract the created Jira ticket from BPMIS.")
-
-        return ticket_key, ticket_link
-
-
-class FallbackBPMISClient(BPMISClient):
-    def __init__(self, primary: BPMISClient, fallback: BPMISClient):
-        self.primary = primary
-        self.fallback = fallback
-
-    def find_project(self, issue_id: str) -> ProjectMatch:
-        try:
-            return self.primary.find_project(issue_id)
-        except Exception:  # noqa: BLE001
-            return self.fallback.find_project(issue_id)
-
-    def create_jira_ticket(self, project: ProjectMatch, fields: dict[str, str]) -> CreatedTicket:
-        try:
-            return self.primary.create_jira_ticket(project, fields)
-        except Exception:  # noqa: BLE001
-            return self.fallback.create_jira_ticket(project, fields)

@@ -17,29 +17,28 @@ Future rollout mode:
 - Internal shared web app
 - Per-user Google OAuth
 - Per-user saved config
-- Per-user BPMIS session bridge from the user's own machine
+- Per-user BPMIS API access token
 - No formal access control in v1
 - No formal audit log in v1
 
-## Why a Local Helper Is Needed
+## Why Access Token Matters
 
-The current BPMIS flow relies on a logged-in Chrome session that lives on the user's own machine.
-An internal shared server cannot directly reuse each user's browser session.
+The BPMIS source code shows that API access is officially supported through `Authorization: Bearer <token>`.
+That means the most reliable integration is to use a BPMIS access token directly instead of reusing a browser session.
 
 So the team edition needs:
 
 - a central web portal
-- a lightweight per-user local helper
+- a BPMIS API token
 
 The central portal handles spreadsheet access and orchestration.
-The local helper handles BPMIS access with the user's own local browser session.
+The direct BPMIS API client handles Jira creation with the configured token.
 
 The current prototype on this branch now includes:
 
 - user-scoped config persistence on the portal side
-- a configurable local helper URL per user
-- browser-visible helper health status
-- a first helper create endpoint that reuses the local BPMIS API client
+- direct BPMIS API creation from the portal
+- self-check coverage for BPMIS API readiness
 - a production-oriented portal startup script for an internal Mac host
 - a launchd installation script for auto-start on the host Mac
 - a teammate quickstart and deployment guide
@@ -52,9 +51,8 @@ It should validate:
 
 - different users can keep different Spreadsheet / Header / field config
 - the web portal can identify the current user and load that user's config
-- the web portal can detect whether that user's local helper is reachable
-- the local helper exposes a stable API for health checks and Jira creation
-- the helper can use the user's local BPMIS session to create a Jira ticket
+- the web portal can detect whether BPMIS API access is ready
+- the portal can use the configured BPMIS token to create a Jira ticket
 
 ## Planned Components
 
@@ -66,22 +64,8 @@ Responsibilities:
 - spreadsheet read/write
 - preview/run UI
 - per-user config storage
-- helper connection status
-- dispatch Jira create requests to the current user's helper
-
-### 2. Local Helper
-
-Responsibilities:
-
-- run on each user's machine
-- expose a local HTTP API
-- reuse the user's logged-in BPMIS browser/session state
-- call BPMIS APIs and return normalized results
-
-Suggested initial endpoints:
-
-- `GET /health`
-- `POST /bpmis/create-jira`
+- BPMIS API readiness status
+- dispatch Jira create requests directly to BPMIS
 
 ## Current Recommended Run Commands
 

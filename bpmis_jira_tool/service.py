@@ -2,8 +2,7 @@ from __future__ import annotations
 
 from bpmis_jira_tool.bpmis import (
     BPMISClient,
-    BPMISHelperClient,
-    BPMISPageApiClient,
+    BPMISDirectApiClient,
 )
 from bpmis_jira_tool.config import Settings
 from bpmis_jira_tool.errors import BPMISError, FieldResolutionError
@@ -14,7 +13,7 @@ from bpmis_jira_tool.models import RunResult
 
 
 def build_bpmis_client(settings: Settings, access_token: str | None = None) -> BPMISClient:
-    return BPMISPageApiClient(settings)
+    return BPMISDirectApiClient(settings, access_token=access_token)
 
 
 class JiraCreationService:

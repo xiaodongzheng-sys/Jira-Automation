@@ -3,7 +3,7 @@
 Current status:
 
 - The default rollout is still local-first.
-- Each teammate runs the portal and helper on their own Mac.
+- Each teammate runs the portal on their own Mac.
 - The shared internal Portal deployment in this document is a future mode for after the team gets a valid domain/hostname for Google OAuth.
 
 This guide describes the future shared deployment shape for a team of around 10-15 users.
@@ -11,9 +11,8 @@ This guide describes the future shared deployment shape for a team of around 10-
 ## Deployment Model
 
 - One shared team portal runs on an existing internal Mac.
-- Each teammate runs their own local helper on their own Mac.
-- Each teammate keeps their own BPMIS login in their own Chrome.
-- Teammates open the same portal URL, but the Jira creation request is bridged back to their own helper.
+- Each teammate has their own BPMIS API token.
+- The portal calls BPMIS APIs directly with that configured token.
 
 This keeps infrastructure simple and avoids buying a new machine.
 
@@ -101,7 +100,7 @@ Portal logs will be written under `TEAM_PORTAL_DATA_DIR/logs`.
 
 ## What Teammates Need To Run Locally
 
-Each teammate still needs their own helper because BPMIS access depends on their own Chrome login session.
+Each teammate still needs their own BPMIS API token because BPMIS access now depends on that token.
 
 They should follow the quickstart in:
 
@@ -115,10 +114,10 @@ Portal host checks:
 - run `./scripts/run_team_portal_prod.sh status`
 - check `./scripts/run_team_portal_prod.sh logs`
 
-Teammate helper checks:
+Teammate BPMIS checks:
 
-- open `http://127.0.0.1:8787/health`
-- confirm the portal shows `Local Helper = Connected`
+- run `./scripts/run_team_stack.sh status`
+- confirm Self-Check shows `BPMIS API`
 
 ## Common Failures
 
@@ -137,13 +136,13 @@ Check:
 
 - the teammate's Google email is present in `TEAM_ALLOWED_EMAILS`
 
-### Local Helper shows Offline
+### BPMIS API check fails
 
 Check:
 
 - teammate has started `./scripts/run_team_stack.sh start`
-- teammate can open `http://127.0.0.1:8787/health`
-- teammate is still logged into BPMIS in Chrome
+- teammate has configured `BPMIS_API_ACCESS_TOKEN`
+- the token is still valid
 
 ### Preview or Run returns Spreadsheet errors
 

@@ -11,6 +11,12 @@ TEMPLATE_PATTERN = re.compile(r"{{\s*(?P<header>[^}]+?)\s*}}")
 INPUT_COLUMN_PATTERN = re.compile(r'^follow input tab column (?P<column>[a-z]+)$', re.I)
 QUOTED_OPTION_PATTERN = re.compile(r'"([^"]+)"')
 OPTIONAL_FIELDS = {"PRD Link/s", "Biz PIC"}
+COMPONENT_DEFAULT_FIELD_KEYS = {
+    "Fix Version": "fix_version",
+    "Assignee": "assignee",
+    "Dev PIC": "dev_pic",
+    "QA PIC": "qa_pic",
+}
 
 
 def _resolve_template(template: str, row: InputRow) -> str:
@@ -93,6 +99,47 @@ def resolve_fields(
 
             market_value = resolved.get("Market", "").strip()
             value = str(market_map.get(market_value, "")).strip()
+        elif source.startswith("component_routes:"):
+            raw = source.partition(":")[2].strip()
+            try:
+                route_rules = json.loads(raw) if raw else []
+            except json.JSONDecodeError as error:
+                raise FieldResolutionError(
+                    f"Invalid component routing rules for Jira field '{mapping.jira_field}'."
+                ) from error
+
+            market_value = resolved.get("Market", "").strip().lower()
+            system_value = resolved.get("System", "").strip().lower()
+            matched_rule = next(
+                (
+                    rule
+                    for rule in route_rules
+                    if str(rule.get("market", "")).strip().lower() == market_value
+                    and str(rule.get("system", "")).strip().lower() == system_value
+                ),
+                None,
+            )
+            value = str((matched_rule or {}).get("component", "")).strip()
+        elif source.startswith("component_defaults:"):
+            raw = source.partition(":")[2].strip()
+            try:
+                payload = json.loads(raw) if raw else {}
+            except json.JSONDecodeError as error:
+                raise FieldResolutionError(
+                    f"Invalid component default rules for Jira field '{mapping.jira_field}'."
+                ) from error
+
+            component_value = resolved.get("Component", "").strip().lower()
+            field_key = str(payload.get("field") or COMPONENT_DEFAULT_FIELD_KEYS.get(mapping.jira_field, "")).strip()
+            matched_rule = next(
+                (
+                    rule
+                    for rule in payload.get("rules", [])
+                    if str(rule.get("component", "")).strip().lower() == component_value
+                ),
+                None,
+            )
+            value = str((matched_rule or {}).get(field_key, "")).strip()
         elif special_value is not None:
             value = special_value
         elif source.startswith("column:"):

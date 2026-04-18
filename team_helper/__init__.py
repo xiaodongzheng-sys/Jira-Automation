@@ -1,1 +1,0 @@
-"""Team helper prototype package."""

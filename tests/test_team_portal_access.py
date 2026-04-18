@@ -1,7 +1,7 @@
 import os
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from bpmis_jira_tool.web import create_app
 
@@ -28,7 +28,7 @@ class TeamPortalAccessTests(unittest.TestCase):
                 response = client.get("/", follow_redirects=False)
                 self.assertEqual(response.status_code, 200)
                 self.assertIn(b"Connect Google", response.data)
-                self.assertIn(b"Local Helper", response.data)
+                self.assertIn(b"BPMIS API", response.data)
 
     def test_allowed_google_user_can_open_index(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
@@ -51,6 +51,7 @@ class TeamPortalAccessTests(unittest.TestCase):
                 response = client.get("/")
                 self.assertEqual(response.status_code, 200)
                 self.assertIn(b"Allowed User", response.data)
+                self.assertIn(b'href="/snake"', response.data)
 
     def test_allowed_google_domain_can_open_index(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
@@ -82,14 +83,8 @@ class TeamPortalAccessTests(unittest.TestCase):
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
             },
             clear=False,
-        ), patch("bpmis_jira_tool.web.requests.get") as mock_get:
-            mock_response = mock_get.return_value
-            mock_response.ok = True
-            mock_response.json.return_value = {
-                "status": "ok",
-                "message": "All local checks passed.",
-                "checks": {"bpmis_tab": {"ok": True, "detail": "BPMIS looks ready."}},
-            }
+        ), patch("bpmis_jira_tool.web.build_bpmis_client") as mock_build_client:
+            mock_build_client.return_value = MagicMock()
             app = create_app()
             app.testing = True
 
@@ -117,6 +112,64 @@ class TeamPortalAccessTests(unittest.TestCase):
                 self.assertEqual(response.status_code, 400)
                 payload = response.get_json()
                 self.assertIn("connect Google", payload["message"])
+
+    def test_sync_job_requires_google_connection(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+            },
+            clear=False,
+        ):
+            app = create_app()
+            app.testing = True
+
+            with app.test_client() as client:
+                response = client.post("/api/jobs/sync-bpmis-projects")
+                self.assertEqual(response.status_code, 400)
+                payload = response.get_json()
+                self.assertIn("connect Google", payload["message"])
+
+    def test_default_sheet_template_download_returns_csv(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+            },
+            clear=False,
+        ):
+            app = create_app()
+            app.testing = True
+
+            with app.test_client() as client:
+                response = client.get("/download/default-sheet-template.csv")
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.mimetype, "text/csv")
+                self.assertIn(b"BPMIS ID,Project Name,Market,System,Jira Title,PRD Link,Description,BRD Link,Jira Ticket Link", response.data)
+
+    def test_snake_route_is_public_and_renders_game_ui(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+            },
+            clear=False,
+        ):
+            app = create_app()
+            app.testing = True
+
+            with app.test_client() as client:
+                response = client.get("/snake")
+                self.assertEqual(response.status_code, 200)
+                self.assertIn(b"Classic Snake", response.data)
+                self.assertIn(b'data-snake-board', response.data)
+                self.assertIn(b'data-snake-score', response.data)
+                self.assertIn(b'data-snake-controls', response.data)
+                self.assertIn(b'data-snake-start', response.data)
+                self.assertIn(b'data-snake-restart', response.data)
 
 
 if __name__ == "__main__":

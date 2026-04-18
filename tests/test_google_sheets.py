@@ -75,6 +75,56 @@ class GoogleSheetsParsingTests(unittest.TestCase):
 
         self.assertIn('Could not find sheet tab "Renamed Input"', str(context.exception))
 
+    def test_append_records_explicitly_turns_off_bold_for_new_rows(self):
+        captured = {}
+
+        class _Execute:
+            def __init__(self, payload=None):
+                self.payload = payload
+
+            def execute(self):
+                return self.payload or {}
+
+        class _FakeValues:
+            def get(self, **_kwargs):
+                return _Execute({"values": [["Issue ID", "Project Name"], ["ISS-1", "Existing"]]})
+
+            def append(self, **kwargs):
+                captured["append"] = kwargs
+                return _Execute({})
+
+        class _FakeSpreadsheets:
+            def values(self):
+                return _FakeValues()
+
+            def get(self, **_kwargs):
+                return _Execute({"sheets": [{"properties": {"title": "Input", "sheetId": 7}}]})
+
+            def batchUpdate(self, **kwargs):
+                captured["batch_update"] = kwargs
+                return _Execute({})
+
+        class _FakeService:
+            def spreadsheets(self):
+                return _FakeSpreadsheets()
+
+        sheets = GoogleSheetsService.__new__(GoogleSheetsService)
+        sheets.service = _FakeService()
+        sheets.spreadsheet_id = "sheet"
+        sheets.input_tab = "Input"
+
+        sheets.append_records(
+            ["Issue ID", "Project Name"],
+            [{"Issue ID": "ISS-2", "Project Name": "New Project"}],
+        )
+
+        repeat_cell = captured["batch_update"]["body"]["requests"][0]["repeatCell"]
+        self.assertEqual(repeat_cell["range"]["sheetId"], 7)
+        self.assertEqual(repeat_cell["range"]["startRowIndex"], 2)
+        self.assertEqual(repeat_cell["range"]["endRowIndex"], 3)
+        self.assertEqual(repeat_cell["cell"]["userEnteredFormat"]["textFormat"]["bold"], False)
+        self.assertEqual(repeat_cell["fields"], "userEnteredFormat.textFormat.bold")
+
 
 if __name__ == "__main__":
     unittest.main()

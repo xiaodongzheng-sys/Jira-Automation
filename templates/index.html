@@ -8,26 +8,26 @@
         <p class="showcase-kicker">Internal Workflow Suite</p>
         <h1>Jira Creation Automation Tool</h1>
         <p class="showcase-lede">
-          Turn spreadsheet rows into BPMIS-backed Jira tickets through a guided, auditable flow.
-          The homepage is now your executive overview; the detailed setup lives in its own workspace tab.
+          Turn spreadsheet rows into BPMIS-backed Jira tickets through a clean, auditable workflow.
+          Use this page for status and execution. Open Configuration only when your sheet setup changes.
         </p>
         <div class="showcase-badges">
-          <span>Google Sheets connected workflow</span>
-          <span>User-scoped configuration</span>
-          <span>BPMIS-assisted Jira creation</span>
+          <span>Google Sheets</span>
+          <span>BPMIS API</span>
+          <span>User configuration</span>
         </div>
         <div class="showcase-metrics">
           <article class="metric-card">
-            <strong>01</strong>
-            <span>Connect your Google account once, then reuse your saved configuration.</span>
+            <strong>Connect once</strong>
+            <span>Reuse the same Google and mapping setup across runs.</span>
           </article>
           <article class="metric-card">
-            <strong>02</strong>
-            <span>Preview candidate rows before running any real Jira creation.</span>
+            <strong>Preview first</strong>
+            <span>Check the candidate list before creating real Jira tickets.</span>
           </article>
           <article class="metric-card">
-            <strong>03</strong>
-            <span>Write the final Jira browse URL straight back into your chosen sheet column.</span>
+            <strong>Write back</strong>
+            <span>Save the final Jira browse URL into your configured sheet column.</span>
           </article>
         </div>
       </div>
@@ -50,8 +50,8 @@
             <strong>{{ "Connected" if google_connected else "Not connected" }}</strong>
           </li>
           <li>
-            <span>Local Helper</span>
-            <strong data-helper-status data-helper-url="{{ mapping_config.helper_base_url }}">Checking…</strong>
+            <span>BPMIS API</span>
+            <strong>Ready via Self-Check</strong>
           </li>
           <li>
             <span>Spreadsheet</span>
@@ -59,7 +59,7 @@
           </li>
         </ul>
         <div class="executive-note">
-          <p>Use the workspace below to configure, validate, and run. The top panel is designed for demos and high-level status at a glance.</p>
+          <p>Use the workspace below to configure, validate, and run. This panel is your quick status snapshot.</p>
         </div>
       </aside>
     </div>
@@ -71,12 +71,12 @@
         <p class="eyebrow">Workspace</p>
         <h2>Automation Console</h2>
         <p class="step-copy">
-          Move between tabs depending on whether you want to present, configure, run, or troubleshoot the tool.
+          Overview is for a quick read. Run Center is for daily use. Configuration is only for setup changes.
         </p>
       </div>
       <div class="workspace-rail">
-        <span>Designed for first-time teammates</span>
-        <span>Configuration separated from execution</span>
+        <span>Simple for first-time teammates</span>
+        <span>Execution separated from setup</span>
       </div>
     </div>
 
@@ -92,14 +92,14 @@
         <div class="panel-head">
           <div>
             <h2>First-Time Flow</h2>
-            <p class="step-copy">This is the recommended order for a teammate using the tool for the first time.</p>
+            <p class="step-copy">The first run is simple: connect, confirm, then preview before you create.</p>
           </div>
         </div>
         <div class="showcase-steps">
           <article class="showcase-step-card">
             <p class="checklist-step">Step 1</p>
             <h3>Connect Google Sheets</h3>
-            <p>Grant access so the tool can read your spreadsheet rows and write the created Jira link back.</p>
+            <p>Grant access so the tool can read your sheet and write the Jira link back after creation.</p>
             <p class="checklist-outcome">Expected status: <strong>Google Sheets = Connected</strong></p>
             <div class="button-row">
               {% if google_connected %}
@@ -113,21 +113,15 @@
           </article>
           <article class="showcase-step-card">
             <p class="checklist-step">Step 2</p>
-            <h3>Start Your Local Helper</h3>
-            <p>Your helper bridges your local BPMIS session. Run <code>./scripts/run_team_stack.sh start</code> in Terminal.</p>
-            <p class="checklist-outcome">Expected status: <strong>Local Helper = Connected</strong></p>
+            <h3>Configure BPMIS Token</h3>
+            <p>Save your BPMIS API token in Configuration. The portal uses your saved token first and only falls back to <code>.env</code> when it is blank.</p>
+            <p class="checklist-outcome">Expected status: <strong>BPMIS API = pass in Self-Check</strong></p>
           </article>
           <article class="showcase-step-card">
             <p class="checklist-step">Step 3</p>
-            <h3>Save Configuration</h3>
-            <p>Use the Configuration tab to map your sheet headers and define the Jira field values used for creation.</p>
-            <p class="checklist-outcome">You usually only update this when your sheet or mapping changes.</p>
-          </article>
-          <article class="showcase-step-card">
-            <p class="checklist-step">Step 4</p>
-            <h3>Preview, Then Run</h3>
-            <p>The Run Center lets you preview eligible rows first, then create Jira tickets only when the list looks correct.</p>
-            <p class="checklist-outcome">Safe habit: <strong>Preview first, Run second</strong></p>
+            <h3>Sync, Preview, Then Run</h3>
+            <p>Save your setup in Configuration, sync BPMIS projects where PM PIC or All Involved PM matches your email, then preview and create Jira tickets.</p>
+            <p class="checklist-outcome">Safe habit: <strong>Sync first, Preview second, Run last</strong></p>
           </article>
         </div>
       </div>
@@ -180,7 +174,7 @@
             <h2>Self-Check</h2>
             <p class="step-copy">Validate the essentials before creating any Jira tickets.</p>
             <p class="help-text">
-              This check confirms Google connectivity, local helper reachability, and spreadsheet readability using your saved config.
+              This check confirms Google connectivity, BPMIS API readiness, and spreadsheet readability using your saved config.
             </p>
           </div>
           <div class="button-row">
@@ -203,12 +197,16 @@
               Preview shows which rows are eligible and what project summary each row will use. Run creates real Jira tickets and writes the result back to Google Sheets.
             </p>
             <div class="result-tips">
+              <span>Sync adds missing BPMIS projects without touching existing rows.</span>
               <span>Preview never creates Jira.</span>
               <span>Run only touches rows whose Jira link cell is blank.</span>
               <span>Project column shows the resolved summary used for creation.</span>
             </div>
           </div>
           <div class="button-row">
+            <form method="post" action="#" data-job-form data-job-url="{{ url_for('create_sync_bpmis_projects_job') }}" data-job-label="Sync BPMIS Projects">
+              <button class="button button-secondary" type="submit">Sync BPMIS Projects</button>
+            </form>
             <form method="post" action="{{ url_for('preview') }}" data-job-form data-job-url="{{ url_for('create_preview_job') }}" data-job-label="Preview Eligible Rows">
               <button class="button button-secondary" type="submit">Preview Eligible Rows</button>
             </form>
@@ -288,7 +286,10 @@
             <div class="config-card">
               <h3>Source Config</h3>
               <p class="card-help">
-                Tell the tool which spreadsheet to read, which tab contains input rows, which column holds the Issue ID, and which column stores the final Jira URL.
+                Tell the tool which spreadsheet to read and which PM email should be used for sync. Column names are configured in the mock sheet below.
+              </p>
+              <p class="field-help">
+                First time setting up? <a href="{{ url_for('download_default_sheet_template_xlsx') }}">Download the default sheet template</a>.
               </p>
               <div class="field-stack">
                 <div class="field-group">
@@ -306,99 +307,134 @@
                     <span class="field-badge field-badge-required">Required</span>
                   </div>
                   <p class="field-help">The exact worksheet tab name that contains the rows you want to process.</p>
-                  <input id="input_tab_name" name="input_tab_name" value="{{ mapping_config.input_tab_name }}" placeholder="Input">
+                  <input id="input_tab_name" name="input_tab_name" value="{{ mapping_config.input_tab_name }}" placeholder="Projects">
                 </div>
 
                 <div class="field-group">
                   <div class="field-label-row">
-                    <label for="issue_id_header">Issue ID Header</label>
-                    <span class="field-badge field-badge-required">Required</span>
+                    <label for="bpmis_api_access_token">BPMIS API Access Token</label>
+                    <span class="field-badge">Recommended</span>
                   </div>
-                  <p class="field-help">The header of the column that contains the BPMIS Issue ID.</p>
-                  <input id="issue_id_header" name="issue_id_header" list="input-header-options" value="{{ mapping_config.issue_id_header }}" placeholder="Issue ID">
+                  <p class="field-help">Stored for this portal user. If filled, it overrides the local <code>.env</code> token during sync, self-check, preview, and run.</p>
+                  <input id="bpmis_api_access_token" name="bpmis_api_access_token" type="password" value="{{ mapping_config.bpmis_api_access_token }}" placeholder="Paste your BPMIS token">
                 </div>
 
                 <div class="field-group">
                   <div class="field-label-row">
-                    <label for="jira_ticket_link_header">Jira Ticket Link Header</label>
-                    <span class="field-badge field-badge-required">Required</span>
+                    <label for="sync_pm_email">Sync PM Email</label>
+                    <span class="field-badge field-badge-required">Required for Sync</span>
                   </div>
-                  <p class="field-help">The header of the column where the created Jira URL will be written back.</p>
-                  <input id="jira_ticket_link_header" name="jira_ticket_link_header" list="input-header-options" value="{{ mapping_config.jira_ticket_link_header }}" placeholder="Jira Ticket Link">
+                  <p class="field-help">Used by the BPMIS sync button to find Biz Projects where PM PIC or All Involved PM includes this email.</p>
+                  <input id="sync_pm_email" name="sync_pm_email" value="{{ mapping_config.sync_pm_email }}" placeholder="pm@example.com">
                 </div>
+              </div>
+            </div>
 
-                <div class="field-group">
-                  <div class="field-label-row">
-                    <label for="helper_base_url">Local Helper URL</label>
-                    <span class="field-badge field-badge-recommended">Recommended</span>
+            <div class="config-card config-card-wide">
+              <h3>Mock Sheet Layout</h3>
+              <p class="card-help">
+                Fill the column names directly in this mock header row. It should match how your real Google Sheet is laid out.
+              </p>
+              <div class="sheet-mock">
+                <div class="sheet-mock-toolbar">
+                  <span class="sheet-chip sheet-chip-required">Required</span>
+                  <span class="sheet-chip">Sync</span>
+                  <span class="sheet-chip">Create Jira</span>
+                  <span class="sheet-chip">Write Back</span>
+                </div>
+                <div class="sheet-mock-grid">
+                  <div class="sheet-mock-col">
+                    <label for="issue_id_header">BPMIS Issue ID</label>
+                    <input id="issue_id_header" name="issue_id_header" list="input-header-options" value="{{ mapping_config.issue_id_header }}" placeholder="Issue ID">
+                    <p>Example: <code>225159</code></p>
+                    <span>Sync key and create parent reference.</span>
                   </div>
-                  <p class="field-help">Normally keep this as <code>http://127.0.0.1:8787</code>.</p>
-                  <input id="helper_base_url" name="helper_base_url" value="{{ mapping_config.helper_base_url }}" placeholder="http://127.0.0.1:8787">
+                  <div class="sheet-mock-col">
+                    <label for="sync_project_name_header">BPMIS - Summary</label>
+                    <input id="sync_project_name_header" name="sync_project_name_header" list="input-header-options" value="{{ mapping_config.sync_project_name_header }}" placeholder="Project Name">
+                    <p>Example: <code>Standalone Cash Loan</code></p>
+                    <span>Filled by BPMIS sync.</span>
+                  </div>
+                  <div class="sheet-mock-col">
+                    <label for="sync_market_header">Market</label>
+                    <input id="sync_market_header" name="sync_market_header" list="input-header-options" value="{{ mapping_config.sync_market_header }}" placeholder="Market">
+                    <p>Example: <code>SG</code></p>
+                    <span>Used for sync and Need UAT mapping.</span>
+                  </div>
+                  <div class="sheet-mock-col">
+                    <label for="system_header">System</label>
+                    <input id="system_header" name="system_header" list="input-header-options" value="{{ mapping_config.system_header }}" placeholder="System">
+                    <p>Example: <code>AF</code></p>
+                    <span>Used with Market to decide Component.</span>
+                  </div>
+                  <div class="sheet-mock-col">
+                    <label for="summary_header">Jira Title</label>
+                    <input id="summary_header" name="summary_header" list="input-header-options" value="{{ mapping_config.summary_header }}" placeholder="Summary">
+                    <p>Example: <code>Fraud rule improvement</code></p>
+                    <span>Used to build the Jira title.</span>
+                  </div>
+                <div class="sheet-mock-col">
+                  <label for="prd_links_header">PRD Link/s</label>
+                  <input id="prd_links_header" name="prd_links_header" list="input-header-options" value="{{ mapping_config.prd_links_header }}" placeholder="PRD Link/s">
+                  <p>Example: <code>https://confluence/...</code></p>
+                  <span>Optional Jira payload field.</span>
+                </div>
+                <div class="sheet-mock-col">
+                  <label for="description_header">Description</label>
+                  <input id="description_header" name="description_header" list="input-header-options" value="{{ mapping_config.description_header }}" placeholder="Description">
+                  <p>Example: <code>Detailed Jira description goes here.</code></p>
+                  <span>Passed into Jira as the description body.</span>
+                </div>
+                <div class="sheet-mock-col">
+                  <label for="sync_brd_link_header">BRD Link</label>
+                  <input id="sync_brd_link_header" name="sync_brd_link_header" list="input-header-options" value="{{ mapping_config.sync_brd_link_header }}" placeholder="BRD Link">
+                  <p>Example: <code>https://docs.google.com/...</code></p>
+                  <span>Filled by sync when exactly one BRD exists.</span>
+                  </div>
+                  <div class="sheet-mock-col">
+                    <label for="jira_ticket_link_header">Jira Ticket Link</label>
+                    <input id="jira_ticket_link_header" name="jira_ticket_link_header" list="input-header-options" value="{{ mapping_config.jira_ticket_link_header }}" placeholder="Jira Ticket Link">
+                    <p>Example: <code>https://jira.shopee.io/browse/ABC-123</code></p>
+                    <span>Written back after ticket creation.</span>
+                  </div>
                 </div>
               </div>
             </div>
 
             <div class="config-card">
-              <h3>Input Header Rules</h3>
+              <h3>Component Routing</h3>
               <p class="card-help">
-                These fields tell the tool which input headers should populate the key Jira values.
+                Keep this simple: one line per route using <code>System | Market | Component</code>.
               </p>
               <div class="field-stack">
                 <div class="field-group">
-                  <div class="field-label-row">
-                    <label for="market_header">Market Header</label>
-                    <span class="field-badge field-badge-required">Required</span>
-                  </div>
-                  <p class="field-help">The input column that contains values such as ID, SG, PH, or Regional.</p>
-                  <input id="market_header" name="market_header" list="input-header-options" value="{{ mapping_config.market_header }}">
-                </div>
-
-                <div class="field-group">
-                  <div class="field-label-row">
-                    <label for="summary_header">Summary Header</label>
-                    <span class="field-badge field-badge-required">Required</span>
-                  </div>
-                  <p class="field-help">The input column containing the business summary used to build the Jira title.</p>
-                  <input id="summary_header" name="summary_header" list="input-header-options" value="{{ mapping_config.summary_header }}">
-                </div>
-
-                <div class="field-group">
-                  <div class="field-label-row">
-                    <label for="prd_links_header">PRD Link/s Header</label>
-                    <span class="field-badge field-badge-recommended">Optional</span>
-                  </div>
-                  <p class="field-help">Optional. If provided, the matching PRD link will be sent into Jira. If blank, creation still continues.</p>
-                  <input id="prd_links_header" name="prd_links_header" list="input-header-options" value="{{ mapping_config.prd_links_header }}">
+                  <label for="component_route_rules_text">System + Market to Component</label>
+                  <p class="field-help">Example: <code>AF | SG | DBP-Anti-fraud</code></p>
+                  <textarea id="component_route_rules_text" name="component_route_rules_text" rows="8" placeholder="AF | SG | DBP-Anti-fraud&#10;AF | PH | DBP-Anti-fraud&#10;Cards | SG | Cards Platform">{{ mapping_config.component_route_rules_text }}</textarea>
                 </div>
               </div>
             </div>
 
             <div class="config-card">
-              <h3>Market Mapping Rules</h3>
+              <h3>Component Defaults</h3>
               <p class="card-help">
-                These BPMIS option texts vary by market. Enter the exact option label used for each market.
+                One line per component using <code>Component | Assignee | Dev PIC | QA PIC | Fix Version</code>.
+              </p>
+              <div class="field-stack">
+                <div class="field-group">
+                  <label for="component_default_rules_text">Component to Assignee / Dev PIC / QA PIC / Fix Version</label>
+                  <p class="field-help">Example: <code>DBP-Anti-fraud | owner@npt.sg | dev@npt.sg | qa@npt.sg | Planning_26Q2</code></p>
+                  <textarea id="component_default_rules_text" name="component_default_rules_text" rows="8" placeholder="DBP-Anti-fraud | owner@npt.sg | dev@npt.sg | qa@npt.sg | Planning_26Q2&#10;Cards Platform | cards.owner@npt.sg | cards.dev@npt.sg | cards.qa@npt.sg | Planning_26Q2">{{ mapping_config.component_default_rules_text }}</textarea>
+                </div>
+              </div>
+            </div>
+
+            <div class="config-card">
+              <h3>Need UAT by Market</h3>
+              <p class="card-help">
+                Keep UAT simple: this still depends only on Market, not on System or Component.
               </p>
               <div class="field-grid">
-                <div class="field-group">
-                  <label>Component / ID</label>
-                  <p class="field-help">Used when the row's market is ID.</p>
-                  <input name="component_ID" value="{{ mapping_config.component_by_market['ID'] }}" placeholder="Value for ID">
-                </div>
-                <div class="field-group">
-                  <label>Component / SG</label>
-                  <p class="field-help">Used when the row's market is SG.</p>
-                  <input name="component_SG" value="{{ mapping_config.component_by_market['SG'] }}" placeholder="Value for SG">
-                </div>
-                <div class="field-group">
-                  <label>Component / PH</label>
-                  <p class="field-help">Used when the row's market is PH.</p>
-                  <input name="component_PH" value="{{ mapping_config.component_by_market['PH'] }}" placeholder="Value for PH">
-                </div>
-                <div class="field-group">
-                  <label>Component / Regional</label>
-                  <p class="field-help">Used when the row's market is Regional.</p>
-                  <input name="component_Regional" value="{{ mapping_config.component_by_market['Regional'] }}" placeholder="Value for Regional">
-                </div>
                 <div class="field-group">
                   <label>Need UAT / ID</label>
                   <p class="field-help">Used when the row's market is ID.</p>
@@ -425,7 +461,7 @@
             <div class="config-card config-card-wide">
               <h3>Direct Value Rules</h3>
               <p class="card-help">
-                These fixed values apply to every Jira ticket created by this saved configuration.
+                Keep only the fields that are truly global. Assignee, Dev PIC, QA PIC, and Fix Version must now be configured in Component Defaults.
               </p>
               <div class="field-grid field-grid-wide">
                 <div class="field-group">
@@ -434,34 +470,14 @@
                   <input id="task_type_value" name="task_type_value" value="{{ mapping_config.task_type_value }}">
                 </div>
                 <div class="field-group">
-                  <label for="fix_version_value">Fix Version</label>
-                  <p class="field-help">The fix version text BPMIS should resolve to an internal ID.</p>
-                  <input id="fix_version_value" name="fix_version_value" value="{{ mapping_config.fix_version_value }}">
-                </div>
-                <div class="field-group">
                   <label for="priority_value">Priority</label>
                   <p class="field-help">The Jira business priority applied to all created rows.</p>
                   <input id="priority_value" name="priority_value" value="{{ mapping_config.priority_value }}">
                 </div>
                 <div class="field-group">
-                  <label for="assignee_value">Assignee</label>
-                  <p class="field-help">The default assignee email for the created Jira ticket.</p>
-                  <input id="assignee_value" name="assignee_value" value="{{ mapping_config.assignee_value }}">
-                </div>
-                <div class="field-group">
                   <label for="product_manager_value">Product Manager</label>
                   <p class="field-help">The default Product Manager email to send to BPMIS.</p>
                   <input id="product_manager_value" name="product_manager_value" value="{{ mapping_config.product_manager_value }}">
-                </div>
-                <div class="field-group">
-                  <label for="dev_pic_value">Dev PIC</label>
-                  <p class="field-help">The default development owner email.</p>
-                  <input id="dev_pic_value" name="dev_pic_value" value="{{ mapping_config.dev_pic_value }}">
-                </div>
-                <div class="field-group">
-                  <label for="qa_pic_value">QA PIC</label>
-                  <p class="field-help">The default QA owner email.</p>
-                  <input id="qa_pic_value" name="qa_pic_value" value="{{ mapping_config.qa_pic_value }}">
                 </div>
                 <div class="field-group">
                   <label for="reporter_value">Reporter</label>
@@ -502,7 +518,7 @@
             </div>
             <div class="premium-list-item">
               <strong>What it does</strong>
-              <span>Starts the local helper, starts the local portal, and prepares the dedicated BPMIS Chrome session.</span>
+              <span>Starts the local portal that reads Google Sheets and calls BPMIS APIs with your configured token.</span>
             </div>
             <div class="premium-list-item">
               <strong>Daily routine</strong>
@@ -524,7 +540,7 @@
             </div>
             <div class="premium-list-item">
               <strong>BPMIS requests fail</strong>
-              <span>Log in to BPMIS in the Chrome window opened for the tool, then retry Preview or Run.</span>
+              <span>Check that your saved BPMIS token is still valid. If you intentionally leave it blank, confirm the fallback <code>.env</code> token is still valid, then retry.</span>
             </div>
           </div>
         </section>

@@ -51,26 +51,34 @@ class Settings:
     common_tab_name: str
     input_tab_name: str
     bpmis_base_url: str
-    bpmis_api_search_url_template: str | None
-    bpmis_api_create_url_template: str | None
-    bpmis_api_search_method: str
-    bpmis_api_create_method: str
-    bpmis_api_search_response_path: str | None
-    bpmis_api_created_ticket_path: str | None
-    bpmis_browser_base_url: str
-    bpmis_browser_project_url_template: str | None
-    bpmis_browser_search_input_selector: str | None
-    bpmis_browser_search_submit_selector: str | None
-    bpmis_browser_project_link_selector: str | None
-    bpmis_browser_create_button_selector: str | None
-    bpmis_browser_task_item_selector: str | None
-    bpmis_browser_fix_version_selector: str | None
-    bpmis_browser_submit_selector: str | None
-    bpmis_browser_executable_path: str | None
-    bpmis_browser_cdp_url: str | None
-    bpmis_browser_token_storage_key: str
-    bpmis_browser_headless: bool
-    bpmis_browser_ticket_url_regex: str | None
+    bpmis_api_access_token: str | None
+    confluence_email: str | None = None
+    confluence_api_token: str | None = None
+    confluence_bearer_token: str | None = None
+    confluence_base_url: str | None = None
+    openai_api_key: str | None = None
+    openai_api_base_url: str = "https://api.openai.com/v1"
+    prd_briefing_text_model: str = "gpt-4.1-mini"
+    gemini_api_key: str | None = None
+    gemini_api_base_url: str = "https://generativelanguage.googleapis.com/v1beta"
+    prd_briefing_gemini_text_model: str = "gemini-2.5-flash"
+    prd_briefing_text_provider_priority: str = "gemini_first"
+    prd_briefing_embedding_model: str = "text-embedding-3-large"
+    prd_briefing_transcription_model: str = "gpt-4o-mini-transcribe"
+    prd_briefing_tts_model: str = "gpt-4o-mini-tts"
+    prd_briefing_openai_default_voice: str = "alloy"
+    prd_briefing_openai_english_voice: str = "coral"
+    prd_briefing_openai_mandarin_voice: str = "sage"
+    prd_briefing_openai_voice_speed: float = 0.96
+    prd_briefing_openai_custom_voice_enabled: bool = False
+    prd_briefing_answer_audio_enabled: bool = False
+    elevenlabs_api_key: str | None = None
+    elevenlabs_tts_model_id: str = "eleven_flash_v2_5"
+    elevenlabs_english_model_id: str = "eleven_flash_v2_5"
+    elevenlabs_mandarin_model_id: str = "eleven_multilingual_v2"
+    elevenlabs_default_voice_id: str = "JBFqnCBsd6RMkjVDRZzb"
+    elevenlabs_english_voice_id: str = "21m00Tcm4TlvDq8ikWAM"
+    elevenlabs_mandarin_voice_id: str = "JBFqnCBsd6RMkjVDRZzb"
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -93,26 +101,34 @@ class Settings:
             team_portal_data_dir=Path(_env_str("TEAM_PORTAL_DATA_DIR", ".")),
             spreadsheet_id=_env_str("SPREADSHEET_ID", DEFAULT_SPREADSHEET_ID),
             common_tab_name=_env_str("COMMON_TAB_NAME", "Common"),
-            input_tab_name=_env_str("INPUT_TAB_NAME", "Input"),
+            input_tab_name=_env_str("INPUT_TAB_NAME", "Projects"),
             bpmis_base_url=_env_str("BPMIS_BASE_URL", "https://bpmis-uat1.uat.npt.seabank.io"),
-            bpmis_api_search_url_template=_env_str("BPMIS_API_SEARCH_URL_TEMPLATE"),
-            bpmis_api_create_url_template=_env_str("BPMIS_API_CREATE_URL_TEMPLATE"),
-            bpmis_api_search_method=_env_str("BPMIS_API_SEARCH_METHOD", "GET"),
-            bpmis_api_create_method=_env_str("BPMIS_API_CREATE_METHOD", "POST"),
-            bpmis_api_search_response_path=_env_str("BPMIS_API_SEARCH_RESPONSE_PATH"),
-            bpmis_api_created_ticket_path=_env_str("BPMIS_API_CREATED_TICKET_PATH"),
-            bpmis_browser_base_url=_env_str("BPMIS_BROWSER_BASE_URL", "https://bpmis-uat1.uat.npt.seabank.io/me"),
-            bpmis_browser_project_url_template=_env_str("BPMIS_BROWSER_PROJECT_URL_TEMPLATE"),
-            bpmis_browser_search_input_selector=_env_str("BPMIS_BROWSER_SEARCH_INPUT_SELECTOR"),
-            bpmis_browser_search_submit_selector=_env_str("BPMIS_BROWSER_SEARCH_SUBMIT_SELECTOR"),
-            bpmis_browser_project_link_selector=_env_str("BPMIS_BROWSER_PROJECT_LINK_SELECTOR"),
-            bpmis_browser_create_button_selector=_env_str("BPMIS_BROWSER_CREATE_BUTTON_SELECTOR"),
-            bpmis_browser_task_item_selector=_env_str("BPMIS_BROWSER_TASK_ITEM_SELECTOR"),
-            bpmis_browser_fix_version_selector=_env_str("BPMIS_BROWSER_FIX_VERSION_SELECTOR"),
-            bpmis_browser_submit_selector=_env_str("BPMIS_BROWSER_SUBMIT_SELECTOR"),
-            bpmis_browser_executable_path=_env_str("BPMIS_BROWSER_EXECUTABLE_PATH"),
-            bpmis_browser_cdp_url=_env_str("BPMIS_BROWSER_CDP_URL", "http://127.0.0.1:9222"),
-            bpmis_browser_token_storage_key=_env_str("BPMIS_BROWSER_TOKEN_STORAGE_KEY", "access_token"),
-            bpmis_browser_headless=_env_bool("BPMIS_BROWSER_HEADLESS", False),
-            bpmis_browser_ticket_url_regex=_env_str("BPMIS_BROWSER_TICKET_URL_REGEX"),
+            bpmis_api_access_token=_env_str("BPMIS_API_ACCESS_TOKEN"),
+            confluence_email=_env_str("CONFLUENCE_EMAIL"),
+            confluence_api_token=_env_str("CONFLUENCE_API_TOKEN"),
+            confluence_bearer_token=_env_str("CONFLUENCE_BEARER_TOKEN"),
+            confluence_base_url=_env_str("CONFLUENCE_BASE_URL"),
+            openai_api_key=_env_str("OPENAI_API_KEY"),
+            openai_api_base_url=_env_str("OPENAI_API_BASE_URL", "https://api.openai.com/v1"),
+            prd_briefing_text_model=_env_str("PRD_BRIEFING_TEXT_MODEL", "gpt-4.1-mini"),
+            gemini_api_key=_env_str("GEMINI_API_KEY"),
+            gemini_api_base_url=_env_str("GEMINI_API_BASE_URL", "https://generativelanguage.googleapis.com/v1beta"),
+            prd_briefing_gemini_text_model=_env_str("PRD_BRIEFING_GEMINI_TEXT_MODEL", "gemini-2.5-flash"),
+            prd_briefing_text_provider_priority=_env_str("PRD_BRIEFING_TEXT_PROVIDER_PRIORITY", "gemini_first"),
+            prd_briefing_embedding_model=_env_str("PRD_BRIEFING_EMBEDDING_MODEL", "text-embedding-3-large"),
+            prd_briefing_transcription_model=_env_str("PRD_BRIEFING_TRANSCRIPTION_MODEL", "gpt-4o-mini-transcribe"),
+            prd_briefing_tts_model=_env_str("PRD_BRIEFING_TTS_MODEL", "gpt-4o-mini-tts"),
+            prd_briefing_openai_default_voice=_env_str("PRD_BRIEFING_OPENAI_DEFAULT_VOICE", "alloy"),
+            prd_briefing_openai_english_voice=_env_str("PRD_BRIEFING_OPENAI_ENGLISH_VOICE", "coral"),
+            prd_briefing_openai_mandarin_voice=_env_str("PRD_BRIEFING_OPENAI_MANDARIN_VOICE", "sage"),
+            prd_briefing_openai_voice_speed=float(_env_str("PRD_BRIEFING_OPENAI_VOICE_SPEED", "0.96")),
+            prd_briefing_openai_custom_voice_enabled=_env_bool("PRD_BRIEFING_OPENAI_CUSTOM_VOICE_ENABLED", False),
+            prd_briefing_answer_audio_enabled=_env_bool("PRD_BRIEFING_ANSWER_AUDIO_ENABLED", False),
+            elevenlabs_api_key=_env_str("ELEVENLABS_API_KEY"),
+            elevenlabs_tts_model_id=_env_str("ELEVENLABS_TTS_MODEL_ID", "eleven_flash_v2_5"),
+            elevenlabs_english_model_id=_env_str("ELEVENLABS_ENGLISH_MODEL_ID", _env_str("ELEVENLABS_TTS_MODEL_ID", "eleven_flash_v2_5")),
+            elevenlabs_mandarin_model_id=_env_str("ELEVENLABS_MANDARIN_MODEL_ID", "eleven_multilingual_v2"),
+            elevenlabs_default_voice_id=_env_str("ELEVENLABS_DEFAULT_VOICE_ID", "JBFqnCBsd6RMkjVDRZzb"),
+            elevenlabs_english_voice_id=_env_str("ELEVENLABS_ENGLISH_VOICE_ID", "21m00Tcm4TlvDq8ikWAM"),
+            elevenlabs_mandarin_voice_id=_env_str("ELEVENLABS_MANDARIN_VOICE_ID", "JBFqnCBsd6RMkjVDRZzb"),
         )

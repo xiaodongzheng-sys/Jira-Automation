@@ -81,6 +81,47 @@ class GoogleSheetsService:
             body=body,
         ).execute()
 
+    def append_records(self, headers: list[str], records: list[dict[str, str]]) -> None:
+        if not records:
+            return
+        existing_values = self._get_values(self.input_tab)
+        values = [[record.get(header, "") for header in headers] for record in records]
+        self.service.spreadsheets().values().append(
+            spreadsheetId=self.spreadsheet_id,
+            range=self.input_tab,
+            valueInputOption="USER_ENTERED",
+            insertDataOption="INSERT_ROWS",
+            body={"values": values},
+        ).execute()
+        start_row_index = len(existing_values)
+        end_row_index = start_row_index + len(records)
+        self.service.spreadsheets().batchUpdate(
+            spreadsheetId=self.spreadsheet_id,
+            body={
+                "requests": [
+                    {
+                        "repeatCell": {
+                            "range": {
+                                "sheetId": self._get_sheet_id(self.input_tab),
+                                "startRowIndex": start_row_index,
+                                "endRowIndex": end_row_index,
+                                "startColumnIndex": 0,
+                                "endColumnIndex": len(headers),
+                            },
+                            "cell": {
+                                "userEnteredFormat": {
+                                    "textFormat": {
+                                        "bold": False,
+                                    }
+                                }
+                            },
+                            "fields": "userEnteredFormat.textFormat.bold",
+                        }
+                    }
+                ]
+            },
+        ).execute()
+
     def _get_values(self, range_name: str) -> list[list[str]]:
         try:
             response = (
@@ -109,6 +150,15 @@ class GoogleSheetsService:
                     f'Could not find sheet tab "{range_name}". Please update "Input Tab Name" in the web config.'
                 ) from error
             raise ToolError(f"Google Sheets request failed: {message or error}") from error
+
+    def _get_sheet_id(self, range_name: str) -> int:
+        response = self.service.spreadsheets().get(spreadsheetId=self.spreadsheet_id).execute()
+        sheets = response.get("sheets", [])
+        for sheet in sheets:
+            properties = sheet.get("properties", {})
+            if str(properties.get("title", "")).strip() == range_name:
+                return int(properties["sheetId"])
+        raise ToolError(f'Could not find sheet tab "{range_name}". Please update "Input Tab Name" in the web config.')
 
     @staticmethod
     def _find_header_index(headers: list[str], *candidates: str) -> int:

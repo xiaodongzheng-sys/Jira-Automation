@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+import io
 from pathlib import Path
 import re
 import secrets
@@ -9,10 +10,11 @@ import time
 from typing import Any
 import uuid
 
-import requests
-from flask import Flask, current_app, flash, jsonify, redirect, render_template, request, session, url_for
+from flask import Flask, current_app, flash, jsonify, redirect, render_template, request, send_file, session, url_for
 from dotenv import load_dotenv
 from google.oauth2.credentials import Credentials
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill
 
 from bpmis_jira_tool.config import Settings
 from bpmis_jira_tool.errors import ConfigError, ToolError
@@ -22,9 +24,9 @@ from bpmis_jira_tool.google_auth import (
     get_google_credentials,
 )
 from bpmis_jira_tool.google_sheets import GoogleSheetsService
-from bpmis_jira_tool.service import JiraCreationService
-from bpmis_jira_tool.bpmis import BPMISHelperClient
-from bpmis_jira_tool.user_config import CONFIGURED_FIELDS, WebConfigStore
+from bpmis_jira_tool.project_sync import BPMISProjectSyncService
+from bpmis_jira_tool.service import JiraCreationService, build_bpmis_client
+from bpmis_jira_tool.user_config import CONFIGURED_FIELDS, DEFAULT_SHEET_HEADERS, WebConfigStore
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -140,7 +142,16 @@ def create_app() -> Flask:
 
     @app.before_request
     def enforce_team_access():
-        if request.endpoint in {None, "static", "index", "google_login", "google_callback", "google_logout"}:
+        if request.endpoint in {
+            None,
+            "static",
+            "index",
+            "google_login",
+            "google_callback",
+            "google_logout",
+            "download_default_sheet_template",
+            "download_default_sheet_template_xlsx",
+        }:
             return None
         if _current_google_user_is_blocked(settings):
             session.pop("google_credentials", None)
@@ -222,26 +233,34 @@ def create_app() -> Flask:
     def save_mapping_config():
         try:
             user_identity = _get_user_identity()
+            existing_config = config_store.load(user_identity["config_key"]) or config_store._normalize({})
             config = {
                 "spreadsheet_link": request.form.get("spreadsheet_link", ""),
                 "input_tab_name": request.form.get("input_tab_name", ""),
+                "bpmis_api_access_token": request.form.get("bpmis_api_access_token", ""),
                 "issue_id_header": request.form.get("issue_id_header", ""),
                 "jira_ticket_link_header": request.form.get("jira_ticket_link_header", ""),
-                "helper_base_url": request.form.get("helper_base_url", ""),
+                "sync_pm_email": request.form.get("sync_pm_email", ""),
+                "sync_project_name_header": request.form.get("sync_project_name_header", ""),
+                "sync_market_header": request.form.get("sync_market_header", ""),
+                "sync_brd_link_header": request.form.get("sync_brd_link_header", ""),
+                "component_route_rules_text": request.form.get("component_route_rules_text", ""),
+                "component_default_rules_text": request.form.get("component_default_rules_text", ""),
                 "market_header": request.form.get("market_header", ""),
+                "system_header": request.form.get("system_header", ""),
                 "summary_header": request.form.get("summary_header", ""),
                 "prd_links_header": request.form.get("prd_links_header", ""),
+                "description_header": request.form.get("description_header", ""),
                 "task_type_value": request.form.get("task_type_value", ""),
-                "fix_version_value": request.form.get("fix_version_value", ""),
                 "priority_value": request.form.get("priority_value", ""),
-                "assignee_value": request.form.get("assignee_value", ""),
                 "product_manager_value": request.form.get("product_manager_value", ""),
-                "dev_pic_value": request.form.get("dev_pic_value", ""),
-                "qa_pic_value": request.form.get("qa_pic_value", ""),
                 "reporter_value": request.form.get("reporter_value", ""),
                 "biz_pic_value": request.form.get("biz_pic_value", ""),
                 "component_by_market": {
-                    market: request.form.get(f"component_{market}", "")
+                    market: request.form.get(
+                        f"component_{market}",
+                        str((existing_config.get("component_by_market") or {}).get(market, "")),
+                    )
                     for market in MARKET_KEYS
                 },
                 "need_uat_by_market": {
@@ -249,11 +268,87 @@ def create_app() -> Flask:
                     for market in MARKET_KEYS
                 },
             }
+            config_store.build_field_mappings(config)
             config_store.save(config, user_identity["config_key"])
             flash("Your web Jira config was saved for this user and will be used for preview/run.", "success")
         except ToolError as error:
             flash(str(error), "error")
         return redirect(url_for("index"))
+
+    @app.get("/download/default-sheet-template.csv")
+    def download_default_sheet_template():
+        sample_row = [
+            "225159",
+            "Standalone Cash Loan",
+            "SG",
+            "AF",
+            "Fraud rule improvement",
+            "https://docs.google.com/document/d/example",
+            "Detailed Jira description goes here.",
+            "https://confluence/example-brd",
+            "",
+        ]
+        csv_lines = [
+            ",".join(_csv_escape(header) for header in DEFAULT_SHEET_HEADERS),
+            ",".join(_csv_escape(value) for value in sample_row),
+        ]
+        payload = io.BytesIO("\n".join(csv_lines).encode("utf-8"))
+        return send_file(
+            payload,
+            mimetype="text/csv",
+            as_attachment=True,
+            download_name="bpmis_jira_default_sheet_template.csv",
+        )
+
+    @app.get("/download/default-sheet-template.xlsx")
+    def download_default_sheet_template_xlsx():
+        workbook = Workbook()
+        worksheet = workbook.active
+        worksheet.title = "Projects"
+
+        sample_row = [
+            "225159",
+            "Standalone Cash Loan",
+            "SG",
+            "AF",
+            "Fraud rule improvement",
+            "https://docs.google.com/document/d/example",
+            "Detailed Jira description goes here.",
+            "https://confluence/example-brd",
+            "",
+        ]
+        worksheet.append(DEFAULT_SHEET_HEADERS)
+        worksheet.append(sample_row)
+
+        header_fill = PatternFill(fill_type="solid", fgColor="DCEBFF")
+        header_font = Font(bold=True, color="1F2937")
+        for cell in worksheet[1]:
+            cell.fill = header_fill
+            cell.font = header_font
+
+        worksheet.freeze_panes = "A2"
+        for column_letter, width in {
+            "A": 16,
+            "B": 28,
+            "C": 12,
+            "D": 14,
+            "E": 28,
+            "F": 34,
+            "G": 42,
+            "H": 30,
+            "I": 28,
+        }.items():
+            worksheet.column_dimensions[column_letter].width = width
+
+        payload = io.BytesIO()
+        workbook.save(payload)
+        payload.seek(0)
+        return send_file(
+            payload,
+            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            as_attachment=True,
+            download_name="bpmis_jira_default_sheet_template.xlsx",
+        )
 
     @app.post("/preview")
     def preview():
@@ -299,6 +394,10 @@ def create_app() -> Flask:
     def create_run_job():
         return _start_job("run", dry_run=False)
 
+    @app.post("/api/jobs/sync-bpmis-projects")
+    def create_sync_bpmis_projects_job():
+        return _start_job("sync-bpmis-projects", dry_run=False)
+
     @app.get("/api/jobs/<job_id>")
     def get_job(job_id: str):
         snapshot = current_app.config["JOB_STORE"].snapshot(job_id)
@@ -313,13 +412,17 @@ def create_app() -> Flask:
         user_identity = _get_user_identity()
         config_data = config_store.load(user_identity["config_key"]) or config_store._normalize({})
         job_store: JobStore = current_app.config["JOB_STORE"]
-        title = "Preview Eligible Rows" if dry_run else "Run Ticket Creation"
+        title = {
+            "preview": "Preview Eligible Rows",
+            "run": "Run Ticket Creation",
+            "sync-bpmis-projects": "Sync BPMIS Projects",
+        }.get(action, "Background Job")
         job = job_store.create(action, title=title)
         credentials_payload = dict(session.get("google_credentials") or {})
 
         thread = threading.Thread(
             target=_run_background_job,
-            args=(app, job.job_id, settings, config_data, credentials_payload, dry_run),
+            args=(app, job.job_id, action, settings, config_data, credentials_payload, dry_run),
             daemon=True,
         )
         thread.start()
@@ -334,13 +437,12 @@ def _build_service(settings: Settings) -> JiraCreationService:
     config_data = config_store.load(user_identity["config_key"]) or config_store._normalize({})
     sheets = _build_sheets_service(settings, config_data)
     field_mappings_override = config_store.build_field_mappings(config_data)
-    helper_base_url = str(config_data.get("helper_base_url", "")).strip()
-    bpmis_client = BPMISHelperClient(helper_base_url) if helper_base_url else None
+    access_token = _resolve_bpmis_access_token(config_data, settings)
     return JiraCreationService(
         settings,
         sheets,
+        access_token=access_token,
         field_mappings_override=field_mappings_override,
-        bpmis_client=bpmis_client,
     )
 
 
@@ -352,14 +454,24 @@ def _build_service_from_config(
     credentials = Credentials(**credentials_payload)
     sheets = _build_sheets_service_with_credentials(settings, config_data, credentials)
     field_mappings_override = _get_config_store().build_field_mappings(config_data)
-    helper_base_url = str(config_data.get("helper_base_url", "")).strip()
-    bpmis_client = BPMISHelperClient(helper_base_url) if helper_base_url else None
+    access_token = _resolve_bpmis_access_token(config_data, settings)
     return JiraCreationService(
         settings,
         sheets,
+        access_token=access_token,
         field_mappings_override=field_mappings_override,
-        bpmis_client=bpmis_client,
     )
+
+
+def _build_project_sync_service_from_config(
+    settings: Settings,
+    config_data: dict[str, Any],
+    credentials_payload: dict[str, Any],
+) -> BPMISProjectSyncService:
+    credentials = Credentials(**credentials_payload)
+    sheets = _build_sheets_service_with_credentials(settings, config_data, credentials)
+    bpmis_client = build_bpmis_client(settings, access_token=_resolve_bpmis_access_token(config_data, settings))
+    return BPMISProjectSyncService(sheets, bpmis_client)
 
 
 def _build_sheets_service(settings: Settings, config_data: dict[str, object] | None = None) -> GoogleSheetsService:
@@ -450,6 +562,28 @@ def _build_run_notice(results: list[object], dry_run: bool) -> dict[str, object]
     }
 
 
+def _build_sync_notice(results: list[object]) -> dict[str, object]:
+    created = [result for result in results if getattr(result, "status", "") == "created"]
+    errors = [result for result in results if getattr(result, "status", "") == "error"]
+    skipped = [result for result in results if getattr(result, "status", "") == "skipped"]
+
+    details: list[str] = []
+    for result in created[:3]:
+        details.append(f"Added BPMIS Issue ID {result.issue_id} to row {result.row_number}.")
+    for result in errors[:3]:
+        details.append(f"{result.issue_id or 'Unknown Issue'}: {result.message}")
+    if not details:
+        for result in skipped[:3]:
+            details.append(f"{result.issue_id}: {result.message}")
+
+    return {
+        "title": "BPMIS Sync Completed" if not errors else "BPMIS Sync Completed With Issues",
+        "tone": "success" if not errors else "warning",
+        "summary": f"{len(created)} added, {len(skipped)} skipped, {len(errors)} error.",
+        "details": details,
+    }
+
+
 def _serialize_results(results: list[object]) -> list[dict[str, Any]]:
     return [result.__dict__ for result in results]
 
@@ -457,6 +591,7 @@ def _serialize_results(results: list[object]) -> list[dict[str, Any]]:
 def _run_background_job(
     app: Flask,
     job_id: str,
+    action: str,
     settings: Settings,
     config_data: dict[str, Any],
     credentials_payload: dict[str, Any],
@@ -484,17 +619,41 @@ def _run_background_job(
             )
 
         try:
-            service = _build_service_from_config(settings, config_data, credentials_payload)
-            if dry_run:
-                results, _headers = service.preview(progress_callback=progress_callback)
+            if action == "sync-bpmis-projects":
+                service = _build_project_sync_service_from_config(settings, config_data, credentials_payload)
+                results = service.sync_projects(
+                    pm_email=str(config_data.get("sync_pm_email", "")).strip(),
+                    issue_id_header=str(config_data.get("issue_id_header", "")).strip() or "Issue ID",
+                    project_name_header=str(config_data.get("sync_project_name_header", "")).strip() or "Project Name",
+                    market_header=str(config_data.get("sync_market_header", "")).strip() or "Market",
+                    brd_link_header=str(config_data.get("sync_brd_link_header", "")).strip(),
+                    progress_callback=progress_callback,
+                )
+                notice = _build_sync_notice(results)
             else:
-                results = service.run(dry_run=False, progress_callback=progress_callback)
-            notice = _build_run_notice(results, dry_run=dry_run)
+                service = _build_service_from_config(settings, config_data, credentials_payload)
+                if dry_run:
+                    results, _headers = service.preview(progress_callback=progress_callback)
+                else:
+                    results = service.run(dry_run=False, progress_callback=progress_callback)
+                notice = _build_run_notice(results, dry_run=dry_run)
             job_store.complete(job_id, results=_serialize_results(results), notice=notice)
         except ToolError as error:
             job_store.fail(job_id, str(error))
         except Exception as error:  # noqa: BLE001
             job_store.fail(job_id, f"Unexpected error: {error}")
+
+
+def _csv_escape(value: str) -> str:
+    text = str(value)
+    if any(character in text for character in [",", "\"", "\n"]):
+        return "\"" + text.replace("\"", "\"\"") + "\""
+    return text
+
+
+def _resolve_bpmis_access_token(config_data: dict[str, Any], settings: Settings) -> str | None:
+    configured_token = str(config_data.get("bpmis_api_access_token", "") or "").strip()
+    return configured_token or settings.bpmis_api_access_token
 
 
 def _run_self_check(settings: Settings, config_data: dict[str, Any]) -> dict[str, Any]:
@@ -508,28 +667,22 @@ def _run_self_check(settings: Settings, config_data: dict[str, Any]) -> dict[str
         }
     )
 
-    helper_base_url = str(config_data.get("helper_base_url", "")).strip() or "http://127.0.0.1:8787"
     try:
-        response = requests.get(f"{helper_base_url.rstrip('/')}/diagnostics", timeout=8)
-        payload = response.json()
-        helper_ok = response.ok
+        build_bpmis_client(settings, access_token=_resolve_bpmis_access_token(config_data, settings)).ping()
+        token_detail = "saved BPMIS token from this portal user" if str(config_data.get("bpmis_api_access_token", "")).strip() else "fallback BPMIS_API_ACCESS_TOKEN from .env"
         checks.append(
             {
-                "name": "Local Helper",
-                "status": "pass" if helper_ok else "fail",
-                "detail": (
-                    "Helper is online. BPMIS tabs will be checked again when you preview or run."
-                    if helper_ok
-                    else payload.get("message") or "Helper is not responding."
-                ),
+                "name": "BPMIS API",
+                "status": "pass",
+                "detail": f"BPMIS API is reachable and the Jira field metadata loaded successfully using the {token_detail}.",
             }
         )
-    except Exception:  # noqa: BLE001
+    except Exception as error:  # noqa: BLE001
         checks.append(
             {
-                "name": "Local Helper",
+                "name": "BPMIS API",
                 "status": "fail",
-                "detail": f"Could not reach helper at {helper_base_url}. Start the helper first.",
+                "detail": str(error),
             }
         )
 

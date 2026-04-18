@@ -20,7 +20,7 @@ This document describes the current single-user local edition that should remain
 - Single machine
 - Local config file: `jira_web_config.json`
 - Google session stored in Flask session cookies
-- BPMIS access depends on the logged-in Chrome session on the same machine
+- BPMIS access depends on a configured BPMIS API token in `.env`
 
 ## Local Setup
 
@@ -45,5 +45,5 @@ If the launch script is unstable on the machine, the fallback is:
 
 - Not intended for multiple users
 - Config is not user-isolated
-- BPMIS integration assumes the local user has an already logged-in Chrome session
+- BPMIS integration assumes the local user has configured a valid `BPMIS_API_ACCESS_TOKEN`
 - The app is appropriate as a personal automation tool, not yet as a shared internal service
