@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-from .models import AnswerPayload, ChunkRecord, Citation, VoiceProfile
+from .models import AnswerPayload, ChunkRecord, Citation
 
 
 def utc_now() -> str:
@@ -23,10 +23,8 @@ class BriefingStore:
         self.db_path = self.root_dir / "prd_briefing.db"
         self.asset_root = self.root_dir / "assets"
         self.audio_root = self.root_dir / "audio"
-        self.upload_root = self.root_dir / "uploads"
         self.asset_root.mkdir(parents=True, exist_ok=True)
         self.audio_root.mkdir(parents=True, exist_ok=True)
-        self.upload_root.mkdir(parents=True, exist_ok=True)
         self._init_schema()
 
     @contextmanager
@@ -99,18 +97,6 @@ class BriefingStore:
                     citations_json text not null default '[]',
                     audio_url text,
                     created_at text not null
-                );
-
-                create table if not exists voice_profiles (
-                    voice_profile_id text primary key,
-                    owner_key text not null,
-                    provider text not null,
-                    consent_status text not null,
-                    sample_language text not null,
-                    provider_voice_id text,
-                    sample_path text,
-                    created_at text not null,
-                    updated_at text not null
                 );
 
                 create table if not exists briefing_audio_cache (
@@ -265,7 +251,7 @@ class BriefingStore:
             rows = conn.execute(
                 """
                 select * from briefing_chunks
-                where owner_key = ? and (session_id = ? or source_type = 'team_kb')
+                where owner_key = ? and session_id = ?
                 order by id asc
                 """,
                 (owner_key, session_id),
@@ -283,18 +269,6 @@ class BriefingStore:
                 (owner_key, session_id),
             ).fetchall()
         return [self._row_to_chunk(row) for row in rows]
-
-    def list_team_kb_sources(self, owner_key: str) -> list[dict[str, Any]]:
-        with self.connect() as conn:
-            rows = conn.execute(
-                """
-                select * from briefing_sources
-                where owner_key = ? and source_type = 'team_kb'
-                order by updated_at desc
-                """,
-                (owner_key,),
-            ).fetchall()
-        return [self._row_to_source(row) for row in rows]
 
     def add_message(self, session_id: str, role: str, body: str, answer: AnswerPayload | None = None) -> None:
         created_at = utc_now()
@@ -325,45 +299,6 @@ class BriefingStore:
                 (session_id, limit),
             ).fetchall()
         return [dict(row) for row in reversed(rows)]
-
-    def save_voice_profile(
-        self,
-        *,
-        owner_key: str,
-        provider: str,
-        consent_status: str,
-        sample_language: str,
-        provider_voice_id: str | None,
-        sample_path: str | None,
-    ) -> VoiceProfile:
-        profile_id = uuid.uuid4().hex
-        now = utc_now()
-        with self.connect() as conn:
-            conn.execute(
-                """
-                insert into voice_profiles (
-                    voice_profile_id, owner_key, provider, consent_status, sample_language,
-                    provider_voice_id, sample_path, created_at, updated_at
-                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (profile_id, owner_key, provider, consent_status, sample_language, provider_voice_id, sample_path, now, now),
-            )
-        return VoiceProfile(profile_id, owner_key, provider, consent_status, sample_language, provider_voice_id, sample_path, now, now)
-
-    def get_latest_voice_profile(self, owner_key: str) -> VoiceProfile | None:
-        with self.connect() as conn:
-            row = conn.execute(
-                """
-                select * from voice_profiles
-                where owner_key = ?
-                order by updated_at desc
-                limit 1
-                """,
-                (owner_key,),
-            ).fetchone()
-        if not row:
-            return None
-        return VoiceProfile(**dict(row))
 
     def save_audio_blob(self, session_id: str, suffix: str, audio_bytes: bytes) -> str:
         session_dir = self.audio_root / session_id
@@ -463,13 +398,6 @@ class BriefingStore:
                 (owner_key, audience, model_id, prompt_version, section_hash, script, utc_now()),
             )
 
-    def save_upload(self, owner_key: str, filename: str, content: bytes) -> Path:
-        owner_dir = self.upload_root / owner_key.replace(":", "_")
-        owner_dir.mkdir(parents=True, exist_ok=True)
-        path = owner_dir / filename
-        path.write_bytes(content)
-        return path
-
     def save_asset(self, session_id: str, filename: str, content: bytes) -> str:
         asset_dir = self.asset_root / session_id
         asset_dir.mkdir(parents=True, exist_ok=True)
@@ -492,12 +420,6 @@ class BriefingStore:
             updated_at=str(row["updated_at"]),
             embedding=json.loads(row["embedding_json"]) if row["embedding_json"] else None,
         )
-
-    def _row_to_source(self, row: sqlite3.Row) -> dict[str, Any]:
-        payload = dict(row)
-        payload["metadata"] = json.loads(payload.pop("metadata_json", "{}"))
-        return payload
-
 
 def citation_from_chunk(chunk: ChunkRecord) -> Citation:
     return Citation(

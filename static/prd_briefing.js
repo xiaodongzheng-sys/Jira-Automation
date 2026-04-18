@@ -1,6 +1,5 @@
 (() => {
   const sessionForm = document.querySelector('[data-briefing-session-form]');
-  const kbForm = document.querySelector('[data-kb-upload-form]');
   const chatForm = document.querySelector('[data-chat-form]');
   const statusNode = document.querySelector('[data-briefing-status]');
   const walkthroughStatusNode = document.querySelector('[data-walkthrough-status]');
@@ -8,22 +7,20 @@
   const sectionListNode = document.querySelector('[data-section-list]');
   const sectionDetailNode = document.querySelector('[data-section-detail]');
   const chatLogNode = document.querySelector('[data-chat-log]');
-  const kbListNode = document.querySelector('[data-kb-list]');
   const narrateButton = document.querySelector('[data-play-section]');
   const readerModeToggle = document.querySelector('[data-reader-mode-toggle]');
-  const recordQuestionButton = document.querySelector('[data-record-question]');
   const quickQuestionButtons = document.querySelectorAll('[data-quick-question]');
   const imageLightbox = document.querySelector('[data-image-lightbox]');
   const imageLightboxMedia = document.querySelector('[data-image-lightbox-media]');
   const imageLightboxClose = document.querySelector('[data-image-lightbox-close]');
   const imageLightboxOpen = document.querySelector('[data-image-lightbox-open]');
+  const sessionSubmitButton = sessionForm?.querySelector('button[type="submit"]');
+  const chatSubmitButton = chatForm?.querySelector('button[type="submit"]');
 
   let state = {
     sessionId: null,
     sections: [],
     currentSectionIndex: 0,
-    mediaRecorder: null,
-    chunks: [],
     messages: [],
     isNarrating: false,
     currentAudio: null,
@@ -31,6 +28,8 @@
   };
 
   const READER_MODE_STORAGE_KEY = 'prd_briefing_reader_mode';
+
+  const isValidHttpUrl = (value) => /^https?:\/\/\S+/i.test(String(value || '').trim());
 
   const escapeHtml = (value) => String(value ?? '')
     .replaceAll('&', '&amp;')
@@ -57,20 +56,6 @@
     walkthroughStatusNode.hidden = true;
     walkthroughStatusNode.innerHTML = '<p>这里会显示当前讲解生成状态。</p>';
     delete walkthroughStatusNode.dataset.tone;
-  };
-
-  const renderKbSources = (sources) => {
-    if (!kbListNode) return;
-    if (!Array.isArray(sources) || !sources.length) {
-      kbListNode.innerHTML = '<p class="help-text">还没有上传知识库文件。</p>';
-      return;
-    }
-    kbListNode.innerHTML = sources.map((source) => `
-      <article class="briefing-chip-card">
-        <strong>${escapeHtml(source.title)}</strong>
-        <span>${escapeHtml(source.source_type)} · updated ${escapeHtml(source.updated_at)}</span>
-      </article>
-    `).join('');
   };
 
   const renderSessionOverview = (overview) => {
@@ -323,7 +308,7 @@
     if (!state.sections.length) {
       clearWalkthroughStatus();
       sectionListNode.innerHTML = '<div class="empty-state"><p>生成完成后，这里会出现 PRD section 导航。</p></div>';
-      sectionDetailNode.innerHTML = '<div class="empty-state"><p>请选择一个 section 查看英文原文和中文开发讲解。</p></div>';
+      sectionDetailNode.innerHTML = '<div class="empty-state"><p>请选择一个 section 查看原文内容和中文开发讲解。</p></div>';
       narrateButton.disabled = true;
       narrateButton.textContent = '开始中文讲解这一节';
       return;
@@ -350,6 +335,7 @@
     sectionDetailNode.innerHTML = `
       <div class="briefing-section-heading">
         <h3>${escapeHtml(section.section_path)}</h3>
+        <span class="briefing-section-meta">第 ${state.currentSectionIndex + 1} / ${state.sections.length} 节</span>
       </div>
       <div class="briefing-original-content">${contentMarkup || `<p>${escapeHtml(section.content || '')}</p>`}</div>
       ${images ? `<div class="briefing-image-grid">${images}</div>` : ''}
@@ -433,7 +419,6 @@
     setStatus(`已生成《${payload.session.title}》的中文开发讲解。`, 'success');
     renderSessionOverview(payload.session_overview || null);
     renderSections();
-    renderKbSources(payload.kb_sources || []);
     renderMessages(payload.messages || []);
   };
 
@@ -441,13 +426,22 @@
     sessionForm.addEventListener('submit', async (event) => {
       event.preventDefault();
       const formData = new FormData(sessionForm);
+      const pageRef = String(formData.get('page_ref') || '').trim();
+      if (!isValidHttpUrl(pageRef)) {
+        setStatus('请输入有效的 Confluence 页面链接。', 'error');
+        return;
+      }
+      if (sessionSubmitButton) {
+        sessionSubmitButton.disabled = true;
+        sessionSubmitButton.textContent = '正在生成…';
+      }
       setStatus('正在读取 Confluence PRD，并生成中文开发讲解…');
       try {
         const response = await fetch('/prd-briefing/api/session', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            page_ref: formData.get('page_ref'),
+            page_ref: pageRef,
             mode: formData.get('mode'),
           }),
         });
@@ -456,28 +450,11 @@
         applySessionPayload(payload);
       } catch (error) {
         setStatus(error.message || '当前无法生成 PRD 讲解。', 'error');
-      }
-    });
-  }
-
-  if (kbForm) {
-    kbForm.addEventListener('submit', async (event) => {
-      event.preventDefault();
-      const formData = new FormData(kbForm);
-      try {
-        const response = await fetch('/prd-briefing/api/kb/upload', { method: 'POST', body: formData });
-        const payload = await response.json();
-        if (!response.ok) throw new Error(payload.message || '知识库文件上传失败。');
-        const sessionId = state.sessionId;
-        if (sessionId) {
-          const sessionResponse = await fetch(`/prd-briefing/api/session/${sessionId}`);
-          const sessionPayload = await sessionResponse.json();
-          applySessionPayload(sessionPayload);
-        } else {
-          kbListNode.insertAdjacentHTML('afterbegin', `<article class="briefing-chip-card"><strong>${escapeHtml(payload.title)}</strong><span>${escapeHtml(payload.chunk_count)} chunks</span></article>`);
+      } finally {
+        if (sessionSubmitButton) {
+          sessionSubmitButton.disabled = false;
+          sessionSubmitButton.textContent = '生成中文开发讲解';
         }
-      } catch (error) {
-        setStatus(error.message || '知识库文件上传失败。', 'error');
       }
     });
   }
@@ -492,6 +469,10 @@
       const formData = new FormData(chatForm);
       const question = String(formData.get('question') || '').trim();
       if (!question) return;
+      if (chatSubmitButton) {
+        chatSubmitButton.disabled = true;
+        chatSubmitButton.textContent = '正在回答…';
+      }
       try {
         const response = await fetch(`/prd-briefing/api/session/${state.sessionId}/answer`, {
           method: 'POST',
@@ -512,6 +493,11 @@
         chatForm.reset();
       } catch (error) {
         setStatus(error.message || '当前无法回答这个问题。', 'error');
+      } finally {
+        if (chatSubmitButton) {
+          chatSubmitButton.disabled = false;
+          chatSubmitButton.textContent = '提交开发问题';
+        }
       }
     });
   }
@@ -541,55 +527,6 @@
       renderReaderMode();
       if (state.readerMode) {
         document.querySelector('.briefing-primary-panel')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      }
-    });
-  }
-
-  const startRecording = async () => {
-    if (!navigator.mediaDevices?.getUserMedia) {
-      setStatus('当前浏览器不支持麦克风录音。', 'error');
-      return;
-    }
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    const chunks = [];
-    const recorder = new MediaRecorder(stream);
-    recorder.ondataavailable = (event) => {
-      if (event.data.size > 0) chunks.push(event.data);
-    };
-    recorder.onstop = async () => {
-      const blob = new Blob(chunks, { type: 'audio/webm' });
-      const formData = new FormData();
-      formData.append('audio', blob, 'question.webm');
-      try {
-        const response = await fetch('/prd-briefing/api/transcribe', { method: 'POST', body: formData });
-        const payload = await response.json();
-        if (!response.ok) throw new Error(payload.message || '录音转文字失败。');
-        const textarea = chatForm?.querySelector('textarea[name="question"]');
-        if (textarea) textarea.value = payload.text || '';
-        setStatus('录音已转成文字，请检查后再提交问题。', 'success');
-      } catch (error) {
-        setStatus(error.message || '录音转文字失败。', 'error');
-      }
-      stream.getTracks().forEach((track) => track.stop());
-      if (recordQuestionButton) recordQuestionButton.textContent = '开始录音';
-      state.mediaRecorder = null;
-      state.chunks = [];
-    };
-    recorder.start();
-    state.mediaRecorder = recorder;
-    recordQuestionButton.textContent = '停止录音';
-  };
-
-  if (recordQuestionButton) {
-    recordQuestionButton.addEventListener('click', async () => {
-      if (state.mediaRecorder && state.mediaRecorder.state === 'recording') {
-        state.mediaRecorder.stop();
-        return;
-      }
-      try {
-        await startRecording();
-      } catch (error) {
-        setStatus(error.message || '当前无法开始录音。', 'error');
       }
     });
   }

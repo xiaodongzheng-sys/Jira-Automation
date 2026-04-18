@@ -28,8 +28,6 @@ class FakeBriefingService:
                 "open_questions": ["question"],
             },
             "sections": [{"section_path": "Overview", "content": "Body", "html_content": "<p>Body</p>", "image_refs": []}],
-            "kb_sources": [],
-            "voice_profile": None,
             "messages": [],
         }
 
@@ -44,15 +42,6 @@ class FakeBriefingService:
             "citations": [],
             "audio_url": None,
         }
-
-    def upload_kb_document(self, **kwargs):
-        return {"title": "kb.txt", "chunk_count": 1}
-
-    def enroll_voice(self, **kwargs):
-        return {"provider": "stored_samples", "consent_status": "granted", "sample_language": "en"}
-
-    def transcribe_audio(self, **kwargs):
-        return {"text": "transcribed"}
 
     def narrate_section(self, **kwargs):
         return {"script": "Section script", "audio_url": None}

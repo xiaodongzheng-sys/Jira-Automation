@@ -2,7 +2,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from bpmis_jira_tool.config import Settings
 from bpmis_jira_tool.google_auth import (
@@ -10,6 +10,7 @@ from bpmis_jira_tool.google_auth import (
     _normalize_authorization_response,
     _resolve_google_redirect_uri,
     create_google_authorization_url,
+    fetch_google_profile,
 )
 
 
@@ -95,6 +96,24 @@ class GoogleAuthTests(unittest.TestCase):
             normalized,
             "https://jira-tool.example.com/auth/google/callback?state=abc&code=xyz",
         )
+
+    def test_fetch_google_profile_closes_response(self):
+        response = Mock()
+        response.json.return_value = {
+            "sub": "1",
+            "email": "user@npt.sg",
+            "name": "User",
+            "picture": "https://example.com/p.png",
+        }
+        response.raise_for_status.return_value = None
+        response.close = Mock()
+        credentials = Mock(token="token")
+
+        with patch("bpmis_jira_tool.google_auth.requests.get", return_value=response):
+            payload = fetch_google_profile(credentials)
+
+        self.assertEqual(payload["email"], "user@npt.sg")
+        response.close.assert_called_once()
 
 
 if __name__ == "__main__":

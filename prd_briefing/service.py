@@ -95,33 +95,15 @@ class VoiceService:
         self.elevenlabs_mandarin_model_id = elevenlabs_mandarin_model_id
         self.elevenlabs_mandarin_voice_id = (elevenlabs_mandarin_voice_id or "").strip()
 
-    def enroll(self, *, owner_key: str, sample_language: str, consent_status: str, sample_path: Path) -> dict[str, Any]:
-        provider = "stored_samples"
-        provider_voice_id = None
-        profile = self.store.save_voice_profile(
-            owner_key=owner_key,
-            provider=provider,
-            consent_status=consent_status,
-            sample_language=sample_language,
-            provider_voice_id=provider_voice_id,
-            sample_path=str(sample_path),
-        )
-        return asdict(profile)
-
     def synthesize(self, *, session_id: str, text: str, language_code: str, owner_key: str) -> str | None:
         normalized_text = optimize_tts_text(text, language_code=language_code)
-        profile = self.store.get_latest_voice_profile(owner_key)
         voice_id = None
         audio_bytes: bytes | None = None
         suffix = "mp3"
         provider = ""
         model_id = ""
 
-        elevenlabs_voice_id = (
-            profile.provider_voice_id
-            if profile and profile.provider == "elevenlabs" and profile.provider_voice_id
-            else self.elevenlabs_mandarin_voice_id
-        )
+        elevenlabs_voice_id = self.elevenlabs_mandarin_voice_id
 
         if self.elevenlabs_api_key and elevenlabs_voice_id:
             provider = "elevenlabs"
@@ -144,11 +126,7 @@ class VoiceService:
             )
             suffix = "mp3"
         elif self.openai_tts_fallback_enabled and self.openai_client.is_configured():
-            voice_id = (
-                profile.provider_voice_id
-                if profile and profile.provider == "openai" and self.openai_custom_voice_enabled
-                else self.openai_mandarin_voice
-            )
+            voice_id = self.openai_mandarin_voice
             provider = "openai"
             model_id = str(self.openai_client.tts_model)
             cached = self.store.get_cached_audio(
@@ -185,9 +163,6 @@ class VoiceService:
                 asset_path=asset_path,
             )
         return asset_path
-
-    def transcribe(self, audio_path: Path) -> str:
-        return self.openai_client.transcribe_audio(audio_path)
 
     def _build_openai_voice_instructions(self) -> str:
         return (
@@ -300,8 +275,6 @@ class PRDBriefingService:
         if not session:
             raise ValueError("Briefing session was not found.")
         prd_chunks = self.store.list_session_prd_chunks(session_id, owner_key)
-        voice_profile = self.store.get_latest_voice_profile(owner_key)
-        kb_sources = self.store.list_team_kb_sources(owner_key)
         sections = self._build_sections(prd_chunks)
         session_overview = self._build_session_overview(
             owner_key=owner_key,
@@ -312,40 +285,8 @@ class PRDBriefingService:
             "session": session,
             "session_overview": session_overview,
             "sections": sections,
-            "kb_sources": kb_sources,
-            "voice_profile": asdict(voice_profile) if voice_profile else None,
             "messages": self.store.list_recent_messages(session_id, limit=20),
         }
-
-    def upload_kb_document(self, *, owner_key: str, filename: str, content: bytes) -> dict[str, Any]:
-        upload_path = self.store.save_upload(owner_key, safe_filename(filename), content)
-        text = extract_text(upload_path)
-        if not text.strip():
-            raise ValueError("The uploaded knowledge-base file did not contain readable text.")
-        source_id = self.store.upsert_source(
-            owner_key=owner_key,
-            session_id=None,
-            source_type="team_kb",
-            external_id=upload_path.name,
-            title=upload_path.name,
-            language="en",
-            source_url=f"file://{upload_path}",
-            updated_at=upload_path.stat().st_mtime_ns.__str__(),
-            metadata={"filename": upload_path.name},
-        )
-        sections = build_sections_from_text(text)
-        chunks = self._sections_to_chunks(
-            owner_key=owner_key,
-            session_id=None,
-            source_id=source_id,
-            source_type="team_kb",
-            title=upload_path.name,
-            source_url=f"file://{upload_path}",
-            updated_at=upload_path.stat().st_mtime_ns.__str__(),
-            sections=sections,
-        )
-        self.store.replace_chunks(chunks)
-        return {"title": upload_path.name, "chunk_count": len(chunks)}
 
     def answer_question(self, *, session_id: str, owner_key: str, question: str) -> dict[str, Any]:
         session = self.store.get_session(session_id, owner_key)
@@ -412,20 +353,6 @@ class PRDBriefingService:
             "script": script,
             "audio_url": f"/prd-briefing/assets/{audio_path}" if audio_path else None,
         }
-
-    def enroll_voice(self, *, owner_key: str, sample_language: str, audio_filename: str, audio_content: bytes) -> dict[str, Any]:
-        sample_path = self.store.save_upload(owner_key, safe_filename(audio_filename), audio_content)
-        return self.voice_service.enroll(
-            owner_key=owner_key,
-            sample_language=sample_language,
-            consent_status="granted",
-            sample_path=sample_path,
-        )
-
-    def transcribe_audio(self, *, owner_key: str, audio_filename: str, audio_content: bytes) -> dict[str, Any]:
-        sample_path = self.store.save_upload(owner_key, safe_filename(audio_filename), audio_content)
-        text = self.voice_service.transcribe(sample_path)
-        return {"text": text}
 
     def _sections_to_chunks(
         self,

@@ -93,59 +93,6 @@ def create_prd_briefing_blueprint() -> Blueprint:
         except Exception as error:  # noqa: BLE001
             return jsonify({"status": "error", "message": str(error)}), 400
 
-    @blueprint.post("/api/kb/upload")
-    def upload_kb():
-        try:
-            owner_key = current_app.config["GET_USER_IDENTITY"]()["config_key"]
-            uploaded = request.files.get("file")
-            if uploaded is None or not uploaded.filename:
-                return jsonify({"status": "error", "message": "Choose a knowledge-base file first."}), 400
-            service = _build_service()
-            data = service.upload_kb_document(
-                owner_key=owner_key,
-                filename=uploaded.filename,
-                content=uploaded.read(),
-            )
-            return jsonify({"status": "ok", **data})
-        except Exception as error:  # noqa: BLE001
-            return jsonify({"status": "error", "message": str(error)}), 400
-
-    @blueprint.post("/api/voice/enroll")
-    def enroll_voice():
-        try:
-            owner_key = current_app.config["GET_USER_IDENTITY"]()["config_key"]
-            uploaded = request.files.get("sample")
-            sample_language = request.form.get("sample_language", "en")
-            if uploaded is None or not uploaded.filename:
-                return jsonify({"status": "error", "message": "Record or upload a voice sample first."}), 400
-            service = _build_service()
-            data = service.enroll_voice(
-                owner_key=owner_key,
-                sample_language=sample_language,
-                audio_filename=uploaded.filename,
-                audio_content=uploaded.read(),
-            )
-            return jsonify({"status": "ok", "voice_profile": data})
-        except Exception as error:  # noqa: BLE001
-            return jsonify({"status": "error", "message": str(error)}), 400
-
-    @blueprint.post("/api/transcribe")
-    def transcribe():
-        try:
-            owner_key = current_app.config["GET_USER_IDENTITY"]()["config_key"]
-            uploaded = request.files.get("audio")
-            if uploaded is None or not uploaded.filename:
-                return jsonify({"status": "error", "message": "Record audio first."}), 400
-            service = _build_service()
-            data = service.transcribe_audio(
-                owner_key=owner_key,
-                audio_filename=uploaded.filename,
-                audio_content=uploaded.read(),
-            )
-            return jsonify({"status": "ok", **data})
-        except Exception as error:  # noqa: BLE001
-            return jsonify({"status": "error", "message": str(error)}), 400
-
     @blueprint.get("/assets/<path:relative_path>")
     def serve_asset(relative_path: str):
         root_dir: Path = current_app.config["PRD_BRIEFING_STORE"].root_dir

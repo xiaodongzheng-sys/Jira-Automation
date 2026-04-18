@@ -118,6 +118,7 @@ def credentials_to_dict(credentials: Credentials) -> dict[str, Any]:
 
 
 def fetch_google_profile(credentials: Credentials) -> dict[str, Any]:
+    response = None
     try:
         response = requests.get(
             "https://www.googleapis.com/oauth2/v3/userinfo",
@@ -128,6 +129,9 @@ def fetch_google_profile(credentials: Credentials) -> dict[str, Any]:
         payload = response.json()
     except requests.RequestException as error:
         raise AuthenticationError("Google sign-in succeeded, but user profile lookup failed. Please try again.") from error
+    finally:
+        if response is not None:
+            response.close()
     return {
         "sub": payload.get("sub"),
         "email": payload.get("email"),

@@ -35,17 +35,8 @@ class FakeOpenAIClient:
 
 
 class FakeVoiceService:
-    def __init__(self):
-        self.transcribed = "what changed"
-
     def synthesize(self, **kwargs):
         return None
-
-    def transcribe(self, audio_path: Path):
-        return self.transcribed
-
-    def enroll(self, **kwargs):
-        return {"provider": "stored_samples", "consent_status": "granted", "sample_language": "en"}
 
 
 @dataclass
@@ -112,16 +103,11 @@ class PRDBriefingServiceTests(unittest.TestCase):
         self.assertTrue(payload["sections"][0]["briefing_notes"])
         self.assertTrue(payload["sections"][0]["briefing_summary"])
 
-    def test_answer_question_uses_prd_and_kb_context(self):
+    def test_answer_question_uses_prd_context(self):
         payload = self.service.create_session(
             owner_key="anon:test",
             page_ref="https://example.atlassian.net/wiki/pages/123",
             mode="walkthrough",
-        )
-        self.service.upload_kb_document(
-            owner_key="anon:test",
-            filename="kb.txt",
-            content=b"Approval workflow requires reviewer assignment and audit notes.",
         )
 
         answer = self.service.answer_question(
