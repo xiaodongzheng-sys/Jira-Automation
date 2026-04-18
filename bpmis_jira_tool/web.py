@@ -283,9 +283,9 @@ def create_app() -> Flask:
             "SG",
             "AF",
             "Fraud rule improvement",
-            "https://docs.google.com/document/d/example",
+            "https://confluence/example-prd",
             "Detailed Jira description goes here.",
-            "https://confluence/example-brd",
+            "https://docs.google.com/document/d/example",
             "",
         ]
         csv_lines = [
@@ -312,9 +312,9 @@ def create_app() -> Flask:
             "SG",
             "AF",
             "Fraud rule improvement",
-            "https://docs.google.com/document/d/example",
+            "https://confluence/example-prd",
             "Detailed Jira description goes here.",
-            "https://confluence/example-brd",
+            "https://docs.google.com/document/d/example",
             "",
         ]
         worksheet.append(DEFAULT_SHEET_HEADERS)
