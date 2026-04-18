@@ -2030,6 +2030,24 @@ select {
   line-height: 1.72;
 }
 
+.briefing-metrics {
+  margin-top: 28px;
+}
+
+.briefing-sidecard .executive-list li {
+  grid-template-columns: minmax(96px, 132px) minmax(0, 1fr);
+}
+
+.briefing-sidecard .executive-list span {
+  color: #667085;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.briefing-sidecard .executive-list strong {
+  line-height: 1.5;
+}
+
 .briefing-sidecard {
   min-width: 0;
   border-left: 1px solid #edf1f7;
