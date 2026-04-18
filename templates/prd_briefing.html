@@ -1,0 +1,130 @@
+{% extends "base.html" %}
+
+{% block body %}
+  <section class="briefing-shell">
+    <div class="briefing-hero">
+      <div class="briefing-copy">
+        <p class="showcase-kicker">English PRD to Chinese Dev Briefing</p>
+        <h1>中文开发需求讲解助手</h1>
+        <p class="showcase-lede">
+          面向中国开发团队，把新加坡 PM 写的英文 Confluence PRD 转成更容易理解的中文开发讲解，帮助团队更快对齐流程、规则、状态流转和边界情况。
+        </p>
+        <div class="showcase-badges">
+          <span>中文开发讲解</span>
+          <span>英文原文对照</span>
+          <span>开发追问 Q&amp;A</span>
+        </div>
+      </div>
+
+      <aside class="executive-card briefing-sidecard">
+        <div class="executive-card-head">
+          <div>
+            <p class="executive-eyebrow">面向开发</p>
+            <h2>你会得到什么</h2>
+          </div>
+          <span class="executive-pill">第一版</span>
+        </div>
+        <ul class="executive-list">
+          <li><span>1</span><strong>把英文 PRD 先讲成更自然的中文开发说明</strong></li>
+          <li><span>2</span><strong>保留英文原文，方便开发随时回看确认</strong></li>
+          <li><span>3</span><strong>支持继续追问流程、规则、校验和异常 case</strong></li>
+          <li><span>4</span><strong>更适合 PM 和中国开发团队快速对齐需求</strong></li>
+        </ul>
+      </aside>
+    </div>
+
+    <div class="briefing-grid briefing-grid-single">
+      <section class="panel glass-panel briefing-panel briefing-start-panel">
+        <div class="panel-head">
+          <div>
+            <h2>生成中文开发讲解</h2>
+            <p class="help-text">输入一个英文 Confluence PRD 链接，系统会自动生成面向开发团队的中文讲解，并保留原始英文内容供对照。</p>
+          </div>
+        </div>
+        <form class="stack" data-briefing-session-form>
+          <div>
+            <label for="page_ref">Confluence Page URL</label>
+            <input id="page_ref" name="page_ref" value="https://confluence.shopee.io/display/SPDB/8.1+Part+1+of+PRD" placeholder="https://your-domain.atlassian.net/wiki/spaces/..." required>
+          </div>
+          <input type="hidden" name="audience" value="developer_zh">
+          <input type="hidden" name="mode" value="walkthrough">
+          <div class="button-row">
+            <button class="button" type="submit">生成中文开发讲解</button>
+          </div>
+        </form>
+        <div class="empty-state briefing-status" data-briefing-status>
+          <p>还没有生成讲解。输入 PRD 链接后开始。</p>
+        </div>
+      </section>
+    </div>
+
+    <section class="panel panel-wide glass-panel briefing-panel briefing-primary-panel">
+        <div class="briefing-overview" data-session-overview>
+          <div class="empty-state"><p>生成完成后，这里会出现“3 分钟看懂这个需求”。</p></div>
+        </div>
+        <div class="panel-head">
+          <div>
+            <h2>中文开发讲解</h2>
+            <p class="help-text">每一节都同时保留英文 PRD 原文和中文开发讲解。重点帮助开发快速理解需求目的、主流程、规则、状态变化和异常情况。</p>
+          </div>
+          <div class="button-row">
+            <button class="button button-secondary" type="button" data-reader-mode-toggle aria-pressed="false">进入阅读模式</button>
+            <button class="button button-secondary" type="button" data-play-section disabled>开始中文讲解这一节</button>
+          </div>
+        </div>
+        <div class="briefing-voice-controls">
+          <div>
+            <label>语音讲解</label>
+            <div class="briefing-provider-note">讲解文案由 OpenAI 生成，语音优先使用 ElevenLabs。若服务端语音不可用，页面会直接提示错误，不再退回机械浏览器音。</div>
+          </div>
+        </div>
+        <p class="microcopy briefing-action-copy">先从上方选择 section，再点击 <strong>开始中文讲解这一节</strong>。切换 section 时当前讲解会立刻停止，方便你按开发视角逐段理解 PRD。</p>
+        <div class="empty-state briefing-inline-status" data-walkthrough-status hidden>
+          <p>这里会显示当前讲解生成状态。</p>
+        </div>
+        <div class="briefing-columns">
+          <aside class="briefing-outline" data-section-list>
+            <div class="empty-state"><p>生成完成后，这里会出现 PRD section 导航。</p></div>
+          </aside>
+          <article class="briefing-section-card" data-section-detail>
+            <div class="empty-state"><p>请选择一个 section 查看英文原文和中文开发讲解。</p></div>
+          </article>
+        </div>
+    </section>
+
+    <section class="panel panel-wide glass-panel briefing-panel briefing-secondary-panel">
+        <div class="panel-head">
+          <div>
+            <h2>开发追问</h2>
+            <p class="help-text">适合继续追问流程、字段、校验、状态流转、异常 case、前后端职责和还没写清楚的点。回答会尽量基于当前 PRD 原文。</p>
+          </div>
+        </div>
+        <div class="briefing-quick-questions">
+          <button class="button button-secondary" type="button" data-quick-question="这一节主流程是什么？">主流程是什么？</button>
+          <button class="button button-secondary" type="button" data-quick-question="这一节前端和后端分别要做什么？">前后端分别做什么？</button>
+          <button class="button button-secondary" type="button" data-quick-question="这里有哪些校验规则或状态变化？">校验和状态变化？</button>
+          <button class="button button-secondary" type="button" data-quick-question="这里有哪些异常 case 或待确认点？">异常 case / 待确认点？</button>
+        </div>
+        <div class="chat-log" data-chat-log>
+          <div class="empty-state"><p>先生成中文开发讲解，再继续追问你的第一个问题。</p></div>
+        </div>
+        <form class="stack" data-chat-form>
+          <textarea name="question" rows="4" placeholder="例如：这里有哪些校验规则？和旧逻辑差异是什么？这个字段为什么需要？异常情况怎么处理？" required></textarea>
+          <div class="button-row">
+            <button class="button" type="submit">提交开发问题</button>
+          </div>
+        </form>
+    </section>
+
+  </section>
+
+  <dialog class="briefing-image-lightbox" data-image-lightbox>
+    <button class="briefing-image-lightbox-close" type="button" data-image-lightbox-close aria-label="关闭图片预览">×</button>
+    <a class="button button-secondary briefing-image-lightbox-open" data-image-lightbox-open href="#" target="_blank" rel="noreferrer">打开原图</a>
+    <img class="briefing-image-lightbox-media" data-image-lightbox-media alt="放大的 PRD 图片预览">
+  </dialog>
+{% endblock %}
+
+{% block extra_scripts %}
+  <script src="{{ url_for('static', filename='prd_briefing.js') }}"></script>
+{% endblock %}

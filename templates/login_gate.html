@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+
+{% block body %}
+  <section class="workspace-shell">
+    <section class="panel panel-wide glass-panel login-gate-panel">
+      <div class="panel-head">
+        <div>
+          <p class="eyebrow">Welcome</p>
+          <h1>Sign in to open the BPMIS workspace</h1>
+          <p class="step-copy">
+            This shared portal is available only to approved NPT Google accounts.
+            Sign in first to access the BPMIS Automation Tool and any private workspace tabs you are allowed to use.
+          </p>
+        </div>
+      </div>
+
+      <div class="premium-list">
+        <div class="premium-list-item">
+          <strong>BPMIS Automation Tool</strong>
+          <span>Sync BPMIS projects, prepare your working sheet, preview rows, and run Jira creation.</span>
+        </div>
+        <div class="premium-list-item">
+          <strong>PRD Briefing Tool</strong>
+          <span>Visible only to the owner account after sign-in.</span>
+        </div>
+        <div class="premium-list-item">
+          <strong>Account requirement</strong>
+          <span>Use your approved <code>@npt.sg</code> Google account to continue.</span>
+        </div>
+      </div>
+
+      <div class="button-row">
+        <a class="button" href="{{ url_for('google_login') }}">Continue with Google</a>
+      </div>
+    </section>
+  </section>
+{% endblock %}

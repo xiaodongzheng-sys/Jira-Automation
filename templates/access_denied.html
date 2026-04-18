@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+
+{% block body %}
+  <section class="workspace-shell">
+    <section class="panel panel-wide glass-panel">
+      <div class="panel-head">
+        <div>
+          <p class="eyebrow">Access Restricted</p>
+          <h1>This account cannot use this portal</h1>
+          <p class="step-copy">
+            You signed in successfully, but this Google account is not allowed to access this website.
+          </p>
+        </div>
+      </div>
+      <div class="premium-list">
+        <div class="premium-list-item">
+          <strong>Team access</strong>
+          <span>Only approved Google accounts in the configured NPT scope can use this shared portal.</span>
+        </div>
+        <div class="premium-list-item">
+          <strong>PRD Briefing Tool</strong>
+          <span>The PRD workspace is further restricted to <code>xiaodong.zheng@npt.sg</code>.</span>
+        </div>
+        <div class="premium-list-item">
+          <strong>Next step</strong>
+          <span>Contact the portal owner if you believe this account should have access.</span>
+        </div>
+      </div>
+    </section>
+  </section>
+{% endblock %}

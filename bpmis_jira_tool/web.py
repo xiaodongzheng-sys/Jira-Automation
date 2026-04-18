@@ -28,6 +28,8 @@ from bpmis_jira_tool.google_sheets import GoogleSheetsService
 from bpmis_jira_tool.project_sync import BPMISProjectSyncService
 from bpmis_jira_tool.service import JiraCreationService, build_bpmis_client
 from bpmis_jira_tool.user_config import CONFIGURED_FIELDS, DEFAULT_SHEET_HEADERS, WebConfigStore
+from prd_briefing import create_prd_briefing_blueprint
+from prd_briefing.storage import BriefingStore
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -144,6 +146,40 @@ def create_app() -> Flask:
     app.config["SETTINGS"] = settings
     app.config["CONFIG_STORE"] = config_store
     app.config["JOB_STORE"] = JobStore()
+    app.config["PRD_BRIEFING_STORE"] = BriefingStore(data_root / "prd_briefing")
+    app.config["GET_USER_IDENTITY"] = lambda: _get_user_identity(settings)
+    app.config["CAN_ACCESS_PRD_BRIEFING"] = lambda: _can_access_prd_briefing(settings)
+    app.register_blueprint(create_prd_briefing_blueprint())
+
+    @app.context_processor
+    def inject_primary_navigation():
+        current_endpoint = request.endpoint or ""
+        if _site_requires_google_login(settings) and not _google_session_is_connected():
+            return {
+                "site_tabs": [],
+                "site_requires_google_login": True,
+                "can_access_prd_briefing": False,
+            }
+        site_tabs = [
+            {
+                "label": "BPMIS Automation Tool",
+                "href": url_for("index"),
+                "active": current_endpoint == "index",
+            }
+        ]
+        if _can_access_prd_briefing(settings):
+            site_tabs.append(
+                {
+                    "label": "PRD Briefing Tool",
+                    "href": url_for("prd_briefing.portal"),
+                    "active": current_endpoint.startswith("prd_briefing"),
+                }
+            )
+        return {
+            "site_tabs": site_tabs,
+            "site_requires_google_login": _site_requires_google_login(settings),
+            "can_access_prd_briefing": _can_access_prd_briefing(settings),
+        }
 
     @app.before_request
     def enforce_team_access():
@@ -154,33 +190,45 @@ def create_app() -> Flask:
             "google_login",
             "google_callback",
             "google_logout",
-            "download_default_sheet_template",
-            "download_default_sheet_template_xlsx",
+            "access_denied",
         }:
             return None
+        login_gate = _require_google_login(
+            settings,
+            api=(request.path.startswith("/api/") or "/api/" in request.path),
+        )
+        if login_gate is not None:
+            return login_gate
         if _current_google_user_is_blocked(settings):
             session.pop("google_credentials", None)
             session.pop("google_profile", None)
-            flash("This Google account is not authorized for the team portal. Please contact the maintainer.", "error")
-            return redirect(url_for("index"))
+            message = "This Google account is not authorized for the team portal. Please contact the maintainer."
+            if request.path.startswith("/api/") or "/api/" in request.path:
+                return jsonify({"status": "error", "message": message}), HTTPStatus.FORBIDDEN
+            flash(message, "error")
+            return redirect(url_for("access_denied"))
         return None
 
     @app.get("/")
     def index():
-        results = session.pop("last_results", [])
-        run_notice = session.pop("run_notice", None)
-        blocked_google_user = _current_google_user_is_blocked(settings)
-        if blocked_google_user:
+        if _current_google_user_is_blocked(settings):
             session.pop("google_credentials", None)
             session.pop("google_profile", None)
             flash("This Google account is not authorized for the team portal. Please contact the maintainer.", "error")
+            return redirect(url_for("access_denied"))
+
+        if _site_requires_google_login(settings) and not _google_session_is_connected():
+            return render_template("login_gate.html", page_title="Sign In")
+
+        results = session.pop("last_results", [])
+        run_notice = session.pop("run_notice", None)
         user_identity = _get_user_identity(settings)
         config_key = user_identity.get("config_key")
         config_data = config_store.load(config_key) if config_key else None
         config_data = config_data or config_store._normalize({})
         input_headers: list[str] = []
 
-        if "google_credentials" in session and not blocked_google_user:
+        if "google_credentials" in session:
             try:
                 sheets = _build_sheets_service(settings, config_data)
                 snapshot = sheets.read_snapshot()
@@ -201,8 +249,12 @@ def create_app() -> Flask:
             mapping_fields=CONFIGURED_FIELDS,
             mapping_config=config_data,
             input_headers=input_headers,
-            google_authorized=not blocked_google_user,
+            google_authorized=True,
         )
+
+    @app.get("/access-denied")
+    def access_denied():
+        return render_template("access_denied.html", page_title="Access Restricted"), HTTPStatus.FORBIDDEN
 
     @app.get("/auth/google/login")
     def google_login():
@@ -222,7 +274,7 @@ def create_app() -> Flask:
                 session.pop("google_credentials", None)
                 session.pop("google_profile", None)
                 flash("This Google account is not authorized for the team portal. Please contact the maintainer.", "error")
-                return redirect(url_for("index"))
+                return redirect(url_for("access_denied"))
             current_identity = _get_user_identity(settings)
             if previous_identity.get("config_key") and current_identity.get("config_key"):
                 config_store.migrate(previous_identity["config_key"], current_identity["config_key"])
@@ -552,24 +604,33 @@ def _shared_portal_enabled(settings: Settings) -> bool:
     )
 
 
+def _site_requires_google_login(settings: Settings) -> bool:
+    return _shared_portal_enabled(settings)
+
+
 def _google_session_is_connected() -> bool:
     return "google_credentials" in session and bool((session.get("google_profile") or {}).get("email"))
 
 
+def _can_access_prd_briefing(settings: Settings) -> bool:
+    profile = session.get("google_profile") or {}
+    email = str(profile.get("email") or "").strip().lower()
+    return bool(email and email == settings.prd_briefing_owner_email.strip().lower())
+
+
 def _require_google_login(settings: Settings, *, api: bool = False):
-    if _shared_portal_enabled(settings):
+    if _site_requires_google_login(settings):
         if not _google_session_is_connected():
             message = "Sign in with your NPT Google account before using the shared portal."
             if api:
                 return jsonify({"status": "error", "message": message}), HTTPStatus.UNAUTHORIZED
-            flash(message, "error")
             return redirect(url_for("index"))
         if _current_google_user_is_blocked(settings):
             message = "This Google account is not authorized for the team portal."
             if api:
                 return jsonify({"status": "error", "message": message}), HTTPStatus.FORBIDDEN
             flash(message, "error")
-            return redirect(url_for("index"))
+            return redirect(url_for("access_denied"))
     return None
 
 

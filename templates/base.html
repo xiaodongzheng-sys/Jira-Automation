@@ -9,6 +9,15 @@
   </head>
   <body>
     <main class="page-shell">
+      {% if site_tabs %}
+        <nav class="site-switcher" aria-label="Primary tools">
+          <div class="site-switcher-track">
+            {% for tab in site_tabs %}
+              <a class="site-switcher-tab{% if tab.active %} is-active{% endif %}" href="{{ tab.href }}">{{ tab.label }}</a>
+            {% endfor %}
+          </div>
+        </nav>
+      {% endif %}
       {% with messages = get_flashed_messages(with_categories=true) %}
         {% if messages %}
           <section class="flash-stack">
