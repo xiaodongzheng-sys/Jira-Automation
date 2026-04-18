@@ -2,6 +2,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from cryptography.fernet import Fernet
+
 from bpmis_jira_tool.errors import ToolError
 from bpmis_jira_tool.user_config import DEFAULT_SHEET_HEADERS, WebConfigStore
 
@@ -120,6 +122,17 @@ class UserConfigStoreTests(unittest.TestCase):
             self.assertEqual(normalized["issue_id_header"], DEFAULT_SHEET_HEADERS[0])
             self.assertEqual(normalized["summary_header"], DEFAULT_SHEET_HEADERS[4])
             self.assertEqual(normalized["description_header"], DEFAULT_SHEET_HEADERS[6])
+
+    def test_save_encrypts_bpmis_token_and_load_decrypts_it(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = WebConfigStore(Path(temp_dir), encryption_key=Fernet.generate_key().decode("utf-8"))
+
+            store.save({"bpmis_api_access_token": "portal-token"}, user_key="google:user@example.com")
+
+            raw_row = store._fetch_row("google:user@example.com")
+            self.assertIn('"bpmis_api_access_token": "enc:', raw_row)
+            loaded = store.load("google:user@example.com")
+            self.assertEqual(loaded["bpmis_api_access_token"], "portal-token")
 
 
 if __name__ == "__main__":

@@ -38,7 +38,7 @@
             <p class="executive-eyebrow">Live Session</p>
             <h2>Operational Snapshot</h2>
           </div>
-          <span class="executive-pill">Local mode</span>
+          <span class="executive-pill">{{ "Team mode" if shared_portal_enabled else "Local mode" }}</span>
         </div>
         <ul class="executive-list">
           <li>
@@ -315,7 +315,7 @@
                     <label for="bpmis_api_access_token">BPMIS API Access Token</label>
                     <span class="field-badge">Recommended</span>
                   </div>
-                  <p class="field-help">Stored for this portal user. If filled, it overrides the local <code>.env</code> token during sync, self-check, preview, and run.</p>
+                  <p class="field-help">Stored for this portal user. In shared mode, this token is encrypted at rest on the host. If filled, it overrides the local <code>.env</code> token during sync, self-check, preview, and run.</p>
                   <input id="bpmis_api_access_token" name="bpmis_api_access_token" type="password" value="{{ mapping_config.bpmis_api_access_token }}" placeholder="Paste your BPMIS token">
                 </div>
 
@@ -509,20 +509,44 @@
     <section class="workspace-panel" data-tab-panel="support">
       <div class="workspace-grid">
         <section class="panel glass-panel">
-          <h2>Simple Start On Mac</h2>
-          <p class="step-copy">For teammates, the most reliable startup path is still Terminal.</p>
+          <h2>{{ "Shared Portal Access" if shared_portal_enabled else "Simple Start On Mac" }}</h2>
+          <p class="step-copy">
+            {% if shared_portal_enabled %}
+              Teammates only need the shared link and an `@npt.sg` Google account.
+            {% else %}
+              For teammates, the most reliable startup path is still Terminal.
+            {% endif %}
+          </p>
           <div class="premium-list">
             <div class="premium-list-item">
-              <strong>Recommended command</strong>
-              <span><code>./scripts/run_team_stack.sh start</code></span>
+              <strong>{{ "Shared URL" if shared_portal_enabled else "Recommended command" }}</strong>
+              <span>
+                {% if shared_portal_enabled %}
+                  <code>{{ settings.team_portal_base_url or "Set TEAM_PORTAL_BASE_URL in .env" }}</code>
+                {% else %}
+                  <code>./scripts/run_team_stack.sh start</code>
+                {% endif %}
+              </span>
             </div>
             <div class="premium-list-item">
-              <strong>What it does</strong>
-              <span>Starts the local portal that reads Google Sheets and calls BPMIS APIs with your configured token.</span>
+              <strong>{{ "What teammates do" if shared_portal_enabled else "What it does" }}</strong>
+              <span>
+                {% if shared_portal_enabled %}
+                  Open the shared link, sign in with NPT Google, save personal config, then use Preview and Run.
+                {% else %}
+                  Starts the local portal that reads Google Sheets and calls BPMIS APIs with your configured token.
+                {% endif %}
+              </span>
             </div>
             <div class="premium-list-item">
-              <strong>Daily routine</strong>
-              <span>Start the stack, open the portal, preview your rows, then run ticket creation.</span>
+              <strong>{{ "Host note" if shared_portal_enabled else "Daily routine" }}</strong>
+              <span>
+                {% if shared_portal_enabled %}
+                  The host Mac and Cloudflare Tunnel must stay online for teammates to access the portal.
+                {% else %}
+                  Start the stack, open the portal, preview your rows, then run ticket creation.
+                {% endif %}
+              </span>
             </div>
           </div>
         </section>
@@ -532,11 +556,23 @@
           <div class="premium-list">
             <div class="premium-list-item">
               <strong>Portal does not open</strong>
-              <span>Run <code>./scripts/run_team_stack.sh restart</code>, then reopen <code>http://127.0.0.1:5000</code>.</span>
+              <span>
+                {% if shared_portal_enabled %}
+                  Ask the portal owner to confirm the host Mac, shared portal process, and Cloudflare Tunnel are all online.
+                {% else %}
+                  Run <code>./scripts/run_team_stack.sh restart</code>, then reopen <code>http://127.0.0.1:5000</code>.
+                {% endif %}
+              </span>
             </div>
             <div class="premium-list-item">
               <strong>Google is not connected</strong>
-              <span>Use the Connect Google button again and make sure your account can open the target spreadsheet.</span>
+              <span>
+                {% if shared_portal_enabled %}
+                  Use the Connect Google button again and make sure you are signing in with an <code>@npt.sg</code> account that can open the target spreadsheet.
+                {% else %}
+                  Use the Connect Google button again and make sure your account can open the target spreadsheet.
+                {% endif %}
+              </span>
             </div>
             <div class="premium-list-item">
               <strong>BPMIS requests fail</strong>

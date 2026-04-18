@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 import io
+from http import HTTPStatus
 from pathlib import Path
 import re
 import secrets
@@ -129,7 +130,11 @@ def create_app() -> Flask:
     data_root = settings.team_portal_data_dir
     if not data_root.is_absolute():
         data_root = (project_root / data_root).resolve()
-    config_store = WebConfigStore(data_root, legacy_root=project_root)
+    config_store = WebConfigStore(
+        data_root,
+        legacy_root=project_root,
+        encryption_key=settings.team_portal_config_encryption_key,
+    )
     app = Flask(
         __name__,
         template_folder=str(project_root / "templates"),
@@ -169,8 +174,10 @@ def create_app() -> Flask:
             session.pop("google_credentials", None)
             session.pop("google_profile", None)
             flash("This Google account is not authorized for the team portal. Please contact the maintainer.", "error")
-        user_identity = _get_user_identity()
-        config_data = config_store.load(user_identity["config_key"]) or config_store._normalize({})
+        user_identity = _get_user_identity(settings)
+        config_key = user_identity.get("config_key")
+        config_data = config_store.load(config_key) if config_key else None
+        config_data = config_data or config_store._normalize({})
         input_headers: list[str] = []
 
         if "google_credentials" in session and not blocked_google_user:
@@ -186,6 +193,7 @@ def create_app() -> Flask:
         return render_template(
             "index.html",
             settings=settings,
+            shared_portal_enabled=_shared_portal_enabled(settings),
             google_connected="google_credentials" in session,
             user_identity=user_identity,
             results=results,
@@ -208,15 +216,16 @@ def create_app() -> Flask:
     @app.get("/auth/google/callback")
     def google_callback():
         try:
-            previous_identity = _get_user_identity()
+            previous_identity = _get_user_identity(settings)
             finish_google_oauth(settings, request.url)
             if _current_google_user_is_blocked(settings):
                 session.pop("google_credentials", None)
                 session.pop("google_profile", None)
                 flash("This Google account is not authorized for the team portal. Please contact the maintainer.", "error")
                 return redirect(url_for("index"))
-            current_identity = _get_user_identity()
-            config_store.migrate(previous_identity["config_key"], current_identity["config_key"])
+            current_identity = _get_user_identity(settings)
+            if previous_identity.get("config_key") and current_identity.get("config_key"):
+                config_store.migrate(previous_identity["config_key"], current_identity["config_key"])
             flash("Google Sheets connected successfully.", "success")
         except ToolError as error:
             flash(str(error), "error")
@@ -231,8 +240,11 @@ def create_app() -> Flask:
 
     @app.post("/config/save")
     def save_mapping_config():
+        login_gate = _require_google_login(settings)
+        if login_gate is not None:
+            return login_gate
         try:
-            user_identity = _get_user_identity()
+            user_identity = _get_user_identity(settings)
             existing_config = config_store.load(user_identity["config_key"]) or config_store._normalize({})
             config = {
                 "spreadsheet_link": request.form.get("spreadsheet_link", ""),
@@ -268,6 +280,7 @@ def create_app() -> Flask:
                     for market in MARKET_KEYS
                 },
             }
+            _validate_config_security(settings, config)
             config_store.build_field_mappings(config)
             config_store.save(config, user_identity["config_key"])
             flash("Your web Jira config was saved for this user and will be used for preview/run.", "success")
@@ -352,6 +365,9 @@ def create_app() -> Flask:
 
     @app.post("/preview")
     def preview():
+        login_gate = _require_google_login(settings)
+        if login_gate is not None:
+            return login_gate
         try:
             service = _build_service(settings)
             results, _headers = service.preview()
@@ -362,6 +378,9 @@ def create_app() -> Flask:
 
     @app.post("/run")
     def run():
+        login_gate = _require_google_login(settings)
+        if login_gate is not None:
+            return login_gate
         dry_run = request.form.get("dry_run") == "on"
         try:
             service = _build_service(settings)
@@ -378,8 +397,11 @@ def create_app() -> Flask:
 
     @app.get("/api/self-check")
     def self_check():
+        login_gate = _require_google_login(settings, api=True)
+        if login_gate is not None:
+            return login_gate
         try:
-            user_identity = _get_user_identity()
+            user_identity = _get_user_identity(settings)
             config_data = config_store.load(user_identity["config_key"]) or config_store._normalize({})
             payload = _run_self_check(settings, config_data)
             return jsonify(payload)
@@ -406,10 +428,13 @@ def create_app() -> Flask:
         return jsonify(snapshot)
 
     def _start_job(action: str, *, dry_run: bool):
+        login_gate = _require_google_login(settings, api=True)
+        if login_gate is not None:
+            return login_gate
         if "google_credentials" not in session:
             return jsonify({"status": "error", "message": "Please connect Google Sheets first."}), 400
 
-        user_identity = _get_user_identity()
+        user_identity = _get_user_identity(settings)
         config_data = config_store.load(user_identity["config_key"]) or config_store._normalize({})
         job_store: JobStore = current_app.config["JOB_STORE"]
         title = {
@@ -432,7 +457,7 @@ def create_app() -> Flask:
 
 
 def _build_service(settings: Settings) -> JiraCreationService:
-    user_identity = _get_user_identity()
+    user_identity = _get_user_identity(settings)
     config_store = _get_config_store()
     config_data = config_store.load(user_identity["config_key"]) or config_store._normalize({})
     sheets = _build_sheets_service(settings, config_data)
@@ -517,6 +542,43 @@ def _current_google_user_is_blocked(settings: Settings) -> bool:
         if domain in settings.team_allowed_email_domains:
             return False
     return True
+
+
+def _shared_portal_enabled(settings: Settings) -> bool:
+    return bool(
+        settings.team_portal_base_url
+        or settings.team_allowed_emails
+        or settings.team_allowed_email_domains
+    )
+
+
+def _google_session_is_connected() -> bool:
+    return "google_credentials" in session and bool((session.get("google_profile") or {}).get("email"))
+
+
+def _require_google_login(settings: Settings, *, api: bool = False):
+    if _shared_portal_enabled(settings):
+        if not _google_session_is_connected():
+            message = "Sign in with your NPT Google account before using the shared portal."
+            if api:
+                return jsonify({"status": "error", "message": message}), HTTPStatus.UNAUTHORIZED
+            flash(message, "error")
+            return redirect(url_for("index"))
+        if _current_google_user_is_blocked(settings):
+            message = "This Google account is not authorized for the team portal."
+            if api:
+                return jsonify({"status": "error", "message": message}), HTTPStatus.FORBIDDEN
+            flash(message, "error")
+            return redirect(url_for("index"))
+    return None
+
+
+def _validate_config_security(settings: Settings, config_data: dict[str, Any]) -> None:
+    portal_token = str(config_data.get("bpmis_api_access_token", "") or "").strip()
+    if _shared_portal_enabled(settings) and portal_token and not settings.team_portal_config_encryption_key:
+        raise ToolError(
+            "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY must be configured on the host before saving BPMIS tokens in shared mode."
+        )
 
 
 def _resolve_spreadsheet_id(value: str) -> str | None:
@@ -732,7 +794,7 @@ def _run_self_check(settings: Settings, config_data: dict[str, Any]) -> dict[str
     return {"status": overall, "checks": checks}
 
 
-def _get_user_identity() -> dict[str, str | None]:
+def _get_user_identity(settings: Settings | None = None) -> dict[str, str | None]:
     profile = session.get("google_profile") or {}
     email = str(profile.get("email") or "").strip().lower()
     name = str(profile.get("name") or "").strip()
@@ -743,6 +805,14 @@ def _get_user_identity() -> dict[str, str | None]:
             "display_name": name or email,
             "email": email,
             "mode": "google",
+        }
+
+    if settings and _shared_portal_enabled(settings):
+        return {
+            "config_key": None,
+            "display_name": "Sign in with your NPT Google account",
+            "email": None,
+            "mode": "guest",
         }
 
     anonymous_key = session.get("anonymous_user_key")

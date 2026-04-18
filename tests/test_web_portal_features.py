@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
+from cryptography.fernet import Fernet
 from openpyxl import load_workbook
 
 from bpmis_jira_tool.config import Settings
@@ -103,6 +104,9 @@ class WebPortalFeatureTests(unittest.TestCase):
             {
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
             },
             clear=False,
         ), patch("bpmis_jira_tool.web.build_bpmis_client") as mock_build_client:
@@ -132,12 +136,142 @@ class WebPortalFeatureTests(unittest.TestCase):
         bpmis_check = next(check for check in payload["checks"] if check["name"] == "BPMIS API")
         self.assertIn("saved BPMIS token", bpmis_check["detail"])
 
+    def test_shared_mode_blocks_anonymous_self_check(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg",
+                "TEAM_PORTAL_BASE_URL": "https://jira-tool.example.com",
+                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
+            },
+            clear=False,
+        ):
+            app = create_app()
+            app.testing = True
+
+            with app.test_client() as client:
+                response = client.get("/api/self-check")
+
+        self.assertEqual(response.status_code, 401)
+        payload = response.get_json()
+        self.assertIn("Sign in with your NPT Google account", payload["message"])
+
+    def test_shared_mode_blocks_anonymous_save(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg",
+                "TEAM_PORTAL_BASE_URL": "https://jira-tool.example.com",
+                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
+            },
+            clear=False,
+        ):
+            app = create_app()
+            app.testing = True
+
+            with app.test_client() as client:
+                response = client.post("/config/save", data={"spreadsheet_link": "sheet-123"}, follow_redirects=False)
+
+        self.assertEqual(response.status_code, 302)
+
+    def test_shared_mode_requires_encryption_key_before_saving_portal_token(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg",
+                "TEAM_PORTAL_BASE_URL": "https://jira-tool.example.com",
+                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
+            },
+            clear=False,
+        ):
+            app = create_app()
+            app.testing = True
+
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
+                    session["google_credentials"] = {"token": "x"}
+
+                response = client.post(
+                    "/config/save",
+                    data={
+                        "spreadsheet_link": "sheet-123",
+                        "input_tab_name": "Projects",
+                        "bpmis_api_access_token": "portal-token",
+                    },
+                    follow_redirects=True,
+                )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"TEAM_PORTAL_CONFIG_ENCRYPTION_KEY", response.data)
+
+    def test_shared_mode_saves_encrypted_portal_token_for_google_user(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg",
+                "TEAM_PORTAL_BASE_URL": "https://jira-tool.example.com",
+                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": Fernet.generate_key().decode("utf-8"),
+            },
+            clear=False,
+        ):
+            app = create_app()
+            app.testing = True
+
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
+                    session["google_credentials"] = {"token": "x"}
+
+                response = client.post(
+                    "/config/save",
+                    data={
+                        "spreadsheet_link": "sheet-123",
+                        "input_tab_name": "Projects",
+                        "bpmis_api_access_token": "portal-token",
+                        "issue_id_header": "BPMIS ID",
+                        "jira_ticket_link_header": "Jira Ticket Link",
+                        "sync_pm_email": "pm@example.com",
+                        "sync_project_name_header": "Project Name",
+                        "sync_market_header": "Market",
+                        "sync_brd_link_header": "BRD Link",
+                        "market_header": "Market",
+                        "system_header": "System",
+                        "summary_header": "Jira Title",
+                        "prd_links_header": "PRD Link",
+                        "description_header": "Description",
+                        "task_type_value": "Feature",
+                        "priority_value": "P1",
+                        "product_manager_value": "pm@example.com",
+                        "reporter_value": "reporter@example.com",
+                        "biz_pic_value": "biz@example.com",
+                    },
+                    follow_redirects=False,
+                )
+
+            self.assertEqual(response.status_code, 302)
+            raw_row = app.config["CONFIG_STORE"]._fetch_row("google:teammate@npt.sg")
+            self.assertIn('"bpmis_api_access_token": "enc:', raw_row)
+            saved = app.config["CONFIG_STORE"].load("google:teammate@npt.sg")
+            self.assertEqual(saved["bpmis_api_access_token"], "portal-token")
+
     def test_save_mapping_config_persists_bpmis_token(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
             },
             clear=False,
         ):

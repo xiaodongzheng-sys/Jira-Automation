@@ -20,12 +20,14 @@ class ConfigTests(unittest.TestCase):
                 with open(".env", "w", encoding="utf-8") as handle:
                     handle.write("TEAM_PORTAL_PORT=5111\n")
                     handle.write("BPMIS_API_ACCESS_TOKEN=test-token\n")
+                    handle.write("TEAM_PORTAL_CONFIG_ENCRYPTION_KEY=shared-key\n")
 
                 with patch.dict(os.environ, {}, clear=True):
                     settings = Settings.from_env()
 
                 self.assertEqual(settings.team_portal_port, 5111)
                 self.assertEqual(settings.bpmis_api_access_token, "test-token")
+                self.assertEqual(settings.team_portal_config_encryption_key, "shared-key")
             finally:
                 os.chdir(original_cwd)
 

@@ -1,8 +1,9 @@
 # Jira Creation Automation Tool
 
-This repository currently tracks a local-first edition of the tool.
+This repository now supports both:
 
-The current recommended usage is still local per user. Each person runs the portal on their own Mac.
+- a local-first edition for individual use
+- a shared portal edition hosted on one Mac and exposed through Cloudflare Tunnel
 
 The current local-first edition is a Flask web app that:
 
@@ -17,7 +18,14 @@ Current local assumptions:
 - the app runs on one machine
 - Google auth is tied to the current browser session
 - BPMIS access uses a configured Bearer token via `BPMIS_API_ACCESS_TOKEN`
-- web config is stored locally in `jira_web_config.json`
+- web config is stored locally per user in the team portal config store
+
+Current shared-team assumptions:
+
+- one host Mac runs the portal
+- teammates open one shared URL and sign in with `@npt.sg` Google accounts
+- each teammate stores their own spreadsheet config and BPMIS token in the portal
+- BPMIS tokens saved through the shared portal are encrypted at rest with `TEAM_PORTAL_CONFIG_ENCRYPTION_KEY`
 
 ## Upload-Style Python Script
 

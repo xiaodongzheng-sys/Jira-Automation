@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from typing import Any
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, urlsplit, urlunsplit
 
 import requests
 from flask import session, url_for
@@ -52,6 +52,22 @@ def _allow_localhost_oauth_http(redirect_uri: str) -> None:
     os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
 
 
+def _normalize_authorization_response(authorization_response: str, redirect_uri: str) -> str:
+    response_parts = urlsplit(authorization_response)
+    redirect_parts = urlsplit(redirect_uri)
+    if response_parts.scheme == "https":
+        return authorization_response
+    return urlunsplit(
+        (
+            redirect_parts.scheme,
+            redirect_parts.netloc,
+            redirect_parts.path,
+            response_parts.query,
+            response_parts.fragment,
+        )
+    )
+
+
 def create_google_authorization_url(settings: Settings) -> str:
     flow = build_google_flow(settings)
     redirect_uri = _resolve_google_redirect_uri(settings)
@@ -72,9 +88,13 @@ def finish_google_oauth(settings: Settings, authorization_response: str) -> None
         raise AuthenticationError("Missing OAuth state. Start the Google sign-in flow again.")
 
     flow = build_google_flow(settings)
-    flow.redirect_uri = _resolve_google_redirect_uri(settings)
-    _allow_localhost_oauth_http(flow.redirect_uri)
-    flow.fetch_token(authorization_response=authorization_response)
+    redirect_uri = _resolve_google_redirect_uri(settings)
+    flow.redirect_uri = redirect_uri
+    _allow_localhost_oauth_http(redirect_uri)
+    if redirect_uri.startswith("https://"):
+        os.environ.pop("OAUTHLIB_INSECURE_TRANSPORT", None)
+    normalized_authorization_response = _normalize_authorization_response(authorization_response, redirect_uri)
+    flow.fetch_token(authorization_response=normalized_authorization_response)
     session["google_credentials"] = credentials_to_dict(flow.credentials)
     session["google_profile"] = fetch_google_profile(flow.credentials)
 

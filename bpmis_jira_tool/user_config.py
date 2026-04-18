@@ -5,6 +5,8 @@ import re
 import sqlite3
 from pathlib import Path
 
+from cryptography.fernet import Fernet, InvalidToken
+
 from bpmis_jira_tool.errors import ToolError
 from bpmis_jira_tool.models import FieldMapping
 
@@ -85,33 +87,39 @@ COMPONENT_ROUTED_DIRECT_FIELDS = {
 
 
 class WebConfigStore:
-    def __init__(self, data_root: Path, legacy_root: Path | None = None):
+    ENCRYPTED_PREFIX = "enc:"
+    ENCRYPTED_FIELDS = ("bpmis_api_access_token",)
+
+    def __init__(self, data_root: Path, legacy_root: Path | None = None, encryption_key: str | None = None):
         self.root = data_root
         self.root.mkdir(parents=True, exist_ok=True)
         self.path = self.root / CONFIG_FILE
         self.db_path = self.root / DB_FILE
         self.legacy_path = (legacy_root / CONFIG_FILE) if legacy_root else None
+        self.encryption_key = (encryption_key or "").strip() or None
+        self._fernet = Fernet(self.encryption_key.encode("utf-8")) if self.encryption_key else None
         self._ensure_db()
 
     def load(self, user_key: str | None = None) -> dict[str, object] | None:
         if user_key:
             row = self._fetch_row(user_key)
             if row is not None:
-                return self._normalize(json.loads(row))
+                return self._normalize(self._deserialize_config(json.loads(row)))
         if not self.path.exists():
             if self.legacy_path and self.legacy_path.exists():
-                data = json.loads(self.legacy_path.read_text(encoding="utf-8"))
+                data = self._deserialize_config(json.loads(self.legacy_path.read_text(encoding="utf-8")))
                 return self._normalize(data)
             return None
-        data = json.loads(self.path.read_text(encoding="utf-8"))
+        data = self._deserialize_config(json.loads(self.path.read_text(encoding="utf-8")))
         return self._normalize(data)
 
     def save(self, data: dict[str, object], user_key: str | None = None) -> dict[str, object]:
         normalized = self._normalize(data)
+        serialized = self._serialize_config(normalized)
         if user_key:
-            self._upsert_row(user_key, normalized)
+            self._upsert_row(user_key, serialized)
         else:
-            self.path.write_text(json.dumps(normalized, indent=2), encoding="utf-8")
+            self.path.write_text(json.dumps(serialized, indent=2), encoding="utf-8")
         return normalized
 
     def migrate(self, from_user_key: str, to_user_key: str) -> None:
@@ -121,7 +129,7 @@ class WebConfigStore:
         if source is None:
             return
         if self._fetch_row(to_user_key) is None:
-            self._upsert_row(to_user_key, self._normalize(json.loads(source)))
+            self._upsert_row(to_user_key, self._serialize_config(self._normalize(self._deserialize_config(json.loads(source)))))
 
     def clear(self, user_key: str | None = None) -> None:
         if user_key:
@@ -336,6 +344,35 @@ class WebConfigStore:
                 (user_key, json.dumps(config, ensure_ascii=False)),
             )
             connection.commit()
+
+    def _serialize_config(self, config: dict[str, object]) -> dict[str, object]:
+        serialized = dict(config)
+        for field in self.ENCRYPTED_FIELDS:
+            raw_value = str(serialized.get(field, "") or "").strip()
+            if not raw_value or raw_value.startswith(self.ENCRYPTED_PREFIX):
+                continue
+            if self._fernet is None:
+                continue
+            encrypted = self._fernet.encrypt(raw_value.encode("utf-8")).decode("utf-8")
+            serialized[field] = f"{self.ENCRYPTED_PREFIX}{encrypted}"
+        return serialized
+
+    def _deserialize_config(self, config: dict[str, object]) -> dict[str, object]:
+        deserialized = dict(config)
+        for field in self.ENCRYPTED_FIELDS:
+            raw_value = str(deserialized.get(field, "") or "").strip()
+            if not raw_value.startswith(self.ENCRYPTED_PREFIX):
+                continue
+            if self._fernet is None:
+                raise ToolError(
+                    "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY is required to read saved BPMIS tokens in shared mode."
+                )
+            token = raw_value[len(self.ENCRYPTED_PREFIX) :]
+            try:
+                deserialized[field] = self._fernet.decrypt(token.encode("utf-8")).decode("utf-8")
+            except InvalidToken as error:
+                raise ToolError("Could not decrypt the saved BPMIS token. Check TEAM_PORTAL_CONFIG_ENCRYPTION_KEY.") from error
+        return deserialized
 
     @staticmethod
     def _normalize_market_choice_map(data: object) -> dict[str, str]:

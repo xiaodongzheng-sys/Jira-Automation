@@ -51,7 +51,6 @@ class TeamPortalAccessTests(unittest.TestCase):
                 response = client.get("/")
                 self.assertEqual(response.status_code, 200)
                 self.assertIn(b"Allowed User", response.data)
-                self.assertIn(b'href="/snake"', response.data)
 
     def test_allowed_google_domain_can_open_index(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
@@ -148,29 +147,6 @@ class TeamPortalAccessTests(unittest.TestCase):
                 self.assertEqual(response.status_code, 200)
                 self.assertEqual(response.mimetype, "text/csv")
                 self.assertIn(b"BPMIS ID,Project Name,Market,System,Jira Title,PRD Link,Description,BRD Link,Jira Ticket Link", response.data)
-
-    def test_snake_route_is_public_and_renders_game_ui(self):
-        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
-            os.environ,
-            {
-                "FLASK_SECRET_KEY": "test-secret",
-                "TEAM_PORTAL_DATA_DIR": temp_dir,
-            },
-            clear=False,
-        ):
-            app = create_app()
-            app.testing = True
-
-            with app.test_client() as client:
-                response = client.get("/snake")
-                self.assertEqual(response.status_code, 200)
-                self.assertIn(b"Classic Snake", response.data)
-                self.assertIn(b'data-snake-board', response.data)
-                self.assertIn(b'data-snake-score', response.data)
-                self.assertIn(b'data-snake-controls', response.data)
-                self.assertIn(b'data-snake-start', response.data)
-                self.assertIn(b'data-snake-restart', response.data)
-
 
 if __name__ == "__main__":
     unittest.main()

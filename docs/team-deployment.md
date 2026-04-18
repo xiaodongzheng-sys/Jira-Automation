@@ -1,61 +1,55 @@
 # Team Deployment Guide
 
-Current status:
+This guide describes the supported **shared-team** setup:
 
-- The default rollout is still local-first.
-- Each teammate runs the portal on their own Mac.
-- The shared internal Portal deployment in this document is a future mode for after the team gets a valid domain/hostname for Google OAuth.
+- one Mac hosts the Flask portal
+- Cloudflare Tunnel exposes the portal through one stable HTTPS URL
+- teammates sign in with `@npt.sg` Google accounts
+- each teammate stores their own config and BPMIS token inside the portal
 
-This guide describes the future shared deployment shape for a team of around 10-15 users.
+## Host Configuration
 
-## Deployment Model
-
-- One shared team portal runs on an existing internal Mac.
-- Each teammate has their own BPMIS API token.
-- The portal calls BPMIS APIs directly with that configured token.
-
-This keeps infrastructure simple and avoids buying a new machine.
-
-## What the Portal Host Needs
-
-Use one Mac that is:
-
-- reachable on the same internal network as the team
-- usually online during working hours
-- configured not to sleep during the day
-- able to run Python and a local Flask process
-
-Recommended host assumptions:
-
-- fixed or stable internal IP
-- project checked out locally
-- `.venv` already created
-- `.env` already configured
-
-## Required Environment Variables
-
-At minimum, configure these in `.env` on the portal host:
+Configure these values in `.env` on the host Mac:
 
 ```bash
 FLASK_SECRET_KEY=change-me
 GOOGLE_OAUTH_CLIENT_SECRET_FILE=/absolute/path/to/google-client-secret.json
-TEAM_PORTAL_HOST=0.0.0.0
+TEAM_PORTAL_HOST=127.0.0.1
 TEAM_PORTAL_PORT=5000
-TEAM_PORTAL_BASE_URL=http://<internal-ip>:5000
-TEAM_ALLOWED_EMAILS=user1@npt.sg,user2@npt.sg
+TEAM_PORTAL_BASE_URL=https://jira-tool.example.com
+TEAM_ALLOWED_EMAIL_DOMAINS=npt.sg
 TEAM_PORTAL_DATA_DIR=/absolute/path/to/team-portal-data
+TEAM_PORTAL_CONFIG_ENCRYPTION_KEY=<fernet-key>
+```
+
+Generate the encryption key with:
+
+```bash
+python3 - <<'PY'
+from cryptography.fernet import Fernet
+print(Fernet.generate_key().decode())
+PY
 ```
 
 Notes:
 
-- `TEAM_PORTAL_HOST=0.0.0.0` allows teammates on the same network to access the portal.
-- `TEAM_PORTAL_BASE_URL` should match the real shared URL used by teammates, because Google OAuth callback generation uses it when no explicit callback override is set.
-- `TEAM_ALLOWED_EMAILS` is a comma-separated Google email whitelist for basic internal access control.
-- `TEAM_PORTAL_DATA_DIR` stores SQLite config, PID files, and logs.
+- `TEAM_PORTAL_BASE_URL` must match the exact Cloudflare hostname teammates will open
+- Google OAuth callback generation uses `TEAM_PORTAL_BASE_URL`
+- `TEAM_PORTAL_CONFIG_ENCRYPTION_KEY` is required if teammates will save BPMIS tokens in the shared portal
+
+## Google OAuth Setup
+
+In Google Cloud Console, configure the OAuth client with this callback:
+
+```text
+https://jira-tool.example.com/auth/google/callback
+```
+
+Replace the hostname with your real Cloudflare hostname.
 
 ## Start the Shared Portal
 
-Manual production-style startup:
+Use the production-style script already included in the repo:
 
 ```bash
 ./scripts/run_team_portal_prod.sh start
@@ -63,22 +57,16 @@ Manual production-style startup:
 ./scripts/run_team_portal_prod.sh logs
 ```
 
-Useful operations:
+To stop or restart:
 
 ```bash
 ./scripts/run_team_portal_prod.sh stop
 ./scripts/run_team_portal_prod.sh restart
 ```
 
-After start, teammates should be able to access:
+## Enable Auto-Start on the Host Mac
 
-```bash
-http://<internal-ip>:5000
-```
-
-## Install launchd Auto-Start on the Portal Host
-
-To make the portal auto-start for the host user on login:
+Install the launchd job:
 
 ```bash
 ./scripts/install_team_portal_launchd.sh
@@ -90,34 +78,53 @@ Then start it:
 launchctl start io.npt.jira-creation-portal
 ```
 
-The generated plist is installed under:
+## Cloudflare Tunnel Setup
 
-```bash
-~/Library/LaunchAgents/io.npt.jira-creation-portal.plist
+Create one tunnel on the host Mac that forwards the public hostname to the local Flask port:
+
+```text
+https://jira-tool.example.com  ->  http://127.0.0.1:5000
 ```
 
-Portal logs will be written under `TEAM_PORTAL_DATA_DIR/logs`.
+Owner-run checklist:
 
-## What Teammates Need To Run Locally
+1. Start the portal with `./scripts/run_team_portal_prod.sh start`
+2. Start the Cloudflare Tunnel
+3. Open the public URL and confirm the homepage loads
+4. Confirm Google sign-in returns to the same public URL
+5. Run `Self-Check` after signing in with an `@npt.sg` account
 
-Each teammate still needs their own BPMIS API token because BPMIS access now depends on that token.
+## What Teammates Need
 
-They should follow the quickstart in:
+Teammates only need:
+
+- the shared URL
+- an `@npt.sg` Google account
+- their own BPMIS API token
+
+They do not need to install anything locally.
+
+See:
 
 - [docs/team-member-quickstart.md](/Users/NPTSG0388/Documents/New%20project/docs/team-member-quickstart.md)
 
 ## Health Checks
 
-Portal host checks:
+Host-side checks:
 
-- open `http://<internal-ip>:5000`
-- run `./scripts/run_team_portal_prod.sh status`
-- check `./scripts/run_team_portal_prod.sh logs`
+- `./scripts/run_team_portal_prod.sh status`
+- `./scripts/run_team_portal_prod.sh logs`
+- open the public Cloudflare URL
+- verify Google login callback works through the public hostname
 
-Teammate BPMIS checks:
+Teammate acceptance check:
 
-- run `./scripts/run_team_stack.sh status`
-- confirm Self-Check shows `BPMIS API`
+- open the shared URL on a fresh laptop
+- sign in with `@npt.sg`
+- save config
+- run `Self-Check`
+- preview rows
+- create Jira successfully
 
 ## Common Failures
 
@@ -126,40 +133,36 @@ Teammate BPMIS checks:
 Check:
 
 - the host Mac is awake
-- the host Mac is on the same network
-- `./scripts/run_team_portal_prod.sh status`
-- macOS firewall is not blocking port `5000`
+- the portal process is running
+- the Cloudflare Tunnel is connected
 
-### Google login works but the user is blocked
+### Google login succeeds but user is denied
 
 Check:
 
-- the teammate's Google email is present in `TEAM_ALLOWED_EMAILS`
+- the teammate is using an `@npt.sg` Google account
+- `TEAM_ALLOWED_EMAIL_DOMAINS=npt.sg` is present in `.env`
+
+### BPMIS token cannot be saved
+
+Check:
+
+- `TEAM_PORTAL_CONFIG_ENCRYPTION_KEY` is configured on the host
 
 ### BPMIS API check fails
 
 Check:
 
-- teammate has started `./scripts/run_team_stack.sh start`
-- teammate has configured `BPMIS_API_ACCESS_TOKEN`
-- the token is still valid
-
-### Preview or Run returns Spreadsheet errors
-
-Check:
-
-- Spreadsheet link or ID
-- Input tab name
-- Issue ID header
-- Jira Ticket Link header
+- the teammate saved a valid BPMIS token in the portal
+- the token is still active
 
 ## v1 Tradeoff
 
-This deployment shape is intentionally simple:
+This shared deployment is intentionally lightweight:
 
-- no extra infrastructure
-- no new hardware
-- no company-wide SSO
-- no 24x7 uptime guarantee
+- one host Mac
+- one Cloudflare Tunnel
+- Google login restricted by domain
+- uptime depends on the host Mac staying online
 
-For a fixed team during working hours, this is usually enough to validate adoption before moving to a more formal server or VM.
+That is enough for an internal team rollout before moving to a more formal server or VM.

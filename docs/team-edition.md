@@ -15,10 +15,11 @@ Current rollout mode:
 Future rollout mode:
 
 - Internal shared web app
-- Per-user Google OAuth
+- Per-user Google OAuth restricted to `@npt.sg`
 - Per-user saved config
 - Per-user BPMIS API access token
-- No formal access control in v1
+- Shared URL through Cloudflare Tunnel
+- Encrypted BPMIS token storage on the host
 - No formal audit log in v1
 
 ## Why Access Token Matters
@@ -29,7 +30,7 @@ That means the most reliable integration is to use a BPMIS access token directly
 So the team edition needs:
 
 - a central web portal
-- a BPMIS API token
+- one BPMIS API token per teammate
 
 The central portal handles spreadsheet access and orchestration.
 The direct BPMIS API client handles Jira creation with the configured token.
@@ -38,6 +39,9 @@ The current prototype on this branch now includes:
 
 - user-scoped config persistence on the portal side
 - direct BPMIS API creation from the portal
+- shared-mode guardrails that require Google login before use
+- `@npt.sg` domain allowlisting support
+- encrypted-at-rest storage for portal-saved BPMIS tokens
 - self-check coverage for BPMIS API readiness
 - a production-oriented portal startup script for an internal Mac host
 - a launchd installation script for auto-start on the host Mac
