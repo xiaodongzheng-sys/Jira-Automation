@@ -1,4 +1,4 @@
-# Jira Creation Automation Tool
+# BPMIS Automation Tool
 
 This repository now supports both:
 

@@ -17,11 +17,11 @@ DEFAULT_SHEET_HEADERS = [
     "BPMIS ID",
     "Project Name",
     "Market",
+    "BRD Link",
     "System",
     "Jira Title",
     "PRD Link",
     "Description",
-    "BRD Link",
     "Jira Ticket Link",
 ]
 CONFIGURED_FIELDS = [
@@ -51,16 +51,16 @@ SOURCE_FIELDS = {
     "sync_pm_email": "",
     "sync_project_name_header": DEFAULT_SHEET_HEADERS[1],
     "sync_market_header": DEFAULT_SHEET_HEADERS[2],
-    "sync_brd_link_header": DEFAULT_SHEET_HEADERS[7],
+    "sync_brd_link_header": DEFAULT_SHEET_HEADERS[3],
     "component_route_rules_text": "",
     "component_default_rules_text": "",
 }
 HEADER_FIELDS = {
     "Market": ("market_header", DEFAULT_SHEET_HEADERS[2]),
-    "System": ("system_header", DEFAULT_SHEET_HEADERS[3]),
-    "Summary": ("summary_header", DEFAULT_SHEET_HEADERS[4]),
-    "PRD Link/s": ("prd_links_header", DEFAULT_SHEET_HEADERS[5]),
-    "Description": ("description_header", DEFAULT_SHEET_HEADERS[6]),
+    "System": ("system_header", DEFAULT_SHEET_HEADERS[4]),
+    "Summary": ("summary_header", DEFAULT_SHEET_HEADERS[5]),
+    "PRD Link/s": ("prd_links_header", DEFAULT_SHEET_HEADERS[6]),
+    "Description": ("description_header", DEFAULT_SHEET_HEADERS[7]),
 }
 MARKET_CHOICE_FIELDS = {
     "Need UAT": "need_uat_by_market",

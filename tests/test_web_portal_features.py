@@ -85,18 +85,18 @@ class WebPortalFeatureTests(unittest.TestCase):
                 "BPMIS ID",
                 "Project Name",
                 "Market",
+                "BRD Link",
                 "System",
                 "Jira Title",
                 "PRD Link",
                 "Description",
-                "BRD Link",
                 "Jira Ticket Link",
             ],
         )
         self.assertEqual("225159", worksheet["A2"].value)
-        self.assertEqual("https://confluence/example-prd", worksheet["F2"].value)
-        self.assertEqual("Detailed Jira description goes here.", worksheet["G2"].value)
-        self.assertEqual("https://docs.google.com/document/d/example", worksheet["H2"].value)
+        self.assertEqual("https://docs.google.com/document/d/example", worksheet["D2"].value)
+        self.assertEqual("https://confluence/example-prd", worksheet["G2"].value)
+        self.assertEqual("Detailed Jira description goes here.", worksheet["H2"].value)
 
     def test_self_check_uses_saved_bpmis_token(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(

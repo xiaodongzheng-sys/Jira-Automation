@@ -120,8 +120,8 @@ class UserConfigStoreTests(unittest.TestCase):
 
             self.assertEqual(normalized["input_tab_name"], "Projects")
             self.assertEqual(normalized["issue_id_header"], DEFAULT_SHEET_HEADERS[0])
-            self.assertEqual(normalized["summary_header"], DEFAULT_SHEET_HEADERS[4])
-            self.assertEqual(normalized["description_header"], DEFAULT_SHEET_HEADERS[6])
+            self.assertEqual(normalized["summary_header"], DEFAULT_SHEET_HEADERS[5])
+            self.assertEqual(normalized["description_header"], DEFAULT_SHEET_HEADERS[7])
 
     def test_save_encrypts_bpmis_token_and_load_decrypts_it(self):
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -294,11 +294,11 @@ def create_app() -> Flask:
             "225159",
             "Standalone Cash Loan",
             "SG",
+            "https://docs.google.com/document/d/example",
             "AF",
             "Fraud rule improvement",
             "https://confluence/example-prd",
             "Detailed Jira description goes here.",
-            "https://docs.google.com/document/d/example",
             "",
         ]
         csv_lines = [
@@ -323,11 +323,11 @@ def create_app() -> Flask:
             "225159",
             "Standalone Cash Loan",
             "SG",
+            "https://docs.google.com/document/d/example",
             "AF",
             "Fraud rule improvement",
             "https://confluence/example-prd",
             "Detailed Jira description goes here.",
-            "https://docs.google.com/document/d/example",
             "",
         ]
         worksheet.append(DEFAULT_SHEET_HEADERS)
@@ -344,11 +344,11 @@ def create_app() -> Flask:
             "A": 16,
             "B": 28,
             "C": 12,
-            "D": 14,
-            "E": 28,
-            "F": 34,
-            "G": 42,
-            "H": 30,
+            "D": 30,
+            "E": 14,
+            "F": 28,
+            "G": 34,
+            "H": 42,
             "I": 28,
         }.items():
             worksheet.column_dimensions[column_letter].width = width

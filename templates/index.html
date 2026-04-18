@@ -5,11 +5,11 @@
     <div class="showcase-backdrop"></div>
     <div class="showcase-grid">
       <div class="showcase-copy">
-        <p class="showcase-kicker">Internal Workflow Suite</p>
-        <h1>Jira Creation Automation Tool</h1>
+        <p class="showcase-kicker">BPMIS Operations Workspace</p>
+        <h1>BPMIS Automation Tool</h1>
         <p class="showcase-lede">
-          Turn spreadsheet rows into BPMIS-backed Jira tickets through a clean, auditable workflow.
-          Use this page for status and execution. Open Configuration only when your sheet setup changes.
+          Sync BPMIS projects, prepare Jira-ready records, and run controlled ticket creation from one shared workspace.
+          Use Run Center for daily execution, and open Configuration only when your sheet structure or mapping rules change.
         </p>
         <div class="showcase-badges">
           <span>Google Sheets</span>
@@ -18,16 +18,16 @@
         </div>
         <div class="showcase-metrics">
           <article class="metric-card">
-            <strong>Connect once</strong>
-            <span>Reuse the same Google and mapping setup across runs.</span>
+            <strong>Sync from BPMIS</strong>
+            <span>Pull the latest Biz Project data into your working sheet before you preview or create.</span>
           </article>
           <article class="metric-card">
-            <strong>Preview first</strong>
-            <span>Check the candidate list before creating real Jira tickets.</span>
+            <strong>Review before run</strong>
+            <span>Preview the candidate rows and resolved mappings before creating real Jira tickets.</span>
           </article>
           <article class="metric-card">
-            <strong>Write back</strong>
-            <span>Save the final Jira browse URL into your configured sheet column.</span>
+            <strong>Write back cleanly</strong>
+            <span>Save the final Jira browse URL into your configured sheet column after creation succeeds.</span>
           </article>
         </div>
       </div>
@@ -54,12 +54,12 @@
             <strong>Ready via Self-Check</strong>
           </li>
           <li>
-            <span>Spreadsheet</span>
+            <span>Source Sheet</span>
             <strong>{{ mapping_config.spreadsheet_link or settings.spreadsheet_id }}</strong>
           </li>
         </ul>
         <div class="executive-note">
-          <p>Use the workspace below to configure, validate, and run. This panel is your quick status snapshot.</p>
+          <p>Use the workspace below to connect, sync, validate, and run. This panel is your quick operating snapshot.</p>
         </div>
       </aside>
     </div>
@@ -69,9 +69,9 @@
     <div class="workspace-head">
       <div>
         <p class="eyebrow">Workspace</p>
-        <h2>Automation Console</h2>
+        <h2>Operations Console</h2>
         <p class="step-copy">
-          Overview is for a quick read. Run Center is for daily use. Configuration is only for setup changes.
+          Overview is for a quick read. Run Center is for daily execution. Configuration is only for setup changes.
         </p>
       </div>
       <div class="workspace-rail">
@@ -99,7 +99,7 @@
           <article class="showcase-step-card">
             <p class="checklist-step">Step 1</p>
             <h3>Connect Google Sheets</h3>
-            <p>Grant access so the tool can read your sheet and write the Jira link back after creation.</p>
+            <p>Grant access so the workspace can read your source sheet and write result links back after a successful run.</p>
             <p class="checklist-outcome">Expected status: <strong>Google Sheets = Connected</strong></p>
             <div class="button-row">
               {% if google_connected %}
@@ -114,13 +114,13 @@
           <article class="showcase-step-card">
             <p class="checklist-step">Step 2</p>
             <h3>Configure BPMIS Token</h3>
-            <p>Save your BPMIS API token in Configuration. The portal uses your saved token first and only falls back to <code>.env</code> when it is blank.</p>
+            <p>Save your BPMIS API token in Configuration. The workspace uses your saved token first and only falls back to <code>.env</code> when it is blank.</p>
             <p class="checklist-outcome">Expected status: <strong>BPMIS API = pass in Self-Check</strong></p>
           </article>
           <article class="showcase-step-card">
             <p class="checklist-step">Step 3</p>
             <h3>Sync, Preview, Then Run</h3>
-            <p>Save your setup in Configuration, sync BPMIS projects where PM PIC or All Involved PM matches your email, then preview and create Jira tickets.</p>
+            <p>Save your setup in Configuration, sync BPMIS projects where PM PIC or All Involved PM matches your email, then preview and run the BPMIS-to-Jira flow.</p>
             <p class="checklist-outcome">Safe habit: <strong>Sync first, Preview second, Run last</strong></p>
           </article>
         </div>
@@ -128,8 +128,8 @@
 
       <div class="workspace-grid">
         <section class="panel glass-panel">
-          <h2>What This Tool Reads</h2>
-          <p class="help-text">Your configured spreadsheet, one input tab, and the mapped columns that drive BPMIS issue lookup and Jira creation.</p>
+          <h2>What This Workspace Reads</h2>
+          <p class="help-text">Your configured source sheet, one input tab, and the mapped columns that drive BPMIS lookup and run preparation.</p>
           <div class="premium-list">
             <div class="premium-list-item">
               <strong>Spreadsheet source</strong>
@@ -137,26 +137,26 @@
             </div>
             <div class="premium-list-item">
               <strong>Eligibility logic</strong>
-              <span>Rows are considered eligible when the configured Jira link column is still blank.</span>
+              <span>Rows are considered eligible when the configured Jira Ticket Link column is still blank.</span>
             </div>
             <div class="premium-list-item">
               <strong>Mapping model</strong>
-              <span>Market, summary, optional PRD link, market-specific options, and fixed Jira values.</span>
+              <span>Market, system, title, supporting links, and the mapping rules used to prepare the final payload.</span>
             </div>
           </div>
         </section>
 
         <section class="panel glass-panel">
-          <h2>What This Tool Produces</h2>
-          <p class="help-text">A full Jira browse URL written back to the spreadsheet after BPMIS accepts the ticket creation request.</p>
+          <h2>What This Workspace Produces</h2>
+          <p class="help-text">A full Jira browse URL written back to the source sheet after BPMIS accepts the creation request.</p>
           <div class="premium-list">
             <div class="premium-list-item">
-              <strong>Jira creation</strong>
-              <span>Creates a Jira ticket through BPMIS for each eligible row.</span>
+              <strong>Controlled execution</strong>
+              <span>Creates Jira tickets through BPMIS for each eligible row that passes preview and run checks.</span>
             </div>
             <div class="premium-list-item">
               <strong>Write-back</strong>
-              <span>Stores the final URL in your configured Jira Ticket Link header.</span>
+              <span>Stores the final browse URL in your configured Jira Ticket Link column.</span>
             </div>
             <div class="premium-list-item">
               <strong>User-scoped settings</strong>
@@ -172,9 +172,9 @@
         <div class="panel-head">
           <div>
             <h2>Self-Check</h2>
-            <p class="step-copy">Validate the essentials before creating any Jira tickets.</p>
+            <p class="step-copy">Validate the essentials before running any BPMIS-backed creation flow.</p>
             <p class="help-text">
-              This check confirms Google connectivity, BPMIS API readiness, and spreadsheet readability using your saved config.
+              This check confirms Google connectivity, BPMIS API readiness, and source sheet readability using your saved config.
             </p>
           </div>
           <div class="button-row">
@@ -192,15 +192,15 @@
         <div class="panel-head">
           <div>
             <h2>Preview or Run</h2>
-            <p class="step-copy">Start with Preview. Only run ticket creation after the preview list looks correct.</p>
+            <p class="step-copy">Start with Preview. Only run after the candidate list and resolved mappings look correct.</p>
             <p class="help-text">
-              Preview shows which rows are eligible and what project summary each row will use. Run creates real Jira tickets and writes the result back to Google Sheets.
+              Preview shows which rows are eligible and what BPMIS summary each row will use. Run creates real Jira tickets and writes the result back to your source sheet.
             </p>
             <div class="result-tips">
               <span>Sync adds missing BPMIS projects without touching existing rows.</span>
               <span>Preview never creates Jira.</span>
               <span>Run only touches rows whose Jira link cell is blank.</span>
-              <span>Project column shows the resolved summary used for creation.</span>
+              <span>Project column shows the resolved BPMIS summary used for creation.</span>
             </div>
           </div>
           <div class="button-row">
@@ -276,7 +276,7 @@
             <h2>Configuration Studio</h2>
             <p class="step-copy">All setup lives here, separate from the presentation-focused homepage and the execution workspace.</p>
             <p class="help-text">
-              Save once, then reuse. These settings are stored for the current portal user and drive both Preview and Run.
+              Save once, then reuse. These settings are stored for the current portal user and drive sync, preview, and run.
             </p>
           </div>
         </div>
@@ -286,7 +286,7 @@
             <div class="config-card">
               <h3>Source Config</h3>
               <p class="card-help">
-                Tell the tool which spreadsheet to read and which PM email should be used for sync. Column names are configured in the mock sheet below.
+                Tell the workspace which source sheet to read and which PM email should be used for sync. Column names are configured in the mock sheet below.
               </p>
               <p class="field-help">
                 First time setting up? <a href="{{ url_for('download_default_sheet_template_xlsx') }}">Download the default sheet template</a>.
@@ -297,7 +297,7 @@
                     <label for="spreadsheet_link">Spreadsheet Link or ID</label>
                     <span class="field-badge field-badge-required">Required</span>
                   </div>
-                  <p class="field-help">Paste the full Google Sheets link or just the spreadsheet ID.</p>
+                  <p class="field-help">Paste the full Google Sheets link or just the spreadsheet ID for your source sheet.</p>
                   <input id="spreadsheet_link" name="spreadsheet_link" value="{{ mapping_config.spreadsheet_link }}" placeholder="https://docs.google.com/spreadsheets/d/...">
                 </div>
 
@@ -306,7 +306,7 @@
                     <label for="input_tab_name">Input Tab Name</label>
                     <span class="field-badge field-badge-required">Required</span>
                   </div>
-                  <p class="field-help">The exact worksheet tab name that contains the rows you want to process.</p>
+                  <p class="field-help">The exact worksheet tab name that contains the BPMIS project rows you want to process.</p>
                   <input id="input_tab_name" name="input_tab_name" value="{{ mapping_config.input_tab_name }}" placeholder="Projects">
                 </div>
 
@@ -347,7 +347,7 @@
                     <label for="issue_id_header">BPMIS Issue ID</label>
                     <input id="issue_id_header" name="issue_id_header" list="input-header-options" value="{{ mapping_config.issue_id_header }}" placeholder="Issue ID">
                     <p>Example: <code>225159</code></p>
-                    <span>Sync key and create parent reference.</span>
+                    <span>Primary sync key and parent reference.</span>
                   </div>
                   <div class="sheet-mock-col">
                     <label for="sync_project_name_header">BPMIS - Summary</label>
@@ -360,6 +360,12 @@
                     <input id="sync_market_header" name="sync_market_header" list="input-header-options" value="{{ mapping_config.sync_market_header }}" placeholder="Market">
                     <p>Example: <code>SG</code></p>
                     <span>Used for sync and Need UAT mapping.</span>
+                  </div>
+                  <div class="sheet-mock-col">
+                    <label for="sync_brd_link_header">BRD Link</label>
+                    <input id="sync_brd_link_header" name="sync_brd_link_header" list="input-header-options" value="{{ mapping_config.sync_brd_link_header }}" placeholder="BRD Link">
+                    <p>Example: <code>https://docs.google.com/...</code></p>
+                    <span>Filled by sync when exactly one BRD exists.</span>
                   </div>
                   <div class="sheet-mock-col">
                     <label for="system_header">System</label>
@@ -385,12 +391,6 @@
                   <p>Example: <code>Detailed Jira description goes here.</code></p>
                   <span>Passed into Jira as the description body.</span>
                 </div>
-                <div class="sheet-mock-col">
-                  <label for="sync_brd_link_header">BRD Link</label>
-                  <input id="sync_brd_link_header" name="sync_brd_link_header" list="input-header-options" value="{{ mapping_config.sync_brd_link_header }}" placeholder="BRD Link">
-                  <p>Example: <code>https://docs.google.com/...</code></p>
-                  <span>Filled by sync when exactly one BRD exists.</span>
-                  </div>
                   <div class="sheet-mock-col">
                     <label for="jira_ticket_link_header">Jira Ticket Link</label>
                     <input id="jira_ticket_link_header" name="jira_ticket_link_header" list="input-header-options" value="{{ mapping_config.jira_ticket_link_header }}" placeholder="Jira Ticket Link">
@@ -544,7 +544,7 @@
                 {% if shared_portal_enabled %}
                   The host Mac and Cloudflare Tunnel must stay online for teammates to access the portal.
                 {% else %}
-                  Start the stack, open the portal, preview your rows, then run ticket creation.
+                  Start the stack, open the portal, review your rows, then run the creation flow.
                 {% endif %}
               </span>
             </div>
