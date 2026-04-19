@@ -108,6 +108,9 @@ class TeamPortalAccessTests(unittest.TestCase):
                 response = client.get("/")
                 self.assertEqual(response.status_code, 200)
                 self.assertIn(b"Allowed User", response.data)
+                self.assertEqual(response.headers.get("Cache-Control"), "no-store, private, max-age=0")
+                self.assertEqual(response.headers.get("Pragma"), "no-cache")
+                self.assertEqual(response.headers.get("Expires"), "0")
 
     def test_allowed_google_domain_can_open_index(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
@@ -130,6 +133,26 @@ class TeamPortalAccessTests(unittest.TestCase):
                 response = client.get("/")
                 self.assertEqual(response.status_code, 200)
                 self.assertIn(b"Teammate", response.data)
+
+    def test_anonymous_login_gate_response_is_not_marked_no_store(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg",
+                "TEAM_PORTAL_BASE_URL": "https://jira-tool.example.com",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+            },
+            clear=False,
+        ):
+            app = create_app()
+            app.testing = True
+
+            with app.test_client() as client:
+                response = client.get("/", follow_redirects=False)
+                self.assertEqual(response.status_code, 200)
+                self.assertIsNone(response.headers.get("Pragma"))
+                self.assertIsNone(response.headers.get("Expires"))
 
     def test_healthz_is_public_in_shared_mode(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(

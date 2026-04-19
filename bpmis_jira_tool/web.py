@@ -235,6 +235,18 @@ def create_app() -> Flask:
             return redirect(url_for("access_denied"))
         return None
 
+    @app.after_request
+    def prevent_authenticated_html_caching(response):
+        if (
+            _google_session_is_connected()
+            and response.mimetype == "text/html"
+            and request.method == "GET"
+        ):
+            response.headers["Cache-Control"] = "no-store, private, max-age=0"
+            response.headers["Pragma"] = "no-cache"
+            response.headers["Expires"] = "0"
+        return response
+
     @app.get("/")
     def index():
         if _current_google_user_is_blocked(settings):
@@ -250,11 +262,11 @@ def create_app() -> Flask:
         run_notice = session.pop("run_notice", None)
         user_identity = _get_user_identity(settings)
         config_key = user_identity.get("config_key")
-        config_data = config_store.load(config_key) if config_key else None
-        config_data = config_data or config_store._normalize({})
+        raw_config_data = config_store.load(config_key) if config_key else None
+        config_data = raw_config_data or config_store._normalize({})
         config_data = _hydrate_setup_defaults(config_data, user_identity)
         input_headers: list[str] = []
-        has_saved_config = bool(config_key and config_store.load(config_key))
+        has_saved_config = bool(config_key and raw_config_data)
 
         if "google_credentials" in session:
             try:
@@ -604,11 +616,18 @@ def _get_config_store() -> WebConfigStore:
     return current_app.config["CONFIG_STORE"]
 
 
+def _current_google_profile() -> dict[str, Any]:
+    return session.get("google_profile") or {}
+
+
+def _current_google_email() -> str:
+    return str(_current_google_profile().get("email") or "").strip().lower()
+
+
 def _current_google_user_is_blocked(settings: Settings) -> bool:
     if not settings.team_allowed_emails and not settings.team_allowed_email_domains:
         return False
-    profile = session.get("google_profile") or {}
-    email = str(profile.get("email") or "").strip().lower()
+    email = _current_google_email()
     if not email:
         return False
     if email in settings.team_allowed_emails:
@@ -633,18 +652,16 @@ def _site_requires_google_login(settings: Settings) -> bool:
 
 
 def _google_session_is_connected() -> bool:
-    return "google_credentials" in session and bool((session.get("google_profile") or {}).get("email"))
+    return "google_credentials" in session and bool(_current_google_email())
 
 
 def _can_access_prd_briefing(settings: Settings) -> bool:
-    profile = session.get("google_profile") or {}
-    email = str(profile.get("email") or "").strip().lower()
+    email = _current_google_email()
     return bool(email and email == settings.prd_briefing_owner_email.strip().lower())
 
 
 def _can_access_grc_demo(settings: Settings) -> bool:
-    profile = session.get("google_profile") or {}
-    email = str(profile.get("email") or "").strip().lower()
+    email = _current_google_email()
     return bool(email and email == settings.grc_demo_owner_email.strip().lower())
 
 
@@ -878,8 +895,8 @@ def _resolve_bpmis_access_token(config_data: dict[str, Any], settings: Settings)
 
 
 def _get_user_identity(settings: Settings | None = None) -> dict[str, str | None]:
-    profile = session.get("google_profile") or {}
-    email = str(profile.get("email") or "").strip().lower()
+    profile = _current_google_profile()
+    email = _current_google_email()
     name = str(profile.get("name") or "").strip()
 
     if email:
