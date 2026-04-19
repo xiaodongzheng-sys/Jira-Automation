@@ -13,6 +13,7 @@ from bpmis_jira_tool.models import RunResult
 
 
 PREVIEW_OPTIONAL_FIELDS = {
+    "Summary",
     "System",
     "Component",
     "Assignee",

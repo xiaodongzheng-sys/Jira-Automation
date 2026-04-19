@@ -175,6 +175,23 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(run_results[0].status, "error")
         self.assertIn("System", run_results[0].message)
 
+    def test_preview_does_not_require_summary_when_create_would(self):
+        service = JiraCreationService.__new__(JiraCreationService)
+        service.sheets_service = FakeSheetsService()
+        service.bpmis_client = FakeBPMISClient()
+        service.field_mappings_override = [
+            FieldMapping("Summary", "column:Missing Summary"),
+            FieldMapping("Market", "column:Market"),
+        ]
+
+        preview_results, _headers = service.preview()
+        run_results = service.run(dry_run=False)
+
+        self.assertEqual(preview_results[0].status, "preview")
+        self.assertEqual(preview_results[0].project_label, "ISS-1")
+        self.assertEqual(run_results[0].status, "error")
+        self.assertIn("Summary", run_results[0].message)
+
     def test_sync_projects_appends_only_missing_issue_ids(self):
         service = BPMISProjectSyncService(
             sheets_service=FakeSheetsService(),
