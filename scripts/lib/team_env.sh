@@ -22,6 +22,31 @@ print(value if value is not None else "")
 PY
 }
 
+read_env_values() {
+  if [[ $# -eq 0 ]]; then
+    return 0
+  fi
+  if [[ ! -f "$ENV_FILE" || ! -x "$PYTHON_BIN" ]]; then
+    for _ in "$@"; do
+      printf '\n'
+    done
+    return 0
+  fi
+  local keys=("$@")
+  local keys_blob
+  keys_blob="$(printf '%s\n' "${keys[@]}")"
+  TEAM_ENV_KEYS="$keys_blob" "$PYTHON_BIN" - <<PY
+import os
+from dotenv import dotenv_values
+
+values = dotenv_values("$ENV_FILE")
+keys = os.environ.get("TEAM_ENV_KEYS", "").splitlines()
+for key in keys:
+    value = values.get(key, "")
+    print(value if value is not None else "")
+PY
+}
+
 resolve_team_data_dir() {
   local data_dir="${1:-}"
   data_dir="${data_dir:-$ROOT_DIR/.team-portal}"

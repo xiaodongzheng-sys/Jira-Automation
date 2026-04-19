@@ -3,6 +3,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$ROOT_DIR/scripts/lib/team_env.sh"
 GUARD_DAEMON_SCRIPT="$ROOT_DIR/scripts/run_team_stack_guard_daemon.sh"
 
 usage() {
@@ -44,34 +45,28 @@ logs() {
 }
 
 doctor() {
-  local env_file="${ENV_FILE:-$ROOT_DIR/.env}"
-  local data_dir="${TEAM_PORTAL_DATA_DIR:-$ROOT_DIR/.team-portal}"
-  local port="${TEAM_PORTAL_PORT:-5000}"
+  local env_file="$ENV_FILE"
+  local data_dir="${TEAM_PORTAL_DATA_DIR:-}"
+  local port="${TEAM_PORTAL_PORT:-}"
   local public_url="${TEAM_PORTAL_BASE_URL:-}"
   local status_file
   local alert_file
   local ok=0
 
-  if [[ -x "$ROOT_DIR/.venv/bin/python" && -f "$env_file" ]]; then
-    local resolved
-    resolved="$("$ROOT_DIR/.venv/bin/python" - <<PY
-from dotenv import dotenv_values
-values = dotenv_values("$env_file")
-print(values.get("TEAM_PORTAL_DATA_DIR", ""))
-print(values.get("TEAM_PORTAL_PORT", ""))
-print(values.get("TEAM_PORTAL_BASE_URL", ""))
-PY
-)"
+  local resolved
+  resolved="$(read_env_values TEAM_PORTAL_DATA_DIR TEAM_PORTAL_PORT TEAM_PORTAL_BASE_URL)"
+  if [[ -z "$data_dir" ]]; then
     data_dir="$(printf '%s' "$resolved" | sed -n '1p')"
+  fi
+  if [[ -z "$port" ]]; then
     port="$(printf '%s' "$resolved" | sed -n '2p')"
+  fi
+  if [[ -z "$public_url" ]]; then
     public_url="$(printf '%s' "$resolved" | sed -n '3p')"
   fi
 
-  data_dir="${data_dir:-$ROOT_DIR/.team-portal}"
+  data_dir="$(resolve_team_data_dir "$data_dir")"
   port="${port:-5000}"
-  if [[ "$data_dir" != /* ]]; then
-    data_dir="$ROOT_DIR/$data_dir"
-  fi
   status_file="$data_dir/run/team_stack_status.json"
   alert_file="$data_dir/run/team_stack_alert.json"
 
