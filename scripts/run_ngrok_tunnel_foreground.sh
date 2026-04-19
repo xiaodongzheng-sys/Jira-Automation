@@ -3,21 +3,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ENV_FILE="${ENV_FILE:-$ROOT_DIR/.env}"
-PYTHON_BIN="$ROOT_DIR/.venv/bin/python"
-
-read_env_value() {
-  local key="$1"
-  if [[ ! -f "$ENV_FILE" || ! -x "$PYTHON_BIN" ]]; then
-    return 0
-  fi
-  "$PYTHON_BIN" - <<PY
-from dotenv import dotenv_values
-values = dotenv_values("$ENV_FILE")
-value = values.get("$key", "")
-print(value if value is not None else "")
-PY
-}
+source "$ROOT_DIR/scripts/lib/team_env.sh"
 
 PUBLIC_URL="${TEAM_PORTAL_BASE_URL:-$(read_env_value TEAM_PORTAL_BASE_URL)}"
 PORT="${TEAM_PORTAL_PORT:-$(read_env_value TEAM_PORTAL_PORT)}"

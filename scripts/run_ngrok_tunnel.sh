@@ -3,31 +3,12 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ENV_FILE="${ENV_FILE:-$ROOT_DIR/.env}"
-PYTHON_BIN="$ROOT_DIR/.venv/bin/python"
+source "$ROOT_DIR/scripts/lib/team_env.sh"
 FOREGROUND_SCRIPT="$ROOT_DIR/scripts/run_ngrok_tunnel_foreground.sh"
-
-read_env_value() {
-  local key="$1"
-  if [[ ! -f "$ENV_FILE" || ! -x "$PYTHON_BIN" ]]; then
-    return 0
-  fi
-  "$PYTHON_BIN" - <<PY
-from dotenv import dotenv_values
-values = dotenv_values("$ENV_FILE")
-value = values.get("$key", "")
-print(value if value is not None else "")
-PY
-}
-
-DATA_DIR="${TEAM_PORTAL_DATA_DIR:-$(read_env_value TEAM_PORTAL_DATA_DIR)}"
-DATA_DIR="${DATA_DIR:-$ROOT_DIR/.team-portal}"
+DATA_DIR="$(resolve_team_data_dir "${TEAM_PORTAL_DATA_DIR:-$(read_env_value TEAM_PORTAL_DATA_DIR)}")"
 PORT="${TEAM_PORTAL_PORT:-$(read_env_value TEAM_PORTAL_PORT)}"
 PORT="${PORT:-5000}"
 PUBLIC_URL="${TEAM_PORTAL_BASE_URL:-$(read_env_value TEAM_PORTAL_BASE_URL)}"
-if [[ "$DATA_DIR" != /* ]]; then
-  DATA_DIR="$ROOT_DIR/$DATA_DIR"
-fi
 
 mkdir -p "$DATA_DIR/logs" "$DATA_DIR/run"
 

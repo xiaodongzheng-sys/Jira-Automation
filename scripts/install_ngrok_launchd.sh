@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ENV_FILE="${ENV_FILE:-$ROOT_DIR/.env}"
+source "$ROOT_DIR/scripts/lib/team_env.sh"
 LABEL="${TEAM_NGROK_LAUNCHD_LABEL:-io.npt.jira-creation-ngrok}"
 LAUNCH_AGENTS_DIR="$HOME/Library/LaunchAgents"
 PLIST_TARGET="$LAUNCH_AGENTS_DIR/$LABEL.plist"
@@ -16,10 +16,7 @@ fi
 
 mkdir -p "$LAUNCH_AGENTS_DIR"
 
-DATA_DIR="${TEAM_PORTAL_DATA_DIR:-$ROOT_DIR/.team-portal}"
-if [[ "$DATA_DIR" != /* ]]; then
-  DATA_DIR="$ROOT_DIR/$DATA_DIR"
-fi
+DATA_DIR="$(resolve_team_data_dir "${TEAM_PORTAL_DATA_DIR:-$(read_env_value TEAM_PORTAL_DATA_DIR)}")"
 mkdir -p "$DATA_DIR/logs"
 
 RUNNER_SCRIPT="$ROOT_DIR/scripts/run_ngrok_tunnel_foreground.sh"
