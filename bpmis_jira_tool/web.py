@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from functools import lru_cache
+import html
 import io
 from http import HTTPStatus
 import os
@@ -529,6 +530,50 @@ def create_app() -> Flask:
     def create_sync_bpmis_projects_job():
         return _start_job("sync-bpmis-projects", dry_run=False)
 
+    @app.get("/api/productization-upgrade-summary/versions")
+    def productization_upgrade_summary_versions():
+        login_gate = _require_google_login(settings, api=True)
+        if login_gate is not None:
+            return login_gate
+
+        query = str(request.args.get("q") or "").strip()
+        if not query:
+            return jsonify({"status": "error", "message": "Version keyword is required."}), HTTPStatus.BAD_REQUEST
+
+        try:
+            bpmis_client = _build_bpmis_client_for_current_user(settings)
+            versions = bpmis_client.search_versions(query)
+            return jsonify(
+                {
+                    "status": "ok",
+                    "items": [_serialize_productization_version_candidate(item) for item in versions],
+                }
+            )
+        except ToolError as error:
+            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
+
+    @app.get("/api/productization-upgrade-summary/issues")
+    def productization_upgrade_summary_issues():
+        login_gate = _require_google_login(settings, api=True)
+        if login_gate is not None:
+            return login_gate
+
+        version_id = str(request.args.get("version_id") or "").strip()
+        if not version_id:
+            return jsonify({"status": "error", "message": "version_id is required."}), HTTPStatus.BAD_REQUEST
+
+        try:
+            bpmis_client = _build_bpmis_client_for_current_user(settings)
+            rows = bpmis_client.list_issues_for_version(version_id)
+            return jsonify(
+                {
+                    "status": "ok",
+                    "items": [_normalize_productization_issue_row(item) for item in rows],
+                }
+            )
+        except ToolError as error:
+            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
+
     @app.get("/api/jobs/<job_id>")
     def get_job(job_id: str):
         snapshot = current_app.config["JOB_STORE"].snapshot(job_id)
@@ -578,6 +623,14 @@ def _build_service(settings: Settings) -> JiraCreationService:
         access_token=access_token,
         field_mappings_override=field_mappings_override,
     )
+
+
+def _build_bpmis_client_for_current_user(settings: Settings):
+    user_identity = _get_user_identity(settings)
+    config_store = _get_config_store()
+    config_data = config_store.load(user_identity["config_key"]) or config_store._normalize({})
+    access_token = _resolve_bpmis_access_token(config_data, settings)
+    return build_bpmis_client(settings, access_token=access_token)
 
 
 def _build_service_from_config(
@@ -913,6 +966,184 @@ def _csv_escape(value: str) -> str:
 def _resolve_bpmis_access_token(config_data: dict[str, Any], settings: Settings) -> str | None:
     configured_token = str(config_data.get("bpmis_api_access_token", "") or "").strip()
     return configured_token or settings.bpmis_api_access_token
+
+
+def _serialize_productization_version_candidate(row: dict[str, Any]) -> dict[str, str]:
+    version_id = str(row.get("id") or row.get("versionId") or "").strip()
+    version_name = (
+        str(row.get("fullName") or row.get("name") or row.get("versionName") or row.get("label") or "").strip()
+    )
+    market = _coerce_display_text(row.get("marketId") or row.get("market") or row.get("country"))
+    label = version_name
+    if market:
+        label = f"{version_name} · {market}"
+    return {
+        "version_id": version_id,
+        "version_name": version_name,
+        "market": market,
+        "label": label,
+    }
+
+
+def _normalize_productization_issue_row(row: dict[str, Any]) -> dict[str, Any]:
+    ticket_key = _extract_first_text(
+        row,
+        "jiraKey",
+        "ticketKey",
+        "jiraIssueKey",
+        "issueKey",
+        "key",
+    )
+    ticket_link = _extract_first_text(row, "jiraLink", "ticketLink", "jiraUrl", "url", "link")
+    if not ticket_key:
+        ticket_key = _extract_issue_key_from_text(ticket_link)
+    if not ticket_link and ticket_key:
+        ticket_link = f"{_jira_browse_base_url()}{ticket_key}"
+
+    return {
+        "jira_ticket_number": ticket_key or "-",
+        "jira_ticket_url": ticket_link or "",
+        "feature_summary": _extract_first_text(row, "summary", "title", "jiraSummary") or "-",
+        "detailed_feature": _summarize_productization_detail(
+            _extract_first_text(row, "desc", "description", "jiraDescription")
+        ),
+        "pm": _extract_person_display(
+            _extract_first_value(row, "jiraRegionalPmPicId", "regionalPmPic", "productManager", "pm", "regionalPm")
+        )
+        or "-",
+        "prd_links": _extract_link_values(
+            _extract_first_value(row, "jiraPrdLink", "prdLink", "prdLinks", "prd", "brdLink")
+        ),
+    }
+
+
+def _summarize_productization_detail(value: str) -> str:
+    if not value.strip():
+        return "-"
+
+    text = html.unescape(value)
+    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.I)
+    text = re.sub(r"</p\s*>", "\n", text, flags=re.I)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = text.replace("\r", "\n")
+    lines = [re.sub(r"\s+", " ", line).strip(" -*\t") for line in text.split("\n")]
+    chunks = [line for line in lines if line]
+    if not chunks:
+        return "-"
+
+    selected: list[str] = []
+    for chunk in chunks:
+        parts = [part.strip() for part in re.split(r"(?<=[.!?;。！？；])\s+", chunk) if part.strip()]
+        for part in parts or [chunk]:
+            if len(part) >= 8:
+                selected.append(part)
+            if len(selected) == 2:
+                break
+        if len(selected) == 2:
+            break
+
+    summary = " ".join(selected or chunks[:1]).strip()
+    summary = re.sub(r"\s+", " ", summary)
+    if len(summary) <= 220:
+        return summary
+    trimmed = summary[:217].rsplit(" ", 1)[0].strip()
+    return f"{trimmed or summary[:217].strip()}..."
+
+
+def _extract_first_value(row: dict[str, Any], *keys: str) -> Any:
+    containers = [row]
+    for nested_key in ("fields", "mapping", "data", "detail", "row"):
+        nested = row.get(nested_key)
+        if isinstance(nested, dict):
+            containers.append(nested)
+
+    for key in keys:
+        lowered_key = key.lower()
+        for container in containers:
+            for candidate_key, value in container.items():
+                if str(candidate_key).lower() == lowered_key:
+                    return value
+    return None
+
+
+def _extract_first_text(row: dict[str, Any], *keys: str) -> str:
+    value = _extract_first_value(row, *keys)
+    return _coerce_display_text(value)
+
+
+def _coerce_display_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, dict):
+        for key in ("displayName", "name", "emailAddress", "label", "value", "fullName", "id"):
+            text = str(value.get(key) or "").strip()
+            if text:
+                return text
+        return ""
+    if isinstance(value, list):
+        parts = [_coerce_display_text(item) for item in value]
+        parts = [part for part in parts if part]
+        return ", ".join(parts)
+    return str(value).strip()
+
+
+def _extract_person_display(value: Any) -> str:
+    if isinstance(value, list):
+        people = [_extract_person_display(item) for item in value]
+        people = [person for person in people if person]
+        return ", ".join(people)
+    if isinstance(value, dict):
+        for key in ("displayName", "name", "emailAddress", "label", "username", "value"):
+            text = str(value.get(key) or "").strip()
+            if text:
+                return text
+        return ""
+    return _coerce_display_text(value)
+
+
+def _extract_link_values(value: Any) -> list[dict[str, str]]:
+    links = _flatten_links(value)
+    deduped: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for link in links:
+        if link in seen:
+            continue
+        seen.add(link)
+        deduped.append({"label": link, "url": link})
+    return deduped
+
+
+def _flatten_links(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        links: list[str] = []
+        for item in value:
+            links.extend(_flatten_links(item))
+        return links
+    if isinstance(value, dict):
+        links: list[str] = []
+        for key in ("url", "link", "href", "value"):
+            links.extend(_flatten_links(value.get(key)))
+        return links
+    text = str(value).strip()
+    if not text:
+        return []
+    matches = re.findall(r"https?://[^\s,]+", text)
+    if matches:
+        return matches
+    return [text] if text.startswith("http://") or text.startswith("https://") else []
+
+
+def _extract_issue_key_from_text(value: str) -> str:
+    match = re.search(r"\b([A-Z][A-Z0-9]+-\d+)\b", value or "")
+    return match.group(1) if match else ""
+
+
+def _jira_browse_base_url() -> str:
+    return "https://jira.shopee.io/browse/"
 
 
 def _get_user_identity(settings: Settings | None = None) -> dict[str, str | None]:

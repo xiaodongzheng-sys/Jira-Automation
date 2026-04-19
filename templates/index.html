@@ -87,6 +87,7 @@
     <div class="workspace-tabs" role="tablist" aria-label="Workspace sections" data-default-tab="{{ default_workspace_tab }}">
       <button class="workspace-tab is-active" type="button" role="tab" aria-selected="true" data-tab-trigger="setup">Setup</button>
       <button class="workspace-tab" type="button" role="tab" aria-selected="false" data-tab-trigger="run">Run</button>
+      <button class="workspace-tab" type="button" role="tab" aria-selected="false" data-tab-trigger="productization-upgrade-summary">Productization Upgrade Summary</button>
     </div>
 
     <section class="workspace-panel is-active" data-tab-panel="setup">
@@ -464,6 +465,76 @@
         </div>
       </section>
     </section>
+
+    <section class="workspace-panel" data-tab-panel="productization-upgrade-summary">
+      <section class="panel panel-wide glass-panel productization-panel" data-productization-upgrade-summary>
+        <div class="panel-head productization-panel-head">
+          <div>
+            <h2>Productization Upgrade Summary</h2>
+            <p class="step-copy">Search a version keyword, choose the exact Fix Version, then review the matching Jira tickets in one table.</p>
+            <p class="help-text">
+              This view searches Fix Versions from BPMIS first, then loads ticket details for the selected version. PM and PRD Link will be enriched when BPMIS exposes extra detail.
+            </p>
+          </div>
+        </div>
+
+        <div class="productization-search-shell">
+          <form class="productization-search-form" data-productization-version-form>
+            <div class="field-group productization-search-field">
+              <label for="productization-version-query">Version Number</label>
+              <p class="field-help">Example: <code>Planning_26Q2</code> or any keyword contained in the version name.</p>
+              <input
+                id="productization-version-query"
+                name="q"
+                placeholder="Key in a version number"
+                autocomplete="off"
+                data-productization-version-input
+                required
+              >
+            </div>
+            <div class="button-row productization-search-actions">
+              <button class="button" type="submit">Search Version</button>
+            </div>
+          </form>
+          <p class="productization-inline-status" data-productization-status>Search for a version to begin.</p>
+        </div>
+
+        <section class="productization-section">
+          <div class="productization-section-head">
+            <h3>Matching Versions</h3>
+            <span>Select one exact version before loading tickets.</span>
+          </div>
+          <div class="productization-candidate-list" data-productization-candidates></div>
+          <div class="empty-state productization-empty" data-productization-candidates-empty>
+            <p>No version results yet.</p>
+          </div>
+        </section>
+
+        <section class="productization-section">
+          <div class="productization-section-head">
+            <h3>Upgrade Tickets</h3>
+            <span>Columns are normalized from BPMIS/Jira fields for quick review.</span>
+          </div>
+          <div class="table-wrap premium-table-wrap" data-productization-table-wrap hidden>
+            <table class="productization-table">
+              <thead>
+                <tr>
+                  <th>JIRA Ticket Number</th>
+                  <th>Feature Summary</th>
+                  <th>Detailed Feature</th>
+                  <th>PM</th>
+                  <th>PRD Link</th>
+                </tr>
+              </thead>
+              <tbody data-productization-results-body></tbody>
+            </table>
+          </div>
+          <div class="empty-state productization-empty" data-productization-results-empty>
+            <p>No upgrade tickets loaded yet.</p>
+          </div>
+        </section>
+      </section>
+    </section>
   </section>
 
   <div class="confirm-modal-backdrop" data-confirm-modal-backdrop hidden>
@@ -493,6 +564,7 @@
 {% endblock %}
 
 {% block extra_scripts %}
+  <script src="{{ url_for('static', filename='productization_upgrade_summary.js') }}"></script>
   <script id="team-profile-data" type="application/json">{{ team_profiles | tojson }}</script>
   <script>
     (() => {
