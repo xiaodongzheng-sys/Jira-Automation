@@ -31,7 +31,7 @@ mkdir -p "$LAUNCH_AGENTS_DIR"
 DATA_DIR="$(resolve_team_data_dir "${TEAM_PORTAL_DATA_DIR:-$(read_env_value TEAM_PORTAL_DATA_DIR)}")"
 mkdir -p "$DATA_DIR/logs"
 
-RUNNER_SCRIPT="$ROOT_DIR/scripts/run_team_stack_guard_daemon.sh"
+RUNNER_SCRIPT="$ROOT_DIR/scripts/run_team_stack_guard.sh"
 STDOUT_LOG="$DATA_DIR/logs/stack.launchd.out.log"
 STDERR_LOG="$DATA_DIR/logs/stack.launchd.err.log"
 TEAM_STACK_USE_CAFFEINATE_VALUE="${TEAM_STACK_USE_CAFFEINATE:-1}"
