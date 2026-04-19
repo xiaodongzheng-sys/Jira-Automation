@@ -10,6 +10,26 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
 class TeamStackScriptTests(unittest.TestCase):
+    def _current_release_revision(self) -> str:
+        helper_path = PROJECT_ROOT / "scripts/lib/team_env.sh"
+        command = f'''
+source "{helper_path}"
+current_release_revision
+'''
+        completed = subprocess.run(
+            ["bash", "-lc", command],
+            capture_output=True,
+            text=True,
+            check=False,
+            env={
+                **os.environ,
+                "ROOT_DIR": str(PROJECT_ROOT),
+                "PYTHON_BIN": sys.executable,
+            },
+        )
+        self.assertEqual(completed.returncode, 0, msg=completed.stderr)
+        return completed.stdout.strip()
+
     def _write_fake_curl(self, bin_dir: Path) -> Path:
         curl_path = bin_dir / "curl"
         curl_path.write_text(
@@ -19,7 +39,7 @@ set -euo pipefail
 url="${@: -1}"
 case "$url" in
   http://127.0.0.1:5000/healthz)
-    printf '{"status":"ok"}\\n'
+    printf '{"status":"ok","revision":"%s"}\\n' "${FAKE_HEALTHZ_REVISION:-unknown}"
     ;;
   http://127.0.0.1:4040/api/tunnels)
     printf '{"tunnels":[]}'\\n
@@ -126,6 +146,27 @@ resolve_team_data_dir "relative-dir"
         self.assertEqual(completed.returncode, 0, msg=completed.stderr)
         self.assertEqual(completed.stdout.strip(), str(PROJECT_ROOT / "relative-dir"))
 
+    def test_team_env_helper_reports_current_release_revision(self):
+        helper_path = PROJECT_ROOT / "scripts/lib/team_env.sh"
+        command = f'''
+source "{helper_path}"
+current_release_revision
+'''
+        completed = subprocess.run(
+            ["bash", "-lc", command],
+            capture_output=True,
+            text=True,
+            check=False,
+            env={
+                **os.environ,
+                "ROOT_DIR": str(PROJECT_ROOT),
+                "PYTHON_BIN": sys.executable,
+            },
+        )
+
+        self.assertEqual(completed.returncode, 0, msg=completed.stderr)
+        self.assertRegex(completed.stdout.strip(), r"^(?:[0-9a-f]{40}(?:-dirty-[0-9a-f]{12})?|unknown)$")
+
     def test_doctor_reports_stale_status_summary_when_live_probes_disagree(self):
         stack_script = PROJECT_ROOT / "scripts/run_team_stack.sh"
 
@@ -156,6 +197,7 @@ resolve_team_data_dir "relative-dir"
                     **os.environ,
                     "PATH": f"{fake_bin}:{os.environ['PATH']}",
                     "PYTHON_BIN": sys.executable,
+                    "FAKE_HEALTHZ_REVISION": self._current_release_revision(),
                     "TEAM_PORTAL_DATA_DIR": str(data_dir),
                     "TEAM_PORTAL_PORT": "5000",
                     "TEAM_PORTAL_BASE_URL": "https://example.ngrok.dev",
@@ -211,6 +253,7 @@ resolve_team_data_dir "relative-dir"
                     **os.environ,
                     "PATH": f"{fake_bin}:{os.environ['PATH']}",
                     "PYTHON_BIN": sys.executable,
+                    "FAKE_HEALTHZ_REVISION": self._current_release_revision(),
                     "TEAM_PORTAL_DATA_DIR": str(data_dir),
                     "TEAM_PORTAL_PORT": "5000",
                     "TEAM_PORTAL_BASE_URL": "https://example.ngrok.dev",

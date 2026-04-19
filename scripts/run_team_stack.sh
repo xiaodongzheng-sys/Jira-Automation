@@ -56,6 +56,8 @@ doctor() {
   local portal_ok=1
   local ngrok_ok=1
   local public_ok=1
+  local expected_revision
+  local served_revision=""
 
   local resolved
   resolved="$(read_env_values TEAM_PORTAL_DATA_DIR TEAM_PORTAL_PORT TEAM_PORTAL_BASE_URL)"
@@ -71,6 +73,7 @@ doctor() {
 
   data_dir="$(resolve_team_data_dir "$data_dir")"
   port="${port:-5000}"
+  expected_revision="$(current_release_revision)"
   status_file="$data_dir/run/team_stack_status.json"
   alert_file="$data_dir/run/team_stack_alert.json"
 
@@ -79,6 +82,7 @@ doctor() {
   echo "Data dir: $data_dir"
   echo "Port: $port"
   echo "Public URL: ${public_url:-<missing>}"
+  echo "Expected revision: $expected_revision"
   echo
 
   echo "== Guard Status =="
@@ -90,7 +94,20 @@ doctor() {
 
   echo "== Healthz =="
   if curl -fsS --max-time 5 "http://127.0.0.1:$port/healthz"; then
+    served_revision="$(fetch_healthz_field "127.0.0.1" "$port" revision 2>/dev/null || true)"
     echo
+    if [[ -n "$served_revision" ]]; then
+      echo "served revision: $served_revision"
+      if [[ "$served_revision" != "$expected_revision" ]]; then
+        echo "healthz revision mismatch: served revision does not match working tree"
+        portal_ok=0
+        ok=1
+      fi
+    else
+      echo "healthz revision missing"
+      portal_ok=0
+      ok=1
+    fi
   else
     echo "healthz check failed"
     portal_ok=0

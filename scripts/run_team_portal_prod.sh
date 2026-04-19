@@ -11,6 +11,7 @@ PORT="${TEAM_PORTAL_PORT:-$(read_env_value TEAM_PORTAL_PORT)}"
 PORT="${PORT:-5000}"
 PROBE_HOST="${TEAM_PORTAL_PROBE_HOST:-127.0.0.1}"
 DATA_DIR="$(resolve_team_data_dir "${TEAM_PORTAL_DATA_DIR:-$(read_env_value TEAM_PORTAL_DATA_DIR)}")"
+EXPECTED_REVISION="$(current_release_revision)"
 
 mkdir -p "$DATA_DIR" "$DATA_DIR/logs" "$DATA_DIR/run"
 
@@ -25,8 +26,10 @@ is_running() {
   local pid
   pid="$(find_live_pid || true)"
   if [[ -n "${pid:-}" ]]; then
-    echo "$pid" >"$PID_FILE"
-    return 0
+    if portal_revision_matches "$PROBE_HOST" "$PORT" "$EXPECTED_REVISION"; then
+      echo "$pid" >"$PID_FILE"
+      return 0
+    fi
   fi
   return 1
 }
@@ -41,18 +44,29 @@ start() {
 
   if is_running; then
     echo "Team portal already running on http://$HOST:$PORT (pid $(cat "$PID_FILE"))."
+    echo "Revision: $EXPECTED_REVISION"
     echo "Log: $LOG_FILE"
     return 0
   fi
 
+  local stale_pid
+  stale_pid="$(find_live_pid || true)"
+  if [[ -n "${stale_pid:-}" ]]; then
+    echo "Stopping stale portal process on port $PORT (pid $stale_pid) because its revision does not match $EXPECTED_REVISION."
+    kill "$stale_pid" >/dev/null 2>&1 || true
+    sleep 1
+    kill -9 "$stale_pid" >/dev/null 2>&1 || true
+  fi
+
   cd "$ROOT_DIR"
-  nohup "$PYTHON_BIN" -m flask --app app run --host "$HOST" --port "$PORT" >"$LOG_FILE" 2>&1 &
+  nohup env "TEAM_PORTAL_RELEASE_REVISION=$EXPECTED_REVISION" "$PYTHON_BIN" -m flask --app app run --host "$HOST" --port "$PORT" >"$LOG_FILE" 2>&1 &
   echo $! >"$PID_FILE"
 
   for _ in {1..20}; do
-    if curl -fsS "http://$PROBE_HOST:$PORT/healthz" >/dev/null 2>&1; then
+    if portal_revision_matches "$PROBE_HOST" "$PORT" "$EXPECTED_REVISION"; then
       echo "Team portal started at http://$HOST:$PORT"
       echo "PID: $(cat "$PID_FILE")"
+      echo "Revision: $EXPECTED_REVISION"
       echo "Data dir: $DATA_DIR"
       echo "Log: $LOG_FILE"
       return 0
@@ -81,6 +95,7 @@ stop() {
 status() {
   if is_running; then
     echo "Team portal running on http://$HOST:$PORT (pid $(cat "$PID_FILE"))."
+    echo "Revision: $EXPECTED_REVISION"
     echo "Data dir: $DATA_DIR"
     echo "Log: $LOG_FILE"
   else

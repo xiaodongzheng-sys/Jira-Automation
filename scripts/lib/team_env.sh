@@ -9,6 +9,93 @@ ROOT_DIR="${ROOT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 ENV_FILE="${ENV_FILE:-$ROOT_DIR/.env}"
 PYTHON_BIN="${PYTHON_BIN:-$ROOT_DIR/.venv/bin/python}"
 
+current_release_revision() {
+  if command -v git >/dev/null 2>&1 && [[ -x "$PYTHON_BIN" ]]; then
+    ROOT_DIR_VALUE="$ROOT_DIR" "$PYTHON_BIN" - <<'PY'
+import hashlib
+import os
+import subprocess
+import sys
+
+root_dir = os.environ.get("ROOT_DIR_VALUE", "")
+if not root_dir:
+    print("unknown")
+    raise SystemExit(0)
+
+def run_git(*args: str) -> str:
+    completed = subprocess.run(
+        ["git", "-C", root_dir, *args],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return completed.stdout
+
+try:
+    head = run_git("rev-parse", "HEAD").strip()
+except (FileNotFoundError, subprocess.CalledProcessError):
+    print("unknown")
+    raise SystemExit(0)
+
+try:
+    diff_text = run_git("diff", "--no-ext-diff", "--binary", "HEAD", "--", ".")
+    untracked = run_git("ls-files", "--others", "--exclude-standard")
+except subprocess.CalledProcessError:
+    print(head or "unknown")
+    raise SystemExit(0)
+
+dirty_material = diff_text
+if untracked.strip():
+    dirty_material += "\n--UNTRACKED--\n" + untracked
+
+if dirty_material.strip():
+    fingerprint = hashlib.sha1(dirty_material.encode("utf-8")).hexdigest()[:12]
+    print(f"{head}-dirty-{fingerprint}")
+else:
+    print(head or "unknown")
+PY
+    return 0
+  fi
+  printf 'unknown\n'
+}
+
+fetch_healthz_field() {
+  local host="$1"
+  local port="$2"
+  local field_name="$3"
+  local payload
+  payload="$(curl -fsS --max-time 5 "http://$host:$port/healthz" 2>/dev/null)" || return 1
+  if [[ ! -x "$PYTHON_BIN" ]]; then
+    return 1
+  fi
+  HEALTHZ_PAYLOAD="$payload" HEALTHZ_FIELD="$field_name" "$PYTHON_BIN" - <<'PY'
+import json
+import os
+import sys
+
+payload = os.environ.get("HEALTHZ_PAYLOAD", "")
+field_name = os.environ.get("HEALTHZ_FIELD", "")
+try:
+    data = json.loads(payload)
+except json.JSONDecodeError:
+    sys.exit(1)
+
+value = data.get(field_name)
+if value is None:
+    sys.exit(1)
+print(value)
+PY
+}
+
+portal_revision_matches() {
+  local host="$1"
+  local port="$2"
+  local expected_revision="${3:-$(current_release_revision)}"
+  local served_revision
+  served_revision="$(fetch_healthz_field "$host" "$port" revision 2>/dev/null)" || return 1
+  [[ "$served_revision" == "$expected_revision" ]]
+}
+
 read_env_value() {
   local key="$1"
   if [[ ! -f "$ENV_FILE" || ! -x "$PYTHON_BIN" ]]; then

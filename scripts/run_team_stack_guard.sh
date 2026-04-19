@@ -11,6 +11,7 @@ PORT="${TEAM_PORTAL_PORT:-$(read_env_value TEAM_PORTAL_PORT)}"
 PORT="${PORT:-5000}"
 PROBE_HOST="${TEAM_PORTAL_PROBE_HOST:-127.0.0.1}"
 PUBLIC_URL="${TEAM_PORTAL_BASE_URL:-$(read_env_value TEAM_PORTAL_BASE_URL)}"
+EXPECTED_REVISION="$(current_release_revision)"
 
 mkdir -p "$DATA_DIR/logs" "$DATA_DIR/run"
 
@@ -185,7 +186,7 @@ start_caffeinate() {
 }
 
 portal_is_healthy() {
-  curl -fsS --max-time 5 "http://$PROBE_HOST:$PORT/healthz" >/dev/null 2>&1
+  portal_revision_matches "$PROBE_HOST" "$PORT" "$EXPECTED_REVISION"
 }
 
 ngrok_is_healthy() {
@@ -230,7 +231,7 @@ start_portal() {
     sleep "$backoff"
   fi
   touch "$PORTAL_LOG_FILE"
-  "$PORTAL_FOREGROUND_SCRIPT" >>"$PORTAL_LOG_FILE" 2>&1 &
+  env "TEAM_PORTAL_RELEASE_REVISION=$EXPECTED_REVISION" "$PORTAL_FOREGROUND_SCRIPT" >>"$PORTAL_LOG_FILE" 2>&1 &
   echo $! >"$PORTAL_CHILD_PID_FILE"
   log "Portal launched (pid $(cat "$PORTAL_CHILD_PID_FILE"))."
 }

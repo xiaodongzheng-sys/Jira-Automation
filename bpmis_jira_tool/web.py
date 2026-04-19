@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+from functools import lru_cache
 import io
 from http import HTTPStatus
+import os
 from pathlib import Path
 import re
 import secrets
+import subprocess
 import threading
 import time
 from typing import Any
@@ -44,6 +47,24 @@ from incident_mockup.app import create_app as create_incident_mockup_app
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(PROJECT_ROOT / ".env")
 MARKET_KEYS = ["ID", "SG", "PH", "Regional"]
+
+
+@lru_cache(maxsize=1)
+def _current_release_revision() -> str:
+    pinned_revision = str(os.environ.get("TEAM_PORTAL_RELEASE_REVISION") or "").strip()
+    if pinned_revision:
+        return pinned_revision
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(PROJECT_ROOT), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return "unknown"
+    revision = completed.stdout.strip()
+    return revision or "unknown"
 
 
 @dataclass
@@ -296,7 +317,7 @@ def create_app() -> Flask:
 
     @app.get("/healthz")
     def healthz():
-        return jsonify({"status": "ok"}), HTTPStatus.OK
+        return jsonify({"status": "ok", "revision": _current_release_revision()}), HTTPStatus.OK
 
     @app.get("/access-denied")
     def access_denied():

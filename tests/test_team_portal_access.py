@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from bpmis_jira_tool.web import create_app
+from bpmis_jira_tool.web import _current_release_revision, create_app
 
 
 class TeamPortalAccessTests(unittest.TestCase):
@@ -171,7 +171,10 @@ class TeamPortalAccessTests(unittest.TestCase):
             with app.test_client() as client:
                 response = client.get("/healthz")
                 self.assertEqual(response.status_code, 200)
-                self.assertEqual(response.get_json(), {"status": "ok"})
+                self.assertEqual(
+                    response.get_json(),
+                    {"status": "ok", "revision": _current_release_revision()},
+                )
 
     def test_preview_job_requires_google_connection(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
