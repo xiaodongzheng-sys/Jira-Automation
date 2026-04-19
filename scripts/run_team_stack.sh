@@ -52,6 +52,10 @@ doctor() {
   local status_file
   local alert_file
   local ok=0
+  local guard_ok=1
+  local portal_ok=1
+  local ngrok_ok=1
+  local public_ok=1
 
   local resolved
   resolved="$(read_env_values TEAM_PORTAL_DATA_DIR TEAM_PORTAL_PORT TEAM_PORTAL_BASE_URL)"
@@ -78,7 +82,10 @@ doctor() {
   echo
 
   echo "== Guard Status =="
-  "$GUARD_DAEMON_SCRIPT" status || ok=1
+  "$GUARD_DAEMON_SCRIPT" status || guard_ok=0
+  if (( guard_ok == 0 )); then
+    ok=1
+  fi
   echo
 
   echo "== Healthz =="
@@ -86,6 +93,7 @@ doctor() {
     echo
   else
     echo "healthz check failed"
+    portal_ok=0
     ok=1
   fi
   echo
@@ -95,6 +103,7 @@ doctor() {
     echo "ngrok inspector reachable"
   else
     echo "ngrok inspector unreachable"
+    ngrok_ok=0
     ok=1
   fi
   echo
@@ -105,10 +114,12 @@ doctor() {
       echo "public URL reachable"
     else
       echo "public URL check failed"
+      public_ok=0
       ok=1
     fi
   else
     echo "TEAM_PORTAL_BASE_URL missing"
+    public_ok=0
     ok=1
   fi
   echo
@@ -118,6 +129,65 @@ doctor() {
     echo "status summary present: $status_file"
     cat "$status_file"
     echo
+    if [[ -x "$PYTHON_BIN" ]]; then
+      local status_analysis
+      status_analysis="$(
+        STATUS_FILE="$status_file" \
+        GUARD_OK="$guard_ok" \
+        PORTAL_OK="$portal_ok" \
+        NGROK_OK="$ngrok_ok" \
+        PUBLIC_OK="$public_ok" \
+        "$PYTHON_BIN" - <<'PY'
+import json
+import os
+import time
+
+status_file = os.environ["STATUS_FILE"]
+guard_ok = os.environ.get("GUARD_OK") == "1"
+portal_ok = os.environ.get("PORTAL_OK") == "1"
+ngrok_ok = os.environ.get("NGROK_OK") == "1"
+public_ok = os.environ.get("PUBLIC_OK") == "1"
+
+with open(status_file, "r", encoding="utf-8") as handle:
+    payload = json.load(handle)
+
+messages = []
+updated_unix = payload.get("updated_unix")
+if isinstance(updated_unix, int):
+    age = int(time.time()) - updated_unix
+    messages.append(f"status summary age: {age}s")
+    if age > 120:
+        messages.append("status summary is older than 120s")
+
+state = str(payload.get("state") or "")
+portal_health = str(payload.get("portal_health") or "")
+ngrok_health = str(payload.get("ngrok_health") or "")
+
+if not guard_ok and state == "running":
+    messages.append("status summary is stale: file says running but guard is not running")
+if guard_ok and state == "stopped":
+    messages.append("status summary is stale: file says stopped but guard is running")
+if portal_ok and portal_health == "unhealthy":
+    messages.append("status summary is stale: portal probe is healthy but file says unhealthy")
+if ngrok_ok and ngrok_health == "unhealthy":
+    messages.append("status summary is stale: ngrok probe is healthy but file says unhealthy")
+if public_ok and not payload.get("public_url"):
+    messages.append("status summary is incomplete: public_url missing while public probe passed")
+
+for message in messages:
+    print(message)
+PY
+      )"
+      if [[ -n "$status_analysis" ]]; then
+        while IFS= read -r line; do
+          [[ -n "$line" ]] || continue
+          echo "$line"
+          if [[ "$line" == status\ summary\ is\ stale:* || "$line" == status\ summary\ is\ older\ than* ]]; then
+            ok=1
+          fi
+        done <<<"$status_analysis"
+      fi
+    fi
   else
     echo "status summary missing: $status_file"
     ok=1

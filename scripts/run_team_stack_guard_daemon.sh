@@ -6,6 +6,10 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT_DIR/scripts/lib/team_env.sh"
 GUARD_SCRIPT="$ROOT_DIR/scripts/run_team_stack_guard.sh"
 DATA_DIR="$(resolve_team_data_dir "${TEAM_PORTAL_DATA_DIR:-$(read_env_value TEAM_PORTAL_DATA_DIR)}")"
+PORT="${TEAM_PORTAL_PORT:-$(read_env_value TEAM_PORTAL_PORT)}"
+PORT="${PORT:-5000}"
+PROBE_HOST="${TEAM_PORTAL_PROBE_HOST:-127.0.0.1}"
+PUBLIC_URL="${TEAM_PORTAL_BASE_URL:-$(read_env_value TEAM_PORTAL_BASE_URL)}"
 
 mkdir -p "$DATA_DIR/logs" "$DATA_DIR/run"
 
@@ -17,6 +21,12 @@ STATUS_FILE="$DATA_DIR/run/team_stack_status.json"
 ALERT_FILE="$DATA_DIR/run/team_stack_alert.json"
 LAUNCH_LOG="$DATA_DIR/logs/team_stack_guard.launch.log"
 USE_CAFFEINATE="${TEAM_STACK_USE_CAFFEINATE:-auto}"
+
+write_stopped_status_summary() {
+  cat >"$STATUS_FILE" <<EOF
+{"state":"stopped","updated_at":"$(date '+%Y-%m-%d %H:%M:%S')","updated_unix":$(date +%s),"guard_pid":null,"portal_child_pid":null,"ngrok_child_pid":null,"caffeinate_pid":null,"portal_health":"unknown","ngrok_health":"unknown","alert_state":"none","public_url":"$PUBLIC_URL","probe_url":"http://$PROBE_HOST:$PORT/healthz"}
+EOF
+}
 
 find_live_pid() {
   if [[ -f "$PID_FILE" ]]; then
@@ -67,6 +77,7 @@ stop() {
     kill "$pid" >/dev/null 2>&1 || true
   fi
   rm -f "$PID_FILE" "$CAFFEINATE_PID_FILE" "$PORTAL_CHILD_PID_FILE" "$NGROK_CHILD_PID_FILE"
+  write_stopped_status_summary
   echo "Team stack guard stopped."
 }
 

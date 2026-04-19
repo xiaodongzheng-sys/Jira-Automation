@@ -97,7 +97,7 @@ cleanup() {
     rm -f "$CAFFEINATE_PID_FILE"
   fi
   cat >"$STATUS_FILE" <<EOF
-{"state":"stopped","updated_at":"$(date '+%Y-%m-%d %H:%M:%S')","guard_pid":null,"portal_child_pid":null,"ngrok_child_pid":null}
+{"state":"stopped","updated_at":"$(date '+%Y-%m-%d %H:%M:%S')","updated_unix":$(date +%s),"guard_pid":null,"portal_child_pid":null,"ngrok_child_pid":null,"caffeinate_pid":null,"portal_health":"unknown","ngrok_health":"unknown","alert_state":"none","public_url":"$(json_escape "$PUBLIC_URL")","probe_url":"$(json_escape "http://$PROBE_HOST:$PORT/healthz")"}
 EOF
   rm -f "$PID_FILE"
 }
@@ -328,7 +328,7 @@ write_status_summary() {
   fi
 
   cat >"$STATUS_FILE" <<EOF
-{"state":"running","updated_at":"$(date '+%Y-%m-%d %H:%M:%S')","guard_pid":$$,"portal_child_pid":${portal_child_pid:-null},"ngrok_child_pid":${ngrok_child_pid:-null},"caffeinate_pid":${caffeinate_pid:-null},"portal_health":"$(json_escape "$portal_health")","ngrok_health":"$(json_escape "$ngrok_health")","alert_state":"$(json_escape "$alert_state")","public_url":"$(json_escape "$PUBLIC_URL")","probe_url":"$(json_escape "http://$PROBE_HOST:$PORT/healthz")"}
+{"state":"running","updated_at":"$(date '+%Y-%m-%d %H:%M:%S')","updated_unix":$(date +%s),"guard_pid":$$,"portal_child_pid":${portal_child_pid:-null},"ngrok_child_pid":${ngrok_child_pid:-null},"caffeinate_pid":${caffeinate_pid:-null},"portal_health":"$(json_escape "$portal_health")","ngrok_health":"$(json_escape "$ngrok_health")","alert_state":"$(json_escape "$alert_state")","public_url":"$(json_escape "$PUBLIC_URL")","probe_url":"$(json_escape "http://$PROBE_HOST:$PORT/healthz")"}
 EOF
 }
 
