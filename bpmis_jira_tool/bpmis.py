@@ -41,6 +41,18 @@ class BPMISClient(ABC):
     def get_single_brd_doc_links_for_projects(self, project_issue_ids: list[str]) -> dict[str, str]:
         raise NotImplementedError
 
+    @abstractmethod
+    def search_versions(self, query: str) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def list_issues_for_version(self, version_id: str | int) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_issue_detail(self, issue_id: str | int) -> dict[str, Any]:
+        raise NotImplementedError
+
 
 class BPMISDirectApiClient(BPMISClient):
     BIZ_PROJECT_TYPE_ID = 1
@@ -236,6 +248,122 @@ class BPMISDirectApiClient(BPMISClient):
                 resolved_links[issue_id] = ""
         return resolved_links
 
+    def search_versions(self, query: str) -> list[dict[str, Any]]:
+        normalized_query = query.strip()
+        if not normalized_query:
+            return []
+
+        rows: list[dict[str, Any]] = []
+        page = 1
+        page_size = 100
+        while True:
+            response = self._api_request(
+                "/api/v1/versions/list",
+                params={
+                    "search": json.dumps(
+                        {
+                            "name": normalized_query,
+                            "archived": 0,
+                            "page": page,
+                            "pageSize": page_size,
+                        }
+                    )
+                },
+            )
+            page_rows = (response.get("data") or {}).get("rows") or []
+            rows.extend(page_rows)
+            if len(page_rows) < page_size:
+                break
+            page += 1
+
+        deduped: dict[str, dict[str, Any]] = {}
+        query_lower = normalized_query.lower()
+        for row in rows:
+            version_id = str(row.get("id") or "").strip()
+            version_name = self._extract_version_name(row)
+            if not version_id or not version_name:
+                continue
+            if query_lower not in version_name.lower():
+                continue
+            if version_id in deduped:
+                continue
+            deduped[version_id] = row
+
+        return sorted(
+            deduped.values(),
+            key=lambda row: self._version_sort_key(normalized_query, self._extract_version_name(row)),
+        )
+
+    def list_issues_for_version(self, version_id: str | int) -> list[dict[str, Any]]:
+        normalized_version_id = str(version_id).strip()
+        if not normalized_version_id:
+            return []
+
+        rows: list[dict[str, Any]] = []
+        page = 1
+        page_size = 200
+        while True:
+            response = self._api_request(
+                "/api/v1/issues/list",
+                params={
+                    "search": json.dumps(
+                        {
+                            "joinType": "and",
+                            "subQueries": [
+                                {"typeId": [self.TASK_TYPE_ID]},
+                                {"fixVersionId": [int(normalized_version_id)]},
+                            ],
+                            "page": page,
+                            "pageSize": page_size,
+                            "mapping": True,
+                        }
+                    )
+                },
+            )
+            page_rows = (response.get("data") or {}).get("rows") or []
+            rows.extend(page_rows)
+            if len(page_rows) < page_size:
+                break
+            page += 1
+
+        enriched_rows: list[dict[str, Any]] = []
+        seen_issue_ids: set[str] = set()
+        for row in rows:
+            issue_id = self._extract_issue_identifier(row)
+            issue_key = self._extract_issue_key_from_row(row)
+            dedupe_key = issue_id or issue_key
+            if dedupe_key and dedupe_key in seen_issue_ids:
+                continue
+            if dedupe_key:
+                seen_issue_ids.add(dedupe_key)
+
+            if self._issue_requires_enrichment(row) and issue_id:
+                detail = self.get_issue_detail(issue_id)
+                if detail:
+                    row = self._merge_issue_payloads(row, detail)
+            enriched_rows.append(row)
+        return enriched_rows
+
+    def get_issue_detail(self, issue_id: str | int) -> dict[str, Any]:
+        normalized_issue_id = str(issue_id).strip()
+        if not normalized_issue_id:
+            return {}
+
+        attempts = [
+            ("GET", "/api/v1/issues/detail", {"id": normalized_issue_id}, None),
+            ("GET", "/api/v1/issues/detail", {"issueId": normalized_issue_id}, None),
+            ("GET", "/api/v1/issue/detail", {"id": normalized_issue_id}, None),
+            ("GET", "/api/v1/issue/detail", {"issueId": normalized_issue_id}, None),
+            ("GET", f"/api/v1/issues/{normalized_issue_id}", None, None),
+            ("GET", f"/api/v1/issue/{normalized_issue_id}", None, None),
+        ]
+        for method, path, params, body in attempts:
+            payload = self._safe_api_request(path, method=method, params=params, body=body)
+            detail = self._extract_issue_detail_payload(payload)
+            if detail:
+                return detail
+        return {}
+
     def _build_create_payload(
         self,
         project: ProjectMatch,
@@ -308,6 +436,170 @@ class BPMISDirectApiClient(BPMISClient):
 
         payload["supportedCountries"] = [self.SUPPORTED_COUNTRIES_ALL_VALUE]
         return payload
+
+    def _extract_issue_detail_payload(self, payload: dict[str, Any] | None) -> dict[str, Any]:
+        if not payload:
+            return {}
+        data = payload.get("data")
+        if isinstance(data, dict):
+            for key in ("detail", "row", "issue", "item", "info"):
+                if isinstance(data.get(key), dict):
+                    return data[key]
+            if any(key in data for key in ("id", "issueId", "summary", "desc", "description", "jiraPrdLink")):
+                return data
+        return {}
+
+    def _safe_api_request(
+        self,
+        path: str,
+        method: str = "GET",
+        params: dict[str, Any] | None = None,
+        body: Any | None = None,
+    ) -> dict[str, Any] | None:
+        try:
+            return self._api_request(path, method=method, params=params, body=body)
+        except BPMISError:
+            return None
+
+    def _issue_requires_enrichment(self, row: dict[str, Any]) -> bool:
+        return not (
+            self._extract_issue_description(row)
+            and self._extract_issue_pm(row)
+            and self._extract_issue_prd_links(row)
+        )
+
+    def _merge_issue_payloads(self, primary: dict[str, Any], fallback: dict[str, Any]) -> dict[str, Any]:
+        merged = dict(fallback)
+        for key, value in primary.items():
+            if value not in (None, "", [], {}):
+                merged[key] = value
+        return merged
+
+    def _extract_issue_identifier(self, row: dict[str, Any]) -> str:
+        for key in ("id", "issueId", "issue_id"):
+            value = self._find_first_value(row, key)
+            if value is not None:
+                text = str(value).strip()
+                if text:
+                    return text
+        return ""
+
+    def _extract_issue_key_from_row(self, row: dict[str, Any]) -> str:
+        for key in ("jiraKey", "ticketKey", "jiraIssueKey", "issueKey", "key"):
+            value = self._find_first_value(row, key)
+            if value is not None:
+                text = str(value).strip()
+                if text:
+                    return text
+        return self._extract_issue_key(str(self._find_first_value(row, "jiraLink") or ""))
+
+    def _extract_issue_description(self, row: dict[str, Any]) -> str:
+        for key in ("desc", "description", "jiraDescription"):
+            value = self._find_first_value(row, key)
+            if value is None:
+                continue
+            text = self._stringify_value(value)
+            if text:
+                return text
+        return ""
+
+    def _extract_issue_pm(self, row: dict[str, Any]) -> str:
+        for key in ("jiraRegionalPmPicId", "regionalPmPic", "productManager", "pm", "regionalPm"):
+            value = self._find_first_value(row, key)
+            text = self._stringify_person(value)
+            if text:
+                return text
+        return ""
+
+    def _extract_issue_prd_links(self, row: dict[str, Any]) -> list[str]:
+        candidates: list[str] = []
+        for key in ("jiraPrdLink", "prdLink", "prdLinks", "prd", "brdLink"):
+            value = self._find_first_value(row, key)
+            candidates.extend(self._extract_links(value))
+        deduped: list[str] = []
+        for item in candidates:
+            if item not in deduped:
+                deduped.append(item)
+        return deduped
+
+    def _extract_version_name(self, row: dict[str, Any]) -> str:
+        for key in ("fullName", "name", "versionName", "label"):
+            value = row.get(key)
+            text = str(value or "").strip()
+            if text:
+                return text
+        return ""
+
+    def _version_sort_key(self, query: str, value: str) -> tuple[int, int, str]:
+        lowered_query = query.lower()
+        lowered_value = value.lower()
+        if lowered_value == lowered_query:
+            return (0, len(value), lowered_value)
+        if lowered_value.startswith(lowered_query):
+            return (1, len(value), lowered_value)
+        return (2, len(value), lowered_value)
+
+    def _find_first_value(self, row: dict[str, Any], key: str) -> Any:
+        containers = [row]
+        for nested_key in ("fields", "mapping", "data", "detail", "row"):
+            nested = row.get(nested_key)
+            if isinstance(nested, dict):
+                containers.append(nested)
+        lowered_key = key.lower()
+        for container in containers:
+            for candidate_key, value in container.items():
+                if str(candidate_key).lower() == lowered_key:
+                    return value
+        return None
+
+    def _stringify_value(self, value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value.strip()
+        if isinstance(value, dict):
+            for key in ("label", "name", "displayName", "emailAddress", "value"):
+                text = str(value.get(key) or "").strip()
+                if text:
+                    return text
+            return ""
+        if isinstance(value, list):
+            rendered = [self._stringify_value(item) for item in value]
+            rendered = [item for item in rendered if item]
+            return ", ".join(rendered)
+        return str(value).strip()
+
+    def _stringify_person(self, value: Any) -> str:
+        if isinstance(value, list):
+            people = [self._stringify_person(item) for item in value]
+            people = [item for item in people if item]
+            return ", ".join(people)
+        if isinstance(value, dict):
+            for key in ("displayName", "name", "emailAddress", "label", "username", "value"):
+                text = str(value.get(key) or "").strip()
+                if text:
+                    return text
+            return ""
+        return self._stringify_value(value)
+
+    def _extract_links(self, value: Any) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, list):
+            links: list[str] = []
+            for item in value:
+                links.extend(self._extract_links(item))
+            return links
+        if isinstance(value, dict):
+            links: list[str] = []
+            for key in ("url", "link", "href", "value"):
+                links.extend(self._extract_links(value.get(key)))
+            return links
+        text = str(value).strip()
+        if not text:
+            return []
+        matches = re.findall(r"https?://[^\s,]+", text)
+        return matches or ([text] if text.startswith("http://") or text.startswith("https://") else [])
 
     def _write_debug_capture(self, payload: dict[str, Any], response: dict[str, Any]) -> None:
         debug_path = Path(__file__).resolve().parent.parent / "tmp" / "last_bpmis_api_result.json"

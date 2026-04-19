@@ -11,7 +11,10 @@ from bpmis_jira_tool.config import Settings
 from bpmis_jira_tool.web import (
     _build_team_profiles_for_display,
     _hydrate_setup_defaults,
+    _normalize_productization_issue_row,
     _resolve_bpmis_access_token,
+    _serialize_productization_version_candidate,
+    _summarize_productization_detail,
     create_app,
 )
 
@@ -290,7 +293,7 @@ class WebPortalFeatureTests(unittest.TestCase):
             saved = app.config["CONFIG_STORE"].load("anon:save-token-user")
             self.assertEqual(saved["bpmis_api_access_token"], "portal-token")
 
-    def test_index_renders_setup_and_run_only(self):
+    def test_index_renders_setup_run_and_productization_tabs(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
@@ -314,11 +317,14 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn(b">Setup<", response.data)
         self.assertIn(b">Run<", response.data)
+        self.assertIn(b">Productization Upgrade Summary<", response.data)
         self.assertNotIn(b">Overview<", response.data)
         self.assertNotIn(b">Support<", response.data)
         self.assertNotIn(b"Self-Check", response.data)
         self.assertIn(b"Apply Team Defaults", response.data)
         self.assertIn(b"PM Team Change", response.data)
+        self.assertIn(b"Search Version", response.data)
+        self.assertIn(b"JIRA Ticket Number", response.data)
         self.assertIn(b"userInitiatedTeamChange", response.data)
         self.assertIn(b"resetConfirmModalState", response.data)
         self.assertIn(b"syncSelectedTeamBaseline", response.data)
@@ -327,6 +333,121 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertIn(b"classList.add('pm-confirm-visible')", response.data)
         self.assertIn(b"classList.remove('pm-confirm-visible')", response.data)
         self.assertIn(b"data-initial-team=", response.data)
+        self.assertIn(b"productization_upgrade_summary.js", response.data)
+
+    def test_productization_versions_api_returns_normalized_candidates(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
+            },
+            clear=False,
+        ):
+            app = create_app()
+            app.testing = True
+
+            fake_client = type(
+                "FakeProductizationClient",
+                (),
+                {
+                    "search_versions": lambda self, query: [
+                        {"id": 88, "fullName": "Planning_26Q2", "marketId": {"label": "SG"}}
+                    ],
+                },
+            )()
+
+            with patch("bpmis_jira_tool.web._build_bpmis_client_for_current_user", return_value=fake_client):
+                with app.test_client() as client:
+                    with client.session_transaction() as session:
+                        session["anonymous_user_key"] = "productization-user"
+
+                    response = client.get("/api/productization-upgrade-summary/versions?q=26Q2")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(
+            payload["items"],
+            [
+                {
+                    "version_id": "88",
+                    "version_name": "Planning_26Q2",
+                    "market": "SG",
+                    "label": "Planning_26Q2 · SG",
+                }
+            ],
+        )
+
+    def test_productization_issues_api_returns_normalized_rows(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
+            },
+            clear=False,
+        ):
+            app = create_app()
+            app.testing = True
+
+            fake_client = type(
+                "FakeProductizationClient",
+                (),
+                {
+                    "list_issues_for_version": lambda self, version_id: [
+                        {
+                            "jiraKey": "ABC-101",
+                            "jiraLink": "https://jira.shopee.io/browse/ABC-101",
+                            "summary": "Upgrade wallet flow",
+                            "desc": "<p>Improve rollback handling.</p><p>Support retry.</p>",
+                            "jiraRegionalPmPicId": [{"displayName": "Alice PM"}],
+                            "jiraPrdLink": "https://confluence/prd-1",
+                        }
+                    ],
+                },
+            )()
+
+            with patch("bpmis_jira_tool.web._build_bpmis_client_for_current_user", return_value=fake_client):
+                with app.test_client() as client:
+                    with client.session_transaction() as session:
+                        session["anonymous_user_key"] = "productization-user"
+
+                    response = client.get("/api/productization-upgrade-summary/issues?version_id=88")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["items"][0]["jira_ticket_number"], "ABC-101")
+        self.assertEqual(payload["items"][0]["jira_ticket_url"], "https://jira.shopee.io/browse/ABC-101")
+        self.assertEqual(payload["items"][0]["feature_summary"], "Upgrade wallet flow")
+        self.assertEqual(payload["items"][0]["pm"], "Alice PM")
+        self.assertEqual(payload["items"][0]["prd_links"], [{"label": "https://confluence/prd-1", "url": "https://confluence/prd-1"}])
+
+    def test_productization_summary_helpers_normalize_missing_fields(self):
+        normalized_version = _serialize_productization_version_candidate(
+            {"id": 7, "fullName": "Planning_26Q2", "marketId": {"label": "SG"}}
+        )
+        normalized_issue = _normalize_productization_issue_row(
+            {
+                "jiraLink": "https://jira.shopee.io/browse/ABC-88",
+                "summary": "Improve onboarding",
+                "description": "First line.\nSecond line with details.",
+            }
+        )
+
+        self.assertEqual(normalized_version["label"], "Planning_26Q2 · SG")
+        self.assertEqual(normalized_issue["jira_ticket_number"], "ABC-88")
+        self.assertEqual(normalized_issue["pm"], "-")
+        self.assertEqual(normalized_issue["prd_links"], [])
+        self.assertEqual(_summarize_productization_detail(""), "-")
+        self.assertIn("First line.", normalized_issue["detailed_feature"])
 
     def test_save_mapping_config_fills_email_defaults_for_google_user(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
