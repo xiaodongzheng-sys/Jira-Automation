@@ -181,6 +181,49 @@ resolve_team_data_dir "relative-dir"
                 completed.stdout,
             )
 
+    def test_doctor_reports_stale_stopped_summary_when_live_probes_respond(self):
+        stack_script = PROJECT_ROOT / "scripts/run_team_stack.sh"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            fake_bin = temp_path / "bin"
+            fake_bin.mkdir()
+            self._write_fake_curl(fake_bin)
+
+            data_dir = temp_path / "team-data"
+            run_dir = data_dir / "run"
+            run_dir.mkdir(parents=True)
+            status_file = run_dir / "team_stack_status.json"
+            status_file.write_text(
+                """
+{"state":"stopped","updated_at":"2026-04-19 13:35:00","updated_unix":4102444800,"guard_pid":null,"portal_child_pid":null,"ngrok_child_pid":null,"caffeinate_pid":null,"portal_health":"unknown","ngrok_health":"unknown","alert_state":"none","public_url":"https://example.ngrok.dev","probe_url":"http://127.0.0.1:5000/healthz"}
+""".strip()
+                + "\n",
+                encoding="utf-8",
+            )
+
+            completed = subprocess.run(
+                ["bash", str(stack_script), "doctor"],
+                capture_output=True,
+                text=True,
+                check=False,
+                env={
+                    **os.environ,
+                    "PATH": f"{fake_bin}:{os.environ['PATH']}",
+                    "PYTHON_BIN": sys.executable,
+                    "TEAM_PORTAL_DATA_DIR": str(data_dir),
+                    "TEAM_PORTAL_PORT": "5000",
+                    "TEAM_PORTAL_BASE_URL": "https://example.ngrok.dev",
+                },
+                cwd=PROJECT_ROOT,
+            )
+
+            self.assertNotEqual(completed.returncode, 0, msg=completed.stdout)
+            self.assertIn(
+                "status summary is stale: file says stopped but live probes still respond",
+                completed.stdout,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

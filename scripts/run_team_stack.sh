@@ -167,6 +167,8 @@ if not guard_ok and state == "running":
     messages.append("status summary is stale: file says running but guard is not running")
 if guard_ok and state == "stopped":
     messages.append("status summary is stale: file says stopped but guard is running")
+if state == "stopped" and (portal_ok or ngrok_ok or public_ok):
+    messages.append("status summary is stale: file says stopped but live probes still respond")
 if portal_ok and portal_health == "unhealthy":
     messages.append("status summary is stale: portal probe is healthy but file says unhealthy")
 if ngrok_ok and ngrok_health == "unhealthy":
