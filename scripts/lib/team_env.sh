@@ -142,3 +142,30 @@ resolve_team_data_dir() {
   fi
   printf '%s\n' "$data_dir"
 }
+
+is_path_within() {
+  local path_value="$1"
+  local parent_value="$2"
+  [[ -n "$path_value" && -n "$parent_value" ]] || return 1
+  case "$path_value" in
+    "$parent_value"|"$parent_value"/*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+is_protected_mac_path() {
+  local path_value="${1:-}"
+  local home_dir="$HOME"
+  [[ -n "$path_value" ]] || return 1
+  case "$path_value" in
+    "$home_dir/Documents"|"$home_dir/Documents"/*) return 0 ;;
+    "$home_dir/Desktop"|"$home_dir/Desktop"/*) return 0 ;;
+    "$home_dir/Downloads"|"$home_dir/Downloads"/*) return 0 ;;
+    "$home_dir/Library/Mobile Documents"|"$home_dir/Library/Mobile Documents"/*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+recommended_team_stack_root() {
+  printf '%s\n' "$HOME/Workspace/jira-creation-stack-host"
+}

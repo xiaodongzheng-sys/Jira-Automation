@@ -47,6 +47,34 @@ https://jira-tool.example.com/auth/google/callback
 
 Replace the hostname with your real ngrok hostname.
 
+## Recommended Host Layout
+
+For the final macOS host setup, do not run the long-lived stack from a repo under protected folders such as:
+
+- `~/Documents`
+- `~/Desktop`
+- `~/Downloads`
+- iCloud Drive paths under `~/Library/Mobile Documents`
+
+Recommended host workspace:
+
+```bash
+~/Workspace/jira-creation-stack-host
+```
+
+If your current checkout is under a protected folder, use the one-shot setup script:
+
+```bash
+./scripts/setup_team_stack_host_workspace.sh
+```
+
+That script will:
+
+- create or reuse the recommended host workspace
+- copy `.env` on first setup
+- install the `launchd` job from the host workspace
+- try to start the `launchd` job
+
 ## Start the Shared Portal
 
 Use the stack guard as the fixed entrypoint. It keeps the Flask portal and ngrok alive together and is now the recommended day-to-day start command:
@@ -102,8 +130,12 @@ launchctl start io.npt.jira-creation-stack
 
 Note:
 
-- macOS may block `launchd` jobs from reading repos under protected folders like `Documents`
-- if that happens, prefer `./scripts/run_team_stack.sh start --caffeinate` from Terminal, or move the repo to a non-protected path such as `~/Workspace`
+- if your repo is under a protected macOS folder, `install_team_stack_launchd.sh` will now stop and tell you to use `./scripts/setup_team_stack_host_workspace.sh`
+- if you still choose to force-install from a protected path, use:
+
+```bash
+TEAM_STACK_ALLOW_PROTECTED_ROOT=1 ./scripts/install_team_stack_launchd.sh
+```
 
 ## ngrok Setup
 
@@ -146,6 +178,7 @@ Host-side checks:
 - verify Google login callback works through the public hostname
 - inspect `.team-portal/run/team_stack_status.json` for the latest guard view of portal and ngrok health
 - run `./scripts/run_team_stack.sh doctor` for a one-shot end-to-end stack diagnosis
+- `doctor` now also checks whether the repo path is launchd-friendly and whether the `launchd` job is installed
 
 Teammate acceptance check:
 
@@ -165,6 +198,20 @@ Check:
 - the host Mac is awake
 - the portal process is running
 - the ngrok tunnel is connected
+- `./scripts/run_team_stack.sh doctor`
+
+### launchd install fails on macOS
+
+Check:
+
+- whether the repo is under `Documents`, `Desktop`, `Downloads`, or iCloud Drive
+- whether `GOOGLE_OAUTH_CLIENT_SECRET_FILE` also points into a protected folder
+
+Recommended fix:
+
+```bash
+./scripts/setup_team_stack_host_workspace.sh
+```
 
 ### Google login succeeds but user is denied
 

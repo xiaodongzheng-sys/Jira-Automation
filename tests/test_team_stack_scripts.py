@@ -167,6 +167,52 @@ current_release_revision
         self.assertEqual(completed.returncode, 0, msg=completed.stderr)
         self.assertRegex(completed.stdout.strip(), r"^(?:[0-9a-f]{40}(?:-dirty-[0-9a-f]{12})?|unknown)$")
 
+    def test_team_env_helper_reports_recommended_host_root(self):
+        helper_path = PROJECT_ROOT / "scripts/lib/team_env.sh"
+        command = f'''
+source "{helper_path}"
+recommended_team_stack_root
+'''
+        completed = subprocess.run(
+            ["bash", "-lc", command],
+            capture_output=True,
+            text=True,
+            check=False,
+            env={
+                **os.environ,
+                "ROOT_DIR": str(PROJECT_ROOT),
+                "PYTHON_BIN": sys.executable,
+            },
+        )
+
+        self.assertEqual(completed.returncode, 0, msg=completed.stderr)
+        self.assertTrue(completed.stdout.strip().endswith("/Workspace/jira-creation-stack-host"))
+
+    def test_team_env_helper_detects_protected_documents_path(self):
+        helper_path = PROJECT_ROOT / "scripts/lib/team_env.sh"
+        command = f'''
+source "{helper_path}"
+if is_protected_mac_path "$HOME/Documents/demo"; then
+  echo "yes"
+else
+  echo "no"
+fi
+'''
+        completed = subprocess.run(
+            ["bash", "-lc", command],
+            capture_output=True,
+            text=True,
+            check=False,
+            env={
+                **os.environ,
+                "ROOT_DIR": str(PROJECT_ROOT),
+                "PYTHON_BIN": sys.executable,
+            },
+        )
+
+        self.assertEqual(completed.returncode, 0, msg=completed.stderr)
+        self.assertEqual(completed.stdout.strip(), "yes")
+
     def test_doctor_reports_stale_status_summary_when_live_probes_disagree(self):
         stack_script = PROJECT_ROOT / "scripts/run_team_stack.sh"
 

@@ -49,6 +49,7 @@ doctor() {
   local data_dir="${TEAM_PORTAL_DATA_DIR:-}"
   local port="${TEAM_PORTAL_PORT:-}"
   local public_url="${TEAM_PORTAL_BASE_URL:-}"
+  local launchd_label="${TEAM_STACK_LAUNCHD_LABEL:-io.npt.jira-creation-stack}"
   local status_file
   local alert_file
   local ok=0
@@ -58,6 +59,7 @@ doctor() {
   local public_ok=1
   local expected_revision
   local served_revision=""
+  local recommended_root
 
   local resolved
   resolved="$(read_env_values TEAM_PORTAL_DATA_DIR TEAM_PORTAL_PORT TEAM_PORTAL_BASE_URL)"
@@ -74,15 +76,38 @@ doctor() {
   data_dir="$(resolve_team_data_dir "$data_dir")"
   port="${port:-5000}"
   expected_revision="$(current_release_revision)"
+  recommended_root="$(recommended_team_stack_root)"
   status_file="$data_dir/run/team_stack_status.json"
   alert_file="$data_dir/run/team_stack_alert.json"
 
   echo "== Doctor =="
+  echo "Repo root: $ROOT_DIR"
+  if is_protected_mac_path "$ROOT_DIR"; then
+    echo "Repo path: protected macOS folder"
+    echo "Recommended host workspace: $recommended_root"
+    ok=1
+  else
+    echo "Repo path: launchd-friendly"
+  fi
   echo "Env file: $env_file"
   echo "Data dir: $data_dir"
   echo "Port: $port"
   echo "Public URL: ${public_url:-<missing>}"
   echo "Expected revision: $expected_revision"
+  echo
+
+  echo "== launchd =="
+  if launchctl print "gui/$(id -u)/$launchd_label" >/dev/null 2>&1; then
+    echo "launchd job installed: $launchd_label"
+  else
+    echo "launchd job not installed: $launchd_label"
+    if is_protected_mac_path "$ROOT_DIR"; then
+      echo "Recommended fix: ./scripts/setup_team_stack_host_workspace.sh"
+    else
+      echo "Recommended fix: ./scripts/install_team_stack_launchd.sh"
+    fi
+    ok=1
+  fi
   echo
 
   echo "== Guard Status =="

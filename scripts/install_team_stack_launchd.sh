@@ -14,6 +14,18 @@ if [[ ! -f "$TEMPLATE_PATH" ]]; then
   exit 1
 fi
 
+if is_protected_mac_path "$ROOT_DIR" && [[ "${TEAM_STACK_ALLOW_PROTECTED_ROOT:-0}" != "1" ]]; then
+  echo "launchd install blocked: repo is under a macOS protected folder:"
+  echo "  $ROOT_DIR"
+  echo
+  echo "Recommended fix:"
+  echo "  ./scripts/setup_team_stack_host_workspace.sh"
+  echo
+  echo "If you really want to force install from here:"
+  echo "  TEAM_STACK_ALLOW_PROTECTED_ROOT=1 ./scripts/install_team_stack_launchd.sh"
+  exit 1
+fi
+
 mkdir -p "$LAUNCH_AGENTS_DIR"
 
 DATA_DIR="$(resolve_team_data_dir "${TEAM_PORTAL_DATA_DIR:-$(read_env_value TEAM_PORTAL_DATA_DIR)}")"
