@@ -8,6 +8,9 @@ TEAM_ENV_HELPERS_LOADED=1
 ROOT_DIR="${ROOT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 ENV_FILE="${ENV_FILE:-$ROOT_DIR/.env}"
 PYTHON_BIN="${PYTHON_BIN:-$ROOT_DIR/.venv/bin/python}"
+if [[ ! -x "$PYTHON_BIN" ]] && command -v python3 >/dev/null 2>&1; then
+  PYTHON_BIN="$(command -v python3)"
+fi
 
 current_release_revision() {
   if command -v git >/dev/null 2>&1 && [[ -x "$PYTHON_BIN" ]]; then

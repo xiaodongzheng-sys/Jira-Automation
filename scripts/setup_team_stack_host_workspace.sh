@@ -26,11 +26,22 @@ if [[ ! -d "$TARGET_ROOT/.git" ]]; then
 else
   echo "Host workspace already exists:"
   echo "  $TARGET_ROOT"
+  if git -C "$TARGET_ROOT" diff --quiet && git -C "$TARGET_ROOT" diff --cached --quiet; then
+    git -C "$TARGET_ROOT" pull --ff-only >/dev/null 2>&1 || true
+  else
+    echo "Host workspace has local changes; skipped auto-update."
+  fi
 fi
 
 if [[ -f "$ROOT_DIR/.env" && ! -f "$TARGET_ROOT/.env" ]]; then
   cp "$ROOT_DIR/.env" "$TARGET_ROOT/.env"
   echo "Copied .env into host workspace."
+fi
+
+if [[ ! -x "$TARGET_ROOT/.venv/bin/python" ]]; then
+  echo "Creating host workspace virtual environment..."
+  python3 -m venv "$TARGET_ROOT/.venv"
+  "$TARGET_ROOT/.venv/bin/pip" install -r "$TARGET_ROOT/requirements.txt" >/dev/null
 fi
 
 if [[ -f "$TARGET_ROOT/.env" ]]; then
