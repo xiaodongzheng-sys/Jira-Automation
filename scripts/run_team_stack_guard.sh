@@ -25,6 +25,7 @@ ALERT_FILE="$DATA_DIR/run/team_stack_alert.json"
 PORTAL_LOG_FILE="$DATA_DIR/logs/team_portal.log"
 NGROK_LOG_FILE="$DATA_DIR/logs/ngrok_tunnel.log"
 CHECK_INTERVAL="${TEAM_STACK_GUARD_INTERVAL_SECONDS:-15}"
+START_READY_TIMEOUT_SECONDS="${TEAM_STACK_START_READY_TIMEOUT_SECONDS:-12}"
 USE_CAFFEINATE="${TEAM_STACK_USE_CAFFEINATE:-auto}"
 RESTART_WINDOW_SECONDS="${TEAM_STACK_RESTART_WINDOW_SECONDS:-60}"
 MAX_RESTART_BACKOFF_SECONDS="${TEAM_STACK_MAX_RESTART_BACKOFF_SECONDS:-30}"
@@ -234,6 +235,15 @@ start_portal() {
   env "TEAM_PORTAL_RELEASE_REVISION=$EXPECTED_REVISION" "$PORTAL_FOREGROUND_SCRIPT" >>"$PORTAL_LOG_FILE" 2>&1 &
   echo $! >"$PORTAL_CHILD_PID_FILE"
   log "Portal launched (pid $(cat "$PORTAL_CHILD_PID_FILE"))."
+  local _attempt
+  for ((_attempt=0; _attempt<START_READY_TIMEOUT_SECONDS; _attempt++)); do
+    if portal_is_healthy; then
+      log "Portal became healthy."
+      return
+    fi
+    sleep 1
+  done
+  log "Portal did not become healthy within ${START_READY_TIMEOUT_SECONDS}s."
 }
 
 start_ngrok() {
@@ -247,6 +257,15 @@ start_ngrok() {
   "$NGROK_FOREGROUND_SCRIPT" >>"$NGROK_LOG_FILE" 2>&1 &
   echo $! >"$NGROK_CHILD_PID_FILE"
   log "ngrok launched (pid $(cat "$NGROK_CHILD_PID_FILE"))."
+  local _attempt
+  for ((_attempt=0; _attempt<START_READY_TIMEOUT_SECONDS; _attempt++)); do
+    if ngrok_is_healthy; then
+      log "ngrok became healthy."
+      return
+    fi
+    sleep 1
+  done
+  log "ngrok did not become healthy within ${START_READY_TIMEOUT_SECONDS}s."
 }
 
 ensure_portal_running() {
