@@ -13,3 +13,13 @@ tmp/
 jira_web_config.json
 team_portal.db
 .team-portal/
+.DS_Store
+output/
+AF_Chatbot_Knowledge_Base/
+AF_Codebases/
+AI_Knowledge_Pack/
+GRC_AI_Knowledge_Pack.md
+GRC_Chatbot_Knowledge_Base/
+GRC_Codebases/
+dbp-grc-service-dbp-master/
+grc-portal-fe-dbp-master/
