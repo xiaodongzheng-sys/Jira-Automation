@@ -437,6 +437,50 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertIn(b"Template Preview", response.data)
         self.assertIn(b"data-mapping-preview-body=\"default\"", response.data)
 
+    def test_index_recovers_legacy_component_defaults_for_google_user(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
+            },
+            clear=False,
+        ):
+            app = create_app()
+            app.testing = True
+            app.config["CONFIG_STORE"]._upsert_row(
+                "google:xiaodong.zheng@npt.sg",
+                {
+                    "spreadsheet_link": "sheet-123",
+                    "component_by_market": {
+                        "ID": "DBP-Anti-fraud",
+                        "SG": "DBP-Anti-fraud",
+                        "PH": "DBP-Anti-fraud",
+                        "Regional": "Anti-fraud",
+                    },
+                    "assignee_value": "xiaodong.zheng@npt.sg",
+                    "dev_pic_value": "xiaodong.zheng@npt.sg",
+                    "qa_pic_value": "xiaodong.zheng@npt.sg",
+                    "fix_version_value": "Planning_26Q2",
+                },
+            )
+
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong Zheng"}
+                    session["google_credentials"] = {"token": "x"}
+
+                response = client.get("/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Planning_26Q2", response.data)
+        self.assertNotIn(b"Recovered legacy config", response.data)
+        self.assertNotIn(b"Legacy Market to Component", response.data)
+        self.assertIn(b"Planning_26Q2", response.data)
+
 
 if __name__ == "__main__":
     unittest.main()

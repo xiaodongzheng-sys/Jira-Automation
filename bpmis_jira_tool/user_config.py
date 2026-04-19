@@ -130,6 +130,12 @@ COMPONENT_ROUTED_DIRECT_FIELDS = {
     "Dev PIC": "dev_pic",
     "QA PIC": "qa_pic",
 }
+LEGACY_COMPONENT_DEFAULT_VALUE_FIELDS = {
+    "assignee": "assignee_value",
+    "dev_pic": "dev_pic_value",
+    "qa_pic": "qa_pic_value",
+    "fix_version": "fix_version_value",
+}
 
 
 class WebConfigStore:
@@ -358,6 +364,17 @@ class WebConfigStore:
         for key in LEGACY_MARKET_CHOICE_FIELDS.values():
             normalized[key] = self._normalize_market_choice_map(data.get(key, {}))
 
+        for key in LEGACY_COMPONENT_DEFAULT_VALUE_FIELDS.values():
+            value = str(data.get(key, "") or "").strip()
+            if value:
+                normalized[key] = value
+
+        if not str(normalized.get("component_default_rules_text", "")).strip():
+            recovered_legacy_rules = self._recover_legacy_component_default_rules(normalized)
+            if recovered_legacy_rules:
+                normalized["component_default_rules_text"] = recovered_legacy_rules
+                normalized["legacy_component_defaults_recovered"] = True
+
         return normalized
 
     def _ensure_db(self) -> None:
@@ -438,6 +455,39 @@ class WebConfigStore:
         text = str(data or "").replace("\r\n", "\n").replace("\r", "\n")
         lines = [line.rstrip() for line in text.split("\n")]
         return "\n".join(lines).strip()
+
+    @staticmethod
+    def _recover_legacy_component_default_rules(data: dict[str, object]) -> str:
+        component_by_market = data.get("component_by_market", {})
+        if not isinstance(component_by_market, dict):
+            return ""
+
+        assignee = str(data.get("assignee_value", "") or "").strip()
+        dev_pic = str(data.get("dev_pic_value", "") or "").strip()
+        qa_pic = str(data.get("qa_pic_value", "") or "").strip()
+        fix_version = str(data.get("fix_version_value", "") or "").strip()
+        if not all([assignee, dev_pic, qa_pic, fix_version]):
+            return ""
+
+        ordered_components: list[str] = []
+        seen_components: set[str] = set()
+        for market in MARKET_KEYS:
+            component = str(component_by_market.get(market, "") or "").strip()
+            if not component:
+                continue
+            component_key = component.lower()
+            if component_key in seen_components:
+                continue
+            seen_components.add(component_key)
+            ordered_components.append(component)
+
+        if not ordered_components:
+            return ""
+
+        return "\n".join(
+            f"{component} | {assignee} | {dev_pic} | {qa_pic} | {fix_version}"
+            for component in ordered_components
+        )
 
     @staticmethod
     def _parse_component_route_rules(text: str) -> list[dict[str, str]]:

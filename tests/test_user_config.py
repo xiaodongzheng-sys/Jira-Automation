@@ -123,6 +123,35 @@ class UserConfigStoreTests(unittest.TestCase):
             self.assertEqual(normalized["summary_header"], DEFAULT_SHEET_HEADERS[5])
             self.assertEqual(normalized["description_header"], DEFAULT_SHEET_HEADERS[7])
 
+    def test_normalize_recovers_legacy_component_defaults(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = WebConfigStore(Path(temp_dir))
+
+            normalized = store._normalize(
+                {
+                    "component_by_market": {
+                        "ID": "DBP-Anti-fraud",
+                        "SG": "DBP-Anti-fraud",
+                        "PH": "DBP-Anti-fraud",
+                        "Regional": "Anti-fraud",
+                    },
+                    "assignee_value": "xiaodong.zheng@npt.sg",
+                    "dev_pic_value": "xiaodong.zheng@npt.sg",
+                    "qa_pic_value": "xiaodong.zheng@npt.sg",
+                    "fix_version_value": "Planning_26Q2",
+                }
+            )
+
+            self.assertTrue(normalized["legacy_component_defaults_recovered"])
+            self.assertIn(
+                "DBP-Anti-fraud | xiaodong.zheng@npt.sg | xiaodong.zheng@npt.sg | xiaodong.zheng@npt.sg | Planning_26Q2",
+                normalized["component_default_rules_text"],
+            )
+            self.assertIn(
+                "Anti-fraud | xiaodong.zheng@npt.sg | xiaodong.zheng@npt.sg | xiaodong.zheng@npt.sg | Planning_26Q2",
+                normalized["component_default_rules_text"],
+            )
+
     def test_save_encrypts_bpmis_token_and_load_decrypts_it(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             store = WebConfigStore(Path(temp_dir), encryption_key=Fernet.generate_key().decode("utf-8"))

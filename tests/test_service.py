@@ -178,9 +178,19 @@ class ServiceTests(unittest.TestCase):
     def test_preview_does_not_require_summary_when_create_would(self):
         service = JiraCreationService.__new__(JiraCreationService)
         service.sheets_service = FakeSheetsService()
+        service.sheets_service.snapshot.rows = [
+            InputRow(
+                row_number=2,
+                values={
+                    "Issue ID": "ISS-1",
+                    "Jira Ticket Link": "",
+                    "Market": "SG",
+                },
+            )
+        ]
         service.bpmis_client = FakeBPMISClient()
         service.field_mappings_override = [
-            FieldMapping("Summary", "column:Missing Summary"),
+            FieldMapping("Summary", "column:Jira Title"),
             FieldMapping("Market", "column:Market"),
         ]
 

@@ -9,6 +9,28 @@
   </head>
   <body>
     <main class="page-shell">
+      {% if user_identity is defined %}
+        <section class="session-bar" aria-label="Current session">
+          <div class="session-copy">
+            <p class="session-kicker">Portal Session</p>
+            <div class="session-identity">
+              <strong>{{ user_identity.display_name }}</strong>
+              {% if user_identity.email %}
+                <span>{{ user_identity.email }}</span>
+              {% endif %}
+            </div>
+          </div>
+          <div class="session-actions">
+            {% if user_identity.mode == "google" %}
+              <form method="post" action="{{ url_for('google_logout') }}">
+                <button class="button button-secondary" type="submit">Logout</button>
+              </form>
+            {% elif user_identity.mode == "guest" %}
+              <a class="button button-secondary" href="{{ url_for('google_login') }}">Sign in with Google</a>
+            {% endif %}
+          </div>
+        </section>
+      {% endif %}
       {% if site_tabs %}
         <nav class="site-switcher" aria-label="Primary tools">
           <div class="site-switcher-track">

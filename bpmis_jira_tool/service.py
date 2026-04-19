@@ -12,18 +12,6 @@ from bpmis_jira_tool.models import FieldMapping
 from bpmis_jira_tool.models import RunResult
 
 
-PREVIEW_OPTIONAL_FIELDS = {
-    "Summary",
-    "System",
-    "Component",
-    "Assignee",
-    "Dev PIC",
-    "QA PIC",
-    "Fix Version",
-    "Fix Version/s",
-}
-
-
 def build_bpmis_client(settings: Settings, access_token: str | None = None) -> BPMISClient:
     return BPMISDirectApiClient(settings, access_token=access_token)
 
@@ -183,25 +171,22 @@ class JiraCreationService:
                 ticket_link=row.jira_ticket_link,
             )
 
-        try:
-            fields = resolve_fields(field_mappings, row, optional_fields=PREVIEW_OPTIONAL_FIELDS)
-        except FieldResolutionError as error:
-            return RunResult(
-                row_number=row.row_number,
-                issue_id=row.issue_id,
-                status="error",
-                message=str(error),
-            )
-
         return RunResult(
             row_number=row.row_number,
             issue_id=row.issue_id,
             status="preview",
             message="Eligible for Jira creation.",
-            project_label=fields.get("Summary") or row.issue_id,
+            project_label=self._preview_project_label(row),
         )
 
     @staticmethod
     def _emit_progress(progress_callback, stage: str, message: str, current: int, total: int) -> None:
         if progress_callback is not None:
             progress_callback(stage, message, current, total)
+
+    @staticmethod
+    def _preview_project_label(row) -> str:
+        return (
+            row._get_first("Jira Title", "Summary", "Project Name", "BPMIS - Summary")
+            or row.issue_id
+        )
