@@ -7,7 +7,9 @@ source "$ROOT_DIR/scripts/lib/team_env.sh"
 
 TARGET_ROOT="${TEAM_STACK_HOST_ROOT:-$(recommended_team_stack_root)}"
 TARGET_ROOT="${TARGET_ROOT/#\~/$HOME}"
-TARGET_ROOT="$(cd "$(dirname "$TARGET_ROOT")" && pwd)/$(basename "$TARGET_ROOT")"
+target_parent="$(dirname "$TARGET_ROOT")"
+mkdir -p "$target_parent"
+TARGET_ROOT="$(cd "$target_parent" && pwd)/$(basename "$TARGET_ROOT")"
 
 if is_protected_mac_path "$TARGET_ROOT"; then
   echo "Target host workspace must not be under a protected macOS folder:"
@@ -15,12 +17,7 @@ if is_protected_mac_path "$TARGET_ROOT"; then
   exit 1
 fi
 
-mkdir -p "$(dirname "$TARGET_ROOT")"
-
-clone_source="$(git -C "$ROOT_DIR" config --get remote.origin.url 2>/dev/null || true)"
-if [[ -z "${clone_source:-}" ]]; then
-  clone_source="$ROOT_DIR"
-fi
+clone_source="${TEAM_STACK_HOST_CLONE_SOURCE:-$ROOT_DIR}"
 
 if [[ ! -d "$TARGET_ROOT/.git" ]]; then
   echo "Creating host workspace at:"
