@@ -43,9 +43,8 @@
         <nav class="portal-menu" aria-label="Primary">
           <div class="menu-group is-open">
             <div class="menu-group-title">Governance, Risk &amp; Compliance (GRC)</div>
-            <a class="submenu-item {% if request.endpoint == 'overview' %}is-active{% endif %}" href="{{ url_for('overview') }}">Incident Management</a>
+            <a class="submenu-item {% if request.endpoint in ['outsourcing_overview', 'outsourcing_new', 'outsourcing_detail', 'outsourcing_assessment_detail', 'outsourcing_assessment_new', 'outsourcing_assessment_edit'] %}is-active{% endif %}" href="{{ url_for('outsourcing_overview') }}">Outsourcing Management</a>
             <a class="submenu-item {% if request.endpoint == 'access_control' %}is-active{% endif %}" href="{{ url_for('access_control') }}">GRC Access Control</a>
-            <a class="submenu-item {% if request.endpoint == 'add_incident' %}is-active{% endif %}" href="{{ url_for('add_incident') }}">Add Incident</a>
             <a class="submenu-item {% if request.endpoint == 'authorization' %}is-active{% endif %}" href="{{ url_for('authorization') }}">Authorization Management</a>
             <a class="submenu-item {% if request.endpoint == 'parameter_management' %}is-active{% endif %}" href="{{ url_for('parameter_management') }}">Parameter Management</a>
             <a class="submenu-item {% if request.endpoint == 'email_management' %}is-active{% endif %}" href="{{ url_for('email_management') }}">Email Management</a>

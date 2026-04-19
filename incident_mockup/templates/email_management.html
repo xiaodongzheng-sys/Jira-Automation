@@ -59,5 +59,39 @@
         </table>
       </div>
     </section>
+
+    <section class="surface-card">
+      <div class="section-toolbar">
+        <h3>Outsourcing Management Email Templates</h3>
+      </div>
+      <div class="ant-table-wrap">
+        <table class="ant-table">
+          <thead>
+            <tr>
+              <th>No.</th>
+              <th>Email ID</th>
+              <th>Email Title</th>
+              <th>Frequency</th>
+              <th>Status</th>
+              <th>Recipient</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for email_id, title, frequency, status, recipient in outsourcing_email_rows %}
+              <tr>
+                <td>{{ loop.index }}</td>
+                <td>{{ email_id }}</td>
+                <td>{{ title }}</td>
+                <td>{{ frequency }}</td>
+                <td>{{ status }}</td>
+                <td>{{ recipient }}</td>
+                <td><a href="{{ url_for('email_edit', email_id=email_id) }}">Edit</a></td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
   </section>
 {% endblock %}

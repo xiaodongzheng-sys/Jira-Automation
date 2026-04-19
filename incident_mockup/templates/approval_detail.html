@@ -5,7 +5,8 @@
     <section class="surface-card page-shell">
       <div class="detail-header detail-header-hero">
         <div>
-          <h2>{{ auth_id }} - Incident - Authorize New Incident</h2>
+          <p class="eyebrow-label">{{ page_kicker }}</p>
+          <h2>{{ auth_id }} - {{ auth_type }}</h2>
         </div>
       </div>
     </section>
@@ -13,7 +14,9 @@
     <section class="surface-card page-shell">
       <div class="ant-tabs">
         <div class="ant-tab-list">
-          <span class="ant-tab is-active">Authorization Details</span>
+          {% for tab in approval_tabs %}
+            <span class="ant-tab {% if loop.first %}is-active{% endif %}">{{ tab }}</span>
+          {% endfor %}
         </div>
         <section class="tab-panel is-active">
           <div class="detail-grid detail-grid-3">
@@ -24,6 +27,21 @@
             <div class="detail-pair"><dt>* Authorization</dt><dd>Approved<br>Approved</dd></div>
             <div class="detail-pair"><dt>* Authorized By</dt><dd>Xiaodong,<br>Cui Qiang</dd></div>
           </div>
+          {% if is_outsourcing_auth and linked_assessment %}
+            <section class="surface-card surface-card-nested">
+              <div class="section-toolbar">
+                <h3>Assessment Snapshot</h3>
+              </div>
+              <div class="detail-grid detail-grid-3 approval-snapshot-grid">
+                {% for label, value in outsourcing_detail_rows %}
+                  <div class="detail-pair">
+                    <dt>{{ label }}</dt>
+                    <dd>{{ value }}</dd>
+                  </div>
+                {% endfor %}
+              </div>
+            </section>
+          {% endif %}
         </section>
       </div>
     </section>
@@ -31,10 +49,16 @@
     <section class="surface-card page-shell">
       <div class="ant-tabs">
         <div class="ant-tab-list">
-          <span class="ant-tab">Details</span>
-          <span class="ant-tab">Action Plan</span>
-          <span class="ant-tab is-active">Review Comment (Old)</span>
-          <span class="ant-tab">Review Comment (New)</span>
+          {% if is_outsourcing_auth and linked_assessment %}
+            {% for tab_label in linked_assessment.comment_tabs %}
+              <span class="ant-tab {% if loop.first %}is-active{% endif %}">{{ tab_label }}</span>
+            {% endfor %}
+          {% else %}
+            <span class="ant-tab">Details</span>
+            <span class="ant-tab">Action Plan</span>
+            <span class="ant-tab is-active">Review Comment (Old)</span>
+            <span class="ant-tab">Review Comment (New)</span>
+          {% endif %}
         </div>
         <section class="tab-panel is-active">
           <div class="ant-table-wrap compact-table">
@@ -45,25 +69,40 @@
                   <th>Reviewer Department</th>
                   <th>Reviewer Name</th>
                   <th>Authorization</th>
-                  <th>Regulatory Breach</th>
-                  <th>Report to Regulator</th>
+                  {% if not is_outsourcing_auth or not linked_assessment %}
+                    <th>Regulatory Breach</th>
+                    <th>Report to Regulator</th>
+                  {% endif %}
                   <th>Review Comment</th>
                   <th>Action</th>
                 </tr>
               </thead>
               <tbody>
-                {% for department, name, authorization, breach, regulator, comment, action in review_comment_rows %}
-                  <tr>
-                    <td>{{ loop.index }}</td>
-                    <td>{{ department }}</td>
-                    <td>{{ name }}</td>
-                    <td>{{ authorization }}</td>
-                    <td>{{ breach }}</td>
-                    <td>{{ regulator }}</td>
-                    <td>{{ comment }}</td>
-                    <td><a href="#">{{ action }}</a></td>
-                  </tr>
-                {% endfor %}
+                {% if is_outsourcing_auth and linked_assessment %}
+                  {% for department, name, authorization, comment, action in review_comment_rows %}
+                    <tr>
+                      <td>{{ loop.index }}</td>
+                      <td>{{ department }}</td>
+                      <td>{{ name }}</td>
+                      <td>{{ authorization }}</td>
+                      <td>{{ comment }}</td>
+                      <td><a href="#">{{ action }}</a></td>
+                    </tr>
+                  {% endfor %}
+                {% else %}
+                  {% for department, name, authorization, breach, regulator, comment, action in review_comment_rows %}
+                    <tr>
+                      <td>{{ loop.index }}</td>
+                      <td>{{ department }}</td>
+                      <td>{{ name }}</td>
+                      <td>{{ authorization }}</td>
+                      <td>{{ breach }}</td>
+                      <td>{{ regulator }}</td>
+                      <td>{{ comment }}</td>
+                      <td><a href="#">{{ action }}</a></td>
+                    </tr>
+                  {% endfor %}
+                {% endif %}
               </tbody>
             </table>
           </div>

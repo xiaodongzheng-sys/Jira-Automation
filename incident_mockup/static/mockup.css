@@ -177,6 +177,12 @@ h2, h3, h4, p, dt, dd { margin: 0; }
   padding: 24px;
 }
 
+.surface-card-nested {
+  padding: 0;
+  border: 0;
+  box-shadow: none;
+}
+
 .page-shell {
   padding: 18px 18px 22px;
 }
@@ -198,6 +204,15 @@ h2, h3, h4, p, dt, dd { margin: 0; }
   font-weight: 700;
 }
 
+.eyebrow-label {
+  margin-bottom: 6px;
+  color: var(--link);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
 .single-field-bar {
   margin-bottom: 14px;
 }
@@ -213,6 +228,7 @@ h2, h3, h4, p, dt, dd { margin: 0; }
 .form-grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .form-grid-4, .detail-grid-4, .info-grid-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .detail-grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.info-grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 
 .field-block {
   display: grid;
@@ -324,6 +340,27 @@ h2, h3, h4, p, dt, dd { margin: 0; }
   margin-top: 18px;
 }
 
+.search-advanced {
+  margin-top: 14px;
+  border-top: 1px solid var(--line);
+  padding-top: 14px;
+}
+
+.search-advanced summary {
+  cursor: pointer;
+  color: var(--link);
+  font-weight: 600;
+  list-style: none;
+}
+
+.search-advanced summary::-webkit-details-marker {
+  display: none;
+}
+
+.search-advanced-grid {
+  margin-top: 14px;
+}
+
 .section-band {
   margin-bottom: 16px;
   padding: 10px 14px;
@@ -337,6 +374,7 @@ h2, h3, h4, p, dt, dd { margin: 0; }
 }
 
 .ant-tabs { margin-top: 8px; }
+.ant-tabs-inline { margin: 18px 0 10px; }
 
 .ant-tab-list {
   display: flex;
@@ -459,6 +497,27 @@ h2, h3, h4, p, dt, dd { margin: 0; }
   flex-wrap: wrap;
 }
 
+.state-chip {
+  min-width: 132px;
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfcfe;
+}
+
+.state-chip span {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--muted);
+}
+
+.state-chip strong {
+  display: inline-flex;
+  align-items: center;
+}
+
 .workflow-link {
   font-size: 16px;
 }
@@ -501,6 +560,8 @@ h2, h3, h4, p, dt, dd { margin: 0; }
 
 .callout-summary { background: var(--info-bg); }
 .callout-cause { background: var(--danger-bg); }
+.callout-info { background: var(--info-bg); }
+.callout-warning { background: var(--warning-bg); }
 
 .callout-card h4,
 .detail-copy-block h4 {
@@ -527,6 +588,10 @@ h2, h3, h4, p, dt, dd { margin: 0; }
   background: #fff;
 }
 
+.outsourcing-hero {
+  background: linear-gradient(135deg, #ffffff, #f6faff 58%, #eef4ff);
+}
+
 .info-card span {
   display: block;
   margin-bottom: 8px;
@@ -536,6 +601,120 @@ h2, h3, h4, p, dt, dd { margin: 0; }
 .info-card strong {
   display: block;
   margin-bottom: 6px;
+}
+
+.assessment-action-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+  margin-bottom: 18px;
+}
+
+.assessment-action-grid-tight {
+  margin-top: 18px;
+}
+
+.assessment-action-card {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: linear-gradient(180deg, #fff, #f8fbff);
+  padding: 16px;
+}
+
+.assessment-action-card strong {
+  display: block;
+  margin-bottom: 6px;
+}
+
+.assessment-card-link-row {
+  margin-top: 12px;
+}
+
+.assessment-card-link-row a {
+  color: var(--link);
+  font-weight: 600;
+}
+
+.assessment-action-card p,
+.callout-secondary {
+  color: var(--muted);
+}
+
+.assessment-type-hero {
+  display: grid;
+  grid-template-columns: 1.6fr 1fr;
+  gap: 18px;
+  margin: 18px 0;
+  padding: 18px;
+  border: 1px solid var(--line);
+  background: linear-gradient(135deg, #f9fbff, #eef5ff);
+}
+
+.assessment-type-copy {
+  display: grid;
+  gap: 8px;
+}
+
+.assessment-type-copy h3 {
+  margin: 0;
+}
+
+.assessment-action-stack {
+  display: flex;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  gap: 8px;
+}
+
+.focus-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.focus-card {
+  border: 1px solid var(--line);
+  background: #fff;
+  padding: 16px;
+}
+
+.focus-card strong {
+  display: block;
+  margin-bottom: 8px;
+}
+
+.timeline-list {
+  display: grid;
+  gap: 14px;
+}
+
+.timeline-item {
+  display: grid;
+  grid-template-columns: 180px 1fr;
+  gap: 16px;
+  padding: 14px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.timeline-item:last-child {
+  border-bottom: 0;
+}
+
+.timeline-time {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.search-action-row-spread {
+  justify-content: space-between;
+}
+
+.callout-secondary {
+  margin-top: 8px;
+}
+
+.approval-snapshot-grid {
+  margin-top: 18px;
 }
 
 .comment-tabs {
@@ -699,6 +878,14 @@ h2, h3, h4, p, dt, dd { margin: 0; }
   margin-bottom: 18px;
 }
 
+@media (max-width: 960px) {
+  .assessment-type-hero,
+  .focus-grid,
+  .timeline-item {
+    grid-template-columns: 1fr;
+  }
+}
+
 .modal-title-group {
   gap: 12px;
 }
@@ -719,6 +906,10 @@ h2, h3, h4, p, dt, dd { margin: 0; }
 
 .support-docs h4 {
   margin-bottom: 12px;
+}
+
+.support-docs-section {
+  margin-top: 18px;
 }
 
 .support-doc-link {
@@ -747,6 +938,13 @@ h2, h3, h4, p, dt, dd { margin: 0; }
   .form-grid-4,
   .detail-grid-4,
   .info-grid-4 {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .form-grid-3,
+  .detail-grid-3,
+  .info-grid-3,
+  .assessment-action-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
@@ -790,7 +988,9 @@ h2, h3, h4, p, dt, dd { margin: 0; }
   .form-grid-4,
   .detail-grid-3,
   .detail-grid-4,
+  .info-grid-3,
   .info-grid-4,
+  .assessment-action-grid,
   .search-grid {
     grid-template-columns: 1fr;
   }

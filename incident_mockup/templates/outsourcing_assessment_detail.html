@@ -1,0 +1,282 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <section class="portal-page">
+    <section class="surface-card page-shell">
+      <div class="detail-header detail-header-hero">
+        <div>
+          <p class="eyebrow-label">{{ page_kicker }}</p>
+          <h2>{{ assessment.id }} - {{ assessment.title }}</h2>
+        </div>
+        <div class="detail-actions">
+          <span class="status-tag status-{{ assessment.status|lower|replace(' ', '-')|replace('/', '-') }}">{{ assessment.status }}</span>
+          <a class="workflow-link" href="{{ url_for('outsourcing_detail', arrangement_id=arrangement.id) }}">{{ arrangement.id }}</a>
+          {% for action_label in assessment_action_buttons %}
+            {% if action_label == 'Edit' %}
+              <a class="ant-btn ant-btn-primary" href="{{ url_for('outsourcing_assessment_edit', arrangement_id=arrangement.id, assessment_id=assessment.id) }}">Edit {{ assessment.short_label }}</a>
+            {% else %}
+              <button class="ant-btn {% if action_label == 'Download' %}ant-btn-primary{% endif %}" type="button">{{ action_label }}</button>
+            {% endif %}
+          {% endfor %}
+        </div>
+      </div>
+
+      <div class="ant-tabs ant-tabs-inline">
+        <div class="ant-tab-list">
+          {% for tab_label in assessment_tabs %}
+            {% set tab_key = comment_tab_keys.get(tab_label, 'submit') %}
+            <a class="ant-tab {% if active_assessment_tab == tab_key %}is-active{% endif %}" href="{{ url_for('outsourcing_assessment_detail', arrangement_id=arrangement.id, assessment_id=assessment.id, tab=tab_key) }}">{{ tab_label }}</a>
+          {% endfor %}
+        </div>
+      </div>
+
+      <section class="tab-panel {% if active_assessment_tab == 'details' %}is-active{% endif %}">
+        {% for title, rows in detail_sections %}
+          <section class="form-section">
+            <h3 class="section-band">{{ title }}</h3>
+            <div class="detail-grid detail-grid-4">
+              {% for label, value in rows %}
+                <div class="detail-pair">
+                  <dt>{{ label }}</dt>
+                  <dd>{{ value }}</dd>
+                </div>
+              {% endfor %}
+            </div>
+          </section>
+        {% endfor %}
+
+        <section class="surface-card surface-card-nested">
+          <div class="section-toolbar">
+            <h3>Supporting Document</h3>
+          </div>
+          <div class="support-docs support-docs-section">
+            <div class="support-doc-grid">
+              {% for item in assessment.supporting_documents %}
+                <a href="#" class="support-doc-link">{{ item }}</a>
+              {% endfor %}
+            </div>
+          </div>
+        </section>
+
+        {% if assessment.short_label in ['SSA', 'DD', 'PIR', 'On-site Visit', 'Termination'] %}
+          <section class="surface-card surface-card-nested">
+            <div class="section-toolbar">
+              <h3>History</h3>
+            </div>
+            <div class="field-block field-block-full history-search-row">
+              <label>Quick Search</label>
+              <input class="ant-input" type="text" value="Filter activity by keyword">
+            </div>
+            <div class="ant-table-wrap compact-table">
+              <table class="ant-table">
+                <thead>
+                  <tr>
+                    <th>No.</th>
+                    <th>Activity ID</th>
+                    <th>Activity Details</th>
+                    <th>Submit / Review Comment</th>
+                    <th>By</th>
+                    <th>Timestamp</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for detail, trigger in activity_rows[:8] %}
+                    <tr>
+                      <td>{{ loop.index }}</td>
+                      <td>{{ arrangement.id }}-{{ '%03d' % loop.index }}</td>
+                      <td>{{ detail }}</td>
+                      <td>{{ 'Latest submission recorded' if loop.first else 'See audit trail for earlier comments' }}</td>
+                      <td>{{ assessment.assignee if loop.first else 'System' }}</td>
+                      <td>{{ assessment.updated_at }}</td>
+                    </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        {% endif %}
+      </section>
+
+      {% for tab_label in assessment_tabs if tab_label != 'Details' and tab_label != 'Risk Committee' %}
+        {% set tab_key = comment_tab_keys.get(tab_label, 'submit') %}
+        <section class="tab-panel {% if active_assessment_tab == tab_key %}is-active{% endif %}">
+          <section class="surface-card surface-card-nested">
+            <div class="section-toolbar">
+              <h3>{{ tab_label }}</h3>
+            </div>
+            {% if tab_key == 'submit' %}
+              <div class="field-block field-block-full">
+                <label>Submit Comment</label>
+                <textarea class="ant-textarea" rows="4">{{ comment_guidance.get(tab_key, assessment.summary) }}</textarea>
+              </div>
+              <div class="ant-table-wrap compact-table">
+                <table class="ant-table">
+                  <thead>
+                    <tr>
+                      <th>No.</th>
+                      <th>Functional Unit Owning the Outsourcing Arrangement</th>
+                      <th>User ID</th>
+                      <th>Authorization</th>
+                      <th>Submit Comment</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {% for functional_unit, user_id, authorization, comment in submit_comment_rows %}
+                      <tr>
+                        <td>{{ loop.index }}</td>
+                        <td>{{ functional_unit }}</td>
+                        <td>{{ user_id }}</td>
+                        <td>{{ authorization }}</td>
+                        <td>{{ comment }}</td>
+                      </tr>
+                    {% endfor %}
+                  </tbody>
+                </table>
+              </div>
+            {% else %}
+              {% set comment_column_label = 'Approve Comment' if tab_key == 'approve' else ('Withdraw Comment' if tab_key == 'withdraw' else 'Review Comment') %}
+              <div class="field-block field-block-full">
+                <label>{{ comment_column_label }}</label>
+                <textarea class="ant-textarea" rows="4">{{ comment_guidance.get(tab_key, assessment.summary) }}</textarea>
+              </div>
+              {% if tab_key == 'review' and assessment.short_label == 'DD' %}
+                <div class="ant-table-wrap compact-table">
+                  <table class="ant-table">
+                    <thead>
+                      <tr>
+                        <th>No.</th>
+                        <th>Description of the Condition</th>
+                        <th>End date of the Condition</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {% for description, end_date in review_condition_rows %}
+                        <tr>
+                          <td>{{ loop.index }}</td>
+                          <td>{{ description }}</td>
+                          <td>{{ end_date }}</td>
+                        </tr>
+                      {% endfor %}
+                    </tbody>
+                  </table>
+                </div>
+              {% endif %}
+              <div class="ant-table-wrap compact-table">
+                <table class="ant-table">
+                  <thead>
+                    <tr>
+                      <th>No.</th>
+                      <th>
+                        {% if assessment.short_label in ['PIR', 'On-site Visit', 'Termination'] and tab_key in ['approve', 'withdraw'] %}
+                          Functional Unit Owning the Outsourcing Arrangement
+                        {% else %}
+                          {{ 'Approver' if tab_key == 'approve' else 'Reviewer Group' }}
+                        {% endif %}
+                      </th>
+                      <th>User ID</th>
+                      <th>Authorization</th>
+                      <th>Date of SignOff</th>
+                      <th>{{ comment_column_label }}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {% if tab_key == 'approve' %}
+                      {% set rows = approve_comment_rows %}
+                    {% elif tab_key == 'withdraw' %}
+                      {% set rows = withdraw_comment_rows %}
+                    {% else %}
+                      {% set rows = review_comment_rows %}
+                    {% endif %}
+                    {% for group, user_id, authorization, signoff_date, comment in rows %}
+                      <tr>
+                        <td>{{ loop.index }}</td>
+                        <td>{{ group }}</td>
+                        <td>{{ user_id }}</td>
+                        <td>{{ authorization }}</td>
+                        <td>{{ signoff_date }}</td>
+                        <td>{{ comment }}</td>
+                      </tr>
+                    {% endfor %}
+                  </tbody>
+                </table>
+              </div>
+            {% endif %}
+          </section>
+        </section>
+      {% endfor %}
+
+      {% if 'Risk Committee' in assessment_tabs %}
+        <section class="tab-panel {% if active_assessment_tab == 'risk-committee' %}is-active{% endif %}">
+          <section class="surface-card surface-card-nested">
+            <div class="section-toolbar">
+              <h3>Risk Committee</h3>
+              {% if assessment.short_label == 'DD' %}
+                <button class="ant-btn ant-btn-primary" type="button">Edit</button>
+              {% endif %}
+            </div>
+            {% if risk_committee_view %}
+              <div class="detail-grid detail-grid-3">
+                <div class="detail-pair">
+                  <dt>Outcome</dt>
+                  <dd>{{ risk_committee_view.outcome }}</dd>
+                </div>
+                {% if risk_committee_view.rmc_date %}
+                  <div class="detail-pair">
+                    <dt>When was the outsourcing arrangement notified and/or approved by the Risk Management Committee (RMC)?</dt>
+                    <dd>{{ risk_committee_view.rmc_date }}</dd>
+                  </div>
+                {% endif %}
+                {% if risk_committee_view.roc_date %}
+                  <div class="detail-pair">
+                    <dt>When was the outsourcing arrangement notified and/or approved by the Risk Oversight Committee (ROC)?</dt>
+                    <dd>{{ risk_committee_view.roc_date }}</dd>
+                  </div>
+                {% endif %}
+              </div>
+              <div class="ant-table-wrap compact-table">
+                <div class="section-toolbar">
+                  <h3>Conditions</h3>
+                </div>
+                <table class="ant-table">
+                  <thead>
+                    <tr>
+                      <th>No.</th>
+                      <th>Description of the Condition</th>
+                      <th>End date of the Condition</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {% for description, end_date in risk_committee_view.conditions %}
+                      <tr>
+                        <td>{{ loop.index }}</td>
+                        <td>{{ description }}</td>
+                        <td>{{ end_date }}</td>
+                      </tr>
+                    {% endfor %}
+                  </tbody>
+                </table>
+              </div>
+              <div class="field-block field-block-full">
+                <label>Review Comment</label>
+                <textarea class="ant-textarea" rows="4">{{ risk_committee_view.review_comment }}</textarea>
+              </div>
+              <section class="surface-card surface-card-nested">
+                <div class="section-toolbar">
+                  <h3>Supporting Document</h3>
+                </div>
+                <div class="support-docs support-docs-section">
+                  <div class="support-doc-grid">
+                    {% for item in risk_committee_view.supporting_documents %}
+                      <a href="#" class="support-doc-link">{{ item }}</a>
+                    {% endfor %}
+                  </div>
+                </div>
+              </section>
+            {% endif %}
+          </section>
+        </section>
+      {% endif %}
+
+    </section>
+  </section>
+{% endblock %}
