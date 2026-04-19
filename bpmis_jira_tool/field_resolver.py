@@ -10,7 +10,7 @@ from bpmis_jira_tool.models import FieldMapping, InputRow
 TEMPLATE_PATTERN = re.compile(r"{{\s*(?P<header>[^}]+?)\s*}}")
 INPUT_COLUMN_PATTERN = re.compile(r'^follow input tab column (?P<column>[a-z]+)$', re.I)
 QUOTED_OPTION_PATTERN = re.compile(r'"([^"]+)"')
-OPTIONAL_FIELDS = {"PRD Link/s", "Biz PIC"}
+OPTIONAL_FIELDS = {"PRD Link/s", "Biz PIC", "Description"}
 COMPONENT_DEFAULT_FIELD_KEYS = {
     "Fix Version": "fix_version",
     "Assignee": "assignee",
@@ -81,8 +81,10 @@ def _resolve_special_mapping(mapping: FieldMapping, row: InputRow) -> str | None
 def resolve_fields(
     mappings: list[FieldMapping],
     row: InputRow,
+    optional_fields: set[str] | None = None,
 ) -> dict[str, str]:
     resolved: dict[str, str] = {}
+    effective_optional_fields = OPTIONAL_FIELDS | {field.strip() for field in (optional_fields or set()) if field.strip()}
 
     for mapping in mappings:
         source = mapping.source.strip()
@@ -157,7 +159,7 @@ def resolve_fields(
             value = row._get_first(mapping.jira_field)
 
         if not value:
-            if mapping.jira_field.strip() in OPTIONAL_FIELDS:
+            if mapping.jira_field.strip() in effective_optional_fields:
                 continue
             raise FieldResolutionError(
                 f"Could not resolve Jira field '{mapping.jira_field}' for sheet row {row.row_number}."

@@ -12,6 +12,17 @@ from bpmis_jira_tool.models import FieldMapping
 from bpmis_jira_tool.models import RunResult
 
 
+PREVIEW_OPTIONAL_FIELDS = {
+    "System",
+    "Component",
+    "Assignee",
+    "Dev PIC",
+    "QA PIC",
+    "Fix Version",
+    "Fix Version/s",
+}
+
+
 def build_bpmis_client(settings: Settings, access_token: str | None = None) -> BPMISClient:
     return BPMISDirectApiClient(settings, access_token=access_token)
 
@@ -172,7 +183,7 @@ class JiraCreationService:
             )
 
         try:
-            fields = resolve_fields(field_mappings, row)
+            fields = resolve_fields(field_mappings, row, optional_fields=PREVIEW_OPTIONAL_FIELDS)
         except FieldResolutionError as error:
             return RunResult(
                 row_number=row.row_number,

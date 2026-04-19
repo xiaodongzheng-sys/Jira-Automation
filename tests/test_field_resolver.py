@@ -162,6 +162,22 @@ class FieldResolverTests(unittest.TestCase):
         self.assertEqual(resolved["Summary"], "Fraud Appeal")
         self.assertNotIn("PRD Link/s", resolved)
 
+    def test_skips_optional_description_when_missing(self):
+        row = InputRow(
+            row_number=2,
+            values={"Summary Header": "Fraud Appeal"},
+            ordered_values=("Fraud Appeal",),
+        )
+        mappings = [
+            FieldMapping("Summary", "column:Summary Header"),
+            FieldMapping("Description", "column:Missing Description Header"),
+        ]
+
+        resolved = resolve_fields(mappings, row)
+
+        self.assertEqual(resolved["Summary"], "Fraud Appeal")
+        self.assertNotIn("Description", resolved)
+
 
 if __name__ == "__main__":
     unittest.main()

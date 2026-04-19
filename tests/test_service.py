@@ -135,6 +135,46 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(results[0].status, "created")
         self.assertEqual(service.bpmis_client.create_calls[0][1]["Description"], "Description text")
 
+    def test_run_does_not_require_description(self):
+        service = JiraCreationService.__new__(JiraCreationService)
+        service.sheets_service = FakeSheetsService()
+        service.bpmis_client = FakeBPMISClient()
+        service.field_mappings_override = [
+            FieldMapping("Summary", "column:Summary"),
+            FieldMapping("Market", "column:Market"),
+            FieldMapping("Description", "column:Missing Description"),
+        ]
+
+        results = service.run(dry_run=False)
+
+        self.assertEqual(results[0].status, "created")
+        self.assertNotIn("Description", service.bpmis_client.create_calls[0][1])
+
+    def test_preview_does_not_require_system_when_create_would(self):
+        service = JiraCreationService.__new__(JiraCreationService)
+        service.sheets_service = FakeSheetsService()
+        service.bpmis_client = FakeBPMISClient()
+        service.field_mappings_override = [
+            FieldMapping("Summary", "column:Summary"),
+            FieldMapping("Market", "column:Market"),
+            FieldMapping("System", "column:Missing System"),
+            FieldMapping(
+                "Component",
+                'component_routes:[{"system":"AF","market":"SG","component":"DBP-Anti-fraud"}]',
+            ),
+            FieldMapping(
+                "Assignee",
+                'component_defaults:{"field":"assignee","rules":[{"component":"DBP-Anti-fraud","assignee":"owner@npt.sg"}]}',
+            ),
+        ]
+
+        preview_results, _headers = service.preview()
+        run_results = service.run(dry_run=False)
+
+        self.assertEqual(preview_results[0].status, "preview")
+        self.assertEqual(run_results[0].status, "error")
+        self.assertIn("System", run_results[0].message)
+
     def test_sync_projects_appends_only_missing_issue_ids(self):
         service = BPMISProjectSyncService(
             sheets_service=FakeSheetsService(),
