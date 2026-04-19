@@ -2,6 +2,7 @@ import tempfile
 import unittest
 from dataclasses import dataclass
 from pathlib import Path
+import json
 
 from prd_briefing.confluence import IngestedConfluencePage, ParsedSection
 from prd_briefing.service import (
@@ -116,7 +117,8 @@ class PRDBriefingServiceTests(unittest.TestCase):
             question="What is the approval workflow?",
         )
 
-        self.assertIn("根据目前可用的来源内容", answer["answer_text"])
+        self.assertIn("根据当前检索到的 PRD 内容", answer["answer_text"])
+        self.assertIn("可优先查看", answer["answer_text"])
         self.assertEqual(answer["groundedness"], "grounded")
         self.assertGreaterEqual(len(answer["citations"]), 1)
 
@@ -185,6 +187,85 @@ class PRDBriefingServiceTests(unittest.TestCase):
 
         self.assertEqual(first["script"], "LLM answer")
         self.assertEqual(second["script"], "LLM answer")
+        self.assertEqual(self.openai_client.answer_calls, 0)
+
+    def test_walkthrough_script_reuses_legacy_cached_entry_from_old_model_id(self):
+        self.openai_client.is_configured = lambda: True
+        payload = self.service.create_session(
+            owner_key="anon:test",
+            page_ref="https://example.atlassian.net/wiki/pages/123",
+            mode="walkthrough",
+        )
+        sections = payload["sections"]
+        notes = sections[0].get("briefing_notes") or []
+        prompt = (
+            "You are a product manager briefing a PRD section to software engineers in Mandarin Chinese. "
+            "Speak the way PMs normally align requirements with developers during grooming or walkthrough sessions. "
+            "Be direct, practical, and structured. First explain the purpose of this section, then the main flow, "
+            "then what developers need to build or pay attention to. Call out scope, user actions, system behavior, "
+            "validation rules, dependencies, edge cases, and any implementation-sensitive details when present. "
+            "Do not sound like a keynote presenter. Do not read the PRD word for word. "
+            "Do not mechanically read every field, bullet, or table row. Summarize dense tables into what engineering should understand. "
+            "Use spoken PM phrasing that feels normal in a dev sync, for example framing the goal first, then saying what the flow is, "
+            "what changes on the page, what gets triggered, what should be validated, and what cases developers need to pay attention to."
+        )
+        body = (
+            f"Section: {sections[0]['section_path']}\n\n"
+            f"Presenter summary:\n{sections[0].get('briefing_summary', '')}\n\n"
+            f"Presenter notes:\n- " + "\n- ".join(notes) + "\n\n"
+            f"Source:\n{sections[0]['content']}\n\n"
+        )
+        body += (
+            "Write a natural spoken script of around 5 to 9 sentences in Mandarin. "
+            "The first sentence should explain why this section matters to implementation. "
+            "Then explain the intended flow in order. "
+            "After that, highlight the key engineering takeaways, such as important rules, triggers, state changes, "
+            "input or output expectations, and any edge cases or risks implied by the source. "
+            "If the section is mostly UI fields, summarize the pattern and only name the most important fields. "
+            "Make it sound like live PM speech rather than written prose. "
+            "Natural phrasing is encouraged, such as: "
+            "'这一块主要是...', '开发这里重点看...', '实际 flow 是...', '这里需要注意...', "
+            "'这个字段很多，但本质上是为了...', '异常情况主要是...'. "
+            "Do not force all phrases in every answer, but keep the overall tone close to that style."
+        )
+        section_payload = json.dumps(
+            {
+                "section_path": sections[0]["section_path"],
+                "briefing_summary": sections[0].get("briefing_summary", ""),
+                "briefing_notes": notes,
+                "content": sections[0]["content"],
+                "prompt": prompt,
+                "body": body,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        with self.store.connect() as conn:
+            conn.execute(
+                """
+                delete from briefing_script_cache
+                where owner_key = ? and audience = ? and prompt_version = ?
+                """,
+                ("anon:test", "developer_zh", "v1_openai_only_pm_briefing"),
+            )
+        self.store.cache_script(
+            owner_key="anon:test",
+            audience="developer_zh",
+            model_id="openai:gpt-4.1-mini|gemini:gemini-2.5-flash",
+            prompt_version="v1_openai_only_pm_briefing",
+            section_payload=section_payload,
+            script="legacy cached script",
+        )
+        self.openai_client.answer_calls = 0
+
+        result = self.service.narrate_section(
+            session_id=payload["session"]["session_id"],
+            owner_key="anon:test",
+            section_index=0,
+            include_audio=False,
+        )
+
+        self.assertEqual(result["script"], "legacy cached script")
         self.assertEqual(self.openai_client.answer_calls, 0)
 
     def test_walkthrough_script_requires_text_provider(self):

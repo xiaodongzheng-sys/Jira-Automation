@@ -118,7 +118,7 @@ class UserConfigStoreTests(unittest.TestCase):
 
             normalized = store._normalize({})
 
-            self.assertEqual(normalized["input_tab_name"], "Projects")
+            self.assertEqual(normalized["input_tab_name"], "Sheet1")
             self.assertEqual(normalized["issue_id_header"], DEFAULT_SHEET_HEADERS[0])
             self.assertEqual(normalized["summary_header"], DEFAULT_SHEET_HEADERS[5])
             self.assertEqual(normalized["description_header"], DEFAULT_SHEET_HEADERS[7])

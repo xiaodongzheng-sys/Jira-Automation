@@ -24,6 +24,52 @@ DEFAULT_SHEET_HEADERS = [
     "Description",
     "Jira Ticket Link",
 ]
+MARKET_KEYS = ["ID", "SG", "PH", "Regional"]
+DEFAULT_NEED_UAT_BY_MARKET = {
+    "ID": "Need UAT",
+    "SG": "Need UAT_by UAT Team",
+    "PH": "Need UAT",
+    "Regional": "Need UAT",
+}
+TEAM_DEFAULT_EMAIL_PLACEHOLDER = "__CURRENT_USER_EMAIL__"
+DEFAULT_TEAM_COMPONENT_ROUTE_RULES = "\n".join(
+    [
+        "AF | SG | DBP-Anti-fraud",
+        "DC | SG | Deposit",
+        "AF | Regional | Anti-fraud",
+        "BC | SG | Pay",
+        "LTS | SG | Loan&CreditRisk",
+    ]
+)
+DEFAULT_TEAM_COMPONENT_DEFAULT_RULES = "\n".join(
+    [
+        f"DBP-Anti-fraud | {TEAM_DEFAULT_EMAIL_PLACEHOLDER} | {TEAM_DEFAULT_EMAIL_PLACEHOLDER} | {TEAM_DEFAULT_EMAIL_PLACEHOLDER} | Planning_26Q2",
+        f"Deposit | {TEAM_DEFAULT_EMAIL_PLACEHOLDER} | {TEAM_DEFAULT_EMAIL_PLACEHOLDER} | {TEAM_DEFAULT_EMAIL_PLACEHOLDER} | Planning_26Q2",
+        f"Anti-fraud | {TEAM_DEFAULT_EMAIL_PLACEHOLDER} | {TEAM_DEFAULT_EMAIL_PLACEHOLDER} | {TEAM_DEFAULT_EMAIL_PLACEHOLDER} | Planning_26Q2",
+        f"Pay | {TEAM_DEFAULT_EMAIL_PLACEHOLDER} | {TEAM_DEFAULT_EMAIL_PLACEHOLDER} | {TEAM_DEFAULT_EMAIL_PLACEHOLDER} | Planning_26Q2",
+        f"Loan&CreditRisk | {TEAM_DEFAULT_EMAIL_PLACEHOLDER} | {TEAM_DEFAULT_EMAIL_PLACEHOLDER} | {TEAM_DEFAULT_EMAIL_PLACEHOLDER} | Planning_26Q2",
+    ]
+)
+TEAM_PROFILE_DEFAULTS = {
+    "AF": {
+        "label": "Anti-fraud",
+        "ready": True,
+        "component_route_rules_text": DEFAULT_TEAM_COMPONENT_ROUTE_RULES,
+        "component_default_rules_text": DEFAULT_TEAM_COMPONENT_DEFAULT_RULES,
+    },
+    "CRMS": {
+        "label": "Credit Risk",
+        "ready": True,
+        "component_route_rules_text": DEFAULT_TEAM_COMPONENT_ROUTE_RULES,
+        "component_default_rules_text": DEFAULT_TEAM_COMPONENT_DEFAULT_RULES,
+    },
+    "GRC": {
+        "label": "Ops Risk",
+        "ready": True,
+        "component_route_rules_text": DEFAULT_TEAM_COMPONENT_ROUTE_RULES,
+        "component_default_rules_text": DEFAULT_TEAM_COMPONENT_DEFAULT_RULES,
+    },
+}
 CONFIGURED_FIELDS = [
     "Market",
     "Task Type",
@@ -41,11 +87,11 @@ CONFIGURED_FIELDS = [
     "Biz PIC",
     "Need UAT",
 ]
-MARKET_KEYS = ["ID", "SG", "PH", "Regional"]
 SOURCE_FIELDS = {
     "spreadsheet_link": "",
-    "input_tab_name": "Projects",
+    "input_tab_name": "Sheet1",
     "bpmis_api_access_token": "",
+    "pm_team": "",
     "issue_id_header": DEFAULT_SHEET_HEADERS[0],
     "jira_ticket_link_header": "Jira Ticket Link",
     "sync_pm_email": "",
@@ -280,7 +326,8 @@ class WebConfigStore:
         normalized: dict[str, object] = {}
 
         for key, default in SOURCE_FIELDS.items():
-            normalized[key] = str(data.get(key, default)).strip()
+            value = str(data.get(key, default)).strip()
+            normalized[key] = value or default
 
         if not normalized.get("sync_project_name_header"):
             normalized["sync_project_name_header"] = "Project Name"
@@ -291,7 +338,8 @@ class WebConfigStore:
 
         for field_name, config_meta in HEADER_FIELDS.items():
             config_key, default_value = config_meta if isinstance(config_meta, tuple) else (config_meta, "")
-            normalized[config_key] = str(data.get(config_key, default_value)).strip()
+            value = str(data.get(config_key, default_value)).strip()
+            normalized[config_key] = value or default_value
 
         if not normalized.get("market_header"):
             normalized["market_header"] = normalized.get("sync_market_header", "").strip()
@@ -300,7 +348,9 @@ class WebConfigStore:
             normalized[key] = self._normalize_multiline_text(data.get(key, ""))
 
         for key in DIRECT_FIELDS.values():
-            normalized[key] = str(data.get(key, DEFAULT_DIRECT_VALUES.get(key, ""))).strip()
+            default_value = DEFAULT_DIRECT_VALUES.get(key, "")
+            value = str(data.get(key, default_value)).strip()
+            normalized[key] = value or default_value
 
         for key in MARKET_CHOICE_FIELDS.values():
             normalized[key] = self._normalize_market_choice_map(data.get(key, {}))

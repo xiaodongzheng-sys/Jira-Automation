@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ page_title }} | GRC Portal Demo</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <link rel="stylesheet" href="{{ url_for('static', filename='mockup.css') }}">
+  </head>
+  <body>
+    {% if site_tabs %}
+      <div class="page-shell grc-demo-shell">
+        <nav class="site-switcher" aria-label="Primary tools">
+          <div class="site-switcher-track">
+            {% for tab in site_tabs %}
+              <a class="site-switcher-tab{% if tab.active %} is-active{% endif %}" href="{{ tab.href }}">{{ tab.label }}</a>
+            {% endfor %}
+          </div>
+        </nav>
+      </div>
+    {% endif %}
+    <header class="portal-header">
+      <div class="portal-brand">
+        <div class="brand-mark">S</div>
+        <div class="brand-text">SeaBank</div>
+      </div>
+      <div class="portal-userbar">
+        <span class="user-avatar">◯</span>
+        <span class="user-name">Rene Chong</span>
+        <span class="user-logout">Logout</span>
+      </div>
+    </header>
+
+    <div class="workspace-strip">
+      {% for item in workspace_tabs %}
+        <a class="workspace-pill {% if item.active %}is-active{% endif %}" href="{{ item.href }}">{{ item.label }}</a>
+      {% endfor %}
+      <span class="workspace-plus">+</span>
+    </div>
+
+    <div class="app-shell">
+      <aside class="side-nav">
+        <nav class="portal-menu" aria-label="Primary">
+          <div class="menu-group is-open">
+            <div class="menu-group-title">Governance, Risk &amp; Compliance (GRC)</div>
+            <a class="submenu-item {% if request.endpoint == 'overview' %}is-active{% endif %}" href="{{ url_for('overview') }}">Incident Management</a>
+            <a class="submenu-item {% if request.endpoint == 'access_control' %}is-active{% endif %}" href="{{ url_for('access_control') }}">GRC Access Control</a>
+            <a class="submenu-item {% if request.endpoint == 'add_incident' %}is-active{% endif %}" href="{{ url_for('add_incident') }}">Add Incident</a>
+            <a class="submenu-item {% if request.endpoint == 'authorization' %}is-active{% endif %}" href="{{ url_for('authorization') }}">Authorization Management</a>
+            <a class="submenu-item {% if request.endpoint == 'parameter_management' %}is-active{% endif %}" href="{{ url_for('parameter_management') }}">Parameter Management</a>
+            <a class="submenu-item {% if request.endpoint == 'email_management' %}is-active{% endif %}" href="{{ url_for('email_management') }}">Email Management</a>
+            <a class="submenu-item {% if request.endpoint == 'reports' %}is-active{% endif %}" href="{{ url_for('reports') }}">Report</a>
+          </div>
+        </nav>
+      </aside>
+
+      <main class="main-shell">
+        {% block content %}{% endblock %}
+      </main>
+    </div>
+    <script src="{{ url_for('static', filename='mockup.js') }}"></script>
+  </body>
+</html>

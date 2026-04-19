@@ -377,6 +377,27 @@ class BriefingStore:
             ).fetchone()
         return str(row["script"]) if row else None
 
+    def get_cached_script_any_model(
+        self,
+        *,
+        owner_key: str,
+        audience: str,
+        prompt_version: str,
+        section_payload: str,
+    ) -> str | None:
+        section_hash = hashlib.sha256(section_payload.encode("utf-8")).hexdigest()
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                select script from briefing_script_cache
+                where owner_key = ? and audience = ? and prompt_version = ? and section_hash = ?
+                order by created_at desc
+                limit 1
+                """,
+                (owner_key, audience, prompt_version, section_hash),
+            ).fetchone()
+        return str(row["script"]) if row else None
+
     def cache_script(
         self,
         *,

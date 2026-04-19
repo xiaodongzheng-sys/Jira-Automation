@@ -16,6 +16,7 @@ from dotenv import load_dotenv
 from google.oauth2.credentials import Credentials
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
+from werkzeug.middleware.dispatcher import DispatcherMiddleware
 
 from bpmis_jira_tool.config import Settings
 from bpmis_jira_tool.errors import ConfigError, ToolError
@@ -27,9 +28,17 @@ from bpmis_jira_tool.google_auth import (
 from bpmis_jira_tool.google_sheets import GoogleSheetsService
 from bpmis_jira_tool.project_sync import BPMISProjectSyncService
 from bpmis_jira_tool.service import JiraCreationService, build_bpmis_client
-from bpmis_jira_tool.user_config import CONFIGURED_FIELDS, DEFAULT_SHEET_HEADERS, WebConfigStore
+from bpmis_jira_tool.user_config import (
+    CONFIGURED_FIELDS,
+    DEFAULT_NEED_UAT_BY_MARKET,
+    DEFAULT_SHEET_HEADERS,
+    TEAM_DEFAULT_EMAIL_PLACEHOLDER,
+    TEAM_PROFILE_DEFAULTS,
+    WebConfigStore,
+)
 from prd_briefing import create_prd_briefing_blueprint
 from prd_briefing.storage import BriefingStore
+from incident_mockup.app import create_app as create_incident_mockup_app
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -149,7 +158,13 @@ def create_app() -> Flask:
     app.config["PRD_BRIEFING_STORE"] = BriefingStore(data_root / "prd_briefing")
     app.config["GET_USER_IDENTITY"] = lambda: _get_user_identity(settings)
     app.config["CAN_ACCESS_PRD_BRIEFING"] = lambda: _can_access_prd_briefing(settings)
+    app.config["CAN_ACCESS_GRC_DEMO"] = lambda: _can_access_grc_demo(settings)
     app.register_blueprint(create_prd_briefing_blueprint())
+    grc_demo_app = create_incident_mockup_app(
+        owner_email=settings.grc_demo_owner_email,
+        secret_key=settings.flask_secret_key,
+    )
+    app.wsgi_app = DispatcherMiddleware(app.wsgi_app, {"/grc-demo": grc_demo_app.wsgi_app})
 
     @app.context_processor
     def inject_primary_navigation():
@@ -159,6 +174,7 @@ def create_app() -> Flask:
                 "site_tabs": [],
                 "site_requires_google_login": True,
                 "can_access_prd_briefing": False,
+                "can_access_grc_demo": False,
             }
         site_tabs = [
             {
@@ -175,10 +191,19 @@ def create_app() -> Flask:
                     "active": current_endpoint.startswith("prd_briefing"),
                 }
             )
+        if _can_access_grc_demo(settings):
+            site_tabs.append(
+                {
+                    "label": "GRC Demo",
+                    "href": "/grc-demo/",
+                    "active": request.path.startswith("/grc-demo/"),
+                }
+            )
         return {
             "site_tabs": site_tabs,
             "site_requires_google_login": _site_requires_google_login(settings),
             "can_access_prd_briefing": _can_access_prd_briefing(settings),
+            "can_access_grc_demo": _can_access_grc_demo(settings),
         }
 
     @app.before_request
@@ -187,6 +212,7 @@ def create_app() -> Flask:
             None,
             "static",
             "index",
+            "healthz",
             "google_login",
             "google_callback",
             "google_logout",
@@ -226,7 +252,9 @@ def create_app() -> Flask:
         config_key = user_identity.get("config_key")
         config_data = config_store.load(config_key) if config_key else None
         config_data = config_data or config_store._normalize({})
+        config_data = _hydrate_setup_defaults(config_data, user_identity)
         input_headers: list[str] = []
+        has_saved_config = bool(config_key and config_store.load(config_key))
 
         if "google_credentials" in session:
             try:
@@ -248,9 +276,15 @@ def create_app() -> Flask:
             run_notice=run_notice,
             mapping_fields=CONFIGURED_FIELDS,
             mapping_config=config_data,
+            team_profiles=_build_team_profiles_for_display(config_data, user_identity),
+            default_workspace_tab="run" if has_saved_config else "setup",
             input_headers=input_headers,
             google_authorized=True,
         )
+
+    @app.get("/healthz")
+    def healthz():
+        return jsonify({"status": "ok"}), HTTPStatus.OK
 
     @app.get("/access-denied")
     def access_denied():
@@ -302,6 +336,7 @@ def create_app() -> Flask:
                 "spreadsheet_link": request.form.get("spreadsheet_link", ""),
                 "input_tab_name": request.form.get("input_tab_name", ""),
                 "bpmis_api_access_token": request.form.get("bpmis_api_access_token", ""),
+                "pm_team": request.form.get("pm_team", ""),
                 "issue_id_header": request.form.get("issue_id_header", ""),
                 "jira_ticket_link_header": request.form.get("jira_ticket_link_header", ""),
                 "sync_pm_email": request.form.get("sync_pm_email", ""),
@@ -332,7 +367,9 @@ def create_app() -> Flask:
                     for market in MARKET_KEYS
                 },
             }
+            config = config_store._normalize(_hydrate_setup_defaults(config, user_identity))
             _validate_config_security(settings, config)
+            _validate_team_profile_setup(config)
             config_store.build_field_mappings(config)
             config_store.save(config, user_identity["config_key"])
             flash("Your web Jira config was saved for this user and will be used for preview/run.", "success")
@@ -369,7 +406,7 @@ def create_app() -> Flask:
     def download_default_sheet_template_xlsx():
         workbook = Workbook()
         worksheet = workbook.active
-        worksheet.title = "Projects"
+        worksheet.title = "Sheet1"
 
         sample_row = [
             "225159",
@@ -446,19 +483,6 @@ def create_app() -> Flask:
         except ToolError as error:
             flash(str(error), "error")
         return redirect(url_for("index"))
-
-    @app.get("/api/self-check")
-    def self_check():
-        login_gate = _require_google_login(settings, api=True)
-        if login_gate is not None:
-            return login_gate
-        try:
-            user_identity = _get_user_identity(settings)
-            config_data = config_store.load(user_identity["config_key"]) or config_store._normalize({})
-            payload = _run_self_check(settings, config_data)
-            return jsonify(payload)
-        except ToolError as error:
-            return jsonify({"status": "error", "message": str(error)}), 400
 
     @app.post("/api/jobs/preview")
     def create_preview_job():
@@ -618,6 +642,12 @@ def _can_access_prd_briefing(settings: Settings) -> bool:
     return bool(email and email == settings.prd_briefing_owner_email.strip().lower())
 
 
+def _can_access_grc_demo(settings: Settings) -> bool:
+    profile = session.get("google_profile") or {}
+    email = str(profile.get("email") or "").strip().lower()
+    return bool(email and email == settings.grc_demo_owner_email.strip().lower())
+
+
 def _require_google_login(settings: Settings, *, api: bool = False):
     if _site_requires_google_login(settings):
         if not _google_session_is_connected():
@@ -639,6 +669,74 @@ def _validate_config_security(settings: Settings, config_data: dict[str, Any]) -
     if _shared_portal_enabled(settings) and portal_token and not settings.team_portal_config_encryption_key:
         raise ToolError(
             "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY must be configured on the host before saving BPMIS tokens in shared mode."
+        )
+
+
+def _hydrate_setup_defaults(config_data: dict[str, Any], user_identity: dict[str, str | None]) -> dict[str, Any]:
+    hydrated = dict(config_data)
+    email = str(user_identity.get("email") or "").strip().lower()
+    pm_team = str(hydrated.get("pm_team", "") or "").strip().upper()
+    if pm_team:
+        hydrated["pm_team"] = pm_team
+    profile = TEAM_PROFILE_DEFAULTS.get(pm_team)
+    if profile:
+        if not str(hydrated.get("component_route_rules_text", "") or "").strip():
+            hydrated["component_route_rules_text"] = str(profile.get("component_route_rules_text", "") or "")
+        if not str(hydrated.get("component_default_rules_text", "") or "").strip():
+            hydrated["component_default_rules_text"] = str(profile.get("component_default_rules_text", "") or "")
+    existing_need_uat = hydrated.get("need_uat_by_market", {})
+    hydrated["need_uat_by_market"] = {
+        market: str((existing_need_uat or {}).get(market, "") or DEFAULT_NEED_UAT_BY_MARKET.get(market, "")).strip()
+        for market in MARKET_KEYS
+    }
+    if email:
+        for field in ("component_route_rules_text", "component_default_rules_text"):
+            value = str(hydrated.get(field, "") or "")
+            if TEAM_DEFAULT_EMAIL_PLACEHOLDER in value:
+                hydrated[field] = value.replace(TEAM_DEFAULT_EMAIL_PLACEHOLDER, email)
+        for field in ("sync_pm_email", "product_manager_value", "reporter_value", "biz_pic_value"):
+            if not str(hydrated.get(field, "") or "").strip():
+                hydrated[field] = email
+    return hydrated
+
+
+def _build_team_profiles_for_display(
+    config_data: dict[str, Any],
+    user_identity: dict[str, str | None],
+) -> dict[str, dict[str, Any]]:
+    display_email = (
+        str(user_identity.get("email") or "").strip().lower()
+        or str(config_data.get("sync_pm_email", "") or "").strip().lower()
+        or str(config_data.get("product_manager_value", "") or "").strip().lower()
+        or str(config_data.get("reporter_value", "") or "").strip().lower()
+        or str(config_data.get("biz_pic_value", "") or "").strip().lower()
+    )
+
+    profiles: dict[str, dict[str, Any]] = {}
+    for team_key, profile in TEAM_PROFILE_DEFAULTS.items():
+        rendered_profile = dict(profile)
+        if display_email:
+            for field in ("component_route_rules_text", "component_default_rules_text"):
+                value = str(rendered_profile.get(field, "") or "")
+                if TEAM_DEFAULT_EMAIL_PLACEHOLDER in value:
+                    rendered_profile[field] = value.replace(TEAM_DEFAULT_EMAIL_PLACEHOLDER, display_email)
+        profiles[team_key] = rendered_profile
+    return profiles
+
+
+def _validate_team_profile_setup(config_data: dict[str, Any]) -> None:
+    pm_team = str(config_data.get("pm_team", "") or "").strip().upper()
+    valid_team_labels = ", ".join(profile["label"] for profile in TEAM_PROFILE_DEFAULTS.values())
+    if not pm_team:
+        raise ToolError(f"PM Team is required. Choose {valid_team_labels} before saving setup.")
+    if pm_team not in TEAM_PROFILE_DEFAULTS:
+        raise ToolError(f"Unsupported PM Team: {pm_team}. Choose {valid_team_labels}.")
+    profile = TEAM_PROFILE_DEFAULTS[pm_team]
+    has_routing = bool(str(config_data.get("component_route_rules_text", "") or "").strip())
+    has_defaults = bool(str(config_data.get("component_default_rules_text", "") or "").strip())
+    if not profile.get("ready") and not (has_routing and has_defaults):
+        raise ToolError(
+            f"{profile['label']} default setup is not available yet. Open Advanced mapping overrides and enter Component Routing and Component Defaults manually for now."
         )
 
 
@@ -777,82 +875,6 @@ def _csv_escape(value: str) -> str:
 def _resolve_bpmis_access_token(config_data: dict[str, Any], settings: Settings) -> str | None:
     configured_token = str(config_data.get("bpmis_api_access_token", "") or "").strip()
     return configured_token or settings.bpmis_api_access_token
-
-
-def _run_self_check(settings: Settings, config_data: dict[str, Any]) -> dict[str, Any]:
-    checks: list[dict[str, Any]] = []
-    google_connected = "google_credentials" in session
-    checks.append(
-        {
-            "name": "Google Sheets connection",
-            "status": "pass" if google_connected else "warn",
-            "detail": "Connected and ready." if google_connected else "Connect Google before previewing or running.",
-        }
-    )
-
-    try:
-        build_bpmis_client(settings, access_token=_resolve_bpmis_access_token(config_data, settings)).ping()
-        token_detail = "saved BPMIS token from this portal user" if str(config_data.get("bpmis_api_access_token", "")).strip() else "fallback BPMIS_API_ACCESS_TOKEN from .env"
-        checks.append(
-            {
-                "name": "BPMIS API",
-                "status": "pass",
-                "detail": f"BPMIS API is reachable and the Jira field metadata loaded successfully using the {token_detail}.",
-            }
-        )
-    except Exception as error:  # noqa: BLE001
-        checks.append(
-            {
-                "name": "BPMIS API",
-                "status": "fail",
-                "detail": str(error),
-            }
-        )
-
-    spreadsheet_link = str(config_data.get("spreadsheet_link", "")).strip()
-    input_tab_name = str(config_data.get("input_tab_name", "")).strip()
-    if not google_connected:
-        checks.append(
-            {
-                "name": "Spreadsheet access",
-                "status": "warn",
-                "detail": "Connect Google first, then run the self-check again.",
-            }
-        )
-    elif not spreadsheet_link or not input_tab_name:
-        checks.append(
-            {
-                "name": "Spreadsheet access",
-                "status": "warn",
-                "detail": "Fill in Spreadsheet Link and Input Tab Name, then save your config.",
-            }
-        )
-    else:
-        try:
-            sheets = _build_sheets_service(settings, config_data)
-            snapshot = sheets.read_snapshot()
-            checks.append(
-                {
-                    "name": "Spreadsheet access",
-                    "status": "pass",
-                    "detail": f"Input tab is readable. Found {len(snapshot.rows)} data row(s).",
-                }
-            )
-        except ToolError as error:
-            checks.append(
-                {
-                    "name": "Spreadsheet access",
-                    "status": "fail",
-                    "detail": str(error),
-                }
-            )
-
-    overall = "pass"
-    if any(check["status"] == "fail" for check in checks):
-        overall = "fail"
-    elif any(check["status"] == "warn" for check in checks):
-        overall = "warn"
-    return {"status": overall, "checks": checks}
 
 
 def _get_user_identity(settings: Settings | None = None) -> dict[str, str | None]:

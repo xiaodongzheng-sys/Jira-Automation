@@ -1,0 +1,266 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <section class="portal-page">
+    <section class="surface-card page-shell">
+      <div class="detail-header detail-header-hero">
+        <div>
+          <h2>{{ incident['id'] }} - {{ incident.title }}</h2>
+        </div>
+        <div class="detail-actions">
+          <span class="status-tag status-draft">Draft</span>
+          <a class="workflow-link" href="#">View Workflow</a>
+          <button class="ant-btn" type="button" data-modal-open="withdraw-modal">Withdraw</button>
+          <button class="ant-btn ant-btn-primary" type="button" data-modal-open="reopen-modal">Reopen</button>
+          <a class="ant-btn ant-btn-primary" href="{{ url_for('edit_incident', incident_id=incident['id']) }}">Edit</a>
+        </div>
+      </div>
+
+      <div class="ant-tabs">
+        <div class="ant-tab-list">
+          <a class="ant-tab {% if active_tab == 'details' %}is-active{% endif %}" href="{{ url_for('incident_detail', incident_id=incident['id'], tab='details') }}">Details</a>
+          <a class="ant-tab {% if active_tab == 'action-plan' %}is-active{% endif %}" href="{{ url_for('incident_detail', incident_id=incident['id'], tab='action-plan') }}">Action Plan</a>
+          <a class="ant-tab {% if active_tab == 'operational-loss' %}is-active{% endif %}" href="{{ url_for('incident_detail', incident_id=incident['id'], tab='operational-loss') }}">Operational Loss</a>
+          {% if show_review_comment %}
+            <a class="ant-tab {% if active_tab == 'review-comment' %}is-active{% endif %}" href="{{ url_for('incident_detail', incident_id=incident['id'], tab='review-comment') }}">Review Comment</a>
+          {% endif %}
+        </div>
+
+        <section class="tab-panel {% if active_tab == 'details' %}is-active{% endif %}">
+          <section class="form-section">
+            <h3 class="section-band">Key Incident Details</h3>
+            <div class="detail-grid detail-grid-3">
+              {% for label, value in key_detail_items %}
+                <div class="detail-pair {% if label == 'Incident Title' %}detail-pair-span-3{% endif %}">
+                  <dt>{% if label in ['Incident ID', 'Incident Type', 'Incident Title', 'Incident Occurred Date', 'Detection Date', 'Near Miss', 'Creation Date', 'Created within Timeline'] %}* {% endif %}{{ label }}</dt>
+                  <dd>{{ value or '&nbsp;'|safe }}</dd>
+                </div>
+              {% endfor %}
+            </div>
+          </section>
+
+          {% for title, body, tone in summary_cards %}
+            <section class="callout-card callout-{{ tone }}">
+              <h4>* {{ title }}</h4>
+              <p>{{ body }}</p>
+            </section>
+          {% endfor %}
+
+          <section class="detail-copy-block">
+            <h4>* Parties Involved</h4>
+            <p>Site Reliability Engineering (SRE), Infrastructure/DevOps, Cloud Provider Support, Application Engineering, IT Operations, Incident Commander, Customer Support</p>
+          </section>
+
+          <section class="detail-copy-block">
+            <h4>* Sequence of Events</h4>
+            <p>15-05-2025 - Manual restart of affected nodes initiated by SRE and Infrastructure teams.</p>
+            <p>16-05-2025 - Services began coming online in a staggered sequence to prevent overload.</p>
+            <p>20-05-2025 - Core services (web frontend, authentication, and APIs) reached partial operational state.</p>
+            <p>22-05-2025 - Manual cluster rebalancing completed to ensure even load distribution.</p>
+            <p>24-05-2025 - Automated health checks passed for all critical services.</p>
+            <p>27-05-2025 - Manual verification began.</p>
+          </section>
+
+          <section class="form-section">
+            <h3 class="section-band">Incident Impact</h3>
+            <div class="detail-grid detail-grid-4">
+              {% for label, value in impact_items %}
+                <div class="detail-pair">
+                  <dt>* {{ label }}</dt>
+                  <dd class="{% if value == 'Significant' %}impact-significant{% endif %}">{{ value }}</dd>
+                </div>
+              {% endfor %}
+            </div>
+          </section>
+        </section>
+
+        <section class="tab-panel {% if active_tab == 'action-plan' %}is-active{% endif %}">
+          <div class="ant-table-wrap compact-table">
+            <table class="ant-table">
+              <thead>
+                <tr>
+                  <th>No.</th>
+                  <th>Action Plan ID/ Action Plan</th>
+                  <th>Status</th>
+                  <th>Target Completion Date</th>
+                  <th>Completion Date</th>
+                  <th>Overdue</th>
+                  <th>Reviewer</th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for plan in action_plans %}
+                  <tr>
+                    <td>{{ loop.index }}</td>
+                    <td>
+                      <a href="#" data-modal-open="action-plan-view-modal">{{ plan.id }}</a>
+                      <div class="cell-subtext">{{ plan.title }}</div>
+                    </td>
+                    <td><span class="status-tag status-{{ plan.status|lower|replace(' ', '-') }}">{{ plan.status }}</span></td>
+                    <td>{{ plan.target }}</td>
+                    <td>{{ plan.completion }}</td>
+                    <td>{{ plan.overdue }}</td>
+                    <td>{{ plan.reviewer }}</td>
+                    <td class="table-actions">
+                      <a href="#">Withdraw</a>
+                      <a href="#" data-modal-open="action-plan-view-modal">Complete</a>
+                    </td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="tab-panel {% if active_tab == 'operational-loss' %}is-active{% endif %}">
+          <div class="info-grid info-grid-4">
+            {% for card in op_loss_cards %}
+              <article class="info-card">
+                <span>{{ card.label }}</span>
+                <strong>{{ card.value }}</strong>
+                <p>{{ card.note }}</p>
+              </article>
+            {% endfor %}
+          </div>
+        </section>
+
+        {% if show_review_comment %}
+          <section class="tab-panel {% if active_tab == 'review-comment' %}is-active{% endif %}">
+            <div class="ant-table-wrap compact-table">
+              <table class="ant-table">
+                <thead>
+                  <tr>
+                    <th>No.</th>
+                    <th>Reviewer Group</th>
+                    <th>Reviewer Name</th>
+                  <th>Authorization</th>
+                  <th>Regulatory Breach</th>
+                  <th>Report to Regulator</th>
+                  <th>Review Comment</th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for row in review_rows %}
+                  <tr>
+                      <td>{{ loop.index }}</td>
+                      <td>{{ row.group }}</td>
+                      <td>{{ row.reviewer }}</td>
+                    <td>{{ row.authorization }}</td>
+                    <td>{{ row.reg_breach }}</td>
+                    <td>{{ row.report_reg }}</td>
+                    <td>{{ row.comment }}</td>
+                    <td><a href="#">{{ row.action }}</a></td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+          </section>
+        {% endif %}
+      </div>
+    </section>
+
+    <section class="surface-card">
+      <div class="comment-tabs">
+        <span class="comment-tab is-active">Comment</span>
+        <span class="comment-tab">History</span>
+      </div>
+      <div class="comment-thread">
+        {% for item in timeline %}
+          <article class="comment-item">
+            <div class="comment-avatar">{{ item.user[0] }}</div>
+            <div class="comment-body">
+              <div class="comment-meta">
+                <strong>{{ item.user }}</strong>
+                <span>{{ item.time }}</span>
+              </div>
+              <p>{{ item.event }}</p>
+              {% if item.replies %}
+                <span class="reply-pill">{{ item.replies }} Replies</span>
+              {% endif %}
+            </div>
+            <div class="comment-action-icon">◔</div>
+          </article>
+        {% endfor %}
+      </div>
+      <div class="comment-input">Click to add comment</div>
+    </section>
+  </section>
+
+  <div class="modal-backdrop" data-modal="withdraw-modal" hidden>
+    <div class="modal-card">
+      <div class="modal-head"><h3>Withdraw Incident</h3><button class="modal-close" type="button" data-modal-close>×</button></div>
+      <div class="field-block field-block-full">
+        <label>Withdrawal Justification</label>
+        <textarea class="ant-textarea" rows="4">Business user requested withdrawal before closure.</textarea>
+      </div>
+      <div class="form-actions">
+        <button class="ant-btn" type="button" data-modal-close>Cancel</button>
+        <button class="ant-btn ant-btn-primary" type="button">Confirm</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" data-modal="reopen-modal" hidden>
+    <div class="modal-card">
+      <div class="modal-head"><h3>Reopen Incident</h3><button class="modal-close" type="button" data-modal-close>×</button></div>
+      <div class="field-block field-block-full">
+        <label>Reopen Justification</label>
+        <textarea class="ant-textarea" rows="4">Additional remediation action plan required after closure.</textarea>
+      </div>
+      <div class="form-actions">
+        <button class="ant-btn" type="button" data-modal-close>Cancel</button>
+        <button class="ant-btn ant-btn-primary" type="button">Confirm</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" data-modal="action-plan-view-modal" hidden>
+    <div class="modal-card modal-card-wide">
+      <div class="modal-head">
+        <div class="modal-title-group">
+          <h3>{{ action_plan_modal.id }}</h3>
+          <span class="status-tag status-{{ action_plan_modal.status|lower|replace(' ', '-') }}">{{ action_plan_modal.status }}</span>
+        </div>
+        <button class="modal-close" type="button" data-modal-close>×</button>
+      </div>
+      <div class="detail-grid detail-grid-4 modal-detail-grid">
+        <div class="detail-pair detail-pair-span-4">
+          <dt>* Action Plan</dt>
+          <dd>{{ action_plan_modal.plan }}</dd>
+        </div>
+        <div class="detail-pair"><dt>* Action Owner</dt><dd>{{ action_plan_modal.owner }}</dd></div>
+        <div class="detail-pair"><dt>* Action Owner Department</dt><dd>{{ action_plan_modal.department }}</dd></div>
+        <div class="detail-pair"><dt>* Action Plan Reviewer</dt><dd>{{ action_plan_modal.reviewer }}</dd></div>
+        <div class="detail-pair"><dt>Validation Date</dt><dd>{{ action_plan_modal.validation_date }}</dd></div>
+        <div class="detail-pair"><dt>* Target Completion Date</dt><dd>{{ action_plan_modal.target_date }}</dd></div>
+        <div class="detail-pair"><dt>Completion Date</dt><dd>{{ action_plan_modal.completion_date }}</dd></div>
+        <div class="detail-pair"><dt>* Overdue</dt><dd>{{ action_plan_modal.overdue }}</dd></div>
+        <div class="detail-pair"><dt>Extended Target Completion Date</dt><dd>{{ action_plan_modal.extended_date }}</dd></div>
+        <div class="detail-pair"><dt>Board / RMC Approval Date</dt><dd>{{ action_plan_modal.board_date }}</dd></div>
+        <div class="detail-pair detail-pair-span-4">
+          <dt>* Status Update</dt>
+          <dd class="preformatted-copy">{{ action_plan_modal.status_update }}</dd>
+        </div>
+      </div>
+
+      <div class="modal-divider"></div>
+
+      <div class="support-docs">
+        <h4>Supporting Document</h4>
+        <div class="support-doc-grid">
+          {% for name in action_plan_modal.documents %}
+            <a href="#" class="support-doc-link">{{ name }}</a>
+          {% endfor %}
+        </div>
+      </div>
+
+      <div class="form-actions">
+        <button class="ant-btn" type="button" data-modal-close>Withdraw</button>
+        <button class="ant-btn ant-btn-primary" type="button" data-modal-close>Complete</button>
+      </div>
+    </div>
+  </div>
+{% endblock %}

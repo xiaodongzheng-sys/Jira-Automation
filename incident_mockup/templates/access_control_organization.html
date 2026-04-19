@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <section class="portal-page">
+    <section class="surface-card page-shell">
+      <div class="search-grid form-grid-4">
+        <div class="field-block"><label>Department</label><select class="ant-select"><option>Select</option></select></div>
+        <div class="field-block"><label>Functional Unit</label><select class="ant-select"><option>Select</option></select></div>
+        <div class="field-block"><label>Status</label><select class="ant-select"><option>Select</option></select></div>
+      </div>
+      <div class="search-action-row">
+        <button class="link-button" type="button">Clear</button>
+        <button class="ant-btn ant-btn-primary" type="button">Search</button>
+      </div>
+    </section>
+
+    <section class="surface-card page-shell">
+      <div class="section-toolbar">
+        <h3>&nbsp;</h3>
+        <div class="toolbar-actions">
+          <button class="ant-btn ant-btn-primary" type="button">Add</button>
+          <button class="ant-btn ant-btn-primary" type="button">Download</button>
+        </div>
+      </div>
+      <div class="ant-table-wrap compact-table">
+        <table class="ant-table">
+          <thead>
+            <tr>
+              <th>No.</th>
+              <th>Department</th>
+              <th>Functional Unit</th>
+              <th>Status</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for department, fu, status in org_rows %}
+              <tr>
+                <td>{{ loop.index }}</td>
+                <td>{{ department }}</td>
+                <td>{{ fu }}</td>
+                <td>{{ status }}</td>
+                <td><a href="#">Edit</a></td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <div class="table-footer">
+        <span>Total 10 items</span>
+        <div class="table-pagination">
+          <button class="pagination-btn" type="button">‹</button>
+          <button class="pagination-btn is-active" type="button">1</button>
+          <button class="pagination-btn" type="button">›</button>
+          <span class="page-size">15 / page</span>
+          <span>Go to</span>
+          <input class="goto-input" type="text">
+        </div>
+      </div>
+    </section>
+  </section>
+{% endblock %}

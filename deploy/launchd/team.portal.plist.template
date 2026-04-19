@@ -19,6 +19,8 @@
     <dict>
       <key>ENV_FILE</key>
       <string>__ENV_FILE__</string>
+      <key>TEAM_STACK_USE_CAFFEINATE</key>
+      <string>__TEAM_STACK_USE_CAFFEINATE__</string>
     </dict>
 
     <key>RunAtLoad</key>

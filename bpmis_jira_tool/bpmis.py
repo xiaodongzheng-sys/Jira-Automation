@@ -545,5 +545,6 @@ class BPMISDirectApiClient(BPMISClient):
             return token
         raise BPMISNotConfiguredError(
             "BPMIS API access token is not configured. "
-            "Please set BPMIS_API_ACCESS_TOKEN in .env with a token generated from BPMIS."
+            "Get a token from https://bpmis-uat1.uat.npt.seabank.io/me/access-token "
+            "and save it in the portal or set BPMIS_API_ACCESS_TOKEN in .env."
         )

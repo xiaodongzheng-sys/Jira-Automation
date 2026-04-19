@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <section class="portal-page">
+    <section class="surface-card">
+      <div class="detail-header">
+        <div><h2>Edit Parameter</h2><p class="detail-subtitle">{{ parameter.id }} · {{ parameter.field_name }}</p></div>
+      </div>
+      <div class="form-grid">
+        <div class="field-block"><label>Parameter ID</label><input class="ant-input" type="text" value="{{ parameter.id }}" disabled></div>
+        <div class="field-block"><label>Module</label><input class="ant-input" type="text" value="{{ parameter.module }}" disabled></div>
+        <div class="field-block"><label>Field Name</label><input class="ant-input" type="text" value="{{ parameter.field_name }}" disabled></div>
+        <div class="field-block"><label>Status</label><select class="ant-select"><option>{{ parameter.status }}</option><option>Inactive</option></select></div>
+        <div class="field-block field-block-full"><label>Content</label><textarea class="ant-textarea" rows="4">{{ parameter.content }}</textarea></div>
+        <div class="field-block field-block-full"><label>Tooltip</label><textarea class="ant-textarea" rows="4">{{ parameter.tooltip }}</textarea></div>
+      </div>
+      <div class="form-actions"><button class="ant-btn" type="button">Cancel</button><button class="ant-btn ant-btn-primary" type="button">Submit</button></div>
+    </section>
+  </section>
+{% endblock %}
+

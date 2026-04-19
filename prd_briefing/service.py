@@ -465,6 +465,24 @@ class PRDBriefingService:
         )
         if cached_script:
             return cached_script
+        legacy_cached_script = self.store.get_cached_script_any_model(
+            owner_key=owner_key,
+            audience=DEVELOPER_AUDIENCE,
+            prompt_version=WALKTHROUGH_SCRIPT_PROMPT_VERSION,
+            section_payload=section_payload,
+        )
+        if legacy_cached_script:
+            # Normalize legacy cache entries under the current model id so later
+            # requests hit the fast path without needing OpenAI again.
+            self.store.cache_script(
+                owner_key=owner_key,
+                audience=DEVELOPER_AUDIENCE,
+                model_id=model_id,
+                prompt_version=WALKTHROUGH_SCRIPT_PROMPT_VERSION,
+                section_payload=section_payload,
+                script=legacy_cached_script,
+            )
+            return legacy_cached_script
         try:
             script = self.text_client.create_answer(system_prompt=prompt, user_prompt=body)
         except Exception as error:  # noqa: BLE001
@@ -527,9 +545,27 @@ class PRDBriefingService:
                 return self.text_client.create_answer(system_prompt=system_prompt, user_prompt=user_prompt)
             except Exception:  # noqa: BLE001
                 pass
-        lead = "根据目前可用的来源内容："
-        excerpt = chunks[0].content if chunks else ""
-        return f"{lead} {excerpt}"
+        return self._build_fallback_answer(chunks=chunks, groundedness=groundedness)
+
+    def _build_fallback_answer(self, *, chunks: list[ChunkRecord], groundedness: str) -> str:
+        if not chunks:
+            return "我暂时无法生成完整回答，但当前也没有检索到足够的 PRD 片段。"
+        lead = "根据当前检索到的 PRD 内容，我先给你一个简短结论："
+        if groundedness == "inference":
+            lead = "根据当前检索到的 PRD 内容，这里先给你一个偏保守的推断："
+        summary_points = []
+        for chunk in chunks[:2]:
+            snippet = summarize_chunk_for_fallback(chunk.content)
+            if snippet:
+                summary_points.append(snippet)
+        if not summary_points:
+            summary_points.append("当前命中的 section 主要覆盖相关流程和字段说明")
+        references = "；".join(
+            f"{chunk.title} · {chunk.section_path}"
+            for chunk in chunks[:3]
+        )
+        body = "；".join(summary_points[:2])
+        return f"{lead}{body}。可优先查看：{references}。"
 
     def _build_session_overview(
         self,
@@ -649,6 +685,19 @@ def keyword_score(query: str, content: str) -> float:
 
 def chunk_has_signal(chunk: ChunkRecord) -> bool:
     return chunk.score > 0.0
+
+
+def summarize_chunk_for_fallback(content: str, limit: int = 90) -> str:
+    normalized = " ".join((content or "").split())
+    if not normalized:
+        return ""
+    parts = re.split(r"(?<=[。！？.!?])\s+|\n+", normalized)
+    first = next((part.strip() for part in parts if part.strip()), normalized)
+    first = re.sub(r"\s+", " ", first)
+    if len(first) <= limit:
+        return first
+    trimmed = first[:limit].rstrip(" ,;:，；：")
+    return f"{trimmed}..."
 
 
 def safe_filename(name: str) -> str:

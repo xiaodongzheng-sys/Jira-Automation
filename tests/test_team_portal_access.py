@@ -1,7 +1,7 @@
 import os
 import tempfile
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from bpmis_jira_tool.web import create_app
 
@@ -131,28 +131,24 @@ class TeamPortalAccessTests(unittest.TestCase):
                 self.assertEqual(response.status_code, 200)
                 self.assertIn(b"Teammate", response.data)
 
-    def test_self_check_returns_warn_without_google(self):
+    def test_healthz_is_public_in_shared_mode(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
                 "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg",
+                "TEAM_PORTAL_BASE_URL": "https://jira-tool.example.com",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
-                "TEAM_PORTAL_BASE_URL": "",
-                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
-                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
             },
             clear=False,
-        ), patch("bpmis_jira_tool.web.build_bpmis_client") as mock_build_client:
-            mock_build_client.return_value = MagicMock()
+        ):
             app = create_app()
             app.testing = True
 
             with app.test_client() as client:
-                response = client.get("/api/self-check")
+                response = client.get("/healthz")
                 self.assertEqual(response.status_code, 200)
-                payload = response.get_json()
-                self.assertEqual(payload["status"], "warn")
-                self.assertEqual(payload["checks"][0]["name"], "Google Sheets connection")
+                self.assertEqual(response.get_json(), {"status": "ok"})
 
     def test_preview_job_requires_google_connection(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(

@@ -1,0 +1,130 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <section class="portal-page">
+    <section class="surface-card">
+      <div class="page-title-row">
+        <h2>GRC Access Control</h2>
+      </div>
+      <div class="ant-tabs">
+        <div class="ant-tab-list">
+          <a class="ant-tab is-active" href="#">Role Management</a>
+          <a class="ant-tab" href="{{ url_for('access_control_organization') }}">Organization Structure</a>
+          <a class="ant-tab" href="{{ url_for('access_control_data_access') }}">Data Access Control</a>
+          <a class="ant-tab" href="{{ url_for('access_control_reviewer_list') }}">Reviewer List</a>
+          <a class="ant-tab" href="{{ url_for('approval_center') }}">Approval Center</a>
+        </div>
+      </div>
+    </section>
+
+    <section class="surface-card">
+      <div class="section-toolbar">
+        <h3>Incident Management Role Permissions</h3>
+      </div>
+      <div class="ant-table-wrap">
+        <table class="ant-table">
+          <thead>
+            <tr>
+              <th>No.</th>
+              <th>Menu Name</th>
+              <th>Access</th>
+              <th>Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for menu_name, access, description in role_permissions %}
+              <tr>
+                <td>{{ loop.index }}</td>
+                <td>{{ menu_name }}</td>
+                <td>{{ access }}</td>
+                <td>{{ description }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="surface-card">
+      <div class="split-two">
+        <div>
+          <div class="section-toolbar"><h3>Organization Structure / Data Access</h3></div>
+          <div class="ant-table-wrap">
+            <table class="ant-table">
+              <thead>
+                <tr>
+                  <th>No.</th>
+                  <th>Department</th>
+                  <th>Functional Unit</th>
+                  <th>Status</th>
+                  <th>Approver / Checker</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for department, fu, status, note in org_rows %}
+                  <tr>
+                    <td>{{ loop.index }}</td>
+                    <td>{{ department }}</td>
+                    <td>{{ fu }}</td>
+                    <td>{{ status }}</td>
+                    <td>{{ note }}</td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div>
+          <div class="section-toolbar"><h3>Reviewer List</h3></div>
+          <div class="ant-table-wrap">
+            <table class="ant-table">
+              <thead>
+                <tr>
+                  <th>No.</th>
+                  <th>Reviewer Group</th>
+                  <th>Role</th>
+                  <th>Remarks</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for reviewer_group, role, remarks in reviewer_rows %}
+                  <tr>
+                    <td>{{ loop.index }}</td>
+                    <td>{{ reviewer_group }}</td>
+                    <td>{{ role }}</td>
+                    <td>{{ remarks }}</td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="surface-card">
+      <div class="section-toolbar"><h3>Approval Center Linkage</h3></div>
+      <div class="ant-table-wrap">
+        <table class="ant-table">
+          <thead>
+            <tr>
+              <th>No.</th>
+              <th>System / Resource</th>
+              <th>Authorization Type</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for resource, auth_type in approval_center %}
+              <tr>
+                <td>{{ loop.index }}</td>
+                <td>{{ resource }}</td>
+                <td>{{ auth_type }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </section>
+{% endblock %}

@@ -1,0 +1,303 @@
+{% extends "base.html" %}
+
+{% macro render_field(field) -%}
+  <div class="field-block {% if field.span == 2 %}field-block-span-2{% elif field.span == 3 %}field-block-span-3{% elif field.span == 4 %}field-block-full{% endif %}">
+    <label>{% if field.required %}<span class="required-mark">*</span>{% endif %} {{ field.label }}</label>
+    {% if field.kind == 'textarea' %}
+      <textarea class="ant-textarea" rows="4">{{ field.value }}</textarea>
+    {% elif field.kind == 'select' %}
+      <select class="ant-select"><option>{{ field.value or 'Select' }}</option></select>
+    {% else %}
+      <input class="ant-input" type="text" value="{{ field.value }}" {% if field.kind == 'date' %}placeholder="Select date"{% endif %}>
+    {% endif %}
+  </div>
+{%- endmacro %}
+
+{% block content %}
+  <section class="portal-page">
+    <section class="surface-card page-shell">
+      <div class="page-title-row">
+        <h2>Add New Incident</h2>
+      </div>
+
+      <div class="single-field-bar">
+        <div class="field-block field-block-narrow">
+          <label><span class="required-mark">*</span> Select Incident Type</label>
+          <select class="ant-select"><option>{{ incident_type }}</option><option>Fraud Incident</option><option>IT Incident</option></select>
+        </div>
+      </div>
+
+      <div class="ant-tabs">
+        <div class="ant-tab-list">
+          <a class="ant-tab {% if active_tab == 'details' %}is-active{% endif %}" href="{{ url_for('add_incident', tab='details') }}">Details</a>
+          <a class="ant-tab {% if active_tab == 'action-plan' %}is-active{% endif %}" href="{{ url_for('add_incident', tab='action-plan') }}">Action Plan</a>
+          <a class="ant-tab {% if active_tab == 'operational-loss' %}is-active{% endif %}" href="{{ url_for('add_incident', tab='operational-loss') }}">Operational Loss</a>
+        </div>
+
+        <section class="tab-panel {% if active_tab == 'details' %}is-active{% endif %}">
+          <section class="form-section">
+            <h3 class="section-band">Key Incident Details</h3>
+            <div class="dense-form-grid form-grid-3">
+              {% for row in key_detail_rows %}
+                {% for field in row %}
+                  {{ render_field(field) }}
+                {% endfor %}
+              {% endfor %}
+            </div>
+          </section>
+
+          <section class="form-section">
+            <h3 class="section-band">Impact Classification</h3>
+            <div class="dense-form-grid form-grid-4">
+              {% for field in impact_header_fields %}
+                {{ render_field(field) }}
+              {% endfor %}
+              <div class="field-block field-block-full">
+                <label><span class="required-mark">*</span> Non-Financial Impact Detailed Description:</label>
+                <div class="ant-table-wrap compact-table">
+                  <table class="ant-table">
+                    <thead>
+                      <tr>
+                        <th>No</th>
+                        <th>Title</th>
+                        <th>Impact</th>
+                        <th>Justifications</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {% for title, impact, justification in non_financial_rows %}
+                        <tr>
+                          <td>{{ loop.index }}</td>
+                          <td>{{ title }}</td>
+                          <td>{{ impact }}</td>
+                          <td>{{ justification }}</td>
+                        </tr>
+                      {% endfor %}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+              <div class="field-block field-block-full">
+                <label>Impacted System</label>
+                <input class="ant-input" type="text" value="Public Website (Web Frontend), Public API Gateway, Authentication Service, Database Cluster, Background Jobs, Monitoring and Alerting Tools, Admin Dashboard (Internal Tooling)">
+              </div>
+            </div>
+          </section>
+
+          <section class="form-section">
+            <h3 class="section-band">Functional Unit Details</h3>
+            <div class="dense-form-grid form-grid-4">
+              {% for field in functional_unit_fields %}
+                {{ render_field(field) }}
+              {% endfor %}
+            </div>
+          </section>
+
+          <section class="form-section">
+            <h3 class="section-band">Additional Info</h3>
+            <div class="dense-form-grid form-grid-4">
+              {% for field in additional_info_fields %}
+                {{ render_field(field) }}
+              {% endfor %}
+            </div>
+          </section>
+
+          <div class="form-actions">
+            <a class="ant-btn" href="{{ url_for('overview') }}">Cancel</a>
+            <a class="ant-btn ant-btn-primary" href="{{ url_for('add_incident', tab='action-plan') }}">Next</a>
+          </div>
+        </section>
+
+        <section class="tab-panel {% if active_tab == 'action-plan' %}is-active{% endif %}">
+          <section class="form-section">
+            <div class="section-toolbar">
+              <h3>Action Plan</h3>
+              <div class="toolbar-actions">
+                <button class="ant-btn ant-btn-primary" type="button" data-modal-open="add-action-plan-modal">Add New Action Plan</button>
+              </div>
+            </div>
+
+            <div class="ant-table-wrap compact-table">
+              <table class="ant-table">
+                <thead>
+                  <tr>
+                    <th>No.</th>
+                    <th>Action Plan ID / Action Plan</th>
+                    <th>Status</th>
+                    <th>Target Completion Date</th>
+                    <th>Completion Date</th>
+                    <th>Overdue</th>
+                    <th>Reviewer</th>
+                    <th>Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for plan in new_action_plans %}
+                    <tr>
+                      <td>{{ loop.index }}</td>
+                      <td>
+                        <a href="#" data-modal-open="add-action-plan-modal">{{ plan.id }}</a>
+                        <div class="cell-subtext">{{ plan.title }}</div>
+                      </td>
+                      <td><span class="status-tag status-{{ plan.status|lower|replace(' ', '-') }}">{{ plan.status }}</span></td>
+                      <td>{{ plan.target }}</td>
+                      <td>{{ plan.completion }}</td>
+                      <td>{{ plan.overdue }}</td>
+                      <td>{{ plan.reviewer }}</td>
+                      <td class="table-actions"><a href="#" data-modal-open="add-action-plan-modal">View</a></td>
+                    </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <div class="form-actions">
+            <a class="ant-btn" href="{{ url_for('add_incident', tab='details') }}">Back</a>
+            <a class="ant-btn ant-btn-primary" href="{{ url_for('add_incident', tab='operational-loss') }}">Next</a>
+          </div>
+        </section>
+
+        <section class="tab-panel {% if active_tab == 'operational-loss' %}is-active{% endif %}">
+          <section class="form-section">
+            <h3 class="section-band">Operational Loss Booking</h3>
+            <div class="dense-form-grid form-grid-4">
+              {% for field in op_loss_fields %}
+                {{ render_field(field) }}
+              {% endfor %}
+            </div>
+          </section>
+
+          <section class="form-section">
+            <h3 class="section-band">Additional / Recoveries of Operational Losses</h3>
+            <div class="ant-table-wrap compact-table">
+              <table class="ant-table">
+                <thead>
+                  <tr>
+                    <th>No.</th>
+                    <th>Operational Loss ID</th>
+                    <th>Original Reported Operational Loss</th>
+                    <th>Additional Loss</th>
+                    <th>Recoveries Reported</th>
+                    <th>Net Reported Operational Loss</th>
+                    <th>Accounting Date</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% if recovery_rows %}
+                    {% for row in recovery_rows %}
+                      <tr>
+                        <td>{{ loop.index }}</td>
+                        <td>{{ row.id }}</td>
+                        <td>{{ row.original }}</td>
+                        <td>{{ row.additional }}</td>
+                        <td>{{ row.recovery }}</td>
+                        <td>{{ row.net }}</td>
+                        <td>{{ row.date }}</td>
+                      </tr>
+                    {% endfor %}
+                  {% else %}
+                    <tr><td colspan="7" class="empty-row">+ Add Operational Loss</td></tr>
+                  {% endif %}
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="form-section">
+            <h3 class="section-band">Supporting Document (To include relevant supporting document if there are additional recoveries/losses)</h3>
+            <div class="upload-dropzone">
+              <div class="upload-icon">◫</div>
+              <strong>Click or drag file to this area to upload</strong>
+              <p>Support for a single or bulk upload. Strictly prohibit from uploading company data or other banned files.</p>
+            </div>
+          </section>
+
+          <div class="form-actions">
+            <a class="ant-btn" href="{{ url_for('add_incident', tab='action-plan') }}">Back</a>
+            <a class="ant-btn ant-btn-primary" href="{{ url_for('overview') }}">Save</a>
+          </div>
+        </section>
+      </div>
+    </section>
+  </section>
+
+  <div class="modal-backdrop" data-modal="add-action-plan-modal" hidden>
+    <div class="modal-card modal-card-wide">
+      <div class="modal-head">
+        <h3>Add New Action Plan</h3>
+        <button class="modal-close" type="button" data-modal-close>×</button>
+      </div>
+      <div class="dense-form-grid form-grid-3">
+        <div class="field-block">
+          <label><span class="required-mark">*</span> Action Plan ID</label>
+          <input class="ant-input" type="text" value="{{ action_plan_modal.id }}">
+        </div>
+        <div class="field-block">
+          <label><span class="required-mark">*</span> Action Plan Status</label>
+          <select class="ant-select"><option>{{ action_plan_modal.status }}</option></select>
+        </div>
+        <div class="field-block field-block-full">
+          <label><span class="required-mark">*</span> Action Plan</label>
+          <textarea class="ant-textarea" rows="3">{{ action_plan_modal.plan }}</textarea>
+        </div>
+        <div class="field-block">
+          <label><span class="required-mark">*</span> Action Owner</label>
+          <input class="ant-input" type="text" value="{{ action_plan_modal.owner }}">
+        </div>
+        <div class="field-block">
+          <label><span class="required-mark">*</span> Action Owner Department</label>
+          <input class="ant-input" type="text" value="{{ action_plan_modal.department }}">
+        </div>
+        <div class="field-block">
+          <label><span class="required-mark">*</span> Action Plan Reviewer</label>
+          <select class="ant-select"><option>{{ action_plan_modal.reviewer }}</option></select>
+        </div>
+        <div class="field-block">
+          <label>Validation Date</label>
+          <input class="ant-input" type="text" value="{{ action_plan_modal.validation_date }}" placeholder="Select date">
+        </div>
+        <div class="field-block">
+          <label><span class="required-mark">*</span> Target Completion Date</label>
+          <input class="ant-input" type="text" value="{{ action_plan_modal.target_date }}" placeholder="Select date">
+        </div>
+        <div class="field-block">
+          <label>Completion Date</label>
+          <input class="ant-input" type="text" value="{{ action_plan_modal.completion_date }}" placeholder="Select date">
+        </div>
+        <div class="field-block">
+          <label><span class="required-mark">*</span> Overdue</label>
+          <select class="ant-select"><option>{{ action_plan_modal.overdue }}</option></select>
+        </div>
+        <div class="field-block">
+          <label>Extended Target Completion Date</label>
+          <input class="ant-input" type="text" value="{{ action_plan_modal.extended_date }}" placeholder="Select date">
+        </div>
+        <div class="field-block">
+          <label>Board / RMC Approval Date</label>
+          <input class="ant-input" type="text" value="{{ action_plan_modal.board_date }}" placeholder="Select date">
+        </div>
+        <div class="field-block field-block-full">
+          <label><span class="required-mark">*</span> Status Update</label>
+          <textarea class="ant-textarea" rows="4">{{ action_plan_modal.status_update }}</textarea>
+        </div>
+      </div>
+
+      <div class="modal-divider"></div>
+
+      <div class="field-block field-block-full">
+        <label>Supporting Document</label>
+        <div class="upload-dropzone upload-dropzone-compact">
+          <div class="upload-icon">◫</div>
+          <strong>Click or drag file to this area to upload</strong>
+          <p>Support for a single or bulk upload. Strictly prohibit from uploading company data or other banned files.</p>
+        </div>
+      </div>
+
+      <div class="form-actions">
+        <button class="ant-btn" type="button" data-modal-close>Back</button>
+        <button class="ant-btn ant-btn-primary" type="button" data-modal-close>Save</button>
+      </div>
+    </div>
+  </div>
+{% endblock %}

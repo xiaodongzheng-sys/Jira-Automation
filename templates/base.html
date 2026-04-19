@@ -60,9 +60,6 @@
         const progressCount = document.querySelector('[data-run-progress-count]');
         const progressMessage = document.querySelector('[data-run-progress-message]');
         const progressFill = document.querySelector('[data-run-progress-fill]');
-        const selfCheckTrigger = document.querySelector('[data-self-check-trigger]');
-        const selfCheckResults = document.querySelector('[data-self-check-results]');
-
         const escapeHtml = (value) => String(value ?? '')
           .replaceAll('&', '&amp;')
           .replaceAll('<', '&lt;')
@@ -246,33 +243,6 @@
           });
         });
 
-        if (selfCheckTrigger && selfCheckResults) {
-          selfCheckTrigger.addEventListener('click', async () => {
-            selfCheckResults.innerHTML = '<div class="empty-state"><p>Running self-check…</p></div>';
-            try {
-              const response = await fetch('/api/self-check', { method: 'GET' });
-              const payload = await response.json();
-              if (!response.ok) {
-                throw new Error(payload.message || 'Could not run the self-check.');
-              }
-              const cards = payload.checks.map((check) => `
-                <article class="diagnostic-card diagnostic-${escapeHtml(check.status)}">
-                  <div class="diagnostic-head">
-                    <strong>${escapeHtml(check.name)}</strong>
-                    <span class="badge badge-${escapeHtml(check.status === 'pass' ? 'created' : check.status === 'warn' ? 'skipped' : 'error')}">
-                      ${escapeHtml(check.status)}
-                    </span>
-                  </div>
-                  <p>${escapeHtml(check.detail)}</p>
-                </article>
-              `).join('');
-              selfCheckResults.innerHTML = `<div class="diagnostic-grid">${cards}</div>`;
-            } catch (error) {
-              selfCheckResults.innerHTML = `<div class="empty-state"><p>${escapeHtml(error.message || 'Could not run the self-check.')}</p></div>`;
-            }
-          });
-        }
-
         const tabTriggers = [...document.querySelectorAll('[data-tab-trigger]')];
         const tabPanels = [...document.querySelectorAll('[data-tab-panel]')];
         const tabStorageKey = 'jira-automation-active-tab';
@@ -298,7 +268,8 @@
         };
 
         if (tabTriggers.length && tabPanels.length) {
-          let initialTab = tabTriggers.find((trigger) => trigger.classList.contains('is-active'))?.dataset.tabTrigger;
+          const tabContainer = document.querySelector('[data-default-tab]');
+          let initialTab = tabContainer?.dataset.defaultTab || tabTriggers.find((trigger) => trigger.classList.contains('is-active'))?.dataset.tabTrigger;
           try {
             const storedTab = window.localStorage.getItem(tabStorageKey);
             if (storedTab && tabTriggers.some((trigger) => trigger.dataset.tabTrigger === storedTab)) {

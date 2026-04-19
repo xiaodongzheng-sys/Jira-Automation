@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <section class="portal-page">
+    <section class="surface-card page-shell">
+      <div class="detail-header detail-header-hero">
+        <div>
+          <h2>{{ auth_id }} - Incident - Authorize New Incident</h2>
+        </div>
+      </div>
+    </section>
+
+    <section class="surface-card page-shell">
+      <div class="ant-tabs">
+        <div class="ant-tab-list">
+          <span class="ant-tab is-active">Authorization Details</span>
+        </div>
+        <section class="tab-panel is-active">
+          <div class="detail-grid detail-grid-3">
+            <div class="detail-pair"><dt>* Submission Timestamp</dt><dd>20-05-2025 10:05:05</dd></div>
+            <div class="detail-pair"><dt>* Submitted By</dt><dd>Rene Chong</dd></div>
+            <div class="detail-pair"><dt>&nbsp;</dt><dd>&nbsp;</dd></div>
+            <div class="detail-pair"><dt>* Authorization Timestamp</dt><dd>20-05-2025 12:05:05,<br>20-05-2025 14:05:05</dd></div>
+            <div class="detail-pair"><dt>* Authorization</dt><dd>Approved<br>Approved</dd></div>
+            <div class="detail-pair"><dt>* Authorized By</dt><dd>Xiaodong,<br>Cui Qiang</dd></div>
+          </div>
+        </section>
+      </div>
+    </section>
+
+    <section class="surface-card page-shell">
+      <div class="ant-tabs">
+        <div class="ant-tab-list">
+          <span class="ant-tab">Details</span>
+          <span class="ant-tab">Action Plan</span>
+          <span class="ant-tab is-active">Review Comment (Old)</span>
+          <span class="ant-tab">Review Comment (New)</span>
+        </div>
+        <section class="tab-panel is-active">
+          <div class="ant-table-wrap compact-table">
+            <table class="ant-table">
+              <thead>
+                <tr>
+                  <th>No.</th>
+                  <th>Reviewer Department</th>
+                  <th>Reviewer Name</th>
+                  <th>Authorization</th>
+                  <th>Regulatory Breach</th>
+                  <th>Report to Regulator</th>
+                  <th>Review Comment</th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for department, name, authorization, breach, regulator, comment, action in review_comment_rows %}
+                  <tr>
+                    <td>{{ loop.index }}</td>
+                    <td>{{ department }}</td>
+                    <td>{{ name }}</td>
+                    <td>{{ authorization }}</td>
+                    <td>{{ breach }}</td>
+                    <td>{{ regulator }}</td>
+                    <td>{{ comment }}</td>
+                    <td><a href="#">{{ action }}</a></td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+    </section>
+  </section>
+{% endblock %}

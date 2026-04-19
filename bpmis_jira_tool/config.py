@@ -53,6 +53,7 @@ class Settings:
     bpmis_base_url: str
     bpmis_api_access_token: str | None
     prd_briefing_owner_email: str = "xiaodong.zheng@npt.sg"
+    grc_demo_owner_email: str = "xiaodong.zheng@npt.sg"
     team_portal_config_encryption_key: str | None = None
     confluence_email: str | None = None
     confluence_api_token: str | None = None
@@ -93,10 +94,11 @@ class Settings:
             team_allowed_email_domains=_env_csv("TEAM_ALLOWED_EMAIL_DOMAINS"),
             team_portal_data_dir=Path(_env_str("TEAM_PORTAL_DATA_DIR", ".")),
             prd_briefing_owner_email=_env_str("PRD_BRIEFING_OWNER_EMAIL", "xiaodong.zheng@npt.sg"),
+            grc_demo_owner_email=_env_str("GRC_DEMO_OWNER_EMAIL", "xiaodong.zheng@npt.sg"),
             team_portal_config_encryption_key=_env_str("TEAM_PORTAL_CONFIG_ENCRYPTION_KEY"),
             spreadsheet_id=_env_str("SPREADSHEET_ID", DEFAULT_SPREADSHEET_ID),
             common_tab_name=_env_str("COMMON_TAB_NAME", "Common"),
-            input_tab_name=_env_str("INPUT_TAB_NAME", "Projects"),
+            input_tab_name=_env_str("INPUT_TAB_NAME", "Sheet1"),
             bpmis_base_url=_env_str("BPMIS_BASE_URL", "https://bpmis-uat1.uat.npt.seabank.io"),
             bpmis_api_access_token=_env_str("BPMIS_API_ACCESS_TOKEN"),
             confluence_email=_env_str("CONFLUENCE_EMAIL"),

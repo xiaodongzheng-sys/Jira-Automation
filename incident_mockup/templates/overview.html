@@ -1,0 +1,132 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <section class="portal-page">
+    <section class="surface-card">
+      <div class="page-title-row">
+        <h2>Incident Management</h2>
+      </div>
+
+      <div class="search-grid form-grid-4">
+        <div class="field-block">
+          <label>Incident ID</label>
+          <input class="ant-input" type="text" placeholder="Search Incident ID">
+        </div>
+        <div class="field-block">
+          <label>Incident Title</label>
+          <input class="ant-input" type="text" placeholder="Search Incident Title">
+        </div>
+        <div class="field-block">
+          <label>Incident Type</label>
+          <select class="ant-select"><option>All</option><option>Operational Risk Incident</option><option>Fraud Incident</option><option>IT Incident</option></select>
+        </div>
+        <div class="field-block">
+          <label>Incident Status</label>
+          <select class="ant-select"><option>All</option><option>Draft</option><option>Withdraw - Pending Approval</option><option>Withdrawn</option><option>Pending Approval</option><option>Pending Review</option><option>Closed</option><option>Reopen - Pending Approval</option></select>
+        </div>
+        <div class="field-block">
+          <label>Impact Classification</label>
+          <select class="ant-select"><option>All</option><option>Significant</option><option>Moderate</option><option>Low</option><option>Minimal</option></select>
+        </div>
+        <div class="field-block">
+          <label>Near Miss</label>
+          <select class="ant-select"><option>All</option><option>Yes</option><option>No</option></select>
+        </div>
+        <div class="field-block">
+          <label>Detection Date</label>
+          <input class="ant-input" type="text" placeholder="Start date      →      End date">
+        </div>
+        <div class="field-block">
+          <label>Creation Date</label>
+          <input class="ant-input" type="text" placeholder="Start date      →      End date">
+        </div>
+        <div class="field-block">
+          <label>Created within Timeline</label>
+          <select class="ant-select"><option>All</option><option>NA</option><option>Yes</option><option>No</option></select>
+        </div>
+        <div class="field-block">
+          <label>Closed within Timeline</label>
+          <select class="ant-select"><option>All</option><option>NA</option><option>Yes</option><option>No</option></select>
+        </div>
+        <div class="field-block">
+          <label>Post Closure Remediation</label>
+          <select class="ant-select"><option>All</option><option>NA</option><option>Yes</option><option>No</option></select>
+        </div>
+        <div class="field-block">
+          <label>Root Cause</label>
+          <input class="ant-input" type="text" placeholder="Search Incident Title">
+        </div>
+        <div class="field-block">
+          <label>Functional Unit</label>
+          <select class="ant-select"><option>All</option><option>Payments Operations</option><option>Card Operations</option><option>Operations Technology</option><option>ORM</option></select>
+        </div>
+      </div>
+
+      <div class="expand-area">
+        <button class="expand-toggle" type="button" data-expand-toggle>⌃</button>
+      </div>
+
+      <div class="search-grid search-grid-extra" data-expand-panel></div>
+
+      <div class="search-action-row">
+        <button class="link-button" type="button">Clear</button>
+        <button class="ant-btn ant-btn-primary" type="button">Search</button>
+      </div>
+    </section>
+
+    <section class="surface-card">
+      <div class="section-toolbar">
+        <h3>Incident List</h3>
+        <div class="toolbar-actions">
+          <a class="ant-btn ant-btn-primary" href="{{ url_for('add_incident') }}">Add Incident</a>
+          <button class="ant-btn ant-btn-primary" type="button">Download Report</button>
+        </div>
+      </div>
+
+      <div class="ant-table-wrap">
+        <table class="ant-table">
+          <thead>
+            <tr>
+              <th>No.</th>
+              <th>Incident ID</th>
+              <th>Incident Title</th>
+              <th>Incident Type</th>
+              <th>Incident Status</th>
+              <th>Impact Classification</th>
+              <th>Near Miss</th>
+              <th>Detection Date</th>
+              <th>Creation Date</th>
+              <th>Created within Timeline</th>
+              <th>Closed within Timeline</th>
+              <th>Post Closure Remediation</th>
+              <th>Root Cause</th>
+              <th>Functional Unit</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for incident in incidents %}
+              <tr>
+                <td>{{ loop.index }}</td>
+                <td><a href="{{ url_for('incident_detail', incident_id=incident['id']) }}">{{ incident['id'] }}</a></td>
+                <td>{{ incident.title }}</td>
+                <td>{{ incident.type }}</td>
+                <td><span class="status-tag status-{{ incident.status|lower|replace(' ', '-')|replace('/', '-') }}">{{ incident.status }}</span></td>
+                <td>{{ incident.materiality }}</td>
+                <td>{% if incident['id'] == 'IM-SG-2026-00397' %}Yes{% else %}No{% endif %}</td>
+                <td>{{ incident.incident_date.split(' ')[0] }}</td>
+                <td>{{ incident.reported_date.split(' ')[0] }}</td>
+                <td>Yes</td>
+                <td>{% if incident.status == 'Closed' %}Yes{% else %}<span class="muted-text">NA</span>{% endif %}</td>
+                <td>{% if incident.status == 'Closed' %}No{% else %}<span class="muted-text">NA</span>{% endif %}</td>
+                <td>{{ incident.classification }}</td>
+                <td>{{ incident.functional_unit }}</td>
+                <td><a href="{{ url_for('incident_detail', incident_id=incident['id']) }}">Edit</a></td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </section>
+{% endblock %}

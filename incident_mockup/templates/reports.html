@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <section class="portal-page">
+    <section class="surface-card">
+      <div class="page-title-row">
+        <h2>Report</h2>
+      </div>
+
+      <div class="search-grid">
+        <div class="field-block">
+          <label>Report</label>
+          <select class="ant-select">
+            {% for report_name, frequency, note in report_rows %}
+              <option>{{ report_name }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="field-block">
+          <label>Functional Unit</label>
+          <select class="ant-select"><option>All Tagged FU</option><option>Payments Operations</option><option>Card Operations</option><option>ORM</option></select>
+        </div>
+        <div class="field-block field-block-wide">
+          <label>Report Date / Month</label>
+          <input class="ant-input" type="text" value="01-04-2026      →      13-04-2026">
+        </div>
+      </div>
+
+      <div class="search-action-row">
+        <button class="link-button" type="button">Clear</button>
+        <button class="ant-btn ant-btn-primary" type="button">Download</button>
+      </div>
+    </section>
+
+    <section class="surface-card">
+      <div class="section-toolbar">
+        <h3>Available Reports</h3>
+      </div>
+      <div class="ant-table-wrap">
+        <table class="ant-table">
+          <thead>
+            <tr>
+              <th>No.</th>
+              <th>Report</th>
+              <th>Frequency</th>
+              <th>Availability Rule</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for report_name, frequency, note in report_rows %}
+              <tr>
+                <td>{{ loop.index }}</td>
+                <td>{{ report_name }}</td>
+                <td>{{ frequency }}</td>
+                <td>{{ note }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </section>
+{% endblock %}

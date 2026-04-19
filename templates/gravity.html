@@ -1,0 +1,261 @@
+{% extends "base.html" %}
+
+{% block extra_head %}
+  <style>
+    body {
+      background:
+        radial-gradient(circle at top, rgba(96, 165, 250, 0.2), transparent 30%),
+        linear-gradient(180deg, #081120 0%, #0f172a 55%, #111827 100%);
+      color: #e5eefc;
+    }
+
+    .page-shell {
+      max-width: 1320px;
+      padding: 28px 20px 40px;
+    }
+
+    .gravity-shell {
+      display: grid;
+      gap: 24px;
+    }
+
+    .gravity-hero,
+    .gravity-panel,
+    .gravity-stage {
+      background: rgba(15, 23, 42, 0.82);
+      border: 1px solid rgba(148, 163, 184, 0.14);
+      border-radius: 28px;
+      box-shadow: 0 24px 60px rgba(2, 6, 23, 0.42);
+      backdrop-filter: blur(18px);
+    }
+
+    .gravity-hero,
+    .gravity-panel,
+    .gravity-stage {
+      padding: 24px;
+    }
+
+    .gravity-hero {
+      display: flex;
+      justify-content: space-between;
+      gap: 20px;
+      align-items: start;
+    }
+
+    .gravity-lede,
+    .gravity-meta,
+    .gravity-panel p,
+    .gravity-list span {
+      color: rgba(226, 232, 240, 0.78);
+      line-height: 1.65;
+    }
+
+    .gravity-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.65fr) minmax(280px, 0.85fr);
+      gap: 24px;
+      align-items: start;
+    }
+
+    .gravity-stage-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      align-items: end;
+      margin-bottom: 18px;
+    }
+
+    .gravity-status {
+      min-height: 1.5rem;
+      color: #7dd3fc;
+      text-align: right;
+      font-size: 0.95rem;
+    }
+
+    .gravity-canvas-wrap {
+      position: relative;
+      min-height: 560px;
+      border-radius: 24px;
+      overflow: hidden;
+      border: 1px solid rgba(148, 163, 184, 0.12);
+      background:
+        radial-gradient(circle at top, rgba(56, 189, 248, 0.08), transparent 32%),
+        linear-gradient(180deg, #07111f 0%, #0c1628 100%);
+    }
+
+    .gravity-canvas {
+      display: block;
+      width: 100%;
+      height: 560px;
+    }
+
+    .gravity-overlay {
+      position: absolute;
+      inset: auto 18px 18px 18px;
+      padding: 14px 16px;
+      border-radius: 18px;
+      background: rgba(15, 23, 42, 0.76);
+      border: 1px solid rgba(148, 163, 184, 0.1);
+      color: rgba(226, 232, 240, 0.86);
+      pointer-events: none;
+    }
+
+    .gravity-sidebar {
+      display: grid;
+      gap: 24px;
+    }
+
+    .gravity-stats {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+      margin-top: 18px;
+    }
+
+    .gravity-stat-card {
+      padding: 16px;
+      border-radius: 18px;
+      border: 1px solid rgba(148, 163, 184, 0.12);
+      background: rgba(255, 255, 255, 0.04);
+    }
+
+    .gravity-stat-card span {
+      display: block;
+      margin-bottom: 8px;
+      font-size: 0.8rem;
+      text-transform: uppercase;
+      letter-spacing: 0.14em;
+      color: rgba(148, 163, 184, 0.88);
+    }
+
+    .gravity-stat-card strong {
+      font-size: 1.8rem;
+      color: #f8fafc;
+    }
+
+    .gravity-list {
+      display: grid;
+      gap: 12px;
+      margin-top: 18px;
+    }
+
+    .gravity-list-item {
+      padding: 14px 16px;
+      border-radius: 18px;
+      border: 1px solid rgba(148, 163, 184, 0.1);
+      background: rgba(255, 255, 255, 0.04);
+    }
+
+    .gravity-list-item strong {
+      display: block;
+      margin-bottom: 4px;
+      color: #f8fafc;
+    }
+
+    @media (max-width: 960px) {
+      .gravity-hero,
+      .gravity-stage-head {
+        flex-direction: column;
+      }
+
+      .gravity-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .gravity-status {
+        text-align: left;
+      }
+
+      .gravity-canvas-wrap,
+      .gravity-canvas {
+        min-height: 420px;
+        height: 420px;
+      }
+    }
+  </style>
+{% endblock %}
+
+{% block body %}
+  <section class="gravity-shell">
+    <div class="gravity-hero">
+      <div>
+        <p class="eyebrow">Physics Playground</p>
+        <h1>Gravity Ball Drop</h1>
+        <p class="gravity-lede">
+          用 HTML5 Canvas 和 Matter.js 实现的重力物理模拟。点击或触碰画布即可掉落随机颜色的小球，球体之间会自然碰撞、弹跳和堆叠。
+        </p>
+      </div>
+      <div class="button-row">
+        <a class="button button-secondary" href="{{ url_for('index') }}">Back to Portal</a>
+      </div>
+    </div>
+
+    <section class="gravity-grid">
+      <div class="gravity-stage">
+        <div class="gravity-stage-head">
+          <div>
+            <p class="eyebrow">Canvas Stage</p>
+            <h2>Tap Anywhere to Drop a Ball</h2>
+          </div>
+          <div class="gravity-status" data-gravity-status>点击画布开始投放球体。</div>
+        </div>
+
+        <div class="gravity-canvas-wrap">
+          <canvas
+            class="gravity-canvas"
+            data-gravity-canvas
+            width="880"
+            height="560"
+            aria-label="Gravity physics simulation"
+          ></canvas>
+          <div class="gravity-overlay">
+            每次点击会生成一个不同颜色和大小的小球。场景内有地面和墙体，球会持续受重力影响并彼此碰撞。
+          </div>
+        </div>
+      </div>
+
+      <aside class="gravity-sidebar">
+        <section class="gravity-panel">
+          <p class="eyebrow">Live Stats</p>
+          <h2>Simulation Snapshot</h2>
+          <div class="gravity-stats">
+            <article class="gravity-stat-card">
+              <span>Ball Count</span>
+              <strong data-ball-count>0</strong>
+            </article>
+            <article class="gravity-stat-card">
+              <span>Last Color</span>
+              <strong data-last-color>--</strong>
+            </article>
+          </div>
+        </section>
+
+        <section class="gravity-panel">
+          <p class="eyebrow">Controls</p>
+          <div class="button-row">
+            <button class="button" type="button" data-gravity-clear>Clear Balls</button>
+          </div>
+          <div class="gravity-list">
+            <div class="gravity-list-item">
+              <strong>点击投放</strong>
+              <span>在点击位置上方生成球体，让它自然坠落。</span>
+            </div>
+            <div class="gravity-list-item">
+              <strong>真实碰撞</strong>
+              <span>使用 Matter.js 刚体引擎处理球体与边界、球体之间的碰撞。</span>
+            </div>
+            <div class="gravity-list-item">
+              <strong>移动端可用</strong>
+              <span>触控设备也可以直接点击或轻触画布投放小球。</span>
+            </div>
+          </div>
+        </section>
+      </aside>
+    </section>
+  </section>
+{% endblock %}
+
+{% block extra_scripts %}
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.20.0/matter.min.js"></script>
+  <script src="{{ url_for('static', filename='gravity.js') }}"></script>
+{% endblock %}

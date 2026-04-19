@@ -3,7 +3,7 @@
 This guide describes the supported **shared-team** setup:
 
 - one Mac hosts the Flask portal
-- Cloudflare Tunnel exposes the portal through one stable HTTPS URL
+- ngrok exposes the portal through one stable HTTPS URL
 - teammates sign in with `@npt.sg` Google accounts
 - each teammate stores their own config and BPMIS token inside the portal
 
@@ -33,7 +33,7 @@ PY
 
 Notes:
 
-- `TEAM_PORTAL_BASE_URL` must match the exact Cloudflare hostname teammates will open
+- `TEAM_PORTAL_BASE_URL` must match the exact ngrok hostname teammates will open
 - Google OAuth callback generation uses `TEAM_PORTAL_BASE_URL`
 - `TEAM_PORTAL_CONFIG_ENCRYPTION_KEY` is required if teammates will save BPMIS tokens in the shared portal
 
@@ -45,40 +45,67 @@ In Google Cloud Console, configure the OAuth client with this callback:
 https://jira-tool.example.com/auth/google/callback
 ```
 
-Replace the hostname with your real Cloudflare hostname.
+Replace the hostname with your real ngrok hostname.
 
 ## Start the Shared Portal
 
-Use the production-style script already included in the repo:
+Use the stack guard as the fixed entrypoint. It keeps the Flask portal and ngrok alive together and is now the recommended day-to-day start command:
 
 ```bash
-./scripts/run_team_portal_prod.sh start
-./scripts/run_team_portal_prod.sh status
-./scripts/run_team_portal_prod.sh logs
+./scripts/run_team_stack.sh start
+./scripts/run_team_stack.sh status
+./scripts/run_team_stack.sh logs
+```
+
+By default this will also enable `caffeinate` on macOS when available, so the host Mac is less likely to sleep and silently drop the portal. You can force the mode explicitly:
+
+```bash
+./scripts/run_team_stack.sh start --caffeinate
+./scripts/run_team_stack.sh start --no-caffeinate
 ```
 
 To stop or restart:
 
 ```bash
-./scripts/run_team_portal_prod.sh stop
-./scripts/run_team_portal_prod.sh restart
+./scripts/run_team_stack.sh stop
+./scripts/run_team_stack.sh restart
 ```
+
+If you need to manage the pieces manually for debugging:
+
+```bash
+./scripts/run_team_portal_prod.sh start
+./scripts/run_ngrok_tunnel.sh start
+```
+
+The stack guard now runs as a lightweight supervisor. It keeps the Flask portal and ngrok as child processes, restarts them with backoff when they crash, probes `/healthz` for the portal, and validates the ngrok inspector API before it reports the stack as healthy.
 
 ## Enable Auto-Start on the Host Mac
 
-Install the launchd job:
+Install the launchd job for the portal only:
 
 ```bash
 ./scripts/install_team_portal_launchd.sh
 ```
 
+Or install one launchd job that restores the whole supervised stack:
+
+```bash
+./scripts/install_team_stack_launchd.sh
+```
+
 Then start it:
 
 ```bash
-launchctl start io.npt.jira-creation-portal
+launchctl start io.npt.jira-creation-stack
 ```
 
-## Cloudflare Tunnel Setup
+Note:
+
+- macOS may block `launchd` jobs from reading repos under protected folders like `Documents`
+- if that happens, prefer `./scripts/run_team_stack.sh start --caffeinate` from Terminal, or move the repo to a non-protected path such as `~/Workspace`
+
+## ngrok Setup
 
 Create one tunnel on the host Mac that forwards the public hostname to the local Flask port:
 
@@ -89,10 +116,10 @@ https://jira-tool.example.com  ->  http://127.0.0.1:5000
 Owner-run checklist:
 
 1. Start the portal with `./scripts/run_team_portal_prod.sh start`
-2. Start the Cloudflare Tunnel
+2. Start the public ngrok tunnel
 3. Open the public URL and confirm the homepage loads
 4. Confirm Google sign-in returns to the same public URL
-5. Run `Self-Check` after signing in with an `@npt.sg` account
+5. Confirm teammates can finish `Setup`, then use `Run`
 
 ## What Teammates Need
 
@@ -114,15 +141,18 @@ Host-side checks:
 
 - `./scripts/run_team_portal_prod.sh status`
 - `./scripts/run_team_portal_prod.sh logs`
-- open the public Cloudflare URL
+- `curl http://127.0.0.1:5000/healthz`
+- open the public ngrok URL
 - verify Google login callback works through the public hostname
+- inspect `.team-portal/run/team_stack_status.json` for the latest guard view of portal and ngrok health
+- run `./scripts/run_team_stack.sh doctor` for a one-shot end-to-end stack diagnosis
 
 Teammate acceptance check:
 
 - open the shared URL on a fresh laptop
 - sign in with `@npt.sg`
 - save config
-- run `Self-Check`
+- finish `Setup`
 - preview rows
 - create Jira successfully
 
@@ -134,7 +164,7 @@ Check:
 
 - the host Mac is awake
 - the portal process is running
-- the Cloudflare Tunnel is connected
+- the ngrok tunnel is connected
 
 ### Google login succeeds but user is denied
 
@@ -161,7 +191,7 @@ Check:
 This shared deployment is intentionally lightweight:
 
 - one host Mac
-- one Cloudflare Tunnel
+- one ngrok tunnel
 - Google login restricted by domain
 - uptime depends on the host Mac staying online
 

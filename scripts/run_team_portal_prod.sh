@@ -69,7 +69,7 @@ start() {
   echo $! >"$PID_FILE"
 
   for _ in {1..20}; do
-    if curl -fsS "http://$PROBE_HOST:$PORT/" >/dev/null 2>&1; then
+    if curl -fsS "http://$PROBE_HOST:$PORT/healthz" >/dev/null 2>&1; then
       echo "Team portal started at http://$HOST:$PORT"
       echo "PID: $(cat "$PID_FILE")"
       echo "Data dir: $DATA_DIR"

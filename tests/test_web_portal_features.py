@@ -2,16 +2,45 @@ import io
 import os
 import tempfile
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from cryptography.fernet import Fernet
 from openpyxl import load_workbook
 
 from bpmis_jira_tool.config import Settings
-from bpmis_jira_tool.web import _resolve_bpmis_access_token, create_app
+from bpmis_jira_tool.web import (
+    _build_team_profiles_for_display,
+    _hydrate_setup_defaults,
+    _resolve_bpmis_access_token,
+    create_app,
+)
 
 
 class WebPortalFeatureTests(unittest.TestCase):
+    def test_hydrate_setup_defaults_applies_team_defaults_and_logged_in_email(self):
+        hydrated = _hydrate_setup_defaults(
+            {"pm_team": "AF", "need_uat_by_market": {}},
+            {"email": "teammate@npt.sg"},
+        )
+
+        self.assertIn("AF | SG | DBP-Anti-fraud", hydrated["component_route_rules_text"])
+        self.assertIn(
+            "Deposit | teammate@npt.sg | teammate@npt.sg | teammate@npt.sg | Planning_26Q2",
+            hydrated["component_default_rules_text"],
+        )
+        self.assertEqual("Need UAT_by UAT Team", hydrated["need_uat_by_market"]["SG"])
+        self.assertEqual("teammate@npt.sg", hydrated["sync_pm_email"])
+        self.assertEqual("teammate@npt.sg", hydrated["product_manager_value"])
+
+    def test_build_team_profiles_for_display_replaces_placeholder_with_user_email(self):
+        profiles = _build_team_profiles_for_display(
+            {"product_manager_value": "fallback@npt.sg"},
+            {"email": "teammate@npt.sg"},
+        )
+
+        self.assertIn("teammate@npt.sg", profiles["AF"]["component_default_rules_text"])
+        self.assertNotIn("__CURRENT_USER_EMAIL__", profiles["AF"]["component_default_rules_text"])
+
     def test_resolve_bpmis_access_token_prefers_saved_portal_value(self):
         settings = Settings(
             flask_secret_key="test-secret",
@@ -25,7 +54,7 @@ class WebPortalFeatureTests(unittest.TestCase):
             team_portal_data_dir=".",
             spreadsheet_id="sheet",
             common_tab_name="Common",
-            input_tab_name="Projects",
+            input_tab_name="Sheet1",
             bpmis_base_url="https://example.com",
             bpmis_api_access_token="env-token",
         )
@@ -47,7 +76,7 @@ class WebPortalFeatureTests(unittest.TestCase):
             team_portal_data_dir=".",
             spreadsheet_id="sheet",
             common_tab_name="Common",
-            input_tab_name="Projects",
+            input_tab_name="Sheet1",
             bpmis_base_url="https://example.com",
             bpmis_api_access_token="env-token",
         )
@@ -81,7 +110,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         )
         workbook = load_workbook(io.BytesIO(response.data))
         worksheet = workbook.active
-        self.assertEqual("Projects", worksheet.title)
+        self.assertEqual("Sheet1", worksheet.title)
         self.assertEqual(
             [cell.value for cell in worksheet[1]],
             [
@@ -100,66 +129,6 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertEqual("https://docs.google.com/document/d/example", worksheet["D2"].value)
         self.assertEqual("https://confluence/example-prd", worksheet["G2"].value)
         self.assertEqual("Detailed Jira description goes here.", worksheet["H2"].value)
-
-    def test_self_check_uses_saved_bpmis_token(self):
-        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
-            os.environ,
-            {
-                "FLASK_SECRET_KEY": "test-secret",
-                "TEAM_PORTAL_DATA_DIR": temp_dir,
-                "TEAM_PORTAL_BASE_URL": "",
-                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
-                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
-            },
-            clear=False,
-        ), patch("bpmis_jira_tool.web.build_bpmis_client") as mock_build_client:
-            mock_build_client.return_value = MagicMock()
-            app = create_app()
-            app.testing = True
-            config_store = app.config["CONFIG_STORE"]
-            config_store.save(
-                {
-                    "bpmis_api_access_token": "portal-token",
-                    "spreadsheet_link": "",
-                    "input_tab_name": "Projects",
-                },
-                user_key="anon:test-user",
-            )
-
-            with app.test_client() as client:
-                with client.session_transaction() as session:
-                    session["anonymous_user_key"] = "test-user"
-
-                response = client.get("/api/self-check")
-
-        self.assertEqual(response.status_code, 200)
-        mock_build_client.assert_called_once()
-        self.assertEqual(mock_build_client.call_args.kwargs["access_token"], "portal-token")
-        payload = response.get_json()
-        bpmis_check = next(check for check in payload["checks"] if check["name"] == "BPMIS API")
-        self.assertIn("saved BPMIS token", bpmis_check["detail"])
-
-    def test_shared_mode_blocks_anonymous_self_check(self):
-        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
-            os.environ,
-            {
-                "FLASK_SECRET_KEY": "test-secret",
-                "TEAM_PORTAL_DATA_DIR": temp_dir,
-                "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg",
-                "TEAM_PORTAL_BASE_URL": "https://jira-tool.example.com",
-                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
-            },
-            clear=False,
-        ):
-            app = create_app()
-            app.testing = True
-
-            with app.test_client() as client:
-                response = client.get("/api/self-check")
-
-        self.assertEqual(response.status_code, 401)
-        payload = response.get_json()
-        self.assertIn("Sign in with your NPT Google account", payload["message"])
 
     def test_shared_mode_blocks_anonymous_save(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
@@ -205,7 +174,7 @@ class WebPortalFeatureTests(unittest.TestCase):
                     "/config/save",
                     data={
                         "spreadsheet_link": "sheet-123",
-                        "input_tab_name": "Projects",
+                        "input_tab_name": "Sheet1",
                         "bpmis_api_access_token": "portal-token",
                     },
                     follow_redirects=True,
@@ -238,14 +207,17 @@ class WebPortalFeatureTests(unittest.TestCase):
                     "/config/save",
                     data={
                         "spreadsheet_link": "sheet-123",
-                        "input_tab_name": "Projects",
+                        "input_tab_name": "Sheet1",
                         "bpmis_api_access_token": "portal-token",
+                        "pm_team": "AF",
                         "issue_id_header": "BPMIS ID",
                         "jira_ticket_link_header": "Jira Ticket Link",
                         "sync_pm_email": "pm@example.com",
                         "sync_project_name_header": "Project Name",
                         "sync_market_header": "Market",
                         "sync_brd_link_header": "BRD Link",
+                        "component_route_rules_text": "AF | SG | DBP-Anti-fraud",
+                        "component_default_rules_text": "DBP-Anti-fraud | owner@npt.sg | dev@npt.sg | qa@npt.sg | Planning_26Q2",
                         "market_header": "Market",
                         "system_header": "System",
                         "summary_header": "Jira Title",
@@ -289,14 +261,17 @@ class WebPortalFeatureTests(unittest.TestCase):
                     "/config/save",
                     data={
                         "spreadsheet_link": "sheet-123",
-                        "input_tab_name": "Projects",
+                        "input_tab_name": "Sheet1",
                         "bpmis_api_access_token": "portal-token",
+                        "pm_team": "AF",
                         "issue_id_header": "BPMIS ID",
                         "jira_ticket_link_header": "Jira Ticket Link",
                         "sync_pm_email": "pm@example.com",
                         "sync_project_name_header": "Project Name",
                         "sync_market_header": "Market",
                         "sync_brd_link_header": "BRD Link",
+                        "component_route_rules_text": "AF | SG | DBP-Anti-fraud",
+                        "component_default_rules_text": "DBP-Anti-fraud | owner@npt.sg | dev@npt.sg | qa@npt.sg | Planning_26Q2",
                         "market_header": "Market",
                         "system_header": "System",
                         "summary_header": "Jira Title",
@@ -314,6 +289,153 @@ class WebPortalFeatureTests(unittest.TestCase):
             self.assertEqual(response.status_code, 302)
             saved = app.config["CONFIG_STORE"].load("anon:save-token-user")
             self.assertEqual(saved["bpmis_api_access_token"], "portal-token")
+
+    def test_index_renders_setup_and_run_only(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
+            },
+            clear=False,
+        ):
+            app = create_app()
+            app.testing = True
+
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["anonymous_user_key"] = "setup-run-user"
+
+                response = client.get("/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b">Setup<", response.data)
+        self.assertIn(b">Run<", response.data)
+        self.assertNotIn(b">Overview<", response.data)
+        self.assertNotIn(b">Support<", response.data)
+        self.assertNotIn(b"Self-Check", response.data)
+        self.assertIn(b"Apply Team Defaults", response.data)
+        self.assertIn(b"PM Team Change", response.data)
+        self.assertIn(b"userInitiatedTeamChange", response.data)
+        self.assertIn(b"resetConfirmModalState", response.data)
+        self.assertIn(b"syncSelectedTeamBaseline", response.data)
+        self.assertIn(b"classList.add('is-visible')", response.data)
+        self.assertIn(b"classList.remove('is-visible')", response.data)
+        self.assertIn(b"classList.add('pm-confirm-visible')", response.data)
+        self.assertIn(b"classList.remove('pm-confirm-visible')", response.data)
+        self.assertIn(b"data-initial-team=", response.data)
+
+    def test_save_mapping_config_fills_email_defaults_for_google_user(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
+            },
+            clear=False,
+        ):
+            app = create_app()
+            app.testing = True
+
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
+                    session["google_credentials"] = {"token": "x"}
+
+                response = client.post(
+                    "/config/save",
+                    data={
+                        "spreadsheet_link": "sheet-123",
+                        "input_tab_name": "Sheet1",
+                        "bpmis_api_access_token": "",
+                        "pm_team": "AF",
+                        "component_route_rules_text": "AF | SG | DBP-Anti-fraud",
+                        "component_default_rules_text": "DBP-Anti-fraud | owner@npt.sg | dev@npt.sg | qa@npt.sg | Planning_26Q2",
+                    },
+                    follow_redirects=False,
+                )
+
+            self.assertEqual(response.status_code, 302)
+            saved = app.config["CONFIG_STORE"].load("google:teammate@npt.sg")
+            self.assertEqual(saved["sync_pm_email"], "teammate@npt.sg")
+            self.assertEqual(saved["product_manager_value"], "teammate@npt.sg")
+            self.assertEqual(saved["reporter_value"], "teammate@npt.sg")
+            self.assertEqual(saved["biz_pic_value"], "teammate@npt.sg")
+
+    def test_team_defaults_allow_saving_setup_without_manual_advanced_mapping(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
+            },
+            clear=False,
+        ):
+            app = create_app()
+            app.testing = True
+
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
+                    session["google_credentials"] = {"token": "x"}
+
+                response = client.post(
+                    "/config/save",
+                    data={
+                        "spreadsheet_link": "sheet-123",
+                        "input_tab_name": "Sheet1",
+                        "pm_team": "AF",
+                    },
+                    follow_redirects=True,
+                )
+
+                saved = app.config["CONFIG_STORE"].load("google:teammate@npt.sg")
+                self.assertIn("AF | SG | DBP-Anti-fraud", saved["component_route_rules_text"])
+                self.assertIn(
+                    "Loan&CreditRisk | teammate@npt.sg | teammate@npt.sg | teammate@npt.sg | Planning_26Q2",
+                    saved["component_default_rules_text"],
+                )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Your web Jira config was saved for this user", response.data)
+
+    def test_index_renders_team_templates_with_actual_email_for_google_user(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
+            },
+            clear=False,
+        ):
+            app = create_app()
+            app.testing = True
+
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
+                    session["google_credentials"] = {"token": "x"}
+
+                response = client.get("/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"teammate@npt.sg", response.data)
+        self.assertNotIn(b"__CURRENT_USER_EMAIL__", response.data)
+        self.assertIn(b"Component | Assignee | Dev PIC | QA PIC | Fix Version", response.data)
+        self.assertIn(b"Template Preview", response.data)
+        self.assertIn(b"data-mapping-preview-body=\"default\"", response.data)
 
 
 if __name__ == "__main__":

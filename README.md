@@ -3,7 +3,7 @@
 This repository now supports both:
 
 - a local-first edition for individual use
-- a shared portal edition hosted on one Mac and exposed through Cloudflare Tunnel
+- a shared portal edition hosted on one Mac and exposed through ngrok
 
 The current local-first edition is a Flask web app that:
 
