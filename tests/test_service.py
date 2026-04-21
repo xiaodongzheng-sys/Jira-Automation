@@ -86,6 +86,13 @@ class FakeBPMISClient:
             for issue_id in issue_ids
         }
 
+    def get_brd_doc_links_for_projects(self, issue_ids):
+        mapping = {
+            "ISS-1": ["https://docs/existing-brd"],
+            "ISS-3": ["https://docs/new-project-brd", "https://docs/new-project-brd-2"],
+        }
+        return {issue_id: mapping.get(issue_id, []) for issue_id in issue_ids}
+
 
 class ServiceTests(unittest.TestCase):
     def test_run_creates_only_eligible_rows(self):
@@ -202,6 +209,28 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(run_results[0].status, "error")
         self.assertIn("Summary", run_results[0].message)
 
+    def test_preview_project_label_prefers_project_name_column(self):
+        service = JiraCreationService.__new__(JiraCreationService)
+        service.sheets_service = FakeSheetsService()
+        service.sheets_service.snapshot.rows = [
+            InputRow(
+                row_number=2,
+                values={
+                    "Issue ID": "225159",
+                    "Project Name": "Standalone Cash Loan",
+                    "BPMIS - Summary": "225159 - Fraud rule improvement",
+                    "Jira Ticket Link": "",
+                },
+            )
+        ]
+        service.bpmis_client = FakeBPMISClient()
+        service.field_mappings_override = [FieldMapping("Summary", "column:Summary")]
+
+        preview_results, _headers = service.preview()
+
+        self.assertEqual(preview_results[0].status, "preview")
+        self.assertEqual(preview_results[0].project_label, "Standalone Cash Loan")
+
     def test_sync_projects_appends_only_missing_issue_ids(self):
         service = BPMISProjectSyncService(
             sheets_service=FakeSheetsService(),
@@ -245,7 +274,7 @@ class ServiceTests(unittest.TestCase):
                     "Issue ID": "ISS-3",
                     "Summary": "New Project",
                     "Market": "PH",
-                    "BRD Link": "https://docs/new-project-brd",
+                    "BRD Link": "https://docs/new-project-brd\nhttps://docs/new-project-brd-2",
                 }
             ],
         )

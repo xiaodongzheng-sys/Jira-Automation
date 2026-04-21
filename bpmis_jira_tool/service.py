@@ -186,7 +186,4 @@ class JiraCreationService:
 
     @staticmethod
     def _preview_project_label(row) -> str:
-        return (
-            row._get_first("Jira Title", "Summary", "Project Name", "BPMIS - Summary")
-            or row.issue_id
-        )
+        return row._get_first("Project Name", "BPMIS - Summary") or row.issue_id

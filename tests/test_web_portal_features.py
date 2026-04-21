@@ -8,18 +8,38 @@ from cryptography.fernet import Fernet
 from openpyxl import load_workbook
 
 from bpmis_jira_tool.config import Settings
+from bpmis_jira_tool.errors import ToolError
 from bpmis_jira_tool.web import (
     _build_team_profiles_for_display,
+    _classify_portal_error,
+    _build_productization_argos_translator,
+    _clean_productization_detail_line,
+    _clean_productization_detail_text,
     _hydrate_setup_defaults,
+    _looks_like_productization_outline_fragment,
     _normalize_productization_issue_row,
+    _normalize_productization_ticket_url,
+    _results_for_display,
     _resolve_bpmis_access_token,
     _serialize_productization_version_candidate,
     _summarize_productization_detail,
+    _translate_productization_text_to_english,
     create_app,
 )
 
 
 class WebPortalFeatureTests(unittest.TestCase):
+    def test_classify_portal_error_categorizes_duplicate_route_rule(self):
+        details = _classify_portal_error(
+            ToolError(
+                "Duplicate System + Market -> Component rule on line 2. Each System + Market pair must map to exactly one Component."
+            )
+        )
+
+        self.assertEqual(details["error_category"], "config_validation")
+        self.assertEqual(details["error_code"], "duplicate_route_rule")
+        self.assertFalse(details["error_retryable"])
+
     def test_hydrate_setup_defaults_applies_team_defaults_and_logged_in_email(self):
         hydrated = _hydrate_setup_defaults(
             {"pm_team": "AF", "need_uat_by_market": {}},
@@ -27,13 +47,37 @@ class WebPortalFeatureTests(unittest.TestCase):
         )
 
         self.assertIn("AF | SG | DBP-Anti-fraud", hydrated["component_route_rules_text"])
+        self.assertIn("AF | ID | DBP-Anti-fraud", hydrated["component_route_rules_text"])
+        self.assertIn("AF | PH | DBP-Anti-fraud", hydrated["component_route_rules_text"])
+        self.assertIn("CRMS | ID | Credit-Risk", hydrated["component_route_rules_text"])
+        self.assertIn("GRC | Regional | GRC", hydrated["component_route_rules_text"])
         self.assertIn(
             "Deposit | teammate@npt.sg | teammate@npt.sg | teammate@npt.sg | Planning_26Q2",
             hydrated["component_default_rules_text"],
         )
+        self.assertIn(
+            "CRS | teammate@npt.sg | teammate@npt.sg | teammate@npt.sg | Planning_26Q2",
+            hydrated["component_default_rules_text"],
+        )
+        self.assertIn(
+            "GRC | teammate@npt.sg | teammate@npt.sg | teammate@npt.sg | Planning_26Q2",
+            hydrated["component_default_rules_text"],
+        )
         self.assertEqual("Need UAT_by UAT Team", hydrated["need_uat_by_market"]["SG"])
+        self.assertEqual("P1", hydrated["priority_value"])
         self.assertEqual("teammate@npt.sg", hydrated["sync_pm_email"])
         self.assertEqual("teammate@npt.sg", hydrated["product_manager_value"])
+
+    def test_results_for_display_hides_skipped_rows_by_default(self):
+        results = _results_for_display(
+            [
+                {"row_number": 2, "status": "skipped", "message": "Skipped because Jira Ticket Link already has a value."},
+                {"row_number": 14, "status": "created", "message": "Created Jira ticket successfully."},
+                {"row_number": 15, "status": "error", "message": "Could not resolve BPMIS Jira user."},
+            ]
+        )
+
+        self.assertEqual([14, 15], [item["row_number"] for item in results])
 
     def test_build_team_profiles_for_display_replaces_placeholder_with_user_email(self):
         profiles = _build_team_profiles_for_display(
@@ -95,6 +139,7 @@ class WebPortalFeatureTests(unittest.TestCase):
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_ALLOWED_EMAILS": "",
                 "TEAM_ALLOWED_EMAIL_DOMAINS": "",
                 "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
             },
@@ -132,6 +177,28 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertEqual("https://docs.google.com/document/d/example", worksheet["D2"].value)
         self.assertEqual("https://confluence/example-prd", worksheet["G2"].value)
         self.assertEqual("Detailed Jira description goes here.", worksheet["H2"].value)
+        self.assertIsNone(worksheet["A1"].fill.fill_type)
+
+    def test_healthz_sets_request_id_header(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
+            },
+            clear=False,
+        ):
+            app = create_app()
+            app.testing = True
+
+            with app.test_client() as client:
+                response = client.get("/healthz")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.headers.get("X-Request-ID"))
 
     def test_shared_mode_blocks_anonymous_save(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
@@ -185,6 +252,38 @@ class WebPortalFeatureTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"TEAM_PORTAL_CONFIG_ENCRYPTION_KEY", response.data)
+
+    def test_shared_mode_index_skips_google_sheet_read_when_spreadsheet_link_is_blank(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg",
+                "TEAM_PORTAL_BASE_URL": "https://jira-tool.example.com",
+                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": Fernet.generate_key().decode("utf-8"),
+            },
+            clear=False,
+        ), patch("bpmis_jira_tool.web.GoogleSheetsService.read_snapshot") as read_snapshot:
+            app = create_app()
+            app.testing = True
+
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["google_profile"] = {"email": "new-user@npt.sg", "name": "New User"}
+                    session["google_credentials"] = {"token": "x"}
+
+                response = client.get("/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn(b"Google Sheets request failed", response.data)
+        self.assertIn(b'id="spreadsheet_link" name="spreadsheet_link" value=""', response.data)
+        self.assertIn(b'id="input_tab_name" name="input_tab_name" value="Sheet1"', response.data)
+        self.assertIn(
+            b'id="summary_header" name="summary_header" list="input-header-options" value="Jira Title"',
+            response.data,
+        )
+        read_snapshot.assert_not_called()
 
     def test_shared_mode_saves_encrypted_portal_token_for_google_user(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
@@ -323,8 +422,13 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertNotIn(b"Self-Check", response.data)
         self.assertIn(b"Apply Team Defaults", response.data)
         self.assertIn(b"PM Team Change", response.data)
-        self.assertIn(b"Search Version", response.data)
-        self.assertIn(b"JIRA Ticket Number", response.data)
+        self.assertNotIn(b"Search Version", response.data)
+        self.assertNotIn(b"Matching Versions", response.data)
+        self.assertIn(b"Version Keyword", response.data)
+        self.assertIn(b"Type a version keyword", response.data)
+        self.assertIn(b"Copy whole table", response.data)
+        self.assertIn(b"Jira Link", response.data)
+        self.assertIn(b"productization_upgrade_summary.js", response.data)
         self.assertIn(b"userInitiatedTeamChange", response.data)
         self.assertIn(b"resetConfirmModalState", response.data)
         self.assertIn(b"syncSelectedTeamBaseline", response.data)
@@ -430,6 +534,117 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertEqual(payload["items"][0]["pm"], "Alice PM")
         self.assertEqual(payload["items"][0]["prd_links"], [{"label": "https://confluence/prd-1", "url": "https://confluence/prd-1"}])
 
+    def test_productization_issues_api_filters_to_anti_fraud_components_for_af_team(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
+            },
+            clear=False,
+        ):
+            app = create_app()
+            app.testing = True
+            app.config["CONFIG_STORE"].save(
+                app.config["CONFIG_STORE"]._normalize(
+                    {
+                        "pm_team": "AF",
+                        "component_route_rules_text": "AF | SG | DBP-Anti-fraud",
+                        "component_default_rules_text": "DBP-Anti-fraud | owner@npt.sg | dev@npt.sg | qa@npt.sg | Planning_26Q2",
+                    }
+                ),
+                "anon:productization-user",
+            )
+
+            fake_client = type(
+                "FakeProductizationClient",
+                (),
+                {
+                    "list_issues_for_version": lambda self, version_id: [
+                        {"jiraKey": "AF-1", "summary": "Keep me", "componentId": [{"label": "DBP-Anti-fraud"}]},
+                        {"jiraKey": "AF-2", "summary": "Keep me too", "component": "Anti-fraud"},
+                        {"jiraKey": "ABC-1", "summary": "Filter me out", "componentId": [{"label": "Payments"}]},
+                    ],
+                },
+            )()
+
+            with patch("bpmis_jira_tool.web._build_bpmis_client_for_current_user", return_value=fake_client):
+                with app.test_client() as client:
+                    with client.session_transaction() as session:
+                        session["anonymous_user_key"] = "productization-user"
+
+                    response = client.get("/api/productization-upgrade-summary/issues?version_id=88")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual([item["jira_ticket_number"] for item in payload["items"]], ["AF-1", "AF-2"])
+
+    def test_productization_versions_api_returns_json_for_unexpected_errors(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
+            },
+            clear=False,
+        ):
+            app = create_app()
+            app.testing = True
+
+            fake_client = type("BrokenProductizationClient", (), {})()
+
+            with patch("bpmis_jira_tool.web._build_bpmis_client_for_current_user", return_value=fake_client):
+                with app.test_client() as client:
+                    with client.session_transaction() as session:
+                        session["anonymous_user_key"] = "productization-user"
+
+                    response = client.get("/api/productization-upgrade-summary/versions?q=26Q2")
+
+        self.assertEqual(response.status_code, 500)
+        payload = response.get_json()
+        self.assertEqual(payload["status"], "error")
+        self.assertIn("Unable to search versions right now", payload["message"])
+
+    def test_productization_issues_api_returns_json_for_unexpected_errors(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
+            },
+            clear=False,
+        ):
+            app = create_app()
+            app.testing = True
+
+            fake_client = type(
+                "BrokenProductizationClient",
+                (),
+                {"list_issues_for_version": lambda self, version_id: (_ for _ in ()).throw(RuntimeError("boom"))},
+            )()
+
+            with patch("bpmis_jira_tool.web._build_bpmis_client_for_current_user", return_value=fake_client):
+                with app.test_client() as client:
+                    with client.session_transaction() as session:
+                        session["anonymous_user_key"] = "productization-user"
+
+                    response = client.get("/api/productization-upgrade-summary/issues?version_id=88")
+
+        self.assertEqual(response.status_code, 500)
+        payload = response.get_json()
+        self.assertEqual(payload["status"], "error")
+        self.assertIn("Unable to load upgrade tickets right now", payload["message"])
+
     def test_productization_summary_helpers_normalize_missing_fields(self):
         normalized_version = _serialize_productization_version_candidate(
             {"id": 7, "fullName": "Planning_26Q2", "marketId": {"label": "SG"}}
@@ -448,6 +663,123 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertEqual(normalized_issue["prd_links"], [])
         self.assertEqual(_summarize_productization_detail(""), "-")
         self.assertIn("First line.", normalized_issue["detailed_feature"])
+
+    def test_clean_productization_detail_text_strips_html(self):
+        cleaned = _clean_productization_detail_text("<p>First line.</p><p>Second line.</p>")
+
+        self.assertEqual(cleaned, "First line.\nSecond line.")
+
+    def test_clean_productization_detail_text_removes_links_and_noise_prefixes(self):
+        cleaned = _clean_productization_detail_text(
+            """
+            <p>[Productization effort] Add fields to ivlog, refer to ivlog sheet:</p>
+            <p>[https://docs.google.com/spreadsheets/d/example/edit#gid=123]</p>
+            <p>PRD: https://confluence.shopee.io/x/abc123</p>
+            """
+        )
+
+        self.assertEqual(cleaned, "Add fields to ivlog")
+
+    def test_clean_productization_detail_line_removes_reference_phrases(self):
+        self.assertEqual(
+            _clean_productization_detail_line("Add fields to ivlog, refer to ivlog sheet"),
+            "Add fields to ivlog",
+        )
+        self.assertEqual(
+            _clean_productization_detail_line("Drainage改造：2way改造，支持FE展示，详见：PRD"),
+            "Drainage改造：2way改造，支持FE展示",
+        )
+
+    def test_clean_productization_detail_line_removes_section_and_urls(self):
+        cleaned = _clean_productization_detail_line(
+            "[https://confluence.shopee.io/x/ww6Itw] section 4.6 PRD: https://confluence.shopee.io/x/ww6Itw"
+        )
+
+        self.assertEqual(cleaned, "")
+
+    def test_clean_productization_detail_line_removes_low_value_versions_and_row_references(self):
+        cleaned = _clean_productization_detail_line(
+            "Upgrade product version: v2.0.33_2060410 PRD: scenarioL1 = MCCManualSplit 4. new scenario for MCA v1.1(FCYConversion for retail and SME, main track Jira: ) new scenarios for card self-uplift Authentication Scenarios Row 499-501 2."
+        )
+
+        self.assertNotIn("v2.0.33_2060410", cleaned)
+        self.assertNotIn("v1.1", cleaned)
+        self.assertNotIn("Row 499-501", cleaned)
+        self.assertNotIn("scenarioL1", cleaned)
+        self.assertIn("new scenario for MCA", cleaned)
+
+    def test_clean_productization_detail_line_removes_antifraud_version_plan_header(self):
+        cleaned = _clean_productization_detail_line(
+            "SG AntiFraud verision plan _feature timeline: new scenarios for card self-uplift"
+        )
+
+        self.assertEqual(cleaned, "new scenarios for card self-uplift")
+
+    def test_clean_productization_detail_line_keeps_actionable_feature_sentence(self):
+        cleaned = _clean_productization_detail_line(
+            "F30 function update to add new identifier F30 enhancement to support card self-uplift"
+        )
+
+        self.assertEqual(
+            cleaned,
+            "F30 function update to add new identifier F30 enhancement to support card self-uplift",
+        )
+
+    def test_outline_fragment_detection_filters_directory_like_text(self):
+        self.assertTrue(_looks_like_productization_outline_fragment("FE UI Pages"))
+        self.assertTrue(_looks_like_productization_outline_fragment("UI Data Points"))
+        self.assertFalse(
+            _looks_like_productization_outline_fragment("Add FE UI pages for multi-currency account settings")
+        )
+
+    def test_productization_summary_normalizes_ticket_url_from_issue_key(self):
+        normalized_issue = _normalize_productization_issue_row(
+            {
+                "jiraKey": "ABC-88",
+                "jiraLink": "ABC-88",
+                "summary": "Improve onboarding",
+            }
+        )
+
+        self.assertEqual(normalized_issue["jira_ticket_number"], "ABC-88")
+        self.assertEqual(normalized_issue["jira_ticket_url"], "https://jira.shopee.io/browse/ABC-88")
+
+    def test_normalize_productization_ticket_url_preserves_full_url(self):
+        self.assertEqual(
+            _normalize_productization_ticket_url("https://jira.shopee.io/browse/ABC-99"),
+            "https://jira.shopee.io/browse/ABC-99",
+        )
+
+    def test_productization_summary_returns_full_cleaned_text_without_summarizing(self):
+        summary = _summarize_productization_detail("<p>First line.</p><p>Second line.</p>")
+
+        self.assertEqual(summary, "First line.\nSecond line.")
+
+    def test_productization_summary_does_not_append_ellipsis_for_long_text(self):
+        long_summary = " ".join(["Detailed"] * 80)
+        summary = _summarize_productization_detail(long_summary)
+
+        self.assertEqual(summary, long_summary)
+        self.assertNotIn("...", summary)
+
+    def test_productization_summary_keeps_chinese_text_without_translation(self):
+        summary = _summarize_productization_detail("支持FE展示；新增字段")
+
+        self.assertEqual(summary, "支持FE展示；新增字段")
+
+    def test_translate_productization_text_to_english_translates_cjk_lines(self):
+        fake_translator = type("FakeTranslator", (), {"translate": lambda self, text: "Support FE display"})()
+
+        with patch("bpmis_jira_tool.web._build_productization_argos_translator", return_value=fake_translator):
+            translated = _translate_productization_text_to_english("支持FE展示")
+
+        self.assertEqual(translated, "Support FE display")
+
+    def test_translate_productization_text_to_english_keeps_english_lines(self):
+        with patch("bpmis_jira_tool.web._build_productization_argos_translator", return_value=None):
+            translated = _translate_productization_text_to_english("Add fields to ivlog")
+
+        self.assertEqual(translated, "Add fields to ivlog")
 
     def test_save_mapping_config_fills_email_defaults_for_google_user(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
@@ -554,9 +886,158 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"teammate@npt.sg", response.data)
         self.assertNotIn(b"__CURRENT_USER_EMAIL__", response.data)
-        self.assertIn(b"Component | Assignee | Dev PIC | QA PIC | Fix Version", response.data)
-        self.assertIn(b"Template Preview", response.data)
-        self.assertIn(b"data-mapping-preview-body=\"default\"", response.data)
+        self.assertIn(b"Save Step 3A first", response.data)
+        self.assertIn(b"Save Route", response.data)
+        self.assertIn(b"System Reference", response.data)
+        self.assertIn(b"data-component-owner-editor-body", response.data)
+        self.assertIn(b"data-route-save-button", response.data)
+        self.assertIn(b"data-route-save-status", response.data)
+        self.assertNotIn(b"Coverage Check", response.data)
+
+    def test_save_route_endpoint_returns_json_and_aligned_component_defaults(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
+            },
+            clear=False,
+        ):
+            app = create_app()
+            app.testing = True
+
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
+                    session["google_credentials"] = {"token": "x"}
+
+                app.config["CONFIG_STORE"].save(
+                    {
+                        "pm_team": "AF",
+                        "system_header": "System",
+                        "market_header": "Market",
+                        "component_route_rules_text": "AF | SG | DBP-Anti-fraud",
+                        "component_default_rules_text": "DBP-Anti-fraud | teammate@npt.sg | teammate@npt.sg | teammate@npt.sg | Planning_26Q2",
+                    },
+                    "google:teammate@npt.sg",
+                )
+
+                response = client.post(
+                    "/config/save-route",
+                    json={
+                        "pm_team": "AF",
+                        "system_header": "System",
+                        "market_header": "Market",
+                        "component_route_rules_text": "AF | SG | DBP-Anti-fraud\nDC | SG | Deposit",
+                    },
+                )
+
+                saved = app.config["CONFIG_STORE"].load("google:teammate@npt.sg")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["component_route_rules_text"], "AF | SG | DBP-Anti-fraud\nDC | SG | Deposit")
+        self.assertIn(
+            "DBP-Anti-fraud | teammate@npt.sg | teammate@npt.sg | teammate@npt.sg | Planning_26Q2",
+            payload["component_default_rules_text"],
+        )
+        self.assertIn("Deposit |  |  |  |", payload["component_default_rules_text"])
+        self.assertEqual(saved["component_route_rules_text"], payload["component_route_rules_text"])
+        self.assertEqual(saved["component_default_rules_text"], payload["component_default_rules_text"])
+
+    def test_save_route_endpoint_allows_multiple_routes_to_share_one_component(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
+            },
+            clear=False,
+        ):
+            app = create_app()
+            app.testing = True
+
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
+                    session["google_credentials"] = {"token": "x"}
+
+                app.config["CONFIG_STORE"].save(
+                    {
+                        "pm_team": "AF",
+                        "system_header": "System",
+                        "market_header": "Market",
+                        "component_route_rules_text": "CRMS DWH | ID | DWH_CreditRisk",
+                        "component_default_rules_text": "DWH_CreditRisk | teammate@npt.sg | teammate@npt.sg | teammate@npt.sg | Planning_26Q2",
+                    },
+                    "google:teammate@npt.sg",
+                )
+
+                response = client.post(
+                    "/config/save-route",
+                    json={
+                        "pm_team": "AF",
+                        "system_header": "System",
+                        "market_header": "Market",
+                        "component_route_rules_text": "CRMS DWH | ID | DWH_CreditRisk\nCRMS DWH | PH | DWH_CreditRisk",
+                    },
+                )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(
+            payload["component_default_rules_text"],
+            "DWH_CreditRisk | teammate@npt.sg | teammate@npt.sg | teammate@npt.sg | Planning_26Q2",
+        )
+
+    def test_save_route_endpoint_logs_route_validation_failures_with_context(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg",
+                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
+            },
+            clear=False,
+        ):
+            app = create_app()
+            app.testing = True
+
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
+                    session["google_credentials"] = {"token": "x"}
+
+                with self.assertLogs(app.logger.name, level="WARNING") as captured:
+                    response = client.post(
+                        "/config/save-route",
+                        json={
+                            "pm_team": "AF",
+                            "system_header": "System",
+                            "market_header": "Market",
+                            "component_route_rules_text": "AF | SG | DBP-Anti-fraud\nAF | SG | Anti-fraud",
+                        },
+                    )
+
+        self.assertEqual(response.status_code, 400)
+        combined_logs = "\n".join(captured.output)
+        self.assertIn("config_save_route_tool_error", combined_logs)
+        self.assertIn("\"error_category\": \"config_validation\"", combined_logs)
+        self.assertIn("\"error_code\": \"duplicate_route_rule\"", combined_logs)
+        self.assertIn("\"error_retryable\": false", combined_logs)
+        self.assertIn("\"route_rule_count\": 2", combined_logs)
+        self.assertIn("\"pm_team\": \"AF\"", combined_logs)
+        self.assertIn("Duplicate System + Market -> Component rule", combined_logs)
 
     def test_index_recovers_legacy_component_defaults_for_google_user(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(

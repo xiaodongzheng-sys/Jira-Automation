@@ -42,6 +42,10 @@ class BPMISClient(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def get_brd_doc_links_for_projects(self, project_issue_ids: list[str]) -> dict[str, list[str]]:
+        raise NotImplementedError
+
+    @abstractmethod
     def search_versions(self, query: str) -> list[dict[str, Any]]:
         raise NotImplementedError
 
@@ -191,6 +195,13 @@ class BPMISDirectApiClient(BPMISClient):
         return self.get_single_brd_doc_links_for_projects([project_issue_id]).get(str(project_issue_id).strip(), "")
 
     def get_single_brd_doc_links_for_projects(self, project_issue_ids: list[str]) -> dict[str, str]:
+        all_links = self.get_brd_doc_links_for_projects(project_issue_ids)
+        resolved_links: dict[str, str] = {}
+        for issue_id, links in all_links.items():
+            resolved_links[issue_id] = links[0] if len(links) == 1 else ""
+        return resolved_links
+
+    def get_brd_doc_links_for_projects(self, project_issue_ids: list[str]) -> dict[str, list[str]]:
         normalized_issue_ids = []
         for issue_id in project_issue_ids:
             cleaned = str(issue_id).strip()
@@ -235,17 +246,25 @@ class BPMISDirectApiClient(BPMISClient):
                 continue
             if brd_id:
                 seen_brd_ids.add(brd_id)
-            parent_ids = [str(parent_id).strip() for parent_id in (row.get("parentIds") or []) if str(parent_id).strip()]
+            parent_ids: list[str] = []
+            for parent_ref in row.get("parentIds") or []:
+                if isinstance(parent_ref, dict):
+                    parent_value = str(parent_ref.get("id") or "").strip()
+                else:
+                    parent_value = str(parent_ref).strip()
+                if parent_value:
+                    parent_ids.append(parent_value)
             for parent_id in parent_ids:
                 if parent_id in grouped_rows:
                     grouped_rows[parent_id].append(row)
 
-        resolved_links: dict[str, str] = {}
+        resolved_links: dict[str, list[str]] = {}
         for issue_id, brd_rows in grouped_rows.items():
-            if len(brd_rows) == 1:
-                resolved_links[issue_id] = str(brd_rows[0].get("link") or "").strip()
-            else:
-                resolved_links[issue_id] = ""
+            resolved_links[issue_id] = [
+                str(brd_row.get("link") or "").strip()
+                for brd_row in brd_rows
+                if str(brd_row.get("link") or "").strip()
+            ]
         return resolved_links
 
     def search_versions(self, query: str) -> list[dict[str, Any]]:
@@ -374,7 +393,12 @@ class BPMISDirectApiClient(BPMISClient):
         market_id = self._resolve_option_value(field_defs["marketId"], market_value)
         task_type_label = fields.get("Task Type", "Feature").strip() or "Feature"
         task_type = self._resolve_option_value(field_defs["taskType"], task_type_label)
-        summary = self._prefix_summary(task_type_label, self._required_field(fields, "Summary"))
+        summary = self._prefix_summary(
+            task_type_label,
+            market_value,
+            fields.get("System", ""),
+            self._required_field(fields, "Summary"),
+        )
 
         payload: dict[str, Any] = {
             "typeId": self.TASK_TYPE_ID,
@@ -397,7 +421,8 @@ class BPMISDirectApiClient(BPMISClient):
 
         if fields.get("Component"):
             payload["componentId"] = [
-                self._resolve_option_value(field_defs["componentId"], fields["Component"], match_value=market_id)
+                self._resolve_option_value(field_defs["componentId"], component_value, match_value=market_id)
+                for component_value in self._split_component_values(fields["Component"])
             ]
 
         if fields.get("Priority"):
@@ -436,6 +461,10 @@ class BPMISDirectApiClient(BPMISClient):
 
         payload["supportedCountries"] = [self.SUPPORTED_COUNTRIES_ALL_VALUE]
         return payload
+
+    @staticmethod
+    def _split_component_values(raw_value: str) -> list[str]:
+        return [value.strip() for value in str(raw_value or "").split(",") if value.strip()]
 
     def _extract_issue_detail_payload(self, payload: dict[str, Any] | None) -> dict[str, Any]:
         if not payload:
@@ -791,12 +820,37 @@ class BPMISDirectApiClient(BPMISClient):
             raise BPMISError(payload.get("message") or f"BPMIS API error for '{path}'.")
         return payload
 
-    def _prefix_summary(self, task_type_label: str, summary: str) -> str:
-        prefix = self.TASK_TYPE_PREFIX.get(task_type_label.strip().lower())
+    def _prefix_summary(self, task_type_label: str, market_value: str, system_value: str, summary: str) -> str:
+        task_prefix = self.TASK_TYPE_PREFIX.get(task_type_label.strip().lower())
         clean_summary = summary.strip()
-        if prefix and not clean_summary.lower().startswith(prefix.lower()):
-            return f"{prefix} {clean_summary}".strip()
+        if not task_prefix:
+            return clean_summary
+        is_regional = market_value.strip().lower() == "regional"
+        scope_value = "Productization" if is_regional else system_value.strip()
+        scope_prefix = f"[{scope_value}]" if scope_value else ""
+        full_prefix = f"{task_prefix}{scope_prefix}"
+        if scope_prefix:
+            core_summary = self._strip_known_summary_prefixes(clean_summary, [task_prefix, scope_prefix])
+            if not core_summary:
+                return full_prefix
+            return f"{full_prefix} {core_summary}".strip()
         return clean_summary
+
+    @staticmethod
+    def _strip_known_summary_prefixes(summary: str, prefixes: list[str]) -> str:
+        text = summary.strip()
+        active_prefixes = [prefix for prefix in prefixes if prefix]
+        while text:
+            matched = False
+            for prefix in active_prefixes:
+                if text.lower().startswith(prefix.lower()):
+                    text = text[len(prefix):]
+                    text = re.sub(r"^\s*[-_:：|]*\s*", "", text)
+                    matched = True
+                    break
+            if not matched:
+                break
+        return text.strip()
 
     def _extract_issue_key(self, value: str | None) -> str | None:
         if not value:

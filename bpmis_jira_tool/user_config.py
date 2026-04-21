@@ -35,10 +35,23 @@ TEAM_DEFAULT_EMAIL_PLACEHOLDER = "__CURRENT_USER_EMAIL__"
 DEFAULT_TEAM_COMPONENT_ROUTE_RULES = "\n".join(
     [
         "AF | SG | DBP-Anti-fraud",
+        "AF | ID | DBP-Anti-fraud",
+        "AF | PH | DBP-Anti-fraud",
         "DC | SG | Deposit",
         "AF | Regional | Anti-fraud",
         "BC | SG | Pay",
         "LTS | SG | Loan&CreditRisk",
+        "CRMS | SG | Loan&CreditRisk",
+        "CRMS | ID | Credit-Risk",
+        "CRMS | PH | CRMS",
+        "CRMS DWH | ID | DWH_CreditRisk",
+        "Collection | ID | Collection",
+        "CRMS DWH | PH | DWH_CreditRisk",
+        "CRMS Reporting | PH | DWH_ReportingPortal",
+        "ECL | ID | DWH_Data_CreditRiskReporting",
+        "Collection | Regional | Collection",
+        "CRMS | Regional | CRS",
+        "GRC | Regional | GRC",
     ]
 )
 DEFAULT_TEAM_COMPONENT_DEFAULT_RULES = "\n".join(
@@ -48,6 +61,14 @@ DEFAULT_TEAM_COMPONENT_DEFAULT_RULES = "\n".join(
         f"Anti-fraud | {TEAM_DEFAULT_EMAIL_PLACEHOLDER} | {TEAM_DEFAULT_EMAIL_PLACEHOLDER} | {TEAM_DEFAULT_EMAIL_PLACEHOLDER} | Planning_26Q2",
         f"Pay | {TEAM_DEFAULT_EMAIL_PLACEHOLDER} | {TEAM_DEFAULT_EMAIL_PLACEHOLDER} | {TEAM_DEFAULT_EMAIL_PLACEHOLDER} | Planning_26Q2",
         f"Loan&CreditRisk | {TEAM_DEFAULT_EMAIL_PLACEHOLDER} | {TEAM_DEFAULT_EMAIL_PLACEHOLDER} | {TEAM_DEFAULT_EMAIL_PLACEHOLDER} | Planning_26Q2",
+        f"Credit-Risk | {TEAM_DEFAULT_EMAIL_PLACEHOLDER} | {TEAM_DEFAULT_EMAIL_PLACEHOLDER} | {TEAM_DEFAULT_EMAIL_PLACEHOLDER} | Planning_26Q2",
+        f"CRMS | {TEAM_DEFAULT_EMAIL_PLACEHOLDER} | {TEAM_DEFAULT_EMAIL_PLACEHOLDER} | {TEAM_DEFAULT_EMAIL_PLACEHOLDER} | Planning_26Q2",
+        f"DWH_CreditRisk | {TEAM_DEFAULT_EMAIL_PLACEHOLDER} | {TEAM_DEFAULT_EMAIL_PLACEHOLDER} | {TEAM_DEFAULT_EMAIL_PLACEHOLDER} | Planning_26Q2",
+        f"Collection | {TEAM_DEFAULT_EMAIL_PLACEHOLDER} | {TEAM_DEFAULT_EMAIL_PLACEHOLDER} | {TEAM_DEFAULT_EMAIL_PLACEHOLDER} | Planning_26Q2",
+        f"DWH_ReportingPortal | {TEAM_DEFAULT_EMAIL_PLACEHOLDER} | {TEAM_DEFAULT_EMAIL_PLACEHOLDER} | {TEAM_DEFAULT_EMAIL_PLACEHOLDER} | Planning_26Q2",
+        f"DWH_Data_CreditRiskReporting | {TEAM_DEFAULT_EMAIL_PLACEHOLDER} | {TEAM_DEFAULT_EMAIL_PLACEHOLDER} | {TEAM_DEFAULT_EMAIL_PLACEHOLDER} | Planning_26Q2",
+        f"CRS | {TEAM_DEFAULT_EMAIL_PLACEHOLDER} | {TEAM_DEFAULT_EMAIL_PLACEHOLDER} | {TEAM_DEFAULT_EMAIL_PLACEHOLDER} | Planning_26Q2",
+        f"GRC | {TEAM_DEFAULT_EMAIL_PLACEHOLDER} | {TEAM_DEFAULT_EMAIL_PLACEHOLDER} | {TEAM_DEFAULT_EMAIL_PLACEHOLDER} | Planning_26Q2",
     ]
 )
 TEAM_PROFILE_DEFAULTS = {
@@ -123,6 +144,7 @@ DIRECT_FIELDS = {
 }
 DEFAULT_DIRECT_VALUES = {
     "task_type_value": "Feature",
+    "priority_value": "P1",
 }
 COMPONENT_ROUTED_DIRECT_FIELDS = {
     "Fix Version": "fix_version",
@@ -157,6 +179,7 @@ class WebConfigStore:
             row = self._fetch_row(user_key)
             if row is not None:
                 return self._normalize(self._deserialize_config(json.loads(row)))
+            return None
         if not self.path.exists():
             if self.legacy_path and self.legacy_path.exists():
                 data = self._deserialize_config(json.loads(self.legacy_path.read_text(encoding="utf-8")))
@@ -181,7 +204,10 @@ class WebConfigStore:
         if source is None:
             return
         if self._fetch_row(to_user_key) is None:
-            self._upsert_row(to_user_key, self._serialize_config(self._normalize(self._deserialize_config(json.loads(source)))))
+            migrated = self._normalize(self._deserialize_config(json.loads(source)))
+            migrated["spreadsheet_link"] = ""
+            migrated["input_tab_name"] = "Sheet1"
+            self._upsert_row(to_user_key, self._serialize_config(migrated))
 
     def clear(self, user_key: str | None = None) -> None:
         if user_key:
@@ -492,6 +518,7 @@ class WebConfigStore:
     @staticmethod
     def _parse_component_route_rules(text: str) -> list[dict[str, str]]:
         rules: list[dict[str, str]] = []
+        seen_pairs: set[tuple[str, str]] = set()
         for line_number, raw_line in enumerate(text.splitlines(), start=1):
             line = raw_line.strip()
             if not line or line.startswith("#"):
@@ -502,12 +529,20 @@ class WebConfigStore:
                     f"Invalid System + Market -> Component rule on line {line_number}. "
                     "Use: System | Market | Component"
                 )
+            pair_key = (parts[0].lower(), parts[1].lower())
+            if pair_key in seen_pairs:
+                raise ToolError(
+                    f"Duplicate System + Market -> Component rule on line {line_number}. "
+                    "Each System + Market pair must map to exactly one Component."
+                )
+            seen_pairs.add(pair_key)
             rules.append({"system": parts[0], "market": parts[1], "component": parts[2]})
         return rules
 
     @staticmethod
     def _parse_component_default_rules(text: str) -> list[dict[str, str]]:
         rules: list[dict[str, str]] = []
+        seen_components: set[str] = set()
         for line_number, raw_line in enumerate(text.splitlines(), start=1):
             line = raw_line.strip()
             if not line or line.startswith("#"):
@@ -518,9 +553,94 @@ class WebConfigStore:
                     f"Invalid Component default rule on line {line_number}. "
                     "Use: Component | Assignee | Dev PIC | QA PIC | Fix Version"
                 )
+            component_key = parts[0].lower()
+            if component_key in seen_components:
+                raise ToolError(
+                    f"Duplicate Component default rule on line {line_number}. "
+                    "Each Component should appear only once in the owner table."
+                )
+            seen_components.add(component_key)
             rules.append(
                 {
                     "component": parts[0],
+                    "assignee": parts[1],
+                    "dev_pic": parts[2],
+                    "qa_pic": parts[3],
+                    "fix_version": parts[4],
+                }
+            )
+        return rules
+
+    @staticmethod
+    def _compose_component_default_rules(rules: list[dict[str, str]]) -> str:
+        if not rules:
+            return ""
+        return "\n".join(
+            " | ".join(
+                [
+                    rule["component"],
+                    rule["assignee"],
+                    rule["dev_pic"],
+                    rule["qa_pic"],
+                    rule["fix_version"],
+                ]
+            )
+            for rule in rules
+        )
+
+    def align_component_defaults_to_routes(self, route_text: str, default_text: str) -> str:
+        route_rules = self._parse_component_route_rules(route_text)
+        default_rules = self._parse_component_default_rules_lenient(default_text) if str(default_text or "").strip() else []
+        default_map = {rule["component"].strip().lower(): rule for rule in default_rules if rule["component"].strip()}
+        ordered_components: list[str] = []
+        seen_components: set[str] = set()
+        for rule in route_rules:
+            component = rule["component"].strip()
+            component_key = component.lower()
+            if not component or component_key in seen_components:
+                continue
+            seen_components.add(component_key)
+            ordered_components.append(component)
+
+        aligned_rules: list[dict[str, str]] = []
+        for component in ordered_components:
+            existing = default_map.get(component.lower())
+            if existing is not None:
+                aligned_rules.append(existing)
+                continue
+            aligned_rules.append(
+                {
+                    "component": component,
+                    "assignee": "",
+                    "dev_pic": "",
+                    "qa_pic": "",
+                    "fix_version": "",
+                }
+            )
+        return self._compose_component_default_rules(aligned_rules)
+
+    @staticmethod
+    def _parse_component_default_rules_lenient(text: str) -> list[dict[str, str]]:
+        rules: list[dict[str, str]] = []
+        seen_components: set[str] = set()
+        for line_number, raw_line in enumerate(text.splitlines(), start=1):
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = [part.strip() for part in line.split("|")]
+            if len(parts) != 5:
+                # Route-only save should not be blocked by malformed historical owner rows.
+                continue
+            component = parts[0]
+            if not component:
+                continue
+            component_key = component.lower()
+            if component_key in seen_components:
+                continue
+            seen_components.add(component_key)
+            rules.append(
+                {
+                    "component": component,
                     "assignee": parts[1],
                     "dev_pic": parts[2],
                     "qa_pic": parts[3],
