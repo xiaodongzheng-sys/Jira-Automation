@@ -211,6 +211,81 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertEqual("Detailed Jira description goes here.", worksheet["H2"].value)
         self.assertIsNone(worksheet["A1"].fill.fill_type)
 
+    def test_index_shows_create_google_sheet_template_button(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_ALLOWED_EMAILS": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
+            },
+            clear=False,
+        ):
+            app = create_app()
+            app.testing = True
+
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
+                    session["google_credentials"] = {"token": "x"}
+                response = client.get("/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Create a new Google Sheet from template", response.data)
+        self.assertIn(b"data-create-template-sheet-button", response.data)
+        self.assertNotIn(b"Download the default sheet template", response.data)
+
+    def test_create_template_spreadsheet_endpoint_returns_new_sheet_link(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_ALLOWED_EMAILS": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
+            },
+            clear=False,
+        ):
+            app = create_app()
+            app.testing = True
+            app.config["CONFIG_STORE"].save(
+                app.config["CONFIG_STORE"]._normalize(
+                    {
+                        "spreadsheet_link": "",
+                        "input_tab_name": "Sheet1",
+                    }
+                ),
+                "google:teammate@npt.sg",
+            )
+
+            with patch(
+                "bpmis_jira_tool.web.GoogleSheetsService.create_template_spreadsheet",
+                return_value={
+                    "spreadsheet_id": "sheet-123",
+                    "spreadsheet_url": "https://docs.google.com/spreadsheets/d/sheet-123/edit",
+                    "input_tab_name": "Sheet1",
+                    "spreadsheet_title": "BPMIS Automation Tool",
+                },
+            ) as mocked_create:
+                with app.test_client() as client:
+                    with client.session_transaction() as session:
+                        session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
+                        session["google_credentials"] = {"token": "x"}
+
+                    response = client.post("/api/spreadsheets/create-template")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["spreadsheet_id"], "sheet-123")
+        self.assertEqual(payload["input_tab_name"], "Sheet1")
+        mocked_create.assert_called_once()
+
     def test_healthz_sets_request_id_header(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,

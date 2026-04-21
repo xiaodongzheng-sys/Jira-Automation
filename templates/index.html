@@ -128,11 +128,12 @@
             <div class="config-card config-card-wide">
               <h3>Step 2 · Sheet Template</h3>
               <p class="card-help">
-                Download the Excel template, import it into Google Sheet, then paste the sheet link here.
+                Create a fresh Google Sheet with the template header row, or paste an existing sheet link here.
               </p>
-              <p class="field-help">
-                <a href="{{ url_for('download_default_sheet_template_xlsx') }}">Download the default sheet template</a>
-              </p>
+              <div class="button-row">
+                <button class="button button-secondary" type="button" data-create-template-sheet-button>Create a new Google Sheet from template</button>
+              </div>
+              <div class="mapping-inline-status" data-create-template-sheet-status hidden></div>
               <div class="field-stack">
                 <div class="field-group">
                   <div class="field-label-row">
@@ -628,6 +629,10 @@
       const profiles = JSON.parse(scriptNode.textContent || '{}');
       const routeRules = document.getElementById('component_route_rules_text');
       const defaultRules = document.getElementById('component_default_rules_text');
+      const spreadsheetLinkInput = document.getElementById('spreadsheet_link');
+      const inputTabNameInput = document.getElementById('input_tab_name');
+      const createTemplateSheetButton = document.querySelector('[data-create-template-sheet-button]');
+      const createTemplateSheetStatus = document.querySelector('[data-create-template-sheet-status]');
       const ownerEditorState = document.querySelector('[data-component-owner-state]');
       const ownerEditorBody = document.querySelector('[data-component-owner-editor-body]');
       const routeSaveButton = document.querySelector('[data-route-save-button]');
@@ -777,6 +782,13 @@
         routeSaveStatus.dataset.tone = tone;
       };
 
+      const setCreateTemplateSheetStatus = (message, tone = 'info') => {
+        if (!createTemplateSheetStatus) return;
+        createTemplateSheetStatus.hidden = !message;
+        createTemplateSheetStatus.textContent = message || '';
+        createTemplateSheetStatus.dataset.tone = tone;
+      };
+
       const syncSelectedTeamBaseline = () => {
         selectedTeam = selector.value || '';
       };
@@ -865,6 +877,12 @@
           : `${teamLabel} defaults are not filled yet. Use Advanced mapping overrides to enter routing and defaults manually for now.`;
       };
 
+      const shouldAutoSaveTeamDefaults = (teamKey) => {
+        const profile = profiles[teamKey] || {};
+        const routeText = (profile.component_route_rules_text || '').trim();
+        return Boolean(routeText);
+      };
+
       selector.addEventListener('change', async () => {
         const nextTeam = selector.value;
         if (!nextTeam || nextTeam === selectedTeam) {
@@ -887,9 +905,15 @@
           }
         }
 
+        const autoSaveAfterApply = shouldAutoSaveTeamDefaults(nextTeam);
         applyProfile(nextTeam);
         selectedTeam = nextTeam;
         userInitiatedTeamChange = false;
+        if (autoSaveAfterApply) {
+          await saveCurrentRoute({
+            successMessage: 'Team defaults applied and route saved automatically. Step 3B is ready to review.',
+          });
+        }
       });
 
       selector.addEventListener('pointerdown', () => {
@@ -915,7 +939,7 @@
       setupForm?.addEventListener('submit', () => {
         serializeOwnerRows();
       });
-      routeSaveButton?.addEventListener('click', async () => {
+      const saveCurrentRoute = async ({ successMessage } = {}) => {
         if (!routeRules || !selector) return;
         if (routeSaveRequestController) {
           routeSaveRequestController.abort();
@@ -949,13 +973,44 @@
           defaultRules.value = payload.component_default_rules_text || '';
           savedRouteBaseline = (routeRules.value || '').trim();
           refreshMappingPreviews();
-          setRouteSaveStatus(payload.message || 'Route saved.', 'success');
+          setRouteSaveStatus(successMessage || payload.message || 'Route saved.', 'success');
         } catch (error) {
           if (error.name === 'AbortError') return;
           setRouteSaveStatus(error.message || 'Could not save System + Market to Component.', 'error');
         } finally {
           routeSaveButton.disabled = false;
           routeSaveRequestController = null;
+        }
+      };
+
+      routeSaveButton?.addEventListener('click', async () => {
+        await saveCurrentRoute();
+      });
+      createTemplateSheetButton?.addEventListener('click', async () => {
+        createTemplateSheetButton.disabled = true;
+        setCreateTemplateSheetStatus('Creating a new Google Sheet...', 'info');
+        try {
+          const response = await fetch('{{ url_for("create_template_spreadsheet") }}', {
+            method: 'POST',
+            headers: {
+              'Accept': 'application/json',
+            },
+            credentials: 'same-origin',
+          });
+          const payload = await response.json().catch(() => ({}));
+          if (!response.ok || payload.status !== 'ok') {
+            throw new Error(payload.message || 'Could not create a new Google Sheet.');
+          }
+          if (spreadsheetLinkInput) spreadsheetLinkInput.value = payload.spreadsheet_url || payload.spreadsheet_id || '';
+          if (inputTabNameInput) inputTabNameInput.value = payload.input_tab_name || 'Sheet1';
+          if (payload.spreadsheet_url) {
+            window.open(payload.spreadsheet_url, '_blank', 'noopener,noreferrer');
+          }
+          setCreateTemplateSheetStatus(payload.message || 'A new Google Sheet was created.', 'success');
+        } catch (error) {
+          setCreateTemplateSheetStatus(error.message || 'Could not create a new Google Sheet.', 'error');
+        } finally {
+          createTemplateSheetButton.disabled = false;
         }
       });
       refreshMappingPreviews();

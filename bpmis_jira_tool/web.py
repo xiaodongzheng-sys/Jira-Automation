@@ -1035,6 +1035,66 @@ def create_app() -> Flask:
             return jsonify({"status": "error", "message": "Job not found."}), 404
         return jsonify(snapshot)
 
+    @app.post("/api/spreadsheets/create-template")
+    def create_template_spreadsheet():
+        login_gate = _require_google_login(settings, api=True)
+        if login_gate is not None:
+            return login_gate
+        if "google_credentials" not in session:
+            return jsonify({"status": "error", "message": "Please connect Google Sheets first."}), HTTPStatus.BAD_REQUEST
+
+        config_data = _load_current_user_config(settings)
+        input_tab_name = str(config_data.get("input_tab_name", "") or "").strip() or settings.input_tab_name or "Sheet1"
+        spreadsheet_title = "BPMIS Automation Tool"
+        try:
+            created = GoogleSheetsService.create_template_spreadsheet(
+                get_google_credentials(),
+                spreadsheet_title=spreadsheet_title,
+                input_tab=input_tab_name,
+                headers=DEFAULT_SHEET_HEADERS,
+            )
+            _log_portal_event(
+                "spreadsheet_template_create_success",
+                **_build_request_log_context(
+                    settings,
+                    extra={"spreadsheet_id": created["spreadsheet_id"], "input_tab_name": input_tab_name},
+                ),
+            )
+            return jsonify(
+                {
+                    "status": "ok",
+                    "message": "A new Google Sheet was created and prefilled with the template header row.",
+                    **created,
+                }
+            )
+        except ToolError as error:
+            error_details = _classify_portal_error(error)
+            _log_portal_event(
+                "spreadsheet_template_create_tool_error",
+                level=logging.WARNING,
+                **_build_request_log_context(
+                    settings,
+                    extra={**error_details, "input_tab_name": input_tab_name},
+                ),
+            )
+            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
+        except Exception:
+            _log_portal_event(
+                "spreadsheet_template_create_unexpected_error",
+                level=logging.ERROR,
+                **_build_request_log_context(settings, extra={"input_tab_name": input_tab_name}),
+            )
+            current_app.logger.exception("Google Sheet template creation failed.")
+            return (
+                jsonify(
+                    {
+                        "status": "error",
+                        "message": "Unable to create a new Google Sheet right now. Please try again shortly.",
+                    }
+                ),
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+
     def _start_job(action: str, *, dry_run: bool):
         login_gate = _require_google_login(settings, api=True)
         if login_gate is not None:

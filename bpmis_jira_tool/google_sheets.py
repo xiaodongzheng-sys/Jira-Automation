@@ -54,6 +54,63 @@ class GoogleSheetsService:
         self.jira_ticket_link_header = jira_ticket_link_header
         self.service = build("sheets", "v4", credentials=credentials, cache_discovery=False)
 
+    @classmethod
+    def create_template_spreadsheet(
+        cls,
+        credentials,
+        *,
+        spreadsheet_title: str,
+        input_tab: str,
+        headers: list[str],
+    ) -> dict[str, str]:
+        service = build("sheets", "v4", credentials=credentials, cache_discovery=False)
+        try:
+            response = (
+                service.spreadsheets()
+                .create(
+                    body={
+                        "properties": {"title": spreadsheet_title},
+                        "sheets": [
+                            {
+                                "properties": {"title": input_tab},
+                                "data": [
+                                    {
+                                        "rowData": [
+                                            {
+                                                "values": [
+                                                    {
+                                                        "userEnteredValue": {"stringValue": header},
+                                                        "userEnteredFormat": {
+                                                            "textFormat": {
+                                                                "bold": True,
+                                                            }
+                                                        },
+                                                    }
+                                                    for header in headers
+                                                ]
+                                            }
+                                        ]
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                )
+                .execute()
+            )
+        except HttpError as error:
+            message = getattr(error, "reason", "") or getattr(getattr(error, "resp", None), "reason", "") or ""
+            raise ToolError(f"Google Sheets request failed: {message or error}") from error
+
+        spreadsheet_id = str(response.get("spreadsheetId") or "").strip()
+        spreadsheet_url = str(response.get("spreadsheetUrl") or "").strip()
+        return {
+            "spreadsheet_id": spreadsheet_id,
+            "spreadsheet_url": spreadsheet_url,
+            "input_tab_name": input_tab,
+            "spreadsheet_title": spreadsheet_title,
+        }
+
     def read_snapshot(self) -> SheetSnapshot:
         input_values = self._get_values(self.input_tab)
         rows, headers = self._parse_input_rows(
@@ -64,9 +121,9 @@ class GoogleSheetsService:
         return SheetSnapshot(field_mappings=[], rows=rows, headers=headers)
 
     def update_success(self, row_number: int, headers: list[str], ticket_value: str) -> None:
-        jira_ticket_link_col = _column_letter(
-            self._find_header_index(headers, self.jira_ticket_link_header, "Jira Ticket Link") + 1
-        )
+        jira_ticket_link_header = getattr(self, "jira_ticket_link_header", "Jira Ticket Link")
+        jira_ticket_link_index = self._find_header_index(headers, jira_ticket_link_header, "Jira Ticket Link")
+        jira_ticket_link_col = _column_letter(jira_ticket_link_index + 1)
         body = {
             "valueInputOption": "USER_ENTERED",
             "data": [
@@ -79,6 +136,21 @@ class GoogleSheetsService:
         self.service.spreadsheets().values().batchUpdate(
             spreadsheetId=self.spreadsheet_id,
             body=body,
+        ).execute()
+        self.service.spreadsheets().batchUpdate(
+            spreadsheetId=self.spreadsheet_id,
+            body={
+                "requests": [
+                    self._build_link_display_request(
+                        sheet_id=self._get_sheet_id(self.input_tab),
+                        start_row_index=row_number - 1,
+                        end_row_index=row_number,
+                        column_index=jira_ticket_link_index,
+                        clip_text=True,
+                        font_size=12,
+                    )
+                ]
+            },
         ).execute()
 
     def append_records(self, headers: list[str], records: list[dict[str, str]]) -> None:
@@ -95,30 +167,57 @@ class GoogleSheetsService:
         ).execute()
         start_row_index = len(existing_values)
         end_row_index = start_row_index + len(records)
+        sheet_id = self._get_sheet_id(self.input_tab)
+        format_requests = [
+            {
+                "repeatCell": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "startRowIndex": start_row_index,
+                        "endRowIndex": end_row_index,
+                        "startColumnIndex": 0,
+                        "endColumnIndex": len(headers),
+                    },
+                    "cell": {
+                        "userEnteredFormat": {
+                            "textFormat": {
+                                "bold": False,
+                            }
+                        }
+                    },
+                    "fields": "userEnteredFormat.textFormat.bold",
+                }
+            }
+        ]
+        brd_link_index = self._find_header_index_if_present(headers, "BRD Link")
+        if brd_link_index is not None:
+            format_requests.append(
+                self._build_link_display_request(
+                    sheet_id=sheet_id,
+                    start_row_index=start_row_index,
+                    end_row_index=end_row_index,
+                    column_index=brd_link_index,
+                    clip_text=True,
+                    font_size=10,
+                )
+            )
+        jira_ticket_link_header = getattr(self, "jira_ticket_link_header", "Jira Ticket Link")
+        jira_ticket_link_index = self._find_header_index_if_present(headers, jira_ticket_link_header, "Jira Ticket Link")
+        if jira_ticket_link_index is not None:
+            format_requests.append(
+                self._build_link_display_request(
+                    sheet_id=sheet_id,
+                    start_row_index=start_row_index,
+                    end_row_index=end_row_index,
+                    column_index=jira_ticket_link_index,
+                    clip_text=True,
+                    font_size=12,
+                )
+            )
         self.service.spreadsheets().batchUpdate(
             spreadsheetId=self.spreadsheet_id,
             body={
-                "requests": [
-                    {
-                        "repeatCell": {
-                            "range": {
-                                "sheetId": self._get_sheet_id(self.input_tab),
-                                "startRowIndex": start_row_index,
-                                "endRowIndex": end_row_index,
-                                "startColumnIndex": 0,
-                                "endColumnIndex": len(headers),
-                            },
-                            "cell": {
-                                "userEnteredFormat": {
-                                    "textFormat": {
-                                        "bold": False,
-                                    }
-                                }
-                            },
-                            "fields": "userEnteredFormat.textFormat.bold",
-                        }
-                    }
-                ]
+                "requests": format_requests
             },
         ).execute()
 
@@ -168,6 +267,61 @@ class GoogleSheetsService:
             if index is not None:
                 return index
         raise ValueError(f"Could not find any of the expected headers: {', '.join(candidates)}")
+
+    @staticmethod
+    def _find_header_index_if_present(headers: list[str], *candidates: str) -> int | None:
+        normalized_headers = {_normalize_header(header): index for index, header in enumerate(headers)}
+        for candidate in candidates:
+            index = normalized_headers.get(_normalize_header(candidate))
+            if index is not None:
+                return index
+        return None
+
+    @staticmethod
+    def _build_link_display_request(
+        *,
+        sheet_id: int,
+        start_row_index: int,
+        end_row_index: int,
+        column_index: int,
+        clip_text: bool,
+        font_size: int,
+    ) -> dict[str, object]:
+        return {
+            "repeatCell": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "startRowIndex": start_row_index,
+                    "endRowIndex": end_row_index,
+                    "startColumnIndex": column_index,
+                    "endColumnIndex": column_index + 1,
+                },
+                "cell": {
+                    "userEnteredFormat": {
+                        "wrapStrategy": "CLIP" if clip_text else "OVERFLOW_CELL",
+                        "textFormat": {
+                            "bold": False,
+                            "underline": True,
+                            "fontSize": font_size,
+                            "foregroundColorStyle": {
+                                "rgbColor": {
+                                    "red": 0.067,
+                                    "green": 0.333,
+                                    "blue": 0.8,
+                                }
+                            },
+                        },
+                    }
+                },
+                "fields": (
+                    "userEnteredFormat.wrapStrategy,"
+                    "userEnteredFormat.textFormat.bold,"
+                    "userEnteredFormat.textFormat.underline,"
+                    "userEnteredFormat.textFormat.fontSize,"
+                    "userEnteredFormat.textFormat.foregroundColorStyle"
+                ),
+            }
+        }
 
     @staticmethod
     def _parse_field_mappings(values: Iterable[Iterable[str]]) -> list[FieldMapping]:
