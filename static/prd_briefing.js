@@ -16,6 +16,7 @@
   const imageLightboxOpen = document.querySelector('[data-image-lightbox-open]');
   const sessionSubmitButton = sessionForm?.querySelector('button[type="submit"]');
   const chatSubmitButton = chatForm?.querySelector('button[type="submit"]');
+  const CACHED_NARRATION_DELAY_MS = 10000;
 
   let state = {
     sessionId: null,
@@ -79,6 +80,10 @@
       </section>
     `;
   };
+
+  const wait = (durationMs) => new Promise((resolve) => {
+    window.setTimeout(resolve, durationMs);
+  });
 
   const renderReaderMode = () => {
     const enabled = Boolean(state.readerMode);
@@ -252,6 +257,10 @@
       });
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.message || '当前 section 无法生成讲解。');
+      if (payload.cached) {
+        setWalkthroughStatus('命中缓存，正在整理这一节的中文讲解并准备播放…', 'neutral');
+        await wait(CACHED_NARRATION_DELAY_MS);
+      }
       if (payload.audio_url) {
         const audio = new Audio(payload.audio_url);
         state.currentAudio = audio;
@@ -280,11 +289,16 @@
       }
       setStatus(
         payload.audio_url
-          ? '当前 section 的中文讲解已经生成。'
+          ? (payload.cached ? '已命中缓存并准备好当前 section 的中文讲解。' : '当前 section 的中文讲解已经生成。')
           : '服务端语音当前不可用。',
         'success',
       );
-      setWalkthroughStatus('当前 section 的中文讲解已经生成并开始播放。', 'success');
+      setWalkthroughStatus(
+        payload.cached
+          ? '已命中缓存，当前 section 的中文讲解已经准备好并开始播放。'
+          : '当前 section 的中文讲解已经生成并开始播放。',
+        'success',
+      );
     } catch (error) {
       state.isNarrating = false;
       if (narrateButton) {
@@ -317,6 +331,10 @@
       <button class="briefing-outline-item ${index === state.currentSectionIndex ? 'is-active' : ''}" type="button" data-section-index="${index}">
         <span>${index + 1}</span>
         <strong>${escapeHtml(section.section_path)}</strong>
+        <div class="briefing-cache-pill-row">
+          ${section.walkthrough_cached ? '<em class="briefing-cache-pill">文案已缓存</em>' : ''}
+          ${section.walkthrough_audio_cached ? '<em class="briefing-cache-pill briefing-cache-pill-secondary">音频已缓存</em>' : ''}
+        </div>
       </button>
     `).join('');
     const section = state.sections[state.currentSectionIndex];
@@ -360,9 +378,17 @@
     sectionListNode.querySelectorAll('[data-section-index]').forEach((button) => {
       button.addEventListener('click', () => {
         stopNarration();
-        clearWalkthroughStatus();
         state.currentSectionIndex = Number(button.dataset.sectionIndex || 0);
         renderSections();
+        if (state.sections[state.currentSectionIndex]?.walkthrough_cached) {
+          const selected = state.sections[state.currentSectionIndex];
+          const detail = selected.walkthrough_audio_cached
+            ? '这一节的文案和音频都已命中缓存，点击“开始中文讲解这一节”时不会重新调用文本模型或语音生成。'
+            : '这一节的文案已命中缓存，点击“开始中文讲解这一节”时不会重新调用文本模型。';
+          setWalkthroughStatus(detail, 'success');
+        } else {
+          clearWalkthroughStatus();
+        }
       });
     });
     narrateButton.disabled = state.isNarrating;

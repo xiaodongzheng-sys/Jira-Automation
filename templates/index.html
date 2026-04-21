@@ -99,7 +99,7 @@
           </div>
         </div>
 
-        <form method="post" action="{{ url_for('save_mapping_config') }}" class="stack">
+        <form method="post" action="{{ url_for('save_mapping_config') }}" class="stack" data-setup-config-form>
           <div class="config-grid setup-grid">
             <div class="config-card config-card-wide">
               <h3>Step 1 · BPMIS Token</h3>
@@ -253,9 +253,21 @@
                   <summary>Advanced mapping overrides</summary>
                   <div class="field-stack">
                     <div class="field-group">
-                      <label for="component_route_rules_text">System + Market to Component</label>
+                      <div class="field-label-row">
+                        <label for="component_route_rules_text">System + Market to Component</label>
+                        <button class="button button-secondary button-inline-save" type="button" data-route-save-button>Save Route</button>
+                      </div>
+                      <p class="field-help"><strong>Step 3A.</strong> You can edit this routing table anytime.</p>
                       <p class="field-help">Format: <code>System | Market | Component</code>. The PM team template below is already expanded with the current user's values when available.</p>
                       <textarea id="component_route_rules_text" class="mapping-textarea" name="component_route_rules_text" rows="8" placeholder="AF | SG | DBP-Anti-fraud&#10;AF | PH | DBP-Anti-fraud" spellcheck="false">{{ mapping_config.component_route_rules_text }}</textarea>
+                      <div class="mapping-inline-status" data-route-save-status hidden></div>
+                      <div class="mapping-reference">
+                        <div class="mapping-preview-head">
+                          <strong>System Reference</strong>
+                          <span>Derived from the current routing table for quick cross-checking.</span>
+                        </div>
+                        <div class="mapping-system-list" data-system-reference-list></div>
+                      </div>
                       <div class="mapping-preview" data-mapping-preview="route">
                         <div class="mapping-preview-head">
                           <strong>Template Preview</strong>
@@ -278,15 +290,13 @@
                     </div>
                     <div class="field-group">
                       <label for="component_default_rules_text">Component to Assignee / Dev PIC / QA PIC / Fix Version</label>
-                      <p class="field-help">Format: <code>Component | Assignee | Dev PIC | QA PIC | Fix Version</code>. Team defaults now show the actual email that will be applied for this user.</p>
-                      <textarea id="component_default_rules_text" class="mapping-textarea" name="component_default_rules_text" rows="8" placeholder="DBP-Anti-fraud | owner@npt.sg | dev@npt.sg | qa@npt.sg | Planning_26Q2" spellcheck="false">{{ mapping_config.component_default_rules_text }}</textarea>
-                      <div class="mapping-preview" data-mapping-preview="default">
-                        <div class="mapping-preview-head">
-                          <strong>Template Preview</strong>
-                          <span>Component / Assignee / Dev PIC / QA PIC / Fix Version</span>
-                        </div>
+                      <p class="field-help"><strong>Step 3B.</strong> Save Step 3A first, then configure component owners in the table below.</p>
+                      <p class="field-help">Only components already present in the saved <code>System + Market to Component</code> table can be configured here.</p>
+                      <textarea id="component_default_rules_text" class="mapping-textarea mapping-textarea-hidden" name="component_default_rules_text" rows="8" placeholder="DBP-Anti-fraud | owner@npt.sg | dev@npt.sg | qa@npt.sg | Planning_26Q2" spellcheck="false" data-component-default-hidden>{{ mapping_config.component_default_rules_text }}</textarea>
+                      <div class="mapping-owner-editor" data-component-owner-editor>
+                        <div class="mapping-owner-editor-state" data-component-owner-state></div>
                         <div class="mapping-preview-table-wrap">
-                          <table class="mapping-preview-table">
+                          <table class="mapping-preview-table mapping-owner-table">
                             <thead>
                               <tr>
                                 <th>Component</th>
@@ -296,10 +306,9 @@
                                 <th>Fix Version</th>
                               </tr>
                             </thead>
-                            <tbody data-mapping-preview-body="default"></tbody>
+                            <tbody data-component-owner-editor-body></tbody>
                           </table>
                         </div>
-                        <p class="mapping-preview-empty" data-mapping-preview-empty="default">No component owner defaults yet.</p>
                       </div>
                     </div>
                   </div>
@@ -395,9 +404,9 @@
             </p>
             <div class="result-tips">
               <span>Sync adds missing BPMIS projects without touching existing rows.</span>
+              <span>Only BPMIS Biz projects that are not done will be synced.</span>
               <span>Preview never creates Jira.</span>
               <span>Run only touches rows whose Jira link cell is blank.</span>
-              <span>Project column shows the resolved BPMIS summary used for creation.</span>
             </div>
           </div>
           <div class="button-row">
@@ -471,59 +480,51 @@
         <div class="panel-head productization-panel-head">
           <div>
             <h2>Productization Upgrade Summary</h2>
-            <p class="step-copy">Search a version keyword, choose the exact Fix Version, then review the matching Jira tickets in one table.</p>
+            <p class="step-copy">Type a version keyword, pick the exact Fix Version from the dropdown, then repeat once more if you want to compare two versions in one combined table.</p>
             <p class="help-text">
-              This view searches Fix Versions from BPMIS first, then loads ticket details for the selected version. PM and PRD Link will be enriched when BPMIS exposes extra detail.
+              This view searches Fix Versions from BPMIS as you type. Pick up to two exact versions, then review everything in one copy-ready table for Excel or Google Sheet.
             </p>
           </div>
         </div>
-
         <div class="productization-search-shell">
-          <form class="productization-search-form" data-productization-version-form>
+          <div class="productization-search-form" data-productization-version-form>
             <div class="field-group productization-search-field">
-              <label for="productization-version-query">Version Number</label>
-              <p class="field-help">Example: <code>Planning_26Q2</code> or any keyword contained in the version name.</p>
-              <input
-                id="productization-version-query"
-                name="q"
-                placeholder="Key in a version number"
-                autocomplete="off"
-                data-productization-version-input
-                required
-              >
+              <label for="productization-version-query">Version Keyword</label>
+              <p class="field-help">Example: <code>Planning_26Q2</code> or <code>v1.0.80</code>. Select one result, then type again for the second version.</p>
+              <div class="productization-input-shell">
+                <input
+                  id="productization-version-query"
+                  name="q"
+                  placeholder="Type a version keyword"
+                  autocomplete="off"
+                  data-productization-version-input
+                >
+                <div class="productization-typeahead" data-productization-typeahead hidden></div>
+              </div>
             </div>
-            <div class="button-row productization-search-actions">
-              <button class="button" type="submit">Search Version</button>
-            </div>
-          </form>
-          <p class="productization-inline-status" data-productization-status>Search for a version to begin.</p>
+            <div class="productization-selected" data-productization-selected></div>
+          </div>
+          <div class="empty-state productization-empty" data-productization-selected-empty>
+            <p>No versions selected yet.</p>
+          </div>
+          <p class="productization-inline-status" data-productization-status>Type a version keyword to begin.</p>
         </div>
 
         <section class="productization-section">
           <div class="productization-section-head">
-            <h3>Matching Versions</h3>
-            <span>Select one exact version before loading tickets.</span>
+            <div>
+              <h3 data-productization-results-title>Upgrade Tickets</h3>
+              <span>Columns are normalized from BPMIS/Jira fields for quick review.</span>
+            </div>
+            <button class="button button-secondary" type="button" data-productization-copy-button disabled>Copy whole table</button>
           </div>
-          <div class="productization-candidate-list" data-productization-candidates></div>
-          <div class="empty-state productization-empty" data-productization-candidates-empty>
-            <p>No version results yet.</p>
-          </div>
-        </section>
-
-        <section class="productization-section">
-          <div class="productization-section-head">
-            <h3>Upgrade Tickets</h3>
-            <span>Columns are normalized from BPMIS/Jira fields for quick review.</span>
-          </div>
-          <div class="table-wrap premium-table-wrap" data-productization-table-wrap hidden>
+              <div class="table-wrap premium-table-wrap" data-productization-table-wrap hidden>
             <table class="productization-table">
               <thead>
                 <tr>
-                  <th>JIRA Ticket Number</th>
+                  <th>Jira Link</th>
                   <th>Feature Summary</th>
                   <th>Detailed Feature</th>
-                  <th>PM</th>
-                  <th>PRD Link</th>
                 </tr>
               </thead>
               <tbody data-productization-results-body></tbody>
@@ -568,6 +569,7 @@
   <script id="team-profile-data" type="application/json">{{ team_profiles | tojson }}</script>
   <script>
     (() => {
+      const setupForm = document.querySelector('[data-setup-config-form]');
       const selector = document.querySelector('[data-team-selector]');
       const scriptNode = document.getElementById('team-profile-data');
       if (!selector || !scriptNode) return;
@@ -575,6 +577,10 @@
       const profiles = JSON.parse(scriptNode.textContent || '{}');
       const routeRules = document.getElementById('component_route_rules_text');
       const defaultRules = document.getElementById('component_default_rules_text');
+      const ownerEditorState = document.querySelector('[data-component-owner-state]');
+      const ownerEditorBody = document.querySelector('[data-component-owner-editor-body]');
+      const routeSaveButton = document.querySelector('[data-route-save-button]');
+      const routeSaveStatus = document.querySelector('[data-route-save-status]');
       const teamNote = document.querySelector('[data-team-profile-note]');
       const confirmModalBackdrop = document.querySelector('[data-confirm-modal-backdrop]');
       const confirmModalMessage = document.querySelector('[data-confirm-modal-message]');
@@ -582,10 +588,11 @@
       const confirmApplyButton = document.querySelector('[data-confirm-modal-confirm]');
       const routePreviewBody = document.querySelector('[data-mapping-preview-body="route"]');
       const routePreviewEmpty = document.querySelector('[data-mapping-preview-empty="route"]');
-      const defaultPreviewBody = document.querySelector('[data-mapping-preview-body="default"]');
-      const defaultPreviewEmpty = document.querySelector('[data-mapping-preview-empty="default"]');
+      const systemReferenceList = document.querySelector('[data-system-reference-list]');
+      let savedRouteBaseline = (routeRules?.value || '').trim();
       let selectedTeam = selector.dataset.initialTeam || selector.value || '';
       let userInitiatedTeamChange = false;
+      let routeSaveRequestController = null;
 
       const escapeHtml = (value) => String(value ?? '')
         .replaceAll('&', '&amp;')
@@ -614,9 +621,109 @@
         `).join('');
       };
 
+      const renderSystemReference = (routeRows) => {
+        if (!systemReferenceList) return;
+        const systems = [...new Set(routeRows.map((row) => row[0]).filter(Boolean))];
+        if (!systems.length) {
+          systemReferenceList.innerHTML = '<span class="mapping-reference-empty">No systems detected yet.</span>';
+          return;
+        }
+        systemReferenceList.innerHTML = systems
+          .map((system) => `<span class="mapping-system-chip">${escapeHtml(system)}</span>`)
+          .join('');
+      };
+
+      const buildDefaultRuleMap = (rows) => {
+        const map = new Map();
+        rows.forEach((row) => {
+          const component = (row[0] || '').trim();
+          if (!component) return;
+          map.set(component.toLowerCase(), {
+            component,
+            assignee: row[1] || '',
+            dev_pic: row[2] || '',
+            qa_pic: row[3] || '',
+            fix_version: row[4] || '',
+          });
+        });
+        return map;
+      };
+
+      const serializeOwnerRows = () => {
+        if (!ownerEditorBody) return;
+        const rows = [...ownerEditorBody.querySelectorAll('[data-owner-row]')].map((row) => {
+          const component = row.dataset.component || '';
+          const assignee = row.querySelector('[data-owner-field="assignee"]')?.value?.trim() || '';
+          const devPic = row.querySelector('[data-owner-field="dev_pic"]')?.value?.trim() || '';
+          const qaPic = row.querySelector('[data-owner-field="qa_pic"]')?.value?.trim() || '';
+          const fixVersion = row.querySelector('[data-owner-field="fix_version"]')?.value?.trim() || '';
+          return [component, assignee, devPic, qaPic, fixVersion].join(' | ');
+        });
+        if (defaultRules) {
+          defaultRules.value = rows.filter(Boolean).join('\n');
+        }
+      };
+
+      const renderOwnerEditor = () => {
+        if (!ownerEditorBody || !ownerEditorState || !defaultRules) return;
+        const currentRouteText = (routeRules?.value || '').trim();
+        const savedRouteRows = parseRules(savedRouteBaseline, 3);
+        const defaultRows = parseRules(defaultRules.value, 5);
+        const defaultMap = buildDefaultRuleMap(defaultRows);
+        const routeChangedSinceSave = currentRouteText !== savedRouteBaseline;
+
+        if (!savedRouteRows.length) {
+          ownerEditorBody.innerHTML = '';
+          ownerEditorState.textContent = 'Save Step 3A first. Component owner configuration becomes available after a routing table has been saved.';
+          return;
+        }
+
+        if (routeChangedSinceSave) {
+          ownerEditorBody.innerHTML = '';
+          ownerEditorState.textContent = 'System + Market to Component has unsaved changes. Save Setup first to refresh the allowed Component list for Step 3B.';
+          return;
+        }
+
+        const components = [...new Set(savedRouteRows.map((row) => row[2]).filter(Boolean))];
+        ownerEditorState.textContent = 'Only saved Components are listed here. Configure each row once, then save Setup.';
+        ownerEditorBody.innerHTML = components.map((component) => {
+          const values = defaultMap.get(component.toLowerCase()) || {
+            assignee: '',
+            dev_pic: '',
+            qa_pic: '',
+            fix_version: '',
+          };
+          return `
+            <tr data-owner-row data-component="${escapeHtml(component)}">
+              <td>${escapeHtml(component)}</td>
+              <td><input type="email" value="${escapeHtml(values.assignee || '')}" data-owner-field="assignee" placeholder="owner@npt.sg"></td>
+              <td><input type="email" value="${escapeHtml(values.dev_pic || '')}" data-owner-field="dev_pic" placeholder="dev@npt.sg"></td>
+              <td><input type="email" value="${escapeHtml(values.qa_pic || '')}" data-owner-field="qa_pic" placeholder="qa@npt.sg"></td>
+              <td><input type="text" value="${escapeHtml(values.fix_version || '')}" data-owner-field="fix_version" placeholder="Planning_26Q2"></td>
+            </tr>
+          `;
+        }).join('');
+
+        ownerEditorBody.querySelectorAll('input').forEach((inputNode) => {
+          inputNode.addEventListener('input', () => {
+            serializeOwnerRows();
+          });
+        });
+        serializeOwnerRows();
+      };
+
       const refreshMappingPreviews = () => {
-        renderPreviewTable(parseRules(routeRules?.value, 3), routePreviewBody, routePreviewEmpty);
-        renderPreviewTable(parseRules(defaultRules?.value, 5), defaultPreviewBody, defaultPreviewEmpty);
+        const routeRows = parseRules(routeRules?.value, 3);
+        renderPreviewTable(routeRows, routePreviewBody, routePreviewEmpty);
+        renderSystemReference(routeRows);
+        renderOwnerEditor();
+      };
+
+      const setRouteSaveStatus = (message, tone = 'info') => {
+        if (!routeSaveStatus) return;
+        routeSaveStatus.hidden = !message;
+        routeSaveStatus.textContent = message || '';
+        routeSaveStatus.dataset.tone = tone;
       };
 
       const syncSelectedTeamBaseline = () => {
@@ -754,6 +861,51 @@
       syncSelectedTeamBaseline();
       routeRules?.addEventListener('input', refreshMappingPreviews);
       defaultRules?.addEventListener('input', refreshMappingPreviews);
+      setupForm?.addEventListener('submit', () => {
+        serializeOwnerRows();
+      });
+      routeSaveButton?.addEventListener('click', async () => {
+        if (!routeRules || !selector) return;
+        if (routeSaveRequestController) {
+          routeSaveRequestController.abort();
+        }
+        routeSaveRequestController = new AbortController();
+        setRouteSaveStatus('Saving route...', 'info');
+        routeSaveButton.disabled = true;
+
+        try {
+          const response = await fetch('{{ url_for("save_mapping_route_only") }}', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Accept': 'application/json',
+            },
+            credentials: 'same-origin',
+            signal: routeSaveRequestController.signal,
+            body: JSON.stringify({
+              pm_team: selector.value || '',
+              system_header: document.getElementById('system_header')?.value || '',
+              market_header: document.getElementById('market_header')?.value || '',
+              component_route_rules_text: routeRules.value || '',
+            }),
+          });
+          const payload = await response.json().catch(() => ({}));
+          if (!response.ok || payload.status !== 'ok') {
+            throw new Error(payload.message || 'Could not save System + Market to Component.');
+          }
+          routeRules.value = payload.component_route_rules_text || '';
+          defaultRules.value = payload.component_default_rules_text || '';
+          savedRouteBaseline = (routeRules.value || '').trim();
+          refreshMappingPreviews();
+          setRouteSaveStatus(payload.message || 'Route saved.', 'success');
+        } catch (error) {
+          if (error.name === 'AbortError') return;
+          setRouteSaveStatus(error.message || 'Could not save System + Market to Component.', 'error');
+        } finally {
+          routeSaveButton.disabled = false;
+          routeSaveRequestController = null;
+        }
+      });
       refreshMappingPreviews();
     })();
   </script>

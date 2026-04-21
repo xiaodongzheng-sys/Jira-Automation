@@ -2,7 +2,7 @@
 
 {% block content %}
   <section class="portal-page">
-    <section class="surface-card">
+    <section class="surface-card outsourcing-search-card">
       <div class="page-title-row">
         <div>
           <p class="eyebrow-label">{{ page_kicker }}</p>
@@ -91,9 +91,7 @@
         </div>
       </details>
 
-      <div class="callout-card callout-info">
-        <p>All search criteria are applied with AND logic. Clear resets the query condition, and date fields follow range validation.</p>
-      </div>
+      <p class="search-meta-note">All search criteria are applied with AND logic. Clear resets the query condition, and date fields follow range validation.</p>
 
       <div class="search-action-row">
         <button class="link-button" type="button">Clear</button>
@@ -110,19 +108,15 @@
       </div>
 
       <div class="ant-table-wrap">
-        <table class="ant-table">
+        <table class="ant-table outsourcing-overview-table">
           <thead>
             <tr>
               <th>No.</th>
               <th>Assessment ID</th>
               <th>Outsourcing Arrangement Identifier</th>
               <th>Full Name</th>
-              <th>Description of Outsourced Service(s)</th>
               <th>Category of Provider</th>
               <th>First Commencement</th>
-              <th>Other Commencement</th>
-              <th>Is the Service Expiry / Next Contract Renewal Date available?</th>
-              <th>Service Expiry / Next Contract Renewal Date (Remarks)</th>
               <th>Date of Request</th>
               <th>Event</th>
               <th>Status of Assessment</th>
@@ -133,19 +127,23 @@
             {% for row in overview_rows %}
               <tr>
                 <td>{{ loop.index }}</td>
-                <td>{{ row.assessment_id }}</td>
+                <td>
+                  <a href="{{ url_for('outsourcing_assessment_detail', arrangement_id=row.arrangement_id, assessment_id=row.assessment_id) }}">
+                    {{ row.assessment_id }}
+                  </a>
+                </td>
                 <td><a href="{{ url_for('outsourcing_detail', arrangement_id=row.arrangement_id) }}">{{ row.arrangement_id }}</a></td>
                 <td>{{ row.full_name }}</td>
-                <td>{{ row.description_of_services }}</td>
                 <td>{{ row.category_of_provider }}</td>
                 <td>{{ row.first_commencement }}</td>
-                <td>{{ row.other_commencement }}</td>
-                <td>{{ row.service_expiry_available }}</td>
-                <td>{{ row.service_expiry_remarks }}</td>
                 <td>{{ row.date_of_request }}</td>
                 <td>{{ row.event }}</td>
                 <td><span class="status-tag status-{{ row.status|lower|replace(' ', '-')|replace('/', '-') }}">{{ row.status }}</span></td>
-                <td><a href="{{ url_for('outsourcing_detail', arrangement_id=row.arrangement_id) }}">View Details</a></td>
+                <td>
+                  <div class="table-actions">
+                    <a href="{{ url_for('outsourcing_assessment_edit', arrangement_id=row.arrangement_id, assessment_id=row.assessment_id) }}">Edit</a>
+                  </div>
+                </td>
               </tr>
             {% endfor %}
           </tbody>

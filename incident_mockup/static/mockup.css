@@ -15,6 +15,8 @@
   --danger-bg: #fdf0ef;
   --warning-bg: #fff7e8;
   --shadow: 0 1px 2px rgba(10, 31, 68, 0.06);
+  --frame-max: 1440px;
+  --frame-gutter: 32px;
 }
 
 * { box-sizing: border-box; }
@@ -25,6 +27,12 @@ body {
   background: var(--bg);
   color: var(--text);
   font: 14px/1.5 "Segoe UI", Arial, sans-serif;
+}
+
+.grc-demo-frame {
+  width: min(var(--frame-max), calc(100vw - var(--frame-gutter)));
+  margin: 0 auto;
+  min-width: 0;
 }
 
 a { color: var(--link); text-decoration: none; }
@@ -53,9 +61,17 @@ h2, h3, h4, p, dt, dd { margin: 0; }
 
 .portal-header {
   height: 58px;
-  padding: 0 18px;
   background: var(--blue);
   color: #fff;
+}
+
+.portal-header-inner {
+  width: min(var(--frame-max), calc(100vw - var(--frame-gutter)));
+  height: 100%;
+  margin: 0 auto;
+  padding: 0 24px;
+  display: flex;
+  align-items: center;
   justify-content: space-between;
 }
 
@@ -97,10 +113,16 @@ h2, h3, h4, p, dt, dd { margin: 0; }
 
 .workspace-strip {
   height: 40px;
-  padding: 0 14px;
   background: #fff;
   border-bottom: 1px solid var(--line);
+}
+
+.workspace-strip-inner {
+  height: 100%;
+  padding: 0 14px;
   gap: 0;
+  display: flex;
+  align-items: center;
   overflow-x: auto;
 }
 
@@ -125,6 +147,8 @@ h2, h3, h4, p, dt, dd { margin: 0; }
   display: grid;
   grid-template-columns: 250px 1fr;
   min-height: calc(100vh - 98px);
+  width: 100%;
+  min-width: 0;
 }
 
 .side-nav {
@@ -163,11 +187,16 @@ h2, h3, h4, p, dt, dd { margin: 0; }
 
 .main-shell {
   padding: 26px;
+  display: flex;
+  justify-content: center;
+  min-width: 0;
 }
 
 .portal-page {
   display: grid;
   gap: 20px;
+  width: 100%;
+  min-width: 0;
 }
 
 .surface-card {
@@ -175,6 +204,7 @@ h2, h3, h4, p, dt, dd { margin: 0; }
   border: 1px solid var(--line);
   box-shadow: var(--shadow);
   padding: 24px;
+  min-width: 0;
 }
 
 .surface-card-nested {
@@ -185,6 +215,7 @@ h2, h3, h4, p, dt, dd { margin: 0; }
 
 .page-shell {
   padding: 18px 18px 22px;
+  min-width: 0;
 }
 
 .page-title-row,
@@ -340,6 +371,49 @@ h2, h3, h4, p, dt, dd { margin: 0; }
   margin-top: 18px;
 }
 
+.outsourcing-search-card {
+  display: grid;
+  gap: 12px;
+  padding-bottom: 18px;
+}
+
+.arrangement-summary-card {
+  display: grid;
+  gap: 12px;
+  padding: 18px 18px 16px;
+  min-height: 0;
+  align-content: start;
+}
+
+.arrangement-summary-card .detail-header {
+  margin-bottom: 0;
+}
+
+.arrangement-summary-card .detail-grid {
+  gap: 14px 22px;
+}
+
+.outsourcing-search-card .page-title-row {
+  margin-bottom: 6px;
+}
+
+.outsourcing-search-card .search-grid,
+.outsourcing-search-card .search-advanced,
+.outsourcing-search-card .search-meta-note,
+.outsourcing-search-card .search-action-row {
+  margin-top: 0;
+}
+
+.outsourcing-search-card .search-advanced {
+  padding-top: 10px;
+}
+
+.search-meta-note {
+  margin-top: 12px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
 .search-advanced {
   margin-top: 14px;
   border-top: 1px solid var(--line);
@@ -408,6 +482,8 @@ h2, h3, h4, p, dt, dd { margin: 0; }
 .tab-panel.is-active { display: block; }
 
 .ant-table-wrap {
+  width: 100%;
+  max-width: 100%;
   overflow: auto;
 }
 
@@ -419,6 +495,13 @@ h2, h3, h4, p, dt, dd { margin: 0; }
   width: 100%;
   min-width: 1400px;
   border-collapse: collapse;
+}
+
+.outsourcing-overview-table {
+  min-width: 1180px;
+  border-collapse: separate;
+  border-spacing: 0;
+  table-layout: fixed;
 }
 
 .ant-table th,
@@ -434,6 +517,72 @@ h2, h3, h4, p, dt, dd { margin: 0; }
   background: #fbfcfe;
   font-size: 12px;
   font-weight: 700;
+}
+
+.outsourcing-overview-table th,
+.outsourcing-overview-table td {
+  padding: 8px 8px;
+  font-size: 12px;
+}
+
+.outsourcing-overview-table th {
+  font-size: 11px;
+}
+
+.outsourcing-overview-table th:nth-child(1),
+.outsourcing-overview-table td:nth-child(1) { width: 44px; }
+.outsourcing-overview-table th:nth-child(2),
+.outsourcing-overview-table td:nth-child(2) { width: 104px; }
+.outsourcing-overview-table th:nth-child(3),
+.outsourcing-overview-table td:nth-child(3) { width: 120px; }
+.outsourcing-overview-table th:nth-child(4),
+.outsourcing-overview-table td:nth-child(4) { width: 96px; }
+.outsourcing-overview-table th:nth-child(5),
+.outsourcing-overview-table td:nth-child(5) { width: 120px; }
+.outsourcing-overview-table th:nth-child(6),
+.outsourcing-overview-table td:nth-child(6) { width: 92px; }
+.outsourcing-overview-table th:nth-child(7),
+.outsourcing-overview-table td:nth-child(7) { width: 108px; }
+.outsourcing-overview-table th:nth-child(8),
+.outsourcing-overview-table td:nth-child(8) { width: 116px; }
+.outsourcing-overview-table th:nth-child(9),
+.outsourcing-overview-table td:nth-child(9) { width: 96px; }
+.outsourcing-overview-table th:nth-child(10),
+.outsourcing-overview-table td:nth-child(10) { width: 112px; }
+.outsourcing-overview-table th:nth-child(11),
+.outsourcing-overview-table td:nth-child(11) { width: 78px; }
+.outsourcing-overview-table th:nth-child(12),
+.outsourcing-overview-table td:nth-child(12) { width: 98px; }
+.outsourcing-overview-table th:nth-child(13),
+.outsourcing-overview-table td:nth-child(13) { width: 120px; }
+
+.outsourcing-overview-table th:nth-child(2),
+.outsourcing-overview-table td:nth-child(2) {
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  background: #fff;
+  box-shadow: 1px 0 0 var(--line);
+}
+
+.outsourcing-overview-table th:nth-child(2) {
+  z-index: 4;
+  background: #fbfcfe;
+}
+
+.outsourcing-overview-table th:last-child,
+.outsourcing-overview-table td:last-child {
+  position: sticky;
+  right: 0;
+  z-index: 2;
+  background: #fff;
+  box-shadow: -1px 0 0 var(--line);
+  width: 72px;
+}
+
+.outsourcing-overview-table th:last-child {
+  z-index: 4;
+  background: #fbfcfe;
 }
 
 .cell-subtext {

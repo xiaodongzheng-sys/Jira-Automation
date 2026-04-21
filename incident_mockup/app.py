@@ -1214,7 +1214,7 @@ def create_app(
                 },
                 {
                     "label": "GRC Demo",
-                    "href": "/grc-demo/",
+                    "href": "/grc-demo/outsourcing-management",
                     "active": current_path == "/" or current_path.startswith("/"),
                 },
             ],
@@ -1230,7 +1230,6 @@ def create_app(
             ],
             "workspace_tabs": [
                 {"label": "Governance, Risk & Compliance (GRC)", "href": "#", "active": False},
-                {"label": "Incident Management", "href": url_for("overview"), "active": not is_outsourcing},
                 {"label": "Outsourcing Management", "href": url_for("outsourcing_overview"), "active": is_outsourcing},
             ],
         }
@@ -1243,7 +1242,7 @@ def create_app(
 
     @app.get("/")
     def root():
-        return overview()
+        return redirect(url_for("outsourcing_overview"))
 
     @app.get("/overview")
     def overview():

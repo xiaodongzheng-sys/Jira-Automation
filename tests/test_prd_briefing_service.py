@@ -36,8 +36,14 @@ class FakeOpenAIClient:
 
 
 class FakeVoiceService:
+    def __init__(self):
+        self.cached_texts = set()
+
     def synthesize(self, **kwargs):
         return None
+
+    def get_cached_audio_for_text(self, *, owner_key, text, language_code):
+        return "audio/cached.mp3" if text in self.cached_texts else None
 
 
 @dataclass
@@ -53,6 +59,7 @@ class PRDBriefingServiceTests(unittest.TestCase):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.store = BriefingStore(Path(self.temp_dir.name))
         self.openai_client = FakeOpenAIClient()
+        self.voice_service = FakeVoiceService()
         page = IngestedConfluencePage(
             page_id="123",
             title="Payments PRD",
@@ -80,7 +87,8 @@ class PRDBriefingServiceTests(unittest.TestCase):
             store=self.store,
             confluence=FakeConnector(page),
             openai_client=self.openai_client,
-            voice_service=FakeVoiceService(),
+            voice_service=self.voice_service,
+            walkthrough_prewarm_enabled=False,
         )
 
     def tearDown(self):
@@ -150,12 +158,13 @@ class PRDBriefingServiceTests(unittest.TestCase):
         self.openai_client.last_system_prompt = None
         self.openai_client.last_user_prompt = None
 
-        result = self.service._compose_walkthrough_section(  # noqa: SLF001
+        result, cached = self.service._compose_walkthrough_section(  # noqa: SLF001
             owner_key="anon:prompt-test",
             section=payload["sections"][0],
         )
 
         self.assertEqual(result, "LLM answer")
+        self.assertFalse(cached)
         self.assertIn("software engineers", self.openai_client.last_system_prompt)
         self.assertIn("validation rules", self.openai_client.last_system_prompt)
         self.assertIn("implementation", self.openai_client.last_user_prompt)
@@ -187,7 +196,9 @@ class PRDBriefingServiceTests(unittest.TestCase):
 
         self.assertEqual(first["script"], "LLM answer")
         self.assertEqual(second["script"], "LLM answer")
-        self.assertEqual(self.openai_client.answer_calls, 0)
+        self.assertFalse(first["cached"])
+        self.assertTrue(second["cached"])
+        self.assertEqual(self.openai_client.answer_calls, 1)
 
     def test_walkthrough_script_reuses_legacy_cached_entry_from_old_model_id(self):
         self.openai_client.is_configured = lambda: True
@@ -266,7 +277,58 @@ class PRDBriefingServiceTests(unittest.TestCase):
         )
 
         self.assertEqual(result["script"], "legacy cached script")
+        self.assertTrue(result["cached"])
+        self.assertFalse(result["audio_cached"])
         self.assertEqual(self.openai_client.answer_calls, 0)
+
+    def test_get_session_payload_marks_cached_sections(self):
+        self.openai_client.is_configured = lambda: True
+        payload = self.service.create_session(
+            owner_key="anon:test",
+            page_ref="https://example.atlassian.net/wiki/pages/123",
+            mode="walkthrough",
+        )
+
+        self.service.narrate_section(
+            session_id=payload["session"]["session_id"],
+            owner_key="anon:test",
+            section_index=0,
+            include_audio=False,
+        )
+
+        refreshed = self.service.get_session_payload(
+            session_id=payload["session"]["session_id"],
+            owner_key="anon:test",
+        )
+
+        self.assertTrue(refreshed["sections"][0]["walkthrough_cached"])
+        self.assertFalse(refreshed["sections"][0]["walkthrough_audio_cached"])
+        self.assertFalse(refreshed["sections"][1]["walkthrough_cached"])
+        self.assertFalse(refreshed["sections"][1]["walkthrough_audio_cached"])
+
+    def test_get_session_payload_marks_cached_audio_sections(self):
+        self.openai_client.is_configured = lambda: True
+        payload = self.service.create_session(
+            owner_key="anon:test",
+            page_ref="https://example.atlassian.net/wiki/pages/123",
+            mode="walkthrough",
+        )
+
+        result = self.service.narrate_section(
+            session_id=payload["session"]["session_id"],
+            owner_key="anon:test",
+            section_index=0,
+            include_audio=False,
+        )
+        self.voice_service.cached_texts.add(result["script"])
+
+        refreshed = self.service.get_session_payload(
+            session_id=payload["session"]["session_id"],
+            owner_key="anon:test",
+        )
+
+        self.assertTrue(refreshed["sections"][0]["walkthrough_cached"])
+        self.assertTrue(refreshed["sections"][0]["walkthrough_audio_cached"])
 
     def test_walkthrough_script_requires_text_provider(self):
         payload = self.service.create_session(

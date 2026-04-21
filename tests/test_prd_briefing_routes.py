@@ -27,7 +27,7 @@ class FakeBriefingService:
                 "unclear_ownership": ["ownership"],
                 "open_questions": ["question"],
             },
-            "sections": [{"section_path": "Overview", "content": "Body", "html_content": "<p>Body</p>", "image_refs": []}],
+            "sections": [{"section_path": "Overview", "content": "Body", "html_content": "<p>Body</p>", "image_refs": [], "walkthrough_cached": True, "walkthrough_audio_cached": True}],
             "messages": [],
         }
 
@@ -44,7 +44,7 @@ class FakeBriefingService:
         }
 
     def narrate_section(self, **kwargs):
-        return {"script": "Section script", "audio_url": None}
+        return {"script": "Section script", "audio_url": None, "cached": True, "audio_cached": True}
 
 
 class PRDBriefingRouteTests(unittest.TestCase):

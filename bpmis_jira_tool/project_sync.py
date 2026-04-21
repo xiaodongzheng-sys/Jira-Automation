@@ -48,7 +48,7 @@ class BPMISProjectSyncService:
         results: list[RunResult] = []
         records_to_append: list[dict[str, str]] = []
         appended_issue_ids: set[str] = set()
-        brd_links_by_issue_id: dict[str, str] = {}
+        brd_links_by_issue_id: dict[str, list[str]] = {}
 
         if brd_link_header.strip():
             candidate_issue_ids = []
@@ -64,14 +64,14 @@ class BPMISProjectSyncService:
                     0,
                     len(candidate_issue_ids),
                 )
-                brd_links_by_issue_id = self.bpmis_client.get_single_brd_doc_links_for_projects(candidate_issue_ids)
+                brd_links_by_issue_id = self.bpmis_client.get_brd_doc_links_for_projects(candidate_issue_ids)
 
         next_row_number = len(snapshot.rows) + 2
         for index, project in enumerate(projects, start=1):
             issue_id = project["issue_id"].strip()
             project_name = project["project_name"].strip()
             market = project["market"].strip()
-            brd_link = ""
+            brd_links: list[str] = []
             self._emit_progress(
                 progress_callback,
                 "syncing",
@@ -105,7 +105,7 @@ class BPMISProjectSyncService:
                 continue
 
             if brd_link_header.strip():
-                brd_link = brd_links_by_issue_id.get(issue_id, "").strip()
+                brd_links = [link.strip() for link in brd_links_by_issue_id.get(issue_id, []) if link.strip()]
 
             appended_issue_ids.add(issue_id)
             record = {
@@ -114,7 +114,7 @@ class BPMISProjectSyncService:
                 market_header: market,
             }
             if brd_link_header.strip():
-                record[brd_link_header] = brd_link
+                record[brd_link_header] = "\n".join(brd_links)
             records_to_append.append(record)
             results.append(
                 RunResult(

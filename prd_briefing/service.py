@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import re
+import threading
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,7 @@ DEVELOPER_LANGUAGE = "Mandarin Chinese"
 
 WALKTHROUGH_SCRIPT_PROMPT_VERSION = "v1_openai_only_pm_briefing"
 SESSION_BRIEF_PROMPT_VERSION = "v7_two_part_chinese_summary"
+WALKTHROUGH_PREWARM_LIMIT = 12
 
 STOPWORDS = {
     "a",
@@ -164,6 +166,36 @@ class VoiceService:
             )
         return asset_path
 
+    def get_cached_audio_for_text(self, *, owner_key: str, text: str, language_code: str) -> str | None:
+        normalized_text = optimize_tts_text(text, language_code=language_code)
+        cache_target = self._resolve_cache_target()
+        if not cache_target:
+            return None
+        return self.store.get_cached_audio(
+            owner_key=owner_key,
+            provider=cache_target["provider"],
+            voice_id=cache_target["voice_id"],
+            language_code=language_code,
+            model_id=cache_target["model_id"],
+            text=normalized_text,
+        )
+
+    def _resolve_cache_target(self) -> dict[str, str] | None:
+        elevenlabs_voice_id = self.elevenlabs_mandarin_voice_id
+        if self.elevenlabs_api_key and elevenlabs_voice_id:
+            return {
+                "provider": "elevenlabs",
+                "voice_id": elevenlabs_voice_id,
+                "model_id": self.elevenlabs_mandarin_model_id,
+            }
+        if self.openai_tts_fallback_enabled and self.openai_client.is_configured():
+            return {
+                "provider": "openai",
+                "voice_id": self.openai_mandarin_voice,
+                "model_id": str(self.openai_client.tts_model),
+            }
+        return None
+
     def _build_openai_voice_instructions(self) -> str:
         return (
             "Speak like an experienced product manager walking software engineers through a requirement in Mandarin. "
@@ -220,6 +252,7 @@ class PRDBriefingService:
         text_client: TextGenerationClient | None = None,
         voice_service: VoiceService,
         answer_audio_enabled: bool = False,
+        walkthrough_prewarm_enabled: bool = True,
     ) -> None:
         self.store = store
         self.confluence = confluence
@@ -228,6 +261,7 @@ class PRDBriefingService:
         self.voice_service = voice_service
         self.retrieval = RetrievalService(openai_client)
         self.answer_audio_enabled = answer_audio_enabled
+        self.walkthrough_prewarm_enabled = walkthrough_prewarm_enabled
 
     def create_session(self, *, owner_key: str, page_ref: str, mode: str) -> dict[str, Any]:
         placeholder_session_id = "pending"
@@ -264,10 +298,11 @@ class PRDBriefingService:
         )
         self.store.replace_chunks(chunks)
         payload = self.get_session_payload(session_id=session_id, owner_key=owner_key)
-        self._prewarm_walkthrough_scripts(
-            owner_key=owner_key,
-            sections=payload["sections"],
-        )
+        if self.walkthrough_prewarm_enabled:
+            self._spawn_prewarm_walkthrough_scripts(
+                owner_key=owner_key,
+                sections=payload["sections"],
+            )
         return payload
 
     def get_session_payload(self, *, session_id: str, owner_key: str) -> dict[str, Any]:
@@ -276,6 +311,7 @@ class PRDBriefingService:
             raise ValueError("Briefing session was not found.")
         prd_chunks = self.store.list_session_prd_chunks(session_id, owner_key)
         sections = self._build_sections(prd_chunks)
+        sections = [self._annotate_section_cache(owner_key=owner_key, section=section) for section in sections]
         session_overview = self._build_session_overview(
             owner_key=owner_key,
             session=session,
@@ -340,7 +376,14 @@ class PRDBriefingService:
         if section_index < 0 or section_index >= len(sections):
             raise ValueError("Section index is out of range.")
         section = sections[section_index]
-        script = self._compose_walkthrough_section(owner_key=owner_key, section=section)
+        script, cached = self._compose_walkthrough_section(owner_key=owner_key, section=section)
+        audio_cached = bool(
+            self.voice_service.get_cached_audio_for_text(
+                owner_key=owner_key,
+                text=script,
+                language_code="zh",
+            )
+        )
         audio_path = None
         if include_audio:
             audio_path = self.voice_service.synthesize(
@@ -352,6 +395,8 @@ class PRDBriefingService:
         return {
             "script": script,
             "audio_url": f"/prd-briefing/assets/{audio_path}" if audio_path else None,
+            "cached": cached,
+            "audio_cached": audio_cached,
         }
 
     def _sections_to_chunks(
@@ -409,7 +454,7 @@ class PRDBriefingService:
             for chunk in prd_chunks
         ]
 
-    def _compose_walkthrough_section(self, *, owner_key: str, section: dict[str, Any]) -> str:
+    def _compose_walkthrough_section(self, *, owner_key: str, section: dict[str, Any]) -> tuple[str, bool]:
         prompt = (
             f"You are a product manager briefing a PRD section to software engineers in {DEVELOPER_LANGUAGE}. "
             "Speak the way PMs normally align requirements with developers during grooming or walkthrough sessions. "
@@ -443,6 +488,143 @@ class PRDBriefingService:
         )
         if not self.text_client.is_configured():
             raise RuntimeError("Walkthrough script generation now requires a configured OpenAI text model.")
+        cache_lookup = self._build_walkthrough_cache_lookup(
+            owner_key=owner_key,
+            section=section,
+            prompt=prompt,
+            body=body,
+            notes=notes,
+        )
+        model_id = cache_lookup["model_id"]
+        section_payload = cache_lookup["section_payload"]
+        cached_script = cache_lookup["cached_script"]
+        if cached_script:
+            return cached_script, True
+        legacy_cached_script = cache_lookup["legacy_cached_script"]
+        if legacy_cached_script:
+            # Normalize legacy cache entries under the current model id so later
+            # requests hit the fast path without needing OpenAI again.
+            self.store.cache_script(
+                owner_key=owner_key,
+                audience=DEVELOPER_AUDIENCE,
+                model_id=model_id,
+                prompt_version=WALKTHROUGH_SCRIPT_PROMPT_VERSION,
+                section_payload=section_payload,
+                script=legacy_cached_script,
+            )
+            return legacy_cached_script, True
+        try:
+            script = self.text_client.create_answer(system_prompt=prompt, user_prompt=body)
+        except Exception as error:  # noqa: BLE001
+            raise RuntimeError(f"Text model could not generate the walkthrough script: {error}") from error
+        self.store.cache_script(
+            owner_key=owner_key,
+            audience=DEVELOPER_AUDIENCE,
+            model_id=model_id,
+            prompt_version=WALKTHROUGH_SCRIPT_PROMPT_VERSION,
+            section_payload=section_payload,
+            script=script,
+        )
+        return script, False
+
+    def _prewarm_walkthrough_scripts(
+        self,
+        *,
+        owner_key: str,
+        sections: list[dict[str, Any]],
+    ) -> None:
+        if not self.text_client.is_configured():
+            return
+        prioritized_sections = select_sections_for_overview(sections)
+        for section in prioritized_sections[:WALKTHROUGH_PREWARM_LIMIT]:
+            try:
+                self._compose_walkthrough_section(
+                    owner_key=owner_key,
+                    section=section,
+                )
+            except Exception:  # noqa: BLE001
+                continue
+
+    def _spawn_prewarm_walkthrough_scripts(
+        self,
+        *,
+        owner_key: str,
+        sections: list[dict[str, Any]],
+    ) -> None:
+        if not self.text_client.is_configured():
+            return
+        section_copies = [
+            dict(section, image_refs=list(section.get("image_refs") or []), briefing_notes=list(section.get("briefing_notes") or []))
+            for section in sections
+        ]
+        worker = threading.Thread(
+            target=self._prewarm_walkthrough_scripts,
+            kwargs={
+                "owner_key": owner_key,
+                "sections": section_copies,
+            },
+            daemon=True,
+            name="prd-briefing-prewarm",
+        )
+        worker.start()
+
+    def _annotate_section_cache(self, *, owner_key: str, section: dict[str, Any]) -> dict[str, Any]:
+        annotated = dict(section)
+        try:
+            cache_lookup = self._build_walkthrough_cache_lookup(owner_key=owner_key, section=section)
+            cached_script = cache_lookup["cached_script"] or cache_lookup["legacy_cached_script"]
+            annotated["walkthrough_cached"] = bool(cached_script)
+            annotated["walkthrough_audio_cached"] = bool(
+                cached_script
+                and self.voice_service.get_cached_audio_for_text(
+                    owner_key=owner_key,
+                    text=cached_script,
+                    language_code="zh",
+                )
+            )
+        except Exception:  # noqa: BLE001
+            annotated["walkthrough_cached"] = False
+            annotated["walkthrough_audio_cached"] = False
+        return annotated
+
+    def _build_walkthrough_cache_lookup(
+        self,
+        *,
+        owner_key: str,
+        section: dict[str, Any],
+        prompt: str | None = None,
+        body: str | None = None,
+        notes: list[str] | None = None,
+    ) -> dict[str, Any]:
+        prompt = prompt or (
+            f"You are a product manager briefing a PRD section to software engineers in {DEVELOPER_LANGUAGE}. "
+            "Speak the way PMs normally align requirements with developers during grooming or walkthrough sessions. "
+            "Be direct, practical, and structured. First explain the purpose of this section, then the main flow, "
+            "then what developers need to build or pay attention to. Call out scope, user actions, system behavior, "
+            "validation rules, dependencies, edge cases, and any implementation-sensitive details when present. "
+            "Do not sound like a keynote presenter. Do not read the PRD word for word. "
+            "Do not mechanically read every field, bullet, or table row. Summarize dense tables into what engineering should understand. "
+            "Use spoken PM phrasing that feels normal in a dev sync, for example framing the goal first, then saying what the flow is, "
+            "what changes on the page, what gets triggered, what should be validated, and what cases developers need to pay attention to."
+        )
+        notes = notes if notes is not None else (section.get("briefing_notes") or [])
+        body = body or (
+            f"Section: {section['section_path']}\n\n"
+            f"Presenter summary:\n{section.get('briefing_summary', '')}\n\n"
+            f"Presenter notes:\n- " + "\n- ".join(notes) + "\n\n"
+            f"Source:\n{section['content']}\n\n"
+            "Write a natural spoken script of around 5 to 9 sentences in Mandarin. "
+            "The first sentence should explain why this section matters to implementation. "
+            "Then explain the intended flow in order. "
+            "After that, highlight the key engineering takeaways, such as important rules, triggers, state changes, "
+            "input or output expectations, and any edge cases or risks implied by the source. "
+            "If the section is mostly UI fields, summarize the pattern and only name the most important fields. "
+            "Make it sound like live PM speech rather than written prose. "
+            "Natural phrasing is encouraged, such as: "
+            "'这一块主要是...', '开发这里重点看...', '实际 flow 是...', '这里需要注意...', "
+            "'这个字段很多，但本质上是为了...', '异常情况主要是...'. "
+            "Do not force all phrases in every answer, but keep the overall tone close to that style."
+        )
         model_id = str(getattr(self.text_client, "model_id", getattr(self.openai_client, "chat_model", "text_model")))
         section_payload = json.dumps(
             {
@@ -463,57 +645,18 @@ class PRDBriefingService:
             prompt_version=WALKTHROUGH_SCRIPT_PROMPT_VERSION,
             section_payload=section_payload,
         )
-        if cached_script:
-            return cached_script
         legacy_cached_script = self.store.get_cached_script_any_model(
             owner_key=owner_key,
             audience=DEVELOPER_AUDIENCE,
             prompt_version=WALKTHROUGH_SCRIPT_PROMPT_VERSION,
             section_payload=section_payload,
         )
-        if legacy_cached_script:
-            # Normalize legacy cache entries under the current model id so later
-            # requests hit the fast path without needing OpenAI again.
-            self.store.cache_script(
-                owner_key=owner_key,
-                audience=DEVELOPER_AUDIENCE,
-                model_id=model_id,
-                prompt_version=WALKTHROUGH_SCRIPT_PROMPT_VERSION,
-                section_payload=section_payload,
-                script=legacy_cached_script,
-            )
-            return legacy_cached_script
-        try:
-            script = self.text_client.create_answer(system_prompt=prompt, user_prompt=body)
-        except Exception as error:  # noqa: BLE001
-            raise RuntimeError(f"Text model could not generate the walkthrough script: {error}") from error
-        self.store.cache_script(
-            owner_key=owner_key,
-            audience=DEVELOPER_AUDIENCE,
-            model_id=model_id,
-            prompt_version=WALKTHROUGH_SCRIPT_PROMPT_VERSION,
-            section_payload=section_payload,
-            script=script,
-        )
-        return script
-
-    def _prewarm_walkthrough_scripts(
-        self,
-        *,
-        owner_key: str,
-        sections: list[dict[str, Any]],
-    ) -> None:
-        if not self.text_client.is_configured():
-            return
-        prioritized_sections = select_sections_for_overview(sections)
-        for section in prioritized_sections[:3]:
-            try:
-                self._compose_walkthrough_section(
-                    owner_key=owner_key,
-                    section=section,
-                )
-            except Exception:  # noqa: BLE001
-                continue
+        return {
+            "model_id": model_id,
+            "section_payload": section_payload,
+            "cached_script": cached_script,
+            "legacy_cached_script": legacy_cached_script,
+        }
 
     def _compose_answer(
         self,
