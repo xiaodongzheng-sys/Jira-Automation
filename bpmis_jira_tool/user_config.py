@@ -32,6 +32,30 @@ DEFAULT_NEED_UAT_BY_MARKET = {
     "Regional": "Need UAT",
 }
 TEAM_DEFAULT_EMAIL_PLACEHOLDER = "__CURRENT_USER_EMAIL__"
+DEFAULT_AF_COMPONENT_ROUTE_RULES = "\n".join(
+    [
+        "AF | SG | DBP-Anti-fraud",
+        "AF | ID | DBP-Anti-fraud",
+        "AF | PH | DBP-Anti-fraud",
+        "DC | SG | Deposit",
+        "AF | Regional | Anti-fraud",
+        "BC | SG | Pay",
+        "UC | SG | User",
+        "FE | SG | FE-Anti-fraud,FE-User",
+        "CC | SG | CardCenter",
+    ]
+)
+DEFAULT_AF_COMPONENT_DEFAULT_RULES = "\n".join(
+    [
+        f"DBP-Anti-fraud | {TEAM_DEFAULT_EMAIL_PLACEHOLDER} | {TEAM_DEFAULT_EMAIL_PLACEHOLDER} | {TEAM_DEFAULT_EMAIL_PLACEHOLDER} | Planning_26Q2",
+        f"Deposit | {TEAM_DEFAULT_EMAIL_PLACEHOLDER} | {TEAM_DEFAULT_EMAIL_PLACEHOLDER} | {TEAM_DEFAULT_EMAIL_PLACEHOLDER} | Planning_26Q2",
+        f"Anti-fraud | {TEAM_DEFAULT_EMAIL_PLACEHOLDER} | {TEAM_DEFAULT_EMAIL_PLACEHOLDER} | {TEAM_DEFAULT_EMAIL_PLACEHOLDER} | Planning_26Q2",
+        f"Pay | {TEAM_DEFAULT_EMAIL_PLACEHOLDER} | {TEAM_DEFAULT_EMAIL_PLACEHOLDER} | {TEAM_DEFAULT_EMAIL_PLACEHOLDER} | Planning_26Q2",
+        f"User | {TEAM_DEFAULT_EMAIL_PLACEHOLDER} | {TEAM_DEFAULT_EMAIL_PLACEHOLDER} | {TEAM_DEFAULT_EMAIL_PLACEHOLDER} | Planning_26Q2",
+        f"FE-Anti-fraud,FE-User | {TEAM_DEFAULT_EMAIL_PLACEHOLDER} | {TEAM_DEFAULT_EMAIL_PLACEHOLDER} | {TEAM_DEFAULT_EMAIL_PLACEHOLDER} | Planning_26Q2",
+        f"CardCenter | {TEAM_DEFAULT_EMAIL_PLACEHOLDER} | {TEAM_DEFAULT_EMAIL_PLACEHOLDER} | {TEAM_DEFAULT_EMAIL_PLACEHOLDER} | Planning_26Q2",
+    ]
+)
 DEFAULT_TEAM_COMPONENT_ROUTE_RULES = "\n".join(
     [
         "AF | SG | DBP-Anti-fraud",
@@ -75,8 +99,8 @@ TEAM_PROFILE_DEFAULTS = {
     "AF": {
         "label": "Anti-fraud",
         "ready": True,
-        "component_route_rules_text": DEFAULT_TEAM_COMPONENT_ROUTE_RULES,
-        "component_default_rules_text": DEFAULT_TEAM_COMPONENT_DEFAULT_RULES,
+        "component_route_rules_text": DEFAULT_AF_COMPONENT_ROUTE_RULES,
+        "component_default_rules_text": DEFAULT_AF_COMPONENT_DEFAULT_RULES,
     },
     "CRMS": {
         "label": "Credit Risk",
@@ -217,6 +241,37 @@ class WebConfigStore:
             return
         if self.path.exists():
             self.path.unlink()
+
+    def load_team_profiles(self) -> dict[str, dict[str, object]]:
+        with sqlite3.connect(self.db_path) as connection:
+            rows = connection.execute(
+                "SELECT team_key, profile_json FROM team_profile_configs"
+            ).fetchall()
+        profiles: dict[str, dict[str, object]] = {}
+        for team_key, profile_json in rows:
+            try:
+                payload = json.loads(profile_json)
+            except json.JSONDecodeError:
+                continue
+            profiles[str(team_key).strip().upper()] = self._normalize_team_profile(payload)
+        return profiles
+
+    def save_team_profile(self, team_key: str, profile: dict[str, object]) -> dict[str, object]:
+        normalized_team_key = str(team_key or "").strip().upper()
+        normalized = self._normalize_team_profile(profile)
+        with sqlite3.connect(self.db_path) as connection:
+            connection.execute(
+                """
+                INSERT INTO team_profile_configs (team_key, profile_json, updated_at)
+                VALUES (?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(team_key) DO UPDATE SET
+                    profile_json = excluded.profile_json,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (normalized_team_key, json.dumps(normalized, ensure_ascii=False)),
+            )
+            connection.commit()
+        return normalized
 
     def build_field_mappings(self, data: dict[str, object]) -> list[FieldMapping]:
         mappings: list[FieldMapping] = []
@@ -414,6 +469,15 @@ class WebConfigStore:
                 )
                 """
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS team_profile_configs (
+                    team_key TEXT PRIMARY KEY,
+                    profile_json TEXT NOT NULL,
+                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
             connection.commit()
 
     def _fetch_row(self, user_key: str) -> str | None:
@@ -474,6 +538,24 @@ class WebConfigStore:
         for market in MARKET_KEYS:
             raw = raw_map.get(market, "")
             normalized[market] = str(raw).strip()
+        return normalized
+
+    def _normalize_team_profile(self, data: dict[str, object]) -> dict[str, object]:
+        normalized: dict[str, object] = {
+            "label": str(data.get("label", "") or "").strip(),
+            "ready": bool(data.get("ready", True)),
+            "component_route_rules_text": self._normalize_multiline_text(data.get("component_route_rules_text", "")),
+        }
+        default_rules_text = self._normalize_multiline_text(data.get("component_default_rules_text", ""))
+        if not default_rules_text and normalized["component_route_rules_text"]:
+            default_rules_text = self.build_component_default_rules_from_routes(
+                str(normalized["component_route_rules_text"]),
+                assignee=TEAM_DEFAULT_EMAIL_PLACEHOLDER,
+                dev_pic=TEAM_DEFAULT_EMAIL_PLACEHOLDER,
+                qa_pic=TEAM_DEFAULT_EMAIL_PLACEHOLDER,
+                fix_version="Planning_26Q2",
+            )
+        normalized["component_default_rules_text"] = default_rules_text
         return normalized
 
     @staticmethod
@@ -586,6 +668,41 @@ class WebConfigStore:
                 ]
             )
             for rule in rules
+        )
+
+    def build_component_default_rules_from_routes(
+        self,
+        route_text: str,
+        *,
+        assignee: str,
+        dev_pic: str,
+        qa_pic: str,
+        fix_version: str,
+    ) -> str:
+        route_rules = self._parse_component_route_rules(route_text)
+        ordered_components: list[str] = []
+        seen_components: set[str] = set()
+        for rule in route_rules:
+            component = str(rule.get("component", "") or "").strip()
+            if not component:
+                continue
+            component_key = component.lower()
+            if component_key in seen_components:
+                continue
+            seen_components.add(component_key)
+            ordered_components.append(component)
+
+        return self._compose_component_default_rules(
+            [
+                {
+                    "component": component,
+                    "assignee": assignee,
+                    "dev_pic": dev_pic,
+                    "qa_pic": qa_pic,
+                    "fix_version": fix_version,
+                }
+                for component in ordered_components
+            ]
         )
 
     def align_component_defaults_to_routes(self, route_text: str, default_text: str) -> str:

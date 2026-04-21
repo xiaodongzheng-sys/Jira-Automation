@@ -12,6 +12,7 @@ from bpmis_jira_tool.errors import ToolError
 from bpmis_jira_tool.web import (
     _build_team_profiles_for_display,
     _classify_portal_error,
+    _load_effective_team_profiles,
     _build_productization_argos_translator,
     _clean_productization_detail_line,
     _clean_productization_detail_text,
@@ -49,24 +50,55 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertIn("AF | SG | DBP-Anti-fraud", hydrated["component_route_rules_text"])
         self.assertIn("AF | ID | DBP-Anti-fraud", hydrated["component_route_rules_text"])
         self.assertIn("AF | PH | DBP-Anti-fraud", hydrated["component_route_rules_text"])
-        self.assertIn("CRMS | ID | Credit-Risk", hydrated["component_route_rules_text"])
-        self.assertIn("GRC | Regional | GRC", hydrated["component_route_rules_text"])
+        self.assertIn("UC | SG | User", hydrated["component_route_rules_text"])
+        self.assertIn("FE | SG | FE-Anti-fraud,FE-User", hydrated["component_route_rules_text"])
+        self.assertIn("CC | SG | CardCenter", hydrated["component_route_rules_text"])
         self.assertIn(
             "Deposit | teammate@npt.sg | teammate@npt.sg | teammate@npt.sg | Planning_26Q2",
             hydrated["component_default_rules_text"],
         )
         self.assertIn(
-            "CRS | teammate@npt.sg | teammate@npt.sg | teammate@npt.sg | Planning_26Q2",
+            "User | teammate@npt.sg | teammate@npt.sg | teammate@npt.sg | Planning_26Q2",
             hydrated["component_default_rules_text"],
         )
         self.assertIn(
-            "GRC | teammate@npt.sg | teammate@npt.sg | teammate@npt.sg | Planning_26Q2",
+            "FE-Anti-fraud,FE-User | teammate@npt.sg | teammate@npt.sg | teammate@npt.sg | Planning_26Q2",
+            hydrated["component_default_rules_text"],
+        )
+        self.assertIn(
+            "CardCenter | teammate@npt.sg | teammate@npt.sg | teammate@npt.sg | Planning_26Q2",
             hydrated["component_default_rules_text"],
         )
         self.assertEqual("Need UAT_by UAT Team", hydrated["need_uat_by_market"]["SG"])
         self.assertEqual("P1", hydrated["priority_value"])
         self.assertEqual("teammate@npt.sg", hydrated["sync_pm_email"])
         self.assertEqual("teammate@npt.sg", hydrated["product_manager_value"])
+
+    def test_hydrate_setup_defaults_can_use_admin_team_profile_override(self):
+        hydrated = _hydrate_setup_defaults(
+            {"pm_team": "AF", "need_uat_by_market": {}},
+            {"email": "teammate@npt.sg"},
+            team_profiles={
+                "AF": {
+                    "label": "Anti-fraud",
+                    "ready": True,
+                    "component_route_rules_text": "AF | SG | DBP-Anti-fraud\nUC | SG | User",
+                    "component_default_rules_text": (
+                        "DBP-Anti-fraud | __CURRENT_USER_EMAIL__ | __CURRENT_USER_EMAIL__ | __CURRENT_USER_EMAIL__ | Planning_26Q2\n"
+                        "User | __CURRENT_USER_EMAIL__ | __CURRENT_USER_EMAIL__ | __CURRENT_USER_EMAIL__ | Planning_26Q2"
+                    ),
+                }
+            },
+        )
+
+        self.assertEqual(
+            "AF | SG | DBP-Anti-fraud\nUC | SG | User",
+            hydrated["component_route_rules_text"],
+        )
+        self.assertIn(
+            "User | teammate@npt.sg | teammate@npt.sg | teammate@npt.sg | Planning_26Q2",
+            hydrated["component_default_rules_text"],
+        )
 
     def test_results_for_display_hides_skipped_rows_by_default(self):
         results = _results_for_display(
@@ -143,7 +175,7 @@ class WebPortalFeatureTests(unittest.TestCase):
                 "TEAM_ALLOWED_EMAIL_DOMAINS": "",
                 "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
             },
-            clear=False,
+            clear=True,
         ):
             app = create_app()
             app.testing = True
@@ -186,6 +218,7 @@ class WebPortalFeatureTests(unittest.TestCase):
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_ALLOWED_EMAILS": "",
                 "TEAM_ALLOWED_EMAIL_DOMAINS": "",
                 "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
             },
@@ -347,10 +380,11 @@ class WebPortalFeatureTests(unittest.TestCase):
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_ALLOWED_EMAILS": "",
                 "TEAM_ALLOWED_EMAIL_DOMAINS": "",
                 "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
             },
-            clear=False,
+            clear=True,
         ):
             app = create_app()
             app.testing = True
@@ -399,10 +433,11 @@ class WebPortalFeatureTests(unittest.TestCase):
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_ALLOWED_EMAILS": "",
                 "TEAM_ALLOWED_EMAIL_DOMAINS": "",
                 "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
             },
-            clear=False,
+            clear=True,
         ):
             app = create_app()
             app.testing = True
@@ -439,6 +474,78 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertIn(b"data-initial-team=", response.data)
         self.assertIn(b"productization_upgrade_summary.js", response.data)
 
+    def test_index_shows_team_default_admin_tab_only_for_admin_user(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_ALLOWED_EMAILS": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
+            },
+            clear=True,
+        ):
+            app = create_app()
+            app.testing = True
+
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong"}
+                    session["google_credentials"] = {"token": "x"}
+                admin_response = client.get("/")
+
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
+                    session["google_credentials"] = {"token": "x"}
+                user_response = client.get("/")
+
+        self.assertEqual(admin_response.status_code, 200)
+        self.assertIn(b">Team Default Admin<", admin_response.data)
+        self.assertIn(b"Save Anti-fraud Defaults", admin_response.data)
+        self.assertNotIn(b">Team Default Admin<", user_response.data)
+
+    def test_team_default_admin_save_persists_route_override(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_ALLOWED_EMAILS": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
+            },
+            clear=True,
+        ):
+            app = create_app()
+            app.testing = True
+
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong"}
+                    session["google_credentials"] = {"token": "x"}
+
+                response = client.post(
+                    "/admin/team-profiles/save",
+                    data={
+                        "team_key": "AF",
+                        "component_route_rules_text": "AF | SG | DBP-Anti-fraud\nUC | SG | User",
+                    },
+                    follow_redirects=False,
+                )
+
+                profiles = _load_effective_team_profiles(app.config["CONFIG_STORE"])
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual("AF | SG | DBP-Anti-fraud\nUC | SG | User", profiles["AF"]["component_route_rules_text"])
+        self.assertIn(
+            "__CURRENT_USER_EMAIL__ | __CURRENT_USER_EMAIL__ | __CURRENT_USER_EMAIL__ | Planning_26Q2",
+            profiles["AF"]["component_default_rules_text"],
+        )
+
     def test_productization_versions_api_returns_normalized_candidates(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
@@ -446,6 +553,7 @@ class WebPortalFeatureTests(unittest.TestCase):
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_ALLOWED_EMAILS": "",
                 "TEAM_ALLOWED_EMAIL_DOMAINS": "",
                 "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
             },
@@ -493,6 +601,7 @@ class WebPortalFeatureTests(unittest.TestCase):
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_ALLOWED_EMAILS": "",
                 "TEAM_ALLOWED_EMAIL_DOMAINS": "",
                 "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
             },
@@ -522,6 +631,8 @@ class WebPortalFeatureTests(unittest.TestCase):
                 with app.test_client() as client:
                     with client.session_transaction() as session:
                         session["anonymous_user_key"] = "productization-user"
+                        session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
+                        session["google_credentials"] = {"token": "x"}
 
                     response = client.get("/api/productization-upgrade-summary/issues?version_id=88")
 
@@ -541,6 +652,62 @@ class WebPortalFeatureTests(unittest.TestCase):
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_ALLOWED_EMAILS": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
+            },
+            clear=False,
+        ):
+            app = create_app()
+            app.testing = True
+            app.config["CONFIG_STORE"].save(
+                app.config["CONFIG_STORE"]._normalize(
+                    {
+                        "pm_team": "AF",
+                        "component_route_rules_text": "AF | SG | DBP-Anti-fraud",
+                        "component_default_rules_text": "DBP-Anti-fraud | owner@npt.sg | dev@npt.sg | qa@npt.sg | Planning_26Q2",
+                    }
+                ),
+                "google:teammate@npt.sg",
+            )
+
+            fake_client = type(
+                "FakeProductizationClient",
+                (),
+                {
+                    "list_issues_for_version": lambda self, version_id: [
+                        {"jiraKey": "AF-1", "summary": "Keep me", "componentId": [{"label": "DBP-Anti-fraud"}]},
+                        {"jiraKey": "AF-2", "summary": "Keep me too", "component": "Anti-fraud"},
+                        {"jiraKey": "ABC-1", "summary": "Filter me out", "componentId": [{"label": "Payments"}]},
+                    ],
+                },
+            )()
+
+            with patch("bpmis_jira_tool.web._build_bpmis_client_for_current_user", return_value=fake_client):
+                with app.test_client() as client:
+                    with client.session_transaction() as session:
+                        session["anonymous_user_key"] = "productization-user"
+                        session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
+                        session["google_credentials"] = {"token": "x"}
+
+                    response = client.get("/api/productization-upgrade-summary/issues?version_id=88")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual([item["jira_ticket_number"] for item in payload["items"]], ["AF-1", "AF-2"])
+        self.assertTrue(payload["team_filter_applied"])
+        self.assertEqual(payload["raw_count"], 3)
+        self.assertEqual(payload["filtered_count"], 2)
+
+    def test_productization_issues_api_can_show_all_before_team_filtering_for_af_team(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_ALLOWED_EMAILS": "",
                 "TEAM_ALLOWED_EMAIL_DOMAINS": "",
                 "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
             },
@@ -565,8 +732,7 @@ class WebPortalFeatureTests(unittest.TestCase):
                 {
                     "list_issues_for_version": lambda self, version_id: [
                         {"jiraKey": "AF-1", "summary": "Keep me", "componentId": [{"label": "DBP-Anti-fraud"}]},
-                        {"jiraKey": "AF-2", "summary": "Keep me too", "component": "Anti-fraud"},
-                        {"jiraKey": "ABC-1", "summary": "Filter me out", "componentId": [{"label": "Payments"}]},
+                        {"jiraKey": "ABC-1", "summary": "Show me too", "componentId": [{"label": "Payments"}]},
                     ],
                 },
             )()
@@ -575,13 +741,73 @@ class WebPortalFeatureTests(unittest.TestCase):
                 with app.test_client() as client:
                     with client.session_transaction() as session:
                         session["anonymous_user_key"] = "productization-user"
+                        session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
+                        session["google_credentials"] = {"token": "x"}
+
+                    response = client.get("/api/productization-upgrade-summary/issues?version_id=88&show_all_before_team_filtering=1")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual([item["jira_ticket_number"] for item in payload["items"]], ["AF-1", "ABC-1"])
+        self.assertFalse(payload["team_filter_applied"])
+        self.assertTrue(payload["show_all_before_team_filtering"])
+        self.assertEqual(payload["raw_count"], 2)
+        self.assertEqual(payload["filtered_count"], 2)
+
+    def test_productization_issues_api_does_not_filter_for_non_af_team(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_ALLOWED_EMAILS": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
+            },
+            clear=False,
+        ):
+            app = create_app()
+            app.testing = True
+            app.config["CONFIG_STORE"].save(
+                app.config["CONFIG_STORE"]._normalize(
+                    {
+                        "pm_team": "CRMS",
+                        "component_route_rules_text": "CRMS | SG | Loan&CreditRisk",
+                        "component_default_rules_text": "Loan&CreditRisk | owner@npt.sg | dev@npt.sg | qa@npt.sg | Planning_26Q2",
+                    }
+                ),
+                "anon:productization-user",
+            )
+
+            fake_client = type(
+                "FakeProductizationClient",
+                (),
+                {
+                    "list_issues_for_version": lambda self, version_id: [
+                        {"jiraKey": "CR-1", "summary": "Credit risk", "componentId": [{"label": "Loan&CreditRisk"}]},
+                        {"jiraKey": "ABC-1", "summary": "Payments too", "componentId": [{"label": "Payments"}]},
+                    ],
+                },
+            )()
+
+            with patch("bpmis_jira_tool.web._build_bpmis_client_for_current_user", return_value=fake_client):
+                with app.test_client() as client:
+                    with client.session_transaction() as session:
+                        session["anonymous_user_key"] = "productization-user"
+                        session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
+                        session["google_credentials"] = {"token": "x"}
 
                     response = client.get("/api/productization-upgrade-summary/issues?version_id=88")
 
         self.assertEqual(response.status_code, 200)
         payload = response.get_json()
         self.assertEqual(payload["status"], "ok")
-        self.assertEqual([item["jira_ticket_number"] for item in payload["items"]], ["AF-1", "AF-2"])
+        self.assertEqual([item["jira_ticket_number"] for item in payload["items"]], ["CR-1", "ABC-1"])
+        self.assertFalse(payload["team_filter_applied"])
+        self.assertEqual(payload["raw_count"], 2)
+        self.assertEqual(payload["filtered_count"], 2)
 
     def test_productization_versions_api_returns_json_for_unexpected_errors(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
@@ -590,6 +816,7 @@ class WebPortalFeatureTests(unittest.TestCase):
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_ALLOWED_EMAILS": "",
                 "TEAM_ALLOWED_EMAIL_DOMAINS": "",
                 "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
             },
@@ -619,6 +846,7 @@ class WebPortalFeatureTests(unittest.TestCase):
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_ALLOWED_EMAILS": "",
                 "TEAM_ALLOWED_EMAIL_DOMAINS": "",
                 "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
             },
@@ -637,6 +865,8 @@ class WebPortalFeatureTests(unittest.TestCase):
                 with app.test_client() as client:
                     with client.session_transaction() as session:
                         session["anonymous_user_key"] = "productization-user"
+                        session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
+                        session["google_credentials"] = {"token": "x"}
 
                     response = client.get("/api/productization-upgrade-summary/issues?version_id=88")
 
@@ -854,7 +1084,7 @@ class WebPortalFeatureTests(unittest.TestCase):
                 saved = app.config["CONFIG_STORE"].load("google:teammate@npt.sg")
                 self.assertIn("AF | SG | DBP-Anti-fraud", saved["component_route_rules_text"])
                 self.assertIn(
-                    "Loan&CreditRisk | teammate@npt.sg | teammate@npt.sg | teammate@npt.sg | Planning_26Q2",
+                    "FE-Anti-fraud,FE-User | teammate@npt.sg | teammate@npt.sg | teammate@npt.sg | Planning_26Q2",
                     saved["component_default_rules_text"],
                 )
 

@@ -51,6 +51,7 @@ from incident_mockup.app import create_app as create_incident_mockup_app
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(PROJECT_ROOT / ".env")
 MARKET_KEYS = ["ID", "SG", "PH", "Regional"]
+TEAM_PROFILE_ADMIN_EMAIL = "xiaodong.zheng@npt.sg"
 
 
 @lru_cache(maxsize=1)
@@ -448,8 +449,9 @@ def create_app() -> Flask:
         user_identity = _get_user_identity(settings)
         config_key = user_identity.get("config_key")
         raw_config_data = config_store.load(config_key) if config_key else None
+        effective_team_profiles = _load_effective_team_profiles(config_store)
         config_data = raw_config_data or config_store._normalize({})
-        config_data = _hydrate_setup_defaults(config_data, user_identity)
+        config_data = _hydrate_setup_defaults(config_data, user_identity, team_profiles=effective_team_profiles)
         input_headers: list[str] = []
         has_saved_config = bool(config_key and raw_config_data)
 
@@ -489,8 +491,14 @@ def create_app() -> Flask:
             run_notice=run_notice,
             mapping_fields=CONFIGURED_FIELDS,
             mapping_config=config_data,
-            team_profiles=_build_team_profiles_for_display(config_data, user_identity),
-            default_workspace_tab="run" if has_saved_config else "setup",
+            team_profiles=_build_team_profiles_for_display(
+                config_data,
+                user_identity,
+                team_profiles=effective_team_profiles,
+            ),
+            team_profile_admin_configs=effective_team_profiles,
+            team_profile_admin_enabled=_is_team_profile_admin(user_identity),
+            default_workspace_tab=session.pop("default_workspace_tab", "run" if has_saved_config else "setup"),
             input_headers=input_headers,
             google_authorized=True,
         )
@@ -597,7 +605,13 @@ def create_app() -> Flask:
                     for market in MARKET_KEYS
                 },
             }
-            config = config_store._normalize(_hydrate_setup_defaults(config, user_identity))
+            config = config_store._normalize(
+                _hydrate_setup_defaults(
+                    config,
+                    user_identity,
+                    team_profiles=_load_effective_team_profiles(config_store),
+                )
+            )
             if save_mode == "route_only":
                 _validate_config_security(settings, config)
                 _save_route_only_config(existing_config, config, user_identity["config_key"])
@@ -613,7 +627,7 @@ def create_app() -> Flask:
                 return redirect(url_for("index"))
 
             _validate_config_security(settings, config)
-            _validate_team_profile_setup(config)
+            _validate_team_profile_setup(config, team_profiles=_load_effective_team_profiles(config_store))
 
             config_store.build_field_mappings(config)
             config_store.save(config, user_identity["config_key"])
@@ -658,12 +672,19 @@ def create_app() -> Flask:
                         "system_header": payload.get("system_header", ""),
                         "market_header": payload.get("market_header", ""),
                         "component_route_rules_text": payload.get("component_route_rules_text", ""),
+                        "component_default_rules_text": payload.get("component_default_rules_text", ""),
                     },
                     user_identity,
+                    team_profiles=_load_effective_team_profiles(config_store),
                 )
             )
             _validate_config_security(settings, config)
-            saved = _save_route_only_config(existing_config, config, user_identity["config_key"])
+            saved = _save_route_only_config(
+                existing_config,
+                config,
+                user_identity["config_key"],
+                default_text_override=str(payload.get("component_default_rules_text", "") or ""),
+            )
             _log_portal_event(
                 "config_save_route_success",
                 **_build_request_log_context(
@@ -696,20 +717,78 @@ def create_app() -> Flask:
             )
             return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
 
-    def _save_route_only_config(existing_config: dict[str, Any], config: dict[str, Any], user_key: str) -> dict[str, Any]:
+    def _save_route_only_config(
+        existing_config: dict[str, Any],
+        config: dict[str, Any],
+        user_key: str,
+        *,
+        default_text_override: str = "",
+    ) -> dict[str, Any]:
         route_only_config = dict(existing_config)
         route_only_config["pm_team"] = config.get("pm_team", "")
         route_only_config["system_header"] = config.get("system_header", "")
         route_only_config["market_header"] = config.get("market_header", "")
         route_only_config["component_route_rules_text"] = config.get("component_route_rules_text", "")
         config_store._parse_component_route_rules(str(route_only_config["component_route_rules_text"]))
+        default_seed_text = str(default_text_override or "").strip() or str(existing_config.get("component_default_rules_text", "") or "")
         route_only_config["component_default_rules_text"] = config_store.align_component_defaults_to_routes(
             str(route_only_config["component_route_rules_text"]),
-            str(existing_config.get("component_default_rules_text", "") or ""),
+            default_seed_text,
         )
         normalized = config_store._normalize(route_only_config)
         config_store.save(normalized, user_key)
         return normalized
+
+    @app.post("/admin/team-profiles/save")
+    def save_team_profile_admin():
+        login_gate = _require_google_login(settings)
+        if login_gate is not None:
+            return login_gate
+        user_identity = _get_user_identity(settings)
+        if not _is_team_profile_admin(user_identity):
+            flash("Only the portal admin can update team default routing.", "error")
+            return redirect(url_for("access_denied"))
+        try:
+            team_key = str(request.form.get("team_key", "") or "").strip().upper()
+            team_profiles = _load_effective_team_profiles(config_store)
+            if team_key not in team_profiles:
+                raise ToolError(f"Unsupported PM Team: {team_key}.")
+            saved_profile = config_store.save_team_profile(
+                team_key,
+                {
+                    "label": str(team_profiles[team_key].get("label", "") or ""),
+                    "ready": True,
+                    "component_route_rules_text": request.form.get("component_route_rules_text", ""),
+                },
+            )
+            session["default_workspace_tab"] = "team-default-admin"
+            _log_portal_event(
+                "team_profile_admin_save_success",
+                **_build_request_log_context(
+                    settings,
+                    user_identity=user_identity,
+                    extra={
+                        "team_key": team_key,
+                        "route_rule_count": _count_configured_lines(str(saved_profile.get("component_route_rules_text", "") or "")),
+                        "default_rule_count": _count_configured_lines(str(saved_profile.get("component_default_rules_text", "") or "")),
+                    },
+                ),
+            )
+            flash(f"{team_profiles[team_key]['label']} team defaults were saved.", "success")
+        except ToolError as error:
+            error_details = _classify_portal_error(error)
+            session["default_workspace_tab"] = "team-default-admin"
+            _log_portal_event(
+                "team_profile_admin_save_tool_error",
+                level=logging.WARNING,
+                **_build_request_log_context(
+                    settings,
+                    user_identity=user_identity,
+                    extra={**error_details, "team_key": str(request.form.get("team_key", "") or "").strip().upper()},
+                ),
+            )
+            flash(str(error), "error")
+        return redirect(url_for("index"))
 
     @app.get("/download/default-sheet-template.csv")
     def download_default_sheet_template():
@@ -896,6 +975,12 @@ def create_app() -> Flask:
             return login_gate
 
         version_id = str(request.args.get("version_id") or "").strip()
+        show_all_before_team_filtering = str(request.args.get("show_all_before_team_filtering") or "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
         if not version_id:
             return jsonify({"status": "error", "message": "version_id is required."}), HTTPStatus.BAD_REQUEST
 
@@ -903,11 +988,19 @@ def create_app() -> Flask:
             bpmis_client = _build_bpmis_client_for_current_user(settings)
             rows = bpmis_client.list_issues_for_version(version_id)
             config_data = _load_current_user_config(settings)
-            rows = _filter_productization_issue_rows_for_pm_team(rows, config_data)
+            raw_count = len(rows)
+            rows, filter_metadata = _filter_productization_issue_rows_for_pm_team(
+                rows,
+                config_data,
+                show_all_before_team_filtering=show_all_before_team_filtering,
+            )
             return jsonify(
                 {
                     "status": "ok",
                     "items": [_normalize_productization_issue_row(item) for item in rows],
+                    "raw_count": raw_count,
+                    "filtered_count": len(rows),
+                    **filter_metadata,
                 }
             )
         except ToolError as error:
@@ -1143,16 +1236,35 @@ def _validate_config_security(settings: Settings, config_data: dict[str, Any]) -
         )
 
 
-def _hydrate_setup_defaults(config_data: dict[str, Any], user_identity: dict[str, str | None]) -> dict[str, Any]:
+def _load_effective_team_profiles(config_store: WebConfigStore) -> dict[str, dict[str, Any]]:
+    profiles = {team_key: dict(profile) for team_key, profile in TEAM_PROFILE_DEFAULTS.items()}
+    for team_key, stored_profile in config_store.load_team_profiles().items():
+        if team_key not in profiles:
+            continue
+        profiles[team_key].update(stored_profile)
+    return profiles
+
+
+def _is_team_profile_admin(user_identity: dict[str, str | None]) -> bool:
+    return str(user_identity.get("email") or "").strip().lower() == TEAM_PROFILE_ADMIN_EMAIL
+
+
+def _hydrate_setup_defaults(
+    config_data: dict[str, Any],
+    user_identity: dict[str, str | None],
+    *,
+    team_profiles: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     hydrated = dict(config_data)
     email = str(user_identity.get("email") or "").strip().lower()
     pm_team = str(hydrated.get("pm_team", "") or "").strip().upper()
+    effective_team_profiles = team_profiles or TEAM_PROFILE_DEFAULTS
     if pm_team:
         hydrated["pm_team"] = pm_team
     for field, default_value in DEFAULT_DIRECT_VALUES.items():
         if not str(hydrated.get(field, "") or "").strip():
             hydrated[field] = default_value
-    profile = TEAM_PROFILE_DEFAULTS.get(pm_team)
+    profile = effective_team_profiles.get(pm_team)
     if profile:
         if not str(hydrated.get("component_route_rules_text", "") or "").strip():
             hydrated["component_route_rules_text"] = str(profile.get("component_route_rules_text", "") or "")
@@ -1177,6 +1289,8 @@ def _hydrate_setup_defaults(config_data: dict[str, Any], user_identity: dict[str
 def _build_team_profiles_for_display(
     config_data: dict[str, Any],
     user_identity: dict[str, str | None],
+    *,
+    team_profiles: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, dict[str, Any]]:
     display_email = (
         str(user_identity.get("email") or "").strip().lower()
@@ -1187,7 +1301,7 @@ def _build_team_profiles_for_display(
     )
 
     profiles: dict[str, dict[str, Any]] = {}
-    for team_key, profile in TEAM_PROFILE_DEFAULTS.items():
+    for team_key, profile in (team_profiles or TEAM_PROFILE_DEFAULTS).items():
         rendered_profile = dict(profile)
         if display_email:
             for field in ("component_route_rules_text", "component_default_rules_text"):
@@ -1198,14 +1312,19 @@ def _build_team_profiles_for_display(
     return profiles
 
 
-def _validate_team_profile_setup(config_data: dict[str, Any]) -> None:
+def _validate_team_profile_setup(
+    config_data: dict[str, Any],
+    *,
+    team_profiles: dict[str, dict[str, Any]] | None = None,
+) -> None:
+    effective_team_profiles = team_profiles or TEAM_PROFILE_DEFAULTS
     pm_team = str(config_data.get("pm_team", "") or "").strip().upper()
-    valid_team_labels = ", ".join(profile["label"] for profile in TEAM_PROFILE_DEFAULTS.values())
+    valid_team_labels = ", ".join(profile["label"] for profile in effective_team_profiles.values())
     if not pm_team:
         raise ToolError(f"PM Team is required. Choose {valid_team_labels} before saving setup.")
-    if pm_team not in TEAM_PROFILE_DEFAULTS:
+    if pm_team not in effective_team_profiles:
         raise ToolError(f"Unsupported PM Team: {pm_team}. Choose {valid_team_labels}.")
-    profile = TEAM_PROFILE_DEFAULTS[pm_team]
+    profile = effective_team_profiles[pm_team]
     has_routing = bool(str(config_data.get("component_route_rules_text", "") or "").strip())
     has_defaults = bool(str(config_data.get("component_default_rules_text", "") or "").strip())
     if not profile.get("ready") and not (has_routing and has_defaults):
@@ -1459,11 +1578,16 @@ def _normalize_productization_issue_row(row: dict[str, Any]) -> dict[str, Any]:
 def _filter_productization_issue_rows_for_pm_team(
     rows: list[dict[str, Any]],
     config_data: dict[str, Any],
-) -> list[dict[str, Any]]:
+    *,
+    show_all_before_team_filtering: bool = False,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     allowed_components = _productization_allowed_components_for_pm_team(config_data)
+    if show_all_before_team_filtering:
+        return rows, {"team_filter_applied": False, "show_all_before_team_filtering": True}
     if not allowed_components:
-        return rows
-    return [row for row in rows if _productization_issue_matches_components(row, allowed_components)]
+        return rows, {"team_filter_applied": False, "show_all_before_team_filtering": False}
+    filtered_rows = [row for row in rows if _productization_issue_matches_components(row, allowed_components)]
+    return filtered_rows, {"team_filter_applied": True, "show_all_before_team_filtering": False}
 
 
 def _productization_allowed_components_for_pm_team(config_data: dict[str, Any]) -> set[str]:

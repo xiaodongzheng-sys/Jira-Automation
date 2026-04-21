@@ -88,6 +88,9 @@
       <button class="workspace-tab is-active" type="button" role="tab" aria-selected="true" data-tab-trigger="setup">Setup</button>
       <button class="workspace-tab" type="button" role="tab" aria-selected="false" data-tab-trigger="run">Run</button>
       <button class="workspace-tab" type="button" role="tab" aria-selected="false" data-tab-trigger="productization-upgrade-summary">Productization Upgrade Summary</button>
+      {% if team_profile_admin_enabled %}
+        <button class="workspace-tab" type="button" role="tab" aria-selected="false" data-tab-trigger="team-default-admin">Team Default Admin</button>
+      {% endif %}
     </div>
 
     <section class="workspace-panel is-active" data-tab-panel="setup">
@@ -516,7 +519,13 @@
               <h3 data-productization-results-title>Upgrade Tickets</h3>
               <span>Columns are normalized from BPMIS/Jira fields for quick review.</span>
             </div>
-            <button class="button button-secondary" type="button" data-productization-copy-button disabled>Copy whole table</button>
+            <div class="button-row">
+              <label class="field-inline-toggle">
+                <input type="checkbox" data-productization-show-all-toggle>
+                <span>Show all tickets before team filtering</span>
+              </label>
+              <button class="button button-secondary" type="button" data-productization-copy-button disabled>Copy whole table</button>
+            </div>
           </div>
               <div class="table-wrap premium-table-wrap" data-productization-table-wrap hidden>
             <table class="productization-table">
@@ -536,6 +545,48 @@
         </section>
       </section>
     </section>
+
+    {% if team_profile_admin_enabled %}
+      <section class="workspace-panel" data-tab-panel="team-default-admin">
+        <section class="panel panel-wide glass-panel">
+          <div class="panel-head">
+            <div>
+              <h2>Team Default Admin</h2>
+              <p class="step-copy">Manage the default System + Market to Component routing for each PM team. New users inherit these defaults automatically.</p>
+            </div>
+          </div>
+
+          <div class="config-grid setup-grid">
+            {% for team_key, profile in team_profile_admin_configs.items() %}
+              <form method="post" action="{{ url_for('save_team_profile_admin') }}" class="config-card config-card-wide stack">
+                <input type="hidden" name="team_key" value="{{ team_key }}">
+                <div class="field-label-row">
+                  <h3>{{ profile.label }}</h3>
+                  <span class="field-badge">Admin Only</span>
+                </div>
+                <p class="card-help">Edit the default routing table that first-time {{ profile.label }} users will receive in Setup.</p>
+
+                <div class="field-group">
+                  <label for="team_default_route_{{ team_key }}">System + Market to Component</label>
+                  <p class="field-help">Format: <code>System | Market | Component</code>. Use a comma inside Component when one route should map to multiple Jira Components.</p>
+                  <textarea id="team_default_route_{{ team_key }}" name="component_route_rules_text" rows="8">{{ profile.component_route_rules_text }}</textarea>
+                </div>
+
+                <div class="field-group">
+                  <label>Auto-applied Component Defaults</label>
+                  <p class="field-help">Every routed Component automatically gets <code>Current user email | Current user email | Current user email | Planning_26Q2</code> for new users.</p>
+                  <textarea rows="6" readonly>{{ profile.component_default_rules_text | replace('__CURRENT_USER_EMAIL__', 'Current user email') }}</textarea>
+                </div>
+
+                <div class="field-actions">
+                  <button class="button" type="submit">Save {{ profile.label }} Defaults</button>
+                </div>
+              </form>
+            {% endfor %}
+          </div>
+        </section>
+      </section>
+    {% endif %}
   </section>
 
   <div class="confirm-modal-backdrop" data-confirm-modal-backdrop hidden>
@@ -887,6 +938,7 @@
               system_header: document.getElementById('system_header')?.value || '',
               market_header: document.getElementById('market_header')?.value || '',
               component_route_rules_text: routeRules.value || '',
+              component_default_rules_text: defaultRules?.value || '',
             }),
           });
           const payload = await response.json().catch(() => ({}));

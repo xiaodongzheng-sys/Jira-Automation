@@ -13,8 +13,9 @@
   const resultsEmpty = root.querySelector('[data-productization-results-empty]');
   const resultsTitle = root.querySelector('[data-productization-results-title]');
   const copyButton = root.querySelector('[data-productization-copy-button]');
+  const showAllToggle = root.querySelector('[data-productization-show-all-toggle]');
 
-  if (!form || !input || !typeahead || !selectedNode || !selectedEmpty || !status || !tableWrap || !resultsBody || !resultsEmpty || !resultsTitle || !copyButton) {
+  if (!form || !input || !typeahead || !selectedNode || !selectedEmpty || !status || !tableWrap || !resultsBody || !resultsEmpty || !resultsTitle || !copyButton || !showAllToggle) {
     return;
   }
 
@@ -131,6 +132,7 @@
   let activeSuggestionIndex = -1;
   let lastSuggestions = [];
   const selectedVersions = [];
+  const isShowAllEnabled = () => Boolean(showAllToggle.checked);
 
   const buildCopyRows = () => {
     const header = ['Jira Link', 'Feature Summary', 'Detailed Feature'];
@@ -317,17 +319,31 @@
   const loadIssuesForSelection = async (selection) => {
     setStatus(`Loading Jira tickets for ${selection.label}...`);
     try {
-      const response = await fetch(`/api/productization-upgrade-summary/issues?version_id=${encodeURIComponent(selection.version_id)}`);
+      const response = await fetch(
+        `/api/productization-upgrade-summary/issues?version_id=${encodeURIComponent(selection.version_id)}&show_all_before_team_filtering=${isShowAllEnabled() ? '1' : '0'}`
+      );
       const payload = await readJsonOrThrow(response, 'Could not load Jira tickets for that version.');
       selection.items = payload.items || [];
+      selection.rawCount = Number(payload.raw_count || 0);
+      selection.filteredCount = Number(payload.filtered_count || 0);
+      selection.teamFilterApplied = Boolean(payload.team_filter_applied);
+      selection.showAllBeforeTeamFiltering = Boolean(payload.show_all_before_team_filtering);
       renderSelectedVersions();
       renderResults();
-      setStatus(
-        selectedVersions.length > 1
-          ? `Loaded ${selectedVersions.length} versions into one combined table.`
-          : `Loaded Jira tickets for ${selection.label}.`,
-        'success',
-      );
+      if (selectedVersions.length > 1) {
+        setStatus(`Loaded ${selectedVersions.length} versions into one combined table.`, 'success');
+      } else if (selection.teamFilterApplied && selection.rawCount > selection.filteredCount) {
+        setStatus(
+          selection.filteredCount > 0
+            ? `Loaded ${selection.filteredCount} matching Jira tickets for ${selection.label} after team filtering (${selection.rawCount} before filtering).`
+            : `Loaded ${selection.rawCount} Jira tickets for ${selection.label}, but 0 matched the current team filter. Turn on "Show all tickets before team filtering" to inspect the raw list.`,
+          'success',
+        );
+      } else if (selection.showAllBeforeTeamFiltering) {
+        setStatus(`Loaded ${selection.rawCount} Jira tickets for ${selection.label} before team filtering.`, 'success');
+      } else {
+        setStatus(`Loaded Jira tickets for ${selection.label}.`, 'success');
+      }
     } catch (error) {
       selectedVersions.splice(selectedVersions.findIndex((entry) => entry.version_id === selection.version_id), 1);
       renderSelectedVersions();
@@ -456,6 +472,39 @@
     window.setTimeout(() => {
       hideSuggestions();
     }, 120);
+  });
+
+  showAllToggle.addEventListener('change', async () => {
+    if (!selectedVersions.length) {
+      setStatus(
+        showAllToggle.checked
+          ? 'Show-all mode is on. Select a version to inspect raw tickets before team filtering.'
+          : 'Team filtering mode is on when applicable. Select a version to inspect tickets.',
+        'success',
+      );
+      return;
+    }
+
+    const selections = selectedVersions.map((selection) => ({
+      version_id: selection.version_id,
+      label: selection.label,
+    }));
+    selectedVersions.length = 0;
+    renderSelectedVersions();
+    renderResults();
+    setStatus('Reloading selected versions...', 'neutral');
+
+    for (const selection of selections) {
+      const nextSelection = {
+        version_id: selection.version_id,
+        label: selection.label,
+        items: null,
+      };
+      selectedVersions.push(nextSelection);
+      renderSelectedVersions();
+      renderResults();
+      await loadIssuesForSelection(nextSelection);
+    }
   });
 
   copyButton.addEventListener('click', async () => {

@@ -100,6 +100,48 @@ class UserConfigStoreTests(unittest.TestCase):
             self.assertEqual(normalized["task_type_value"], "Feature")
             self.assertEqual(normalized["priority_value"], "P1")
 
+    def test_build_component_default_rules_from_routes_uses_shared_defaults(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = WebConfigStore(Path(temp_dir))
+
+            defaults = store.build_component_default_rules_from_routes(
+                "AF | SG | DBP-Anti-fraud\nFE | SG | FE-Anti-fraud,FE-User",
+                assignee="__CURRENT_USER_EMAIL__",
+                dev_pic="__CURRENT_USER_EMAIL__",
+                qa_pic="__CURRENT_USER_EMAIL__",
+                fix_version="Planning_26Q2",
+            )
+
+            self.assertIn(
+                "DBP-Anti-fraud | __CURRENT_USER_EMAIL__ | __CURRENT_USER_EMAIL__ | __CURRENT_USER_EMAIL__ | Planning_26Q2",
+                defaults,
+            )
+            self.assertIn(
+                "FE-Anti-fraud,FE-User | __CURRENT_USER_EMAIL__ | __CURRENT_USER_EMAIL__ | __CURRENT_USER_EMAIL__ | Planning_26Q2",
+                defaults,
+            )
+
+    def test_save_and_load_team_profile_generates_component_defaults(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = WebConfigStore(Path(temp_dir))
+
+            saved = store.save_team_profile(
+                "AF",
+                {
+                    "label": "Anti-fraud",
+                    "ready": True,
+                    "component_route_rules_text": "AF | SG | DBP-Anti-fraud\nUC | SG | User",
+                },
+            )
+            loaded = store.load_team_profiles()
+
+            self.assertEqual(saved["component_route_rules_text"], "AF | SG | DBP-Anti-fraud\nUC | SG | User")
+            self.assertIn(
+                "User | __CURRENT_USER_EMAIL__ | __CURRENT_USER_EMAIL__ | __CURRENT_USER_EMAIL__ | Planning_26Q2",
+                saved["component_default_rules_text"],
+            )
+            self.assertEqual(saved["component_default_rules_text"], loaded["AF"]["component_default_rules_text"])
+
     def test_component_route_rules_reject_duplicate_system_market_pairs(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             store = WebConfigStore(Path(temp_dir))
