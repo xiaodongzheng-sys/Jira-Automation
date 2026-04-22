@@ -9,12 +9,16 @@ from bpmis_jira_tool.google_auth import (
     _allow_localhost_oauth_http,
     _normalize_authorization_response,
     _resolve_google_redirect_uri,
+    GOOGLE_SCOPES,
     create_google_authorization_url,
     fetch_google_profile,
 )
 
 
 class GoogleAuthTests(unittest.TestCase):
+    def test_google_scopes_include_gmail_readonly(self):
+        self.assertIn("https://www.googleapis.com/auth/gmail.readonly", GOOGLE_SCOPES)
+
     def test_allow_localhost_oauth_http_sets_insecure_transport(self):
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("OAUTHLIB_INSECURE_TRANSPORT", None)

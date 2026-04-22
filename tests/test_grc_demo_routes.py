@@ -34,17 +34,26 @@ class GRCDemoRouteTests(unittest.TestCase):
             response = client.get("/")
 
         self.assertEqual(response.status_code, 200)
-        self.assertIn(b"GRC Demo", response.data)
+        self.assertIn(b"FE Demo", response.data)
+        self.assertIn(b"Gmail &amp; SeaTalk Demo", response.data)
         self.assertIn(b"/grc-demo/", response.data)
 
     def test_owner_can_open_grc_demo(self):
         with self.app.test_client() as client:
             self._login_owner(client)
-            response = client.get("/grc-demo/")
+            response = client.get("/grc-demo/", follow_redirects=True)
 
         self.assertEqual(response.status_code, 200)
-        self.assertIn(b"GRC Demo", response.data)
-        self.assertIn(b"Incident Overview", response.data)
+        self.assertIn(b"FE Demo", response.data)
+        self.assertIn(b"Gmail &amp; SeaTalk Demo", response.data)
+        self.assertIn(b"Outsourcing Management", response.data)
+        self.assertIn(b"Outsourcing Management", response.data)
+        self.assertIn(b"GRC Access Control", response.data)
+        self.assertIn(b"Authorization Management", response.data)
+        self.assertIn(b"Parameter Management", response.data)
+        self.assertNotIn(b"Rene Chong", response.data)
+        self.assertIn(b'action="/auth/google/logout"', response.data)
+        self.assertNotIn(b'workspace-strip', response.data)
 
     def test_owner_can_open_outsourcing_overview(self):
         with self.app.test_client() as client:
@@ -61,6 +70,7 @@ class GRCDemoRouteTests(unittest.TestCase):
         self.assertIn(b"Periodic Review / Contractual Renewal / Change Management", response.data)
         self.assertIn(b"More Search Criteria", response.data)
         self.assertIn(b"All search criteria are applied with AND logic", response.data)
+        self.assertNotIn(b'workspace-plus', response.data)
         self.assertNotIn(b'<a class="submenu-item is-active" href="/grc-demo/overview">Incident Management</a>', response.data)
         self.assertNotIn(b'<a class="submenu-item " href="/grc-demo/overview">Incident Management</a>', response.data)
         self.assertNotIn(b'href="/grc-demo/incident/new">Add Incident</a>', response.data)
@@ -372,7 +382,7 @@ class GRCDemoRouteTests(unittest.TestCase):
             route_response = client.get("/grc-demo/", follow_redirects=False)
 
         self.assertEqual(index_response.status_code, 200)
-        self.assertNotIn(b"GRC Demo", index_response.data)
+        self.assertNotIn(b"FE Demo", index_response.data)
         self.assertEqual(route_response.status_code, 302)
         self.assertEqual(route_response.headers["Location"], "/")
 

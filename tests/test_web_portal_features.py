@@ -393,6 +393,38 @@ class WebPortalFeatureTests(unittest.TestCase):
         )
         read_snapshot.assert_not_called()
 
+    def test_shared_mode_index_skips_google_sheet_read_with_partial_google_credentials(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg",
+                "TEAM_PORTAL_BASE_URL": "https://jira-tool.example.com",
+                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": Fernet.generate_key().decode("utf-8"),
+            },
+            clear=False,
+        ), patch("bpmis_jira_tool.web.GoogleSheetsService.read_snapshot") as read_snapshot:
+            app = create_app()
+            app.testing = True
+
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["google_profile"] = {"email": "new-user@npt.sg", "name": "New User"}
+                    session["google_credentials"] = {"token": "x"}
+
+                app.config["CONFIG_STORE"].save(
+                    {
+                        "spreadsheet_link": "sheet-123",
+                        "input_tab_name": "Sheet1",
+                    },
+                    "google:new-user@npt.sg",
+                )
+                response = client.get("/")
+
+        self.assertEqual(response.status_code, 200)
+        read_snapshot.assert_not_called()
+
     def test_shared_mode_saves_encrypted_portal_token_for_google_user(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,

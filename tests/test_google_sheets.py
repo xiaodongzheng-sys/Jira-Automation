@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 from googleapiclient.errors import HttpError
 
@@ -31,7 +32,7 @@ class GoogleSheetsParsingTests(unittest.TestCase):
             def spreadsheets(self):
                 return _FakeSpreadsheets()
 
-        with unittest.mock.patch("bpmis_jira_tool.google_sheets.build", return_value=_FakeService()):
+        with patch("bpmis_jira_tool.google_sheets.build", return_value=_FakeService()):
             created = GoogleSheetsService.create_template_spreadsheet(
                 credentials=object(),
                 spreadsheet_title="BPMIS Automation Tool",
@@ -174,12 +175,7 @@ class GoogleSheetsParsingTests(unittest.TestCase):
         self.assertEqual(brd_format["cell"]["userEnteredFormat"]["textFormat"]["underline"], True)
         self.assertEqual(brd_format["cell"]["userEnteredFormat"]["textFormat"]["fontSize"], 10)
 
-        jira_format = requests[2]["repeatCell"]
-        self.assertEqual(jira_format["range"]["startColumnIndex"], 3)
-        self.assertEqual(jira_format["range"]["endColumnIndex"], 4)
-        self.assertEqual(jira_format["cell"]["userEnteredFormat"]["wrapStrategy"], "CLIP")
-        self.assertEqual(jira_format["cell"]["userEnteredFormat"]["textFormat"]["underline"], True)
-        self.assertEqual(jira_format["cell"]["userEnteredFormat"]["textFormat"]["fontSize"], 12)
+        self.assertEqual(len(requests), 2)
 
     def test_update_success_formats_jira_ticket_link_cell_like_standard_hyperlink(self):
         captured = {}

@@ -26,21 +26,12 @@
           <div class="brand-text">SeaBank</div>
         </div>
         <div class="portal-userbar">
-          <span class="user-avatar">◯</span>
-          <span class="user-name">Rene Chong</span>
-          <span class="user-logout">Logout</span>
+          <form class="user-logout-form" method="post" action="/auth/google/logout">
+            <button class="user-logout-button" type="submit">Logout</button>
+          </form>
         </div>
       </div>
     </header>
-
-    <div class="workspace-strip">
-      <div class="grc-demo-frame workspace-strip-inner">
-        {% for item in workspace_tabs %}
-          <a class="workspace-pill {% if item.active %}is-active{% endif %}" href="{{ item.href }}">{{ item.label }}</a>
-        {% endfor %}
-        <span class="workspace-plus">+</span>
-      </div>
-    </div>
 
     <div class="app-shell grc-demo-frame">
       <aside class="side-nav">

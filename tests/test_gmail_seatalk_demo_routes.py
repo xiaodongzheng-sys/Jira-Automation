@@ -1,0 +1,325 @@
+import os
+import tempfile
+import unittest
+from unittest.mock import patch
+
+from bpmis_jira_tool.gmail_dashboard import GMAIL_READONLY_SCOPE
+from bpmis_jira_tool import web as web_module
+from bpmis_jira_tool.web import create_app
+
+
+class GmailSeaTalkDemoRouteTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        with patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": self.temp_dir.name,
+                "SEATALK_LOCAL_APP_PATH": os.path.join(self.temp_dir.name, "missing", "SeaTalk.app"),
+                "SEATALK_LOCAL_DATA_DIR": os.path.join(self.temp_dir.name, "missing", "SeaTalkData"),
+            },
+            clear=False,
+        ):
+            self.app = create_app()
+            self.app.testing = True
+
+    def tearDown(self):
+        with web_module._gmail_export_active_users_lock:
+            web_module._gmail_export_active_users.clear()
+        self.temp_dir.cleanup()
+
+    @staticmethod
+    def _login_owner(client, *, scopes=None):
+        with client.session_transaction() as session:
+            session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong Zheng"}
+            session["google_credentials"] = {"token": "x", "scopes": scopes or []}
+
+    @staticmethod
+    def _login_teammate(client):
+        with client.session_transaction() as session:
+            session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
+            session["google_credentials"] = {"token": "x", "scopes": [GMAIL_READONLY_SCOPE]}
+
+    def test_owner_sees_gmail_demo_tab_on_index(self):
+        with self.app.test_client() as client:
+            self._login_owner(client, scopes=[GMAIL_READONLY_SCOPE])
+            response = client.get("/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Gmail &amp; SeaTalk Demo", response.data)
+        self.assertIn(b"/gmail-sea-talk-demo", response.data)
+
+    def test_non_owner_does_not_see_gmail_demo_tab(self):
+        with self.app.test_client() as client:
+            self._login_teammate(client)
+            response = client.get("/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn(b"Gmail &amp; SeaTalk Demo", response.data)
+
+    def test_owner_can_open_demo_page(self):
+        with self.app.test_client() as client:
+            self._login_owner(client, scopes=[GMAIL_READONLY_SCOPE])
+            response = client.get("/gmail-sea-talk-demo")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Gmail &amp; SeaTalk Demo", response.data)
+        self.assertIn(b"Mailbox Overview", response.data)
+        self.assertIn(b"Daily Received Volume", response.data)
+        self.assertIn(b"last 7 days", response.data)
+        self.assertIn(b"Preparing Gmail download batches", response.data)
+        self.assertIn(b"data-gmail-export-manifest-url", response.data)
+        self.assertNotIn(b"Top 10 Senders", response.data)
+        self.assertIn(b"SeaTalk Overview", response.data)
+        self.assertIn(b"Desktop data unavailable", response.data)
+
+    def test_owner_page_shows_reconnect_when_scope_missing(self):
+        with self.app.test_client() as client:
+            self._login_owner(client, scopes=[])
+            response = client.get("/gmail-sea-talk-demo")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Reconnect Google to grant Gmail access", response.data)
+        self.assertNotIn(b"Download 7-Day Gmail History", response.data)
+
+    def test_non_owner_page_is_denied(self):
+        with self.app.test_client() as client:
+            self._login_teammate(client)
+            response = client.get("/gmail-sea-talk-demo", follow_redirects=False)
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.headers["Location"], "/")
+
+    def test_non_owner_api_is_forbidden(self):
+        with self.app.test_client() as client:
+            self._login_teammate(client)
+            response = client.get("/api/gmail-sea-talk-demo/dashboard")
+
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("restricted", response.get_json()["message"])
+
+    def test_api_requires_gmail_scope_refresh(self):
+        with self.app.test_client() as client:
+            self._login_owner(client, scopes=[])
+            response = client.get("/api/gmail-sea-talk-demo/dashboard")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("grant Gmail read access", response.get_json()["message"])
+
+    def test_owner_api_returns_dashboard_payload(self):
+        fake_dashboard = {
+            "summary": {
+                "received_today": 8,
+                "current_unread": 12,
+                "read_rate_percent": 76,
+                "received_period_total": 240,
+                "sent_period_total": 110,
+            },
+            "trends": {
+                "received": [{"date": "2026-04-21", "label": "Apr 21", "count": 8}],
+                "sent": [{"date": "2026-04-21", "label": "Apr 21", "count": 4}],
+            },
+            "leaderboards": {"top_senders": [], "top_recipients": []},
+            "generated_at": "2026-04-21T21:00:00+08:00",
+            "period_days": 7,
+        }
+        fake_service = type("FakeDashboardService", (), {"build_overview": lambda self: fake_dashboard})()
+
+        with patch("bpmis_jira_tool.web._build_gmail_dashboard_service", return_value=fake_service):
+            with self.app.test_client() as client:
+                self._login_owner(client, scopes=[GMAIL_READONLY_SCOPE])
+                response = client.get("/api/gmail-sea-talk-demo/dashboard")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["summary"]["received_today"], 8)
+        self.assertEqual(payload["leaderboards"]["top_senders"], [])
+
+    def test_owner_network_api_returns_leaderboards(self):
+        fake_network = {
+            "leaderboards": {
+                "top_senders": [{"rank": 1, "label": "alice@example.com", "count": 12}],
+                "top_recipients": [{"rank": 1, "label": "bob@example.com", "count": 9}],
+            },
+            "generated_at": "2026-04-21T21:00:00+08:00",
+            "period_days": 2,
+            "data_quality": {"used_fallback_cache": False, "truncated": False},
+        }
+        fake_service = type("FakeDashboardService", (), {"build_network": lambda self: fake_network})()
+
+        with patch("bpmis_jira_tool.web._build_gmail_dashboard_service", return_value=fake_service):
+            with self.app.test_client() as client:
+                self._login_owner(client, scopes=[GMAIL_READONLY_SCOPE])
+                response = client.get("/api/gmail-sea-talk-demo/network")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["leaderboards"]["top_senders"][0]["label"], "alice@example.com")
+
+    def test_owner_gmail_export_downloads_text_attachment(self):
+        fake_service = type(
+            "FakeDashboardService",
+            (),
+            {
+                "export_history_text": lambda self, batch=1: ("gmail export", f"gmail-history-last-7-days-batch-{batch}.txt"),
+                "get_cached_export_history_text": lambda self, batch=1: None,
+            },
+        )()
+
+        with patch("bpmis_jira_tool.web._build_gmail_dashboard_service", return_value=fake_service):
+            with self.app.test_client() as client:
+                self._login_owner(client, scopes=[GMAIL_READONLY_SCOPE])
+                response = client.get("/api/gmail-sea-talk-demo/gmail/export?batch=2")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["Content-Disposition"], 'attachment; filename=gmail-history-last-7-days-batch-2.txt')
+        self.assertEqual(response.get_data(as_text=True), "gmail export")
+
+    def test_owner_gmail_export_serves_cached_batch_when_lock_is_active(self):
+        fake_service = type(
+            "FakeDashboardService",
+            (),
+            {
+                "get_cached_export_history_text": lambda self, batch=1: ("cached gmail export", f"gmail-history-last-7-days-batch-{batch}.txt"),
+                "export_history_text": lambda self, batch=1: ("live gmail export", f"gmail-history-last-7-days-batch-{batch}.txt"),
+            },
+        )()
+
+        with patch("bpmis_jira_tool.web._build_gmail_dashboard_service", return_value=fake_service):
+            with self.app.test_client() as client:
+                self._login_owner(client, scopes=[GMAIL_READONLY_SCOPE])
+                with web_module._gmail_export_active_users_lock:
+                    web_module._gmail_export_active_users.add("xiaodong.zheng@npt.sg")
+                response = client.get("/api/gmail-sea-talk-demo/gmail/export?batch=1")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_data(as_text=True), "cached gmail export")
+
+    def test_owner_gmail_export_manifest_returns_batch_metadata(self):
+        fake_service = type(
+            "FakeDashboardService",
+            (),
+            {
+                "build_export_manifest": lambda self: {
+                    "generated_at": "2026-04-22T09:00:00+08:00",
+                    "period_days": 7,
+                    "total_messages": 205,
+                    "batch_size": 50,
+                    "batch_count": 5,
+                    "excluded_senders": ["reports.dwh@maribank.com.sg"],
+                }
+            },
+        )()
+
+        with patch("bpmis_jira_tool.web._build_gmail_dashboard_service", return_value=fake_service):
+            with self.app.test_client() as client:
+                self._login_owner(client, scopes=[GMAIL_READONLY_SCOPE])
+                response = client.get("/api/gmail-sea-talk-demo/gmail/export-manifest")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["batch_count"], 5)
+        self.assertEqual(payload["batch_size"], 50)
+        self.assertEqual(payload["total_messages"], 205)
+
+    def test_owner_gmail_export_prewarm_returns_ok_when_cache_is_ready(self):
+        fake_service = type(
+            "FakeDashboardService",
+            (),
+            {
+                "get_cached_export_history_text": lambda self, batch=1: ("gmail export", f"gmail-history-last-7-days-batch-{batch}.txt"),
+                "prewarm_export_history_text": lambda self, batch=1: ("gmail export", f"gmail-history-last-7-days-batch-{batch}.txt"),
+            },
+        )()
+
+        with patch("bpmis_jira_tool.web._build_gmail_dashboard_service", return_value=fake_service):
+            with self.app.test_client() as client:
+                self._login_owner(client, scopes=[GMAIL_READONLY_SCOPE])
+                response = client.post("/api/gmail-sea-talk-demo/gmail/export-prewarm?batch=1")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.get_json()["cached"])
+
+    def test_gmail_export_requires_scope_refresh(self):
+        with self.app.test_client() as client:
+            self._login_owner(client, scopes=[])
+            response = client.get("/api/gmail-sea-talk-demo/gmail/export")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("grant Gmail read access", response.get_json()["message"])
+
+    def test_gmail_export_is_rate_limited_while_same_user_export_is_active(self):
+        with self.app.test_client() as client:
+            self._login_owner(client, scopes=[GMAIL_READONLY_SCOPE])
+            with web_module._gmail_export_active_users_lock:
+                web_module._gmail_export_active_users.add("xiaodong.zheng@npt.sg")
+            response = client.get("/api/gmail-sea-talk-demo/gmail/export?batch=1")
+
+        self.assertEqual(response.status_code, 429)
+        self.assertIn("already running", response.get_json()["message"])
+
+    def test_seatalk_api_reports_missing_config_cleanly(self):
+        with self.app.test_client() as client:
+            self._login_owner(client, scopes=[GMAIL_READONLY_SCOPE])
+            response = client.get("/api/gmail-sea-talk-demo/seatalk")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("SeaTalk desktop app was not found", response.get_json()["message"])
+
+    def test_owner_seatalk_api_returns_dashboard_payload(self):
+        fake_dashboard = {
+            "summary": {
+                "received_today": 6,
+                "current_unread": 2,
+                "read_rate_percent": 67,
+                "received_period_total": 30,
+                "sent_period_total": 12,
+            },
+            "trends": {
+                "received": [{"date": "2026-04-21", "label": "Apr 21", "count": 6}],
+                "sent": [{"date": "2026-04-21", "label": "Apr 21", "count": 2}],
+            },
+            "metric_availability": {
+                "current_unread": {"available": True, "reason": ""},
+                "read_rate_percent": {"available": False, "reason": "Not available from local SeaTalk desktop data for this scope."},
+            },
+            "generated_at": "2026-04-21T21:00:00+08:00",
+            "period_days": 7,
+            "data_quality": {"used_fallback_cache": False, "partial_data": False, "status_note": "ok"},
+        }
+        fake_service = type("FakeSeaTalkService", (), {"build_overview": lambda self: fake_dashboard})()
+
+        with patch("bpmis_jira_tool.web._build_seatalk_dashboard_service", return_value=fake_service):
+            with self.app.test_client() as client:
+                self._login_owner(client, scopes=[GMAIL_READONLY_SCOPE])
+                response = client.get("/api/gmail-sea-talk-demo/seatalk")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["summary"]["read_rate_percent"], 67)
+        self.assertTrue(payload["metric_availability"]["current_unread"]["available"])
+
+    def test_owner_seatalk_export_downloads_text_attachment(self):
+        fake_service = type(
+            "FakeSeaTalkService",
+            (),
+            {"export_history_text": lambda self: ("hello history", "seatalk-history-last-7-days.txt")},
+        )()
+
+        with patch("bpmis_jira_tool.web._build_seatalk_dashboard_service", return_value=fake_service):
+            with self.app.test_client() as client:
+                self._login_owner(client, scopes=[GMAIL_READONLY_SCOPE])
+                response = client.get("/api/gmail-sea-talk-demo/seatalk/export")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["Content-Disposition"], 'attachment; filename=seatalk-history-last-7-days.txt')
+        self.assertEqual(response.get_data(as_text=True), "hello history")
+
+
+if __name__ == "__main__":
+    unittest.main()

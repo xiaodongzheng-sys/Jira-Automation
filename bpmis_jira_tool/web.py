@@ -31,6 +31,8 @@ from bpmis_jira_tool.google_auth import (
     finish_google_oauth,
     get_google_credentials,
 )
+from bpmis_jira_tool.gmail_dashboard import GMAIL_READONLY_SCOPE, GmailDashboardService
+from bpmis_jira_tool.seatalk_dashboard import SeaTalkDashboardService
 from bpmis_jira_tool.google_sheets import GoogleSheetsService
 from bpmis_jira_tool.project_sync import BPMISProjectSyncService
 from bpmis_jira_tool.service import JiraCreationService, build_bpmis_client
@@ -52,6 +54,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(PROJECT_ROOT / ".env")
 MARKET_KEYS = ["ID", "SG", "PH", "Regional"]
 TEAM_PROFILE_ADMIN_EMAIL = "xiaodong.zheng@npt.sg"
+_gmail_export_active_users: set[str] = set()
+_gmail_export_active_users_lock = threading.Lock()
 
 
 @lru_cache(maxsize=1)
@@ -164,6 +168,25 @@ def _safe_email_identity(user_identity: dict[str, str | None] | None = None) -> 
     if not user_identity:
         return ""
     return str(user_identity.get("email") or user_identity.get("config_key") or "").strip().lower()
+
+
+def _try_acquire_gmail_export_lock(email: str) -> bool:
+    normalized = str(email or "").strip().lower()
+    if not normalized:
+        return False
+    with _gmail_export_active_users_lock:
+        if normalized in _gmail_export_active_users:
+            return False
+        _gmail_export_active_users.add(normalized)
+        return True
+
+
+def _release_gmail_export_lock(email: str) -> None:
+    normalized = str(email or "").strip().lower()
+    if not normalized:
+        return
+    with _gmail_export_active_users_lock:
+        _gmail_export_active_users.discard(normalized)
 
 
 def _count_configured_lines(value: Any) -> int:
@@ -328,6 +351,7 @@ def create_app() -> Flask:
     app.config["GET_USER_IDENTITY"] = lambda: _get_user_identity(settings)
     app.config["CAN_ACCESS_PRD_BRIEFING"] = lambda: _can_access_prd_briefing(settings)
     app.config["CAN_ACCESS_GRC_DEMO"] = lambda: _can_access_grc_demo(settings)
+    app.config["CAN_ACCESS_GMAIL_SEATALK_DEMO"] = lambda: _can_access_gmail_seatalk_demo(settings)
     app.register_blueprint(create_prd_briefing_blueprint())
     grc_demo_app = create_incident_mockup_app(
         owner_email=settings.grc_demo_owner_email,
@@ -363,9 +387,17 @@ def create_app() -> Flask:
         if _can_access_grc_demo(settings):
             site_tabs.append(
                 {
-                    "label": "GRC Demo",
+                    "label": "FE Demo",
                     "href": "/grc-demo/outsourcing-management",
                     "active": request.path.startswith("/grc-demo/"),
+                }
+            )
+        if _can_access_gmail_seatalk_demo(settings):
+            site_tabs.append(
+                {
+                    "label": "Gmail & SeaTalk Demo",
+                    "href": url_for("gmail_seatalk_demo"),
+                    "active": request.path.startswith("/gmail-sea-talk-demo"),
                 }
             )
         return {
@@ -373,6 +405,7 @@ def create_app() -> Flask:
             "site_requires_google_login": _site_requires_google_login(settings),
             "can_access_prd_briefing": _can_access_prd_briefing(settings),
             "can_access_grc_demo": _can_access_grc_demo(settings),
+            "can_access_gmail_seatalk_demo": _can_access_gmail_seatalk_demo(settings),
         }
 
     @app.before_request
@@ -455,7 +488,11 @@ def create_app() -> Flask:
         input_headers: list[str] = []
         has_saved_config = bool(config_key and raw_config_data)
 
-        if "google_credentials" in session and _has_explicit_spreadsheet_link(raw_config_data):
+        if (
+            "google_credentials" in session
+            and _has_explicit_spreadsheet_link(raw_config_data)
+            and _google_session_can_call_live_google_apis()
+        ):
             try:
                 sheets = _build_sheets_service(settings, config_data)
                 snapshot = sheets.read_snapshot()
@@ -471,15 +508,13 @@ def create_app() -> Flask:
                         extra=error_details,
                     ),
                 )
-                flash(str(error), "error")
             except Exception:
                 _log_portal_event(
                     "index_sheet_snapshot_unexpected_error",
-                    level=logging.ERROR,
+                    level=logging.WARNING,
                     **_build_request_log_context(settings, user_identity=user_identity),
                 )
-                current_app.logger.exception("Google Sheets snapshot read failed on index.")
-                flash("Google Sheets is connected, but the current sheet could not be read. Please reconnect Google or verify your Spreadsheet settings.", "error")
+                current_app.logger.warning("Google Sheets snapshot read failed on index.", exc_info=True)
 
         return render_template(
             "index.html",
@@ -543,7 +578,7 @@ def create_app() -> Flask:
                 "google_callback_success",
                 **_build_request_log_context(settings, user_identity=current_identity),
             )
-            flash("Google Sheets connected successfully.", "success")
+            flash("Google account connected successfully.", "success")
         except ToolError as error:
             error_details = _classify_portal_error(error)
             _log_portal_event(
@@ -553,6 +588,320 @@ def create_app() -> Flask:
             )
             flash(str(error), "error")
         return redirect(url_for("index"))
+
+    @app.get("/gmail-sea-talk-demo")
+    def gmail_seatalk_demo():
+        access_gate = _require_gmail_seatalk_demo_access(settings)
+        if access_gate is not None:
+            return access_gate
+        user_identity = _get_user_identity(settings)
+        return render_template(
+            "gmail_seatalk_demo.html",
+            page_title="Gmail & SeaTalk Demo",
+            user_identity=user_identity,
+            google_connected="google_credentials" in session,
+            gmail_scope_ready=_google_credentials_have_scopes(GMAIL_READONLY_SCOPE),
+            seatalk_configured=_seatalk_dashboard_is_configured(settings),
+            asset_revision=_current_release_revision(),
+        )
+
+    @app.get("/api/gmail-sea-talk-demo/dashboard")
+    def gmail_seatalk_demo_dashboard_api():
+        access_gate = _require_gmail_seatalk_demo_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        if not _google_credentials_have_scopes(GMAIL_READONLY_SCOPE):
+            return jsonify(
+                {
+                    "status": "error",
+                    "message": "Gmail access is not available for this Google session yet. Please sign in with Google again to grant Gmail read access.",
+                }
+            ), HTTPStatus.BAD_REQUEST
+        try:
+            dashboard = _build_gmail_dashboard_service().build_overview()
+            return jsonify({"status": "ok", **dashboard})
+        except ToolError as error:
+            error_details = _classify_portal_error(error)
+            _log_portal_event(
+                "gmail_seatalk_dashboard_tool_error",
+                level=logging.WARNING,
+                **_build_request_log_context(
+                    settings,
+                    user_identity=_get_user_identity(settings),
+                    extra=error_details,
+                ),
+            )
+            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
+        except Exception:
+            _log_portal_event(
+                "gmail_seatalk_dashboard_unexpected_error",
+                level=logging.ERROR,
+                **_build_request_log_context(settings, user_identity=_get_user_identity(settings)),
+            )
+            current_app.logger.exception("Gmail dashboard load failed.")
+            return jsonify({"status": "error", "message": "Gmail data could not be loaded right now. Please try again shortly."}), HTTPStatus.INTERNAL_SERVER_ERROR
+
+    @app.get("/api/gmail-sea-talk-demo/network")
+    def gmail_seatalk_demo_network_api():
+        access_gate = _require_gmail_seatalk_demo_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        if not _google_credentials_have_scopes(GMAIL_READONLY_SCOPE):
+            return jsonify(
+                {
+                    "status": "error",
+                    "message": "Gmail access is not available for this Google session yet. Please sign in with Google again to grant Gmail read access.",
+                }
+            ), HTTPStatus.BAD_REQUEST
+        try:
+            network = _build_gmail_dashboard_service().build_network()
+            return jsonify({"status": "ok", **network})
+        except ToolError as error:
+            error_details = _classify_portal_error(error)
+            _log_portal_event(
+                "gmail_seatalk_network_tool_error",
+                level=logging.WARNING,
+                **_build_request_log_context(
+                    settings,
+                    user_identity=_get_user_identity(settings),
+                    extra=error_details,
+                ),
+            )
+            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
+        except Exception:
+            _log_portal_event(
+                "gmail_seatalk_network_unexpected_error",
+                level=logging.ERROR,
+                **_build_request_log_context(settings, user_identity=_get_user_identity(settings)),
+            )
+            current_app.logger.exception("Gmail network load failed.")
+            return jsonify({"status": "error", "message": "Gmail network rankings could not be loaded right now. Please try again shortly."}), HTTPStatus.INTERNAL_SERVER_ERROR
+
+    @app.get("/api/gmail-sea-talk-demo/gmail/export-manifest")
+    def gmail_seatalk_demo_gmail_export_manifest():
+        access_gate = _require_gmail_seatalk_demo_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        if not _google_credentials_have_scopes(GMAIL_READONLY_SCOPE):
+            return jsonify(
+                {
+                    "status": "error",
+                    "message": "Gmail access is not available for this Google session yet. Please sign in with Google again to grant Gmail read access.",
+                }
+            ), HTTPStatus.BAD_REQUEST
+        try:
+            manifest = _build_gmail_dashboard_service().build_export_manifest()
+            return jsonify({"status": "ok", **manifest})
+        except ToolError as error:
+            error_details = _classify_portal_error(error)
+            _log_portal_event(
+                "gmail_seatalk_gmail_export_manifest_tool_error",
+                level=logging.WARNING,
+                **_build_request_log_context(
+                    settings,
+                    user_identity=_get_user_identity(settings),
+                    extra=error_details,
+                ),
+            )
+            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
+        except Exception:
+            _log_portal_event(
+                "gmail_seatalk_gmail_export_manifest_unexpected_error",
+                level=logging.ERROR,
+                **_build_request_log_context(settings, user_identity=_get_user_identity(settings)),
+            )
+            current_app.logger.exception("Gmail export manifest failed.")
+            return (
+                jsonify({"status": "error", "message": "Gmail export batches could not be prepared right now. Please try again shortly."}),
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+
+    @app.get("/api/gmail-sea-talk-demo/gmail/export")
+    def gmail_seatalk_demo_gmail_export():
+        access_gate = _require_gmail_seatalk_demo_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        if not _google_credentials_have_scopes(GMAIL_READONLY_SCOPE):
+            return jsonify(
+                {
+                    "status": "error",
+                    "message": "Gmail access is not available for this Google session yet. Please sign in with Google again to grant Gmail read access.",
+                }
+            ), HTTPStatus.BAD_REQUEST
+        try:
+            batch = max(int(request.args.get("batch", "1")), 1)
+        except ValueError:
+            return jsonify({"status": "error", "message": "Invalid Gmail export batch. Please refresh and try again."}), HTTPStatus.BAD_REQUEST
+        user_email = _safe_email_identity(_get_user_identity(settings))
+        service = _build_gmail_dashboard_service()
+        if not _try_acquire_gmail_export_lock(user_email):
+            cached_payload = service.get_cached_export_history_text(batch=batch)
+            if cached_payload is not None:
+                content, filename = cached_payload
+                return send_file(
+                    io.BytesIO(content.encode("utf-8")),
+                    mimetype="text/plain; charset=utf-8",
+                    as_attachment=True,
+                    download_name=filename,
+                )
+            return (
+                jsonify({"status": "error", "message": "A Gmail export is already running for this account. Please wait a few seconds and try again."}),
+                HTTPStatus.TOO_MANY_REQUESTS,
+            )
+        try:
+            content, filename = service.export_history_text(batch=batch)
+            return send_file(
+                io.BytesIO(content.encode("utf-8")),
+                mimetype="text/plain; charset=utf-8",
+                as_attachment=True,
+                download_name=filename,
+            )
+        except ToolError as error:
+            error_details = _classify_portal_error(error)
+            _log_portal_event(
+                "gmail_seatalk_gmail_export_tool_error",
+                level=logging.WARNING,
+                **_build_request_log_context(
+                    settings,
+                    user_identity=_get_user_identity(settings),
+                    extra=error_details,
+                ),
+            )
+            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
+        except Exception:
+            _log_portal_event(
+                "gmail_seatalk_gmail_export_unexpected_error",
+                level=logging.ERROR,
+                **_build_request_log_context(settings, user_identity=_get_user_identity(settings)),
+            )
+            current_app.logger.exception("Gmail history export failed.")
+            return (
+                jsonify({"status": "error", "message": "Gmail mail history could not be exported right now. Please try again shortly."}),
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+        finally:
+            _release_gmail_export_lock(user_email)
+
+    @app.post("/api/gmail-sea-talk-demo/gmail/export-prewarm")
+    def gmail_seatalk_demo_gmail_export_prewarm():
+        access_gate = _require_gmail_seatalk_demo_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        if not _google_credentials_have_scopes(GMAIL_READONLY_SCOPE):
+            return jsonify(
+                {
+                    "status": "error",
+                    "message": "Gmail access is not available for this Google session yet. Please sign in with Google again to grant Gmail read access.",
+                }
+            ), HTTPStatus.BAD_REQUEST
+        try:
+            batch = max(int(request.args.get("batch", "1")), 1)
+        except ValueError:
+            return jsonify({"status": "error", "message": "Invalid Gmail export batch. Please refresh and try again."}), HTTPStatus.BAD_REQUEST
+        user_email = _safe_email_identity(_get_user_identity(settings))
+        service = _build_gmail_dashboard_service()
+        cached_payload = service.get_cached_export_history_text(batch=batch)
+        if cached_payload is not None:
+            return jsonify({"status": "ok", "cached": True, "batch": batch}), HTTPStatus.OK
+        if not _try_acquire_gmail_export_lock(user_email):
+            return jsonify({"status": "ok", "cached": False, "in_progress": True, "batch": batch}), HTTPStatus.ACCEPTED
+        try:
+            service.prewarm_export_history_text(batch=batch)
+            return jsonify({"status": "ok", "cached": True, "batch": batch}), HTTPStatus.OK
+        except ToolError as error:
+            error_details = _classify_portal_error(error)
+            _log_portal_event(
+                "gmail_seatalk_gmail_export_prewarm_tool_error",
+                level=logging.WARNING,
+                **_build_request_log_context(
+                    settings,
+                    user_identity=_get_user_identity(settings),
+                    extra=error_details,
+                ),
+            )
+            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
+        except Exception:
+            _log_portal_event(
+                "gmail_seatalk_gmail_export_prewarm_unexpected_error",
+                level=logging.ERROR,
+                **_build_request_log_context(settings, user_identity=_get_user_identity(settings)),
+            )
+            current_app.logger.exception("Gmail export prewarm failed.")
+            return (
+                jsonify({"status": "error", "message": "Gmail export prewarm could not be completed right now. Please try again shortly."}),
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+        finally:
+            _release_gmail_export_lock(user_email)
+
+    @app.get("/api/gmail-sea-talk-demo/seatalk")
+    def gmail_seatalk_demo_seatalk_api():
+        access_gate = _require_gmail_seatalk_demo_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        try:
+            payload = _build_seatalk_dashboard_service(settings).build_overview()
+            return jsonify({"status": "ok", **payload})
+        except ToolError as error:
+            error_details = _classify_portal_error(error)
+            _log_portal_event(
+                "gmail_seatalk_seatalk_tool_error",
+                level=logging.WARNING,
+                **_build_request_log_context(
+                    settings,
+                    user_identity=_get_user_identity(settings),
+                    extra=error_details,
+                ),
+            )
+            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
+        except Exception:
+            _log_portal_event(
+                "gmail_seatalk_seatalk_unexpected_error",
+                level=logging.ERROR,
+                **_build_request_log_context(settings, user_identity=_get_user_identity(settings)),
+            )
+            current_app.logger.exception("SeaTalk dashboard load failed.")
+            return (
+                jsonify({"status": "error", "message": "SeaTalk data could not be loaded right now. Please try again shortly."}),
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+
+    @app.get("/api/gmail-sea-talk-demo/seatalk/export")
+    def gmail_seatalk_demo_seatalk_export():
+        access_gate = _require_gmail_seatalk_demo_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        try:
+            content, filename = _build_seatalk_dashboard_service(settings).export_history_text()
+            return send_file(
+                io.BytesIO(content.encode("utf-8")),
+                mimetype="text/plain; charset=utf-8",
+                as_attachment=True,
+                download_name=filename,
+            )
+        except ToolError as error:
+            error_details = _classify_portal_error(error)
+            _log_portal_event(
+                "gmail_seatalk_seatalk_export_tool_error",
+                level=logging.WARNING,
+                **_build_request_log_context(
+                    settings,
+                    user_identity=_get_user_identity(settings),
+                    extra=error_details,
+                ),
+            )
+            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
+        except Exception:
+            _log_portal_event(
+                "gmail_seatalk_seatalk_export_unexpected_error",
+                level=logging.ERROR,
+                **_build_request_log_context(settings, user_identity=_get_user_identity(settings)),
+            )
+            current_app.logger.exception("SeaTalk history export failed.")
+            return (
+                jsonify({"status": "error", "message": "SeaTalk chat history could not be exported right now. Please try again shortly."}),
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
 
     @app.post("/auth/google/logout")
     def google_logout():
@@ -1193,6 +1542,25 @@ def _build_sheets_service(settings: Settings, config_data: dict[str, object] | N
     return _build_sheets_service_with_credentials(settings, config_data or {}, credentials)
 
 
+def _build_gmail_dashboard_service() -> GmailDashboardService:
+    credentials = get_google_credentials()
+    return GmailDashboardService(credentials=credentials, cache_key=_current_google_email())
+
+
+def _build_seatalk_dashboard_service(settings: Settings) -> SeaTalkDashboardService:
+    return SeaTalkDashboardService(
+        owner_email=settings.seatalk_owner_email,
+        seatalk_app_path=settings.seatalk_local_app_path,
+        seatalk_data_dir=settings.seatalk_local_data_dir,
+    )
+
+
+def _seatalk_dashboard_is_configured(settings: Settings) -> bool:
+    app_path = Path(str(settings.seatalk_local_app_path or "")).expanduser()
+    data_dir = Path(str(settings.seatalk_local_data_dir or "")).expanduser()
+    return bool(app_path.exists() and data_dir.exists() and (data_dir / "config.json").exists())
+
+
 def _has_explicit_spreadsheet_link(config_data: dict[str, object] | None) -> bool:
     if not config_data:
         return False
@@ -1232,6 +1600,8 @@ def _current_google_email() -> str:
 
 
 def _current_google_user_is_blocked(settings: Settings) -> bool:
+    if not _shared_portal_enabled(settings):
+        return False
     if not settings.team_allowed_emails and not settings.team_allowed_email_domains:
         return False
     email = _current_google_email()
@@ -1249,7 +1619,6 @@ def _current_google_user_is_blocked(settings: Settings) -> bool:
 def _shared_portal_enabled(settings: Settings) -> bool:
     return bool(
         settings.team_portal_base_url
-        or settings.team_allowed_emails
         or settings.team_allowed_email_domains
     )
 
@@ -1272,6 +1641,32 @@ def _can_access_grc_demo(settings: Settings) -> bool:
     return bool(email and email == settings.grc_demo_owner_email.strip().lower())
 
 
+def _can_access_gmail_seatalk_demo(settings: Settings) -> bool:
+    email = _current_google_email()
+    return bool(email and email == settings.gmail_seatalk_demo_owner_email.strip().lower())
+
+
+def _google_credentials_have_scopes(*required_scopes: str) -> bool:
+    payload = dict(session.get("google_credentials") or {})
+    scopes = payload.get("scopes") or []
+    normalized_scopes = {str(scope).strip() for scope in scopes if str(scope).strip()}
+    return all(scope in normalized_scopes for scope in required_scopes)
+
+
+def _google_session_can_call_live_google_apis() -> bool:
+    payload = dict(session.get("google_credentials") or {})
+    token = str(payload.get("token") or "").strip()
+    if not token:
+        return False
+    refresh_fields = (
+        "refresh_token",
+        "token_uri",
+        "client_id",
+        "client_secret",
+    )
+    return all(str(payload.get(field) or "").strip() for field in refresh_fields)
+
+
 def _require_google_login(settings: Settings, *, api: bool = False):
     if _site_requires_google_login(settings):
         if not _google_session_is_connected():
@@ -1285,6 +1680,19 @@ def _require_google_login(settings: Settings, *, api: bool = False):
                 return jsonify({"status": "error", "message": message}), HTTPStatus.FORBIDDEN
             flash(message, "error")
             return redirect(url_for("access_denied"))
+    return None
+
+
+def _require_gmail_seatalk_demo_access(settings: Settings, *, api: bool = False):
+    login_gate = _require_google_login(settings, api=api)
+    if login_gate is not None:
+        return login_gate
+    message = f"Gmail & SeaTalk Demo is restricted to {settings.gmail_seatalk_demo_owner_email.strip().lower()}."
+    if not _can_access_gmail_seatalk_demo(settings):
+        if api:
+            return jsonify({"status": "error", "message": message}), HTTPStatus.FORBIDDEN
+        flash(message, "error")
+        return redirect(url_for("index"))
     return None
 
 

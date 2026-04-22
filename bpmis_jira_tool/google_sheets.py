@@ -201,19 +201,6 @@ class GoogleSheetsService:
                     font_size=10,
                 )
             )
-        jira_ticket_link_header = getattr(self, "jira_ticket_link_header", "Jira Ticket Link")
-        jira_ticket_link_index = self._find_header_index_if_present(headers, jira_ticket_link_header, "Jira Ticket Link")
-        if jira_ticket_link_index is not None:
-            format_requests.append(
-                self._build_link_display_request(
-                    sheet_id=sheet_id,
-                    start_row_index=start_row_index,
-                    end_row_index=end_row_index,
-                    column_index=jira_ticket_link_index,
-                    clip_text=True,
-                    font_size=12,
-                )
-            )
         self.service.spreadsheets().batchUpdate(
             spreadsheetId=self.spreadsheet_id,
             body={

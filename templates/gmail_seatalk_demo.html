@@ -1,0 +1,377 @@
+{% extends "base.html" %}
+
+{% block extra_head %}
+  <style>
+    .mail-demo-shell {
+      display: grid;
+      gap: 1.5rem;
+    }
+
+    .mail-demo-copy .showcase-lede,
+    .mail-demo-copy .step-copy,
+    .mail-demo-copy .help-text,
+    .mail-demo-card p,
+    .mail-demo-table td,
+    .mail-demo-table th {
+      color: #5d6b8a;
+    }
+
+    .mail-demo-grid {
+      display: grid;
+      gap: 1.25rem;
+    }
+
+    .mail-demo-scorecards {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 1rem;
+    }
+
+    .mail-demo-scorecard {
+      padding: 1.25rem;
+      border-radius: 20px;
+      border: 1px solid rgba(107, 133, 184, 0.14);
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.94), rgba(242, 247, 255, 0.88));
+      box-shadow: 0 18px 40px rgba(37, 72, 135, 0.08);
+    }
+
+    .mail-demo-scorecard strong {
+      display: block;
+      font-size: 0.95rem;
+      color: #30435f;
+      margin-bottom: 0.6rem;
+    }
+
+    .mail-demo-scorecard span {
+      display: block;
+      font-size: 2.2rem;
+      font-weight: 700;
+      color: #0d1f40;
+      letter-spacing: -0.04em;
+    }
+
+    .mail-demo-scorecard small {
+      display: block;
+      margin-top: 0.55rem;
+      color: #6d7d9d;
+    }
+
+    .mail-demo-chart-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 1rem;
+    }
+
+    .mail-demo-note-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 1rem;
+    }
+
+    .mail-demo-card {
+      padding: 1.25rem;
+    }
+
+    .mail-demo-card h3 {
+      margin: 0 0 0.3rem;
+      font-size: 1.05rem;
+      color: #10203d;
+    }
+
+    .mail-demo-chart {
+      width: 100%;
+      height: 230px;
+      margin-top: 1rem;
+      border-radius: 18px;
+      background:
+        linear-gradient(180deg, rgba(248, 251, 255, 0.94), rgba(240, 246, 255, 0.88)),
+        radial-gradient(circle at top left, rgba(86, 144, 255, 0.08), transparent 55%);
+      border: 1px solid rgba(110, 139, 194, 0.18);
+    }
+
+    .mail-demo-chart-empty {
+      display: grid;
+      place-items: center;
+      min-height: 230px;
+      margin-top: 1rem;
+      border-radius: 18px;
+      border: 1px dashed rgba(110, 139, 194, 0.24);
+      color: #7183a3;
+      background: rgba(248, 251, 255, 0.72);
+    }
+
+    .mail-demo-table {
+      width: 100%;
+      margin-top: 1rem;
+      border-collapse: collapse;
+    }
+
+    .mail-demo-table th,
+    .mail-demo-table td {
+      padding: 0.8rem 0.35rem;
+      border-bottom: 1px solid rgba(122, 145, 190, 0.14);
+      text-align: left;
+      font-size: 0.95rem;
+    }
+
+    .mail-demo-table th {
+      font-size: 0.78rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: #7383a2;
+    }
+
+    .mail-demo-rank {
+      width: 56px;
+      color: #3c4e70;
+      font-weight: 700;
+    }
+
+    .mail-demo-status {
+      min-height: 92px;
+      display: grid;
+      place-items: center;
+      text-align: center;
+    }
+
+    .mail-demo-status[data-tone="error"] p {
+      color: #8d2b4a;
+    }
+
+    .mail-demo-status[data-tone="success"] p {
+      color: #1e5f4f;
+    }
+
+    .mail-demo-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      padding: 0.35rem 0.7rem;
+      border-radius: 999px;
+      background: rgba(69, 120, 213, 0.1);
+      color: #305497;
+      font-size: 0.8rem;
+      font-weight: 600;
+    }
+
+    .mail-demo-note-card {
+      padding: 1rem 1.1rem;
+      border-radius: 18px;
+      border: 1px solid rgba(110, 139, 194, 0.16);
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(245, 249, 255, 0.88));
+    }
+
+    .mail-demo-note-card strong {
+      display: block;
+      margin-bottom: 0.45rem;
+      font-size: 0.9rem;
+      color: #203253;
+    }
+
+    .mail-demo-note-card p {
+      margin: 0;
+      color: #5d6b8a;
+      line-height: 1.5;
+    }
+
+    .mail-demo-source-strip {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.55rem;
+      margin-top: 0.75rem;
+    }
+
+    .mail-demo-source-tag {
+      display: inline-flex;
+      align-items: center;
+      padding: 0.36rem 0.7rem;
+      border-radius: 999px;
+      background: rgba(24, 58, 118, 0.08);
+      color: #355180;
+      font-size: 0.78rem;
+      font-weight: 600;
+    }
+
+    @media (max-width: 900px) {
+      .mail-demo-scorecards,
+      .mail-demo-chart-grid,
+      .mail-demo-note-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+{% endblock %}
+
+{% block body %}
+  <section class="showcase-shell">
+    <div class="showcase-backdrop"></div>
+    <div class="showcase-grid">
+      <div class="showcase-copy mail-demo-copy">
+        <p class="showcase-kicker">Mailbox Intelligence Demo</p>
+        <h1>Gmail &amp; SeaTalk Demo</h1>
+        <p class="showcase-lede">
+          Review Gmail and SeaTalk activity in a clean admin dashboard with 7-day trend visibility and owner-scoped operational metrics.
+        </p>
+        <div class="showcase-badges">
+          <span>Gmail Readonly</span>
+          <span>7-Day Trends</span>
+          <span>SeaTalk Desktop Data</span>
+        </div>
+        <div class="showcase-metrics">
+          <article class="metric-card">
+            <strong>Fast mailbox pulse</strong>
+            <span>Track incoming volume, unread pressure, and read rate without opening Gmail directly.</span>
+          </article>
+          <article class="metric-card">
+            <strong>Trend visibility</strong>
+            <span>Spot volume changes across the last 7 days for both inbound and outbound mail.</span>
+          </article>
+          <article class="metric-card">
+            <strong>Dual-channel visibility</strong>
+            <span>Track Gmail and local SeaTalk desktop activity separately without leaving the portal.</span>
+          </article>
+        </div>
+      </div>
+
+      <aside class="executive-card">
+        <div class="executive-card-head">
+          <div>
+            <p class="executive-eyebrow">Access</p>
+            <h2>Mailbox Session</h2>
+          </div>
+          <span class="executive-pill">Owner only</span>
+        </div>
+        <ul class="executive-list">
+          <li>
+            <span>Portal User</span>
+            <strong>{{ user_identity.display_name }}</strong>
+          </li>
+          <li>
+            <span>Google Login</span>
+            <strong>{{ "Connected" if google_connected else "Not connected" }}</strong>
+          </li>
+          <li>
+            <span>Gmail Scope</span>
+            <strong>{{ "Ready" if gmail_scope_ready else "Reconnect required" }}</strong>
+          </li>
+          <li>
+            <span>SeaTalk</span>
+            <strong>{{ "Available on this Mac" if seatalk_configured else "Desktop data unavailable" }}</strong>
+          </li>
+        </ul>
+        <div class="executive-note">
+          <p>Gmail data is read-only in this version. SeaTalk metrics load from the local SeaTalk desktop data stored on this Mac.</p>
+        </div>
+      </aside>
+    </div>
+  </section>
+
+  <section class="workspace-shell mail-demo-shell" data-gmail-demo-root data-dashboard-url="{{ url_for('gmail_seatalk_demo_dashboard_api') }}" data-gmail-export-url="{{ url_for('gmail_seatalk_demo_gmail_export') }}" data-gmail-export-manifest-url="{{ url_for('gmail_seatalk_demo_gmail_export_manifest') }}" data-gmail-export-prewarm-url="{{ url_for('gmail_seatalk_demo_gmail_export_prewarm') }}" data-gmail-scope-ready="{{ 'true' if gmail_scope_ready else 'false' }}">
+    <section class="panel panel-wide glass-panel">
+      <div class="panel-head">
+        <div>
+          <p class="eyebrow">Dashboard</p>
+          <h2>Mailbox Overview</h2>
+          <p class="step-copy">This dashboard uses real Gmail mailbox metadata. Trend charts cover the last 7 days.</p>
+        </div>
+        <div class="button-row">
+          {% if gmail_scope_ready %}
+            <div class="button-row" data-gmail-export-buttons>
+              <span class="help-text">Preparing Gmail download batches…</span>
+            </div>
+          {% else %}
+            <a class="button" href="{{ url_for('google_login') }}">Reconnect Google to grant Gmail access</a>
+          {% endif %}
+        </div>
+      </div>
+      <div class="empty-state mail-demo-status" data-mail-demo-status data-tone="neutral">
+        {% if gmail_scope_ready %}
+          <p>Loading Gmail dashboard data…</p>
+        {% else %}
+          <p>Gmail access has not been granted to this Google session yet. Reconnect Google to continue.</p>
+        {% endif %}
+      </div>
+    </section>
+
+    <div class="mail-demo-grid" data-mail-demo-content {% if not gmail_scope_ready %}hidden{% endif %}>
+      <section class="mail-demo-scorecards" data-mail-demo-scorecards></section>
+
+      <section class="mail-demo-chart-grid">
+        <article class="panel glass-panel mail-demo-card">
+          <div class="mail-demo-pill">Inbound trend</div>
+          <h3>Daily Received Volume</h3>
+          <p>Inbound Gmail volume over the last 7 days.</p>
+          <div data-mail-demo-chart="received"></div>
+        </article>
+        <article class="panel glass-panel mail-demo-card">
+          <div class="mail-demo-pill">Outbound trend</div>
+          <h3>Daily Sent Volume</h3>
+          <p>Outbound Gmail volume over the last 7 days.</p>
+          <div data-mail-demo-chart="sent"></div>
+        </article>
+      </section>
+
+      <section
+        class="panel panel-wide glass-panel mail-demo-card"
+        data-seatalk-demo-root
+        data-seatalk-url="{{ url_for('gmail_seatalk_demo_seatalk_api') }}"
+        data-seatalk-export-url="{{ url_for('gmail_seatalk_demo_seatalk_export') }}"
+        data-seatalk-configured="{{ 'true' if seatalk_configured else 'false' }}"
+      >
+        <div class="panel-head">
+          <div>
+            <p class="eyebrow">SeaTalk</p>
+            <h2>SeaTalk Overview</h2>
+            <p class="help-text">SeaTalk metrics cover the last 7 days for the local SeaTalk desktop account on this Mac.</p>
+          </div>
+          <div class="button-row">
+            <a class="button button-secondary" data-seatalk-export-button href="{{ url_for('gmail_seatalk_demo_seatalk_export') }}">
+              Download 7-Day Chat History
+            </a>
+          </div>
+        </div>
+        <div class="empty-state mail-demo-status" data-seatalk-status data-tone="neutral">
+          {% if seatalk_configured %}
+            <p>Loading SeaTalk dashboard data…</p>
+          {% else %}
+            <p>SeaTalk desktop data is not available yet. Open the SeaTalk Mac app on this machine to enable these metrics.</p>
+          {% endif %}
+        </div>
+        <div class="mail-demo-grid" data-seatalk-content {% if not seatalk_configured %}hidden{% endif %}>
+          <section class="mail-demo-scorecards" data-seatalk-scorecards></section>
+          <section class="mail-demo-chart-grid">
+            <article class="panel glass-panel mail-demo-card">
+              <div class="mail-demo-pill">Inbound trend</div>
+              <h3>Daily Received Volume</h3>
+              <p>Inbound SeaTalk messages over the last 7 days.</p>
+              <div data-seatalk-chart="received"></div>
+            </article>
+            <article class="panel glass-panel mail-demo-card">
+              <div class="mail-demo-pill">Outbound trend</div>
+              <h3>Daily Sent Volume</h3>
+              <p>Outbound SeaTalk messages over the last 7 days.</p>
+              <div data-seatalk-chart="sent"></div>
+            </article>
+          </section>
+          <section class="mail-demo-note-grid">
+            <article class="mail-demo-note-card" data-seatalk-note>
+              <strong>Local Status</strong>
+              <p>SeaTalk status note will appear here after the dashboard loads.</p>
+            </article>
+            <article class="mail-demo-note-card">
+              <strong>Data Scope</strong>
+              <p data-seatalk-scope>The portal will summarize the local SeaTalk desktop account visible on this Mac.</p>
+              <div class="mail-demo-source-strip" data-seatalk-meta>
+                <span class="mail-demo-source-tag">7-day window</span>
+              </div>
+            </article>
+          </section>
+        </div>
+      </section>
+    </div>
+  </section>
+{% endblock %}
+
+{% block extra_scripts %}
+  <script src="{{ url_for('static', filename='gmail_seatalk_demo.js', v=asset_revision) }}"></script>
+{% endblock %}

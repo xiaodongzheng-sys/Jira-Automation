@@ -266,5 +266,30 @@ class TeamPortalAccessTests(unittest.TestCase):
                 self.assertEqual(response.mimetype, "text/csv")
                 self.assertIn(b"BPMIS ID,Project Name,Market,BRD Link,System,Jira Title,PRD Link,Description,Jira Ticket Link", response.data)
 
+    def test_allowlist_without_shared_portal_host_does_not_block_local_user_sessions(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_ALLOWED_EMAILS": "xiaodong.zheng1991@gmail.com",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
+            },
+            clear=False,
+        ):
+            app = create_app()
+            app.testing = True
+
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
+                    session["google_credentials"] = {"token": "x"}
+
+                response = client.get("/")
+
+        self.assertEqual(response.status_code, 200)
+
 if __name__ == "__main__":
     unittest.main()

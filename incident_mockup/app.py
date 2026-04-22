@@ -1199,7 +1199,6 @@ def create_app(
     @app.context_processor
     def inject_navigation():
         current_path = request.path or "/"
-        is_outsourcing = current_path.startswith("/outsourcing-management")
         return {
             "site_tabs": [
                 {
@@ -1213,9 +1212,14 @@ def create_app(
                     "active": False,
                 },
                 {
-                    "label": "GRC Demo",
+                    "label": "FE Demo",
                     "href": "/grc-demo/outsourcing-management",
-                    "active": current_path == "/" or current_path.startswith("/"),
+                    "active": True,
+                },
+                {
+                    "label": "Gmail & SeaTalk Demo",
+                    "href": "/gmail-sea-talk-demo",
+                    "active": False,
                 },
             ],
             "nav_items": [
@@ -1227,10 +1231,6 @@ def create_app(
                 {"label": "Parameter Management", "endpoint": "parameter_management"},
                 {"label": "Email Management", "endpoint": "email_management"},
                 {"label": "Report", "endpoint": "reports"},
-            ],
-            "workspace_tabs": [
-                {"label": "Governance, Risk & Compliance (GRC)", "href": "#", "active": False},
-                {"label": "Outsourcing Management", "href": url_for("outsourcing_overview"), "active": is_outsourcing},
             ],
         }
 

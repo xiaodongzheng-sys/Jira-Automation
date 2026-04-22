@@ -11,6 +11,7 @@ from prd_briefing.service import (
     overview_is_low_signal,
     parse_session_overview,
     select_sections_for_overview,
+    truncate_for_prompt,
 )
 from prd_briefing.storage import BriefingStore
 
@@ -400,6 +401,72 @@ class PRDBriefingServiceTests(unittest.TestCase):
         self.assertIn("implementation_overview", payload["session_overview"])
         self.assertEqual(payload["session_overview"]["scope"], [])
         self.assertEqual(payload["session_overview"]["developer_focus"], [])
+
+    def test_developer_overview_reuses_legacy_cached_entry_from_old_model_id(self):
+        self.openai_client.is_configured = lambda: True
+        payload = self.service.create_session(
+            owner_key="anon:test",
+            page_ref="https://example.atlassian.net/wiki/pages/123",
+            mode="walkthrough",
+        )
+        sections = payload["sections"]
+        prioritized_sections = select_sections_for_overview(sections)
+        section_digest = [
+            {
+                "section_path": section["section_path"],
+                "content_excerpt": truncate_for_prompt(section.get("content", ""), 1200),
+            }
+            for section in prioritized_sections[:10]
+        ]
+        overview_payload = json.dumps(
+            {
+                "title": payload["session"]["title"],
+                "section_digest": section_digest,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        with self.store.connect() as conn:
+            conn.execute(
+                """
+                delete from briefing_script_cache
+                where owner_key = ? and audience = ? and prompt_version = ?
+                """,
+                ("anon:test", "developer_zh", "v7_two_part_chinese_summary"),
+            )
+        legacy_summary = json.dumps(
+            {
+                "background_goal": "这是旧缓存里的业务背景。",
+                "implementation_overview": "这是旧缓存里的开发概览，重点是复用旧 model 的摘要缓存。",
+            },
+            ensure_ascii=False,
+        )
+        self.store.cache_script(
+            owner_key="anon:test",
+            audience="developer_zh",
+            model_id="openai:gpt-4.1-mini|gemini:gemini-2.5-flash",
+            prompt_version="v7_two_part_chinese_summary",
+            section_payload=overview_payload,
+            script=legacy_summary,
+        )
+        self.openai_client.answer_calls = 0
+
+        refreshed = self.service.get_session_payload(
+            session_id=payload["session"]["session_id"],
+            owner_key="anon:test",
+        )
+
+        self.assertEqual(refreshed["session_overview"]["background_goal"], "这是旧缓存里的业务背景。")
+        self.assertIn("复用旧 model 的摘要缓存", refreshed["session_overview"]["implementation_overview"])
+        self.assertEqual(self.openai_client.answer_calls, 0)
+        current_model_cached = self.store.get_cached_script(
+            owner_key="anon:test",
+            audience="developer_zh",
+            model_id=self.openai_client.chat_model,
+            prompt_version="v7_two_part_chinese_summary",
+            section_payload=overview_payload,
+        )
+        self.assertEqual(current_model_cached, legacy_summary)
 
     def test_low_signal_overview_is_detected(self):
         overview = {

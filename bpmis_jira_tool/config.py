@@ -54,6 +54,13 @@ class Settings:
     bpmis_api_access_token: str | None
     prd_briefing_owner_email: str = "xiaodong.zheng@npt.sg"
     grc_demo_owner_email: str = "xiaodong.zheng@npt.sg"
+    gmail_seatalk_demo_owner_email: str = "xiaodong.zheng@npt.sg"
+    seatalk_openapi_base_url: str = "https://openapi.seatalk.io"
+    seatalk_app_id: str | None = None
+    seatalk_app_secret: str | None = None
+    seatalk_owner_email: str = "xiaodong.zheng@npt.sg"
+    seatalk_local_app_path: str = "/Applications/SeaTalk.app"
+    seatalk_local_data_dir: str = "~/Library/Application Support/SeaTalk"
     team_portal_config_encryption_key: str | None = None
     confluence_email: str | None = None
     confluence_api_token: str | None = None
@@ -95,6 +102,13 @@ class Settings:
             team_portal_data_dir=Path(_env_str("TEAM_PORTAL_DATA_DIR", ".")),
             prd_briefing_owner_email=_env_str("PRD_BRIEFING_OWNER_EMAIL", "xiaodong.zheng@npt.sg"),
             grc_demo_owner_email=_env_str("GRC_DEMO_OWNER_EMAIL", "xiaodong.zheng@npt.sg"),
+            gmail_seatalk_demo_owner_email=_env_str("GMAIL_SEATALK_DEMO_OWNER_EMAIL", "xiaodong.zheng@npt.sg"),
+            seatalk_openapi_base_url=_env_str("SEATALK_OPENAPI_BASE_URL", "https://openapi.seatalk.io"),
+            seatalk_app_id=_env_str("SEATALK_APP_ID"),
+            seatalk_app_secret=_env_str("SEATALK_APP_SECRET"),
+            seatalk_owner_email=_env_str("SEATALK_OWNER_EMAIL", "xiaodong.zheng@npt.sg"),
+            seatalk_local_app_path=_env_str("SEATALK_LOCAL_APP_PATH", "/Applications/SeaTalk.app"),
+            seatalk_local_data_dir=_env_str("SEATALK_LOCAL_DATA_DIR", "~/Library/Application Support/SeaTalk"),
             team_portal_config_encryption_key=_env_str("TEAM_PORTAL_CONFIG_ENCRYPTION_KEY"),
             spreadsheet_id=_env_str("SPREADSHEET_ID", DEFAULT_SPREADSHEET_ID),
             common_tab_name=_env_str("COMMON_TAB_NAME", "Common"),

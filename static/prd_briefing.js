@@ -16,7 +16,7 @@
   const imageLightboxOpen = document.querySelector('[data-image-lightbox-open]');
   const sessionSubmitButton = sessionForm?.querySelector('button[type="submit"]');
   const chatSubmitButton = chatForm?.querySelector('button[type="submit"]');
-  const CACHED_NARRATION_DELAY_MS = 10000;
+  const CACHED_NARRATION_DELAY_MS = 0;
 
   let state = {
     sessionId: null,

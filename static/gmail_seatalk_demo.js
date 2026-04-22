@@ -1,0 +1,306 @@
+(() => {
+  const gmailRoot = document.querySelector('[data-gmail-demo-root]');
+  const seatalkRoot = document.querySelector('[data-seatalk-demo-root]');
+  if (!gmailRoot && !seatalkRoot) return;
+
+  const escapeHtml = (value) => String(value ?? '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
+
+  const formatNumber = (value) => new Intl.NumberFormat('en-US').format(Number(value || 0));
+  const formatDateTime = (value) => {
+    if (!value) return 'Unknown';
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) return String(value);
+    return new Intl.DateTimeFormat('en-US', {
+      month: 'short',
+      day: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+    }).format(parsed);
+  };
+
+  const parseDashboardResponse = async (response) => {
+    const contentType = response.headers.get('content-type') || '';
+    if (contentType.includes('application/json')) {
+      return response.json();
+    }
+    const text = await response.text();
+    if (response.redirected || contentType.includes('text/html')) {
+      throw new Error('The dashboard request returned an HTML page instead of API data. Please refresh the portal and sign in again if needed.');
+    }
+    throw new Error(text || 'Could not load dashboard data.');
+  };
+
+  const setScopedStatus = (root, selector, message, tone = 'neutral') => {
+    const node = root?.querySelector(selector);
+    if (!node) return;
+    node.dataset.tone = tone;
+    node.innerHTML = `<p>${escapeHtml(message)}</p>`;
+    node.hidden = false;
+  };
+
+  const hideScopedStatus = (root, selector) => {
+    const node = root?.querySelector(selector);
+    if (!node) return;
+    node.hidden = true;
+  };
+
+  const renderCards = (container, cards) => {
+    if (!container) return;
+    container.innerHTML = cards.map((card) => `
+      <article class="mail-demo-scorecard">
+        <strong>${escapeHtml(card.label)}</strong>
+        <span>${escapeHtml(card.value)}</span>
+        <small>${escapeHtml(card.detail)}</small>
+      </article>
+    `).join('');
+  };
+
+  const renderSourceTags = (container, tags) => {
+    if (!container) return;
+    const rows = (Array.isArray(tags) ? tags : []).filter(Boolean);
+    container.innerHTML = rows.map((tag) => `<span class="mail-demo-source-tag">${escapeHtml(tag)}</span>`).join('');
+  };
+
+  const renderChart = (container, series) => {
+    if (!container) return;
+    const rows = Array.isArray(series) ? series : [];
+    if (!rows.length) {
+      container.innerHTML = '<div class="mail-demo-chart-empty"><p>No activity was found for this time range.</p></div>';
+      return;
+    }
+    const width = 680;
+    const height = 230;
+    const padding = { top: 20, right: 22, bottom: 28, left: 24 };
+    const usableWidth = width - padding.left - padding.right;
+    const usableHeight = height - padding.top - padding.bottom;
+    const maxValue = Math.max(...rows.map((row) => Number(row.count || 0)), 1);
+    const points = rows.map((row, index) => {
+      const x = padding.left + (rows.length === 1 ? usableWidth / 2 : (usableWidth * index) / (rows.length - 1));
+      const y = padding.top + usableHeight - ((Number(row.count || 0) / maxValue) * usableHeight);
+      return { x, y, count: Number(row.count || 0), label: row.label || row.date || '' };
+    });
+    const peakPoint = points.reduce((best, point) => (point.count > best.count ? point : best), points[0]);
+    const polyline = points.map((point) => `${point.x},${point.y}`).join(' ');
+    const horizontalGrid = [0, 0.25, 0.5, 0.75, 1].map((ratio) => {
+      const y = padding.top + usableHeight - (ratio * usableHeight);
+      return `<line x1="${padding.left}" y1="${y}" x2="${width - padding.right}" y2="${y}" stroke="rgba(96, 120, 162, 0.14)" stroke-width="1" />`;
+    }).join('');
+    const circles = points.map((point) => `
+      <g>
+        <circle cx="${point.x}" cy="${point.y}" r="4.5" fill="#2c6de6" />
+        <title>${escapeHtml(`${point.label}: ${point.count}`)}</title>
+      </g>
+    `).join('');
+    const startLabel = rows[0]?.label || '';
+    const endLabel = rows[rows.length - 1]?.label || '';
+    const peakText = `Peak: ${peakPoint.count}`;
+    const peakLabelWidth = Math.max(76, 18 + (peakText.length * 6.4));
+    const peakLabelX = Math.min(width - padding.right - (peakLabelWidth / 2), Math.max(padding.left + (peakLabelWidth / 2), peakPoint.x));
+    const peakAboveY = peakPoint.y - 18;
+    const peakBelowY = peakPoint.y + 28;
+    const peakLabelY = peakAboveY >= padding.top + 12 ? peakAboveY : Math.min(height - padding.bottom - 10, peakBelowY);
+    const connectorY = peakLabelY < peakPoint.y ? peakLabelY + 6 : peakLabelY - 18;
+    container.innerHTML = `
+      <svg class="mail-demo-chart" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" role="img" aria-label="Activity trend">
+        ${horizontalGrid}
+        <polyline fill="none" stroke="#2c6de6" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" points="${polyline}" />
+        ${circles}
+        <text x="${padding.left}" y="${height - 8}" fill="#7b8aab" font-size="11">${escapeHtml(startLabel)}</text>
+        <text x="${width - padding.right}" y="${height - 8}" fill="#7b8aab" font-size="11" text-anchor="end">${escapeHtml(endLabel)}</text>
+        <g>
+          <line x1="${peakPoint.x}" y1="${peakPoint.y}" x2="${peakLabelX}" y2="${connectorY}" stroke="rgba(96,120,162,0.28)" stroke-width="1.5" />
+          <rect x="${peakLabelX - (peakLabelWidth / 2)}" y="${peakLabelY - 13}" width="${peakLabelWidth}" height="20" rx="10" fill="rgba(255,255,255,0.92)" stroke="rgba(96,120,162,0.18)" />
+          <text x="${peakLabelX}" y="${peakLabelY}" fill="#42577f" font-size="11" font-weight="600" text-anchor="middle">${escapeHtml(peakText)}</text>
+        </g>
+      </svg>
+    `;
+  };
+
+  const buildMetricValue = (value, availability) => {
+    if (value === null || value === undefined) {
+      return 'N/A';
+    }
+    if (typeof value === 'number') {
+      return formatNumber(value);
+    }
+    return String(value);
+  };
+
+  const renderGmailExportButtons = (container, exportUrl, manifest) => {
+    if (!container) return;
+    const batchCount = Number(manifest?.batch_count || 0);
+    const totalMessages = Number(manifest?.total_messages || 0);
+    const batchSize = Number(manifest?.batch_size || 100);
+    const estimated = manifest?.estimated === true;
+    if (!batchCount || !totalMessages) {
+      container.innerHTML = `
+        <span class="help-text">No recent inbox emails were available for Gmail download batches.</span>
+      `;
+      return;
+    }
+    const buttons = Array.from({ length: batchCount }, (_value, index) => {
+      const batchNumber = index + 1;
+      const start = (index * batchSize) + 1;
+      const end = Math.min(totalMessages, start + batchSize - 1);
+      return `
+        <a class="button button-secondary" data-gmail-export-button href="${escapeHtml(`${exportUrl}?batch=${batchNumber}`)}">
+          Download Emails ${start}-${end}
+        </a>
+      `;
+    }).join('');
+    container.innerHTML = `
+      <div class="button-row">${buttons}</div>
+      <span class="help-text">${escapeHtml(
+        estimated
+          ? `${formatNumber(totalMessages)} recent inbox emails were counted to prepare download batches quickly. Final batch contents are filtered during download.`
+          : `${formatNumber(totalMessages)} exportable inbox emails found in the last 7 days.`
+      )}</span>
+    `;
+  };
+
+  const renderGmail = async () => {
+    if (!gmailRoot) return;
+    const dashboardUrl = gmailRoot.dataset.dashboardUrl || '';
+    const exportUrl = gmailRoot.dataset.gmailExportUrl || '';
+    const exportManifestUrl = gmailRoot.dataset.gmailExportManifestUrl || '';
+    const gmailScopeReady = gmailRoot.dataset.gmailScopeReady === 'true';
+    const contentNode = gmailRoot.querySelector('[data-mail-demo-content]');
+    const scorecardsNode = gmailRoot.querySelector('[data-mail-demo-scorecards]');
+    const receivedChartNode = gmailRoot.querySelector('[data-mail-demo-chart="received"]');
+    const sentChartNode = gmailRoot.querySelector('[data-mail-demo-chart="sent"]');
+    const exportButtonsNode = gmailRoot.querySelector('[data-gmail-export-buttons]');
+    if (!gmailScopeReady) return;
+    setScopedStatus(gmailRoot, '[data-mail-demo-status]', 'Loading Gmail dashboard data…', 'neutral');
+    try {
+      const dashboardResponse = await fetch(dashboardUrl, { method: 'GET' });
+      const payload = await parseDashboardResponse(dashboardResponse);
+      if (!dashboardResponse.ok) throw new Error(payload.message || 'Could not load Gmail dashboard data.');
+      renderCards(scorecardsNode, [
+        {
+          label: 'Received Today',
+          value: buildMetricValue(payload.summary?.received_today),
+          detail: `${formatNumber(payload.summary?.received_period_total)} inbound messages in the last 7 days`,
+        },
+        {
+          label: 'Current Unread',
+          value: buildMetricValue(payload.summary?.current_unread),
+          detail: 'Current unread Gmail inbox messages',
+        },
+        {
+          label: 'Read Rate',
+          value: payload.summary?.read_rate_percent === null || payload.summary?.read_rate_percent === undefined
+            ? 'N/A'
+            : `${buildMetricValue(payload.summary?.read_rate_percent)}%`,
+          detail: 'Calculated from inbox messages over the last 7 days',
+        },
+      ]);
+      renderChart(receivedChartNode, payload.trends?.received || []);
+      renderChart(sentChartNode, payload.trends?.sent || []);
+      if (exportButtonsNode) {
+        exportButtonsNode.innerHTML = '<span class="help-text">Preparing Gmail download batches…</span>';
+      }
+      if (exportManifestUrl) {
+        const loadExportManifest = () => {
+          fetch(exportManifestUrl, { method: 'GET' })
+            .then(parseDashboardResponse)
+            .then((exportManifest) => {
+              renderGmailExportButtons(exportButtonsNode, exportUrl, exportManifest);
+            })
+            .catch(() => {
+              if (exportButtonsNode) {
+                exportButtonsNode.innerHTML = '<span class="help-text">Gmail download batches are temporarily unavailable. The mailbox overview is still up to date.</span>';
+              }
+            });
+        };
+        if ('requestIdleCallback' in window) {
+          window.requestIdleCallback(loadExportManifest, { timeout: 800 });
+        } else {
+          window.setTimeout(loadExportManifest, 120);
+        }
+      }
+      if (contentNode) contentNode.hidden = false;
+      hideScopedStatus(gmailRoot, '[data-mail-demo-status]');
+    } catch (error) {
+      if (contentNode) contentNode.hidden = true;
+      setScopedStatus(gmailRoot, '[data-mail-demo-status]', error.message || 'Could not load Gmail dashboard data.', 'error');
+    }
+  };
+
+  const renderSeaTalk = async () => {
+    if (!seatalkRoot) return;
+    const seatalkConfigured = seatalkRoot.dataset.seatalkConfigured === 'true';
+    const seatalkUrl = seatalkRoot.dataset.seatalkUrl || '';
+    const exportUrl = seatalkRoot.dataset.seatalkExportUrl || '';
+    const contentNode = seatalkRoot.querySelector('[data-seatalk-content]');
+    const scorecardsNode = seatalkRoot.querySelector('[data-seatalk-scorecards]');
+    const receivedChartNode = seatalkRoot.querySelector('[data-seatalk-chart="received"]');
+    const sentChartNode = seatalkRoot.querySelector('[data-seatalk-chart="sent"]');
+    const noteNode = seatalkRoot.querySelector('[data-seatalk-note]');
+    const scopeNode = seatalkRoot.querySelector('[data-seatalk-scope]');
+    const metaNode = seatalkRoot.querySelector('[data-seatalk-meta]');
+    const exportButton = seatalkRoot.querySelector('[data-seatalk-export-button]');
+    if (!seatalkConfigured) return;
+    if (exportButton && exportUrl) {
+      exportButton.href = exportUrl;
+    }
+    setScopedStatus(seatalkRoot, '[data-seatalk-status]', 'Loading SeaTalk dashboard data…', 'neutral');
+    try {
+      const response = await fetch(seatalkUrl, { method: 'GET' });
+      const payload = await parseDashboardResponse(response);
+      if (!response.ok) throw new Error(payload.message || 'Could not load SeaTalk dashboard data.');
+      const availability = payload.metric_availability || {};
+      const unreadAvailability = availability.current_unread || {};
+      const readRateAvailability = availability.read_rate_percent || {};
+      renderCards(scorecardsNode, [
+        {
+          label: 'Received Today',
+          value: buildMetricValue(payload.summary?.received_today),
+          detail: `${formatNumber(payload.summary?.received_period_total)} inbound SeaTalk messages in the last 7 days`,
+        },
+        {
+          label: 'Current Unread',
+          value: buildMetricValue(payload.summary?.current_unread),
+          detail: unreadAvailability.available ? 'Current unread SeaTalk conversations' : (unreadAvailability.reason || 'Not available'),
+        },
+        {
+          label: 'Read Rate',
+          value: payload.summary?.read_rate_percent === null || payload.summary?.read_rate_percent === undefined
+            ? 'N/A'
+            : `${buildMetricValue(payload.summary?.read_rate_percent)}%`,
+          detail: readRateAvailability.available
+            ? 'Estimated as (Received Today - Current Unread) / Received Today'
+            : (readRateAvailability.reason || 'Not available'),
+        },
+      ]);
+      renderChart(receivedChartNode, payload.trends?.received || []);
+      renderChart(sentChartNode, payload.trends?.sent || []);
+      if (noteNode) {
+        noteNode.innerHTML = `
+          <strong>Local Status</strong>
+          <p>${escapeHtml(payload.data_quality?.status_note || 'SeaTalk metrics loaded.')}</p>
+        `;
+      }
+      if (scopeNode) {
+        scopeNode.textContent = payload.data_quality?.source_scope || 'SeaTalk metrics are loaded from local desktop chat data on this Mac.';
+      }
+      renderSourceTags(metaNode, [
+        `${formatNumber(payload.period_days || 7)}-day window`,
+        payload.data_quality?.current_account_uid ? `UID ${payload.data_quality.current_account_uid}` : '',
+        `Updated ${formatDateTime(payload.generated_at)}`,
+      ]);
+      if (contentNode) contentNode.hidden = false;
+      hideScopedStatus(seatalkRoot, '[data-seatalk-status]');
+    } catch (error) {
+      if (contentNode) contentNode.hidden = true;
+      setScopedStatus(seatalkRoot, '[data-seatalk-status]', error.message || 'Could not load SeaTalk dashboard data.', 'error');
+    }
+  };
+
+  renderGmail();
+  renderSeaTalk();
+})();

@@ -760,6 +760,24 @@ class PRDBriefingService:
                     parsed_cached = parse_developer_overview_payload(cached.strip())
                     if parsed_cached.get("overview"):
                         return parsed_cached
+                legacy_cached = self.store.get_cached_script_any_model(
+                    owner_key=owner_key,
+                    audience=DEVELOPER_AUDIENCE,
+                    prompt_version=SESSION_BRIEF_PROMPT_VERSION,
+                    section_payload=payload,
+                )
+                if legacy_cached:
+                    parsed_legacy = parse_developer_overview_payload(legacy_cached.strip())
+                    if parsed_legacy.get("overview"):
+                        self.store.cache_script(
+                            owner_key=owner_key,
+                            audience=DEVELOPER_AUDIENCE,
+                            model_id=model_id,
+                            prompt_version=SESSION_BRIEF_PROMPT_VERSION,
+                            section_payload=payload,
+                            script=legacy_cached,
+                        )
+                        return parsed_legacy
                 system_prompt = (
                     "你在帮中国开发团队快速理解一份英文 PRD。"
                     "请基于提供的 PRD 细节，产出高质量、自然、全中文的开发摘要。"
