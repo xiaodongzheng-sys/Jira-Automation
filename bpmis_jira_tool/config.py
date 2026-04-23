@@ -53,7 +53,6 @@ class Settings:
     bpmis_base_url: str
     bpmis_api_access_token: str | None
     prd_briefing_owner_email: str = "xiaodong.zheng@npt.sg"
-    grc_demo_owner_email: str = "xiaodong.zheng@npt.sg"
     gmail_seatalk_demo_owner_email: str = "xiaodong.zheng@npt.sg"
     seatalk_openapi_base_url: str = "https://openapi.seatalk.io"
     seatalk_app_id: str | None = None
@@ -101,7 +100,6 @@ class Settings:
             team_allowed_email_domains=_env_csv("TEAM_ALLOWED_EMAIL_DOMAINS"),
             team_portal_data_dir=Path(_env_str("TEAM_PORTAL_DATA_DIR", ".")),
             prd_briefing_owner_email=_env_str("PRD_BRIEFING_OWNER_EMAIL", "xiaodong.zheng@npt.sg"),
-            grc_demo_owner_email=_env_str("GRC_DEMO_OWNER_EMAIL", "xiaodong.zheng@npt.sg"),
             gmail_seatalk_demo_owner_email=_env_str("GMAIL_SEATALK_DEMO_OWNER_EMAIL", "xiaodong.zheng@npt.sg"),
             seatalk_openapi_base_url=_env_str("SEATALK_OPENAPI_BASE_URL", "https://openapi.seatalk.io"),
             seatalk_app_id=_env_str("SEATALK_APP_ID"),

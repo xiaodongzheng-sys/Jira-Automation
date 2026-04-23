@@ -230,7 +230,7 @@ class GoogleSheetsParsingTests(unittest.TestCase):
         self.assertEqual(repeat_cell["range"]["endColumnIndex"], 2)
         self.assertEqual(repeat_cell["cell"]["userEnteredFormat"]["wrapStrategy"], "CLIP")
         self.assertEqual(repeat_cell["cell"]["userEnteredFormat"]["textFormat"]["underline"], True)
-        self.assertEqual(repeat_cell["cell"]["userEnteredFormat"]["textFormat"]["fontSize"], 12)
+        self.assertEqual(repeat_cell["cell"]["userEnteredFormat"]["textFormat"]["fontSize"], 10)
 
 
 if __name__ == "__main__":

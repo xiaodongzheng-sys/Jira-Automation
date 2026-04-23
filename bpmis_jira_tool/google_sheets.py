@@ -147,7 +147,7 @@ class GoogleSheetsService:
                         end_row_index=row_number,
                         column_index=jira_ticket_link_index,
                         clip_text=True,
-                        font_size=12,
+                        font_size=10,
                     )
                 ]
             },

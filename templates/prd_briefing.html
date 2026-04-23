@@ -156,5 +156,5 @@
 {% endblock %}
 
 {% block extra_scripts %}
-  <script src="{{ url_for('static', filename='prd_briefing.js') }}"></script>
+  <script src="{{ url_for('static', filename='prd_briefing.js', v=asset_revision) }}"></script>
 {% endblock %}

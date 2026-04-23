@@ -85,6 +85,22 @@
     window.setTimeout(resolve, durationMs);
   });
 
+  const parseJsonResponse = async (response) => {
+    const contentType = String(response.headers.get('content-type') || '').toLowerCase();
+    if (contentType.includes('application/json')) {
+      return response.json();
+    }
+
+    const text = await response.text().catch(() => '');
+    if (response.redirected) {
+      throw new Error('当前会话已失效或需要重新登录，请刷新页面后重试。');
+    }
+    if (text.trim().startsWith('<!DOCTYPE') || text.trim().startsWith('<html')) {
+      throw new Error('服务端返回了页面而不是接口结果。请刷新页面后重试；如果还不行，通常是登录态失效或服务短暂异常。');
+    }
+    throw new Error(`接口返回格式异常（${contentType || 'unknown'}）。`);
+  };
+
   const renderReaderMode = () => {
     const enabled = Boolean(state.readerMode);
     document.body.classList.toggle('briefing-reader-mode', enabled);
@@ -255,7 +271,7 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ section_index: state.currentSectionIndex, include_audio: true }),
       });
-      const payload = await response.json();
+      const payload = await parseJsonResponse(response);
       if (!response.ok) throw new Error(payload.message || '当前 section 无法生成讲解。');
       if (payload.cached) {
         setWalkthroughStatus('命中缓存，正在整理这一节的中文讲解并准备播放…', 'neutral');
@@ -471,7 +487,7 @@
             mode: formData.get('mode'),
           }),
         });
-        const payload = await response.json();
+        const payload = await parseJsonResponse(response);
         if (!response.ok) throw new Error(payload.message || '当前无法生成 PRD 讲解。');
         applySessionPayload(payload);
       } catch (error) {
@@ -505,7 +521,7 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ question }),
         });
-        const payload = await response.json();
+        const payload = await parseJsonResponse(response);
         if (!response.ok) throw new Error(payload.message || '当前无法回答这个问题。');
         const userBubble = { role: 'user', body: question };
         const assistantBubble = {

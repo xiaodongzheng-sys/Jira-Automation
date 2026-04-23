@@ -264,7 +264,7 @@ class TeamPortalAccessTests(unittest.TestCase):
                 response = client.get("/download/default-sheet-template.csv")
                 self.assertEqual(response.status_code, 200)
                 self.assertEqual(response.mimetype, "text/csv")
-                self.assertIn(b"BPMIS ID,Project Name,Market,BRD Link,System,Jira Title,PRD Link,Description,Jira Ticket Link", response.data)
+                self.assertIn(b"BPMIS ID,Project Name,BRD Link,Market,System,Jira Title,PRD Link,Description,Jira Ticket Link", response.data)
 
     def test_allowlist_without_shared_portal_host_does_not_block_local_user_sessions(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(

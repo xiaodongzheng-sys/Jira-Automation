@@ -196,8 +196,8 @@ class WebPortalFeatureTests(unittest.TestCase):
             [
                 "BPMIS ID",
                 "Project Name",
-                "Market",
                 "BRD Link",
+                "Market",
                 "System",
                 "Jira Title",
                 "PRD Link",
@@ -206,7 +206,8 @@ class WebPortalFeatureTests(unittest.TestCase):
             ],
         )
         self.assertEqual("225159", worksheet["A2"].value)
-        self.assertEqual("https://docs.google.com/document/d/example", worksheet["D2"].value)
+        self.assertEqual("https://docs.google.com/document/d/example", worksheet["C2"].value)
+        self.assertEqual("SG", worksheet["D2"].value)
         self.assertEqual("https://confluence/example-prd", worksheet["G2"].value)
         self.assertEqual("Detailed Jira description goes here.", worksheet["H2"].value)
         self.assertIsNone(worksheet["A1"].fill.fill_type)

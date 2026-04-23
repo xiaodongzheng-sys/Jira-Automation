@@ -16,8 +16,8 @@ DB_FILE = "team_portal.db"
 DEFAULT_SHEET_HEADERS = [
     "BPMIS ID",
     "Project Name",
-    "Market",
     "BRD Link",
+    "Market",
     "System",
     "Jira Title",
     "PRD Link",
@@ -141,13 +141,13 @@ SOURCE_FIELDS = {
     "jira_ticket_link_header": "Jira Ticket Link",
     "sync_pm_email": "",
     "sync_project_name_header": DEFAULT_SHEET_HEADERS[1],
-    "sync_market_header": DEFAULT_SHEET_HEADERS[2],
-    "sync_brd_link_header": DEFAULT_SHEET_HEADERS[3],
+    "sync_market_header": DEFAULT_SHEET_HEADERS[3],
+    "sync_brd_link_header": DEFAULT_SHEET_HEADERS[2],
     "component_route_rules_text": "",
     "component_default_rules_text": "",
 }
 HEADER_FIELDS = {
-    "Market": ("market_header", DEFAULT_SHEET_HEADERS[2]),
+    "Market": ("market_header", DEFAULT_SHEET_HEADERS[3]),
     "System": ("system_header", DEFAULT_SHEET_HEADERS[4]),
     "Summary": ("summary_header", DEFAULT_SHEET_HEADERS[5]),
     "PRD Link/s": ("prd_links_header", DEFAULT_SHEET_HEADERS[6]),

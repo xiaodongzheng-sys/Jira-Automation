@@ -22,7 +22,6 @@ from dotenv import load_dotenv
 from google.oauth2.credentials import Credentials
 from openpyxl import Workbook
 from openpyxl.styles import Font
-from werkzeug.middleware.dispatcher import DispatcherMiddleware
 
 from bpmis_jira_tool.config import Settings
 from bpmis_jira_tool.errors import ConfigError, ToolError
@@ -47,7 +46,6 @@ from bpmis_jira_tool.user_config import (
 )
 from prd_briefing import create_prd_briefing_blueprint
 from prd_briefing.storage import BriefingStore
-from incident_mockup.app import create_app as create_incident_mockup_app
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -350,14 +348,8 @@ def create_app() -> Flask:
     app.config["PRD_BRIEFING_STORE"] = BriefingStore(data_root / "prd_briefing")
     app.config["GET_USER_IDENTITY"] = lambda: _get_user_identity(settings)
     app.config["CAN_ACCESS_PRD_BRIEFING"] = lambda: _can_access_prd_briefing(settings)
-    app.config["CAN_ACCESS_GRC_DEMO"] = lambda: _can_access_grc_demo(settings)
     app.config["CAN_ACCESS_GMAIL_SEATALK_DEMO"] = lambda: _can_access_gmail_seatalk_demo(settings)
     app.register_blueprint(create_prd_briefing_blueprint())
-    grc_demo_app = create_incident_mockup_app(
-        owner_email=settings.grc_demo_owner_email,
-        secret_key=settings.flask_secret_key,
-    )
-    app.wsgi_app = DispatcherMiddleware(app.wsgi_app, {"/grc-demo": grc_demo_app.wsgi_app})
 
     @app.context_processor
     def inject_primary_navigation():
@@ -367,7 +359,6 @@ def create_app() -> Flask:
                 "site_tabs": [],
                 "site_requires_google_login": True,
                 "can_access_prd_briefing": False,
-                "can_access_grc_demo": False,
             }
         site_tabs = [
             {
@@ -384,14 +375,6 @@ def create_app() -> Flask:
                     "active": current_endpoint.startswith("prd_briefing"),
                 }
             )
-        if _can_access_grc_demo(settings):
-            site_tabs.append(
-                {
-                    "label": "FE Demo",
-                    "href": "/grc-demo/outsourcing-management",
-                    "active": request.path.startswith("/grc-demo/"),
-                }
-            )
         if _can_access_gmail_seatalk_demo(settings):
             site_tabs.append(
                 {
@@ -404,8 +387,8 @@ def create_app() -> Flask:
             "site_tabs": site_tabs,
             "site_requires_google_login": _site_requires_google_login(settings),
             "can_access_prd_briefing": _can_access_prd_briefing(settings),
-            "can_access_grc_demo": _can_access_grc_demo(settings),
             "can_access_gmail_seatalk_demo": _can_access_gmail_seatalk_demo(settings),
+            "asset_revision": _current_release_revision(),
         }
 
     @app.before_request
@@ -1144,8 +1127,8 @@ def create_app() -> Flask:
         sample_row = [
             "225159",
             "Standalone Cash Loan",
-            "SG",
             "https://docs.google.com/document/d/example",
+            "SG",
             "AF",
             "Fraud rule improvement",
             "https://confluence/example-prd",
@@ -1173,8 +1156,8 @@ def create_app() -> Flask:
         sample_row = [
             "225159",
             "Standalone Cash Loan",
-            "SG",
             "https://docs.google.com/document/d/example",
+            "SG",
             "AF",
             "Fraud rule improvement",
             "https://confluence/example-prd",
@@ -1634,11 +1617,6 @@ def _google_session_is_connected() -> bool:
 def _can_access_prd_briefing(settings: Settings) -> bool:
     email = _current_google_email()
     return bool(email and email == settings.prd_briefing_owner_email.strip().lower())
-
-
-def _can_access_grc_demo(settings: Settings) -> bool:
-    email = _current_google_email()
-    return bool(email and email == settings.grc_demo_owner_email.strip().lower())
 
 
 def _can_access_gmail_seatalk_demo(settings: Settings) -> bool:
