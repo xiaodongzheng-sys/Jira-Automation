@@ -24,7 +24,7 @@ CRMS_COUNTRIES = ("SG", "ID", "PH")
 ANSWER_MODE = "retrieval_only"
 ANSWER_MODE_GEMINI = "gemini_flash"
 CONFIG_VERSION = 1
-CODE_INDEX_VERSION = 3
+CODE_INDEX_VERSION = 4
 GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 DEFAULT_DOMAIN_PROFILE_PATH = Path(__file__).resolve().parent.parent / "config" / "source_code_qa_domain_profiles.json"
 LLM_BUDGETS = {
@@ -219,6 +219,7 @@ DATA_CARRIER_SUFFIXES = (
     "do", "entity", "model", "profile", "info", "wrap",
 )
 QUALITY_GATE_TRACE_STAGE = "quality_gate"
+TOOL_LOOP_TRACE_PREFIX = "tool_loop_"
 
 
 @dataclass(frozen=True)
@@ -770,6 +771,7 @@ class SourceCodeQAService:
             "definitions": int(metadata.get("indexed_definitions") or 0),
             "references": int(metadata.get("indexed_references") or 0),
             "edges": int(metadata.get("indexed_edges") or 0),
+            "flow_edges": int(metadata.get("indexed_flow_edges") or 0),
             "fts_enabled": metadata.get("fts_enabled") == "1",
             "updated_at": metadata.get("updated_at"),
         }
@@ -860,6 +862,21 @@ class SourceCodeQAService:
                 create index idx_graph_from_file on graph_edges(from_file);
                 create index idx_graph_lower_symbol on graph_edges(lower_symbol);
                 create index idx_graph_to_file on graph_edges(to_file);
+                create table flow_edges (
+                    from_file text not null,
+                    from_line integer not null,
+                    from_kind text not null,
+                    from_name text not null,
+                    edge_kind text not null,
+                    to_name text not null,
+                    to_file text not null,
+                    to_line integer not null,
+                    evidence text not null
+                );
+                create index idx_flow_from_file on flow_edges(from_file);
+                create index idx_flow_to_file on flow_edges(to_file);
+                create index idx_flow_to_name on flow_edges(to_name);
+                create index idx_flow_edge_kind on flow_edges(edge_kind);
                 """
             )
             fts_enabled = self._try_create_fts(connection)
@@ -928,6 +945,7 @@ class SourceCodeQAService:
                 indexed_definitions += len(structure["definitions"])
                 indexed_references += len(structure["references"])
             indexed_edges = self._build_graph_edges(connection)
+            indexed_flow_edges = self._build_flow_edges(connection)
             metadata = {
                 "version": str(CODE_INDEX_VERSION),
                 "file_count": str(fingerprint["file_count"]),
@@ -938,6 +956,7 @@ class SourceCodeQAService:
                 "indexed_definitions": str(indexed_definitions),
                 "indexed_references": str(indexed_references),
                 "indexed_edges": str(indexed_edges),
+                "indexed_flow_edges": str(indexed_flow_edges),
                 "fts_enabled": "1" if fts_enabled else "0",
                 "updated_at": self._now_iso(),
             }
@@ -951,6 +970,7 @@ class SourceCodeQAService:
             "definitions": indexed_definitions,
             "references": indexed_references,
             "edges": indexed_edges,
+            "flow_edges": indexed_flow_edges,
             "fts_enabled": fts_enabled,
             "updated_at": metadata["updated_at"],
         }
@@ -990,6 +1010,112 @@ class SourceCodeQAService:
             rows,
         )
         return len(rows)
+
+    @staticmethod
+    def _build_flow_edges(connection: sqlite3.Connection) -> int:
+        rows: list[tuple[str, int, str, str, str, str, str, int, str]] = []
+
+        for target, kind, file_path, line_no, context in connection.execute(
+            """
+            select target, kind, file_path, line_no, context
+            from references_index
+            where kind in ('route', 'sql_table')
+            """
+        ):
+            edge_kind = "route" if str(kind) == "route" else "sql_table"
+            rows.append(
+                (
+                    str(file_path),
+                    int(line_no),
+                    SourceCodeQAService._flow_role_for_path(str(file_path)),
+                    SourceCodeQAService._flow_name_for_path(str(file_path)),
+                    edge_kind,
+                    str(target),
+                    "",
+                    0,
+                    str(context or "")[:500],
+                )
+            )
+
+        for from_file, from_line, symbol, edge_kind, to_file, to_line in connection.execute(
+            """
+            select from_file, from_line, symbol, edge_kind, to_file, to_line
+            from graph_edges
+            """
+        ):
+            classified = SourceCodeQAService._classify_flow_edge(
+                str(edge_kind),
+                str(from_file),
+                str(to_file),
+                str(symbol),
+            )
+            rows.append(
+                (
+                    str(from_file),
+                    int(from_line),
+                    SourceCodeQAService._flow_role_for_path(str(from_file)),
+                    SourceCodeQAService._flow_name_for_path(str(from_file)),
+                    classified,
+                    str(symbol),
+                    str(to_file),
+                    int(to_line),
+                    f"{edge_kind} {symbol}".strip()[:500],
+                )
+            )
+
+        rows = list(dict.fromkeys(rows))
+        connection.executemany(
+            """
+            insert into flow_edges(from_file, from_line, from_kind, from_name, edge_kind, to_name, to_file, to_line, evidence)
+            values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            rows,
+        )
+        return len(rows)
+
+    @staticmethod
+    def _flow_name_for_path(path: str) -> str:
+        return Path(str(path or "unknown")).stem or "unknown"
+
+    @staticmethod
+    def _flow_role_for_path(path: str) -> str:
+        lowered = str(path or "").lower()
+        if any(term in lowered for term in ("controller", "/api/", "/web/")):
+            return "controller"
+        if "service" in lowered:
+            return "service"
+        if "repository" in lowered:
+            return "repository"
+        if "mapper" in lowered:
+            return "mapper"
+        if "dao" in lowered:
+            return "dao"
+        if any(term in lowered for term in ("client", "integration", "gateway", "adapter")):
+            return "client"
+        if any(term in lowered for term in ("config", "properties", ".yml", ".yaml")):
+            return "config"
+        return "code"
+
+    @staticmethod
+    def _classify_flow_edge(reference_kind: str, from_file: str, to_file: str, symbol: str) -> str:
+        del from_file
+        lowered_symbol = str(symbol or "").lower()
+        to_role = SourceCodeQAService._flow_role_for_path(to_file)
+        if str(reference_kind) == "route":
+            return "route"
+        if str(reference_kind) == "sql_table":
+            return "sql_table"
+        if to_role in {"repository", "mapper", "dao"}:
+            return to_role
+        if to_role == "service":
+            return "service"
+        if to_role == "controller":
+            return "controller"
+        if to_role == "client" or any(suffix in lowered_symbol for suffix in ("client", "integration", "gateway")):
+            return "client"
+        if to_role == "config":
+            return "config"
+        return "call"
 
     def _extract_structure_rows(self, relative_path: str, lines: list[str]) -> dict[str, list[tuple[Any, ...]]]:
         definitions: list[tuple[Any, ...]] = []
@@ -1058,7 +1184,7 @@ class SourceCodeQAService:
         index_path = self._index_path(repo_path)
         matches: list[dict[str, Any]] = []
         repo_score = self._repo_match_score(entry, tokens)
-        trace_stage_bonus = 90 if trace_stage == "two_hop" or trace_stage.startswith("agent_trace") or trace_stage.startswith("agent_plan") or trace_stage == QUALITY_GATE_TRACE_STAGE else 0
+        trace_stage_bonus = 90 if trace_stage == "two_hop" or trace_stage.startswith(TOOL_LOOP_TRACE_PREFIX) or trace_stage.startswith("agent_trace") or trace_stage.startswith("agent_plan") or trace_stage == QUALITY_GATE_TRACE_STAGE else 0
         normalized_focus_terms = [term.lower() for term in (focus_terms or []) if term]
         query_terms = list(dict.fromkeys([*tokens, *normalized_focus_terms]))
         file_hits: dict[str, dict[str, Any]] = {}
@@ -1314,7 +1440,7 @@ class SourceCodeQAService:
     ) -> list[dict[str, Any]]:
         matches: list[dict[str, Any]] = []
         repo_score = self._repo_match_score(entry, tokens)
-        trace_stage_bonus = 90 if trace_stage == "two_hop" or trace_stage.startswith("agent_trace") or trace_stage.startswith("agent_plan") or trace_stage == QUALITY_GATE_TRACE_STAGE else 0
+        trace_stage_bonus = 90 if trace_stage == "two_hop" or trace_stage.startswith(TOOL_LOOP_TRACE_PREFIX) or trace_stage.startswith("agent_trace") or trace_stage.startswith("agent_plan") or trace_stage == QUALITY_GATE_TRACE_STAGE else 0
         normalized_focus_terms = [term.lower() for term in (focus_terms or []) if term]
         for file_path in self._iter_text_files(repo_path):
             relative_path = file_path.relative_to(repo_path)
@@ -1485,6 +1611,8 @@ class SourceCodeQAService:
             parts.append("dependency trace")
         elif trace_stage == "two_hop":
             parts.append("two-hop trace")
+        elif trace_stage.startswith(TOOL_LOOP_TRACE_PREFIX):
+            parts.append("planner tool trace")
         elif trace_stage.startswith("agent_trace"):
             parts.append("agent trace")
         elif trace_stage.startswith("agent_plan"):
@@ -1676,46 +1804,205 @@ class SourceCodeQAService:
         base_matches: list[dict[str, Any]],
         limit: int,
     ) -> list[dict[str, Any]]:
-        plan = self._build_tool_loop_plan(question, base_matches)
         collected: list[dict[str, Any]] = []
-        seen = {(item["repo"], item["path"], item["line_start"], item["line_end"]) for item in base_matches}
-        for step_index, step in enumerate(plan, start=1):
-            tool = step["tool"]
-            terms = step["terms"]
-            step_matches: list[dict[str, Any]] = []
-            for entry in entries:
-                repo_path = self._repo_path(key, entry)
-                if not (repo_path / ".git").exists():
-                    continue
-                if tool == "find_definition":
-                    step_matches.extend(self._tool_find_definition(entry, repo_path, terms, question, step_index))
-                elif tool == "find_references":
-                    step_matches.extend(self._tool_find_references(entry, repo_path, terms, question, step_index))
-                elif tool == "trace_graph":
-                    step_matches.extend(self._tool_trace_graph(entry, repo_path, base_matches, question, step_index))
-                elif tool == "search_code":
-                    expanded_tokens: list[str] = []
-                    for term in terms:
-                        expanded_tokens.extend(self._question_tokens(term))
-                    step_matches.extend(
-                        self._search_repo(
-                            entry,
-                            repo_path,
-                            list(dict.fromkeys(expanded_tokens))[:30],
-                            question=question,
-                            focus_terms=terms,
-                            trace_stage=f"tool_loop_{step_index}",
-                        )
-                    )
+        current_matches = list(base_matches)
+        seen = {(item["repo"], item["path"], item["line_start"], item["line_end"]) for item in current_matches}
+        executed_steps: set[str] = set()
+        empty_rounds = 0
+        max_rounds = 5
+        for step_index in range(1, max_rounds + 1):
+            evidence_summary = self._compress_evidence(question, current_matches)
+            quality_gate = self._quality_gate(question, evidence_summary)
+            step = self._choose_next_tool_step(
+                question=question,
+                matches=current_matches,
+                evidence_summary=evidence_summary,
+                quality_gate=quality_gate,
+                executed_steps=executed_steps,
+            )
+            if not step:
+                break
+            step_signature = self._tool_step_signature(step, current_matches)
+            executed_steps.add(step_signature)
+            step_matches = self._execute_tool_loop_step(
+                entries=entries,
+                key=key,
+                question=question,
+                matches=current_matches,
+                step=step,
+                step_index=step_index,
+            )
             step_matches.sort(key=lambda item: item["score"], reverse=True)
-            for item in step_matches[: max(5, min(int(limit or 12), 16))]:
+            added = 0
+            for item in step_matches[: max(5, min(int(limit or 12), 18))]:
                 item_key = (item["repo"], item["path"], item["line_start"], item["line_end"])
                 if item_key in seen:
+                    self._annotate_duplicate_tool_match(current_matches, item)
                     continue
                 collected.append(item)
+                current_matches.append(item)
                 seen.add(item_key)
+                added += 1
+            current_matches.sort(key=lambda item: item["score"], reverse=True)
+            current_matches = self._select_result_matches(current_matches, max(1, min(int(limit or 12), 30)))
+            empty_rounds = empty_rounds + 1 if added == 0 else 0
+            if self._should_stop_tool_loop(question, current_matches, step_index, empty_rounds):
+                break
         collected.sort(key=lambda item: item["score"], reverse=True)
         return collected[: max(6, min(int(limit or 12) * 2, 24))]
+
+    @staticmethod
+    def _annotate_duplicate_tool_match(existing_matches: list[dict[str, Any]], duplicate: dict[str, Any]) -> None:
+        duplicate_key = (
+            duplicate.get("repo"),
+            duplicate.get("path"),
+            duplicate.get("line_start"),
+            duplicate.get("line_end"),
+        )
+        for existing in existing_matches:
+            existing_key = (
+                existing.get("repo"),
+                existing.get("path"),
+                existing.get("line_start"),
+                existing.get("line_end"),
+            )
+            if existing_key != duplicate_key:
+                continue
+            duplicate_retrieval = str(duplicate.get("retrieval") or "")
+            existing_retrieval = str(existing.get("retrieval") or "file_scan")
+            if duplicate_retrieval and duplicate_retrieval != existing_retrieval:
+                chain = existing.setdefault("retrieval_chain", [])
+                for retrieval in (existing_retrieval, duplicate_retrieval):
+                    if retrieval and retrieval not in chain:
+                        chain.append(retrieval)
+                if duplicate_retrieval in {"flow_graph", "code_graph"}:
+                    existing["retrieval"] = duplicate_retrieval
+            duplicate_reason = str(duplicate.get("reason") or "")
+            if duplicate_reason and duplicate_reason not in str(existing.get("reason") or ""):
+                existing["reason"] = f"{existing.get('reason')}; corroborated by {duplicate_reason}"
+            existing["score"] = max(int(existing.get("score") or 0), int(duplicate.get("score") or 0))
+            return
+
+    def _choose_next_tool_step(
+        self,
+        *,
+        question: str,
+        matches: list[dict[str, Any]],
+        evidence_summary: dict[str, Any],
+        quality_gate: dict[str, Any],
+        executed_steps: set[str],
+    ) -> dict[str, Any] | None:
+        terms = self._tool_loop_terms(question, matches)
+        quality_terms = self._quality_gate_trace_terms(question, evidence_summary, quality_gate, matches)
+        intent = evidence_summary.get("intent") or self._question_intent(question)
+        candidates: list[dict[str, Any]] = []
+
+        if intent.get("data_source"):
+            candidates.extend(
+                [
+                    {"tool": "trace_flow", "terms": terms[:12]},
+                    {"tool": "trace_graph", "terms": terms[:12]},
+                    {"tool": "search_code", "terms": [*quality_terms, "repository", "mapper", "dao", "select", "from", "client"]},
+                ]
+            )
+        if intent.get("api"):
+            candidates.extend(
+                [
+                    {"tool": "trace_flow", "terms": terms[:12]},
+                    {"tool": "find_references", "terms": [*terms[:10], "RequestMapping", "PostMapping", "GetMapping"]},
+                    {"tool": "search_code", "terms": [*terms[:8], "controller", "endpoint", "client"]},
+                ]
+            )
+        if intent.get("config"):
+            candidates.append({"tool": "search_code", "terms": [*terms[:8], *quality_terms, "properties", "yaml", "configuration"]})
+        if intent.get("rule_logic") or intent.get("error"):
+            candidates.append({"tool": "search_code", "terms": [*terms[:8], *quality_terms, "validate", "rule", "exception"]})
+
+        candidates.extend(self._build_tool_loop_plan(question, matches))
+        if terms:
+            candidates.append({"tool": "trace_flow", "terms": terms[:12]})
+
+        for candidate in candidates:
+            normalized_terms = list(
+                dict.fromkeys(str(term).strip() for term in candidate.get("terms") or [] if str(term).strip())
+            )
+            tool = str(candidate.get("tool") or "")
+            if tool not in {"find_definition", "find_references", "trace_graph", "trace_flow", "search_code"}:
+                continue
+            if tool in {"find_definition", "find_references", "search_code"} and not normalized_terms:
+                continue
+            step = {"tool": tool, "terms": normalized_terms[:18]}
+            signature = self._tool_step_signature(step, matches)
+            if signature not in executed_steps:
+                return step
+        return None
+
+    @staticmethod
+    def _tool_step_signature(step: dict[str, Any], matches: list[dict[str, Any]]) -> str:
+        tool = str(step.get("tool") or "")
+        terms = ",".join(str(term).lower() for term in (step.get("terms") or [])[:10])
+        if tool in {"trace_flow", "trace_graph"}:
+            seed_paths = ",".join(str(match.get("path") or "") for match in matches[:10])
+            return f"{tool}:{seed_paths}:{terms}"
+        return f"{tool}:{terms}"
+
+    def _execute_tool_loop_step(
+        self,
+        *,
+        entries: list[RepositoryEntry],
+        key: str,
+        question: str,
+        matches: list[dict[str, Any]],
+        step: dict[str, Any],
+        step_index: int,
+    ) -> list[dict[str, Any]]:
+        tool = str(step.get("tool") or "")
+        terms = [str(term) for term in (step.get("terms") or []) if str(term)]
+        step_matches: list[dict[str, Any]] = []
+        for entry in entries:
+            repo_path = self._repo_path(key, entry)
+            if not (repo_path / ".git").exists():
+                continue
+            if tool == "find_definition":
+                step_matches.extend(self._tool_find_definition(entry, repo_path, terms, question, step_index))
+            elif tool == "find_references":
+                step_matches.extend(self._tool_find_references(entry, repo_path, terms, question, step_index))
+            elif tool == "trace_graph":
+                step_matches.extend(self._tool_trace_graph(entry, repo_path, matches, question, step_index))
+            elif tool == "trace_flow":
+                step_matches.extend(self._tool_trace_flow(entry, repo_path, matches, question, step_index))
+            elif tool == "search_code":
+                expanded_tokens: list[str] = []
+                for term in terms:
+                    expanded_tokens.extend(self._question_tokens(term))
+                step_matches.extend(
+                    self._search_repo(
+                        entry,
+                        repo_path,
+                        list(dict.fromkeys(expanded_tokens))[:30],
+                        question=question,
+                        focus_terms=terms,
+                        trace_stage=f"{TOOL_LOOP_TRACE_PREFIX}{step_index}",
+                    )
+                )
+        return step_matches
+
+    def _should_stop_tool_loop(
+        self,
+        question: str,
+        matches: list[dict[str, Any]],
+        step_index: int,
+        empty_rounds: int,
+    ) -> bool:
+        if empty_rounds >= 2:
+            return True
+        evidence_summary = self._compress_evidence(question, matches)
+        quality_gate = self._quality_gate(question, evidence_summary)
+        if quality_gate.get("status") != "sufficient" or step_index < 2:
+            return False
+        if evidence_summary.get("intent", {}).get("data_source"):
+            return bool(evidence_summary.get("data_sources"))
+        return True
 
     def _build_tool_loop_plan(self, question: str, base_matches: list[dict[str, Any]]) -> list[dict[str, Any]]:
         intent = self._question_intent(question)
@@ -1725,6 +2012,7 @@ class SourceCodeQAService:
             plan.append({"tool": "find_definition", "terms": terms[:12]})
             plan.append({"tool": "find_references", "terms": terms[:12]})
         if intent.get("data_source") or intent.get("api") or intent.get("rule_logic"):
+            plan.append({"tool": "trace_flow", "terms": terms[:12]})
             plan.append({"tool": "trace_graph", "terms": terms[:12]})
         if intent.get("config"):
             plan.append({"tool": "search_code", "terms": [*terms[:8], "properties", "configuration", "yaml", "feature"]})
@@ -1876,6 +2164,75 @@ class SourceCodeQAService:
                                 retrieval="code_graph",
                             )
                         )
+        except (OSError, sqlite3.Error):
+            return []
+        return [match for match in matches if match]
+
+    def _tool_trace_flow(
+        self,
+        entry: RepositoryEntry,
+        repo_path: Path,
+        base_matches: list[dict[str, Any]],
+        question: str,
+        step_index: int,
+    ) -> list[dict[str, Any]]:
+        index_path = self._index_path(repo_path)
+        seed_paths = [str(match.get("path") or "") for match in base_matches if match.get("repo") == entry.display_name][:12]
+        matches: list[dict[str, Any]] = []
+        try:
+            self._ensure_repo_index(key=None, entry=entry, repo_path=repo_path)
+            with sqlite3.connect(index_path) as connection:
+                connection.row_factory = sqlite3.Row
+                for path in seed_paths:
+                    for row in connection.execute(
+                        """
+                        select * from flow_edges
+                        where from_file = ? or to_file = ?
+                        order by
+                            case edge_kind
+                                when 'sql_table' then 0
+                                when 'repository' then 1
+                                when 'mapper' then 2
+                                when 'dao' then 3
+                                when 'client' then 4
+                                when 'service' then 5
+                                else 6
+                            end,
+                            from_line
+                        limit 40
+                        """,
+                        (path, path),
+                    ):
+                        target_path = str(row["to_file"] or "")
+                        target_line = int(row["to_line"] or 0)
+                        if target_path and target_path != path:
+                            matches.append(
+                                self._match_from_index_location(
+                                    entry,
+                                    connection,
+                                    target_path,
+                                    target_line,
+                                    score=172 if row["edge_kind"] in {"repository", "mapper", "dao", "sql_table"} else 158,
+                                    reason=f"planner flow trace: {row['edge_kind']} {row['to_name']}",
+                                    question=question,
+                                    trace_stage=f"{TOOL_LOOP_TRACE_PREFIX}{step_index}",
+                                    retrieval="flow_graph",
+                                )
+                            )
+                        else:
+                            matches.append(
+                                self._match_from_index_location(
+                                    entry,
+                                    connection,
+                                    str(row["from_file"]),
+                                    int(row["from_line"]),
+                                    score=166 if row["edge_kind"] == "sql_table" else 148,
+                                    reason=f"planner flow trace: {row['edge_kind']} {row['to_name']}",
+                                    question=question,
+                                    trace_stage=f"{TOOL_LOOP_TRACE_PREFIX}{step_index}",
+                                    retrieval="flow_graph",
+                                )
+                            )
         except (OSError, sqlite3.Error):
             return []
         return [match for match in matches if match]
@@ -2625,6 +2982,7 @@ class SourceCodeQAService:
             "direct": [match for match in matches if match.get("trace_stage") == "direct"],
             "dependency": [match for match in matches if match.get("trace_stage") == "dependency"],
             "two_hop": [match for match in matches if match.get("trace_stage") == "two_hop"],
+            "tool_loop": [match for match in matches if str(match.get("trace_stage") or "").startswith(TOOL_LOOP_TRACE_PREFIX)],
             "agent_trace": [match for match in matches if str(match.get("trace_stage") or "").startswith("agent_trace")],
             "agent_plan": [match for match in matches if str(match.get("trace_stage") or "").startswith("agent_plan")],
             "quality_gate": [match for match in matches if match.get("trace_stage") == QUALITY_GATE_TRACE_STAGE],
@@ -2643,7 +3001,15 @@ class SourceCodeQAService:
             selected.append(match)
             seen.add(key)
 
-        for stage, stage_limit in (("direct", 3), ("dependency", 3), ("two_hop", 3), ("agent_trace", 8), ("agent_plan", 6), ("quality_gate", 4)):
+        for stage, stage_limit in (
+            ("direct", 3),
+            ("dependency", 3),
+            ("two_hop", 3),
+            ("tool_loop", 5),
+            ("agent_trace", 8),
+            ("agent_plan", 6),
+            ("quality_gate", 4),
+        ):
             for match in buckets[stage][:stage_limit]:
                 add(match)
         for match in sorted(matches, key=lambda item: item["score"], reverse=True):

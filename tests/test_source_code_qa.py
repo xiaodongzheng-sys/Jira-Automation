@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from bpmis_jira_tool.source_code_qa import SourceCodeQAService
 from bpmis_jira_tool.user_config import TEAM_PROFILE_DEFAULTS
 from bpmis_jira_tool.web import create_app
+from scripts.source_code_qa_feedback_to_eval import build_eval_candidates
 
 
 class SourceCodeQARouteTests(unittest.TestCase):
@@ -145,6 +146,31 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertTrue(feedback_path.exists())
         self.assertIn("too_vague", feedback_path.read_text(encoding="utf-8"))
 
+    def test_feedback_records_can_be_promoted_to_eval_candidates(self):
+        candidates = build_eval_candidates(
+            [
+                {
+                    "rating": "needs_deeper_trace",
+                    "pm_team": "AF",
+                    "country": "All",
+                    "question_preview": "where does createIssue load data from",
+                    "question_sha1": "abc123456789",
+                    "top_paths": ["controller/IssueController.java", "repository/IssueRepository.java"],
+                    "comment": "missed repository",
+                },
+                {
+                    "rating": "useful",
+                    "pm_team": "AF",
+                    "country": "All",
+                    "question_preview": "where is createIssue",
+                },
+            ]
+        )
+
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["id"], "feedback-needs_deeper_trace-abc1234567")
+        self.assertEqual(candidates[0]["expected_paths"], ["controller/IssueController.java", "repository/IssueRepository.java"])
+
 
 class SourceCodeQAServiceTests(unittest.TestCase):
     def setUp(self):
@@ -268,10 +294,12 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             definition_count = connection.execute("select count(*) from definitions").fetchone()[0]
             reference_count = connection.execute("select count(*) from references_index").fetchone()[0]
             edge_count = connection.execute("select count(*) from graph_edges").fetchone()[0]
+            flow_edge_count = connection.execute("select count(*) from flow_edges").fetchone()[0]
             fts_count = connection.execute("select count(*) from lines_fts").fetchone()[0]
         self.assertGreaterEqual(definition_count, 3)
         self.assertGreaterEqual(reference_count, 3)
         self.assertGreaterEqual(edge_count, 1)
+        self.assertGreaterEqual(flow_edge_count, 1)
         self.assertGreaterEqual(fts_count, 1)
         telemetry = self.service.telemetry_path.read_text(encoding="utf-8").strip().splitlines()
         self.assertTrue(telemetry)
@@ -323,8 +351,60 @@ class SourceCodeQAServiceTests(unittest.TestCase):
 
         retrievals = {match.get("retrieval") for match in payload["matches"]}
         paths = {match["path"] for match in payload["matches"]}
-        self.assertTrue({"planner_definition", "planner_reference", "code_graph"} & retrievals)
+        trace_stages = {match.get("trace_stage") for match in payload["matches"]}
+        self.assertTrue({"planner_definition", "planner_reference", "code_graph", "flow_graph"} & retrievals)
         self.assertIn("repository/IssueRepository.java", paths)
+        self.assertTrue(any(str(stage).startswith("tool_loop_") for stage in trace_stages))
+
+    def test_flow_graph_can_trace_controller_service_repository_table_chain(self):
+        self.service.save_mapping(
+            pm_team="AF",
+            country="All",
+            repositories=[{"display_name": "Portal Repo", "url": "https://git.example.com/team/portal.git"}],
+        )
+        entry = self.service.load_config()["mappings"]["AF:All"][0]
+        repo_path = self.service._repo_path("AF:All", type("Entry", (), entry)())
+        (repo_path / ".git").mkdir(parents=True)
+        controller_file = repo_path / "controller" / "IssueController.java"
+        controller_file.parent.mkdir(parents=True)
+        controller_file.write_text(
+            "@PostMapping(\"/issue/create\")\n"
+            "public class IssueController {\n"
+            "    private IssueService issueService;\n"
+            "    public Issue createIssue() {\n"
+            "        return issueService.createIssue();\n"
+            "    }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        service_file = repo_path / "service" / "IssueService.java"
+        service_file.parent.mkdir(parents=True)
+        service_file.write_text(
+            "public class IssueService {\n"
+            "    private IssueRepository issueRepository;\n"
+            "    public Issue createIssue() {\n"
+            "        return issueRepository.findIssue();\n"
+            "    }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        repository_file = repo_path / "repository" / "IssueRepository.java"
+        repository_file.parent.mkdir(parents=True)
+        repository_file.write_text(
+            "public class IssueRepository {\n"
+            "    public Issue findIssue() {\n"
+            "        return jdbcTemplate.queryForObject(\"select * from issue_table\", mapper);\n"
+            "    }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+
+        payload = self.service.query(pm_team="AF", country="All", question="which API flow reaches issue data source table")
+
+        self.assertEqual(payload["status"], "ok")
+        self.assertIn("repository/IssueRepository.java", {match["path"] for match in payload["matches"]})
+        self.assertIn("flow_graph", {match.get("retrieval") for match in payload["matches"]})
+        self.assertTrue(any("issue_table" in match["snippet"] for match in payload["matches"]))
 
     def test_domain_profile_terms_can_boost_configured_data_source_names(self):
         profile_path = Path(self.temp_dir.name) / "profiles.json"
