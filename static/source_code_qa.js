@@ -34,10 +34,12 @@
   const fallbackNotice = document.querySelector('[data-source-fallback-notice]');
   const feedback = document.querySelector('[data-source-feedback]');
   const feedbackStatus = document.querySelector('[data-source-feedback-status]');
+  const debugTrace = document.querySelector('[data-source-debug-trace]');
   let config = { mappings: {} };
   let gitAuthReady = false;
   let llmReady = false;
   let lastPayload = null;
+  let conversationContext = null;
   const preferenceKey = 'source-code-qa:last-query-config:v1';
 
   const escapeHtml = (value) => String(value ?? '')
@@ -219,6 +221,30 @@
     }
   };
 
+  const pollSyncJob = async (jobId) => {
+    while (jobId) {
+      const response = await fetch(`/api/jobs/${encodeURIComponent(jobId)}`, { method: 'GET' });
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload.message || 'Could not read sync job status.');
+      }
+      adminStatus.textContent = payload.message || 'Syncing repositories...';
+      if (payload.state === 'completed') {
+        const result = (payload.results || [])[0] || {};
+        renderStatus(result.repo_status || result.results || []);
+        adminStatus.textContent = result.status === 'ok'
+          ? 'Sync completed.'
+          : (payload.notice?.summary || 'Sync completed with issues. Check status cards.');
+        return result;
+      }
+      if (payload.state === 'failed') {
+        throw new Error(payload.error || payload.message || 'Sync failed.');
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 900));
+    }
+    return {};
+  };
+
   const syncRepos = async () => {
     if (!canManage) return;
     if (!gitAuthReady) {
@@ -232,6 +258,10 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ pm_team: pmTeam.value, country: currentCountry() }),
       }).then(readJson);
+      if (payload.status === 'queued' && payload.job_id) {
+        await pollSyncJob(payload.job_id);
+        return;
+      }
       renderStatus(payload.repo_status || payload.results || []);
       adminStatus.textContent = payload.status === 'ok'
         ? 'Sync completed.'
@@ -267,6 +297,62 @@
       return;
     }
     results.innerHTML = body;
+  };
+
+  const buildConversationContext = (payload) => ({
+    question: questionInput.value,
+    matches: (payload?.matches || []).slice(0, 8).map((match) => ({
+      path: match.path,
+      snippet: match.snippet,
+      repo: match.repo,
+    })),
+    trace_paths: (payload?.trace_paths || []).slice(0, 5),
+    structured_answer: payload?.structured_answer || {},
+  });
+
+  const renderDebugTrace = (payload) => {
+    if (!debugTrace) return;
+    if (!payload || payload.status !== 'ok') {
+      debugTrace.hidden = true;
+      debugTrace.innerHTML = '';
+      return;
+    }
+    const quality = payload.answer_quality || {};
+    const queryComponents = (payload.query_plan?.components || [])
+      .map((component) => `<li>${escapeHtml(component.name)}: ${escapeHtml((component.terms || []).slice(0, 8).join(', '))}</li>`)
+      .join('');
+    const tracePaths = (payload.trace_paths || [])
+      .slice(0, 5)
+      .map((path) => `<li>${escapeHtml(path.repo)}: ${escapeHtml((path.edges || []).map((edge) => `${edge.edge_kind}:${edge.to_name || edge.to_file}`).join(' -> '))}</li>`)
+      .join('');
+    const repoEdges = (payload.repo_graph?.edges || [])
+      .slice(0, 8)
+      .map((edge) => `<li>${escapeHtml(edge.from_repo)} -> ${escapeHtml(edge.to_repo)} · ${escapeHtml(edge.edge_kind)} · ${escapeHtml(edge.evidence)}</li>`)
+      .join('');
+    debugTrace.hidden = false;
+    debugTrace.innerHTML = `
+      <details class="source-qa-evidence">
+        <summary>Why this answer?</summary>
+        <div class="source-qa-debug-grid">
+          <section>
+            <strong>Quality</strong>
+            <p>${escapeHtml(quality.status || 'unknown')} · ${escapeHtml(quality.confidence || 'unknown')} · missing: ${escapeHtml((quality.missing || []).join(', ') || 'none')}</p>
+          </section>
+          <section>
+            <strong>Query plan</strong>
+            <ul>${queryComponents || '<li>No decomposition terms.</li>'}</ul>
+          </section>
+          <section>
+            <strong>Trace paths</strong>
+            <ul>${tracePaths || '<li>No trace path found.</li>'}</ul>
+          </section>
+          <section>
+            <strong>Repo graph</strong>
+            <ul>${repoEdges || '<li>No cross-repo edge found.</li>'}</ul>
+          </section>
+        </div>
+      </details>
+    `;
   };
 
   const renderLlmAnswer = (payload) => {
@@ -355,9 +441,11 @@
           question: questionInput.value,
           answer_mode: selectedAnswerMode,
           llm_budget_mode: selectedBudget,
+          conversation_context: conversationContext,
         }),
       }).then(readJson);
       lastPayload = payload;
+      conversationContext = buildConversationContext(payload);
       rememberLastQueryConfig(selectedAnswerMode, selectedBudget);
       summary.textContent = payload.summary || 'Search completed.';
       queryStatus.textContent = payload.status === 'ok' ? 'Search completed.' : payload.status;
@@ -366,6 +454,7 @@
       renderFallbackNotice(payload);
       renderStatus(payload.repo_status || []);
       renderLlmAnswer(payload);
+      renderDebugTrace(payload);
       renderMatches(payload.matches || [], { compact: Boolean(payload.llm_answer) });
       if (feedback) {
         feedback.hidden = payload.status !== 'ok';
@@ -378,6 +467,7 @@
       renderUsageBadges({}, selectedBudget);
       renderFallbackNotice({});
       renderLlmAnswer({});
+      renderDebugTrace(null);
       if (feedback) feedback.hidden = true;
     }
   };

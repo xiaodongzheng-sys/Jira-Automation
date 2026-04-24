@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 import sqlite3
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 from types import SimpleNamespace
@@ -128,6 +129,32 @@ class SourceCodeQARouteTests(unittest.TestCase):
         payload = response.get_json()
         self.assertFalse(payload["llm_ready"])
 
+    def test_sync_api_runs_as_background_job(self):
+        sync_result = {
+            "status": "ok",
+            "key": "AF:All",
+            "results": [{"state": "ok", "display_name": "Repo One"}],
+            "repo_status": [{"display_name": "Repo One", "state": "synced", "message": "ready"}],
+        }
+        with patch("bpmis_jira_tool.source_code_qa.SourceCodeQAService.sync", return_value=sync_result):
+            with self.app.test_client() as client:
+                self._login(client, "xiaodong.zheng@npt.sg")
+                response = client.post("/api/source-code-qa/sync", json={"pm_team": "AF", "country": "All"})
+                self.assertEqual(response.status_code, 200)
+                payload = response.get_json()
+                self.assertEqual(payload["status"], "queued")
+                job_id = payload["job_id"]
+                snapshot = {}
+                for _ in range(20):
+                    job_response = client.get(f"/api/jobs/{job_id}")
+                    snapshot = job_response.get_json()
+                    if snapshot.get("state") == "completed":
+                        break
+                    time.sleep(0.05)
+
+        self.assertEqual(snapshot.get("state"), "completed")
+        self.assertEqual(snapshot["results"][0]["repo_status"][0]["state"], "synced")
+
     def test_feedback_api_saves_user_signal(self):
         with self.app.test_client() as client:
             self._login(client, "teammate@npt.sg")
@@ -200,6 +227,28 @@ class SourceCodeQAServiceTests(unittest.TestCase):
 
         self.assertEqual(payload["status"], "partial")
         self.assertIn("timed out", payload["results"][0]["message"])
+        self.assertEqual(payload["job"]["status"], "partial")
+
+    def test_index_lock_reports_concurrent_indexing(self):
+        self.service.save_mapping(
+            pm_team="AF",
+            country="All",
+            repositories=[{"display_name": "Portal Repo", "url": "https://git.example.com/team/portal.git"}],
+        )
+        entry = self.service.load_config()["mappings"]["AF:All"][0]
+        repo_path = self.service._repo_path("AF:All", type("Entry", (), entry)())
+        (repo_path / ".git").mkdir(parents=True)
+        source_file = repo_path / "bpmis" / "jira_client.py"
+        source_file.parent.mkdir(parents=True)
+        source_file.write_text("class BPMISClient:\n    pass\n", encoding="utf-8")
+        lock_path = self.service._index_lock_path(repo_path)
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path.write_text("busy", encoding="utf-8")
+
+        with self.assertRaisesRegex(Exception, "already being indexed"):
+            self.service._build_repo_index("AF:All", type("Entry", (), entry)(), repo_path)
+
+        lock_path.unlink(missing_ok=True)
 
     def test_retrieval_query_returns_path_line_and_snippet(self):
         self.service.save_mapping(
@@ -496,6 +545,56 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertIn(("http_endpoint", "https://issue.example.com"), edge_rows)
         self.assertTrue(any(kind == "mapper_statement" and "findIssue" in target for kind, target in edge_rows))
         self.assertTrue(any(kind == "sql_table" and target == "issue_table" for kind, target in edge_rows))
+
+    def test_cross_repo_graph_links_client_to_service_repo(self):
+        self.service.save_mapping(
+            pm_team="AF",
+            country="All",
+            repositories=[
+                {"display_name": "Portal Repo", "url": "https://git.example.com/team/portal.git"},
+                {"display_name": "Issue Service", "url": "https://git.example.com/team/issue-service.git"},
+            ],
+        )
+        entries = self.service.load_config()["mappings"]["AF:All"]
+        portal = type("Entry", (), entries[0])()
+        service_entry = type("Entry", (), entries[1])()
+        portal_path = self.service._repo_path("AF:All", portal)
+        service_path = self.service._repo_path("AF:All", service_entry)
+        (portal_path / ".git").mkdir(parents=True)
+        (service_path / ".git").mkdir(parents=True)
+        client_file = portal_path / "client" / "IssueClient.java"
+        client_file.parent.mkdir(parents=True)
+        client_file.write_text(
+            "@FeignClient(name = \"issue-service\")\n"
+            "public interface IssueClient { Issue createIssue(); }\n",
+            encoding="utf-8",
+        )
+        service_file = service_path / "controller" / "IssueController.java"
+        service_file.parent.mkdir(parents=True)
+        service_file.write_text(
+            "@PostMapping(\"/issue/create\")\n"
+            "public class IssueController { public Issue createIssue() { return new Issue(); } }\n",
+            encoding="utf-8",
+        )
+
+        payload = self.service.query(pm_team="AF", country="All", question="which service does issue client call")
+
+        edges = payload["repo_graph"]["edges"]
+        self.assertTrue(any(edge["from_repo"] == "Portal Repo" and edge["to_repo"] == "Issue Service" for edge in edges))
+
+    def test_followup_context_augments_short_question(self):
+        question, context = self.service._apply_conversation_context(
+            "继续找这个表哪里写入",
+            {
+                "question": "what table does issue creation use",
+                "matches": [{"path": "repository/IssueRepository.java", "snippet": "select * from issue_table"}],
+                "trace_paths": [{"edges": [{"to_name": "issue_table", "to_file": ""}]}],
+                "structured_answer": {"claims": [{"text": "IssueRepository reads issue_table"}]},
+            },
+        )
+
+        self.assertTrue(context["used"])
+        self.assertIn("issue_table", question)
 
     def test_domain_profile_terms_can_boost_configured_data_source_names(self):
         profile_path = Path(self.temp_dir.name) / "profiles.json"

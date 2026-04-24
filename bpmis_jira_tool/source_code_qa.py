@@ -255,6 +255,8 @@ class SourceCodeQAService:
         self.answer_cache_root = self.data_root / "answer_cache"
         self.telemetry_path = self.data_root / "telemetry.jsonl"
         self.feedback_path = self.data_root / "feedback.jsonl"
+        self.sync_jobs_path = self.data_root / "sync_jobs.json"
+        self.lock_root = self.data_root / "locks"
         self.domain_profile_path = Path(os.getenv("SOURCE_CODE_QA_DOMAIN_PROFILES", str(DEFAULT_DOMAIN_PROFILE_PATH)))
         self.team_profiles = team_profiles
         self.gitlab_token = str(gitlab_token or "").strip()
@@ -360,6 +362,46 @@ class SourceCodeQAService:
                     expanded.append(token)
         return expanded[:40]
 
+    def _apply_conversation_context(
+        self,
+        question: str,
+        conversation_context: dict[str, Any] | None,
+    ) -> tuple[str, dict[str, Any]]:
+        if not isinstance(conversation_context, dict):
+            return question, {"used": False}
+        lowered = question.lower()
+        followup_markers = (
+            "this", "that", "it", "them", "above", "previous", "same", "continue",
+            "这个", "那个", "上面", "继续", "它", "他们", "这个方法", "这个表",
+        )
+        is_followup = len(self._question_tokens(question)) <= 8 or any(marker in lowered for marker in followup_markers)
+        if not is_followup:
+            return question, {"used": False}
+        terms: list[str] = []
+        for match in conversation_context.get("matches") or []:
+            terms.extend(IDENTIFIER_PATTERN.findall(str(match.get("path") or "")))
+            terms.extend(IDENTIFIER_PATTERN.findall(str(match.get("snippet") or ""))[:8])
+        for path in conversation_context.get("trace_paths") or []:
+            for edge in path.get("edges") or []:
+                terms.extend(IDENTIFIER_PATTERN.findall(str(edge.get("to_name") or "")))
+                terms.extend(IDENTIFIER_PATTERN.findall(str(edge.get("to_file") or "")))
+        structured = conversation_context.get("structured_answer") or {}
+        for claim in structured.get("claims") or []:
+            if isinstance(claim, dict):
+                terms.extend(IDENTIFIER_PATTERN.findall(str(claim.get("text") or "")))
+        deduped: list[str] = []
+        for term in terms:
+            lowered_term = term.lower()
+            if len(lowered_term) < 4 or lowered_term in STOPWORDS or lowered_term in LOW_VALUE_CALL_SYMBOLS:
+                continue
+            if lowered_term not in deduped:
+                deduped.append(lowered_term)
+        context_terms = deduped[:16]
+        if not context_terms:
+            return question, {"used": False}
+        augmented = f"{question}\n\nPrevious Source Code Q&A context terms: {' '.join(context_terms)}"
+        return augmented, {"used": True, "terms": context_terms, "previous_question": str(conversation_context.get("question") or "")[:180]}
+
     def _all_profile_terms(self, *keys: str) -> list[str]:
         terms: list[str] = []
         for profile in self.load_domain_profiles().values():
@@ -397,9 +439,15 @@ class SourceCodeQAService:
                 "results": [],
             }
         self.repo_root.mkdir(parents=True, exist_ok=True)
-        results = [self._sync_entry(key, entry) for entry in entries]
-        status = "ok" if all(result["state"] == "ok" for result in results) else "partial"
-        return {"status": status, "key": key, "results": results, "repo_status": self.repo_status(key)}
+        job = self._start_sync_job(key, entries)
+        try:
+            results = [self._sync_entry(key, entry) for entry in entries]
+            status = "ok" if all(result["state"] == "ok" for result in results) else "partial"
+            self._finish_sync_job(key, job["job_id"], status=status, results=results)
+            return {"status": status, "key": key, "job": self.sync_job_status(key), "results": results, "repo_status": self.repo_status(key)}
+        except Exception:
+            self._finish_sync_job(key, job["job_id"], status="failed", results=[])
+            raise
 
     def query(
         self,
@@ -410,12 +458,15 @@ class SourceCodeQAService:
         limit: int = 12,
         answer_mode: str = ANSWER_MODE,
         llm_budget_mode: str = "cheap",
+        conversation_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         key = self.mapping_key(pm_team, country)
         question = str(question or "").strip()
         started_at = time.time()
         if not question:
             raise ToolError("Please enter a source-code question.")
+        original_question = question
+        question, followup_context = self._apply_conversation_context(question, conversation_context)
         entries = self._load_entries_for_key(key)
         if not entries:
             payload = self._empty_query_payload(
@@ -604,6 +655,7 @@ class SourceCodeQAService:
         trace_paths = self._build_trace_paths(entries=entries, key=key, matches=top_matches, question=question)
         if trace_paths:
             evidence_summary["trace_paths"] = trace_paths
+        repo_graph = self._build_repo_dependency_graph(key=key, entries=entries)
         payload = {
             "status": "ok",
             "answer_mode": ANSWER_MODE,
@@ -611,10 +663,13 @@ class SourceCodeQAService:
             "matches": top_matches,
             "citations": self._build_citations(top_matches),
             "trace_paths": trace_paths,
+            "repo_graph": repo_graph,
             "repo_status": repo_status,
             "answer_quality": quality_gate,
             "agent_plan": self._build_agent_plan(question, evidence_summary, quality_gate),
             "query_plan": query_plan,
+            "followup_context": followup_context,
+            "original_question": original_question,
         }
         normalized_answer_mode = str(answer_mode or ANSWER_MODE).strip() or ANSWER_MODE
         if normalized_answer_mode == ANSWER_MODE_GEMINI:
@@ -665,6 +720,7 @@ class SourceCodeQAService:
                         else "Run Sync / Refresh before asking questions."
                     ),
                     "index": index_info,
+                    "sync_job": self.sync_job_status(key),
                 }
             )
         return statuses
@@ -766,9 +822,62 @@ class SourceCodeQAService:
             "message": message,
         }
 
+    def sync_job_status(self, key: str) -> dict[str, Any]:
+        try:
+            payload = json.loads(self.sync_jobs_path.read_text(encoding="utf-8")) if self.sync_jobs_path.exists() else {}
+        except (OSError, json.JSONDecodeError):
+            payload = {}
+        return payload.get(key) if isinstance(payload.get(key), dict) else {"status": "idle", "key": key}
+
+    def _start_sync_job(self, key: str, entries: list[RepositoryEntry]) -> dict[str, Any]:
+        job = {
+            "job_id": hashlib.sha1(f"{key}:{time.time()}".encode("utf-8")).hexdigest()[:12],
+            "key": key,
+            "status": "running",
+            "started_at": self._now_iso(),
+            "finished_at": None,
+            "repo_count": len(entries),
+            "results": [],
+        }
+        self._write_sync_job(key, job)
+        return job
+
+    def _finish_sync_job(self, key: str, job_id: str, *, status: str, results: list[dict[str, Any]]) -> None:
+        job = self.sync_job_status(key)
+        if job.get("job_id") != job_id:
+            return
+        job.update({"status": status, "finished_at": self._now_iso(), "results": results})
+        self._write_sync_job(key, job)
+
+    def _write_sync_job(self, key: str, job: dict[str, Any]) -> None:
+        try:
+            self.sync_jobs_path.parent.mkdir(parents=True, exist_ok=True)
+            payload = json.loads(self.sync_jobs_path.read_text(encoding="utf-8")) if self.sync_jobs_path.exists() else {}
+            if not isinstance(payload, dict):
+                payload = {}
+            payload[key] = job
+            self.sync_jobs_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+        except OSError:
+            return
+
     def _index_path(self, repo_path: Path) -> Path:
         digest = hashlib.sha1(str(repo_path).encode("utf-8")).hexdigest()[:16]
         return self.index_root / f"{digest}.sqlite3"
+
+    def _index_lock_path(self, repo_path: Path) -> Path:
+        digest = hashlib.sha1(str(repo_path).encode("utf-8")).hexdigest()[:16]
+        return self.lock_root / f"{digest}.lock"
+
+    def _acquire_index_lock(self, repo_path: Path) -> Path:
+        self.lock_root.mkdir(parents=True, exist_ok=True)
+        lock_path = self._index_lock_path(repo_path)
+        try:
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError as error:
+            raise ToolError("This repository is already being indexed. Please wait for the current sync to finish.") from error
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(self._now_iso())
+        return lock_path
 
     def _ensure_repo_index(
         self,
@@ -835,6 +944,7 @@ class SourceCodeQAService:
 
     def _build_repo_index(self, key: str, entry: RepositoryEntry, repo_path: Path) -> dict[str, Any]:
         del key, entry
+        lock_path = self._acquire_index_lock(repo_path)
         self.index_root.mkdir(parents=True, exist_ok=True)
         index_path = self._index_path(repo_path)
         tmp_path = index_path.with_suffix(".tmp")
@@ -846,228 +956,231 @@ class SourceCodeQAService:
         indexed_references = 0
         indexed_entities = 0
         indexed_entity_edges = 0
-        with sqlite3.connect(tmp_path) as connection:
-            connection.execute("pragma journal_mode=off")
-            connection.execute("pragma synchronous=off")
-            connection.executescript(
-                """
-                create table metadata (key text primary key, value text not null);
-                create table files (
-                    path text primary key,
-                    lower_path text not null,
-                    size integer not null,
-                    mtime_ns integer not null,
-                    line_count integer not null,
-                    symbols text not null
-                );
-                create table lines (
-                    file_path text not null,
-                    line_no integer not null,
-                    line_text text not null,
-                    lower_text text not null,
-                    symbols text not null,
-                    is_declaration integer not null,
-                    has_pathish integer not null,
-                    primary key (file_path, line_no)
-                );
-                create index idx_lines_file_path on lines(file_path);
-                create table definitions (
-                    name text not null,
-                    lower_name text not null,
-                    kind text not null,
-                    file_path text not null,
-                    line_no integer not null,
-                    signature text not null
-                );
-                create index idx_definitions_lower_name on definitions(lower_name);
-                create index idx_definitions_file_path on definitions(file_path);
-                create table references_index (
-                    target text not null,
-                    lower_target text not null,
-                    kind text not null,
-                    file_path text not null,
-                    line_no integer not null,
-                    context text not null
-                );
-                create index idx_references_lower_target on references_index(lower_target);
-                create index idx_references_file_path on references_index(file_path);
-                create table code_entities (
-                    entity_id text primary key,
-                    name text not null,
-                    lower_name text not null,
-                    kind text not null,
-                    language text not null,
-                    file_path text not null,
-                    line_no integer not null,
-                    parent text not null,
-                    signature text not null
-                );
-                create index idx_entities_lower_name on code_entities(lower_name);
-                create index idx_entities_file_path on code_entities(file_path);
-                create index idx_entities_kind on code_entities(kind);
-                create table entity_edges (
-                    from_entity_id text not null,
-                    from_file text not null,
-                    from_line integer not null,
-                    edge_kind text not null,
-                    to_name text not null,
-                    lower_to_name text not null,
-                    to_entity_id text not null,
-                    to_file text not null,
-                    to_line integer not null,
-                    evidence text not null
-                );
-                create index idx_entity_edges_from on entity_edges(from_entity_id);
-                create index idx_entity_edges_from_file on entity_edges(from_file);
-                create index idx_entity_edges_lower_to_name on entity_edges(lower_to_name);
-                create index idx_entity_edges_to_file on entity_edges(to_file);
-                create index idx_entity_edges_kind on entity_edges(edge_kind);
-                create table graph_edges (
-                    from_file text not null,
-                    from_line integer not null,
-                    symbol text not null,
-                    lower_symbol text not null,
-                    edge_kind text not null,
-                    to_file text not null,
-                    to_line integer not null
-                );
-                create index idx_graph_from_file on graph_edges(from_file);
-                create index idx_graph_lower_symbol on graph_edges(lower_symbol);
-                create index idx_graph_to_file on graph_edges(to_file);
-                create table flow_edges (
-                    from_file text not null,
-                    from_line integer not null,
-                    from_kind text not null,
-                    from_name text not null,
-                    edge_kind text not null,
-                    to_name text not null,
-                    to_file text not null,
-                    to_line integer not null,
-                    evidence text not null
-                );
-                create index idx_flow_from_file on flow_edges(from_file);
-                create index idx_flow_to_file on flow_edges(to_file);
-                create index idx_flow_to_name on flow_edges(to_name);
-                create index idx_flow_edge_kind on flow_edges(edge_kind);
-                """
-            )
-            fts_enabled = self._try_create_fts(connection)
-            for file_path in self._iter_text_files(repo_path):
-                relative_path = str(file_path.relative_to(repo_path))
-                try:
-                    stat = file_path.stat()
-                    lines = file_path.read_text(encoding="utf-8", errors="ignore").splitlines()
-                except OSError:
-                    continue
-                file_symbols = self._collect_symbols(lines)
-                connection.execute(
-                    "insert into files(path, lower_path, size, mtime_ns, line_count, symbols) values (?, ?, ?, ?, ?, ?)",
-                    (
-                        relative_path,
-                        relative_path.lower(),
-                        stat.st_size,
-                        stat.st_mtime_ns,
-                        len(lines),
-                        json.dumps(sorted(file_symbols), separators=(",", ":")),
-                    ),
+        try:
+            with sqlite3.connect(tmp_path) as connection:
+                connection.execute("pragma journal_mode=off")
+                connection.execute("pragma synchronous=off")
+                connection.executescript(
+                    """
+                    create table metadata (key text primary key, value text not null);
+                    create table files (
+                        path text primary key,
+                        lower_path text not null,
+                        size integer not null,
+                        mtime_ns integer not null,
+                        line_count integer not null,
+                        symbols text not null
+                    );
+                    create table lines (
+                        file_path text not null,
+                        line_no integer not null,
+                        line_text text not null,
+                        lower_text text not null,
+                        symbols text not null,
+                        is_declaration integer not null,
+                        has_pathish integer not null,
+                        primary key (file_path, line_no)
+                    );
+                    create index idx_lines_file_path on lines(file_path);
+                    create table definitions (
+                        name text not null,
+                        lower_name text not null,
+                        kind text not null,
+                        file_path text not null,
+                        line_no integer not null,
+                        signature text not null
+                    );
+                    create index idx_definitions_lower_name on definitions(lower_name);
+                    create index idx_definitions_file_path on definitions(file_path);
+                    create table references_index (
+                        target text not null,
+                        lower_target text not null,
+                        kind text not null,
+                        file_path text not null,
+                        line_no integer not null,
+                        context text not null
+                    );
+                    create index idx_references_lower_target on references_index(lower_target);
+                    create index idx_references_file_path on references_index(file_path);
+                    create table code_entities (
+                        entity_id text primary key,
+                        name text not null,
+                        lower_name text not null,
+                        kind text not null,
+                        language text not null,
+                        file_path text not null,
+                        line_no integer not null,
+                        parent text not null,
+                        signature text not null
+                    );
+                    create index idx_entities_lower_name on code_entities(lower_name);
+                    create index idx_entities_file_path on code_entities(file_path);
+                    create index idx_entities_kind on code_entities(kind);
+                    create table entity_edges (
+                        from_entity_id text not null,
+                        from_file text not null,
+                        from_line integer not null,
+                        edge_kind text not null,
+                        to_name text not null,
+                        lower_to_name text not null,
+                        to_entity_id text not null,
+                        to_file text not null,
+                        to_line integer not null,
+                        evidence text not null
+                    );
+                    create index idx_entity_edges_from on entity_edges(from_entity_id);
+                    create index idx_entity_edges_from_file on entity_edges(from_file);
+                    create index idx_entity_edges_lower_to_name on entity_edges(lower_to_name);
+                    create index idx_entity_edges_to_file on entity_edges(to_file);
+                    create index idx_entity_edges_kind on entity_edges(edge_kind);
+                    create table graph_edges (
+                        from_file text not null,
+                        from_line integer not null,
+                        symbol text not null,
+                        lower_symbol text not null,
+                        edge_kind text not null,
+                        to_file text not null,
+                        to_line integer not null
+                    );
+                    create index idx_graph_from_file on graph_edges(from_file);
+                    create index idx_graph_lower_symbol on graph_edges(lower_symbol);
+                    create index idx_graph_to_file on graph_edges(to_file);
+                    create table flow_edges (
+                        from_file text not null,
+                        from_line integer not null,
+                        from_kind text not null,
+                        from_name text not null,
+                        edge_kind text not null,
+                        to_name text not null,
+                        to_file text not null,
+                        to_line integer not null,
+                        evidence text not null
+                    );
+                    create index idx_flow_from_file on flow_edges(from_file);
+                    create index idx_flow_to_file on flow_edges(to_file);
+                    create index idx_flow_to_name on flow_edges(to_name);
+                    create index idx_flow_edge_kind on flow_edges(edge_kind);
+                    """
                 )
-                line_rows = []
-                for index, line in enumerate(lines, start=1):
-                    lowered = line.lower()
-                    line_rows.append(
+                fts_enabled = self._try_create_fts(connection)
+                for file_path in self._iter_text_files(repo_path):
+                    relative_path = str(file_path.relative_to(repo_path))
+                    try:
+                        stat = file_path.stat()
+                        lines = file_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+                    except OSError:
+                        continue
+                    file_symbols = self._collect_symbols(lines)
+                    connection.execute(
+                        "insert into files(path, lower_path, size, mtime_ns, line_count, symbols) values (?, ?, ?, ?, ?, ?)",
                         (
                             relative_path,
-                            index,
-                            line,
-                            lowered,
-                            json.dumps(sorted(self._line_symbols(lowered)), separators=(",", ":")),
-                            1 if self._is_declaration_line(line) else 0,
-                            1 if PATHISH_PATTERN.search(line) else 0,
+                            relative_path.lower(),
+                            stat.st_size,
+                            stat.st_mtime_ns,
+                            len(lines),
+                            json.dumps(sorted(file_symbols), separators=(",", ":")),
+                        ),
+                    )
+                    line_rows = []
+                    for index, line in enumerate(lines, start=1):
+                        lowered = line.lower()
+                        line_rows.append(
+                            (
+                                relative_path,
+                                index,
+                                line,
+                                lowered,
+                                json.dumps(sorted(self._line_symbols(lowered)), separators=(",", ":")),
+                                1 if self._is_declaration_line(line) else 0,
+                                1 if PATHISH_PATTERN.search(line) else 0,
+                            )
                         )
-                    )
-                connection.executemany(
-                    """
-                    insert into lines(file_path, line_no, line_text, lower_text, symbols, is_declaration, has_pathish)
-                    values (?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    line_rows,
-                )
-                if fts_enabled:
                     connection.executemany(
-                        "insert into lines_fts(file_path, line_no, content) values (?, ?, ?)",
-                        [(relative_path, row[1], row[2]) for row in line_rows],
+                        """
+                        insert into lines(file_path, line_no, line_text, lower_text, symbols, is_declaration, has_pathish)
+                        values (?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        line_rows,
                     )
-                structure = self._extract_structure_rows(relative_path, lines)
-                connection.executemany(
-                    """
-                    insert into definitions(name, lower_name, kind, file_path, line_no, signature)
-                    values (?, ?, ?, ?, ?, ?)
-                    """,
-                    structure["definitions"],
-                )
-                connection.executemany(
-                    """
-                    insert into references_index(target, lower_target, kind, file_path, line_no, context)
-                    values (?, ?, ?, ?, ?, ?)
-                    """,
-                    structure["references"],
-                )
-                connection.executemany(
-                    """
-                    insert or ignore into code_entities(entity_id, name, lower_name, kind, language, file_path, line_no, parent, signature)
-                    values (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    structure["entities"],
-                )
-                connection.executemany(
-                    """
-                    insert into entity_edges(from_entity_id, from_file, from_line, edge_kind, to_name, lower_to_name, to_entity_id, to_file, to_line, evidence)
-                    values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    structure["entity_edges"],
-                )
-                indexed_files += 1
-                indexed_lines += len(lines)
-                indexed_definitions += len(structure["definitions"])
-                indexed_references += len(structure["references"])
-                indexed_entities += len(structure["entities"])
-                indexed_entity_edges += len(structure["entity_edges"])
-            indexed_edges = self._build_graph_edges(connection)
-            resolved_entity_edges = self._resolve_entity_edges(connection)
-            indexed_entity_edges += resolved_entity_edges
-            indexed_flow_edges = self._build_flow_edges(connection)
-            metadata = {
-                "version": str(CODE_INDEX_VERSION),
-                "file_count": str(fingerprint["file_count"]),
-                "latest_mtime_ns": str(fingerprint["latest_mtime_ns"]),
-                "total_size": str(fingerprint["total_size"]),
-                "indexed_files": str(indexed_files),
-                "indexed_lines": str(indexed_lines),
-                "indexed_definitions": str(indexed_definitions),
-                "indexed_references": str(indexed_references),
-                "indexed_entities": str(indexed_entities),
-                "indexed_entity_edges": str(indexed_entity_edges),
-                "indexed_edges": str(indexed_edges),
-                "indexed_flow_edges": str(indexed_flow_edges),
-                "fts_enabled": "1" if fts_enabled else "0",
-                "updated_at": self._now_iso(),
+                    if fts_enabled:
+                        connection.executemany(
+                            "insert into lines_fts(file_path, line_no, content) values (?, ?, ?)",
+                            [(relative_path, row[1], row[2]) for row in line_rows],
+                        )
+                    structure = self._extract_structure_rows(relative_path, lines)
+                    connection.executemany(
+                        """
+                        insert into definitions(name, lower_name, kind, file_path, line_no, signature)
+                        values (?, ?, ?, ?, ?, ?)
+                        """,
+                        structure["definitions"],
+                    )
+                    connection.executemany(
+                        """
+                        insert into references_index(target, lower_target, kind, file_path, line_no, context)
+                        values (?, ?, ?, ?, ?, ?)
+                        """,
+                        structure["references"],
+                    )
+                    connection.executemany(
+                        """
+                        insert or ignore into code_entities(entity_id, name, lower_name, kind, language, file_path, line_no, parent, signature)
+                        values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        structure["entities"],
+                    )
+                    connection.executemany(
+                        """
+                        insert into entity_edges(from_entity_id, from_file, from_line, edge_kind, to_name, lower_to_name, to_entity_id, to_file, to_line, evidence)
+                        values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        structure["entity_edges"],
+                    )
+                    indexed_files += 1
+                    indexed_lines += len(lines)
+                    indexed_definitions += len(structure["definitions"])
+                    indexed_references += len(structure["references"])
+                    indexed_entities += len(structure["entities"])
+                    indexed_entity_edges += len(structure["entity_edges"])
+                indexed_edges = self._build_graph_edges(connection)
+                resolved_entity_edges = self._resolve_entity_edges(connection)
+                indexed_entity_edges += resolved_entity_edges
+                indexed_flow_edges = self._build_flow_edges(connection)
+                metadata = {
+                    "version": str(CODE_INDEX_VERSION),
+                    "file_count": str(fingerprint["file_count"]),
+                    "latest_mtime_ns": str(fingerprint["latest_mtime_ns"]),
+                    "total_size": str(fingerprint["total_size"]),
+                    "indexed_files": str(indexed_files),
+                    "indexed_lines": str(indexed_lines),
+                    "indexed_definitions": str(indexed_definitions),
+                    "indexed_references": str(indexed_references),
+                    "indexed_entities": str(indexed_entities),
+                    "indexed_entity_edges": str(indexed_entity_edges),
+                    "indexed_edges": str(indexed_edges),
+                    "indexed_flow_edges": str(indexed_flow_edges),
+                    "fts_enabled": "1" if fts_enabled else "0",
+                    "updated_at": self._now_iso(),
+                }
+                connection.executemany("insert into metadata(key, value) values (?, ?)", metadata.items())
+            tmp_path.replace(index_path)
+            return {
+                "state": "ready",
+                "path": str(index_path),
+                "files": indexed_files,
+                "lines": indexed_lines,
+                "definitions": indexed_definitions,
+                "references": indexed_references,
+                "entities": indexed_entities,
+                "entity_edges": indexed_entity_edges,
+                "edges": indexed_edges,
+                "flow_edges": indexed_flow_edges,
+                "fts_enabled": fts_enabled,
+                "updated_at": metadata["updated_at"],
             }
-            connection.executemany("insert into metadata(key, value) values (?, ?)", metadata.items())
-        tmp_path.replace(index_path)
-        return {
-            "state": "ready",
-            "path": str(index_path),
-            "files": indexed_files,
-            "lines": indexed_lines,
-            "definitions": indexed_definitions,
-            "references": indexed_references,
-            "entities": indexed_entities,
-            "entity_edges": indexed_entity_edges,
-            "edges": indexed_edges,
-            "flow_edges": indexed_flow_edges,
-            "fts_enabled": fts_enabled,
-            "updated_at": metadata["updated_at"],
-        }
+        finally:
+            lock_path.unlink(missing_ok=True)
 
     @staticmethod
     def _try_create_fts(connection: sqlite3.Connection) -> bool:
@@ -2782,6 +2895,61 @@ class SourceCodeQAService:
                 continue
         paths.sort(key=lambda item: item.get("confidence", 0), reverse=True)
         return paths[: max(1, int(limit or 6))]
+
+    def _build_repo_dependency_graph(self, *, key: str, entries: list[RepositoryEntry]) -> dict[str, Any]:
+        nodes = [{"name": entry.display_name, "url": entry.url} for entry in entries]
+        edge_rows: list[dict[str, Any]] = []
+        for source in entries:
+            source_path = self._repo_path(key, source)
+            if not (source_path / ".git").exists():
+                continue
+            try:
+                self._ensure_repo_index(key=None, entry=source, repo_path=source_path)
+                with sqlite3.connect(self._index_path(source_path)) as connection:
+                    connection.row_factory = sqlite3.Row
+                    rows = connection.execute(
+                        """
+                        select edge_kind, to_name, evidence, from_file, from_line
+                        from flow_edges
+                        where edge_kind in ('client', 'route', 'framework')
+                        limit 300
+                        """
+                    ).fetchall()
+            except (OSError, sqlite3.Error):
+                continue
+            for row in rows:
+                target = self._match_repo_dependency_target(str(row["to_name"] or row["evidence"] or ""), entries, source.display_name)
+                if not target:
+                    continue
+                edge_rows.append(
+                    {
+                        "from_repo": source.display_name,
+                        "to_repo": target.display_name,
+                        "edge_kind": str(row["edge_kind"] or "dependency"),
+                        "evidence": str(row["evidence"] or row["to_name"] or "")[:300],
+                        "from_file": str(row["from_file"] or ""),
+                        "from_line": int(row["from_line"] or 0),
+                    }
+                )
+        deduped = list({json.dumps(edge, sort_keys=True): edge for edge in edge_rows}.values())
+        return {"nodes": nodes, "edges": deduped[:80]}
+
+    @staticmethod
+    def _match_repo_dependency_target(value: str, entries: list[RepositoryEntry], source_name: str) -> RepositoryEntry | None:
+        normalized_value = re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+        if not normalized_value:
+            return None
+        for entry in entries:
+            if entry.display_name == source_name:
+                continue
+            candidates = {
+                re.sub(r"[^a-z0-9]+", "", entry.display_name.lower()),
+                re.sub(r"[^a-z0-9]+", "", SourceCodeQAService._derive_display_name(entry.url).lower()),
+            }
+            for candidate in candidates:
+                if len(candidate) >= 4 and (candidate in normalized_value or normalized_value in candidate):
+                    return entry
+        return None
 
     @staticmethod
     def _trace_path_edges_for_seed(connection: sqlite3.Connection, seed_path: str) -> list[dict[str, Any]]:

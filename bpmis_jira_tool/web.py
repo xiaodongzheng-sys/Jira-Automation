@@ -619,14 +619,18 @@ def create_app() -> Flask:
         if access_gate is not None:
             return access_gate
         payload = request.get_json(silent=True) or {}
-        try:
-            result = _build_source_code_qa_service().sync(
-                pm_team=str(payload.get("pm_team") or ""),
-                country=str(payload.get("country") or ""),
-            )
-            return jsonify(result)
-        except ToolError as error:
-            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
+        pm_team = str(payload.get("pm_team") or "")
+        country = str(payload.get("country") or "")
+        job_store: JobStore = current_app.config["JOB_STORE"]
+        job = job_store.create("source-code-qa-sync", title="Sync Source Code Repositories")
+        app_obj = current_app._get_current_object()
+        thread = threading.Thread(
+            target=_run_source_code_qa_sync_job,
+            args=(app_obj, job.job_id, settings, pm_team, country),
+            daemon=True,
+        )
+        thread.start()
+        return jsonify({"status": "queued", "job_id": job.job_id})
 
     @app.post("/api/source-code-qa/query")
     def source_code_qa_query_api():
@@ -641,6 +645,7 @@ def create_app() -> Flask:
                 question=str(payload.get("question") or ""),
                 answer_mode=str(payload.get("answer_mode") or "retrieval_only"),
                 llm_budget_mode=str(payload.get("llm_budget_mode") or "cheap"),
+                conversation_context=payload.get("conversation_context") if isinstance(payload.get("conversation_context"), dict) else None,
             )
             return jsonify(result)
         except ToolError as error:
@@ -2034,6 +2039,45 @@ def _results_for_display(results: list[dict[str, Any]] | list[object], *, includ
 
 def _serialize_results(results: list[object], *, include_skipped: bool = True) -> list[dict[str, Any]]:
     return _results_for_display(results, include_skipped=include_skipped)
+
+
+def _run_source_code_qa_sync_job(
+    app: Flask,
+    job_id: str,
+    settings: Settings,
+    pm_team: str,
+    country: str,
+) -> None:
+    del settings
+    with app.app_context():
+        job_store: JobStore = app.config["JOB_STORE"]
+        job_store.update(
+            job_id,
+            state="running",
+            stage="syncing",
+            message="Syncing repositories and rebuilding the source-code index.",
+            current=0,
+            total=1,
+        )
+        try:
+            result = _build_source_code_qa_service().sync(pm_team=pm_team, country=country)
+            status = str(result.get("status") or "ok")
+            summary = "Source repositories are synced." if status == "ok" else "Source repository sync completed with issues."
+            job_store.complete(
+                job_id,
+                results=[result],
+                notice={
+                    "title": "Source Code Sync",
+                    "tone": "success" if status == "ok" else "warning",
+                    "summary": summary,
+                    "details": [f"Status: {status}", f"Repositories: {len(result.get('results') or [])}"],
+                },
+            )
+        except ToolError as error:
+            job_store.fail(job_id, str(error))
+        except Exception as error:  # pragma: no cover - defensive guard for background worker failures.
+            app.logger.exception("Source code QA sync job failed unexpectedly.")
+            job_store.fail(job_id, f"Unexpected error: {error}")
 
 
 def _run_background_job(

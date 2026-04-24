@@ -4256,6 +4256,35 @@ select:focus {
   font-weight: 700;
 }
 
+.source-qa-debug-trace {
+  margin-bottom: 14px;
+}
+
+.source-qa-debug-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+}
+
+.source-qa-debug-grid section {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid #e4e7ec;
+  border-radius: 8px;
+  background: #f9fafb;
+}
+
+.source-qa-debug-grid p,
+.source-qa-debug-grid ul {
+  margin: 6px 0 0;
+  color: #475467;
+  line-height: 1.5;
+}
+
+.source-qa-debug-grid ul {
+  padding-left: 18px;
+}
+
 .source-qa-llm-card {
   display: grid;
   gap: 10px;
