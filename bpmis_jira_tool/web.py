@@ -35,6 +35,7 @@ from bpmis_jira_tool.seatalk_dashboard import SeaTalkDashboardService
 from bpmis_jira_tool.google_sheets import GoogleSheetsService
 from bpmis_jira_tool.project_sync import BPMISProjectSyncService
 from bpmis_jira_tool.service import JiraCreationService, build_bpmis_client
+from bpmis_jira_tool.source_code_qa import CRMS_COUNTRIES, ALL_COUNTRY, SourceCodeQAService
 from bpmis_jira_tool.user_config import (
     CONFIGURED_FIELDS,
     DEFAULT_DIRECT_VALUES,
@@ -346,6 +347,18 @@ def create_app() -> Flask:
     app.config["CONFIG_STORE"] = config_store
     app.config["JOB_STORE"] = JobStore()
     app.config["PRD_BRIEFING_STORE"] = BriefingStore(data_root / "prd_briefing")
+    app.config["SOURCE_CODE_QA_SERVICE"] = SourceCodeQAService(
+        data_root=data_root,
+        team_profiles=TEAM_PROFILE_DEFAULTS,
+        gitlab_token=settings.source_code_qa_gitlab_token,
+        gitlab_username=settings.source_code_qa_gitlab_username,
+        gemini_api_key=settings.source_code_qa_gemini_api_key,
+        gemini_model=settings.source_code_qa_gemini_model,
+        gemini_fallback_model=settings.source_code_qa_gemini_fallback_model,
+        llm_cache_ttl_seconds=settings.source_code_qa_llm_cache_ttl_seconds,
+        git_timeout_seconds=settings.source_code_qa_git_timeout_seconds,
+        max_file_bytes=settings.source_code_qa_max_file_bytes,
+    )
     app.config["GET_USER_IDENTITY"] = lambda: _get_user_identity(settings)
     app.config["CAN_ACCESS_PRD_BRIEFING"] = lambda: _can_access_prd_briefing(settings)
     app.config["CAN_ACCESS_GMAIL_SEATALK_DEMO"] = lambda: _can_access_gmail_seatalk_demo(settings)
@@ -359,6 +372,9 @@ def create_app() -> Flask:
                 "site_tabs": [],
                 "site_requires_google_login": True,
                 "can_access_prd_briefing": False,
+                "can_access_gmail_seatalk_demo": False,
+                "can_access_source_code_qa": False,
+                "can_manage_source_code_qa": False,
             }
         site_tabs = [
             {
@@ -367,6 +383,14 @@ def create_app() -> Flask:
                 "active": current_endpoint == "index",
             }
         ]
+        if _can_access_source_code_qa(settings):
+            site_tabs.append(
+                {
+                    "label": "Source Code Q&A",
+                    "href": url_for("source_code_qa"),
+                    "active": request.path.startswith("/source-code-qa"),
+                }
+            )
         if _can_access_prd_briefing(settings):
             site_tabs.append(
                 {
@@ -388,6 +412,8 @@ def create_app() -> Flask:
             "site_requires_google_login": _site_requires_google_login(settings),
             "can_access_prd_briefing": _can_access_prd_briefing(settings),
             "can_access_gmail_seatalk_demo": _can_access_gmail_seatalk_demo(settings),
+            "can_access_source_code_qa": _can_access_source_code_qa(settings),
+            "can_manage_source_code_qa": _can_manage_source_code_qa(settings),
             "asset_revision": _current_release_revision(),
         }
 
@@ -528,6 +554,97 @@ def create_app() -> Flask:
     @app.get("/access-denied")
     def access_denied():
         return render_template("access_denied.html", page_title="Access Restricted"), HTTPStatus.FORBIDDEN
+
+    @app.get("/source-code-qa")
+    def source_code_qa():
+        access_gate = _require_source_code_qa_access(settings)
+        if access_gate is not None:
+            return access_gate
+        user_identity = _get_user_identity(settings)
+        service = _build_source_code_qa_service()
+        return render_template(
+            "source_code_qa.html",
+            page_title="Source Code Q&A",
+            user_identity=user_identity,
+            options=service.options_payload(),
+            team_profiles=TEAM_PROFILE_DEFAULTS,
+            country_options=list(CRMS_COUNTRIES),
+            all_country=ALL_COUNTRY,
+            can_manage_source_code_qa=_can_manage_source_code_qa(settings),
+            asset_revision=_current_release_revision(),
+        )
+
+    @app.get("/api/source-code-qa/config")
+    def source_code_qa_config_api():
+        access_gate = _require_source_code_qa_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        try:
+            service = _build_source_code_qa_service()
+            return jsonify(
+                {
+                    "status": "ok",
+                    "answer_mode": "retrieval_only",
+                    "can_manage": _can_manage_source_code_qa(settings),
+                    "git_auth_ready": bool(settings.source_code_qa_gitlab_token),
+                    "llm_ready": bool(settings.source_code_qa_gemini_api_key),
+                    "llm_model": settings.source_code_qa_gemini_model,
+                    "llm_fallback_model": settings.source_code_qa_gemini_fallback_model,
+                    "options": service.options_payload(),
+                    "config": service.load_config(),
+                }
+            )
+        except ToolError as error:
+            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
+
+    @app.post("/api/source-code-qa/config")
+    def source_code_qa_save_config_api():
+        access_gate = _require_source_code_qa_manage_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        payload = request.get_json(silent=True) or {}
+        try:
+            result = _build_source_code_qa_service().save_mapping(
+                pm_team=str(payload.get("pm_team") or ""),
+                country=str(payload.get("country") or ""),
+                repositories=payload.get("repositories") or [],
+            )
+            return jsonify({"status": "ok", **result})
+        except ToolError as error:
+            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
+
+    @app.post("/api/source-code-qa/sync")
+    def source_code_qa_sync_api():
+        access_gate = _require_source_code_qa_manage_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        payload = request.get_json(silent=True) or {}
+        try:
+            result = _build_source_code_qa_service().sync(
+                pm_team=str(payload.get("pm_team") or ""),
+                country=str(payload.get("country") or ""),
+            )
+            return jsonify(result)
+        except ToolError as error:
+            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
+
+    @app.post("/api/source-code-qa/query")
+    def source_code_qa_query_api():
+        access_gate = _require_source_code_qa_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        payload = request.get_json(silent=True) or {}
+        try:
+            result = _build_source_code_qa_service().query(
+                pm_team=str(payload.get("pm_team") or ""),
+                country=str(payload.get("country") or ""),
+                question=str(payload.get("question") or ""),
+                answer_mode=str(payload.get("answer_mode") or "retrieval_only"),
+                llm_budget_mode=str(payload.get("llm_budget_mode") or "cheap"),
+            )
+            return jsonify(result)
+        except ToolError as error:
+            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
 
     @app.get("/auth/google/login")
     def google_login():
@@ -1624,6 +1741,26 @@ def _can_access_gmail_seatalk_demo(settings: Settings) -> bool:
     return bool(email and email == settings.gmail_seatalk_demo_owner_email.strip().lower())
 
 
+def _can_access_source_code_qa(settings: Settings) -> bool:
+    email = _current_google_email()
+    return bool(
+        email
+        and (
+            email.endswith("@npt.sg")
+            or email == "xiaodong.zheng1991@gmail.com"
+        )
+    )
+
+
+def _can_manage_source_code_qa(settings: Settings) -> bool:
+    email = _current_google_email()
+    return bool(email and email == settings.source_code_qa_owner_email.strip().lower())
+
+
+def _build_source_code_qa_service() -> SourceCodeQAService:
+    return current_app.config["SOURCE_CODE_QA_SERVICE"]
+
+
 def _google_credentials_have_scopes(*required_scopes: str) -> bool:
     payload = dict(session.get("google_credentials") or {})
     scopes = payload.get("scopes") or []
@@ -1671,6 +1808,32 @@ def _require_gmail_seatalk_demo_access(settings: Settings, *, api: bool = False)
             return jsonify({"status": "error", "message": message}), HTTPStatus.FORBIDDEN
         flash(message, "error")
         return redirect(url_for("index"))
+    return None
+
+
+def _require_source_code_qa_access(settings: Settings, *, api: bool = False):
+    login_gate = _require_google_login(settings, api=api)
+    if login_gate is not None:
+        return login_gate
+    message = "Source Code Q&A is available to signed-in @npt.sg users only."
+    if not _can_access_source_code_qa(settings):
+        if api:
+            return jsonify({"status": "error", "message": message}), HTTPStatus.FORBIDDEN
+        flash(message, "error")
+        return redirect(url_for("index"))
+    return None
+
+
+def _require_source_code_qa_manage_access(settings: Settings, *, api: bool = False):
+    access_gate = _require_source_code_qa_access(settings, api=api)
+    if access_gate is not None:
+        return access_gate
+    message = f"Source Code Q&A repository admin is restricted to {settings.source_code_qa_owner_email.strip().lower()}."
+    if not _can_manage_source_code_qa(settings):
+        if api:
+            return jsonify({"status": "error", "message": message}), HTTPStatus.FORBIDDEN
+        flash(message, "error")
+        return redirect(url_for("source_code_qa"))
     return None
 
 

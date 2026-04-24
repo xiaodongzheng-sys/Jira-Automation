@@ -1,0 +1,1 @@
+{"id":"example-symbol-location","pm_team":"AF","country":"All","question":"where is batchCreateJiraIssue implemented","expected_paths":["bpmis/jira_client.py"],"required_terms":["batchCreateJiraIssue"],"answer_mode":"retrieval_only"}

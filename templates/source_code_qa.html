@@ -1,0 +1,164 @@
+{% extends "base.html" %}
+
+{% block body %}
+  <section
+    class="panel panel-wide source-qa-root"
+    data-source-code-qa-root
+    data-config-url="{{ url_for('source_code_qa_config_api') }}"
+    data-save-url="{{ url_for('source_code_qa_save_config_api') }}"
+    data-sync-url="{{ url_for('source_code_qa_sync_api') }}"
+    data-query-url="{{ url_for('source_code_qa_query_api') }}"
+    data-can-manage="{{ 'true' if can_manage_source_code_qa else 'false' }}"
+    data-options='{{ options | tojson }}'
+  >
+    <div class="panel-head source-qa-hero">
+      <div>
+        <p class="eyebrow">Retrieval Only</p>
+        <h1>Source Code Q&amp;A</h1>
+        <p class="lede">
+          Ask questions against manually synced source repositories. The portal focuses on direct answers,
+          with local code retrieval used behind the scenes to keep Gemini grounded and cost-aware.
+        </p>
+      </div>
+    </div>
+
+    <div class="source-qa-selector config-card">
+      <div class="field-grid">
+        <label class="field-group">
+          <span>PM Team</span>
+          <select data-source-pm-team>
+            {% for code, profile in team_profiles.items() %}
+              <option value="{{ code }}">{{ profile.label }} ({{ code }})</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label class="field-group" data-source-country-wrap>
+          <span>Country</span>
+          <select data-source-country>
+            <option value="{{ all_country }}">{{ all_country }}</option>
+            {% for country in country_options %}
+              <option value="{{ country }}">{{ country }}</option>
+            {% endfor %}
+          </select>
+          <small class="field-help">Only applies to Credit Risk. Other teams use All.</small>
+        </label>
+      </div>
+      <div class="field-grid">
+        <label class="field-group">
+          <span>Answer Mode</span>
+          <select data-source-answer-mode>
+            {% for mode in options.answer_modes %}
+              <option value="{{ mode.value }}">{{ mode.label }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label class="field-group">
+          <span>LLM Budget</span>
+          <select data-source-llm-budget>
+            {% for mode in options.llm_budget_modes %}
+              <option value="{{ mode.value }}"{% if mode.value == 'cheap' %} selected{% endif %}>{{ mode.label }}</option>
+            {% endfor %}
+          </select>
+          <small class="field-help">Cheap sends fewer snippets. Deep sends more context and costs more.</small>
+        </label>
+      </div>
+      <div class="source-qa-status" data-source-config-status>
+        Loading repository configuration...
+      </div>
+    </div>
+  </section>
+
+  <div class="workspace-tabs source-qa-tabs" role="tablist" aria-label="Source Code Q&A sections" data-default-tab="ask-search">
+    <button class="workspace-tab is-active" type="button" role="tab" aria-selected="true" data-tab-trigger="ask-search">
+      Ask &amp; Search
+    </button>
+    {% if can_manage_source_code_qa %}
+      <button class="workspace-tab" type="button" role="tab" aria-selected="false" data-tab-trigger="repo-admin">
+        Repo Admin
+      </button>
+    {% endif %}
+  </div>
+
+  <section class="workspace-panel source-qa-panel is-active" data-tab-panel="ask-search">
+    <section class="grid source-qa-workspace">
+      <article class="panel panel-wide">
+        <div class="panel-head">
+          <div>
+            <p class="eyebrow">Question</p>
+            <h2>Ask The Codebase</h2>
+            <p class="card-help">Use concrete terms: API path, class name, table, field, error code, or business keyword.</p>
+          </div>
+        </div>
+        <textarea data-source-question rows="6" placeholder="Example: where is Jira issue batch creation handled?"></textarea>
+        <div class="button-row source-qa-actions">
+          <button class="button" type="button" data-source-query>Search Code</button>
+          <span class="microcopy" data-source-query-status>Ready.</span>
+        </div>
+      </article>
+    </section>
+
+    <section class="panel panel-wide">
+        <div class="panel-head">
+          <div>
+            <p class="eyebrow">Results</p>
+            <h2>Answer</h2>
+            <p class="card-help" data-source-summary>No question asked yet.</p>
+          </div>
+        <div class="source-qa-metadata">
+          <span class="field-badge field-badge-recommended" data-source-active-mode>retrieval_only</span>
+          <span class="field-badge source-qa-meta-badge" data-source-active-budget>cheap</span>
+          <span class="field-badge source-qa-meta-badge" data-source-active-cache hidden>live</span>
+          <span class="field-badge source-qa-meta-badge" data-source-active-usage hidden>tokens</span>
+        </div>
+      </div>
+      <div class="source-qa-fallback-notice" data-source-fallback-notice hidden></div>
+      <div class="source-qa-llm-answer" data-source-llm-answer hidden></div>
+      <div class="source-qa-results" data-source-results>
+        <div class="source-qa-empty">Ask a question to generate an answer. Retrieval details stay in the background unless Gemini is unavailable.</div>
+      </div>
+    </section>
+  </section>
+
+  {% if can_manage_source_code_qa %}
+    <section class="workspace-panel source-qa-panel" data-tab-panel="repo-admin" hidden>
+      <section class="grid source-qa-workspace">
+        <section class="panel panel-wide source-qa-admin">
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow">Owner Admin</p>
+              <h2>Repository Mapping</h2>
+              <p class="card-help">
+                Add one HTTPS clone URL per line. Optional format: <code>Display Name | https://gitlab.example.com/group/repo.git</code>.
+              </p>
+            </div>
+            <div class="button-row">
+              <button class="button button-secondary" type="button" data-source-save-config>Save Config</button>
+              <button class="button" type="button" data-source-sync>Sync / Refresh</button>
+            </div>
+          </div>
+          <textarea class="mapping-textarea source-qa-repos" data-source-repos-input spellcheck="false" placeholder="https://gitlab.example.com/group/repo.git"></textarea>
+          <div class="source-qa-status" data-source-admin-status>
+            Save URLs first, then run Sync / Refresh. HTTPS auth uses a server-side GitLab token and never runs during user questions.
+          </div>
+        </section>
+
+        <article class="panel panel-wide">
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow">Local Repos</p>
+              <h2>Sync Status</h2>
+              <p class="card-help">Questions use the last synced local clone. If code changed upstream, ask the owner to refresh.</p>
+            </div>
+          </div>
+          <div class="source-qa-repo-list" data-source-repo-status>
+            No repository status loaded yet.
+          </div>
+        </article>
+      </section>
+    </section>
+  {% endif %}
+{% endblock %}
+
+{% block extra_head %}
+  <script defer src="{{ url_for('static', filename='source_code_qa.js') }}?v={{ asset_revision }}&qa=20260424b"></script>
+{% endblock %}

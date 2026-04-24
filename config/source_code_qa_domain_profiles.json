@@ -1,0 +1,61 @@
+{
+  "default": {
+    "description": "Generic source-code QA profile used when no PM-team profile is configured.",
+    "data_carriers": ["DTO", "Input", "Context", "Record", "Result", "Request", "Response", "Entity", "Model", "Info"],
+    "source_terms": ["Repository", "Mapper", "Dao", "DAO", "Client", "Integration", "Gateway", "Provider", "Adapter", "jdbcTemplate", "queryForObject", "select", "from"],
+    "api_terms": ["Controller", "RequestMapping", "GetMapping", "PostMapping", "PutMapping", "DeleteMapping", "Client", "Endpoint"],
+    "config_terms": ["Configuration", "Properties", "yaml", "yml", "feature", "config"],
+    "logic_terms": ["validate", "rule", "condition", "exception", "status", "approval", "permission"]
+  },
+  "CRMS": {
+    "description": "Credit Risk code profile. Keeps domain terms configurable instead of hardcoding them into retrieval logic.",
+    "data_carriers": [
+      "DataSourceResult",
+      "UnderwritingContext",
+      "UnderwritingInitiationDTO",
+      "UnderwritingBasicInfo",
+      "CustomerInfo",
+      "LoanInfo",
+      "CreditRiskInfo",
+      "CustomerInfoDO",
+      "CustomerExtraInfoDTO",
+      "FeatureData"
+    ],
+    "source_terms": [
+      "DataSourceResult",
+      "dataSourceResult",
+      "UnderwritingInitiationProvider",
+      "CustomerInfoDAO",
+      "CustomerInfoDao",
+      "CustomerInfoMapper",
+      "LoanInfoDAO",
+      "LoanInfoDao",
+      "LoanInfoMapper",
+      "CreditRiskInfoDAO",
+      "CreditRiskInfoDao",
+      "CreditRiskInfoMapper",
+      "UnderwritingBasicInfoDAO",
+      "UnderwritingBasicInfoMapper",
+      "Repository",
+      "Mapper",
+      "Dao",
+      "jdbcTemplate",
+      "queryForObject",
+      "select",
+      "from"
+    ],
+    "field_population_terms": [
+      "setCustomerInfo",
+      "setLoanInfo",
+      "setCreditRiskInfo",
+      "getCustomerInfo",
+      "getLoanInfo",
+      "getCreditRiskInfo",
+      "populate",
+      "build",
+      "provider",
+      "converter",
+      "assembler"
+    ]
+  }
+}
