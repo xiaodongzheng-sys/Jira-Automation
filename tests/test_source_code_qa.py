@@ -126,6 +126,25 @@ class SourceCodeQARouteTests(unittest.TestCase):
         payload = response.get_json()
         self.assertFalse(payload["llm_ready"])
 
+    def test_feedback_api_saves_user_signal(self):
+        with self.app.test_client() as client:
+            self._login(client, "teammate@npt.sg")
+            response = client.post(
+                "/api/source-code-qa/feedback",
+                json={
+                    "rating": "too_vague",
+                    "pm_team": "AF",
+                    "country": "All",
+                    "question": "where is createIssue",
+                    "top_paths": ["controller/IssueController.java"],
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        feedback_path = Path(self.temp_dir.name) / "source_code_qa" / "feedback.jsonl"
+        self.assertTrue(feedback_path.exists())
+        self.assertIn("too_vague", feedback_path.read_text(encoding="utf-8"))
+
 
 class SourceCodeQAServiceTests(unittest.TestCase):
     def setUp(self):
@@ -202,7 +221,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
 
         self.assertEqual(payload["status"], "ok")
         self.assertTrue(self.service._index_path(repo_path).exists())
-        self.assertEqual(payload["matches"][0]["retrieval"], "persistent_index")
+        self.assertIn("persistent_index", {match.get("retrieval") for match in payload["matches"]})
         self.assertEqual(payload["citations"][0]["id"], "S1")
         self.assertEqual(payload["citations"][0]["path"], "bpmis/jira_client.py")
         self.assertEqual(self.service.repo_status("AF:All")[0]["index"]["state"], "ready")
@@ -248,11 +267,64 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         with sqlite3.connect(index_path) as connection:
             definition_count = connection.execute("select count(*) from definitions").fetchone()[0]
             reference_count = connection.execute("select count(*) from references_index").fetchone()[0]
+            edge_count = connection.execute("select count(*) from graph_edges").fetchone()[0]
+            fts_count = connection.execute("select count(*) from lines_fts").fetchone()[0]
         self.assertGreaterEqual(definition_count, 3)
         self.assertGreaterEqual(reference_count, 3)
+        self.assertGreaterEqual(edge_count, 1)
+        self.assertGreaterEqual(fts_count, 1)
         telemetry = self.service.telemetry_path.read_text(encoding="utf-8").strip().splitlines()
         self.assertTrue(telemetry)
         self.assertIn("IssueController", telemetry[-1])
+
+    def test_planner_tool_loop_adds_code_graph_matches(self):
+        self.service.save_mapping(
+            pm_team="AF",
+            country="All",
+            repositories=[{"display_name": "Portal Repo", "url": "https://git.example.com/team/portal.git"}],
+        )
+        entry = self.service.load_config()["mappings"]["AF:All"][0]
+        repo_path = self.service._repo_path("AF:All", type("Entry", (), entry)())
+        (repo_path / ".git").mkdir(parents=True)
+        controller_file = repo_path / "controller" / "IssueController.java"
+        controller_file.parent.mkdir(parents=True)
+        controller_file.write_text(
+            "public class IssueController {\n"
+            "    private IssueService issueService;\n"
+            "    public Issue createIssue() {\n"
+            "        return issueService.createIssue();\n"
+            "    }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        service_file = repo_path / "service" / "IssueService.java"
+        service_file.parent.mkdir(parents=True)
+        service_file.write_text(
+            "public class IssueService {\n"
+            "    private IssueRepository issueRepository;\n"
+            "    public Issue createIssue() {\n"
+            "        return issueRepository.findIssue();\n"
+            "    }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        repository_file = repo_path / "repository" / "IssueRepository.java"
+        repository_file.parent.mkdir(parents=True)
+        repository_file.write_text(
+            "public class IssueRepository {\n"
+            "    public Issue findIssue() {\n"
+            "        return jdbcTemplate.queryForObject(\"select * from issue_table\", mapper);\n"
+            "    }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+
+        payload = self.service.query(pm_team="AF", country="All", question="trace issue create API data source")
+
+        retrievals = {match.get("retrieval") for match in payload["matches"]}
+        paths = {match["path"] for match in payload["matches"]}
+        self.assertTrue({"planner_definition", "planner_reference", "code_graph"} & retrievals)
+        self.assertIn("repository/IssueRepository.java", paths)
 
     def test_domain_profile_terms_can_boost_configured_data_source_names(self):
         profile_path = Path(self.temp_dir.name) / "profiles.json"
@@ -319,7 +391,11 @@ class SourceCodeQAServiceTests(unittest.TestCase):
 
         self.assertEqual(payload["status"], "ok")
         self.assertEqual(payload["matches"][0]["path"], "bpmis/jira_client.py")
-        self.assertIn("symbol matched", payload["matches"][0]["reason"])
+        self.assertTrue(
+            "symbol matched" in payload["matches"][0]["reason"]
+            or "planner_definition" in payload["matches"][0]["reason"]
+            or "structure matched" in payload["matches"][0]["reason"]
+        )
 
     def test_dependency_question_expands_to_service_and_integration_matches(self):
         self.service.save_mapping(
@@ -836,7 +912,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         success_response = SimpleNamespace(
             ok=True,
             json=lambda: {
-                "candidates": [{"content": {"parts": [{"text": "Recovered answer"}]}}],
+                "candidates": [{"content": {"parts": [{"text": "Recovered answer: batchCreateJiraIssue is handled in the BPMIS client method and grounded by the retrieved source reference."}]}}],
                 "usageMetadata": {"promptTokenCount": 50, "candidatesTokenCount": 20},
             },
             text='{"ok":true}',

@@ -4237,6 +4237,25 @@ select:focus {
   line-height: 1.5;
 }
 
+.source-qa-feedback {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.source-qa-evidence {
+  display: grid;
+  gap: 12px;
+}
+
+.source-qa-evidence summary {
+  cursor: pointer;
+  color: #344054;
+  font-weight: 700;
+}
+
 .source-qa-llm-card {
   display: grid;
   gap: 10px;

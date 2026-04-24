@@ -24,7 +24,7 @@ CRMS_COUNTRIES = ("SG", "ID", "PH")
 ANSWER_MODE = "retrieval_only"
 ANSWER_MODE_GEMINI = "gemini_flash"
 CONFIG_VERSION = 1
-CODE_INDEX_VERSION = 2
+CODE_INDEX_VERSION = 3
 GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 DEFAULT_DOMAIN_PROFILE_PATH = Path(__file__).resolve().parent.parent / "config" / "source_code_qa_domain_profiles.json"
 LLM_BUDGETS = {
@@ -158,6 +158,7 @@ JAVA_METHOD_DEF_PATTERN = re.compile(
 ANNOTATION_ROUTE_PATTERN = re.compile(r"@(RequestMapping|GetMapping|PostMapping|PutMapping|DeleteMapping|PatchMapping)\s*(?:\(([^)]*)\))?")
 SQL_TABLE_PATTERN = re.compile(r"\b(?:from|join|update|into)\s+([A-Za-z_][A-Za-z0-9_.$]*)", re.IGNORECASE)
 PROPERTIES_KEY_PATTERN = re.compile(r"^\s*([A-Za-z0-9_.-]{3,})\s*[:=]")
+FTS_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_./:-]{2,}")
 DECLARATION_HINT_PATTERN = re.compile(
     r"^\s*(class|def|function|func|interface|type|enum|const|let|var|public|private|protected|static|final)\b",
     re.IGNORECASE,
@@ -247,6 +248,7 @@ class SourceCodeQAService:
         self.index_root = self.data_root / "indexes"
         self.answer_cache_root = self.data_root / "answer_cache"
         self.telemetry_path = self.data_root / "telemetry.jsonl"
+        self.feedback_path = self.data_root / "feedback.jsonl"
         self.domain_profile_path = Path(os.getenv("SOURCE_CODE_QA_DOMAIN_PROFILES", str(DEFAULT_DOMAIN_PROFILE_PATH)))
         self.team_profiles = team_profiles
         self.gitlab_token = str(gitlab_token or "").strip()
@@ -503,6 +505,23 @@ class SourceCodeQAService:
                 top_matches.sort(key=lambda item: item["score"], reverse=True)
                 top_matches = self._select_result_matches(top_matches, max(1, min(int(limit or 12), 30)))
         if top_matches:
+            tool_loop_matches = self._run_planner_tool_loop(
+                entries=entries,
+                key=key,
+                question=question,
+                base_matches=top_matches,
+                limit=limit,
+            )
+            if tool_loop_matches:
+                existing_keys = {(item["repo"], item["path"], item["line_start"], item["line_end"]) for item in top_matches}
+                for item in tool_loop_matches:
+                    item_key = (item["repo"], item["path"], item["line_start"], item["line_end"])
+                    if item_key not in existing_keys:
+                        top_matches.append(item)
+                        existing_keys.add(item_key)
+                top_matches.sort(key=lambda item: item["score"], reverse=True)
+                top_matches = self._select_result_matches(top_matches, max(1, min(int(limit or 12), 30)))
+        if top_matches:
             evidence_summary = self._compress_evidence(question, top_matches)
             quality_gate = self._quality_gate(question, evidence_summary)
             agent_plan = self._build_agent_plan(question, evidence_summary, quality_gate)
@@ -611,6 +630,28 @@ class SourceCodeQAService:
                 }
             )
         return statuses
+
+    def save_feedback(self, *, user_email: str, payload: dict[str, Any]) -> dict[str, Any]:
+        rating = str(payload.get("rating") or "").strip().lower()
+        if rating not in {"useful", "not_useful", "wrong_file", "too_vague", "hallucinated", "missing_repo", "needs_deeper_trace"}:
+            raise ToolError("Unknown feedback rating.")
+        question = str(payload.get("question") or "").strip()
+        record = {
+            "timestamp": self._now_iso(),
+            "user_email": str(user_email or "").strip().lower(),
+            "rating": rating,
+            "pm_team": str(payload.get("pm_team") or "").strip().upper(),
+            "country": str(payload.get("country") or "").strip(),
+            "question_sha1": hashlib.sha1(question.encode("utf-8")).hexdigest() if question else "",
+            "question_preview": question[:180],
+            "top_paths": [str(path) for path in payload.get("top_paths") or []][:8],
+            "comment": str(payload.get("comment") or "").strip()[:1000],
+            "answer_quality": payload.get("answer_quality") if isinstance(payload.get("answer_quality"), dict) else {},
+        }
+        self.feedback_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.feedback_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+        return {"status": "ok", "message": "Feedback saved."}
 
     def _load_entries_for_key(self, key: str) -> list[RepositoryEntry]:
         raw_entries = self.load_config().get("mappings", {}).get(key, [])
@@ -728,6 +769,8 @@ class SourceCodeQAService:
             "lines": int(metadata.get("indexed_lines") or 0),
             "definitions": int(metadata.get("indexed_definitions") or 0),
             "references": int(metadata.get("indexed_references") or 0),
+            "edges": int(metadata.get("indexed_edges") or 0),
+            "fts_enabled": metadata.get("fts_enabled") == "1",
             "updated_at": metadata.get("updated_at"),
         }
 
@@ -805,8 +848,21 @@ class SourceCodeQAService:
                 );
                 create index idx_references_lower_target on references_index(lower_target);
                 create index idx_references_file_path on references_index(file_path);
+                create table graph_edges (
+                    from_file text not null,
+                    from_line integer not null,
+                    symbol text not null,
+                    lower_symbol text not null,
+                    edge_kind text not null,
+                    to_file text not null,
+                    to_line integer not null
+                );
+                create index idx_graph_from_file on graph_edges(from_file);
+                create index idx_graph_lower_symbol on graph_edges(lower_symbol);
+                create index idx_graph_to_file on graph_edges(to_file);
                 """
             )
+            fts_enabled = self._try_create_fts(connection)
             for file_path in self._iter_text_files(repo_path):
                 relative_path = str(file_path.relative_to(repo_path))
                 try:
@@ -847,6 +903,11 @@ class SourceCodeQAService:
                     """,
                     line_rows,
                 )
+                if fts_enabled:
+                    connection.executemany(
+                        "insert into lines_fts(file_path, line_no, content) values (?, ?, ?)",
+                        [(relative_path, row[1], row[2]) for row in line_rows],
+                    )
                 structure = self._extract_structure_rows(relative_path, lines)
                 connection.executemany(
                     """
@@ -866,6 +927,7 @@ class SourceCodeQAService:
                 indexed_lines += len(lines)
                 indexed_definitions += len(structure["definitions"])
                 indexed_references += len(structure["references"])
+            indexed_edges = self._build_graph_edges(connection)
             metadata = {
                 "version": str(CODE_INDEX_VERSION),
                 "file_count": str(fingerprint["file_count"]),
@@ -875,6 +937,8 @@ class SourceCodeQAService:
                 "indexed_lines": str(indexed_lines),
                 "indexed_definitions": str(indexed_definitions),
                 "indexed_references": str(indexed_references),
+                "indexed_edges": str(indexed_edges),
+                "fts_enabled": "1" if fts_enabled else "0",
                 "updated_at": self._now_iso(),
             }
             connection.executemany("insert into metadata(key, value) values (?, ?)", metadata.items())
@@ -886,8 +950,46 @@ class SourceCodeQAService:
             "lines": indexed_lines,
             "definitions": indexed_definitions,
             "references": indexed_references,
+            "edges": indexed_edges,
+            "fts_enabled": fts_enabled,
             "updated_at": metadata["updated_at"],
         }
+
+    @staticmethod
+    def _try_create_fts(connection: sqlite3.Connection) -> bool:
+        try:
+            connection.execute(
+                "create virtual table lines_fts using fts5(file_path unindexed, line_no unindexed, content)"
+            )
+            return True
+        except sqlite3.Error:
+            return False
+
+    @staticmethod
+    def _build_graph_edges(connection: sqlite3.Connection) -> int:
+        definitions = connection.execute(
+            "select lower_name, file_path, line_no from definitions"
+        ).fetchall()
+        definition_by_name: dict[str, list[tuple[str, int]]] = {}
+        for lower_name, file_path, line_no in definitions:
+            definition_by_name.setdefault(str(lower_name), []).append((str(file_path), int(line_no)))
+        rows = []
+        for target, lower_target, kind, file_path, line_no, _context in connection.execute(
+            "select target, lower_target, kind, file_path, line_no, context from references_index"
+        ):
+            for to_file, to_line in definition_by_name.get(str(lower_target), [])[:8]:
+                if to_file == file_path:
+                    continue
+                rows.append((file_path, int(line_no), target, lower_target, kind, to_file, to_line))
+        rows = list(dict.fromkeys(rows))
+        connection.executemany(
+            """
+            insert into graph_edges(from_file, from_line, symbol, lower_symbol, edge_kind, to_file, to_line)
+            values (?, ?, ?, ?, ?, ?, ?)
+            """,
+            rows,
+        )
+        return len(rows)
 
     def _extract_structure_rows(self, relative_path: str, lines: list[str]) -> dict[str, list[tuple[Any, ...]]]:
         definitions: list[tuple[Any, ...]] = []
@@ -1033,6 +1135,25 @@ class SourceCodeQAService:
                         hit["best_line"] = int(row["line_no"])
                         hit["best_score"] = score
                     hit["structure_hits"].append(f"{row['kind']} reference {row['target']}")
+            for row in self._fts_search_rows(connection, tokens, normalized_focus_terms):
+                file_path = str(row["file_path"])
+                hit = file_hits.setdefault(
+                    file_path,
+                    {
+                        "path_text": file_path.lower(),
+                        "file_symbols": set(),
+                        "path_score": 0,
+                        "symbol_score": 0,
+                        "best_line": int(row["line_no"]),
+                        "best_score": 0,
+                        "structure_hits": [],
+                    },
+                )
+                score = max(12, int(80 - min(float(row["rank"]), 60))) + repo_score + trace_stage_bonus
+                if score > hit.get("best_score", 0):
+                    hit["best_line"] = int(row["line_no"])
+                    hit["best_score"] = score
+                hit["structure_hits"].append("bm25 content match")
             for row in connection.execute("select * from lines"):
                 lower_text = str(row["lower_text"] or "")
                 line_symbols = set(json.loads(row["symbols"] or "[]"))
@@ -1117,6 +1238,39 @@ class SourceCodeQAService:
                     }
                 )
         return matches
+
+    def _fts_search_rows(
+        self,
+        connection: sqlite3.Connection,
+        tokens: list[str],
+        focus_terms: list[str],
+    ) -> list[sqlite3.Row]:
+        terms = []
+        for term in [*tokens, *focus_terms]:
+            normalized = str(term or "").strip().lower()
+            if len(normalized) < 3 or normalized in STOPWORDS:
+                continue
+            if FTS_TOKEN_PATTERN.fullmatch(normalized):
+                terms.append(normalized.replace('"', ""))
+        terms = list(dict.fromkeys(terms))[:12]
+        if not terms:
+            return []
+        query = " OR ".join(f'"{term}"' for term in terms)
+        try:
+            return list(
+                connection.execute(
+                    """
+                    select file_path, line_no, bm25(lines_fts) as rank
+                    from lines_fts
+                    where lines_fts match ?
+                    order by rank
+                    limit 80
+                    """,
+                    (query,),
+                )
+            )
+        except sqlite3.Error:
+            return []
 
     def _search_repo(
         self,
@@ -1512,6 +1666,252 @@ class SourceCodeQAService:
             )
         matches.sort(key=lambda item: item["score"], reverse=True)
         return matches[: max(6, min(int(limit or 12), 18))]
+
+    def _run_planner_tool_loop(
+        self,
+        *,
+        entries: list[RepositoryEntry],
+        key: str,
+        question: str,
+        base_matches: list[dict[str, Any]],
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        plan = self._build_tool_loop_plan(question, base_matches)
+        collected: list[dict[str, Any]] = []
+        seen = {(item["repo"], item["path"], item["line_start"], item["line_end"]) for item in base_matches}
+        for step_index, step in enumerate(plan, start=1):
+            tool = step["tool"]
+            terms = step["terms"]
+            step_matches: list[dict[str, Any]] = []
+            for entry in entries:
+                repo_path = self._repo_path(key, entry)
+                if not (repo_path / ".git").exists():
+                    continue
+                if tool == "find_definition":
+                    step_matches.extend(self._tool_find_definition(entry, repo_path, terms, question, step_index))
+                elif tool == "find_references":
+                    step_matches.extend(self._tool_find_references(entry, repo_path, terms, question, step_index))
+                elif tool == "trace_graph":
+                    step_matches.extend(self._tool_trace_graph(entry, repo_path, base_matches, question, step_index))
+                elif tool == "search_code":
+                    expanded_tokens: list[str] = []
+                    for term in terms:
+                        expanded_tokens.extend(self._question_tokens(term))
+                    step_matches.extend(
+                        self._search_repo(
+                            entry,
+                            repo_path,
+                            list(dict.fromkeys(expanded_tokens))[:30],
+                            question=question,
+                            focus_terms=terms,
+                            trace_stage=f"tool_loop_{step_index}",
+                        )
+                    )
+            step_matches.sort(key=lambda item: item["score"], reverse=True)
+            for item in step_matches[: max(5, min(int(limit or 12), 16))]:
+                item_key = (item["repo"], item["path"], item["line_start"], item["line_end"])
+                if item_key in seen:
+                    continue
+                collected.append(item)
+                seen.add(item_key)
+        collected.sort(key=lambda item: item["score"], reverse=True)
+        return collected[: max(6, min(int(limit or 12) * 2, 24))]
+
+    def _build_tool_loop_plan(self, question: str, base_matches: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        intent = self._question_intent(question)
+        terms = self._tool_loop_terms(question, base_matches)
+        plan: list[dict[str, Any]] = []
+        if terms:
+            plan.append({"tool": "find_definition", "terms": terms[:12]})
+            plan.append({"tool": "find_references", "terms": terms[:12]})
+        if intent.get("data_source") or intent.get("api") or intent.get("rule_logic"):
+            plan.append({"tool": "trace_graph", "terms": terms[:12]})
+        if intent.get("config"):
+            plan.append({"tool": "search_code", "terms": [*terms[:8], "properties", "configuration", "yaml", "feature"]})
+        if intent.get("data_source"):
+            plan.append({"tool": "search_code", "terms": [*terms[:8], "repository", "mapper", "select", "from", "client"]})
+        return plan[:5]
+
+    def _tool_loop_terms(self, question: str, base_matches: list[dict[str, Any]]) -> list[str]:
+        terms = list(self._question_tokens(question))
+        for match in base_matches[:8]:
+            terms.extend(IDENTIFIER_PATTERN.findall(str(match.get("path") or "")))
+            terms.extend(self._extract_downstream_symbols(str(match.get("snippet") or "")))
+            terms.extend(self._extract_assignment_sources(str(match.get("snippet") or "")))
+        deduped = []
+        for term in terms:
+            lowered = str(term or "").strip().lower()
+            if len(lowered) < 3 or lowered in STOPWORDS or lowered in LOW_VALUE_CALL_SYMBOLS:
+                continue
+            if lowered not in deduped:
+                deduped.append(lowered)
+        return deduped[:20]
+
+    def _tool_find_definition(
+        self,
+        entry: RepositoryEntry,
+        repo_path: Path,
+        terms: list[str],
+        question: str,
+        step_index: int,
+    ) -> list[dict[str, Any]]:
+        return self._tool_lookup_structure(
+            entry,
+            repo_path,
+            terms,
+            question=question,
+            table="definitions",
+            name_column="name",
+            lower_column="lower_name",
+            line_column="line_no",
+            kind_column="kind",
+            trace_stage=f"tool_loop_{step_index}",
+            retrieval="planner_definition",
+        )
+
+    def _tool_find_references(
+        self,
+        entry: RepositoryEntry,
+        repo_path: Path,
+        terms: list[str],
+        question: str,
+        step_index: int,
+    ) -> list[dict[str, Any]]:
+        return self._tool_lookup_structure(
+            entry,
+            repo_path,
+            terms,
+            question=question,
+            table="references_index",
+            name_column="target",
+            lower_column="lower_target",
+            line_column="line_no",
+            kind_column="kind",
+            trace_stage=f"tool_loop_{step_index}",
+            retrieval="planner_reference",
+        )
+
+    def _tool_lookup_structure(
+        self,
+        entry: RepositoryEntry,
+        repo_path: Path,
+        terms: list[str],
+        *,
+        question: str,
+        table: str,
+        name_column: str,
+        lower_column: str,
+        line_column: str,
+        kind_column: str,
+        trace_stage: str,
+        retrieval: str,
+    ) -> list[dict[str, Any]]:
+        matches: list[dict[str, Any]] = []
+        index_path = self._index_path(repo_path)
+        try:
+            self._ensure_repo_index(key=None, entry=entry, repo_path=repo_path)
+            with sqlite3.connect(index_path) as connection:
+                connection.row_factory = sqlite3.Row
+                for term in terms[:16]:
+                    lowered = str(term).lower()
+                    if len(lowered) < 3:
+                        continue
+                    for row in connection.execute(
+                        f"select * from {table} where {lower_column} like ? limit 20",
+                        (f"%{lowered}%",),
+                    ):
+                        matches.append(
+                            self._match_from_index_location(
+                                entry,
+                                connection,
+                                str(row["file_path"]),
+                                int(row[line_column]),
+                                score=170 if str(row[lower_column]) == lowered else 132,
+                                reason=f"planner {retrieval}: {row[kind_column]} {row[name_column]}",
+                                question=question,
+                                trace_stage=trace_stage,
+                                retrieval=retrieval,
+                            )
+                        )
+        except (OSError, sqlite3.Error):
+            return []
+        return [match for match in matches if match]
+
+    def _tool_trace_graph(
+        self,
+        entry: RepositoryEntry,
+        repo_path: Path,
+        base_matches: list[dict[str, Any]],
+        question: str,
+        step_index: int,
+    ) -> list[dict[str, Any]]:
+        index_path = self._index_path(repo_path)
+        seed_paths = [str(match.get("path") or "") for match in base_matches if match.get("repo") == entry.display_name][:8]
+        matches: list[dict[str, Any]] = []
+        try:
+            self._ensure_repo_index(key=None, entry=entry, repo_path=repo_path)
+            with sqlite3.connect(index_path) as connection:
+                connection.row_factory = sqlite3.Row
+                for path in seed_paths:
+                    for row in connection.execute(
+                        """
+                        select * from graph_edges
+                        where from_file = ? or to_file = ?
+                        limit 30
+                        """,
+                        (path, path),
+                    ):
+                        target_path = str(row["to_file"] if row["from_file"] == path else row["from_file"])
+                        target_line = int(row["to_line"] if row["from_file"] == path else row["from_line"])
+                        matches.append(
+                            self._match_from_index_location(
+                                entry,
+                                connection,
+                                target_path,
+                                target_line,
+                                score=150,
+                                reason=f"planner graph trace: {row['edge_kind']} {row['symbol']}",
+                                question=question,
+                                trace_stage=f"tool_loop_{step_index}",
+                                retrieval="code_graph",
+                            )
+                        )
+        except (OSError, sqlite3.Error):
+            return []
+        return [match for match in matches if match]
+
+    def _match_from_index_location(
+        self,
+        entry: RepositoryEntry,
+        connection: sqlite3.Connection,
+        file_path: str,
+        line_no: int,
+        *,
+        score: int,
+        reason: str,
+        question: str,
+        trace_stage: str,
+        retrieval: str,
+    ) -> dict[str, Any] | None:
+        rows = connection.execute(
+            "select line_text from lines where file_path = ? order by line_no",
+            (file_path,),
+        ).fetchall()
+        lines = [str(row["line_text"] if isinstance(row, sqlite3.Row) else row[0]) for row in rows]
+        if not lines:
+            return None
+        start, end = self._best_snippet_window(lines, max(1, min(line_no, len(lines))))
+        return {
+            "repo": entry.display_name,
+            "path": file_path,
+            "line_start": start,
+            "line_end": end,
+            "score": score,
+            "snippet": "\n".join(lines[start - 1 : end]).strip()[:2400],
+            "reason": reason,
+            "trace_stage": trace_stage,
+            "retrieval": retrieval,
+        }
 
     def _build_agent_plan(
         self,

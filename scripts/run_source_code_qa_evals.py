@@ -48,6 +48,8 @@ def _evaluate_case(service: SourceCodeQAService, case: dict[str, Any]) -> dict[s
         llm_budget_mode=str(case.get("llm_budget_mode") or "cheap"),
     )
     matched_paths = {str(match.get("path") or "") for match in payload.get("matches") or []}
+    retrievals = {str(match.get("retrieval") or "") for match in payload.get("matches") or []}
+    trace_stages = {str(match.get("trace_stage") or "") for match in payload.get("matches") or []}
     text = _case_text(payload)
     failures: list[str] = []
 
@@ -65,12 +67,25 @@ def _evaluate_case(service: SourceCodeQAService, case: dict[str, Any]) -> dict[s
     for term in case.get("forbidden_terms") or []:
         if str(term).lower() in text:
             failures.append(f"found forbidden term {term!r}")
+    for retrieval in case.get("expected_retrieval") or []:
+        if retrieval not in retrievals:
+            failures.append(f"missing retrieval type {retrieval!r}")
+    for trace_stage in case.get("expected_trace_stage") or []:
+        if trace_stage not in trace_stages:
+            failures.append(f"missing trace stage {trace_stage!r}")
+    expected_quality = case.get("expected_quality_status")
+    if expected_quality and (payload.get("answer_quality") or {}).get("status") != expected_quality:
+        failures.append(
+            f"quality expected {expected_quality!r}, got {(payload.get('answer_quality') or {}).get('status')!r}"
+        )
 
     return {
         "id": case["id"],
         "status": "pass" if not failures else "fail",
         "failures": failures,
         "matched_paths": sorted(matched_paths),
+        "retrievals": sorted(retrievals),
+        "trace_stages": sorted(trace_stages),
         "answer_quality": payload.get("answer_quality") or {},
         "citations": payload.get("citations") or [],
     }

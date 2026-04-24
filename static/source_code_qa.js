@@ -6,6 +6,7 @@
   const saveUrl = root.dataset.saveUrl;
   const syncUrl = root.dataset.syncUrl;
   const queryUrl = root.dataset.queryUrl;
+  const feedbackUrl = root.dataset.feedbackUrl;
   const canManage = root.dataset.canManage === 'true';
   const options = JSON.parse(root.dataset.options || '{}');
 
@@ -31,9 +32,12 @@
   const activeCache = document.querySelector('[data-source-active-cache]');
   const activeUsage = document.querySelector('[data-source-active-usage]');
   const fallbackNotice = document.querySelector('[data-source-fallback-notice]');
+  const feedback = document.querySelector('[data-source-feedback]');
+  const feedbackStatus = document.querySelector('[data-source-feedback-status]');
   let config = { mappings: {} };
   let gitAuthReady = false;
   let llmReady = false;
+  let lastPayload = null;
   const preferenceKey = 'source-code-qa:last-query-config:v1';
 
   const escapeHtml = (value) => String(value ?? '')
@@ -353,6 +357,7 @@
           llm_budget_mode: selectedBudget,
         }),
       }).then(readJson);
+      lastPayload = payload;
       rememberLastQueryConfig(selectedAnswerMode, selectedBudget);
       summary.textContent = payload.summary || 'Search completed.';
       queryStatus.textContent = payload.status === 'ok' ? 'Search completed.' : payload.status;
@@ -362,11 +367,40 @@
       renderStatus(payload.repo_status || []);
       renderLlmAnswer(payload);
       renderMatches(payload.matches || [], { compact: Boolean(payload.llm_answer) });
+      if (feedback) {
+        feedback.hidden = payload.status !== 'ok';
+      }
+      if (feedbackStatus) {
+        feedbackStatus.textContent = '';
+      }
     } catch (error) {
       queryStatus.textContent = error.message || 'Search failed.';
       renderUsageBadges({}, selectedBudget);
       renderFallbackNotice({});
       renderLlmAnswer({});
+      if (feedback) feedback.hidden = true;
+    }
+  };
+
+  const sendFeedback = async (rating) => {
+    if (!lastPayload || !feedbackUrl) return;
+    if (feedbackStatus) feedbackStatus.textContent = 'Saving feedback...';
+    try {
+      await fetch(feedbackUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          rating,
+          pm_team: pmTeam.value,
+          country: currentCountry(),
+          question: questionInput.value,
+          top_paths: (lastPayload.matches || []).slice(0, 5).map((match) => match.path),
+          answer_quality: lastPayload.answer_quality || {},
+        }),
+      }).then(readJson);
+      if (feedbackStatus) feedbackStatus.textContent = 'Feedback saved.';
+    } catch (error) {
+      if (feedbackStatus) feedbackStatus.textContent = error.message || 'Feedback failed.';
     }
   };
 
@@ -379,6 +413,9 @@
   saveButton?.addEventListener('click', saveConfig);
   syncButton?.addEventListener('click', syncRepos);
   queryButton?.addEventListener('click', queryCode);
+  document.querySelectorAll('[data-source-feedback-rating]').forEach((button) => {
+    button.addEventListener('click', () => sendFeedback(button.dataset.sourceFeedbackRating));
+  });
 
   restoreLastQueryConfig();
   updateAnswerModeState();

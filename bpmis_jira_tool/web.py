@@ -646,6 +646,21 @@ def create_app() -> Flask:
         except ToolError as error:
             return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
 
+    @app.post("/api/source-code-qa/feedback")
+    def source_code_qa_feedback_api():
+        access_gate = _require_source_code_qa_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        payload = request.get_json(silent=True) or {}
+        try:
+            result = _build_source_code_qa_service().save_feedback(
+                user_email=_current_google_email() or "",
+                payload=payload,
+            )
+            return jsonify(result)
+        except ToolError as error:
+            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
+
     @app.get("/auth/google/login")
     def google_login():
         try:
