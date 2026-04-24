@@ -1014,6 +1014,41 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertEqual(check["status"], "retry")
         self.assertIn("answer stops at DTO/carrier layer instead of tracing upstream source", check["issues"])
 
+    def test_llm_finalizer_blocks_dto_only_source_answer_when_source_missing(self):
+        compressed = {
+            "intent": self.service._question_intent("What data sources does Term Loan Precheck 1 underwriting call?"),
+            "entry_points": ["Credit Risk:engine/Layer4TermLoanPreCheckEngineStrategy.java:1-8"],
+            "data_carriers": ["DataSourceResult (Credit Risk:engine/Layer4TermLoanPreCheckEngineStrategy.java:1-8)"],
+            "field_population": ["Credit Risk:engine/Layer4TermLoanPreCheckEngineStrategy.java:1-8: input.setDataSourceResult(result)"],
+            "downstream_components": [],
+            "data_sources": [],
+            "api_or_config": [],
+            "rule_or_error_logic": [],
+            "source_count": 2,
+        }
+        quality = self.service._quality_gate("What data sources does Term Loan Precheck 1 underwriting call?", compressed)
+        final = self.service._finalize_llm_answer(
+            question="What data sources does Term Loan Precheck 1 underwriting call?",
+            answer="It likely uses internal or external financial providers through integrations.",
+            structured_answer=self.service._parse_structured_answer("It likely uses internal or external financial providers through integrations."),
+            evidence_summary=compressed,
+            quality_gate=quality,
+            claim_check={"status": "needs_citation", "issues": ["concrete answer claims need citation-backed evidence"]},
+            selected_matches=[
+                {
+                    "repo": "Credit Risk",
+                    "path": "engine/Layer4TermLoanPreCheckEngineStrategy.java",
+                    "line_start": 1,
+                    "line_end": 8,
+                }
+            ],
+        )
+
+        self.assertEqual(final["answer_contract"]["status"], "blocked_missing_source")
+        self.assertNotIn("likely", final["answer"].lower())
+        self.assertIn("I cannot confirm the final upstream data source", final["answer"])
+        self.assertIn("Missing link", final["answer"])
+
     def test_imported_dao_is_not_treated_as_concrete_data_source(self):
         matches = [
             {
@@ -1038,6 +1073,36 @@ class SourceCodeQAServiceTests(unittest.TestCase):
 
         self.assertFalse(compressed["data_sources"])
         self.assertEqual(quality["status"], "needs_more_trace")
+
+    def test_field_level_data_flow_edges_are_indexed(self):
+        self.service.save_mapping(
+            pm_team="AF",
+            country="All",
+            repositories=[{"display_name": "Portal Repo", "url": "https://git.example.com/team/portal.git"}],
+        )
+        entry = self.service.load_config()["mappings"]["AF:All"][0]
+        repo_path = self.service._repo_path("AF:All", type("Entry", (), entry)())
+        (repo_path / ".git").mkdir(parents=True)
+        service_file = repo_path / "service" / "IssueService.java"
+        service_file.parent.mkdir(parents=True)
+        service_file.write_text(
+            "public class IssueService {\n"
+            "    public EngineInput buildInput(DataSourceResult result) {\n"
+            "        EngineInput input = new EngineInput();\n"
+            "        input.setDataSourceResult(result);\n"
+            "        return input;\n"
+            "    }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+
+        self.service._build_repo_index("AF:All", type("Entry", (), entry)(), repo_path)
+        with sqlite3.connect(self.service._index_path(repo_path)) as connection:
+            entity_edges = {row[0] for row in connection.execute("select edge_kind from entity_edges")}
+            flow_edges = {row[0] for row in connection.execute("select edge_kind from flow_edges")}
+
+        self.assertIn("data_flow", entity_edges)
+        self.assertIn("field_population", flow_edges)
 
     def test_claim_verifier_flags_uncited_concrete_claims(self):
         evidence_summary = {

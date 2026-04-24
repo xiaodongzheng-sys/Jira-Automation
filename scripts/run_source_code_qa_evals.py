@@ -96,6 +96,11 @@ def _evaluate_case(service: SourceCodeQAService, case: dict[str, Any]) -> dict[s
         failures.append(
             f"claim check expected {expected_claim_status!r}, got {(payload.get('answer_claim_check') or {}).get('status')!r}"
         )
+    expected_contract_status = case.get("expected_answer_contract_status")
+    if expected_contract_status and (payload.get("answer_contract") or {}).get("status") != expected_contract_status:
+        failures.append(
+            f"answer contract expected {expected_contract_status!r}, got {(payload.get('answer_contract') or {}).get('status')!r}"
+        )
 
     return {
         "id": case["id"],
@@ -108,6 +113,7 @@ def _evaluate_case(service: SourceCodeQAService, case: dict[str, Any]) -> dict[s
         "trace_paths": trace_paths,
         "structured_answer": structured_answer,
         "answer_claim_check": payload.get("answer_claim_check") or {},
+        "answer_contract": payload.get("answer_contract") or {},
         "citations": payload.get("citations") or [],
     }
 

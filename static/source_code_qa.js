@@ -288,9 +288,13 @@
       </article>
     `).join('');
     if (options.compact) {
+      const openAttr = options.open ? ' open' : '';
+      const summary = options.open
+        ? `Showing ${matches.length} code references because the answer needs evidence review`
+        : `Show ${matches.length} code references used for this answer`;
       results.innerHTML = `
-        <details class="source-qa-evidence">
-          <summary>Show ${escapeHtml(matches.length)} code references used for this answer</summary>
+        <details class="source-qa-evidence"${openAttr}>
+          <summary>${escapeHtml(summary)}</summary>
           ${body}
         </details>
       `;
@@ -308,7 +312,17 @@
     })),
     trace_paths: (payload?.trace_paths || []).slice(0, 5),
     structured_answer: payload?.structured_answer || {},
+    answer_contract: payload?.answer_contract || {},
   });
+
+  const shouldOpenEvidence = (payload) => {
+    const quality = payload?.answer_quality || {};
+    const contract = payload?.answer_contract || {};
+    return quality.status === 'needs_more_trace'
+      || quality.confidence === 'low'
+      || contract.status === 'blocked_missing_source'
+      || Boolean((contract.missing_links || []).length);
+  };
 
   const renderDebugTrace = (payload) => {
     if (!debugTrace) return;
@@ -328,6 +342,15 @@
     const repoEdges = (payload.repo_graph?.edges || [])
       .slice(0, 8)
       .map((edge) => `<li>${escapeHtml(edge.from_repo)} -> ${escapeHtml(edge.to_repo)} · ${escapeHtml(edge.edge_kind)} · ${escapeHtml(edge.evidence)}</li>`)
+      .join('');
+    const contract = payload.answer_contract || {};
+    const confirmedSources = (contract.confirmed_sources || [])
+      .slice(0, 6)
+      .map((item) => `<li>${escapeHtml(item)}</li>`)
+      .join('');
+    const missingLinks = (contract.missing_links || [])
+      .slice(0, 6)
+      .map((item) => `<li>${escapeHtml(item)}</li>`)
       .join('');
     debugTrace.hidden = false;
     debugTrace.innerHTML = `
@@ -349,6 +372,14 @@
           <section>
             <strong>Repo graph</strong>
             <ul>${repoEdges || '<li>No cross-repo edge found.</li>'}</ul>
+          </section>
+          <section>
+            <strong>Evidence boundary</strong>
+            <ul>${confirmedSources || missingLinks || '<li>No answer contract boundary.</li>'}</ul>
+          </section>
+          <section>
+            <strong>Missing links</strong>
+            <ul>${missingLinks || '<li>No missing link reported.</li>'}</ul>
           </section>
         </div>
       </details>
@@ -455,7 +486,7 @@
       renderStatus(payload.repo_status || []);
       renderLlmAnswer(payload);
       renderDebugTrace(payload);
-      renderMatches(payload.matches || [], { compact: Boolean(payload.llm_answer) });
+      renderMatches(payload.matches || [], { compact: Boolean(payload.llm_answer), open: shouldOpenEvidence(payload) });
       if (feedback) {
         feedback.hidden = payload.status !== 'ok';
       }

@@ -25,7 +25,7 @@ CRMS_COUNTRIES = ("SG", "ID", "PH")
 ANSWER_MODE = "retrieval_only"
 ANSWER_MODE_GEMINI = "gemini_flash"
 CONFIG_VERSION = 1
-CODE_INDEX_VERSION = 6
+CODE_INDEX_VERSION = 7
 GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 DEFAULT_DOMAIN_PROFILE_PATH = Path(__file__).resolve().parent.parent / "config" / "source_code_qa_domain_profiles.json"
 LLM_BUDGETS = {
@@ -156,6 +156,9 @@ JAVA_METHOD_DEF_PATTERN = re.compile(
     r"^\s*(?:public|private|protected)?\s*(?:static\s+)?(?:final\s+)?"
     r"[A-Za-z_][A-Za-z0-9_<>, ?\[\]]+\s+([A-Za-z_][A-Za-z0-9_]*)\s*\("
 )
+SETTER_CALL_PATTERN = re.compile(r"\.set([A-Z][A-Za-z0-9_]*)\s*\(([^)]{1,240})\)")
+BUILDER_FIELD_PATTERN = re.compile(r"\.([a-z][A-Za-z0-9_]*)\s*\(([^)]{1,240})\)")
+ASSIGNMENT_PATTERN = re.compile(r"\b([A-Za-z_][A-Za-z0-9_.]*)\s*=\s*([^;]{2,240})")
 ANNOTATION_ROUTE_PATTERN = re.compile(r"@(RequestMapping|GetMapping|PostMapping|PutMapping|DeleteMapping|PatchMapping)\s*(?:\(([^)]*)\))?")
 FEIGN_CLIENT_PATTERN = re.compile(r"@FeignClient\s*\(([^)]*)\)")
 MYBATIS_NAMESPACE_PATTERN = re.compile(r"<mapper\b[^>]*\bnamespace\s*=\s*[\"']([^\"']+)[\"']", re.IGNORECASE)
@@ -1311,7 +1314,8 @@ class SourceCodeQAService:
             from entity_edges
             where edge_kind in (
                 'route', 'sql_table', 'injects', 'call', 'import', 'symbol_reference',
-                'mapper_statement', 'downstream_api', 'http_endpoint', 'framework_binding'
+                'mapper_statement', 'downstream_api', 'http_endpoint', 'framework_binding',
+                'data_flow'
             )
             """
         ):
@@ -1377,6 +1381,8 @@ class SourceCodeQAService:
             return "client"
         if str(reference_kind) == "framework_binding":
             return "framework"
+        if str(reference_kind) == "data_flow":
+            return "field_population"
         if to_role in {"repository", "mapper", "dao"}:
             return to_role
         if to_role == "service":
@@ -1548,6 +1554,9 @@ class SourceCodeQAService:
             field_match = FIELD_OR_PARAM_TYPE_PATTERN.search(line)
             if field_match:
                 add_entity_edge(current_class_id or file_entity_id, "injects", field_match.group(1), line_no, stripped)
+            for target in self._extract_data_flow_targets(stripped):
+                add_reference(target, "data_flow", line_no, stripped)
+                add_entity_edge(current_method_id or current_class_id or file_entity_id, "data_flow", target, line_no, stripped)
             for symbol in self._extract_downstream_symbols(line):
                 add_reference(symbol, "symbol_reference", line_no, stripped)
                 add_entity_edge(current_method_id or current_class_id or file_entity_id, "symbol_reference", symbol, line_no, stripped)
@@ -1669,6 +1678,39 @@ class SourceCodeQAService:
                 return ""
 
         Visitor().visit(tree)
+
+    @staticmethod
+    def _extract_data_flow_targets(line: str) -> list[str]:
+        stripped = str(line or "").strip()
+        if not stripped or stripped.startswith(("import ", "package ", "//", "*")):
+            return []
+        targets: list[str] = []
+
+        def add_tokens(value: str) -> None:
+            for token in IDENTIFIER_PATTERN.findall(str(value or "")):
+                lowered = token.lower()
+                if lowered in STOPWORDS or lowered in LOW_VALUE_CALL_SYMBOLS:
+                    continue
+                if len(lowered) < 4:
+                    continue
+                targets.append(token)
+
+        for match in SETTER_CALL_PATTERN.finditer(stripped):
+            field_name = match.group(1)
+            argument = match.group(2)
+            targets.append(f"set{field_name}")
+            add_tokens(argument)
+        for match in BUILDER_FIELD_PATTERN.finditer(stripped):
+            field_name = match.group(1)
+            argument = match.group(2)
+            if field_name.lower() not in LOW_VALUE_CALL_SYMBOLS:
+                targets.append(field_name)
+                add_tokens(argument)
+        assignment = ASSIGNMENT_PATTERN.search(stripped)
+        if assignment and "==" not in stripped:
+            add_tokens(assignment.group(1))
+            add_tokens(assignment.group(2))
+        return list(dict.fromkeys(targets))[:12]
 
     def _search_repo_index(
         self,
@@ -2704,8 +2746,9 @@ class SourceCodeQAService:
                                 when 'repository' then 1
                                 when 'mapper' then 2
                                 when 'dao' then 3
-                                when 'client' then 4
-                                when 'service' then 5
+                                when 'field_population' then 4
+                                when 'client' then 5
+                                when 'service' then 6
                                 else 6
                             end,
                             from_line
@@ -2771,8 +2814,9 @@ class SourceCodeQAService:
                             case edge_kind
                                 when 'sql_table' then 0
                                 when 'route' then 1
-                                when 'injects' then 2
-                                when 'call' then 3
+                                when 'data_flow' then 2
+                                when 'injects' then 3
+                                when 'call' then 4
                                 else 4
                             end,
                             from_line
@@ -2964,8 +3008,9 @@ class SourceCodeQAService:
                     when 'mapper' then 2
                     when 'dao' then 3
                     when 'repository' then 4
-                    when 'service' then 5
-                    when 'route' then 6
+                    when 'field_population' then 5
+                    when 'service' then 6
+                    when 'route' then 7
                     else 7
                 end,
                 from_line
@@ -3024,6 +3069,7 @@ class SourceCodeQAService:
                 "dao": 24,
                 "sql_table": 70,
                 "client": 55,
+                "field_population": 26,
                 "framework": 16,
             }.get(edge_kind, 10)
         return {
@@ -3502,7 +3548,7 @@ class SourceCodeQAService:
         return score
 
     def _compress_evidence(self, question: str, matches: list[dict[str, Any]]) -> dict[str, Any]:
-        selected = self._select_llm_matches(matches, 12)
+        selected = self._select_llm_matches(matches, 12, question=question)
         summary: dict[str, Any] = {
             "intent": self._question_intent(question),
             "entry_points": [],
@@ -3890,7 +3936,7 @@ class SourceCodeQAService:
             raise ToolError("Gemini mode is not configured yet. Set SOURCE_CODE_QA_GEMINI_API_KEY on the server first.")
         budget = LLM_BUDGETS.get(str(llm_budget_mode or "cheap").strip().lower(), LLM_BUDGETS["cheap"])
         selected_model = str(budget.get("model") or self.gemini_model).strip() or self.gemini_model
-        selected_matches = self._select_llm_matches(matches, int(budget["match_limit"]))
+        selected_matches = self._select_llm_matches(matches, int(budget["match_limit"]), question=question)
         evidence_summary = self._compress_evidence(question, selected_matches)
         trace_paths = self._build_trace_paths(entries=entries, key=key, matches=selected_matches, question=question)
         if trace_paths:
@@ -3912,12 +3958,27 @@ class SourceCodeQAService:
         )
         cached = self._load_cached_answer(cache_key)
         if cached is not None:
+            cached_answer = str(cached["answer"])
+            cached_structured = self._parse_structured_answer(cached_answer)
+            cached_claim_check = self._verify_answer_claims(cached_answer, evidence_summary, selected_matches)
+            cached_final = self._finalize_llm_answer(
+                question=question,
+                answer=cached_answer,
+                structured_answer=cached_structured,
+                evidence_summary=evidence_summary,
+                quality_gate=cached.get("answer_quality") or quality_gate,
+                claim_check=cached_claim_check,
+                selected_matches=selected_matches,
+            )
             return {
-                "llm_answer": cached["answer"],
+                "llm_answer": cached_final["answer"],
                 "llm_budget_mode": llm_budget_mode,
                 "llm_cached": True,
                 "llm_usage": cached.get("usage") or {},
                 "answer_quality": cached.get("answer_quality") or quality_gate,
+                "answer_claim_check": cached_claim_check,
+                "structured_answer": cached_final["structured_answer"],
+                "answer_contract": cached_final["answer_contract"],
             }
         payload = {
             "contents": [
@@ -3941,8 +4002,10 @@ class SourceCodeQAService:
                             "You are a codebase analyst for an internal portal. "
                             "Answer only from the provided retrieval evidence. "
                             "Treat the compressed evidence facts as the primary signal, and snippets as secondary grounding. "
+                            "Never upgrade DTO/carrier evidence into a final data source. "
+                            "Avoid speculative language such as likely, suggests, or appears unless explicitly marking missing evidence. "
                             "Prioritize answering the user's actual question directly and accurately. "
-                            "Do not dump ranked references or evidence bullets unless the user explicitly asks where in code. "
+                            "Do not dump ranked references, but do cite concrete claims with provided citation ids. "
                             "If the evidence is insufficient for a confident answer, say what is missing and give the best next question to ask. "
                             "Keep the answer concise, practical, and business-readable."
                         )
@@ -3982,7 +4045,7 @@ class SourceCodeQAService:
                 limit=int(budget["match_limit"]) + 6,
             )
             if retry_matches:
-                retry_selected_matches = self._select_llm_matches(retry_matches, int(budget["match_limit"]) + 4)
+                retry_selected_matches = self._select_llm_matches(retry_matches, int(budget["match_limit"]) + 4, question=question)
                 retry_evidence_summary = self._compress_evidence(question, retry_selected_matches)
                 retry_trace_paths = self._build_trace_paths(entries=entries, key=key, matches=retry_selected_matches, question=question)
                 if retry_trace_paths:
@@ -4042,6 +4105,18 @@ class SourceCodeQAService:
                 claim_check = retry_claim_check
                 selected_matches = retry_selected_matches
                 prompt_context = retry_context
+        final = self._finalize_llm_answer(
+            question=question,
+            answer=answer,
+            structured_answer=structured_answer,
+            evidence_summary=evidence_summary,
+            quality_gate=quality_gate,
+            claim_check=claim_check,
+            selected_matches=selected_matches,
+        )
+        answer = final["answer"]
+        structured_answer = final["structured_answer"]
+        answer_contract = final["answer_contract"]
         self._store_cached_answer(cache_key, answer=answer, usage=usage, answer_quality=quality_gate)
         return {
             "llm_answer": answer,
@@ -4054,6 +4129,7 @@ class SourceCodeQAService:
             "answer_self_check": answer_check,
             "answer_claim_check": claim_check,
             "structured_answer": structured_answer,
+            "answer_contract": answer_contract,
         }
 
     def _generate_gemini_with_retry(
@@ -4200,7 +4276,7 @@ class SourceCodeQAService:
             f"{context}\n\n"
             f"{retry_note}"
             "Answer requirements:\n"
-            "- Prefer this JSON shape when possible: "
+            "- Return this JSON shape whenever possible: "
             "{\"direct_answer\":\"...\",\"claims\":[{\"text\":\"...\",\"citations\":[\"S1\"]}],"
             "\"missing_evidence\":[],\"confidence\":\"high|medium|low\"}. "
             "If a short prose answer is more appropriate, still keep citation tags on concrete claims.\n"
@@ -4211,11 +4287,128 @@ class SourceCodeQAService:
             "- A DAO/Mapper import or field declaration is not enough; prefer method bodies, SQL, mapper XML, API client calls, or table names.\n"
             "- If only DTO fields are known, clearly say that these are carriers, not the upstream source.\n"
             "- If a quality gate says evidence is missing, do not pretend certainty. Say the closest known flow and the exact missing link.\n"
+            "- Do not use likely/suggests/appears for final data-source claims. Put uncertainty in missing_evidence instead.\n"
             "- Summarize the relevant logic, data sources, APIs, tables, or classes in plain language when applicable.\n"
             "- Add short citation tags like [S1] next to concrete code-backed claims.\n"
             "- Avoid listing file paths or line ranges unless the user asks for code locations.\n"
             "- If unsure, explain the uncertainty instead of inventing details.\n"
         )
+
+    def _finalize_llm_answer(
+        self,
+        *,
+        question: str,
+        answer: str,
+        structured_answer: dict[str, Any],
+        evidence_summary: dict[str, Any],
+        quality_gate: dict[str, Any],
+        claim_check: dict[str, Any],
+        selected_matches: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        intent = evidence_summary.get("intent") or self._question_intent(question)
+        confirmed_sources = [
+            self._append_fact_citation(fact, selected_matches)
+            for fact in evidence_summary.get("data_sources") or []
+            if self._is_concrete_source_line(str(fact))
+        ]
+        data_carriers = [
+            self._append_fact_citation(fact, selected_matches)
+            for fact in evidence_summary.get("data_carriers") or []
+        ][:8]
+        field_population = [
+            self._append_fact_citation(fact, selected_matches)
+            for fact in evidence_summary.get("field_population") or []
+        ][:8]
+        missing_links = list(dict.fromkeys([*(quality_gate.get("missing") or []), *(structured_answer.get("missing_evidence") or [])]))
+        blocked = bool(intent.get("data_source") and not confirmed_sources)
+        weak_answer = any(phrase in str(answer or "").lower() for phrase in ANSWER_SELF_CHECK_WEAK_PHRASES)
+        uncited_claims = claim_check.get("status") not in {None, "ok"}
+        contract = {
+            "intent": intent,
+            "status": "blocked_missing_source" if blocked else "grounded",
+            "confirmed_sources": confirmed_sources[:8],
+            "data_carriers": data_carriers,
+            "field_population": field_population,
+            "missing_links": missing_links[:8],
+            "confidence": "low" if blocked else str(structured_answer.get("confidence") or quality_gate.get("confidence") or "medium").lower(),
+            "claim_check": claim_check,
+        }
+        final_answer = str(answer or "").strip()
+        if blocked:
+            final_answer = self._build_missing_source_answer(contract)
+        elif structured_answer.get("format") == "json" and structured_answer.get("direct_answer"):
+            final_answer = self._render_structured_answer(structured_answer, contract)
+        elif uncited_claims and intent.get("data_source"):
+            final_answer = self._render_structured_answer(structured_answer, contract)
+        elif weak_answer and confirmed_sources:
+            final_answer = self._render_structured_answer(structured_answer, contract)
+        final_structured = self._parse_structured_answer(final_answer)
+        return {
+            "answer": final_answer,
+            "structured_answer": final_structured,
+            "answer_contract": contract,
+        }
+
+    @staticmethod
+    def _append_fact_citation(fact: str, selected_matches: list[dict[str, Any]]) -> str:
+        text = str(fact or "").strip()
+        if not text:
+            return ""
+        if re.search(r"\[S\d+\]", text):
+            return text
+        for index, match in enumerate(selected_matches, start=1):
+            label = SourceCodeQAService._evidence_label(match)
+            if label and label in text:
+                return f"{text} [S{index}]"
+        return text
+
+    @staticmethod
+    def _build_missing_source_answer(contract: dict[str, Any]) -> str:
+        lines = [
+            "I cannot confirm the final upstream data source from the current indexed evidence.",
+            "",
+        ]
+        carriers = [item for item in contract.get("data_carriers") or [] if item]
+        population = [item for item in contract.get("field_population") or [] if item]
+        if carriers or population:
+            lines.append("Confirmed so far:")
+            for item in carriers[:5]:
+                lines.append(f"- Carrier/processing evidence: {item}")
+            for item in population[:5]:
+                lines.append(f"- Population trail: {item}")
+            lines.append("")
+        lines.append("Missing link:")
+        missing = contract.get("missing_links") or ["concrete upstream source/table/API/repository evidence beyond DTO fields"]
+        for item in missing[:4]:
+            lines.append(f"- {item}")
+        lines.append("")
+        lines.append("Next trace target:")
+        lines.append("- Follow the provider/builder/setter into a repository, mapper, client/API, or SQL table method.")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _render_structured_answer(structured_answer: dict[str, Any], contract: dict[str, Any]) -> str:
+        lines = [str(structured_answer.get("direct_answer") or "").strip()]
+        claims = [claim for claim in structured_answer.get("claims") or [] if isinstance(claim, dict) and str(claim.get("text") or "").strip()]
+        if claims:
+            lines.append("")
+            for claim in claims[:6]:
+                text = str(claim.get("text") or "").strip()
+                citation_tags = []
+                for item in claim.get("citations") or []:
+                    tag = str(item).strip()
+                    tag = tag if tag.startswith("[") else f"[{tag}]"
+                    if tag not in text:
+                        citation_tags.append(tag)
+                suffix = f" {' '.join(citation_tags)}" if citation_tags else ""
+                lines.append(f"- {text}{suffix}")
+        missing = contract.get("missing_links") or structured_answer.get("missing_evidence") or []
+        if missing:
+            lines.append("")
+            lines.append("Missing evidence:")
+            for item in missing[:4]:
+                lines.append(f"- {item}")
+        return "\n".join(line for line in lines if line is not None).strip()
 
     def _parse_structured_answer(self, answer: str) -> dict[str, Any]:
         text = str(answer or "").strip()
@@ -4490,11 +4683,11 @@ class SourceCodeQAService:
         except OSError:
             return
 
-    @staticmethod
-    def _select_llm_matches(matches: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    def _select_llm_matches(self, matches: list[dict[str, Any]], limit: int, *, question: str = "") -> list[dict[str, Any]]:
         if not matches:
             return []
         limit = max(1, int(limit or 1))
+        intent = self._question_intent(question) if question else {}
         buckets = {
             "direct": [match for match in matches if match.get("trace_stage") == "direct"],
             "query_decomposition": [match for match in matches if match.get("trace_stage") == "query_decomposition"],
@@ -4520,7 +4713,35 @@ class SourceCodeQAService:
         # Keep a balanced evidence bundle: entry point, purpose-specific logic,
         # and downstream/common builders. This improves answer accuracy more than
         # sending only the highest raw scores.
-        for stage in ("direct", "query_decomposition", "dependency", "two_hop", "tool_loop", "agent_trace", "agent_plan", "quality_gate"):
+        stage_order = ("direct", "query_decomposition", "dependency", "two_hop", "tool_loop", "agent_trace", "agent_plan", "quality_gate")
+        for stage in stage_order:
+            stage_take = 1 if intent.get("data_source") else 2
+            for match in buckets[stage][:stage_take]:
+                add(match)
+        if intent.get("data_source"):
+            purpose_buckets = (
+                (
+                    "concrete_source",
+                    lambda item: self._match_has_concrete_source_evidence(item),
+                ),
+                (
+                    "field_population",
+                    lambda item: self._match_has_field_population_evidence(item),
+                ),
+                (
+                    "carrier",
+                    lambda item: any(
+                        symbol.lower().endswith(DATA_CARRIER_SUFFIXES)
+                        for symbol in IDENTIFIER_PATTERN.findall(str(item.get("snippet") or ""))
+                    ),
+                ),
+            )
+            for _name, predicate in purpose_buckets:
+                for match in matches:
+                    if predicate(match):
+                        add(match)
+                        break
+        for stage in stage_order:
             for match in buckets[stage][:2]:
                 add(match)
         for match in matches:
@@ -4528,6 +4749,19 @@ class SourceCodeQAService:
             if len(selected) >= limit:
                 break
         return selected
+
+    @staticmethod
+    def _match_has_concrete_source_evidence(match: dict[str, Any]) -> bool:
+        path = str(match.get("path") or "").lower()
+        snippet = str(match.get("snippet") or "")
+        if any(term in path for term in ("repository", "mapper", "dao", "client", "integration", "gateway")):
+            return True
+        return any(SourceCodeQAService._is_concrete_source_line(line) for line in snippet.splitlines())
+
+    @staticmethod
+    def _match_has_field_population_evidence(match: dict[str, Any]) -> bool:
+        snippet = str(match.get("snippet") or "")
+        return bool(SETTER_CALL_PATTERN.search(snippet) or ASSIGNMENT_PATTERN.search(snippet) or any(term in snippet.lower() for term in FIELD_POPULATION_HINTS))
 
     @staticmethod
     def _empty_query_payload(
