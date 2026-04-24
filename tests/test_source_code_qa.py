@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from bpmis_jira_tool.source_code_qa import SourceCodeQAService
 from bpmis_jira_tool.user_config import TEAM_PROFILE_DEFAULTS
 from bpmis_jira_tool.web import create_app
+from scripts.run_source_code_qa_evals import _evaluate_case
 from scripts.source_code_qa_feedback_to_eval import build_eval_candidates
 
 
@@ -440,6 +441,61 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertIn("repository/IssueRepository.java", {match["path"] for match in payload["matches"]})
         self.assertTrue({"flow_graph", "entity_graph"} & {match.get("retrieval") for match in payload["matches"]})
         self.assertTrue(any("issue_table" in match["snippet"] for match in payload["matches"]))
+        self.assertTrue(payload["trace_paths"])
+        self.assertIn("issue_table", str(payload["trace_paths"]))
+
+    def test_framework_adapters_extract_spring_mybatis_and_feign_edges(self):
+        self.service.save_mapping(
+            pm_team="AF",
+            country="All",
+            repositories=[{"display_name": "Portal Repo", "url": "https://git.example.com/team/portal.git"}],
+        )
+        entry = self.service.load_config()["mappings"]["AF:All"][0]
+        repo_path = self.service._repo_path("AF:All", type("Entry", (), entry)())
+        (repo_path / ".git").mkdir(parents=True)
+        controller_file = repo_path / "controller" / "IssueController.java"
+        controller_file.parent.mkdir(parents=True)
+        controller_file.write_text(
+            "public class IssueController {\n"
+            "    @PostMapping(\"/issue/create\")\n"
+            "    public Issue createIssue() {\n"
+            "        return issueClient.createIssue();\n"
+            "    }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        client_file = repo_path / "client" / "IssueClient.java"
+        client_file.parent.mkdir(parents=True)
+        client_file.write_text(
+            "@FeignClient(name = \"issue-service\", url = \"https://issue.example.com\")\n"
+            "public interface IssueClient {\n"
+            "    @PostMapping(\"/remote/issue\")\n"
+            "    Issue createIssue();\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        mapper_file = repo_path / "mapper" / "IssueMapper.xml"
+        mapper_file.parent.mkdir(parents=True)
+        mapper_file.write_text(
+            "<mapper namespace=\"com.example.IssueMapper\">\n"
+            "  <select id=\"findIssue\">\n"
+            "    select * from issue_table\n"
+            "  </select>\n"
+            "</mapper>\n",
+            encoding="utf-8",
+        )
+
+        payload = self.service.query(pm_team="AF", country="All", question="trace create issue API to downstream service and table")
+        index_path = self.service._index_path(repo_path)
+
+        self.assertEqual(payload["status"], "ok")
+        self.assertTrue(payload["trace_paths"])
+        with sqlite3.connect(index_path) as connection:
+            edge_rows = list(connection.execute("select edge_kind, to_name from entity_edges"))
+        self.assertIn(("downstream_api", "issue-service"), edge_rows)
+        self.assertIn(("http_endpoint", "https://issue.example.com"), edge_rows)
+        self.assertTrue(any(kind == "mapper_statement" and "findIssue" in target for kind, target in edge_rows))
+        self.assertTrue(any(kind == "sql_table" and target == "issue_table" for kind, target in edge_rows))
 
     def test_domain_profile_terms_can_boost_configured_data_source_names(self):
         profile_path = Path(self.temp_dir.name) / "profiles.json"
@@ -906,6 +962,52 @@ class SourceCodeQAServiceTests(unittest.TestCase):
 
         self.assertEqual(check["status"], "needs_citation")
         self.assertTrue(check["unsupported_claims"])
+
+    def test_structured_answer_parser_accepts_json_and_fallback_prose(self):
+        parsed = self.service._parse_structured_answer(
+            '{"direct_answer":"Uses issue_table","claims":[{"text":"IssueRepository reads issue_table","citations":["S1"]}],"missing_evidence":[],"confidence":"high"}'
+        )
+        fallback = self.service._parse_structured_answer("IssueRepository reads issue_table [S1].")
+
+        self.assertEqual(parsed["format"], "json")
+        self.assertEqual(parsed["claims"][0]["citations"], ["S1"])
+        self.assertEqual(fallback["format"], "prose_fallback")
+        self.assertEqual(fallback["claims"][0]["citations"], ["S1"])
+
+    def test_eval_runner_checks_trace_paths_and_structured_claims(self):
+        self.service.save_mapping(
+            pm_team="AF",
+            country="All",
+            repositories=[{"display_name": "Portal Repo", "url": "https://git.example.com/team/portal.git"}],
+        )
+        entry = self.service.load_config()["mappings"]["AF:All"][0]
+        repo_path = self.service._repo_path("AF:All", type("Entry", (), entry)())
+        (repo_path / ".git").mkdir(parents=True)
+        repository_file = repo_path / "repository" / "IssueRepository.java"
+        repository_file.parent.mkdir(parents=True)
+        repository_file.write_text(
+            "public class IssueRepository {\n"
+            "    public Issue findIssue() {\n"
+            "        return jdbcTemplate.queryForObject(\"select * from issue_table\", mapper);\n"
+            "    }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+
+        result = _evaluate_case(
+            self.service,
+            {
+                "id": "trace-path-eval",
+                "pm_team": "AF",
+                "country": "All",
+                "question": "what table does IssueRepository use",
+                "expected_paths": ["repository/IssueRepository.java"],
+                "min_trace_paths": 1,
+                "expected_trace_path_terms": ["issue_table"],
+            },
+        )
+
+        self.assertEqual(result["status"], "pass")
 
     def test_gemini_query_returns_answer_and_usage(self):
         service = SourceCodeQAService(

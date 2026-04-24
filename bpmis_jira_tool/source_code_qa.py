@@ -25,7 +25,7 @@ CRMS_COUNTRIES = ("SG", "ID", "PH")
 ANSWER_MODE = "retrieval_only"
 ANSWER_MODE_GEMINI = "gemini_flash"
 CONFIG_VERSION = 1
-CODE_INDEX_VERSION = 5
+CODE_INDEX_VERSION = 6
 GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 DEFAULT_DOMAIN_PROFILE_PATH = Path(__file__).resolve().parent.parent / "config" / "source_code_qa_domain_profiles.json"
 LLM_BUDGETS = {
@@ -157,6 +157,10 @@ JAVA_METHOD_DEF_PATTERN = re.compile(
     r"[A-Za-z_][A-Za-z0-9_<>, ?\[\]]+\s+([A-Za-z_][A-Za-z0-9_]*)\s*\("
 )
 ANNOTATION_ROUTE_PATTERN = re.compile(r"@(RequestMapping|GetMapping|PostMapping|PutMapping|DeleteMapping|PatchMapping)\s*(?:\(([^)]*)\))?")
+FEIGN_CLIENT_PATTERN = re.compile(r"@FeignClient\s*\(([^)]*)\)")
+MYBATIS_NAMESPACE_PATTERN = re.compile(r"<mapper\b[^>]*\bnamespace\s*=\s*[\"']([^\"']+)[\"']", re.IGNORECASE)
+MYBATIS_STATEMENT_PATTERN = re.compile(r"<(select|insert|update|delete)\b[^>]*\bid\s*=\s*[\"']([^\"']+)[\"']", re.IGNORECASE)
+HTTP_LITERAL_PATTERN = re.compile(r"[\"'](https?://[^\"']+|/[A-Za-z0-9_./{}:-]{2,})[\"']")
 SQL_TABLE_PATTERN = re.compile(r"\b(?:from|join|update|into)\s+([A-Za-z_][A-Za-z0-9_.$]*)", re.IGNORECASE)
 PROPERTIES_KEY_PATTERN = re.compile(r"^\s*([A-Za-z0-9_.-]{3,})\s*[:=]")
 FTS_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_./:-]{2,}")
@@ -597,12 +601,16 @@ class SourceCodeQAService:
             return payload
         evidence_summary = self._compress_evidence(question, top_matches)
         quality_gate = self._quality_gate(question, evidence_summary)
+        trace_paths = self._build_trace_paths(entries=entries, key=key, matches=top_matches, question=question)
+        if trace_paths:
+            evidence_summary["trace_paths"] = trace_paths
         payload = {
             "status": "ok",
             "answer_mode": ANSWER_MODE,
             "summary": self._build_summary(top_matches),
             "matches": top_matches,
             "citations": self._build_citations(top_matches),
+            "trace_paths": trace_paths,
             "repo_status": repo_status,
             "answer_quality": quality_gate,
             "agent_plan": self._build_agent_plan(question, evidence_summary, quality_gate),
@@ -1188,7 +1196,10 @@ class SourceCodeQAService:
             """
             select from_file, from_line, edge_kind, to_name, to_file, to_line, evidence
             from entity_edges
-            where edge_kind in ('route', 'sql_table', 'injects', 'call', 'import', 'symbol_reference')
+            where edge_kind in (
+                'route', 'sql_table', 'injects', 'call', 'import', 'symbol_reference',
+                'mapper_statement', 'downstream_api', 'http_endpoint', 'framework_binding'
+            )
             """
         ):
             rows.append(
@@ -1247,6 +1258,12 @@ class SourceCodeQAService:
             return "route"
         if str(reference_kind) == "sql_table":
             return "sql_table"
+        if str(reference_kind) == "mapper_statement":
+            return "mapper"
+        if str(reference_kind) in {"downstream_api", "http_endpoint"}:
+            return "client"
+        if str(reference_kind) == "framework_binding":
+            return "framework"
         if to_role in {"repository", "mapper", "dao"}:
             return to_role
         if to_role == "service":
@@ -1347,10 +1364,31 @@ class SourceCodeQAService:
         current_class_id = file_entity_id
         current_method = ""
         current_method_id = file_entity_id
+        pending_routes: list[tuple[str, int, str]] = []
+        mapper_namespace = ""
+        mapper_namespace_id = file_entity_id
         for line_no, line in enumerate(lines, start=1):
             stripped = line.strip()
             if not stripped:
                 continue
+            namespace_match = MYBATIS_NAMESPACE_PATTERN.search(line)
+            if namespace_match:
+                mapper_namespace = namespace_match.group(1)
+                add_definition(mapper_namespace, "mybatis_mapper_namespace", line_no, stripped)
+                mapper_namespace_id = self._entity_id(relative_path, "mybatis_mapper_namespace", mapper_namespace, line_no)
+            statement_match = MYBATIS_STATEMENT_PATTERN.search(line)
+            if statement_match:
+                statement_name = f"{mapper_namespace}.{statement_match.group(2)}" if mapper_namespace else statement_match.group(2)
+                add_definition(statement_name, f"mybatis_{statement_match.group(1).lower()}", line_no, stripped)
+                statement_id = self._entity_id(relative_path, f"mybatis_{statement_match.group(1).lower()}", statement_name, line_no)
+                add_entity_edge(mapper_namespace_id, "mapper_statement", statement_name, line_no, stripped)
+                current_method = statement_name
+                current_method_id = statement_id
+            feign_match = FEIGN_CLIENT_PATTERN.search(line)
+            if feign_match:
+                for value in re.findall(r'"([^"]+)"', feign_match.group(1)):
+                    add_reference(value, "downstream_api", line_no, stripped)
+                    add_entity_edge(current_class_id or file_entity_id, "downstream_api", value, line_no, stripped)
             for match in CLASS_DEF_PATTERN.finditer(line):
                 add_definition(match.group(2), match.group(1).lower(), line_no, stripped)
                 current_class = match.group(2)
@@ -1372,14 +1410,23 @@ class SourceCodeQAService:
                 add_definition(method_name, "java_method", line_no, stripped)
                 current_method = method_name
                 current_method_id = self._entity_id(relative_path, "java_method", method_name, line_no)
+                for route, route_line, route_context in pending_routes:
+                    add_reference(route, "route", route_line, route_context)
+                    add_entity_edge(current_method_id, "route", route, route_line, route_context)
+                pending_routes = []
             for annotation in ANNOTATION_ROUTE_PATTERN.finditer(line):
                 add_definition(annotation.group(1), "route_annotation", line_no, stripped)
                 for route in re.findall(r'"([^"]+)"', annotation.group(2) or ""):
                     add_reference(route, "route", line_no, stripped)
                     add_entity_edge(current_method_id or current_class_id, "route", route, line_no, stripped)
+                    pending_routes.append((route, line_no, stripped))
             for table in SQL_TABLE_PATTERN.findall(line):
                 add_reference(table, "sql_table", line_no, stripped)
                 add_entity_edge(current_method_id or current_class_id, "sql_table", table, line_no, stripped)
+            for endpoint in HTTP_LITERAL_PATTERN.findall(line):
+                if endpoint.startswith("http") or any(client in stripped.lower() for client in ("resttemplate", "webclient", "feign", "exchange", "postfor", "getfor", "request")):
+                    add_reference(endpoint, "http_endpoint", line_no, stripped)
+                    add_entity_edge(current_method_id or current_class_id or file_entity_id, "http_endpoint", endpoint, line_no, stripped)
             if suffix in {".properties", ".yaml", ".yml", ".conf", ".toml"}:
                 key_match = PROPERTIES_KEY_PATTERN.search(line)
                 if key_match:
@@ -2687,6 +2734,139 @@ class SourceCodeQAService:
             "retrieval": retrieval,
         }
 
+    def _build_trace_paths(
+        self,
+        *,
+        entries: list[RepositoryEntry],
+        key: str,
+        matches: list[dict[str, Any]],
+        question: str,
+        limit: int = 6,
+    ) -> list[dict[str, Any]]:
+        del question
+        if not matches:
+            return []
+        paths: list[dict[str, Any]] = []
+        seen_signatures: set[str] = set()
+        for entry in entries:
+            repo_path = self._repo_path(key, entry)
+            if not (repo_path / ".git").exists():
+                continue
+            seed_paths = [str(match.get("path") or "") for match in matches if match.get("repo") == entry.display_name][:10]
+            if not seed_paths:
+                continue
+            try:
+                self._ensure_repo_index(key=None, entry=entry, repo_path=repo_path)
+                with sqlite3.connect(self._index_path(repo_path)) as connection:
+                    connection.row_factory = sqlite3.Row
+                    for seed in seed_paths:
+                        first_hops = self._trace_path_edges_for_seed(connection, seed)
+                        for first in first_hops[:10]:
+                            path = self._trace_path_from_edges(entry.display_name, seed, [first])
+                            signature = json.dumps(path.get("edges") or [], sort_keys=True)
+                            if signature not in seen_signatures:
+                                paths.append(path)
+                                seen_signatures.add(signature)
+                            next_seed = str(first.get("to_file") or "")
+                            if not next_seed:
+                                continue
+                            for second in self._trace_path_edges_for_seed(connection, next_seed)[:6]:
+                                if second.get("from_file") == first.get("from_file") and second.get("to_file") == first.get("to_file"):
+                                    continue
+                                extended = self._trace_path_from_edges(entry.display_name, seed, [first, second])
+                                signature = json.dumps(extended.get("edges") or [], sort_keys=True)
+                                if signature not in seen_signatures:
+                                    paths.append(extended)
+                                    seen_signatures.add(signature)
+            except (OSError, sqlite3.Error):
+                continue
+        paths.sort(key=lambda item: item.get("confidence", 0), reverse=True)
+        return paths[: max(1, int(limit or 6))]
+
+    @staticmethod
+    def _trace_path_edges_for_seed(connection: sqlite3.Connection, seed_path: str) -> list[dict[str, Any]]:
+        rows = connection.execute(
+            """
+            select * from flow_edges
+            where from_file = ? or to_file = ?
+            order by
+                case edge_kind
+                    when 'sql_table' then 0
+                    when 'client' then 1
+                    when 'mapper' then 2
+                    when 'dao' then 3
+                    when 'repository' then 4
+                    when 'service' then 5
+                    when 'route' then 6
+                    else 7
+                end,
+                from_line
+            limit 30
+            """,
+            (seed_path, seed_path),
+        ).fetchall()
+        edges: list[dict[str, Any]] = []
+        for row in rows:
+            edge = dict(row)
+            if edge.get("to_file") == seed_path and edge.get("from_file") != seed_path:
+                edge = {
+                    **edge,
+                    "from_file": edge.get("to_file"),
+                    "from_line": edge.get("to_line"),
+                    "to_file": edge.get("from_file"),
+                    "to_line": edge.get("from_line"),
+                    "to_name": edge.get("from_name"),
+                    "evidence": f"reverse trace: {edge.get('evidence')}",
+                }
+            edges.append(edge)
+        return edges
+
+    @staticmethod
+    def _trace_path_from_edges(repo_name: str, seed_path: str, edges: list[dict[str, Any]]) -> dict[str, Any]:
+        nodes: list[dict[str, Any]] = [{"path": seed_path, "kind": SourceCodeQAService._flow_role_for_path(seed_path), "name": SourceCodeQAService._flow_name_for_path(seed_path)}]
+        normalized_edges: list[dict[str, Any]] = []
+        confidence = 0
+        for edge in edges:
+            edge_kind = str(edge.get("edge_kind") or "call")
+            to_file = str(edge.get("to_file") or "")
+            to_name = str(edge.get("to_name") or "")
+            node = {
+                "path": to_file,
+                "line": int(edge.get("to_line") or 0),
+                "kind": SourceCodeQAService._flow_role_for_path(to_file) if to_file else edge_kind,
+                "name": to_name or SourceCodeQAService._flow_name_for_path(to_file),
+            }
+            nodes.append(node)
+            normalized_edges.append(
+                {
+                    "from_file": edge.get("from_file"),
+                    "from_line": edge.get("from_line"),
+                    "edge_kind": edge_kind,
+                    "to_name": to_name,
+                    "to_file": to_file,
+                    "to_line": edge.get("to_line"),
+                    "evidence": edge.get("evidence"),
+                }
+            )
+            confidence += {
+                "route": 20,
+                "service": 18,
+                "repository": 24,
+                "mapper": 24,
+                "dao": 24,
+                "sql_table": 70,
+                "client": 55,
+                "framework": 16,
+            }.get(edge_kind, 10)
+        return {
+            "repo": repo_name,
+            "seed_path": seed_path,
+            "nodes": nodes,
+            "edges": normalized_edges,
+            "confidence": confidence,
+            "missing_hop": "" if edges else "no graph edge found from seed",
+        }
+
     def _build_agent_plan(
         self,
         question: str,
@@ -3544,6 +3724,9 @@ class SourceCodeQAService:
         selected_model = str(budget.get("model") or self.gemini_model).strip() or self.gemini_model
         selected_matches = self._select_llm_matches(matches, int(budget["match_limit"]))
         evidence_summary = self._compress_evidence(question, selected_matches)
+        trace_paths = self._build_trace_paths(entries=entries, key=key, matches=selected_matches, question=question)
+        if trace_paths:
+            evidence_summary["trace_paths"] = trace_paths
         quality_gate = self._quality_gate(question, evidence_summary)
         prompt_context = self._build_compressed_llm_context(
             evidence_summary,
@@ -3612,6 +3795,7 @@ class SourceCodeQAService:
             fallback_model=self.gemini_fallback_model,
         )
         answer = self._extract_gemini_text(result)
+        structured_answer = self._parse_structured_answer(answer)
         usage = usage or result.get("usageMetadata") or {}
         answer_check = self._answer_self_check(question, answer, evidence_summary, quality_gate)
         claim_check = self._verify_answer_claims(answer, evidence_summary, selected_matches)
@@ -3632,6 +3816,9 @@ class SourceCodeQAService:
             if retry_matches:
                 retry_selected_matches = self._select_llm_matches(retry_matches, int(budget["match_limit"]) + 4)
                 retry_evidence_summary = self._compress_evidence(question, retry_selected_matches)
+                retry_trace_paths = self._build_trace_paths(entries=entries, key=key, matches=retry_selected_matches, question=question)
+                if retry_trace_paths:
+                    retry_evidence_summary["trace_paths"] = retry_trace_paths
                 retry_quality_gate = self._quality_gate(question, retry_evidence_summary)
                 retry_context = self._build_compressed_llm_context(
                     retry_evidence_summary,
@@ -3669,6 +3856,7 @@ class SourceCodeQAService:
                     fallback_model=self.gemini_fallback_model,
                 )
                 retry_answer = self._extract_gemini_text(retry_result)
+                retry_structured_answer = self._parse_structured_answer(retry_answer)
                 retry_check = self._answer_self_check(question, retry_answer, retry_evidence_summary, retry_quality_gate)
                 retry_claim_check = self._verify_answer_claims(retry_answer, retry_evidence_summary, retry_selected_matches)
                 if retry_claim_check.get("status") != "ok":
@@ -3676,6 +3864,7 @@ class SourceCodeQAService:
                     issues.extend(retry_claim_check.get("issues") or [])
                     retry_check = {"status": "retry", "issues": list(dict.fromkeys(issues))}
                 answer = retry_answer
+                structured_answer = retry_structured_answer
                 usage = retry_usage or retry_result.get("usageMetadata") or {}
                 effective_model = retry_model
                 attempts += retry_attempts
@@ -3696,6 +3885,7 @@ class SourceCodeQAService:
             "answer_quality": quality_gate,
             "answer_self_check": answer_check,
             "answer_claim_check": claim_check,
+            "structured_answer": structured_answer,
         }
 
     def _generate_gemini_with_retry(
@@ -3799,6 +3989,15 @@ class SourceCodeQAService:
             if values:
                 sections.append(f"- {label}:")
                 sections.extend(f"  - {value}" for value in values[:10])
+        trace_paths = evidence_summary.get("trace_paths") or []
+        if trace_paths:
+            sections.append("- Trace paths:")
+            for path in trace_paths[:5]:
+                edge_text = " -> ".join(
+                    f"{edge.get('edge_kind')}:{edge.get('to_name') or edge.get('to_file')}"
+                    for edge in path.get("edges") or []
+                )
+                sections.append(f"  - {path.get('repo')}: {edge_text}")
         snippet_context = self._build_llm_context(
             matches,
             snippet_line_budget=max(8, min(int(snippet_line_budget or 40), 180)),
@@ -3833,6 +4032,10 @@ class SourceCodeQAService:
             f"{context}\n\n"
             f"{retry_note}"
             "Answer requirements:\n"
+            "- Prefer this JSON shape when possible: "
+            "{\"direct_answer\":\"...\",\"claims\":[{\"text\":\"...\",\"citations\":[\"S1\"]}],"
+            "\"missing_evidence\":[],\"confidence\":\"high|medium|low\"}. "
+            "If a short prose answer is more appropriate, still keep citation tags on concrete claims.\n"
             "- Start with the direct answer.\n"
             "- Prefer agent trace and two-hop trace evidence when it clarifies downstream service, integration, repository, mapper, API, or table usage.\n"
             "- Use compressed facts first; only use raw snippets to verify or disambiguate.\n"
@@ -3845,6 +4048,50 @@ class SourceCodeQAService:
             "- Avoid listing file paths or line ranges unless the user asks for code locations.\n"
             "- If unsure, explain the uncertainty instead of inventing details.\n"
         )
+
+    def _parse_structured_answer(self, answer: str) -> dict[str, Any]:
+        text = str(answer or "").strip()
+        payload: dict[str, Any] | None = None
+        candidates = [text]
+        fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, flags=re.IGNORECASE | re.DOTALL)
+        if fenced:
+            candidates.insert(0, fenced.group(1))
+        for candidate in candidates:
+            try:
+                parsed = json.loads(candidate)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, dict):
+                payload = parsed
+                break
+        if payload is None:
+            claims = [
+                {"text": claim, "citations": [f"S{number}" for number in re.findall(r"\[S(\d+)\]", claim)]}
+                for claim in self._split_answer_claims(text)
+            ]
+            return {
+                "direct_answer": text,
+                "claims": claims[:8],
+                "missing_evidence": [],
+                "confidence": "medium" if claims else "low",
+                "format": "prose_fallback",
+            }
+        claims = payload.get("claims") if isinstance(payload.get("claims"), list) else []
+        normalized_claims = []
+        for claim in claims[:12]:
+            if isinstance(claim, dict):
+                text_value = str(claim.get("text") or "").strip()
+                citations = [str(item).strip().lstrip("[S").rstrip("]") for item in claim.get("citations") or []]
+                normalized_claims.append({"text": text_value, "citations": [f"S{item}" if item.isdigit() else item for item in citations if item]})
+            else:
+                normalized_claims.append({"text": str(claim).strip(), "citations": []})
+        return {
+            "direct_answer": str(payload.get("direct_answer") or payload.get("answer") or text).strip(),
+            "claims": normalized_claims,
+            "missing_evidence": [str(item) for item in payload.get("missing_evidence") or []] if isinstance(payload.get("missing_evidence"), list) else [],
+            "confidence": str(payload.get("confidence") or "medium").strip().lower(),
+            "format": "json",
+        }
 
     def _verify_answer_claims(
         self,

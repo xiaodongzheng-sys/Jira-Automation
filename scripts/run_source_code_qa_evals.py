@@ -50,7 +50,11 @@ def _evaluate_case(service: SourceCodeQAService, case: dict[str, Any]) -> dict[s
     matched_paths = {str(match.get("path") or "") for match in payload.get("matches") or []}
     retrievals = {str(match.get("retrieval") or "") for match in payload.get("matches") or []}
     trace_stages = {str(match.get("trace_stage") or "") for match in payload.get("matches") or []}
+    trace_paths = payload.get("trace_paths") or []
+    structured_answer = payload.get("structured_answer") or {}
     text = _case_text(payload)
+    trace_path_text = json.dumps(trace_paths, ensure_ascii=False).lower()
+    structured_answer_text = json.dumps(structured_answer, ensure_ascii=False).lower()
     failures: list[str] = []
 
     if case.get("expected_status") and payload.get("status") != case["expected_status"]:
@@ -78,6 +82,20 @@ def _evaluate_case(service: SourceCodeQAService, case: dict[str, Any]) -> dict[s
         failures.append(
             f"quality expected {expected_quality!r}, got {(payload.get('answer_quality') or {}).get('status')!r}"
         )
+    for term in case.get("expected_trace_path_terms") or []:
+        if str(term).lower() not in trace_path_text:
+            failures.append(f"missing trace path term {term!r}")
+    min_trace_paths = case.get("min_trace_paths")
+    if min_trace_paths is not None and len(trace_paths) < int(min_trace_paths):
+        failures.append(f"trace path count expected >= {int(min_trace_paths)}, got {len(trace_paths)}")
+    for term in case.get("expected_answer_claim_terms") or []:
+        if str(term).lower() not in structured_answer_text:
+            failures.append(f"missing structured answer claim term {term!r}")
+    expected_claim_status = case.get("expected_claim_check_status")
+    if expected_claim_status and (payload.get("answer_claim_check") or {}).get("status") != expected_claim_status:
+        failures.append(
+            f"claim check expected {expected_claim_status!r}, got {(payload.get('answer_claim_check') or {}).get('status')!r}"
+        )
 
     return {
         "id": case["id"],
@@ -87,6 +105,9 @@ def _evaluate_case(service: SourceCodeQAService, case: dict[str, Any]) -> dict[s
         "retrievals": sorted(retrievals),
         "trace_stages": sorted(trace_stages),
         "answer_quality": payload.get("answer_quality") or {},
+        "trace_paths": trace_paths,
+        "structured_answer": structured_answer,
+        "answer_claim_check": payload.get("answer_claim_check") or {},
         "citations": payload.get("citations") or [],
     }
 
