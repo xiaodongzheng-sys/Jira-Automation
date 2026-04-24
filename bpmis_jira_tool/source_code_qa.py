@@ -22,13 +22,14 @@ from bpmis_jira_tool.errors import ToolError
 
 ALL_COUNTRY = "All"
 CRMS_COUNTRIES = ("SG", "ID", "PH")
+ANSWER_MODE_AUTO = "auto"
 ANSWER_MODE = "retrieval_only"
 ANSWER_MODE_GEMINI = "gemini_flash"
 CONFIG_VERSION = 1
 CODE_INDEX_VERSION = 7
 GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 DEFAULT_DOMAIN_PROFILE_PATH = Path(__file__).resolve().parent.parent / "config" / "source_code_qa_domain_profiles.json"
-LLM_BUDGETS = {
+DEFAULT_LLM_BUDGETS = {
     "cheap": {
         "match_limit": 4,
         "snippet_line_budget": 40,
@@ -54,6 +55,7 @@ LLM_BUDGETS = {
         "model": "gemini-2.5-flash",
     },
 }
+LLM_BUDGETS = DEFAULT_LLM_BUDGETS
 ANSWER_SELF_CHECK_WEAK_PHRASES = (
     "does not specify",
     "does not explicitly",
@@ -245,7 +247,9 @@ class SourceCodeQAService:
         gitlab_token: str | None = None,
         gitlab_username: str = "oauth2",
         gemini_api_key: str | None = None,
-        gemini_model: str = "gemini-2.5-flash-lite",
+        gemini_model: str = "gemini-2.5-flash",
+        gemini_fast_model: str = "gemini-2.5-flash-lite",
+        gemini_deep_model: str = "gemini-2.5-flash",
         gemini_fallback_model: str = "gemini-2.5-flash-lite",
         llm_cache_ttl_seconds: int = 1800,
         git_timeout_seconds: int = 90,
@@ -265,8 +269,11 @@ class SourceCodeQAService:
         self.gitlab_token = str(gitlab_token or "").strip()
         self.gitlab_username = str(gitlab_username or "oauth2").strip() or "oauth2"
         self.gemini_api_key = str(gemini_api_key or "").strip()
-        self.gemini_model = str(gemini_model or "gemini-2.5-flash-lite").strip() or "gemini-2.5-flash-lite"
+        self.gemini_model = str(gemini_model or "gemini-2.5-flash").strip() or "gemini-2.5-flash"
+        self.gemini_fast_model = str(gemini_fast_model or "gemini-2.5-flash-lite").strip() or "gemini-2.5-flash-lite"
+        self.gemini_deep_model = str(gemini_deep_model or self.gemini_model).strip() or self.gemini_model
         self.gemini_fallback_model = str(gemini_fallback_model or "gemini-2.5-flash-lite").strip() or "gemini-2.5-flash-lite"
+        self.llm_budgets = self._build_llm_budgets()
         self.llm_cache_ttl_seconds = max(60, int(llm_cache_ttl_seconds or 1800))
         self.git_timeout_seconds = max(5, int(git_timeout_seconds or 90))
         self.max_file_bytes = max(20_000, int(max_file_bytes or 500_000))
@@ -280,15 +287,24 @@ class SourceCodeQAService:
             "countries": list(CRMS_COUNTRIES),
             "all_country": ALL_COUNTRY,
             "answer_modes": [
+                {"value": ANSWER_MODE_AUTO, "label": "Auto"},
                 {"value": ANSWER_MODE, "label": "Retrieval Only"},
-                {"value": ANSWER_MODE_GEMINI, "label": "Gemini"},
+                {"value": ANSWER_MODE_GEMINI, "label": "LLM"},
             ],
             "llm_budget_modes": [
+                {"value": "auto", "label": "Auto"},
                 {"value": "cheap", "label": "Cheap"},
                 {"value": "balanced", "label": "Balanced"},
                 {"value": "deep", "label": "Deep"},
             ],
         }
+
+    def _build_llm_budgets(self) -> dict[str, dict[str, Any]]:
+        budgets = json.loads(json.dumps(DEFAULT_LLM_BUDGETS))
+        budgets["cheap"]["model"] = self.gemini_fast_model
+        budgets["balanced"]["model"] = self.gemini_model
+        budgets["deep"]["model"] = self.gemini_deep_model
+        return budgets
 
     def load_config(self) -> dict[str, Any]:
         if not self.config_path.exists():
@@ -675,7 +691,22 @@ class SourceCodeQAService:
             "original_question": original_question,
         }
         normalized_answer_mode = str(answer_mode or ANSWER_MODE).strip() or ANSWER_MODE
-        if normalized_answer_mode == ANSWER_MODE_GEMINI:
+        if normalized_answer_mode in {ANSWER_MODE_GEMINI, ANSWER_MODE_AUTO}:
+            if normalized_answer_mode == ANSWER_MODE_AUTO and not self.llm_ready():
+                payload["fallback_notice"] = {
+                    "title": "Auto LLM unavailable",
+                    "message": "Auto mode is using retrieval-only results because Source Code Q&A LLM credentials are not configured.",
+                    "fallback_mode": ANSWER_MODE,
+                }
+                self._record_query_telemetry(
+                    key=key,
+                    question=question,
+                    answer_mode=answer_mode,
+                    llm_budget_mode=llm_budget_mode,
+                    payload=payload,
+                    started_at=started_at,
+                )
+                return payload
             try:
                 llm_payload = self._build_gemini_answer(
                     entries=entries,
@@ -685,9 +716,10 @@ class SourceCodeQAService:
                     question=question,
                     matches=top_matches,
                     llm_budget_mode=llm_budget_mode,
+                    requested_answer_mode=normalized_answer_mode,
                 )
                 payload.update(llm_payload)
-                payload["answer_mode"] = ANSWER_MODE_GEMINI
+                payload["answer_mode"] = normalized_answer_mode
             except ToolError as error:
                 payload["fallback_notice"] = {
                     "title": "Gemini unavailable",
@@ -3931,10 +3963,11 @@ class SourceCodeQAService:
         question: str,
         matches: list[dict[str, Any]],
         llm_budget_mode: str,
+        requested_answer_mode: str = ANSWER_MODE_GEMINI,
     ) -> dict[str, Any]:
         if not self.llm_ready():
-            raise ToolError("Gemini mode is not configured yet. Set SOURCE_CODE_QA_GEMINI_API_KEY on the server first.")
-        budget = LLM_BUDGETS.get(str(llm_budget_mode or "cheap").strip().lower(), LLM_BUDGETS["cheap"])
+            raise ToolError("LLM mode is not configured yet. Set SOURCE_CODE_QA_GEMINI_API_KEY or GEMINI_API_KEY on the server first.")
+        routed_budget_mode, budget, llm_route = self._resolve_llm_budget(llm_budget_mode, question, matches)
         selected_model = str(budget.get("model") or self.gemini_model).strip() or self.gemini_model
         selected_matches = self._select_llm_matches(matches, int(budget["match_limit"]), question=question)
         evidence_summary = self._compress_evidence(question, selected_matches)
@@ -3952,8 +3985,8 @@ class SourceCodeQAService:
         cache_key = self._answer_cache_key(
             model=selected_model,
             question=question,
-            answer_mode=ANSWER_MODE_GEMINI,
-            llm_budget_mode=llm_budget_mode,
+            answer_mode=requested_answer_mode,
+            llm_budget_mode=routed_budget_mode,
             context=prompt_context,
         )
         cached = self._load_cached_answer(cache_key)
@@ -3972,7 +4005,9 @@ class SourceCodeQAService:
             )
             return {
                 "llm_answer": cached_final["answer"],
-                "llm_budget_mode": llm_budget_mode,
+                "llm_budget_mode": routed_budget_mode,
+                "llm_requested_budget_mode": llm_budget_mode,
+                "llm_route": llm_route,
                 "llm_cached": True,
                 "llm_usage": cached.get("usage") or {},
                 "answer_quality": cached.get("answer_quality") or quality_gate,
@@ -4015,6 +4050,8 @@ class SourceCodeQAService:
             "generationConfig": {
                 "temperature": 0.2,
                 "maxOutputTokens": budget["max_output_tokens"],
+                "responseMimeType": "application/json",
+                "responseSchema": self._llm_answer_response_schema(),
                 "thinkingConfig": {
                     "thinkingBudget": budget["thinking_budget"],
                 },
@@ -4120,7 +4157,9 @@ class SourceCodeQAService:
         self._store_cached_answer(cache_key, answer=answer, usage=usage, answer_quality=quality_gate)
         return {
             "llm_answer": answer,
-            "llm_budget_mode": llm_budget_mode,
+            "llm_budget_mode": routed_budget_mode,
+            "llm_requested_budget_mode": llm_budget_mode,
+            "llm_route": llm_route,
             "llm_cached": False,
             "llm_usage": usage,
             "llm_model": effective_model,
@@ -4180,6 +4219,64 @@ class SourceCodeQAService:
                     raise ToolError(f"Gemini answer generation failed. {detail[:500]}")
             # try next fallback model after retries on the current model
         raise ToolError(f"Gemini answer generation failed. {str(last_error or 'Model unavailable.')[:500]}")
+
+    def _resolve_llm_budget(
+        self,
+        requested_budget_mode: str,
+        question: str,
+        matches: list[dict[str, Any]],
+    ) -> tuple[str, dict[str, Any], dict[str, Any]]:
+        requested = str(requested_budget_mode or "auto").strip().lower() or "auto"
+        if requested in self.llm_budgets:
+            return requested, self.llm_budgets[requested], {"mode": "manual", "requested": requested, "reason": "user_selected"}
+        intent = self._question_intent(question)
+        trace_stages = {str(match.get("trace_stage") or "") for match in matches}
+        retrievals = {str(match.get("retrieval") or "") for match in matches}
+        lowered_question = str(question or "").lower()
+        deep_reasons: list[str] = []
+        if intent.get("data_source"):
+            deep_reasons.append("data_source_trace")
+        if intent.get("error") or "root cause" in lowered_question or "why" in lowered_question:
+            deep_reasons.append("root_cause_or_error")
+        if any(stage.startswith(("agent_trace", "agent_plan", TOOL_LOOP_TRACE_PREFIX)) for stage in trace_stages):
+            deep_reasons.append("agentic_trace_used")
+        if {"flow_graph", "entity_graph", "code_graph"} & retrievals and len(matches) >= 8:
+            deep_reasons.append("graph_evidence_bundle")
+        if deep_reasons:
+            mode = "deep"
+        elif any(intent.get(key) for key in ("api", "config", "rule_logic")) or len(matches) >= 5:
+            mode = "balanced"
+            deep_reasons.append("moderate_code_reasoning")
+        else:
+            mode = "cheap"
+            deep_reasons.append("simple_lookup")
+        return mode, self.llm_budgets[mode], {"mode": "auto", "requested": requested, "selected": mode, "reason": ",".join(deep_reasons)}
+
+    @staticmethod
+    def _llm_answer_response_schema() -> dict[str, Any]:
+        string_array = {"type": "ARRAY", "items": {"type": "STRING"}}
+        return {
+            "type": "OBJECT",
+            "properties": {
+                "direct_answer": {"type": "STRING"},
+                "claims": {
+                    "type": "ARRAY",
+                    "items": {
+                        "type": "OBJECT",
+                        "properties": {
+                            "text": {"type": "STRING"},
+                            "citations": string_array,
+                        },
+                        "required": ["text", "citations"],
+                        "propertyOrdering": ["text", "citations"],
+                    },
+                },
+                "missing_evidence": string_array,
+                "confidence": {"type": "STRING", "enum": ["high", "medium", "low"]},
+            },
+            "required": ["direct_answer", "claims", "missing_evidence", "confidence"],
+            "propertyOrdering": ["direct_answer", "claims", "missing_evidence", "confidence"],
+        }
 
     def _build_llm_context(self, matches: list[dict[str, Any]], *, snippet_line_budget: int, snippet_char_budget: int) -> str:
         chunks: list[str] = []

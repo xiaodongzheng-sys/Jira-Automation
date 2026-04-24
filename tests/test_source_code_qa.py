@@ -24,6 +24,8 @@ class SourceCodeQARouteTests(unittest.TestCase):
                 "TEAM_PORTAL_DATA_DIR": self.temp_dir.name,
                 "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg",
                 "SOURCE_CODE_QA_GITLAB_TOKEN": "secret-token",
+                "SOURCE_CODE_QA_GEMINI_API_KEY": "",
+                "GEMINI_API_KEY": "",
             },
             clear=False,
         ):
@@ -128,6 +130,8 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         payload = response.get_json()
         self.assertFalse(payload["llm_ready"])
+        self.assertEqual(payload["options"]["answer_modes"][0]["value"], "auto")
+        self.assertEqual(payload["options"]["llm_budget_modes"][0]["value"], "auto")
 
     def test_sync_api_runs_as_background_job(self):
         sync_result = {
@@ -1216,7 +1220,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             text='{"ok":true}',
         )
 
-        with patch("bpmis_jira_tool.source_code_qa.requests.post", return_value=fake_response):
+        with patch("bpmis_jira_tool.source_code_qa.requests.post", return_value=fake_response) as mocked_post:
             payload = service.query(
                 pm_team="AF",
                 country="All",
@@ -1229,6 +1233,77 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertIn("Short answer", payload["llm_answer"])
         self.assertEqual(payload["llm_usage"]["promptTokenCount"], 123)
         self.assertFalse(payload["llm_cached"])
+        request_payload = mocked_post.call_args.kwargs["json"]
+        self.assertEqual(request_payload["generationConfig"]["responseMimeType"], "application/json")
+        self.assertIn("responseSchema", request_payload["generationConfig"])
+        self.assertEqual(payload["llm_route"]["mode"], "manual")
+
+    def test_auto_answer_mode_routes_data_source_questions_to_deep_budget(self):
+        service = SourceCodeQAService(
+            data_root=Path(self.temp_dir.name),
+            team_profiles=TEAM_PROFILE_DEFAULTS,
+            gemini_api_key="gemini-key",
+            gitlab_token="secret-token",
+            git_timeout_seconds=5,
+            max_file_bytes=200_000,
+        )
+        service.save_mapping(
+            pm_team="AF",
+            country="All",
+            repositories=[{"display_name": "Portal Repo", "url": "https://git.example.com/team/portal.git"}],
+        )
+        entry = service.load_config()["mappings"]["AF:All"][0]
+        repo_path = service._repo_path("AF:All", type("Entry", (), entry)())
+        (repo_path / ".git").mkdir(parents=True)
+        repository_file = repo_path / "repository" / "IssueRepository.java"
+        repository_file.parent.mkdir(parents=True)
+        repository_file.write_text(
+            "public class IssueRepository {\n"
+            "    public Issue findIssue() {\n"
+            "        return jdbcTemplate.queryForObject(\"select * from issue_table\", mapper);\n"
+            "    }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        fake_response = SimpleNamespace(
+            ok=True,
+            json=lambda: {
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [
+                                {
+                                    "text": (
+                                        '{"direct_answer":"IssueRepository reads issue_table.",'
+                                        '"claims":[{"text":"IssueRepository reads issue_table","citations":["S1"]}],'
+                                        '"missing_evidence":[],"confidence":"high"}'
+                                    )
+                                }
+                            ]
+                        }
+                    }
+                ],
+                "usageMetadata": {"promptTokenCount": 123, "candidatesTokenCount": 45, "totalTokenCount": 168},
+            },
+            text='{"ok":true}',
+            raise_for_status=lambda: None,
+        )
+
+        with patch("bpmis_jira_tool.source_code_qa.requests.post", return_value=fake_response) as mocked_post:
+            payload = service.query(
+                pm_team="AF",
+                country="All",
+                question="what data source does issue creation use",
+                answer_mode="auto",
+                llm_budget_mode="auto",
+            )
+
+        self.assertEqual(payload["answer_mode"], "auto")
+        self.assertEqual(payload["llm_budget_mode"], "deep")
+        self.assertEqual(payload["llm_route"]["mode"], "auto")
+        self.assertIn("data_source_trace", payload["llm_route"]["reason"])
+        self.assertIn("IssueRepository reads issue_table", payload["llm_answer"])
+        self.assertIn("gemini-2.5-flash", mocked_post.call_args.args[0])
 
     def test_gemini_failure_falls_back_to_retrieval_only(self):
         service = SourceCodeQAService(

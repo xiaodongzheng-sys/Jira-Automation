@@ -31,6 +31,14 @@ class ConfigTests(unittest.TestCase):
             finally:
                 os.chdir(original_cwd)
 
+    def test_source_code_qa_gemini_key_falls_back_to_shared_gemini_key(self):
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "shared-gemini-key"}, clear=True):
+            settings = Settings.from_env()
+
+        self.assertEqual(settings.source_code_qa_gemini_api_key, "shared-gemini-key")
+        self.assertEqual(settings.source_code_qa_gemini_fast_model, "gemini-2.5-flash-lite")
+        self.assertEqual(settings.source_code_qa_gemini_model, "gemini-2.5-flash")
+
 
 if __name__ == "__main__":
     unittest.main()

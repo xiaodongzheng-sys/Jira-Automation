@@ -122,18 +122,21 @@
   };
 
   const updateAnswerModeState = () => {
-    const llmSelected = answerMode?.value === 'gemini_flash';
+    const answerModeValue = answerMode?.value || 'auto';
+    const llmSelected = answerModeValue !== 'retrieval_only';
     if (llmBudget) {
       llmBudget.disabled = !llmSelected;
     }
     if (queryButton) {
-      queryButton.textContent = llmSelected ? 'Search + Generate LLM Answer' : 'Search Code';
+      queryButton.textContent = llmSelected ? 'Search + Generate Answer' : 'Search Code';
     }
     if (queryStatus) {
-      if (llmSelected && !llmReady) {
-        queryStatus.textContent = 'Gemini mode is not configured on the server yet.';
+      if (answerModeValue === 'gemini_flash' && !llmReady) {
+        queryStatus.textContent = 'LLM mode is not configured on the server yet.';
       } else if (!llmSelected) {
         queryStatus.textContent = 'Ready.';
+      } else if (answerModeValue === 'auto' && !llmReady) {
+        queryStatus.textContent = 'Auto mode will use retrieval-only results until LLM credentials are configured.';
       }
     }
   };
@@ -397,6 +400,7 @@
     const usage = payload?.llm_usage || {};
     const meta = [
       payload?.llm_budget_mode ? `budget: ${payload.llm_budget_mode}` : '',
+      payload?.llm_route?.mode === 'auto' ? `route: ${payload.llm_route.reason}` : '',
       payload?.llm_cached ? 'cache hit' : 'live call',
       usage?.promptTokenCount ? `prompt: ${usage.promptTokenCount}` : '',
       usage?.candidatesTokenCount ? `output: ${usage.candidatesTokenCount}` : '',
@@ -427,10 +431,11 @@
 
   const renderUsageBadges = (payload, selectedBudget) => {
     if (activeBudget) {
-      activeBudget.textContent = selectedBudget || 'cheap';
+      activeBudget.textContent = payload?.llm_budget_mode || selectedBudget || 'auto';
     }
+    const llmAnswered = ['gemini_flash', 'auto'].includes(payload?.answer_mode) && Boolean(payload?.llm_answer);
     if (activeCache) {
-      if (payload?.answer_mode === 'gemini_flash') {
+      if (llmAnswered) {
         activeCache.hidden = false;
         activeCache.textContent = payload?.llm_cached ? 'cache hit' : 'live LLM';
       } else {
@@ -441,7 +446,7 @@
     if (activeUsage) {
       const usage = payload?.llm_usage || {};
       const total = usage?.totalTokenCount;
-      if (payload?.answer_mode === 'gemini_flash' && total) {
+      if (llmAnswered && total) {
         activeUsage.hidden = false;
         activeUsage.textContent = `${total} tokens`;
       } else {
@@ -452,14 +457,14 @@
   };
 
   const queryCode = async () => {
-    const selectedAnswerMode = answerMode?.value || 'retrieval_only';
-    const selectedBudget = llmBudget?.value || 'cheap';
+    const selectedAnswerMode = answerMode?.value || 'auto';
+    const selectedBudget = llmBudget?.value || 'auto';
     if (selectedAnswerMode === 'gemini_flash' && !llmReady) {
-      queryStatus.textContent = 'Gemini mode is not configured on the server yet.';
+      queryStatus.textContent = 'LLM mode is not configured on the server yet.';
       return;
     }
     activeMode.textContent = selectedAnswerMode;
-    queryStatus.textContent = selectedAnswerMode === 'gemini_flash'
+    queryStatus.textContent = selectedAnswerMode !== 'retrieval_only'
       ? 'Searching local code and asking Gemini...'
       : 'Searching local code index...';
     try {

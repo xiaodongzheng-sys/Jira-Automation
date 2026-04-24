@@ -60,7 +60,9 @@ class Settings:
     source_code_qa_gitlab_token: str | None = None
     source_code_qa_gitlab_username: str = "oauth2"
     source_code_qa_gemini_api_key: str | None = None
-    source_code_qa_gemini_model: str = "gemini-2.5-flash-lite"
+    source_code_qa_gemini_model: str = "gemini-2.5-flash"
+    source_code_qa_gemini_fast_model: str = "gemini-2.5-flash-lite"
+    source_code_qa_gemini_deep_model: str = "gemini-2.5-flash"
     source_code_qa_gemini_fallback_model: str = "gemini-2.5-flash-lite"
     source_code_qa_llm_cache_ttl_seconds: int = 1800
     seatalk_openapi_base_url: str = "https://openapi.seatalk.io"
@@ -115,8 +117,10 @@ class Settings:
             source_code_qa_max_file_bytes=int(_env_str("SOURCE_CODE_QA_MAX_FILE_BYTES", "500000")),
             source_code_qa_gitlab_token=_env_str("SOURCE_CODE_QA_GITLAB_TOKEN"),
             source_code_qa_gitlab_username=_env_str("SOURCE_CODE_QA_GITLAB_USERNAME", "oauth2"),
-            source_code_qa_gemini_api_key=_env_str("SOURCE_CODE_QA_GEMINI_API_KEY"),
-            source_code_qa_gemini_model=_env_str("SOURCE_CODE_QA_GEMINI_MODEL", "gemini-2.5-flash-lite"),
+            source_code_qa_gemini_api_key=_env_str("SOURCE_CODE_QA_GEMINI_API_KEY") or _env_str("GEMINI_API_KEY"),
+            source_code_qa_gemini_model=_env_str("SOURCE_CODE_QA_GEMINI_MODEL", "gemini-2.5-flash"),
+            source_code_qa_gemini_fast_model=_env_str("SOURCE_CODE_QA_GEMINI_FAST_MODEL", "gemini-2.5-flash-lite"),
+            source_code_qa_gemini_deep_model=_env_str("SOURCE_CODE_QA_GEMINI_DEEP_MODEL", _env_str("SOURCE_CODE_QA_GEMINI_MODEL", "gemini-2.5-flash")),
             source_code_qa_gemini_fallback_model=_env_str("SOURCE_CODE_QA_GEMINI_FALLBACK_MODEL", "gemini-2.5-flash-lite"),
             source_code_qa_llm_cache_ttl_seconds=int(_env_str("SOURCE_CODE_QA_LLM_CACHE_TTL_SECONDS", "1800")),
             seatalk_openapi_base_url=_env_str("SEATALK_OPENAPI_BASE_URL", "https://openapi.seatalk.io"),

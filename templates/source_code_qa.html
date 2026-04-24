@@ -57,10 +57,10 @@
           <span>LLM Budget</span>
           <select data-source-llm-budget>
             {% for mode in options.llm_budget_modes %}
-              <option value="{{ mode.value }}"{% if mode.value == 'cheap' %} selected{% endif %}>{{ mode.label }}</option>
+              <option value="{{ mode.value }}"{% if mode.value == 'auto' %} selected{% endif %}>{{ mode.label }}</option>
             {% endfor %}
           </select>
-          <small class="field-help">Cheap sends fewer snippets. Deep sends more context and costs more.</small>
+          <small class="field-help">Auto routes simple lookups cheaply and sends deeper context for trace-heavy questions.</small>
         </label>
       </div>
       <div class="source-qa-status" data-source-config-status>
@@ -106,8 +106,8 @@
             <p class="card-help" data-source-summary>No question asked yet.</p>
           </div>
         <div class="source-qa-metadata">
-          <span class="field-badge field-badge-recommended" data-source-active-mode>retrieval_only</span>
-          <span class="field-badge source-qa-meta-badge" data-source-active-budget>cheap</span>
+          <span class="field-badge field-badge-recommended" data-source-active-mode>auto</span>
+          <span class="field-badge source-qa-meta-badge" data-source-active-budget>auto</span>
           <span class="field-badge source-qa-meta-badge" data-source-active-cache hidden>live</span>
           <span class="field-badge source-qa-meta-badge" data-source-active-usage hidden>tokens</span>
         </div>
