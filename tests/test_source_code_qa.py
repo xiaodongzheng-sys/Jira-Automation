@@ -293,11 +293,15 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         with sqlite3.connect(index_path) as connection:
             definition_count = connection.execute("select count(*) from definitions").fetchone()[0]
             reference_count = connection.execute("select count(*) from references_index").fetchone()[0]
+            entity_count = connection.execute("select count(*) from code_entities").fetchone()[0]
+            entity_edge_count = connection.execute("select count(*) from entity_edges").fetchone()[0]
             edge_count = connection.execute("select count(*) from graph_edges").fetchone()[0]
             flow_edge_count = connection.execute("select count(*) from flow_edges").fetchone()[0]
             fts_count = connection.execute("select count(*) from lines_fts").fetchone()[0]
         self.assertGreaterEqual(definition_count, 3)
         self.assertGreaterEqual(reference_count, 3)
+        self.assertGreaterEqual(entity_count, 3)
+        self.assertGreaterEqual(entity_edge_count, 1)
         self.assertGreaterEqual(edge_count, 1)
         self.assertGreaterEqual(flow_edge_count, 1)
         self.assertGreaterEqual(fts_count, 1)
@@ -352,9 +356,40 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         retrievals = {match.get("retrieval") for match in payload["matches"]}
         paths = {match["path"] for match in payload["matches"]}
         trace_stages = {match.get("trace_stage") for match in payload["matches"]}
-        self.assertTrue({"planner_definition", "planner_reference", "code_graph", "flow_graph"} & retrievals)
+        self.assertTrue({"planner_definition", "planner_reference", "code_graph", "flow_graph", "entity_graph"} & retrievals)
         self.assertIn("repository/IssueRepository.java", paths)
         self.assertTrue(any(str(stage).startswith("tool_loop_") for stage in trace_stages))
+
+    def test_python_ast_index_extracts_entities_and_calls(self):
+        self.service.save_mapping(
+            pm_team="AF",
+            country="All",
+            repositories=[{"display_name": "Portal Repo", "url": "https://git.example.com/team/portal.git"}],
+        )
+        entry = self.service.load_config()["mappings"]["AF:All"][0]
+        repo_path = self.service._repo_path("AF:All", type("Entry", (), entry)())
+        (repo_path / ".git").mkdir(parents=True)
+        source_file = repo_path / "services" / "issue_service.py"
+        source_file.parent.mkdir(parents=True)
+        source_file.write_text(
+            "from bpmis.client import BPMISClient\n"
+            "class IssueService:\n"
+            "    def create_issue(self):\n"
+            "        client = BPMISClient()\n"
+            "        return client.batchCreateJiraIssue()\n",
+            encoding="utf-8",
+        )
+
+        payload = self.service.query(pm_team="AF", country="All", question="where does create_issue call BPMIS")
+        index_path = self.service._index_path(repo_path)
+
+        self.assertEqual(payload["status"], "ok")
+        with sqlite3.connect(index_path) as connection:
+            entity_names = {row[0] for row in connection.execute("select name from code_entities")}
+            edge_targets = {row[0] for row in connection.execute("select to_name from entity_edges")}
+        self.assertIn("IssueService", entity_names)
+        self.assertIn("create_issue", entity_names)
+        self.assertTrue(any("batchCreateJiraIssue" in target for target in edge_targets))
 
     def test_flow_graph_can_trace_controller_service_repository_table_chain(self):
         self.service.save_mapping(
@@ -403,7 +438,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
 
         self.assertEqual(payload["status"], "ok")
         self.assertIn("repository/IssueRepository.java", {match["path"] for match in payload["matches"]})
-        self.assertIn("flow_graph", {match.get("retrieval") for match in payload["matches"]})
+        self.assertTrue({"flow_graph", "entity_graph"} & {match.get("retrieval") for match in payload["matches"]})
         self.assertTrue(any("issue_table" in match["snippet"] for match in payload["matches"]))
 
     def test_domain_profile_terms_can_boost_configured_data_source_names(self):
@@ -848,6 +883,29 @@ class SourceCodeQAServiceTests(unittest.TestCase):
 
         self.assertFalse(compressed["data_sources"])
         self.assertEqual(quality["status"], "needs_more_trace")
+
+    def test_claim_verifier_flags_uncited_concrete_claims(self):
+        evidence_summary = {
+            "data_sources": ["Portal Repo:repository/IssueRepository.java:3-5: select * from issue_table"],
+            "api_or_config": [],
+        }
+        selected_matches = [
+            {
+                "repo": "Portal Repo",
+                "path": "repository/IssueRepository.java",
+                "line_start": 1,
+                "line_end": 5,
+            }
+        ]
+
+        check = self.service._verify_answer_claims(
+            "Issue creation reads from issue_table through IssueRepository.",
+            evidence_summary,
+            selected_matches,
+        )
+
+        self.assertEqual(check["status"], "needs_citation")
+        self.assertTrue(check["unsupported_claims"])
 
     def test_gemini_query_returns_answer_and_usage(self):
         service = SourceCodeQAService(

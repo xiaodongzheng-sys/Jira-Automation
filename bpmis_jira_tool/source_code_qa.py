@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
@@ -24,7 +25,7 @@ CRMS_COUNTRIES = ("SG", "ID", "PH")
 ANSWER_MODE = "retrieval_only"
 ANSWER_MODE_GEMINI = "gemini_flash"
 CONFIG_VERSION = 1
-CODE_INDEX_VERSION = 4
+CODE_INDEX_VERSION = 5
 GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 DEFAULT_DOMAIN_PROFILE_PATH = Path(__file__).resolve().parent.parent / "config" / "source_code_qa_domain_profiles.json"
 LLM_BUDGETS = {
@@ -445,6 +446,7 @@ class SourceCodeQAService:
             return payload
         domain_profile = self._domain_profile(pm_team, country)
         tokens = self._expand_tokens_with_domain_profile(tokens, question, domain_profile)
+        query_plan = self._build_query_decomposition(question, domain_profile)
         matches: list[dict[str, Any]] = []
         repo_status = self.repo_status(key)
         for entry in entries:
@@ -452,7 +454,25 @@ class SourceCodeQAService:
             if not (repo_path / ".git").exists():
                 continue
             matches.extend(self._search_repo(entry, repo_path, tokens, question=question))
-        matches.sort(key=lambda item: item["score"], reverse=True)
+            for component in query_plan.get("components") or []:
+                component_terms = [str(term) for term in component.get("terms") or [] if str(term).strip()]
+                expanded_tokens: list[str] = []
+                for term in component_terms:
+                    expanded_tokens.extend(self._question_tokens(term))
+                expanded_tokens = list(dict.fromkeys(expanded_tokens))[:24]
+                if not expanded_tokens:
+                    continue
+                matches.extend(
+                    self._search_repo(
+                        entry,
+                        repo_path,
+                        expanded_tokens,
+                        question=question,
+                        focus_terms=component_terms,
+                        trace_stage="query_decomposition",
+                    )
+                )
+        matches = self._rank_matches(question, matches)
         top_matches = matches[: max(1, min(int(limit or 12), 30))]
         if top_matches and self._is_dependency_question(question):
             dependency_matches = self._expand_dependency_matches(
@@ -469,7 +489,9 @@ class SourceCodeQAService:
                     if item_key not in existing_keys:
                         top_matches.append(item)
                         existing_keys.add(item_key)
-                top_matches.sort(key=lambda item: item["score"], reverse=True)
+                    else:
+                        self._annotate_duplicate_tool_match(top_matches, item)
+                top_matches = self._rank_matches(question, top_matches)
                 top_matches = self._select_result_matches(top_matches, max(1, min(int(limit or 12), 30)))
         if top_matches:
             trace_matches = self._expand_two_hop_matches(
@@ -486,7 +508,9 @@ class SourceCodeQAService:
                     if item_key not in existing_keys:
                         top_matches.append(item)
                         existing_keys.add(item_key)
-                top_matches.sort(key=lambda item: item["score"], reverse=True)
+                    else:
+                        self._annotate_duplicate_tool_match(top_matches, item)
+                top_matches = self._rank_matches(question, top_matches)
                 top_matches = self._select_result_matches(top_matches, max(1, min(int(limit or 12), 30)))
         if top_matches:
             agent_matches = self._expand_agent_trace_matches(
@@ -503,7 +527,9 @@ class SourceCodeQAService:
                     if item_key not in existing_keys:
                         top_matches.append(item)
                         existing_keys.add(item_key)
-                top_matches.sort(key=lambda item: item["score"], reverse=True)
+                    else:
+                        self._annotate_duplicate_tool_match(top_matches, item)
+                top_matches = self._rank_matches(question, top_matches)
                 top_matches = self._select_result_matches(top_matches, max(1, min(int(limit or 12), 30)))
         if top_matches:
             tool_loop_matches = self._run_planner_tool_loop(
@@ -520,7 +546,9 @@ class SourceCodeQAService:
                     if item_key not in existing_keys:
                         top_matches.append(item)
                         existing_keys.add(item_key)
-                top_matches.sort(key=lambda item: item["score"], reverse=True)
+                    else:
+                        self._annotate_duplicate_tool_match(top_matches, item)
+                top_matches = self._rank_matches(question, top_matches)
                 top_matches = self._select_result_matches(top_matches, max(1, min(int(limit or 12), 30)))
         if top_matches:
             evidence_summary = self._compress_evidence(question, top_matches)
@@ -578,6 +606,7 @@ class SourceCodeQAService:
             "repo_status": repo_status,
             "answer_quality": quality_gate,
             "agent_plan": self._build_agent_plan(question, evidence_summary, quality_gate),
+            "query_plan": query_plan,
         }
         normalized_answer_mode = str(answer_mode or ANSWER_MODE).strip() or ANSWER_MODE
         if normalized_answer_mode == ANSWER_MODE_GEMINI:
@@ -770,6 +799,8 @@ class SourceCodeQAService:
             "lines": int(metadata.get("indexed_lines") or 0),
             "definitions": int(metadata.get("indexed_definitions") or 0),
             "references": int(metadata.get("indexed_references") or 0),
+            "entities": int(metadata.get("indexed_entities") or 0),
+            "entity_edges": int(metadata.get("indexed_entity_edges") or 0),
             "edges": int(metadata.get("indexed_edges") or 0),
             "flow_edges": int(metadata.get("indexed_flow_edges") or 0),
             "fts_enabled": metadata.get("fts_enabled") == "1",
@@ -805,6 +836,8 @@ class SourceCodeQAService:
         indexed_lines = 0
         indexed_definitions = 0
         indexed_references = 0
+        indexed_entities = 0
+        indexed_entity_edges = 0
         with sqlite3.connect(tmp_path) as connection:
             connection.execute("pragma journal_mode=off")
             connection.execute("pragma synchronous=off")
@@ -850,6 +883,37 @@ class SourceCodeQAService:
                 );
                 create index idx_references_lower_target on references_index(lower_target);
                 create index idx_references_file_path on references_index(file_path);
+                create table code_entities (
+                    entity_id text primary key,
+                    name text not null,
+                    lower_name text not null,
+                    kind text not null,
+                    language text not null,
+                    file_path text not null,
+                    line_no integer not null,
+                    parent text not null,
+                    signature text not null
+                );
+                create index idx_entities_lower_name on code_entities(lower_name);
+                create index idx_entities_file_path on code_entities(file_path);
+                create index idx_entities_kind on code_entities(kind);
+                create table entity_edges (
+                    from_entity_id text not null,
+                    from_file text not null,
+                    from_line integer not null,
+                    edge_kind text not null,
+                    to_name text not null,
+                    lower_to_name text not null,
+                    to_entity_id text not null,
+                    to_file text not null,
+                    to_line integer not null,
+                    evidence text not null
+                );
+                create index idx_entity_edges_from on entity_edges(from_entity_id);
+                create index idx_entity_edges_from_file on entity_edges(from_file);
+                create index idx_entity_edges_lower_to_name on entity_edges(lower_to_name);
+                create index idx_entity_edges_to_file on entity_edges(to_file);
+                create index idx_entity_edges_kind on entity_edges(edge_kind);
                 create table graph_edges (
                     from_file text not null,
                     from_line integer not null,
@@ -940,11 +1004,29 @@ class SourceCodeQAService:
                     """,
                     structure["references"],
                 )
+                connection.executemany(
+                    """
+                    insert or ignore into code_entities(entity_id, name, lower_name, kind, language, file_path, line_no, parent, signature)
+                    values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    structure["entities"],
+                )
+                connection.executemany(
+                    """
+                    insert into entity_edges(from_entity_id, from_file, from_line, edge_kind, to_name, lower_to_name, to_entity_id, to_file, to_line, evidence)
+                    values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    structure["entity_edges"],
+                )
                 indexed_files += 1
                 indexed_lines += len(lines)
                 indexed_definitions += len(structure["definitions"])
                 indexed_references += len(structure["references"])
+                indexed_entities += len(structure["entities"])
+                indexed_entity_edges += len(structure["entity_edges"])
             indexed_edges = self._build_graph_edges(connection)
+            resolved_entity_edges = self._resolve_entity_edges(connection)
+            indexed_entity_edges += resolved_entity_edges
             indexed_flow_edges = self._build_flow_edges(connection)
             metadata = {
                 "version": str(CODE_INDEX_VERSION),
@@ -955,6 +1037,8 @@ class SourceCodeQAService:
                 "indexed_lines": str(indexed_lines),
                 "indexed_definitions": str(indexed_definitions),
                 "indexed_references": str(indexed_references),
+                "indexed_entities": str(indexed_entities),
+                "indexed_entity_edges": str(indexed_entity_edges),
                 "indexed_edges": str(indexed_edges),
                 "indexed_flow_edges": str(indexed_flow_edges),
                 "fts_enabled": "1" if fts_enabled else "0",
@@ -969,6 +1053,8 @@ class SourceCodeQAService:
             "lines": indexed_lines,
             "definitions": indexed_definitions,
             "references": indexed_references,
+            "entities": indexed_entities,
+            "entity_edges": indexed_entity_edges,
             "edges": indexed_edges,
             "flow_edges": indexed_flow_edges,
             "fts_enabled": fts_enabled,
@@ -1010,6 +1096,41 @@ class SourceCodeQAService:
             rows,
         )
         return len(rows)
+
+    @staticmethod
+    def _resolve_entity_edges(connection: sqlite3.Connection) -> int:
+        entities = connection.execute(
+            "select entity_id, lower_name, file_path, line_no from code_entities"
+        ).fetchall()
+        by_name: dict[str, list[tuple[str, str, int]]] = {}
+        for entity_id, lower_name, file_path, line_no in entities:
+            by_name.setdefault(str(lower_name), []).append((str(entity_id), str(file_path), int(line_no)))
+        updates: list[tuple[str, str, int, int]] = []
+        for rowid, lower_to_name, from_file in connection.execute(
+            """
+            select rowid, lower_to_name, from_file
+            from entity_edges
+            where to_file = ''
+            """
+        ):
+            candidates = by_name.get(str(lower_to_name)) or []
+            if not candidates:
+                short_name = str(lower_to_name).rsplit(".", 1)[-1]
+                candidates = by_name.get(short_name) or []
+            if not candidates:
+                continue
+            candidates = sorted(candidates, key=lambda item: 0 if item[1] != str(from_file) else 1)
+            to_entity_id, to_file, to_line = candidates[0]
+            updates.append((to_entity_id, to_file, to_line, int(rowid)))
+        connection.executemany(
+            """
+            update entity_edges
+            set to_entity_id = ?, to_file = ?, to_line = ?
+            where rowid = ?
+            """,
+            updates,
+        )
+        return len(updates)
 
     @staticmethod
     def _build_flow_edges(connection: sqlite3.Connection) -> int:
@@ -1060,6 +1181,27 @@ class SourceCodeQAService:
                     str(to_file),
                     int(to_line),
                     f"{edge_kind} {symbol}".strip()[:500],
+                )
+            )
+
+        for from_file, from_line, edge_kind, to_name, to_file, to_line, evidence in connection.execute(
+            """
+            select from_file, from_line, edge_kind, to_name, to_file, to_line, evidence
+            from entity_edges
+            where edge_kind in ('route', 'sql_table', 'injects', 'call', 'import', 'symbol_reference')
+            """
+        ):
+            rows.append(
+                (
+                    str(from_file),
+                    int(from_line),
+                    SourceCodeQAService._flow_role_for_path(str(from_file)),
+                    SourceCodeQAService._flow_name_for_path(str(from_file)),
+                    SourceCodeQAService._classify_flow_edge(str(edge_kind), str(from_file), str(to_file), str(to_name)),
+                    str(to_name),
+                    str(to_file),
+                    int(to_line or 0),
+                    str(evidence or "")[:500],
                 )
             )
 
@@ -1117,16 +1259,27 @@ class SourceCodeQAService:
             return "config"
         return "call"
 
+    @staticmethod
+    def _entity_id(file_path: str, kind: str, name: str, line_no: int) -> str:
+        raw = f"{file_path}:{kind}:{name}:{line_no}"
+        return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:24]
+
     def _extract_structure_rows(self, relative_path: str, lines: list[str]) -> dict[str, list[tuple[Any, ...]]]:
         definitions: list[tuple[Any, ...]] = []
         references: list[tuple[Any, ...]] = []
+        entities: list[tuple[Any, ...]] = []
+        entity_edges: list[tuple[Any, ...]] = []
         suffix = Path(relative_path).suffix.lower()
+        language = self._language_for_suffix(suffix)
+        file_entity_id = self._entity_id(relative_path, "file", relative_path, 1)
+        entities.append((file_entity_id, relative_path, relative_path.lower(), "file", language, relative_path, 1, "", relative_path))
 
         def add_definition(name: str, kind: str, line_no: int, signature: str) -> None:
             name = str(name or "").strip()
             if not name:
                 return
             definitions.append((name, name.lower(), kind, relative_path, line_no, signature.strip()[:500]))
+            add_entity(name, kind, line_no, signature)
 
         def add_reference(target: str, kind: str, line_no: int, context: str) -> None:
             target = str(target or "").strip().strip("\"'")
@@ -1134,42 +1287,228 @@ class SourceCodeQAService:
                 return
             references.append((target, target.lower(), kind, relative_path, line_no, context.strip()[:500]))
 
+        def add_entity(name: str, kind: str, line_no: int, signature: str, parent: str = "") -> str:
+            normalized = str(name or "").strip()
+            if not normalized:
+                return file_entity_id
+            entity_id = self._entity_id(relative_path, kind, normalized, line_no)
+            entities.append(
+                (
+                    entity_id,
+                    normalized,
+                    normalized.lower(),
+                    kind,
+                    language,
+                    relative_path,
+                    int(line_no),
+                    str(parent or ""),
+                    str(signature or "").strip()[:500],
+                )
+            )
+            return entity_id
+
+        def add_entity_edge(
+            from_entity_id: str,
+            edge_kind: str,
+            to_name: str,
+            line_no: int,
+            evidence: str,
+        ) -> None:
+            target = str(to_name or "").strip().strip("\"'")
+            if len(target) < 2:
+                return
+            entity_edges.append(
+                (
+                    from_entity_id or file_entity_id,
+                    relative_path,
+                    int(line_no),
+                    str(edge_kind or "reference"),
+                    target,
+                    target.lower(),
+                    "",
+                    "",
+                    0,
+                    str(evidence or "").strip()[:500],
+                )
+            )
+
+        if suffix == ".py":
+            self._extract_python_ast_structure(
+                relative_path=relative_path,
+                lines=lines,
+                add_definition=add_definition,
+                add_reference=add_reference,
+                add_entity=add_entity,
+                add_entity_edge=add_entity_edge,
+                file_entity_id=file_entity_id,
+            )
+
+        current_class = ""
+        current_class_id = file_entity_id
+        current_method = ""
+        current_method_id = file_entity_id
         for line_no, line in enumerate(lines, start=1):
             stripped = line.strip()
             if not stripped:
                 continue
             for match in CLASS_DEF_PATTERN.finditer(line):
                 add_definition(match.group(2), match.group(1).lower(), line_no, stripped)
+                current_class = match.group(2)
+                current_class_id = self._entity_id(relative_path, match.group(1).lower(), current_class, line_no)
+                current_method = ""
+                current_method_id = current_class_id
             py_match = PY_DEF_PATTERN.search(line)
-            if py_match:
+            if py_match and suffix != ".py":
                 add_definition(py_match.group(2), "python_" + py_match.group(1).lower(), line_no, stripped)
             js_match = JS_DEF_PATTERN.search(line)
             if js_match:
-                add_definition(js_match.group(1) or js_match.group(2), "javascript_function", line_no, stripped)
+                function_name = js_match.group(1) or js_match.group(2)
+                add_definition(function_name, "javascript_function", line_no, stripped)
+                current_method = function_name
+                current_method_id = self._entity_id(relative_path, "javascript_function", function_name, line_no)
             java_method = JAVA_METHOD_DEF_PATTERN.search(line)
             if java_method and not stripped.startswith(("if ", "for ", "while ", "switch ", "catch ")):
-                add_definition(java_method.group(1), "java_method", line_no, stripped)
+                method_name = java_method.group(1)
+                add_definition(method_name, "java_method", line_no, stripped)
+                current_method = method_name
+                current_method_id = self._entity_id(relative_path, "java_method", method_name, line_no)
             for annotation in ANNOTATION_ROUTE_PATTERN.finditer(line):
                 add_definition(annotation.group(1), "route_annotation", line_no, stripped)
                 for route in re.findall(r'"([^"]+)"', annotation.group(2) or ""):
                     add_reference(route, "route", line_no, stripped)
+                    add_entity_edge(current_method_id or current_class_id, "route", route, line_no, stripped)
             for table in SQL_TABLE_PATTERN.findall(line):
                 add_reference(table, "sql_table", line_no, stripped)
+                add_entity_edge(current_method_id or current_class_id, "sql_table", table, line_no, stripped)
             if suffix in {".properties", ".yaml", ".yml", ".conf", ".toml"}:
                 key_match = PROPERTIES_KEY_PATTERN.search(line)
                 if key_match:
                     add_definition(key_match.group(1), "config_key", line_no, stripped)
+                    add_entity_edge(file_entity_id, "config", key_match.group(1), line_no, stripped)
+            field_match = FIELD_OR_PARAM_TYPE_PATTERN.search(line)
+            if field_match:
+                add_entity_edge(current_class_id or file_entity_id, "injects", field_match.group(1), line_no, stripped)
             for symbol in self._extract_downstream_symbols(line):
                 add_reference(symbol, "symbol_reference", line_no, stripped)
+                add_entity_edge(current_method_id or current_class_id or file_entity_id, "symbol_reference", symbol, line_no, stripped)
             for call in CALL_SYMBOL_PATTERN.findall(line):
                 lowered = call.lower()
                 if lowered not in LOW_VALUE_CALL_SYMBOLS and lowered not in STOPWORDS:
                     add_reference(call, "call", line_no, stripped)
+                    add_entity_edge(current_method_id or current_class_id or file_entity_id, "call", call, line_no, stripped)
 
         return {
             "definitions": list(dict.fromkeys(definitions)),
             "references": list(dict.fromkeys(references)),
+            "entities": list(dict.fromkeys(entities)),
+            "entity_edges": list(dict.fromkeys(entity_edges)),
         }
+
+    @staticmethod
+    def _language_for_suffix(suffix: str) -> str:
+        return {
+            ".java": "java",
+            ".py": "python",
+            ".js": "javascript",
+            ".jsx": "javascript",
+            ".ts": "typescript",
+            ".tsx": "typescript",
+            ".xml": "xml",
+            ".yaml": "yaml",
+            ".yml": "yaml",
+            ".properties": "properties",
+            ".sql": "sql",
+        }.get(str(suffix or "").lower(), "text")
+
+    def _extract_python_ast_structure(
+        self,
+        *,
+        relative_path: str,
+        lines: list[str],
+        add_definition,
+        add_reference,
+        add_entity,
+        add_entity_edge,
+        file_entity_id: str,
+    ) -> None:
+        try:
+            tree = ast.parse("\n".join(lines))
+        except SyntaxError:
+            return
+
+        class Visitor(ast.NodeVisitor):
+            def __init__(self) -> None:
+                self.stack: list[tuple[str, str]] = []
+
+            def _current_entity(self) -> str:
+                return self.stack[-1][1] if self.stack else file_entity_id
+
+            def visit_ClassDef(self, node: ast.ClassDef) -> Any:
+                signature = lines[node.lineno - 1].strip() if 0 < node.lineno <= len(lines) else node.name
+                add_definition(node.name, "python_class", node.lineno, signature)
+                entity_id = SourceCodeQAService._entity_id(relative_path, "python_class", node.name, node.lineno)
+                self.stack.append((node.name, entity_id))
+                self.generic_visit(node)
+                self.stack.pop()
+
+            def visit_FunctionDef(self, node: ast.FunctionDef) -> Any:
+                self._visit_function(node, "python_function")
+
+            def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> Any:
+                self._visit_function(node, "python_async_function")
+
+            def _visit_function(self, node: ast.AST, kind: str) -> None:
+                name = getattr(node, "name", "")
+                line_no = int(getattr(node, "lineno", 1) or 1)
+                signature = lines[line_no - 1].strip() if 0 < line_no <= len(lines) else name
+                parent = self.stack[-1][0] if self.stack else ""
+                add_definition(name, kind, line_no, signature)
+                entity_id = add_entity(name, kind, line_no, signature, parent=parent)
+                self.stack.append((name, entity_id))
+                self.generic_visit(node)
+                self.stack.pop()
+
+            def visit_Import(self, node: ast.Import) -> Any:
+                line_no = int(getattr(node, "lineno", 1) or 1)
+                evidence = lines[line_no - 1].strip() if 0 < line_no <= len(lines) else "import"
+                for alias in node.names:
+                    add_reference(alias.name, "import", line_no, evidence)
+                    add_entity_edge(self._current_entity(), "import", alias.name, line_no, evidence)
+
+            def visit_ImportFrom(self, node: ast.ImportFrom) -> Any:
+                line_no = int(getattr(node, "lineno", 1) or 1)
+                evidence = lines[line_no - 1].strip() if 0 < line_no <= len(lines) else "import"
+                module = str(node.module or "")
+                for alias in node.names:
+                    target = f"{module}.{alias.name}" if module else alias.name
+                    add_reference(target, "import", line_no, evidence)
+                    add_entity_edge(self._current_entity(), "import", target, line_no, evidence)
+
+            def visit_Call(self, node: ast.Call) -> Any:
+                line_no = int(getattr(node, "lineno", 1) or 1)
+                evidence = lines[line_no - 1].strip() if 0 < line_no <= len(lines) else "call"
+                target = self._call_name(node.func)
+                if target:
+                    add_reference(target, "call", line_no, evidence)
+                    add_entity_edge(self._current_entity(), "call", target, line_no, evidence)
+                self.generic_visit(node)
+
+            @staticmethod
+            def _call_name(node: ast.AST) -> str:
+                if isinstance(node, ast.Name):
+                    return node.id
+                if isinstance(node, ast.Attribute):
+                    parts = [node.attr]
+                    value = node.value
+                    while isinstance(value, ast.Attribute):
+                        parts.append(value.attr)
+                        value = value.value
+                    if isinstance(value, ast.Name):
+                        parts.append(value.id)
+                    return ".".join(reversed(parts))
+                return ""
+
+        Visitor().visit(tree)
 
     def _search_repo_index(
         self,
@@ -1184,7 +1523,7 @@ class SourceCodeQAService:
         index_path = self._index_path(repo_path)
         matches: list[dict[str, Any]] = []
         repo_score = self._repo_match_score(entry, tokens)
-        trace_stage_bonus = 90 if trace_stage == "two_hop" or trace_stage.startswith(TOOL_LOOP_TRACE_PREFIX) or trace_stage.startswith("agent_trace") or trace_stage.startswith("agent_plan") or trace_stage == QUALITY_GATE_TRACE_STAGE else 0
+        trace_stage_bonus = 90 if trace_stage == "two_hop" or trace_stage == "query_decomposition" or trace_stage.startswith(TOOL_LOOP_TRACE_PREFIX) or trace_stage.startswith("agent_trace") or trace_stage.startswith("agent_plan") or trace_stage == QUALITY_GATE_TRACE_STAGE else 0
         normalized_focus_terms = [term.lower() for term in (focus_terms or []) if term]
         query_terms = list(dict.fromkeys([*tokens, *normalized_focus_terms]))
         file_hits: dict[str, dict[str, Any]] = {}
@@ -1440,7 +1779,7 @@ class SourceCodeQAService:
     ) -> list[dict[str, Any]]:
         matches: list[dict[str, Any]] = []
         repo_score = self._repo_match_score(entry, tokens)
-        trace_stage_bonus = 90 if trace_stage == "two_hop" or trace_stage.startswith(TOOL_LOOP_TRACE_PREFIX) or trace_stage.startswith("agent_trace") or trace_stage.startswith("agent_plan") or trace_stage == QUALITY_GATE_TRACE_STAGE else 0
+        trace_stage_bonus = 90 if trace_stage == "two_hop" or trace_stage == "query_decomposition" or trace_stage.startswith(TOOL_LOOP_TRACE_PREFIX) or trace_stage.startswith("agent_trace") or trace_stage.startswith("agent_plan") or trace_stage == QUALITY_GATE_TRACE_STAGE else 0
         normalized_focus_terms = [term.lower() for term in (focus_terms or []) if term]
         for file_path in self._iter_text_files(repo_path):
             relative_path = file_path.relative_to(repo_path)
@@ -1611,6 +1950,8 @@ class SourceCodeQAService:
             parts.append("dependency trace")
         elif trace_stage == "two_hop":
             parts.append("two-hop trace")
+        elif trace_stage == "query_decomposition":
+            parts.append("query decomposition")
         elif trace_stage.startswith(TOOL_LOOP_TRACE_PREFIX):
             parts.append("planner tool trace")
         elif trace_stage.startswith("agent_trace"):
@@ -1875,11 +2216,15 @@ class SourceCodeQAService:
                 for retrieval in (existing_retrieval, duplicate_retrieval):
                     if retrieval and retrieval not in chain:
                         chain.append(retrieval)
-                if duplicate_retrieval in {"flow_graph", "code_graph"}:
+                if duplicate_retrieval in {"flow_graph", "code_graph", "entity_graph"}:
                     existing["retrieval"] = duplicate_retrieval
             duplicate_reason = str(duplicate.get("reason") or "")
             if duplicate_reason and duplicate_reason not in str(existing.get("reason") or ""):
                 existing["reason"] = f"{existing.get('reason')}; corroborated by {duplicate_reason}"
+            duplicate_stage = str(duplicate.get("trace_stage") or "")
+            existing_stage = str(existing.get("trace_stage") or "")
+            if duplicate_stage and duplicate_stage not in {"direct", "query_decomposition"} and existing_stage in {"direct", "query_decomposition"}:
+                existing["trace_stage"] = duplicate_stage
             existing["score"] = max(int(existing.get("score") or 0), int(duplicate.get("score") or 0))
             return
 
@@ -1900,6 +2245,7 @@ class SourceCodeQAService:
         if intent.get("data_source"):
             candidates.extend(
                 [
+                    {"tool": "trace_entity", "terms": terms[:12]},
                     {"tool": "trace_flow", "terms": terms[:12]},
                     {"tool": "trace_graph", "terms": terms[:12]},
                     {"tool": "search_code", "terms": [*quality_terms, "repository", "mapper", "dao", "select", "from", "client"]},
@@ -1908,6 +2254,7 @@ class SourceCodeQAService:
         if intent.get("api"):
             candidates.extend(
                 [
+                    {"tool": "trace_entity", "terms": terms[:12]},
                     {"tool": "trace_flow", "terms": terms[:12]},
                     {"tool": "find_references", "terms": [*terms[:10], "RequestMapping", "PostMapping", "GetMapping"]},
                     {"tool": "search_code", "terms": [*terms[:8], "controller", "endpoint", "client"]},
@@ -1927,7 +2274,7 @@ class SourceCodeQAService:
                 dict.fromkeys(str(term).strip() for term in candidate.get("terms") or [] if str(term).strip())
             )
             tool = str(candidate.get("tool") or "")
-            if tool not in {"find_definition", "find_references", "trace_graph", "trace_flow", "search_code"}:
+            if tool not in {"find_definition", "find_references", "trace_graph", "trace_flow", "trace_entity", "search_code"}:
                 continue
             if tool in {"find_definition", "find_references", "search_code"} and not normalized_terms:
                 continue
@@ -1941,7 +2288,7 @@ class SourceCodeQAService:
     def _tool_step_signature(step: dict[str, Any], matches: list[dict[str, Any]]) -> str:
         tool = str(step.get("tool") or "")
         terms = ",".join(str(term).lower() for term in (step.get("terms") or [])[:10])
-        if tool in {"trace_flow", "trace_graph"}:
+        if tool in {"trace_flow", "trace_graph", "trace_entity"}:
             seed_paths = ",".join(str(match.get("path") or "") for match in matches[:10])
             return f"{tool}:{seed_paths}:{terms}"
         return f"{tool}:{terms}"
@@ -1971,6 +2318,8 @@ class SourceCodeQAService:
                 step_matches.extend(self._tool_trace_graph(entry, repo_path, matches, question, step_index))
             elif tool == "trace_flow":
                 step_matches.extend(self._tool_trace_flow(entry, repo_path, matches, question, step_index))
+            elif tool == "trace_entity":
+                step_matches.extend(self._tool_trace_entity(entry, repo_path, matches, question, step_index))
             elif tool == "search_code":
                 expanded_tokens: list[str] = []
                 for term in terms:
@@ -2012,6 +2361,7 @@ class SourceCodeQAService:
             plan.append({"tool": "find_definition", "terms": terms[:12]})
             plan.append({"tool": "find_references", "terms": terms[:12]})
         if intent.get("data_source") or intent.get("api") or intent.get("rule_logic"):
+            plan.append({"tool": "trace_entity", "terms": terms[:12]})
             plan.append({"tool": "trace_flow", "terms": terms[:12]})
             plan.append({"tool": "trace_graph", "terms": terms[:12]})
         if intent.get("config"):
@@ -2231,6 +2581,73 @@ class SourceCodeQAService:
                                     question=question,
                                     trace_stage=f"{TOOL_LOOP_TRACE_PREFIX}{step_index}",
                                     retrieval="flow_graph",
+                                )
+                            )
+        except (OSError, sqlite3.Error):
+            return []
+        return [match for match in matches if match]
+
+    def _tool_trace_entity(
+        self,
+        entry: RepositoryEntry,
+        repo_path: Path,
+        base_matches: list[dict[str, Any]],
+        question: str,
+        step_index: int,
+    ) -> list[dict[str, Any]]:
+        index_path = self._index_path(repo_path)
+        seed_paths = [str(match.get("path") or "") for match in base_matches if match.get("repo") == entry.display_name][:12]
+        matches: list[dict[str, Any]] = []
+        try:
+            self._ensure_repo_index(key=None, entry=entry, repo_path=repo_path)
+            with sqlite3.connect(index_path) as connection:
+                connection.row_factory = sqlite3.Row
+                for path in seed_paths:
+                    for row in connection.execute(
+                        """
+                        select * from entity_edges
+                        where from_file = ? or to_file = ?
+                        order by
+                            case edge_kind
+                                when 'sql_table' then 0
+                                when 'route' then 1
+                                when 'injects' then 2
+                                when 'call' then 3
+                                else 4
+                            end,
+                            from_line
+                        limit 50
+                        """,
+                        (path, path),
+                    ):
+                        target_path = str(row["to_file"] or "")
+                        target_line = int(row["to_line"] or 0)
+                        if target_path and target_path != path:
+                            matches.append(
+                                self._match_from_index_location(
+                                    entry,
+                                    connection,
+                                    target_path,
+                                    target_line,
+                                    score=176 if row["edge_kind"] in {"sql_table", "injects", "call"} else 154,
+                                    reason=f"planner entity trace: {row['edge_kind']} {row['to_name']}",
+                                    question=question,
+                                    trace_stage=f"{TOOL_LOOP_TRACE_PREFIX}{step_index}",
+                                    retrieval="entity_graph",
+                                )
+                            )
+                        else:
+                            matches.append(
+                                self._match_from_index_location(
+                                    entry,
+                                    connection,
+                                    str(row["from_file"]),
+                                    int(row["from_line"]),
+                                    score=156,
+                                    reason=f"planner entity trace: {row['edge_kind']} {row['to_name']}",
+                                    question=question,
+                                    trace_stage=f"{TOOL_LOOP_TRACE_PREFIX}{step_index}",
+                                    retrieval="entity_graph",
                                 )
                             )
         except (OSError, sqlite3.Error):
@@ -2647,6 +3064,95 @@ class SourceCodeQAService:
             "rule_logic": any(term in lowered for term in RULE_HINTS),
         }
 
+    def _build_query_decomposition(self, question: str, domain_profile: dict[str, Any] | None = None) -> dict[str, Any]:
+        intent = self._question_intent(question)
+        question_terms = [token for token in self._question_tokens(question) if token not in DEPENDENCY_QUESTION_TERMS]
+        profile_terms = self._all_profile_terms(
+            "data_carriers",
+            "source_terms",
+            "field_population_terms",
+            "api_terms",
+            "config_terms",
+            "logic_terms",
+        )
+        if domain_profile:
+            for value in domain_profile.values():
+                if isinstance(value, list):
+                    profile_terms.extend(str(item) for item in value)
+        components: list[dict[str, Any]] = []
+
+        def add(name: str, terms: list[str]) -> None:
+            deduped: list[str] = []
+            for term in terms:
+                normalized = str(term or "").strip()
+                lowered = normalized.lower()
+                if len(lowered) < 3 or lowered in STOPWORDS or lowered in deduped:
+                    continue
+                deduped.append(lowered)
+            if deduped:
+                components.append({"name": name, "terms": deduped[:18]})
+
+        add("entry_point", ["controller", "service", "engine", "handler", "consumer", *question_terms])
+        if intent.get("api"):
+            add("api_surface", ["requestmapping", "postmapping", "getmapping", "route", "endpoint", "client", *question_terms])
+        if intent.get("data_source"):
+            add("source_trace", ["repository", "mapper", "dao", "select", "from", "jdbcTemplate", "client", "integration", *question_terms])
+            add("carrier_backtrace", ["provider", "builder", "converter", "assembler", *profile_terms[:16], *question_terms])
+        if intent.get("config"):
+            add("configuration", ["properties", "yaml", "configuration", "feature", "config", *question_terms])
+        if intent.get("rule_logic") or intent.get("error"):
+            add("decision_logic", ["validate", "rule", "condition", "exception", "status", "approval", *question_terms])
+
+        return {
+            "mode": "query_decomposition",
+            "intent": intent,
+            "components": components[:5],
+        }
+
+    def _rank_matches(self, question: str, matches: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if not matches:
+            return []
+        ranked = []
+        for match in matches:
+            enriched = dict(match)
+            enriched["rerank_score"] = self._rerank_score(question, enriched)
+            ranked.append(enriched)
+        ranked.sort(key=lambda item: item.get("rerank_score", item.get("score", 0)), reverse=True)
+        return ranked
+
+    def _rerank_score(self, question: str, match: dict[str, Any]) -> int:
+        score = int(match.get("score") or 0)
+        intent = self._question_intent(question)
+        path = str(match.get("path") or "").lower()
+        snippet = str(match.get("snippet") or "").lower()
+        retrieval = str(match.get("retrieval") or "")
+        trace_stage = str(match.get("trace_stage") or "")
+        if trace_stage == "query_decomposition":
+            score += 20
+        if retrieval in {"flow_graph", "code_graph"}:
+            score += 18
+        if retrieval in {"entity_graph", "planner_definition", "planner_reference"}:
+            score += 14
+        if intent.get("data_source"):
+            if any(term in path for term in ("repository", "mapper", "dao", "client", "integration")):
+                score += 35
+            if re.search(r"\bselect\b.+\bfrom\b", snippet):
+                score += 35
+            if any(term in snippet for term in ("jdbctemplate", "resttemplate", "webclient", "feign")):
+                score += 22
+        if intent.get("api"):
+            if any(term in path for term in ("controller", "client", "api")):
+                score += 24
+            if any(term in snippet for term in ("requestmapping", "postmapping", "getmapping", "endpoint")):
+                score += 24
+        if intent.get("config"):
+            if path.endswith((".properties", ".yaml", ".yml", ".toml", ".conf")):
+                score += 30
+        if intent.get("rule_logic") or intent.get("error"):
+            if any(term in snippet for term in ("validate", "condition", "exception", "approval", "permission")):
+                score += 20
+        return score
+
     def _compress_evidence(self, question: str, matches: list[dict[str, Any]]) -> dict[str, Any]:
         selected = self._select_llm_matches(matches, 12)
         summary: dict[str, Any] = {
@@ -2980,6 +3486,7 @@ class SourceCodeQAService:
         limit = max(1, int(limit or 1))
         buckets = {
             "direct": [match for match in matches if match.get("trace_stage") == "direct"],
+            "query_decomposition": [match for match in matches if match.get("trace_stage") == "query_decomposition"],
             "dependency": [match for match in matches if match.get("trace_stage") == "dependency"],
             "two_hop": [match for match in matches if match.get("trace_stage") == "two_hop"],
             "tool_loop": [match for match in matches if str(match.get("trace_stage") or "").startswith(TOOL_LOOP_TRACE_PREFIX)],
@@ -3003,6 +3510,7 @@ class SourceCodeQAService:
 
         for stage, stage_limit in (
             ("direct", 3),
+            ("query_decomposition", 3),
             ("dependency", 3),
             ("two_hop", 3),
             ("tool_loop", 5),
@@ -3106,6 +3614,11 @@ class SourceCodeQAService:
         answer = self._extract_gemini_text(result)
         usage = usage or result.get("usageMetadata") or {}
         answer_check = self._answer_self_check(question, answer, evidence_summary, quality_gate)
+        claim_check = self._verify_answer_claims(answer, evidence_summary, selected_matches)
+        if claim_check.get("status") != "ok" and answer_check.get("status") == "retry":
+            issues = list(answer_check.get("issues") or [])
+            issues.extend(claim_check.get("issues") or [])
+            answer_check = {"status": "retry", "issues": list(dict.fromkeys(issues))}
         if answer_check.get("status") == "retry":
             retry_matches = self._expand_answer_retry_matches(
                 entries=entries,
@@ -3157,6 +3670,11 @@ class SourceCodeQAService:
                 )
                 retry_answer = self._extract_gemini_text(retry_result)
                 retry_check = self._answer_self_check(question, retry_answer, retry_evidence_summary, retry_quality_gate)
+                retry_claim_check = self._verify_answer_claims(retry_answer, retry_evidence_summary, retry_selected_matches)
+                if retry_claim_check.get("status") != "ok":
+                    issues = list(retry_check.get("issues") or [])
+                    issues.extend(retry_claim_check.get("issues") or [])
+                    retry_check = {"status": "retry", "issues": list(dict.fromkeys(issues))}
                 answer = retry_answer
                 usage = retry_usage or retry_result.get("usageMetadata") or {}
                 effective_model = retry_model
@@ -3164,6 +3682,7 @@ class SourceCodeQAService:
                 evidence_summary = retry_evidence_summary
                 quality_gate = retry_quality_gate
                 answer_check = retry_check
+                claim_check = retry_claim_check
                 selected_matches = retry_selected_matches
                 prompt_context = retry_context
         self._store_cached_answer(cache_key, answer=answer, usage=usage, answer_quality=quality_gate)
@@ -3176,6 +3695,7 @@ class SourceCodeQAService:
             "llm_attempts": attempts,
             "answer_quality": quality_gate,
             "answer_self_check": answer_check,
+            "answer_claim_check": claim_check,
         }
 
     def _generate_gemini_with_retry(
@@ -3325,6 +3845,53 @@ class SourceCodeQAService:
             "- Avoid listing file paths or line ranges unless the user asks for code locations.\n"
             "- If unsure, explain the uncertainty instead of inventing details.\n"
         )
+
+    def _verify_answer_claims(
+        self,
+        answer: str,
+        evidence_summary: dict[str, Any],
+        selected_matches: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        evidence_text = json.dumps(evidence_summary, ensure_ascii=False).lower()
+        valid_citations = {f"s{index}" for index in range(1, len(selected_matches) + 1)}
+        issues: list[str] = []
+        checked_claims = 0
+        unsupported_claims: list[str] = []
+        for claim in self._split_answer_claims(answer):
+            lowered = claim.lower()
+            concrete = any(term in lowered for term in ANSWER_CONCRETE_SOURCE_HINTS + API_HINTS + CONFIG_HINTS + RULE_HINTS)
+            if not concrete:
+                continue
+            checked_claims += 1
+            citations = {token.lower() for token in re.findall(r"\[S(\d+)\]", claim)}
+            if citations and not citations <= {item.removeprefix("s") for item in valid_citations}:
+                issues.append("answer cites evidence ids outside the provided context")
+            if not citations and not any(phrase in lowered for phrase in ANSWER_SELF_CHECK_WEAK_PHRASES):
+                unsupported_claims.append(claim[:220])
+                continue
+            expected_terms = self._answer_expected_terms(evidence_summary, "data_sources")
+            expected_terms.extend(self._answer_expected_terms(evidence_summary, "api_or_config"))
+            if expected_terms and not any(term in lowered for term in expected_terms) and not any(term in evidence_text for term in expected_terms):
+                unsupported_claims.append(claim[:220])
+        if unsupported_claims:
+            issues.append("concrete answer claims need citation-backed evidence")
+        return {
+            "status": "ok" if not issues else "needs_citation",
+            "checked_claims": checked_claims,
+            "unsupported_claims": unsupported_claims[:5],
+            "issues": list(dict.fromkeys(issues)),
+        }
+
+    @staticmethod
+    def _split_answer_claims(answer: str) -> list[str]:
+        claims: list[str] = []
+        for raw_line in str(answer or "").splitlines():
+            line = raw_line.strip(" -\t")
+            if not line:
+                continue
+            parts = re.split(r"(?<=[.!?])\s+", line)
+            claims.extend(part.strip() for part in parts if part.strip())
+        return claims[:16]
 
     def _answer_self_check(
         self,
@@ -3515,8 +4082,10 @@ class SourceCodeQAService:
         limit = max(1, int(limit or 1))
         buckets = {
             "direct": [match for match in matches if match.get("trace_stage") == "direct"],
+            "query_decomposition": [match for match in matches if match.get("trace_stage") == "query_decomposition"],
             "dependency": [match for match in matches if match.get("trace_stage") == "dependency"],
             "two_hop": [match for match in matches if match.get("trace_stage") == "two_hop"],
+            "tool_loop": [match for match in matches if str(match.get("trace_stage") or "").startswith(TOOL_LOOP_TRACE_PREFIX)],
             "agent_trace": [match for match in matches if str(match.get("trace_stage") or "").startswith("agent_trace")],
             "agent_plan": [match for match in matches if str(match.get("trace_stage") or "").startswith("agent_plan")],
             "quality_gate": [match for match in matches if match.get("trace_stage") == QUALITY_GATE_TRACE_STAGE],
@@ -3536,7 +4105,7 @@ class SourceCodeQAService:
         # Keep a balanced evidence bundle: entry point, purpose-specific logic,
         # and downstream/common builders. This improves answer accuracy more than
         # sending only the highest raw scores.
-        for stage in ("direct", "dependency", "two_hop", "agent_trace", "agent_plan", "quality_gate"):
+        for stage in ("direct", "query_decomposition", "dependency", "two_hop", "tool_loop", "agent_trace", "agent_plan", "quality_gate"):
             for match in buckets[stage][:2]:
                 add(match)
         for match in matches:
