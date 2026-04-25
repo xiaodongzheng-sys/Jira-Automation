@@ -132,14 +132,22 @@ def _build_fixture_repositories(service: SourceCodeQAService) -> None:
         country="ID",
         repositories=[{"display_name": "Credit Risk", "url": "https://git.example.com/team/credit-risk.git"}],
     )
+    service.save_mapping(
+        pm_team="GRC",
+        country="All",
+        repositories=[{"display_name": "Ops Risk", "url": "https://git.example.com/team/ops-risk.git"}],
+    )
     af_entries = service.load_config()["mappings"]["AF:All"]
     cr_entry = service.load_config()["mappings"]["CRMS:ID"][0]
+    grc_entry = service.load_config()["mappings"]["GRC:All"][0]
     af_repo = service._repo_path("AF:All", type("Entry", (), af_entries[0])())
     issue_service_repo = service._repo_path("AF:All", type("Entry", (), af_entries[1])())
     cr_repo = service._repo_path("CRMS:ID", type("Entry", (), cr_entry)())
+    grc_repo = service._repo_path("GRC:All", type("Entry", (), grc_entry)())
     (af_repo / ".git").mkdir(parents=True, exist_ok=True)
     (issue_service_repo / ".git").mkdir(parents=True, exist_ok=True)
     (cr_repo / ".git").mkdir(parents=True, exist_ok=True)
+    (grc_repo / ".git").mkdir(parents=True, exist_ok=True)
 
     _write_text(
         af_repo / "bpmis" / "jira_client.py",
@@ -631,10 +639,105 @@ def _build_fixture_repositories(service: SourceCodeQAService) -> None:
         "    }\n"
         "}\n",
     )
+    _write_text(
+        cr_repo / "engine" / "Layer4TermLoanPreCheckEngineStrategy.java",
+        "public class Layer4TermLoanPreCheckEngineStrategy {\n"
+        "    private CustomerRepository customerRepository;\n"
+        "    private FeatureFlagRepository featureFlagRepository;\n"
+        "    public DataSourceResult buildDataSourceResult(EngineTermLoanPreCheckLayer1Input input) {\n"
+        "        CustomerProfile profile = customerRepository.loadProfile(input.getCustomerId());\n"
+        "        boolean enabled = featureFlagRepository.isEnabled(\"term.loan.precheck.layer4\");\n"
+        "        return new DataSourceResult(profile, enabled);\n"
+        "    }\n"
+        "}\n",
+    )
+    _write_text(
+        cr_repo / "repository" / "FeatureFlagRepository.java",
+        "public class FeatureFlagRepository {\n"
+        "    public boolean isEnabled(String flagKey) {\n"
+        "        return jdbcTemplate.queryForObject(\"select enabled from cr_feature_flag where flag_key = ?\", Boolean.class, flagKey);\n"
+        "    }\n"
+        "}\n",
+    )
+    _write_text(
+        grc_repo / "config" / "application.yml",
+        "mysql-isolate:\n"
+        "  globallock:\n"
+        "    enabled: true\n"
+        "    table-name: bcf_global_lock\n"
+        "    lease-seconds: 30\n"
+        "grc:\n"
+        "  parameter:\n"
+        "    approval-mode: maker-checker\n",
+    )
+    _write_text(
+        grc_repo / "config" / "GlobalLockConfig.java",
+        "@Configuration\n"
+        "public class GlobalLockConfig {\n"
+        "    @Value(\"${mysql-isolate.globallock.table-name:bcf_global_lock}\")\n"
+        "    private String tableName;\n"
+        "    @Bean\n"
+        "    public GlobalLockClient globalLockClient(GlobalLockRepository globalLockRepository) {\n"
+        "        return new GlobalLockClient(globalLockRepository, tableName);\n"
+        "    }\n"
+        "}\n",
+    )
+    _write_text(
+        grc_repo / "repository" / "GlobalLockRepository.java",
+        "public class GlobalLockRepository {\n"
+        "    public GlobalLockRecord findByLockKey(String lockKey) {\n"
+        "        return jdbcTemplate.queryForObject(\"select * from bcf_global_lock where lock_key = ?\", mapper, lockKey);\n"
+        "    }\n"
+        "    public void acquireLock(String lockKey) {\n"
+        "        jdbcTemplate.update(\"insert into bcf_global_lock(lock_key) values (?)\", lockKey);\n"
+        "    }\n"
+        "}\n",
+    )
+    _write_text(
+        grc_repo / "controller" / "ParameterController.java",
+        "@RestController\n"
+        "@RequestMapping(\"/api/grc/parameters\")\n"
+        "public class ParameterController {\n"
+        "    private ParameterApprovalService parameterApprovalService;\n"
+        "    @PostMapping(\"/submit\")\n"
+        "    public ApprovalTicket submitParameterChange(ParameterChangeRequest request) {\n"
+        "        return parameterApprovalService.submitParameterChange(request);\n"
+        "    }\n"
+        "    @GetMapping(\"/approvals\")\n"
+        "    public List<ApprovalTicket> listVisibleApprovals(UserContext userContext) {\n"
+        "        return parameterApprovalService.listVisibleApprovals(userContext);\n"
+        "    }\n"
+        "}\n",
+    )
+    _write_text(
+        grc_repo / "approval" / "ParameterApprovalService.java",
+        "@Service\n"
+        "public class ParameterApprovalService {\n"
+        "    private ParameterApprovalRepository parameterApprovalRepository;\n"
+        "    public ApprovalTicket submitParameterChange(ParameterChangeRequest request) {\n"
+        "        return parameterApprovalRepository.insertTicket(request, ApprovalStatus.PENDING_REVIEW, \"maker-checker\");\n"
+        "    }\n"
+        "    public List<ApprovalTicket> listVisibleApprovals(UserContext userContext) {\n"
+        "        return parameterApprovalRepository.findVisibleByApprover(userContext.getUserId(), ApprovalStatus.PENDING_REVIEW);\n"
+        "    }\n"
+        "}\n",
+    )
+    _write_text(
+        grc_repo / "approval" / "ParameterApprovalRepository.java",
+        "public class ParameterApprovalRepository {\n"
+        "    public ApprovalTicket insertTicket(ParameterChangeRequest request, ApprovalStatus status, String makerCheckerMode) {\n"
+        "        return jdbcTemplate.queryForObject(\"insert into grc_parameter_approval(status, mode) values (?, ?)\", mapper, status, makerCheckerMode);\n"
+        "    }\n"
+        "    public List<ApprovalTicket> findVisibleByApprover(String approverId, ApprovalStatus status) {\n"
+        "        return jdbcTemplate.query(\"select * from grc_parameter_approval where approver_id = ? and status = ?\", mapper, approverId, status);\n"
+        "    }\n"
+        "}\n",
+    )
     for key, raw_entry, repo_path in (
         ("AF:All", af_entries[0], af_repo),
         ("AF:All", af_entries[1], issue_service_repo),
         ("CRMS:ID", cr_entry, cr_repo),
+        ("GRC:All", grc_entry, grc_repo),
     ):
         service._build_repo_index(key, type("Entry", (), raw_entry)(), repo_path)
 
@@ -920,6 +1023,7 @@ def main() -> int:
     failure_buckets: dict[str, int] = {}
     route_buckets: dict[str, int] = {}
     coverage_buckets: dict[str, dict[str, int]] = {}
+    team_buckets: dict[str, dict[str, int]] = {}
     for result in results:
         for bucket, count in (result.get("failure_buckets") or {}).items():
             failure_buckets[str(bucket)] = failure_buckets.get(str(bucket), 0) + int(count)
@@ -931,6 +1035,12 @@ def main() -> int:
         coverage["total"] += 1
         if result["status"] != "pass":
             coverage["failed"] += 1
+    for case, result in zip(cases, results):
+        team = str(case.get("pm_team") or "unknown").upper()
+        team_bucket = team_buckets.setdefault(team, {"total": 0, "failed": 0})
+        team_bucket["total"] += 1
+        if result["status"] != "pass":
+            team_bucket["failed"] += 1
     summary = {
         "status": "pass" if not failed else "fail",
         "total": len(results),
@@ -938,6 +1048,7 @@ def main() -> int:
         "failure_buckets": failure_buckets,
         "route_buckets": route_buckets,
         "coverage_buckets": coverage_buckets,
+        "team_buckets": team_buckets,
         "results": results,
     }
 
@@ -953,6 +1064,14 @@ def main() -> int:
                 + ", ".join(
                     f"{key}={value['total'] - value['failed']}/{value['total']}"
                     for key, value in sorted(coverage_buckets.items())
+                )
+            )
+        if team_buckets:
+            print(
+                "Team buckets: "
+                + ", ".join(
+                    f"{key}={value['total'] - value['failed']}/{value['total']}"
+                    for key, value in sorted(team_buckets.items())
                 )
             )
         for result in results:
