@@ -8,6 +8,7 @@
   const chatLogNode = document.querySelector('[data-chat-log]');
   const narrateButton = document.querySelector('[data-play-section]');
   const readerModeToggle = document.querySelector('[data-reader-mode-toggle]');
+  const noImageModeToggle = document.querySelector('[data-no-image-mode-toggle]');
   const quickQuestionButtons = document.querySelectorAll('[data-quick-question]');
   const imageLightbox = document.querySelector('[data-image-lightbox]');
   const imageLightboxMedia = document.querySelector('[data-image-lightbox-media]');
@@ -27,9 +28,11 @@
     isNarrating: false,
     currentAudio: null,
     readerMode: false,
+    noImageMode: false,
   };
 
   const READER_MODE_STORAGE_KEY = 'prd_briefing_reader_mode';
+  const NO_IMAGE_MODE_STORAGE_KEY = 'prd_briefing_no_image_mode';
 
   const isValidHttpUrl = (value) => /^https?:\/\/\S+/i.test(String(value || '').trim());
 
@@ -86,6 +89,18 @@
     if (readerModeToggle) {
       readerModeToggle.textContent = enabled ? '退出阅读模式' : '进入阅读模式';
       readerModeToggle.setAttribute('aria-pressed', enabled ? 'true' : 'false');
+    }
+  };
+
+  const renderNoImageMode = () => {
+    const enabled = Boolean(state.noImageMode);
+    document.body.classList.toggle('briefing-no-image-mode', enabled);
+    if (noImageModeToggle) {
+      noImageModeToggle.textContent = enabled ? '显示图片' : '无图模式';
+      noImageModeToggle.setAttribute('aria-pressed', enabled ? 'true' : 'false');
+    }
+    if (enabled) {
+      closeImageLightbox();
     }
   };
 
@@ -641,6 +656,16 @@
     });
   }
 
+  if (noImageModeToggle) {
+    noImageModeToggle.addEventListener('click', () => {
+      state.noImageMode = !state.noImageMode;
+      try {
+        window.localStorage.setItem(NO_IMAGE_MODE_STORAGE_KEY, state.noImageMode ? '1' : '0');
+      } catch {}
+      renderNoImageMode();
+    });
+  }
+
   if (imageLightboxClose) {
     imageLightboxClose.addEventListener('click', () => {
       closeImageLightbox();
@@ -684,5 +709,11 @@
   } catch {
     state.readerMode = false;
   }
+  try {
+    state.noImageMode = window.localStorage.getItem(NO_IMAGE_MODE_STORAGE_KEY) === '1';
+  } catch {
+    state.noImageMode = false;
+  }
   renderReaderMode();
+  renderNoImageMode();
 })();

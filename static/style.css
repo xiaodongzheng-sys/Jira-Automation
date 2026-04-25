@@ -2883,6 +2883,28 @@ select {
   max-height: none;
 }
 
+body.briefing-no-image-mode .briefing-original-content img,
+body.briefing-no-image-mode .briefing-image-grid,
+body.briefing-no-image-mode .briefing-presentation-visual,
+body.briefing-no-image-mode .briefing-original-content .confluence-embedded-file-wrapper,
+body.briefing-no-image-mode .briefing-original-content table.briefing-media-table .briefing-media-cell {
+  display: none !important;
+}
+
+body.briefing-no-image-mode .briefing-original-content table.briefing-media-table,
+body.briefing-no-image-mode .briefing-original-content table.briefing-media-split-table {
+  table-layout: auto;
+}
+
+body.briefing-no-image-mode .briefing-original-content table.briefing-media-split-table td:not(.briefing-media-cell),
+body.briefing-no-image-mode .briefing-original-content table.briefing-media-split-table th:not(.briefing-media-cell) {
+  width: 100% !important;
+}
+
+body.briefing-no-image-mode .briefing-presentation-card {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .briefing-original-content .briefing-inline-icon,
 .briefing-presentation-copy img,
 .briefing-original-content p img,
@@ -3061,6 +3083,32 @@ select {
   position: absolute;
   top: 16px;
   right: 68px;
+}
+
+.briefing-floating-toggle {
+  position: fixed;
+  right: 24px;
+  bottom: 24px;
+  z-index: 80;
+  min-height: 44px;
+  padding: 0 18px;
+  border: 1px solid rgba(27, 107, 92, 0.28);
+  border-radius: 999px;
+  background: rgba(27, 107, 92, 0.94);
+  color: #fff;
+  box-shadow: 0 16px 34px rgba(27, 107, 92, 0.24);
+  font-weight: 800;
+  letter-spacing: 0;
+  cursor: pointer;
+}
+
+.briefing-floating-toggle:hover {
+  background: rgba(21, 91, 78, 0.98);
+}
+
+.briefing-floating-toggle[aria-pressed="true"] {
+  background: rgba(28, 37, 65, 0.94);
+  border-color: rgba(28, 37, 65, 0.28);
 }
 
 .briefing-scroll-hint {
