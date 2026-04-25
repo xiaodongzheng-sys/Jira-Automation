@@ -1118,6 +1118,39 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertIn("git_revisions", payload["index_freshness"])
         self.assertEqual(self.service.repo_status("AF:All")[0]["index"]["state"], "ready")
 
+    def test_soft_exact_lookup_miss_falls_back_to_broad_search(self):
+        self.service.save_mapping(
+            pm_team="AF",
+            country="All",
+            repositories=[{"display_name": "Portal Repo", "url": "https://git.example.com/team/portal.git"}],
+        )
+        entry = self.service.load_config()["mappings"]["AF:All"][0]
+        repo_path = self.service._repo_path("AF:All", type("Entry", (), entry)())
+        (repo_path / ".git").mkdir(parents=True)
+        source_file = repo_path / "src" / "RiskEngineTimeoutConfig.java"
+        source_file.parent.mkdir(parents=True)
+        source_file.write_text(
+            "package com.example.risk.engine;\n"
+            "public class RiskEngineTimeoutConfig {\n"
+            "    public int timeoutSeconds() { return 30; }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        self._build_index_for_entry("AF:All", entry)
+
+        payload = self.service.query(pm_team="AF", country="All", question="where is risk.engine.timeout configured")
+
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["exact_lookup"]["terms"], ["risk.engine.timeout"])
+        self.assertEqual(payload["exact_lookup"]["matched_terms"], [])
+        self.assertGreaterEqual(payload["retrieval_runtime"].get("exact_lookup_soft_misses", 0), 1)
+        self.assertIn("src/RiskEngineTimeoutConfig.java", {match["path"] for match in payload["matches"]})
+
+    def test_exact_lookup_miss_still_stops_for_strict_table_terms(self):
+        self.assertTrue(self.service._exact_lookup_miss_should_stop(["missing_schema.dwd_missing_table_di"]))
+        self.assertTrue(self.service._exact_lookup_miss_should_stop(["mapper/MissingMapper.xml"]))
+        self.assertFalse(self.service._exact_lookup_miss_should_stop(["risk.engine.timeout"]))
+
     def test_query_does_not_build_missing_index_synchronously(self):
         self.service.save_mapping(
             pm_team="AF",

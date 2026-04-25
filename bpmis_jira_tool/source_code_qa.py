@@ -2252,7 +2252,7 @@ class SourceCodeQAService:
         exact_lookup_sufficient = self._exact_lookup_is_sufficient(exact_lookup_terms, exact_matches) and not cross_repo_context
         if exact_matches:
             matches.extend(exact_matches)
-        elif exact_lookup_terms:
+        elif exact_lookup_terms and self._exact_lookup_miss_should_stop(exact_lookup_terms):
             report("completed", "Exact references were not found in the current indexes.", 0, 0)
             payload = self._empty_query_payload(
                 key,
@@ -2272,6 +2272,9 @@ class SourceCodeQAService:
                 started_at=started_at,
             )
             return payload
+        elif exact_lookup_terms:
+            self._increment_retrieval_stat(request_cache, "exact_lookup_soft_misses")
+            report("exact_lookup", "Exact dotted references were not found; falling back to broader token retrieval.", 0, 0)
         if question_specific_terms and not exact_lookup_sufficient:
             specific_tokens: list[str] = []
             for term in question_specific_terms:
@@ -7415,6 +7418,23 @@ class SourceCodeQAService:
         required_terms = {str(term).lower() for term in terms if term}
         return bool(required_terms) and required_terms.issubset(covered_terms)
 
+    @classmethod
+    def _exact_lookup_miss_should_stop(cls, terms: list[str]) -> bool:
+        strong_terms = [term for term in terms if cls._is_strict_exact_lookup_term(term)]
+        return bool(strong_terms) and len(strong_terms) == len([term for term in terms if str(term or "").strip()])
+
+    @staticmethod
+    def _is_strict_exact_lookup_term(term: str) -> bool:
+        value = str(term or "").strip().lower()
+        if not value:
+            return False
+        if "/" in value or value.endswith((".java", ".kt", ".py", ".xml", ".sql", ".yaml", ".yml", ".properties", ".ts", ".tsx", ".js", ".jsx")):
+            return True
+        if "_" not in value:
+            return False
+        table_markers = ("_tab", "_table", "dwd", "dim", "tmp", "ads", "ods", "snapshot", "process_info", "response_body")
+        return any(marker in value for marker in table_markers)
+
     def _exact_table_path_lookup_repo(
         self,
         entry: RepositoryEntry,
@@ -7650,6 +7670,7 @@ class SourceCodeQAService:
                 "exact_lookup_repos": 0,
                 "exact_lookup_hits": 0,
                 "exact_lookup_misses": 0,
+                "exact_lookup_soft_misses": 0,
                 "direct_quality_short_circuits": 0,
                 "early_quality_short_circuits": 0,
                 "simple_file_hit_prunes": 0,
