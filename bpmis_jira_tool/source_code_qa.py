@@ -15,6 +15,7 @@ import subprocess
 import time
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
+import uuid
 
 import requests
 
@@ -1547,6 +1548,7 @@ class SourceCodeQAService:
         key = self.mapping_key(pm_team, country)
         question = str(question or "").strip()
         started_at = time.time()
+        trace_id = uuid.uuid4().hex
         if not question:
             raise ToolError("Please enter a source-code question.")
         original_question = question
@@ -1557,6 +1559,7 @@ class SourceCodeQAService:
                 key,
                 status="empty_config",
                 summary="No repositories are configured for this PM Team and country yet.",
+                trace_id=trace_id,
             )
             self._record_query_telemetry(
                 key=key,
@@ -1573,6 +1576,7 @@ class SourceCodeQAService:
                 key,
                 status="weak_question",
                 summary="No confident match. Try adding exact class, API, table, field, or function names.",
+                trace_id=trace_id,
             )
             self._record_query_telemetry(
                 key=key,
@@ -1794,6 +1798,7 @@ class SourceCodeQAService:
                 index_freshness=index_freshness,
                 status="no_match",
                 summary="No confident match. Try exact symbols, route paths, table names, or error codes.",
+                trace_id=trace_id,
             )
             self._record_query_telemetry(
                 key=key,
@@ -1835,6 +1840,7 @@ class SourceCodeQAService:
             "retrieval_runtime": self._retrieval_cache_stats(request_cache),
             "followup_context": followup_context,
             "original_question": original_question,
+            "trace_id": trace_id,
         }
         normalized_answer_mode = str(answer_mode or ANSWER_MODE).strip() or ANSWER_MODE
         if normalized_answer_mode in {ANSWER_MODE_GEMINI, ANSWER_MODE_AUTO}:
@@ -1943,22 +1949,109 @@ class SourceCodeQAService:
         if rating not in {"useful", "not_useful", "wrong_file", "too_vague", "hallucinated", "missing_repo", "needs_deeper_trace"}:
             raise ToolError("Unknown feedback rating.")
         question = str(payload.get("question") or "").strip()
+        replay_context = self._feedback_replay_context(payload)
         record = {
             "timestamp": self._now_iso(),
             "user_email": str(user_email or "").strip().lower(),
             "rating": rating,
             "pm_team": str(payload.get("pm_team") or "").strip().upper(),
             "country": str(payload.get("country") or "").strip(),
+            "trace_id": replay_context.get("trace_id") or str(payload.get("trace_id") or "").strip(),
             "question_sha1": hashlib.sha1(question.encode("utf-8")).hexdigest() if question else "",
             "question_preview": question[:180],
             "top_paths": [str(path) for path in payload.get("top_paths") or []][:8],
             "comment": str(payload.get("comment") or "").strip()[:1000],
             "answer_quality": payload.get("answer_quality") if isinstance(payload.get("answer_quality"), dict) else {},
+            "replay_context": replay_context,
         }
         self.feedback_path.parent.mkdir(parents=True, exist_ok=True)
         with self.feedback_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
         return {"status": "ok", "message": "Feedback saved."}
+
+    @classmethod
+    def _feedback_replay_context(cls, payload: dict[str, Any]) -> dict[str, Any]:
+        source = payload.get("replay_context") if isinstance(payload.get("replay_context"), dict) else payload
+        matches = source.get("matches_snapshot") or source.get("matches") or []
+        match_snapshots: list[dict[str, Any]] = []
+        if isinstance(matches, list):
+            for match in matches[:10]:
+                if not isinstance(match, dict):
+                    continue
+                match_snapshots.append(
+                    {
+                        "repo": cls._trim_feedback_value(match.get("repo"), text_limit=180),
+                        "path": cls._trim_feedback_value(match.get("path"), text_limit=300),
+                        "line_start": match.get("line_start"),
+                        "line_end": match.get("line_end"),
+                        "retrieval": cls._trim_feedback_value(match.get("retrieval"), text_limit=80),
+                        "trace_stage": cls._trim_feedback_value(match.get("trace_stage"), text_limit=80),
+                        "score": match.get("score"),
+                        "snippet": cls._trim_feedback_value(match.get("snippet"), text_limit=1600),
+                    }
+                )
+        context = {
+            "trace_id": str(source.get("trace_id") or payload.get("trace_id") or "").strip()[:64],
+            "answer_mode": str(source.get("answer_mode") or payload.get("answer_mode") or "").strip()[:60],
+            "llm_budget_mode": str(source.get("llm_budget_mode") or payload.get("llm_budget_mode") or "").strip()[:60],
+            "llm_provider": str(source.get("llm_provider") or payload.get("llm_provider") or "").strip()[:80],
+            "llm_model": str(source.get("llm_model") or payload.get("llm_model") or "").strip()[:120],
+            "llm_route": cls._trim_feedback_value(source.get("llm_route") or payload.get("llm_route") or {}),
+            "llm_finish_reason": str(source.get("llm_finish_reason") or payload.get("llm_finish_reason") or "").strip()[:120],
+            "summary": cls._trim_feedback_value(source.get("summary") or payload.get("summary") or "", text_limit=1000),
+            "rendered_answer": cls._trim_feedback_value(
+                source.get("rendered_answer") or source.get("llm_answer") or payload.get("llm_answer") or "",
+                text_limit=8000,
+            ),
+            "citations": cls._trim_feedback_value(source.get("citations") or payload.get("citations") or [], list_limit=20),
+            "matches_snapshot": match_snapshots,
+            "answer_contract": cls._trim_feedback_value(source.get("answer_contract") or payload.get("answer_contract") or {}),
+            "evidence_pack": cls._trim_feedback_value(source.get("evidence_pack") or payload.get("evidence_pack") or {}, list_limit=30),
+            "tool_trace": cls._trim_feedback_value(source.get("tool_trace") or payload.get("tool_trace") or [], list_limit=30, text_limit=1000),
+        }
+        return {key: value for key, value in context.items() if value not in ("", [], {})}
+
+    @classmethod
+    def _trim_feedback_value(
+        cls,
+        value: Any,
+        *,
+        depth: int = 0,
+        text_limit: int = 4000,
+        list_limit: int = 50,
+        dict_limit: int = 80,
+    ) -> Any:
+        if depth >= 6:
+            return None
+        if value is None or isinstance(value, (bool, int, float)):
+            return value
+        if isinstance(value, str):
+            return value[:text_limit]
+        if isinstance(value, dict):
+            trimmed: dict[str, Any] = {}
+            for index, (key, item) in enumerate(value.items()):
+                if index >= dict_limit:
+                    break
+                trimmed[str(key)[:120]] = cls._trim_feedback_value(
+                    item,
+                    depth=depth + 1,
+                    text_limit=text_limit,
+                    list_limit=list_limit,
+                    dict_limit=dict_limit,
+                )
+            return trimmed
+        if isinstance(value, (list, tuple)):
+            return [
+                cls._trim_feedback_value(
+                    item,
+                    depth=depth + 1,
+                    text_limit=text_limit,
+                    list_limit=list_limit,
+                    dict_limit=dict_limit,
+                )
+                for item in list(value)[:list_limit]
+            ]
+        return str(value)[:text_limit]
 
     def _load_entries_for_key(self, key: str) -> list[RepositoryEntry]:
         raw_entries = self.load_config().get("mappings", {}).get(key, [])
@@ -10980,6 +11073,7 @@ class SourceCodeQAService:
             record = {
                 "timestamp": self._now_iso(),
                 "key": key,
+                "trace_id": payload.get("trace_id"),
                 "question_sha1": hashlib.sha1(question.encode("utf-8")).hexdigest(),
                 "question_preview": question[:180],
                 "requested_answer_mode": answer_mode,
@@ -11166,6 +11260,7 @@ class SourceCodeQAService:
         summary: str,
         repo_status: list[dict[str, Any]] | None = None,
         index_freshness: dict[str, Any] | None = None,
+        trace_id: str = "",
     ) -> dict[str, Any]:
         return {
             "status": status,
@@ -11175,6 +11270,7 @@ class SourceCodeQAService:
             "repo_status": repo_status or [],
             "index_freshness": index_freshness or {},
             "key": key,
+            "trace_id": trace_id,
         }
 
     @staticmethod

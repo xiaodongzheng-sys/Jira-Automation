@@ -225,13 +225,35 @@ class SourceCodeQARouteTests(unittest.TestCase):
                     "country": "All",
                     "question": "where is createIssue",
                     "top_paths": ["controller/IssueController.java"],
+                    "trace_id": "trace-123",
+                    "replay_context": {
+                        "trace_id": "trace-123",
+                        "answer_mode": "gemini_flash",
+                        "llm_model": "gemini-2.5-flash-lite",
+                        "rendered_answer": "createIssue is handled by IssueController.",
+                        "answer_contract": {"status": "satisfied"},
+                        "evidence_pack": {"items": [{"type": "entry_point", "claim": "IssueController"}]},
+                        "matches_snapshot": [
+                            {
+                                "repo": "Portal Repo",
+                                "path": "controller/IssueController.java",
+                                "line_start": 10,
+                                "line_end": 20,
+                                "snippet": "public Issue createIssue() {}",
+                            }
+                        ],
+                    },
                 },
             )
 
         self.assertEqual(response.status_code, 200)
         feedback_path = Path(self.temp_dir.name) / "source_code_qa" / "feedback.jsonl"
         self.assertTrue(feedback_path.exists())
-        self.assertIn("too_vague", feedback_path.read_text(encoding="utf-8"))
+        feedback = json.loads(feedback_path.read_text(encoding="utf-8").strip())
+        self.assertEqual(feedback["rating"], "too_vague")
+        self.assertEqual(feedback["trace_id"], "trace-123")
+        self.assertEqual(feedback["replay_context"]["answer_contract"]["status"], "satisfied")
+        self.assertEqual(feedback["replay_context"]["matches_snapshot"][0]["path"], "controller/IssueController.java")
 
     def test_feedback_records_can_be_promoted_to_eval_candidates(self):
         candidates = build_eval_candidates(
@@ -242,8 +264,20 @@ class SourceCodeQARouteTests(unittest.TestCase):
                     "country": "All",
                     "question_preview": "where does createIssue load data from",
                     "question_sha1": "abc123456789",
+                    "trace_id": "trace-abc",
                     "top_paths": ["controller/IssueController.java", "repository/IssueRepository.java"],
                     "comment": "missed repository",
+                    "replay_context": {
+                        "trace_id": "trace-abc",
+                        "answer_mode": "gemini_flash",
+                        "llm_model": "gemini-2.5-flash-lite",
+                        "answer_contract": {"status": "satisfied"},
+                        "evidence_pack": {"items": [{"type": "entry_point", "claim": "IssueController"}]},
+                        "matches_snapshot": [
+                            {"path": "controller/IssueController.java"},
+                            {"path": "repository/IssueRepository.java"},
+                        ],
+                    },
                 },
                 {
                     "rating": "useful",
@@ -256,7 +290,31 @@ class SourceCodeQARouteTests(unittest.TestCase):
 
         self.assertEqual(len(candidates), 1)
         self.assertEqual(candidates[0]["id"], "feedback-needs_deeper_trace-abc1234567")
-        self.assertEqual(candidates[0]["expected_paths"], ["controller/IssueController.java", "repository/IssueRepository.java"])
+        self.assertEqual(candidates[0]["expected_paths"], [])
+        self.assertEqual(candidates[0]["observed_paths"], ["controller/IssueController.java", "repository/IssueRepository.java"])
+        self.assertEqual(candidates[0]["draft_status"], "needs_human_expected_evidence")
+        self.assertEqual(candidates[0]["review_context"]["trace_id"], "trace-abc")
+
+    def test_useful_feedback_can_become_positive_smoke_eval(self):
+        candidates = build_eval_candidates(
+            [
+                {
+                    "rating": "useful",
+                    "pm_team": "AF",
+                    "country": "All",
+                    "question_preview": "where is createIssue",
+                    "question_sha1": "def123456789",
+                    "replay_context": {
+                        "matches_snapshot": [{"path": "controller/IssueController.java"}],
+                    },
+                }
+            ],
+            include_useful=True,
+        )
+
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["expected_paths"], ["controller/IssueController.java"])
+        self.assertEqual(candidates[0]["draft_status"], "ready_positive_smoke")
 
 
 class SourceCodeQAServiceTests(unittest.TestCase):

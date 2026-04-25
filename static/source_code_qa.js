@@ -65,6 +65,32 @@
   const currentCountry = () => (pmTeam.value === 'CRMS' ? country.value : 'All');
   const currentKey = () => `${pmTeam.value}:${currentCountry()}`;
 
+  const buildFeedbackReplayContext = (payload) => ({
+    trace_id: payload.trace_id || '',
+    answer_mode: payload.answer_mode || '',
+    llm_budget_mode: payload.llm_budget_mode || payload.llm_requested_budget_mode || '',
+    llm_provider: payload.llm_provider || '',
+    llm_model: payload.llm_model || '',
+    llm_route: payload.llm_route || {},
+    llm_finish_reason: payload.llm_finish_reason || '',
+    summary: payload.summary || '',
+    rendered_answer: payload.llm_answer || '',
+    citations: payload.citations || [],
+    answer_contract: payload.answer_contract || {},
+    evidence_pack: payload.evidence_pack || {},
+    tool_trace: (payload.tool_trace || []).slice(0, 30),
+    matches_snapshot: (payload.matches || []).slice(0, 10).map((match) => ({
+      repo: match.repo,
+      path: match.path,
+      line_start: match.line_start,
+      line_end: match.line_end,
+      retrieval: match.retrieval,
+      trace_stage: match.trace_stage,
+      score: match.score,
+      snippet: match.snippet,
+    })),
+  });
+
   const selectHasValue = (select, value) => {
     if (!select || value == null) return false;
     return Array.from(select.options).some((option) => option.value === String(value));
@@ -626,8 +652,12 @@
           pm_team: pmTeam.value,
           country: currentCountry(),
           question: questionInput.value,
+          trace_id: lastPayload.trace_id || '',
+          answer_mode: lastPayload.answer_mode || '',
+          llm_budget_mode: lastPayload.llm_budget_mode || lastPayload.llm_requested_budget_mode || '',
           top_paths: (lastPayload.matches || []).slice(0, 5).map((match) => match.path),
           answer_quality: lastPayload.answer_quality || {},
+          replay_context: buildFeedbackReplayContext(lastPayload),
         }),
       }).then(readJson);
       if (feedbackStatus) feedbackStatus.textContent = 'Feedback saved.';

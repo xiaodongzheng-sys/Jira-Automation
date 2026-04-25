@@ -26,9 +26,12 @@ Turn user feedback into draft eval candidates:
 
 ```bash
 python3 scripts/source_code_qa_feedback_to_eval.py --output evals/source_code_qa/feedback_candidates.jsonl
+python3 scripts/source_code_qa_feedback_to_eval.py --include-useful --json --output evals/source_code_qa/feedback_candidates.jsonl
 ```
 
 Review the generated candidates before promoting them into `golden.jsonl`. Negative feedback is included by default; add `--include-useful` if you also want positive smoke-test cases.
+
+Feedback candidates preserve replay context from the original answer: trace id, answer mode, LLM route/model, answer contract status, observed answer preview, evidence count, and observed paths. Negative feedback is intentionally marked `draft_status=needs_human_expected_evidence`; do not promote it as a blocking golden eval until a reviewer adds the corrected `expected_paths`, `required_terms`, `forbidden_terms`, or policy expectations. Positive `useful` feedback can be used as `ready_positive_smoke` coverage because the observed paths are expected to remain present.
 
 `scenario_matrix.jsonl` is the coverage checklist for promoting new cases. Keep at least one positive and one negative case for symbol lookup, API flow, data-source tracing, config lookup, error/root-cause, cross-repo flow, and follow-up context before calling a release broadly improved.
 

@@ -11,6 +11,7 @@ from bpmis_jira_tool.config import Settings
 
 
 NEGATIVE_FEEDBACK_RATINGS = {"not_useful", "wrong_file", "too_vague", "hallucinated", "missing_repo", "needs_deeper_trace"}
+REVIEW_ONLY_RATINGS = NEGATIVE_FEEDBACK_RATINGS
 
 
 def _load_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -28,6 +29,35 @@ def _load_jsonl(path: Path) -> list[dict[str, Any]]:
         if isinstance(payload, dict):
             records.append(payload)
     return records
+
+
+def _observed_paths(record: dict[str, Any]) -> list[str]:
+    replay_context = record.get("replay_context") if isinstance(record.get("replay_context"), dict) else {}
+    matches = replay_context.get("matches_snapshot") if isinstance(replay_context.get("matches_snapshot"), list) else []
+    paths = [
+        str(match.get("path") or "").strip()
+        for match in matches
+        if isinstance(match, dict) and str(match.get("path") or "").strip()
+    ]
+    if not paths:
+        paths = [str(path).strip() for path in record.get("top_paths") or [] if str(path).strip()]
+    return list(dict.fromkeys(paths))
+
+
+def _review_context(record: dict[str, Any]) -> dict[str, Any]:
+    replay_context = record.get("replay_context") if isinstance(record.get("replay_context"), dict) else {}
+    answer_contract = replay_context.get("answer_contract") if isinstance(replay_context.get("answer_contract"), dict) else {}
+    evidence_pack = replay_context.get("evidence_pack") if isinstance(replay_context.get("evidence_pack"), dict) else {}
+    items = evidence_pack.get("items") if isinstance(evidence_pack.get("items"), list) else []
+    return {
+        "trace_id": str(record.get("trace_id") or replay_context.get("trace_id") or "").strip(),
+        "answer_mode": str(replay_context.get("answer_mode") or "").strip(),
+        "llm_provider": str(replay_context.get("llm_provider") or "").strip(),
+        "llm_model": str(replay_context.get("llm_model") or "").strip(),
+        "answer_contract_status": str(answer_contract.get("status") or "").strip(),
+        "evidence_item_count": len(items),
+        "observed_answer_preview": str(replay_context.get("rendered_answer") or "").strip()[:800],
+    }
 
 
 def build_eval_candidates(records: list[dict[str, Any]], *, include_useful: bool = False) -> list[dict[str, Any]]:
@@ -49,20 +79,31 @@ def build_eval_candidates(records: list[dict[str, Any]], *, include_useful: bool
             continue
         seen_questions.add(key)
         digest = str(record.get("question_sha1") or hashlib.sha1(question.encode("utf-8")).hexdigest())[:10]
-        top_paths = [str(path) for path in record.get("top_paths") or [] if str(path).strip()]
-        candidates.append(
-            {
-                "id": f"feedback-{rating}-{digest}",
-                "pm_team": pm_team,
-                "country": country,
-                "question": question,
-                "answer_mode": "retrieval_only",
-                "expected_paths": top_paths[:5],
-                "required_terms": [],
-                "source_feedback_rating": rating,
-                "comment": str(record.get("comment") or "").strip()[:500],
-            }
-        )
+        observed_paths = _observed_paths(record)
+        candidate = {
+            "id": f"feedback-{rating}-{digest}",
+            "pm_team": pm_team,
+            "country": country,
+            "question": question,
+            "answer_mode": "retrieval_only",
+            "required_terms": [],
+            "source_feedback_rating": rating,
+            "comment": str(record.get("comment") or "").strip()[:500],
+            "source_feedback_timestamp": str(record.get("timestamp") or "").strip(),
+            "observed_paths": observed_paths[:8],
+            "review_context": _review_context(record),
+        }
+        if rating == "useful":
+            candidate["expected_paths"] = observed_paths[:5]
+            candidate["draft_status"] = "ready_positive_smoke"
+        elif rating in REVIEW_ONLY_RATINGS:
+            candidate["expected_paths"] = []
+            candidate["draft_status"] = "needs_human_expected_evidence"
+            candidate["review_note"] = (
+                "Negative feedback records preserve observed paths only. Add expected_paths, required_terms, "
+                "or forbidden_terms before promoting this candidate into a blocking golden eval."
+            )
+        candidates.append(candidate)
     return candidates
 
 
@@ -88,7 +129,17 @@ def main() -> int:
     records = _load_jsonl(feedback_path)
     candidates = build_eval_candidates(records, include_useful=args.include_useful)
     write_jsonl(output_path, candidates)
-    summary = {"status": "ok", "feedback_records": len(records), "candidates": len(candidates), "output": str(output_path)}
+    draft_counts: dict[str, int] = {}
+    for candidate in candidates:
+        status = str(candidate.get("draft_status") or "unknown")
+        draft_counts[status] = draft_counts.get(status, 0) + 1
+    summary = {
+        "status": "ok",
+        "feedback_records": len(records),
+        "candidates": len(candidates),
+        "draft_statuses": draft_counts,
+        "output": str(output_path),
+    }
     if args.json:
         print(json.dumps(summary, indent=2, ensure_ascii=False))
     else:
