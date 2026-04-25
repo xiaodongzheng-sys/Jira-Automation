@@ -74,6 +74,14 @@ Run only the LLM answer smoke eval without calling an external model:
 PYTHONPATH=. ./.venv/bin/python scripts/run_source_code_qa_evals.py --fixture --mock-llm --cases evals/source_code_qa/llm_smoke.jsonl
 ```
 
+Compare provider profiles side by side when validating Vertex changes:
+
+```bash
+PYTHONPATH=. ./.venv/bin/python scripts/run_source_code_qa_evals.py --fixture --mock-llm --cases evals/source_code_qa/golden.jsonl --compare-profiles gemini,vertex,vertex_embedding --json
+```
+
+`vertex_embedding` uses `SOURCE_CODE_QA_EMBEDDING_PROVIDER=vertex_ai` behavior with `gemini-embedding-001` by default when the configured embedding model is still local-only. For live non-mock runs, make sure the Vertex service account and project settings are present before running the comparison.
+
 Use `--fixture` when you want a deterministic miniature repo set for regression checks. It creates AF and CRMS fixture repositories under the selected data root, then runs the same eval cases against generated code instead of depending on whatever repos happen to be synced locally.
 
 The JSON output includes LLM routing and quality metadata (`llm_provider`, `llm_model`, `llm_route`, `llm_budget_mode`, `answer_claim_check`, and `answer_contract`) so regressions can be grouped by provider, budget, and evidence policy rather than inspected case by case.

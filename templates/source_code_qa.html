@@ -18,7 +18,7 @@
         <h1>Source Code Q&amp;A</h1>
         <p class="lede">
           Ask questions against manually synced source repositories. The portal focuses on direct answers,
-          with local code retrieval used behind the scenes to keep Gemini grounded and cost-aware.
+          with local retrieval used behind the scenes to narrow the candidate repositories and paths before Codex reads the files.
         </p>
       </div>
     </div>
@@ -53,6 +53,15 @@
             {% endfor %}
           </select>
           <small class="field-help">Smart Answer searches first, calls LLM only when useful, and skips LLM for deterministic no-hit lookups.</small>
+        </label>
+        <label class="field-group">
+          <span>Model</span>
+          <select data-source-llm-provider>
+            {% for provider in options.llm_providers %}
+              <option value="{{ provider.value }}" {% if provider.disabled %}disabled{% endif %}>{{ provider.label }}</option>
+            {% endfor %}
+          </select>
+          <small class="field-help">Codex is the default. Gemini is temporarily disabled. Vertex AI uses your Google Cloud project credits.</small>
         </label>
       </div>
       <div class="source-qa-status" data-source-config-status>
@@ -115,7 +124,7 @@
         <span class="microcopy" data-source-feedback-status></span>
       </div>
       <div class="source-qa-results" data-source-results>
-        <div class="source-qa-empty">Ask a question to generate an answer. Retrieval details stay in the background unless Gemini is unavailable.</div>
+        <div class="source-qa-empty">Ask a question to generate an answer. Retrieval details stay in the background unless Codex is unavailable.</div>
       </div>
     </section>
   </section>

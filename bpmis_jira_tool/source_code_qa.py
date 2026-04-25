@@ -12,12 +12,16 @@ import re
 import shutil
 import sqlite3
 import subprocess
+import tempfile
+import threading
 import time
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 import uuid
 
 import requests
+from google.auth.transport.requests import Request as GoogleAuthRequest
+from google.oauth2 import service_account
 
 from bpmis_jira_tool.errors import ToolError
 
@@ -31,23 +35,40 @@ CONFIG_VERSION = 1
 CODE_INDEX_VERSION = 29
 LLM_PROVIDER_GEMINI = "gemini"
 LLM_PROVIDER_OPENAI_COMPATIBLE = "openai_compatible"
-LLM_PROMPT_VERSION = 6
+LLM_PROVIDER_CODEX_CLI_BRIDGE = "codex_cli_bridge"
+LLM_PROVIDER_VERTEX_AI = "vertex_ai"
+LLM_PROVIDER_ALLOWED_QUERY_CHOICES = {LLM_PROVIDER_GEMINI, LLM_PROVIDER_CODEX_CLI_BRIDGE, LLM_PROVIDER_VERTEX_AI}
+LLM_PROMPT_VERSION = 7
 LLM_RESPONSE_SCHEMA_VERSION = 3
-LLM_ROUTER_VERSION = 6
-LLM_CACHE_VERSION = 8
-LLM_RUNTIME_VERSION = 1
+LLM_ROUTER_VERSION = 7
+LLM_CACHE_VERSION = 11
+LLM_RUNTIME_VERSION = 2
 PLANNER_TOOL_DSL_VERSION = 1
 GEMINI_MIN_THINKING_BUDGET = 512
 GEMINI_MAX_THINKING_BUDGET = 24576
+COMPACT_DEEP_BUDGET_MODE = "compact_deep"
+LLM_PROMPT_COMPACT_THRESHOLD_TOKENS = 18_000
+LLM_PROMPT_TIGHT_THRESHOLD_TOKENS = 24_000
+VERTEX_PROMPT_COMPACT_THRESHOLD_TOKENS = 72_000
+VERTEX_PROMPT_TIGHT_THRESHOLD_TOKENS = 96_000
+LLM_TOKEN_ESTIMATE_CHARS_PER_TOKEN = 3.0
 GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
+VERTEX_AI_GLOBAL_API_BASE_URL = "https://aiplatform.googleapis.com/v1"
 OPENAI_COMPATIBLE_API_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_SEMANTIC_INDEX_MODEL = "local-token-hybrid-v1"
+DEFAULT_VERTEX_EMBEDDING_MODEL = "gemini-embedding-001"
+VERTEX_EMBEDDING_DOCUMENT_TASK = "RETRIEVAL_DOCUMENT"
+VERTEX_EMBEDDING_QUERY_TASK = "CODE_RETRIEVAL_QUERY"
 DEFAULT_DOMAIN_PROFILE_PATH = Path(__file__).resolve().parent.parent / "config" / "source_code_qa_domain_profiles.json"
 DEFAULT_DOMAIN_KNOWLEDGE_PACK_PATH = Path(__file__).resolve().parent.parent / "config" / "source_code_qa_domain_knowledge_packs.json"
 DEFAULT_LLM_TIMEOUT_SECONDS = 90
 DEFAULT_LLM_MAX_RETRIES = 2
 DEFAULT_LLM_BACKOFF_SECONDS = 1.0
 DEFAULT_LLM_MAX_BACKOFF_SECONDS = 8.0
+DEFAULT_CODEX_CLI_MODEL = "codex-cli"
+DEFAULT_CODEX_TIMEOUT_SECONDS = 240
+DEFAULT_CODEX_TOP_PATH_LIMIT = 30
+CODEX_INVESTIGATION_PROMPT_MODE = "codex_investigation_brief_v1"
 MAX_CACHED_INDEX_LINES = 5_000
 MAX_CACHED_SEMANTIC_CHUNKS = 2_000
 MAX_TARGETED_INDEX_FILES = 220
@@ -78,6 +99,44 @@ DEFAULT_LLM_BUDGETS = {
         "thinking_budget": 1024,
         "max_output_tokens": 1_400,
         "model": "gemini-2.5-flash",
+    },
+    COMPACT_DEEP_BUDGET_MODE: {
+        "match_limit": 8,
+        "snippet_line_budget": 55,
+        "snippet_char_budget": 8_000,
+        "thinking_budget": 512,
+        "max_output_tokens": 2_000,
+        "model": "gemini-2.5-flash",
+    },
+}
+VERTEX_QUALITY_LLM_BUDGETS = {
+    "cheap": {
+        "match_limit": 10,
+        "snippet_line_budget": 90,
+        "snippet_char_budget": 24_000,
+        "thinking_budget": 512,
+        "max_output_tokens": 1_800,
+    },
+    "balanced": {
+        "match_limit": 18,
+        "snippet_line_budget": 180,
+        "snippet_char_budget": 48_000,
+        "thinking_budget": 2048,
+        "max_output_tokens": 2_800,
+    },
+    "deep": {
+        "match_limit": 28,
+        "snippet_line_budget": 260,
+        "snippet_char_budget": 86_000,
+        "thinking_budget": 4096,
+        "max_output_tokens": 4_800,
+    },
+    COMPACT_DEEP_BUDGET_MODE: {
+        "match_limit": 18,
+        "snippet_line_budget": 140,
+        "snippet_char_budget": 44_000,
+        "thinking_budget": 2048,
+        "max_output_tokens": 4_000,
     },
 }
 LLM_BUDGETS = DEFAULT_LLM_BUDGETS
@@ -605,7 +664,8 @@ class SourceCodeQAEmbeddingProvider:
     def ready(self) -> bool:
         return True
 
-    def embed_texts(self, texts: list[str]) -> list[list[float]]:
+    def embed_texts(self, texts: list[str], *, task_type: str | None = None) -> list[list[float]]:
+        del task_type
         del texts
         return []
 
@@ -624,7 +684,8 @@ class OpenAICompatibleEmbeddingProvider(SourceCodeQAEmbeddingProvider):
     def ready(self) -> bool:
         return bool(self.api_key and self.model and not self.model.startswith("local-"))
 
-    def embed_texts(self, texts: list[str]) -> list[list[float]]:
+    def embed_texts(self, texts: list[str], *, task_type: str | None = None) -> list[list[float]]:
+        del task_type
         if not texts:
             return []
         if not self.ready():
@@ -661,6 +722,133 @@ class OpenAICompatibleEmbeddingProvider(SourceCodeQAEmbeddingProvider):
         return re.sub(r"https://[^:@/\s]+:[^@/\s]+@", "https://***:***@", sanitized)
 
 
+class VertexAIEmbeddingProvider(SourceCodeQAEmbeddingProvider):
+    name = LLM_PROVIDER_VERTEX_AI
+    _SCOPES = ("https://www.googleapis.com/auth/cloud-platform",)
+
+    def __init__(
+        self,
+        *,
+        credentials_file: str | None = None,
+        project_id: str | None = None,
+        location: str = "global",
+        model: str = DEFAULT_VERTEX_EMBEDDING_MODEL,
+        output_dimensionality: int = 768,
+    ) -> None:
+        self.credentials_file = str(credentials_file or "").strip()
+        self.project_id = str(project_id or "").strip()
+        self.location = str(location or "global").strip() or "global"
+        self.model = str(model or DEFAULT_VERTEX_EMBEDDING_MODEL).strip() or DEFAULT_VERTEX_EMBEDDING_MODEL
+        self.output_dimensionality = max(0, int(output_dimensionality or 0))
+
+    def ready(self) -> bool:
+        return bool(self._credentials_path() and self._resolved_project_id() and self.model)
+
+    def embed_texts(self, texts: list[str], *, task_type: str | None = None) -> list[list[float]]:
+        if not texts:
+            return []
+        if not self.ready():
+            raise ToolError(
+                "Vertex AI embedding provider is not configured. Set SOURCE_CODE_QA_VERTEX_CREDENTIALS_FILE "
+                "or GOOGLE_APPLICATION_CREDENTIALS, plus SOURCE_CODE_QA_VERTEX_PROJECT_ID when needed."
+            )
+        task = str(task_type or VERTEX_EMBEDDING_DOCUMENT_TASK).strip() or VERTEX_EMBEDDING_DOCUMENT_TASK
+        embeddings: list[list[float]] = []
+        for text in texts:
+            response = requests.post(
+                self._predict_url(),
+                headers={
+                    "Authorization": f"Bearer {self._access_token()}",
+                    "Content-Type": "application/json",
+                },
+                json=self._predict_payload(str(text or "")[:8000], task),
+                timeout=90,
+            )
+            if not response.ok:
+                detail = self._sanitize_error_detail(response.text)
+                raise ToolError(f"Vertex AI embedding generation failed. {detail[:500]}")
+            embeddings.append(self._embedding_from_response(response.json()))
+        return embeddings
+
+    def public_config(self) -> dict[str, Any]:
+        return {
+            "provider": self.name,
+            "ready": self.ready(),
+            "model": self.model,
+            "project_id": self._resolved_project_id(),
+            "location": self.location,
+            "credentials_configured": bool(self._credentials_path()),
+            "output_dimensionality": self.output_dimensionality,
+        }
+
+    def _credentials_path(self) -> Path | None:
+        if not self.credentials_file:
+            return None
+        path = Path(self.credentials_file).expanduser()
+        return path if path.exists() and path.is_file() else None
+
+    def _resolved_project_id(self) -> str:
+        if self.project_id:
+            return self.project_id
+        path = self._credentials_path()
+        if path is None:
+            return ""
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return ""
+        return str(payload.get("project_id") or "").strip()
+
+    def _access_token(self) -> str:
+        path = self._credentials_path()
+        if path is None:
+            raise ToolError("Vertex AI credentials file is missing or unreadable.")
+        credentials = service_account.Credentials.from_service_account_file(
+            str(path),
+            scopes=list(self._SCOPES),
+        )
+        credentials.refresh(GoogleAuthRequest())
+        token = str(getattr(credentials, "token", "") or "").strip()
+        if not token:
+            raise ToolError("Vertex AI service account did not return an OAuth access token.")
+        return token
+
+    def _predict_url(self) -> str:
+        location = self.location
+        base_url = VERTEX_AI_GLOBAL_API_BASE_URL if location == "global" else f"https://{location}-aiplatform.googleapis.com/v1"
+        return (
+            f"{base_url}/projects/{self._resolved_project_id()}/locations/{location}"
+            f"/publishers/google/models/{self.model}:predict"
+        )
+
+    def _predict_payload(self, text: str, task_type: str) -> dict[str, Any]:
+        instance: dict[str, Any] = {"content": text, "task_type": task_type}
+        parameters: dict[str, Any] = {}
+        if self.output_dimensionality > 0:
+            parameters["outputDimensionality"] = self.output_dimensionality
+        return {"instances": [instance], "parameters": parameters}
+
+    @staticmethod
+    def _embedding_from_response(payload: dict[str, Any]) -> list[float]:
+        predictions = payload.get("predictions") or []
+        if not predictions:
+            raise ToolError("Vertex AI embedding provider returned no predictions.")
+        first = predictions[0] or {}
+        candidates = [
+            ((first.get("embeddings") or {}).get("values") if isinstance(first, dict) else None),
+            ((first.get("embedding") or {}).get("values") if isinstance(first, dict) else None),
+            first.get("values") if isinstance(first, dict) else None,
+        ]
+        values = next((item for item in candidates if isinstance(item, list)), None)
+        if values is None:
+            raise ToolError("Vertex AI embedding provider returned an unreadable embedding.")
+        return [float(value) for value in values]
+
+    @staticmethod
+    def _sanitize_error_detail(detail: str) -> str:
+        return re.sub(r"https://[^:@/\s]+:[^@/\s]+@", "https://***:***@", str(detail or ""))
+
+
 class SourceCodeQALLMProvider:
     name = "unknown"
 
@@ -681,6 +869,191 @@ class SourceCodeQALLMProvider:
 
     def public_config(self) -> dict[str, Any]:
         return {"provider": self.name, "ready": self.ready()}
+
+
+class CodexCliBridgeSourceCodeQALLMProvider(SourceCodeQALLMProvider):
+    name = LLM_PROVIDER_CODEX_CLI_BRIDGE
+    _run_lock = threading.Lock()
+
+    def __init__(
+        self,
+        *,
+        workspace_root: Path,
+        timeout_seconds: int = DEFAULT_LLM_TIMEOUT_SECONDS,
+        codex_binary: str | None = None,
+    ) -> None:
+        self.workspace_root = Path(workspace_root)
+        self.timeout_seconds = max(10, int(timeout_seconds or DEFAULT_LLM_TIMEOUT_SECONDS))
+        self.codex_binary = str(codex_binary or os.getenv("SOURCE_CODE_QA_CODEX_BINARY") or "codex").strip() or "codex"
+
+    def ready(self) -> bool:
+        if not shutil.which(self.codex_binary):
+            return False
+        try:
+            result = subprocess.run(
+                [self.codex_binary, "login", "status"],
+                cwd=str(self.workspace_root),
+                text=True,
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False
+        output = f"{result.stdout}\n{result.stderr}"
+        return result.returncode == 0 and "Logged in using ChatGPT" in output
+
+    def generate(
+        self,
+        *,
+        payload: dict[str, Any],
+        primary_model: str,
+        fallback_model: str,
+    ) -> LLMGenerateResult:
+        del fallback_model
+        if not self.ready():
+            raise ToolError("Codex is unavailable. Run `codex login` with ChatGPT on this server before using Codex mode.")
+        self.workspace_root.mkdir(parents=True, exist_ok=True)
+        prompt = self._prompt_from_gemini_payload(payload)
+        started_at = time.time()
+        attempt_started = time.time()
+        model = str(primary_model or "codex-cli").strip() or "codex-cli"
+        with tempfile.NamedTemporaryFile("w+", encoding="utf-8", delete=True) as output_file:
+            prompt_mode = str(payload.get("codex_prompt_mode") or "").strip()
+            command = [
+                self.codex_binary,
+                "exec",
+                "--cd",
+                str(self.workspace_root),
+                "--skip-git-repo-check",
+                "--sandbox",
+                "read-only",
+                "--ephemeral",
+                "--json",
+                "--output-last-message",
+                output_file.name,
+                "-",
+            ]
+            if model not in {"codex-cli", "codex"}:
+                command[2:2] = ["--model", model]
+            try:
+                with self._run_lock:
+                    result = subprocess.run(
+                        command,
+                        input=prompt,
+                        cwd=str(self.workspace_root),
+                        text=True,
+                        capture_output=True,
+                        timeout=self.timeout_seconds,
+                        check=False,
+                    )
+            except subprocess.TimeoutExpired as error:
+                raise ToolError(f"Codex unavailable; used code search fallback. Codex CLI timed out after {self.timeout_seconds}s.") from error
+            except OSError as error:
+                raise ToolError(f"Codex unavailable; used code search fallback. {error}") from error
+            output_file.seek(0)
+            answer = output_file.read().strip()
+        if result.returncode != 0:
+            detail = self._sanitize_cli_output(f"{result.stderr}\n{result.stdout}")
+            raise ToolError(f"Codex unavailable; used code search fallback. Codex CLI exited with {result.returncode}. {detail[:500]}")
+        if not answer:
+            answer = self._extract_last_json_event_message(result.stdout)
+        if not answer:
+            raise ToolError("Codex unavailable; used code search fallback. Codex CLI returned no readable answer.")
+        latency_ms = int((time.time() - started_at) * 1000)
+        return LLMGenerateResult(
+            payload={"text": answer, "finish_reason": "codex_cli_completed"},
+            usage={},
+            model=model,
+            attempts=1,
+            latency_ms=latency_ms,
+            attempt_log=(
+                {
+                    "model": model,
+                    "attempt": 1,
+                    "status": "ok",
+                    "retryable": False,
+                    "latency_ms": int((time.time() - attempt_started) * 1000),
+                    "provider": self.name,
+                    "exit_code": result.returncode,
+                    "timeout": False,
+                    "workspace_root": str(self.workspace_root),
+                    "prompt_mode": prompt_mode,
+                    "command": self._command_summary(command),
+                },
+            ),
+        )
+
+    def extract_text(self, payload: dict[str, Any]) -> str:
+        text = str(payload.get("text") or "").strip()
+        if text:
+            return text
+        raise ToolError("Codex CLI returned no readable answer.")
+
+    def public_config(self) -> dict[str, Any]:
+        return {
+            "provider": self.name,
+            "ready": self.ready(),
+            "workspace_root": str(self.workspace_root),
+            "runtime": {"timeout_seconds": self.timeout_seconds, "concurrency": 1, "sandbox": "read-only"},
+        }
+
+    @staticmethod
+    def _prompt_from_gemini_payload(payload: dict[str, Any]) -> str:
+        system_text = "\n".join(
+            str(part.get("text") or "").strip()
+            for part in (payload.get("systemInstruction") or {}).get("parts") or []
+            if str(part.get("text") or "").strip()
+        )
+        user_parts: list[str] = []
+        for content in payload.get("contents") or []:
+            for part in content.get("parts") or []:
+                text = str(part.get("text") or "").strip()
+                if text:
+                    user_parts.append(text)
+        user_text = "\n\n".join(user_parts)
+        return (
+            f"{system_text}\n\n"
+            "Codex CLI bridge policy:\n"
+            "- Read only from the provided repository workspace and retrieval evidence.\n"
+            "- Do not modify files, create commits, deploy, install dependencies, or run write commands.\n"
+            "- Return a concise answer in the requested JSON shape when possible.\n\n"
+            f"{user_text}"
+        ).strip()
+
+    @staticmethod
+    def _extract_last_json_event_message(output: str) -> str:
+        answer = ""
+        for raw_line in str(output or "").splitlines():
+            try:
+                event = json.loads(raw_line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(event, dict):
+                continue
+            for key in ("message", "text", "output_text"):
+                value = event.get(key)
+                if isinstance(value, str) and value.strip():
+                    answer = value.strip()
+            item = event.get("item")
+            if isinstance(item, dict):
+                content = item.get("content")
+                if isinstance(content, str) and content.strip():
+                    answer = content.strip()
+        return answer
+
+    @staticmethod
+    def _sanitize_cli_output(output: str) -> str:
+        return re.sub(r"\s+", " ", str(output or "").strip())
+
+    @staticmethod
+    def _command_summary(command: list[str]) -> list[str]:
+        summarized = list(command)
+        if "--output-last-message" in summarized:
+            index = summarized.index("--output-last-message")
+            if index + 1 < len(summarized):
+                summarized[index + 1] = "<output-file>"
+        return summarized
 
 
 class UnsupportedSourceCodeQALLMProvider(SourceCodeQALLMProvider):
@@ -898,6 +1271,219 @@ class GeminiSourceCodeQALLMProvider(SourceCodeQALLMProvider):
         if isinstance(error, dict):
             return str(error.get("status") or "").strip()
         return ""
+
+
+class VertexAISourceCodeQALLMProvider(GeminiSourceCodeQALLMProvider):
+    name = LLM_PROVIDER_VERTEX_AI
+    _SCOPES = ("https://www.googleapis.com/auth/cloud-platform",)
+
+    def __init__(
+        self,
+        *,
+        credentials_file: str | None = None,
+        project_id: str | None = None,
+        location: str = "global",
+        timeout_seconds: int = DEFAULT_LLM_TIMEOUT_SECONDS,
+        max_retries: int = DEFAULT_LLM_MAX_RETRIES,
+        backoff_seconds: float = DEFAULT_LLM_BACKOFF_SECONDS,
+        max_backoff_seconds: float = DEFAULT_LLM_MAX_BACKOFF_SECONDS,
+    ) -> None:
+        self.credentials_file = str(credentials_file or "").strip()
+        self.project_id = str(project_id or "").strip()
+        self.location = str(location or "global").strip() or "global"
+        self.timeout_seconds = max(5, int(timeout_seconds or DEFAULT_LLM_TIMEOUT_SECONDS))
+        self.max_retries = max(0, int(max_retries or 0))
+        self.backoff_seconds = max(0.0, float(backoff_seconds or 0.0))
+        self.max_backoff_seconds = max(self.backoff_seconds, float(max_backoff_seconds or self.backoff_seconds or DEFAULT_LLM_MAX_BACKOFF_SECONDS))
+
+    def ready(self) -> bool:
+        return bool(self._credentials_path() and self._resolved_project_id() and self.location)
+
+    def generate(
+        self,
+        *,
+        payload: dict[str, Any],
+        primary_model: str,
+        fallback_model: str,
+    ) -> LLMGenerateResult:
+        if not self.ready():
+            raise ToolError(
+                "Vertex AI mode is not configured yet. Set SOURCE_CODE_QA_VERTEX_CREDENTIALS_FILE "
+                "or GOOGLE_APPLICATION_CREDENTIALS, plus SOURCE_CODE_QA_VERTEX_PROJECT_ID when the JSON has no project_id."
+            )
+        access_token = self._access_token()
+        models = [primary_model]
+        if fallback_model and fallback_model not in models:
+            models.append(fallback_model)
+        retryable_statuses = {429, 500, 502, 503, 504}
+        last_error: str | None = None
+        last_status_code: int | None = None
+        last_provider_status = ""
+        last_retry_after: float | None = None
+        attempts = 0
+        attempt_log: list[dict[str, Any]] = []
+        started_at = time.time()
+        delays = self._retry_delays()
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json",
+        }
+        for model in models:
+            model_delays = list(delays)
+            for attempt_index, delay in enumerate(model_delays):
+                attempts += 1
+                if delay:
+                    time.sleep(delay)
+                attempt_started = time.time()
+                try:
+                    response = requests.post(
+                        self._generate_content_url(model),
+                        headers=headers,
+                        json=self._payload_for_generate_content(payload),
+                        timeout=self.timeout_seconds,
+                    )
+                except requests.Timeout as error:
+                    last_error = self._sanitize_error_detail(str(error))
+                    attempt_log.append(
+                        {
+                            "model": model,
+                            "attempt": attempt_index + 1,
+                            "status": "timeout",
+                            "retryable": True,
+                            "latency_ms": int((time.time() - attempt_started) * 1000),
+                        }
+                    )
+                    continue
+                except requests.RequestException as error:
+                    last_error = self._sanitize_error_detail(str(error))
+                    attempt_log.append(
+                        {
+                            "model": model,
+                            "attempt": attempt_index + 1,
+                            "status": "request_error",
+                            "retryable": True,
+                            "latency_ms": int((time.time() - attempt_started) * 1000),
+                        }
+                    )
+                    continue
+                response_ok = getattr(response, "ok", None)
+                if response_ok is None:
+                    try:
+                        response.raise_for_status()
+                        response_ok = True
+                    except requests.HTTPError:
+                        response_ok = False
+                if response_ok:
+                    result = response.json()
+                    usage = result.get("usageMetadata") or {}
+                    attempt_log.append(
+                        {
+                            "model": model,
+                            "attempt": attempt_index + 1,
+                            "status": "ok",
+                            "retryable": False,
+                            "latency_ms": int((time.time() - attempt_started) * 1000),
+                        }
+                    )
+                    return LLMGenerateResult(
+                        payload=result,
+                        usage=usage,
+                        model=model,
+                        attempts=attempts,
+                        latency_ms=int((time.time() - started_at) * 1000),
+                        attempt_log=tuple(attempt_log),
+                    )
+                status = int(getattr(response, "status_code", 500) or 500)
+                detail = self._sanitize_error_detail(response.text)
+                last_error = detail
+                last_status_code = status
+                last_provider_status = self._provider_error_status(detail)
+                retryable = status in retryable_statuses
+                attempt_log.append(
+                    {
+                        "model": model,
+                        "attempt": attempt_index + 1,
+                        "status": status,
+                        "retryable": retryable,
+                        "latency_ms": int((time.time() - attempt_started) * 1000),
+                    }
+                )
+                if not retryable:
+                    raise ToolError(f"Vertex AI answer generation failed. {detail[:500]}")
+                if attempt_index + 1 < len(model_delays):
+                    retry_after = self._retry_after_seconds(response)
+                    if retry_after is not None:
+                        last_retry_after = retry_after
+                        model_delays[attempt_index + 1] = retry_after
+        raise SourceCodeQALLMError(
+            f"Vertex AI answer generation failed. {str(last_error or 'Model unavailable.')[:500]}",
+            status_code=last_status_code,
+            provider_status=last_provider_status,
+            retryable=bool(last_status_code in retryable_statuses),
+            retry_after_seconds=last_retry_after,
+        )
+
+    @staticmethod
+    def _payload_for_generate_content(payload: dict[str, Any]) -> dict[str, Any]:
+        normalized = json.loads(json.dumps(payload or {}, ensure_ascii=False))
+        for content in normalized.get("contents") or []:
+            if isinstance(content, dict) and not str(content.get("role") or "").strip():
+                content["role"] = "user"
+        return normalized
+
+    def public_config(self) -> dict[str, Any]:
+        return {
+            "provider": self.name,
+            "ready": self.ready(),
+            "project_id": self._resolved_project_id(),
+            "location": self.location,
+            "credentials_configured": bool(self._credentials_path()),
+            "runtime": self.runtime_config(),
+        }
+
+    def _credentials_path(self) -> Path | None:
+        if not self.credentials_file:
+            return None
+        path = Path(self.credentials_file).expanduser()
+        return path if path.exists() and path.is_file() else None
+
+    def _resolved_project_id(self) -> str:
+        if self.project_id:
+            return self.project_id
+        path = self._credentials_path()
+        if path is None:
+            return ""
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return ""
+        return str(payload.get("project_id") or "").strip()
+
+    def _access_token(self) -> str:
+        path = self._credentials_path()
+        if path is None:
+            raise ToolError("Vertex AI credentials file is missing or unreadable.")
+        credentials = service_account.Credentials.from_service_account_file(
+            str(path),
+            scopes=list(self._SCOPES),
+        )
+        credentials.refresh(GoogleAuthRequest())
+        token = str(getattr(credentials, "token", "") or "").strip()
+        if not token:
+            raise ToolError("Vertex AI service account did not return an OAuth access token.")
+        return token
+
+    def _generate_content_url(self, model: str) -> str:
+        location = self.location
+        base_url = VERTEX_AI_GLOBAL_API_BASE_URL if location == "global" else f"https://{location}-aiplatform.googleapis.com/v1"
+        project_id = self._resolved_project_id()
+        return (
+            f"{base_url}/projects/{project_id}/locations/{location}"
+            f"/publishers/google/models/{model}:generateContent"
+        )
+
+    def _sanitize_error_detail(self, detail: str) -> str:
+        return re.sub(r"https://[^:@/\s]+:[^@/\s]+@", "https://***:***@", str(detail or ""))
 
 
 class OpenAICompatibleSourceCodeQALLMProvider(SourceCodeQALLMProvider):
@@ -1140,6 +1726,13 @@ class SourceCodeQAService:
         gemini_fast_model: str = "gemini-2.5-flash-lite",
         gemini_deep_model: str = "gemini-2.5-flash",
         gemini_fallback_model: str = "gemini-2.5-flash-lite",
+        vertex_credentials_file: str | None = None,
+        vertex_project_id: str | None = None,
+        vertex_location: str = "global",
+        vertex_model: str = "gemini-2.5-flash",
+        vertex_fast_model: str = "gemini-2.5-flash-lite",
+        vertex_deep_model: str = "gemini-2.5-flash",
+        vertex_fallback_model: str = "gemini-2.5-flash-lite",
         query_rewrite_model: str | None = None,
         planner_model: str | None = None,
         answer_model: str | None = None,
@@ -1153,12 +1746,16 @@ class SourceCodeQAService:
         embedding_api_base_url: str = OPENAI_COMPATIBLE_API_BASE_URL,
         llm_cache_ttl_seconds: int = 1800,
         llm_timeout_seconds: int = DEFAULT_LLM_TIMEOUT_SECONDS,
+        codex_timeout_seconds: int | None = None,
+        codex_top_path_limit: int = DEFAULT_CODEX_TOP_PATH_LIMIT,
+        codex_repair_enabled: bool = True,
         llm_max_retries: int = DEFAULT_LLM_MAX_RETRIES,
         llm_backoff_seconds: float = DEFAULT_LLM_BACKOFF_SECONDS,
         llm_max_backoff_seconds: float = DEFAULT_LLM_MAX_BACKOFF_SECONDS,
         git_timeout_seconds: int = 90,
         max_file_bytes: int = 500_000,
     ) -> None:
+        self.base_data_root = data_root
         self.data_root = data_root / "source_code_qa"
         self.config_path = self.data_root / "config.json"
         self.repo_root = self.data_root / "repos"
@@ -1186,18 +1783,33 @@ class SourceCodeQAService:
         self.gemini_fast_model = str(gemini_fast_model or "gemini-2.5-flash-lite").strip() or "gemini-2.5-flash-lite"
         self.gemini_deep_model = str(gemini_deep_model or self.gemini_model).strip() or self.gemini_model
         self.gemini_fallback_model = str(gemini_fallback_model or "gemini-2.5-flash-lite").strip() or "gemini-2.5-flash-lite"
+        self.vertex_credentials_file = str(vertex_credentials_file or "").strip()
+        self.vertex_project_id = str(vertex_project_id or "").strip()
+        self.vertex_location = str(vertex_location or "global").strip() or "global"
+        self.vertex_model = str(vertex_model or "gemini-2.5-flash").strip() or "gemini-2.5-flash"
+        self.vertex_fast_model = str(vertex_fast_model or "gemini-2.5-flash-lite").strip() or "gemini-2.5-flash-lite"
+        self.vertex_deep_model = str(vertex_deep_model or self.vertex_model).strip() or self.vertex_model
+        self.vertex_fallback_model = str(vertex_fallback_model or "gemini-2.5-flash-lite").strip() or "gemini-2.5-flash-lite"
         self.query_rewrite_model = str(query_rewrite_model or "").strip()
         self.planner_model = str(planner_model or "").strip()
         self.answer_model = str(answer_model or "").strip()
         self.judge_model = str(judge_model or "").strip()
         self.repair_model = str(repair_model or "").strip()
         self.llm_judge_enabled = bool(llm_judge_enabled)
-        self.semantic_index_model = str(semantic_index_model or DEFAULT_SEMANTIC_INDEX_MODEL).strip() or DEFAULT_SEMANTIC_INDEX_MODEL
-        self.semantic_index_enabled = bool(semantic_index_enabled)
         self.embedding_provider_name = str(embedding_provider or "local_token_hybrid").strip().lower() or "local_token_hybrid"
+        self.semantic_index_model = str(semantic_index_model or DEFAULT_SEMANTIC_INDEX_MODEL).strip() or DEFAULT_SEMANTIC_INDEX_MODEL
+        if self.embedding_provider_name == LLM_PROVIDER_VERTEX_AI and self.semantic_index_model.startswith("local-"):
+            self.semantic_index_model = DEFAULT_VERTEX_EMBEDDING_MODEL
+        self.semantic_index_enabled = bool(semantic_index_enabled)
         self.embedding_api_key = str(embedding_api_key or "").strip()
         self.embedding_api_base_url = str(embedding_api_base_url or OPENAI_COMPATIBLE_API_BASE_URL).strip() or OPENAI_COMPATIBLE_API_BASE_URL
         self.llm_timeout_seconds = max(5, int(llm_timeout_seconds or DEFAULT_LLM_TIMEOUT_SECONDS))
+        self.codex_timeout_seconds = max(
+            10,
+            int(codex_timeout_seconds if codex_timeout_seconds is not None else DEFAULT_CODEX_TIMEOUT_SECONDS),
+        )
+        self.codex_top_path_limit = max(5, min(int(codex_top_path_limit or DEFAULT_CODEX_TOP_PATH_LIMIT), 80))
+        self.codex_repair_enabled = bool(codex_repair_enabled)
         self.llm_max_retries = max(0, int(llm_max_retries or 0))
         self.llm_backoff_seconds = max(0.0, float(llm_backoff_seconds or 0.0))
         self.llm_max_backoff_seconds = max(
@@ -1214,6 +1826,63 @@ class SourceCodeQAService:
         self.git_timeout_seconds = max(5, int(git_timeout_seconds or 90))
         self.max_file_bytes = max(20_000, int(max_file_bytes or 500_000))
 
+    def with_llm_provider(self, llm_provider: str) -> "SourceCodeQAService":
+        normalized = self.normalize_query_llm_provider(llm_provider)
+        if normalized == self.llm_provider_name:
+            return self
+        return SourceCodeQAService(
+            data_root=self.base_data_root,
+            team_profiles=self.team_profiles,
+            gitlab_token=self.gitlab_token,
+            gitlab_username=self.gitlab_username,
+            llm_provider=normalized,
+            gemini_api_key=self.gemini_api_key,
+            gemini_api_base_url=self.gemini_api_base_url,
+            openai_api_key=self.openai_api_key,
+            openai_api_base_url=self.openai_api_base_url,
+            openai_model=self.openai_model,
+            openai_fast_model=self.openai_fast_model,
+            openai_deep_model=self.openai_deep_model,
+            openai_fallback_model=self.openai_fallback_model,
+            gemini_model=self.gemini_model,
+            gemini_fast_model=self.gemini_fast_model,
+            gemini_deep_model=self.gemini_deep_model,
+            gemini_fallback_model=self.gemini_fallback_model,
+            vertex_credentials_file=self.vertex_credentials_file,
+            vertex_project_id=self.vertex_project_id,
+            vertex_location=self.vertex_location,
+            vertex_model=self.vertex_model,
+            vertex_fast_model=self.vertex_fast_model,
+            vertex_deep_model=self.vertex_deep_model,
+            vertex_fallback_model=self.vertex_fallback_model,
+            query_rewrite_model=self.query_rewrite_model,
+            planner_model=self.planner_model,
+            answer_model=self.answer_model,
+            judge_model=self.judge_model,
+            repair_model=self.repair_model,
+            llm_judge_enabled=self.llm_judge_enabled,
+            semantic_index_model=self.semantic_index_model,
+            semantic_index_enabled=self.semantic_index_enabled,
+            embedding_provider=self.embedding_provider_name,
+            embedding_api_key=self.embedding_api_key,
+            embedding_api_base_url=self.embedding_api_base_url,
+            llm_cache_ttl_seconds=self.llm_cache_ttl_seconds,
+            llm_timeout_seconds=self.llm_timeout_seconds,
+            codex_timeout_seconds=self.codex_timeout_seconds,
+            codex_top_path_limit=self.codex_top_path_limit,
+            codex_repair_enabled=self.codex_repair_enabled,
+            llm_max_retries=self.llm_max_retries,
+            llm_backoff_seconds=self.llm_backoff_seconds,
+            llm_max_backoff_seconds=self.llm_max_backoff_seconds,
+            git_timeout_seconds=self.git_timeout_seconds,
+            max_file_bytes=self.max_file_bytes,
+        )
+
+    @staticmethod
+    def normalize_query_llm_provider(llm_provider: str | None) -> str:
+        provider = str(llm_provider or LLM_PROVIDER_CODEX_CLI_BRIDGE).strip().lower() or LLM_PROVIDER_CODEX_CLI_BRIDGE
+        return provider if provider in LLM_PROVIDER_ALLOWED_QUERY_CHOICES else LLM_PROVIDER_CODEX_CLI_BRIDGE
+
     def options_payload(self) -> dict[str, Any]:
         return {
             "pm_teams": [
@@ -1225,6 +1894,11 @@ class SourceCodeQAService:
             "answer_modes": [
                 {"value": ANSWER_MODE_AUTO, "label": "Smart Answer"},
                 {"value": ANSWER_MODE, "label": "Code Search Only"},
+            ],
+            "llm_providers": [
+                {"value": LLM_PROVIDER_CODEX_CLI_BRIDGE, "label": "Codex"},
+                {"value": LLM_PROVIDER_GEMINI, "label": "Gemini (Unavailable)", "disabled": True},
+                {"value": LLM_PROVIDER_VERTEX_AI, "label": "Vertex AI"},
             ],
         }
 
@@ -1240,6 +1914,7 @@ class SourceCodeQAService:
                     {"budget": "deep", "reason": "data_source_trace"},
                     {"budget": "deep", "reason": "root_cause_or_error"},
                     {"budget": "deep", "reason": "agentic_or_graph_trace"},
+                    {"budget": COMPACT_DEEP_BUDGET_MODE, "reason": "prompt_token_pressure"},
                     {"budget": "balanced", "reason": "api_config_rule_or_5_plus_matches"},
                     {"budget": "cheap", "reason": "simple_lookup"},
                 ],
@@ -1247,6 +1922,19 @@ class SourceCodeQAService:
                     "cheap": "Flash-Lite for simple lookup and lightweight judge/rewrite work.",
                     "balanced": "Flash with moderate thinking for API, config, rule, or multi-match questions.",
                     "deep": "Flash with higher thinking for data-source, cross-repo, root-cause, and repair work.",
+                    COMPACT_DEEP_BUDGET_MODE: "Flash with compact evidence and low thinking for token-heavy code questions.",
+                },
+                "token_pressure": {
+                    "compact_threshold": LLM_PROMPT_COMPACT_THRESHOLD_TOKENS,
+                    "tight_threshold": LLM_PROMPT_TIGHT_THRESHOLD_TOKENS,
+                    "vertex_compact_threshold": VERTEX_PROMPT_COMPACT_THRESHOLD_TOKENS,
+                    "vertex_tight_threshold": VERTEX_PROMPT_TIGHT_THRESHOLD_TOKENS,
+                    "strategy": "switch balanced/deep answers to compact_deep before the model call when estimated prompt tokens are high",
+                },
+                "vertex_quality_profile": {
+                    "enabled": self.llm_provider_name == LLM_PROVIDER_VERTEX_AI,
+                    "quality_floor": "cheap requests are routed to balanced",
+                    "context_policy": "raw code snippets are primary evidence; compressed facts are navigation hints",
                 },
             },
             "planner_tools": self._planner_tool_registry(),
@@ -1304,6 +1992,13 @@ class SourceCodeQAService:
             return "LLM mode is not configured yet. Set SOURCE_CODE_QA_OPENAI_API_KEY or OPENAI_API_KEY on the server first."
         if self.llm_provider_name == LLM_PROVIDER_GEMINI:
             return "LLM mode is not configured yet. Set SOURCE_CODE_QA_GEMINI_API_KEY or GEMINI_API_KEY on the server first."
+        if self.llm_provider_name == LLM_PROVIDER_CODEX_CLI_BRIDGE:
+            return "Codex is unavailable. Run `codex login` with ChatGPT on this server before using Codex mode."
+        if self.llm_provider_name == LLM_PROVIDER_VERTEX_AI:
+            return (
+                "Vertex AI mode is not configured yet. Set SOURCE_CODE_QA_VERTEX_CREDENTIALS_FILE "
+                "or GOOGLE_APPLICATION_CREDENTIALS, and set SOURCE_CODE_QA_VERTEX_PROJECT_ID / SOURCE_CODE_QA_VERTEX_LOCATION if needed."
+            )
         return f"LLM mode is not configured yet. Provider {self.llm_provider_name!r} is unsupported or missing credentials."
 
     def _build_llm_provider(self) -> SourceCodeQALLMProvider:
@@ -1325,9 +2020,34 @@ class SourceCodeQAService:
                 backoff_seconds=self.llm_backoff_seconds,
                 max_backoff_seconds=self.llm_max_backoff_seconds,
             )
+        if self.llm_provider_name == LLM_PROVIDER_CODEX_CLI_BRIDGE:
+            return CodexCliBridgeSourceCodeQALLMProvider(
+                workspace_root=self.repo_root,
+                timeout_seconds=self.codex_timeout_seconds,
+            )
+        if self.llm_provider_name == LLM_PROVIDER_VERTEX_AI:
+            return VertexAISourceCodeQALLMProvider(
+                credentials_file=self.vertex_credentials_file,
+                project_id=self.vertex_project_id,
+                location=self.vertex_location,
+                timeout_seconds=self.llm_timeout_seconds,
+                max_retries=self.llm_max_retries,
+                backoff_seconds=self.llm_backoff_seconds,
+                max_backoff_seconds=self.llm_max_backoff_seconds,
+            )
         return UnsupportedSourceCodeQALLMProvider(self.llm_provider_name)
 
     def _build_embedding_provider(self) -> SourceCodeQAEmbeddingProvider:
+        if self.embedding_provider_name == LLM_PROVIDER_VERTEX_AI:
+            model = self.semantic_index_model
+            if model.startswith("local-"):
+                model = DEFAULT_VERTEX_EMBEDDING_MODEL
+            return VertexAIEmbeddingProvider(
+                credentials_file=self.vertex_credentials_file,
+                project_id=self.vertex_project_id,
+                location=self.vertex_location,
+                model=model,
+            )
         if self.embedding_provider_name == "openai_compatible" or not self.semantic_index_model.startswith("local-"):
             return OpenAICompatibleEmbeddingProvider(
                 api_key=self.embedding_api_key,
@@ -1342,10 +2062,25 @@ class SourceCodeQAService:
             budgets["cheap"]["model"] = self.openai_fast_model
             budgets["balanced"]["model"] = self.openai_model
             budgets["deep"]["model"] = self.openai_deep_model
+            budgets[COMPACT_DEEP_BUDGET_MODE]["model"] = self.openai_deep_model
+        elif self.llm_provider_name == LLM_PROVIDER_CODEX_CLI_BRIDGE:
+            codex_model = self._codex_cli_model()
+            budgets["cheap"]["model"] = codex_model
+            budgets["balanced"]["model"] = codex_model
+            budgets["deep"]["model"] = codex_model
+            budgets[COMPACT_DEEP_BUDGET_MODE]["model"] = codex_model
+        elif self.llm_provider_name == LLM_PROVIDER_VERTEX_AI:
+            for budget_name, overrides in VERTEX_QUALITY_LLM_BUDGETS.items():
+                budgets[budget_name].update(overrides)
+            budgets["cheap"]["model"] = self.vertex_fast_model
+            budgets["balanced"]["model"] = self.vertex_model
+            budgets["deep"]["model"] = self.vertex_deep_model
+            budgets[COMPACT_DEEP_BUDGET_MODE]["model"] = self.vertex_deep_model
         else:
             budgets["cheap"]["model"] = self.gemini_fast_model
             budgets["balanced"]["model"] = self.gemini_model
             budgets["deep"]["model"] = self.gemini_deep_model
+            budgets[COMPACT_DEEP_BUDGET_MODE]["model"] = self.gemini_deep_model
         return budgets
 
     def _build_model_policy_matrix(self) -> dict[str, dict[str, Any]]:
@@ -1394,7 +2129,7 @@ class SourceCodeQAService:
         quality_gate: dict[str, Any] | None = None,
         retry: bool = False,
     ) -> int:
-        if self.llm_provider_name != LLM_PROVIDER_GEMINI:
+        if self.llm_provider_name not in {LLM_PROVIDER_GEMINI, LLM_PROVIDER_VERTEX_AI}:
             return int((budget or {}).get("thinking_budget") or 0)
         role = str(role or "").strip().lower()
         mode = str(budget_mode or "").strip().lower()
@@ -1408,30 +2143,98 @@ class SourceCodeQAService:
             return max(base, 1024)
         if mode == "deep":
             return max(base, 1024)
+        if mode == COMPACT_DEEP_BUDGET_MODE:
+            return max(base, 512)
         if mode == "balanced":
             return max(base, 512)
         return base
 
     def _normalize_thinking_budget_for_provider(self, budget: int | None) -> int:
         value = int(budget or 0)
-        if self.llm_provider_name != LLM_PROVIDER_GEMINI:
+        if self.llm_provider_name not in {LLM_PROVIDER_GEMINI, LLM_PROVIDER_VERTEX_AI}:
             return value
         if value <= 0:
             return 0
         return max(GEMINI_MIN_THINKING_BUDGET, min(value, GEMINI_MAX_THINKING_BUDGET))
 
-    def _thinking_config_for_provider(self, budget: int | None) -> dict[str, int]:
+    @staticmethod
+    def _is_gemini_3_model(model: str | None) -> bool:
+        return str(model or "").strip().lower().startswith("gemini-3")
+
+    @staticmethod
+    def _gemini_3_thinking_level(*, role: str, budget_mode: str) -> str:
+        normalized_role = str(role or "").strip().lower()
+        normalized_mode = str(budget_mode or "").strip().lower()
+        if normalized_role in {"repair", "judge"}:
+            return "HIGH"
+        if normalized_mode in {"deep", COMPACT_DEEP_BUDGET_MODE, "balanced"}:
+            return "HIGH"
+        return "MEDIUM"
+
+    def _thinking_config_for_provider(
+        self,
+        budget: int | None,
+        *,
+        model: str | None = None,
+        role: str = "",
+        budget_mode: str = "",
+    ) -> dict[str, Any]:
+        if self.llm_provider_name == LLM_PROVIDER_VERTEX_AI and self._is_gemini_3_model(model):
+            return {"thinkingLevel": self._gemini_3_thinking_level(role=role, budget_mode=budget_mode)}
         return {"thinkingBudget": self._normalize_thinking_budget_for_provider(budget)}
+
+    @staticmethod
+    def _finish_reason_needs_generation_repair(finish_reason: str | None) -> bool:
+        reason = str(finish_reason or "").strip()
+        return reason.upper() in {"MAX_TOKENS", "SAFETY", "RECITATION"} or reason.lower() in {"length", "content_filter"}
+
+    @staticmethod
+    def _finish_reason_is_token_limited(finish_reason: str | None) -> bool:
+        reason = str(finish_reason or "").strip()
+        return reason.upper() == "MAX_TOKENS" or reason.lower() == "length"
+
+    @staticmethod
+    def _estimate_llm_tokens(text: str) -> int:
+        return max(1, int((len(str(text or "")) / LLM_TOKEN_ESTIMATE_CHARS_PER_TOKEN) + 0.999))
+
+    @staticmethod
+    def _llm_prompt_pressure(estimated_prompt_tokens: int) -> str:
+        if estimated_prompt_tokens >= LLM_PROMPT_TIGHT_THRESHOLD_TOKENS:
+            return "tight"
+        if estimated_prompt_tokens >= LLM_PROMPT_COMPACT_THRESHOLD_TOKENS:
+            return "compact"
+        return "normal"
+
+    def _llm_prompt_pressure_for_provider(self, estimated_prompt_tokens: int) -> str:
+        if self.llm_provider_name == LLM_PROVIDER_VERTEX_AI:
+            if estimated_prompt_tokens >= VERTEX_PROMPT_TIGHT_THRESHOLD_TOKENS:
+                return "tight"
+            if estimated_prompt_tokens >= VERTEX_PROMPT_COMPACT_THRESHOLD_TOKENS:
+                return "compact"
+            return "normal"
+        return self._llm_prompt_pressure(estimated_prompt_tokens)
 
     def _llm_fallback_model(self) -> str:
         if self.llm_provider_name == LLM_PROVIDER_OPENAI_COMPATIBLE:
             return self.openai_fallback_model
+        if self.llm_provider_name == LLM_PROVIDER_CODEX_CLI_BRIDGE:
+            return self._codex_cli_model()
+        if self.llm_provider_name == LLM_PROVIDER_VERTEX_AI:
+            return self.vertex_fallback_model
         return self.gemini_fallback_model
 
     def _llm_default_model(self) -> str:
         if self.llm_provider_name == LLM_PROVIDER_OPENAI_COMPATIBLE:
             return self.openai_model
+        if self.llm_provider_name == LLM_PROVIDER_CODEX_CLI_BRIDGE:
+            return self._codex_cli_model()
+        if self.llm_provider_name == LLM_PROVIDER_VERTEX_AI:
+            return self.vertex_model
         return self.gemini_model
+
+    @staticmethod
+    def _codex_cli_model() -> str:
+        return str(os.getenv("SOURCE_CODE_QA_CODEX_MODEL") or DEFAULT_CODEX_CLI_MODEL).strip() or DEFAULT_CODEX_CLI_MODEL
 
     @staticmethod
     def _normalize_llm_usage(usage: dict[str, Any]) -> dict[str, Any]:
@@ -1486,6 +2289,9 @@ class SourceCodeQAService:
             reason = str(choice.get("finish_reason") or "").strip()
             if reason:
                 return reason
+        reason = str(payload.get("finish_reason") or "").strip()
+        if reason:
+            return reason
         return ""
 
     def load_config(self) -> dict[str, Any]:
@@ -2783,6 +3589,7 @@ class SourceCodeQAService:
         }
         normalized_answer_mode = str(answer_mode or ANSWER_MODE).strip() or ANSWER_MODE
         if normalized_answer_mode in {ANSWER_MODE_GEMINI, ANSWER_MODE_AUTO}:
+            payload["llm_provider"] = self.llm_provider.name
             local_no_hit_answer = self._llm_cost_skip_for_local_no_hit(
                 question=question,
                 matches=top_matches,
@@ -2825,6 +3632,7 @@ class SourceCodeQAService:
                         question=question,
                         matches=top_matches,
                         llm_budget_mode=llm_budget_mode,
+                        followup_context=followup_context,
                         requested_answer_mode=normalized_answer_mode,
                         request_cache=request_cache,
                     )
@@ -4098,7 +4906,7 @@ class SourceCodeQAService:
             return chunks
         texts = [chunk[4] for chunk in chunks]
         try:
-            embeddings = self.embedding_provider.embed_texts(texts)
+            embeddings = self.embedding_provider.embed_texts(texts, task_type=VERTEX_EMBEDDING_DOCUMENT_TASK)
         except ToolError:
             return chunks
         enriched = []
@@ -7276,7 +8084,7 @@ class SourceCodeQAService:
 
     def _query_embedding(self, question: str) -> list[float]:
         try:
-            rows = self.embedding_provider.embed_texts([question[:6000]])
+            rows = self.embedding_provider.embed_texts([question[:6000]], task_type=VERTEX_EMBEDDING_QUERY_TASK)
         except ToolError:
             return []
         return rows[0] if rows else []
@@ -12781,6 +13589,7 @@ class SourceCodeQAService:
         question: str,
         matches: list[dict[str, Any]],
         llm_budget_mode: str,
+        followup_context: dict[str, Any] | None = None,
         requested_answer_mode: str = ANSWER_MODE_GEMINI,
         request_cache: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
@@ -12801,6 +13610,26 @@ class SourceCodeQAService:
             trace_paths=trace_paths,
             quality_gate=quality_gate,
         )
+        if self.llm_provider_name == LLM_PROVIDER_CODEX_CLI_BRIDGE:
+            return self._build_codex_llm_answer(
+                entries=entries,
+                key=key,
+                pm_team=pm_team,
+                country=country,
+                question=question,
+                matches=matches,
+                selected_matches=selected_matches,
+                evidence_summary=evidence_summary,
+                quality_gate=quality_gate,
+                evidence_pack=evidence_pack,
+                llm_budget_mode=llm_budget_mode,
+                routed_budget_mode=routed_budget_mode,
+                budget=budget,
+                llm_route=llm_route,
+                selected_model=selected_model,
+                followup_context=followup_context,
+                requested_answer_mode=requested_answer_mode,
+            )
         domain_context = self._llm_domain_context(
             pm_team=pm_team,
             country=country,
@@ -12814,10 +13643,17 @@ class SourceCodeQAService:
             quality_gate=quality_gate,
         )
         answer_thinking_budget = self._normalize_thinking_budget_for_provider(answer_thinking_budget)
+        answer_thinking_config = self._thinking_config_for_provider(
+            answer_thinking_budget,
+            model=selected_model,
+            role="answer",
+            budget_mode=routed_budget_mode,
+        )
         llm_route = {
             **llm_route,
             "answer_model": selected_model,
             "thinking_budget": answer_thinking_budget,
+            "thinking_config": answer_thinking_config,
         }
         prompt_context = self._build_compressed_llm_context(
             evidence_summary,
@@ -12828,6 +13664,88 @@ class SourceCodeQAService:
             snippet_line_budget=budget["snippet_line_budget"],
             snippet_char_budget=budget["snippet_char_budget"],
         )
+        initial_prompt_tokens = self._estimate_llm_tokens(
+            self._llm_user_prompt(pm_team=pm_team, country=country, question=question, context=prompt_context)
+        )
+        token_pressure = self._llm_prompt_pressure_for_provider(initial_prompt_tokens)
+        if token_pressure != "normal" and routed_budget_mode in {"balanced", "deep"}:
+            original_budget_mode = routed_budget_mode
+            routed_budget_mode = COMPACT_DEEP_BUDGET_MODE
+            budget = self.llm_budgets[COMPACT_DEEP_BUDGET_MODE]
+            selected_model = self._model_for_role_or_budget("answer", budget)
+            selected_matches = self._select_llm_matches(matches, int(budget["match_limit"]), question=question)
+            evidence_summary = self._compress_evidence_cached(question, selected_matches, request_cache=request_cache)
+            trace_paths = self._build_trace_paths(entries=entries, key=key, matches=selected_matches, question=question, request_cache=request_cache)
+            if trace_paths:
+                evidence_summary["trace_paths"] = trace_paths
+            quality_gate = self._quality_gate_cached(question, evidence_summary, request_cache=request_cache)
+            evidence_pack = self._build_evidence_pack(
+                question=question,
+                evidence_summary=evidence_summary,
+                matches=selected_matches,
+                trace_paths=trace_paths,
+                quality_gate=quality_gate,
+            )
+            domain_context = self._llm_domain_context(
+                pm_team=pm_team,
+                country=country,
+                question=question,
+                evidence_summary=evidence_summary,
+            )
+            answer_thinking_budget = self._thinking_budget_for_call(
+                role="answer",
+                budget_mode=routed_budget_mode,
+                budget=budget,
+                quality_gate=quality_gate,
+            )
+            if token_pressure == "tight":
+                answer_thinking_budget = 0
+            answer_thinking_budget = self._normalize_thinking_budget_for_provider(answer_thinking_budget)
+            answer_thinking_config = self._thinking_config_for_provider(
+                answer_thinking_budget,
+                model=selected_model,
+                role="answer",
+                budget_mode=routed_budget_mode,
+            )
+            llm_route = {
+                **llm_route,
+                "selected": routed_budget_mode,
+                "reason": f"{llm_route.get('reason') or ''},token_pressure_{token_pressure}".strip(","),
+                "original_budget": original_budget_mode,
+                "answer_model": selected_model,
+                "thinking_budget": answer_thinking_budget,
+                "thinking_config": answer_thinking_config,
+            }
+            prompt_context = self._build_compressed_llm_context(
+                evidence_summary,
+                quality_gate,
+                evidence_pack,
+                selected_matches,
+                domain_context=domain_context,
+                snippet_line_budget=budget["snippet_line_budget"],
+                snippet_char_budget=budget["snippet_char_budget"],
+                compact=True,
+            )
+            final_prompt_tokens = self._estimate_llm_tokens(
+                self._llm_user_prompt(pm_team=pm_team, country=country, question=question, context=prompt_context)
+            )
+        else:
+            final_prompt_tokens = initial_prompt_tokens
+        if token_pressure != "normal":
+            llm_route = {
+                **llm_route,
+                "token_pressure": {
+                    "status": token_pressure,
+                    "initial_estimated_prompt_tokens": initial_prompt_tokens,
+                    "final_estimated_prompt_tokens": final_prompt_tokens,
+                    "compact_threshold": LLM_PROMPT_COMPACT_THRESHOLD_TOKENS,
+                    "tight_threshold": LLM_PROMPT_TIGHT_THRESHOLD_TOKENS,
+                },
+            }
+        answer_max_output_tokens = int(budget["max_output_tokens"])
+        if routed_budget_mode == COMPACT_DEEP_BUDGET_MODE and token_pressure == "tight":
+            answer_max_output_tokens = max(answer_max_output_tokens, 2_400)
+        vertex_two_pass = self.llm_provider_name == LLM_PROVIDER_VERTEX_AI
         cache_key = self._answer_cache_key(
             provider=self.llm_provider.name,
             model=selected_model,
@@ -12836,7 +13754,7 @@ class SourceCodeQAService:
             llm_budget_mode=routed_budget_mode,
             context=prompt_context,
         )
-        cached = self._load_cached_answer(cache_key)
+        cached = None if vertex_two_pass else self._load_cached_answer(cache_key)
         if cached is not None:
             cached_answer = str(cached["answer"])
             cached_structured = self._parse_structured_answer(cached_answer)
@@ -12873,17 +13791,140 @@ class SourceCodeQAService:
                 "answer_contract": cached_final["answer_contract"],
                 "evidence_pack": evidence_pack,
             }
+        draft_answer = ""
+        draft_usage: dict[str, Any] = {}
+        draft_attempts = 0
+        draft_latency_ms = 0
+        draft_attempt_log: list[dict[str, Any]] = []
+        vertex_draft_check: dict[str, Any] | None = None
+        vertex_draft_claim_check: dict[str, Any] | None = None
+        vertex_draft_judge: dict[str, Any] | None = None
+        if vertex_two_pass:
+            draft_payload = {
+                "contents": [
+                    {
+                        "parts": [
+                            {
+                                "text": self._vertex_draft_prompt(
+                                    pm_team=pm_team,
+                                    country=country,
+                                    question=question,
+                                    context=prompt_context,
+                                )
+                            }
+                        ]
+                    }
+                ],
+                "systemInstruction": {
+                    "parts": [
+                        {
+                            "text": self._llm_system_instruction()
+                        }
+                    ]
+                },
+                "generationConfig": {
+                    "temperature": 0.1,
+                    "maxOutputTokens": max(1_800, min(answer_max_output_tokens, 3_600)),
+                    "thinkingConfig": answer_thinking_config,
+                },
+            }
+            draft_result = self.llm_provider.generate(
+                payload=draft_payload,
+                primary_model=selected_model,
+                fallback_model=self._llm_fallback_model(),
+            )
+            draft_answer = self.llm_provider.extract_text(draft_result.payload)
+            draft_usage = self._normalize_llm_usage(draft_result.usage or draft_result.payload.get("usageMetadata") or {})
+            draft_attempts = draft_result.attempts
+            draft_latency_ms = int(draft_result.latency_ms or 0)
+            draft_attempt_log = [dict(item) for item in draft_result.attempt_log]
+            vertex_draft_check = self._answer_self_check(question, draft_answer, evidence_summary, quality_gate)
+            vertex_draft_claim_check = self._verify_answer_claims(draft_answer, evidence_summary, selected_matches)
+            vertex_draft_judge = self._run_answer_judge(question, draft_answer, evidence_pack, vertex_draft_claim_check)
+            vertex_retry_matches = self._expand_answer_retry_matches(
+                entries=entries,
+                key=key,
+                question=question,
+                matches=matches,
+                draft_answer=draft_answer,
+                answer_check=vertex_draft_check,
+                claim_check=vertex_draft_claim_check,
+                answer_judge=vertex_draft_judge,
+                evidence_summary=evidence_summary,
+                quality_gate=quality_gate,
+                limit=int(budget["match_limit"]) + 10,
+                request_cache=request_cache,
+            )
+            if vertex_retry_matches:
+                retry_match_limit = int(budget["match_limit"]) + 6
+                selected_matches = self._select_llm_matches(vertex_retry_matches, retry_match_limit, question=question)
+                evidence_summary = self._compress_evidence_cached(question, selected_matches, request_cache=request_cache)
+                trace_paths = self._build_trace_paths(
+                    entries=entries,
+                    key=key,
+                    matches=selected_matches,
+                    question=question,
+                    request_cache=request_cache,
+                )
+                if trace_paths:
+                    evidence_summary["trace_paths"] = trace_paths
+                quality_gate = self._quality_gate_cached(question, evidence_summary, request_cache=request_cache)
+                evidence_pack = self._build_evidence_pack(
+                    question=question,
+                    evidence_summary=evidence_summary,
+                    matches=selected_matches,
+                    trace_paths=trace_paths,
+                    quality_gate=quality_gate,
+                )
+                domain_context = self._llm_domain_context(
+                    pm_team=pm_team,
+                    country=country,
+                    question=question,
+                    evidence_summary=evidence_summary,
+                )
+                prompt_context = self._build_compressed_llm_context(
+                    evidence_summary,
+                    quality_gate,
+                    evidence_pack,
+                    selected_matches,
+                    domain_context=domain_context,
+                    snippet_line_budget=min(int(budget["snippet_line_budget"]) + 120, 360),
+                    snippet_char_budget=min(int(budget["snippet_char_budget"]) + 24_000, 120_000),
+                )
+                llm_route = {
+                    **llm_route,
+                    "vertex_second_pass": True,
+                    "vertex_second_pass_match_count": len(selected_matches),
+                }
+            llm_route = {
+                **llm_route,
+                "vertex_two_pass": True,
+                "vertex_draft_model": draft_result.model,
+                "vertex_final_schema": True,
+            }
+            cache_key = self._answer_cache_key(
+                provider=self.llm_provider.name,
+                model=selected_model,
+                question=question,
+                answer_mode=requested_answer_mode,
+                llm_budget_mode=routed_budget_mode,
+                context=prompt_context,
+            )
+        final_prompt = self._llm_user_prompt(
+            pm_team=pm_team,
+            country=country,
+            question=question,
+            context=prompt_context,
+            self_check=vertex_draft_check if vertex_two_pass else None,
+        )
+        if vertex_two_pass:
+            final_prompt = self._vertex_final_prompt(final_prompt=final_prompt, draft_answer=draft_answer)
         payload = {
             "contents": [
                 {
                     "parts": [
                         {
-                            "text": self._llm_user_prompt(
-                                pm_team=pm_team,
-                                country=country,
-                                question=question,
-                                context=prompt_context,
-                            )
+                            "text": final_prompt
                         }
                     ]
                 }
@@ -12891,27 +13932,16 @@ class SourceCodeQAService:
             "systemInstruction": {
                 "parts": [
                     {
-                        "text": (
-                            "You are a codebase analyst for an internal portal. "
-                            "Answer only from the provided retrieval evidence. "
-                            "Treat the compressed evidence facts as the primary signal, and snippets as secondary grounding. "
-                            "Follow the supplied domain guidance and answer blueprint, but never let domain hints override code evidence. "
-                            "Never upgrade DTO/carrier evidence into a final data source. "
-                            "Avoid speculative language such as likely, suggests, or appears unless explicitly marking missing evidence. "
-                            "Prioritize answering the user's actual question directly and accurately. "
-                            "Do not dump ranked references, but do cite concrete claims with provided citation ids. "
-                            "If the evidence is insufficient for a confident answer, say what is missing and give the best next question to ask. "
-                            "Keep the answer concise, practical, and business-readable."
-                        )
+                        "text": self._llm_system_instruction()
                     }
                 ]
             },
             "generationConfig": {
                 "temperature": 0.2,
-                "maxOutputTokens": budget["max_output_tokens"],
+                "maxOutputTokens": answer_max_output_tokens,
                 "responseMimeType": "application/json",
                 "responseSchema": self._llm_answer_response_schema(),
-                "thinkingConfig": self._thinking_config_for_provider(answer_thinking_budget),
+                "thinkingConfig": answer_thinking_config,
             },
         }
         result = self.llm_provider.generate(
@@ -12921,14 +13951,16 @@ class SourceCodeQAService:
         )
         answer = self.llm_provider.extract_text(result.payload)
         structured_answer = self._parse_structured_answer(answer)
-        usage = self._normalize_llm_usage(result.usage or result.payload.get("usageMetadata") or {})
+        result_usage = self._normalize_llm_usage(result.usage or result.payload.get("usageMetadata") or {})
+        usage = self._merge_llm_usage(draft_usage, result_usage) if vertex_two_pass else result_usage
         effective_model = result.model
-        attempts = result.attempts
-        llm_latency_ms = int(result.latency_ms or 0)
-        llm_attempt_log = [dict(item) for item in result.attempt_log]
+        attempts = draft_attempts + result.attempts
+        llm_latency_ms = draft_latency_ms + int(result.latency_ms or 0)
+        llm_attempt_log = [*draft_attempt_log, *[dict(item) for item in result.attempt_log]]
         finish_reason = self._llm_finish_reason(result.payload)
         answer_check = self._answer_self_check(question, answer, evidence_summary, quality_gate)
-        if finish_reason.upper() in {"MAX_TOKENS", "SAFETY", "RECITATION"} or finish_reason.lower() in {"length", "content_filter"}:
+        token_limited_generation = self._finish_reason_is_token_limited(finish_reason)
+        if self._finish_reason_needs_generation_repair(finish_reason):
             issues = list(answer_check.get("issues") or [])
             issues.append(f"model finish reason requires repair: {finish_reason}")
             answer_check = {"status": "retry", "issues": list(dict.fromkeys(issues))}
@@ -12943,18 +13975,26 @@ class SourceCodeQAService:
             issues.extend(answer_judge.get("issues") or [])
             answer_check = {"status": "retry", "issues": list(dict.fromkeys(issues))}
         if answer_check.get("status") == "retry":
-            retry_matches = self._expand_answer_retry_matches(
-                entries=entries,
-                key=key,
-                question=question,
-                matches=matches,
-                evidence_summary=evidence_summary,
-                quality_gate=quality_gate,
-                limit=int(budget["match_limit"]) + 6,
-                request_cache=request_cache,
-            )
+            if token_limited_generation:
+                retry_matches = selected_matches[: max(4, min(int(budget["match_limit"]), 8))]
+            else:
+                retry_matches = self._expand_answer_retry_matches(
+                    entries=entries,
+                    key=key,
+                    question=question,
+                    matches=matches,
+                    draft_answer=answer,
+                    answer_check=answer_check,
+                    claim_check=claim_check,
+                    answer_judge=answer_judge,
+                    evidence_summary=evidence_summary,
+                    quality_gate=quality_gate,
+                    limit=int(budget["match_limit"]) + 6,
+                    request_cache=request_cache,
+                )
             if retry_matches:
-                retry_selected_matches = self._select_llm_matches(retry_matches, int(budget["match_limit"]) + 4, question=question)
+                retry_match_limit = max(4, min(int(budget["match_limit"]), 8)) if token_limited_generation else int(budget["match_limit"]) + 4
+                retry_selected_matches = self._select_llm_matches(retry_matches, retry_match_limit, question=question)
                 retry_evidence_summary = self._compress_evidence_cached(question, retry_selected_matches, request_cache=request_cache)
                 retry_trace_paths = self._build_trace_paths(
                     entries=entries,
@@ -12979,14 +14019,21 @@ class SourceCodeQAService:
                     question=question,
                     evidence_summary=retry_evidence_summary,
                 )
+                if self.llm_provider_name == LLM_PROVIDER_VERTEX_AI and not token_limited_generation:
+                    retry_snippet_line_budget = min(int(budget["snippet_line_budget"]) + 100, 320)
+                    retry_snippet_char_budget = min(int(budget["snippet_char_budget"]) + 16_000, 100_000)
+                else:
+                    retry_snippet_line_budget = 45 if token_limited_generation else min(int(budget["snippet_line_budget"]) + 60, 180)
+                    retry_snippet_char_budget = 6_000 if token_limited_generation else min(int(budget["snippet_char_budget"]) + 8000, 28_000)
                 retry_context = self._build_compressed_llm_context(
                     retry_evidence_summary,
                     retry_quality_gate,
                     retry_evidence_pack,
                     retry_selected_matches,
                     domain_context=retry_domain_context,
-                    snippet_line_budget=min(int(budget["snippet_line_budget"]) + 60, 180),
-                    snippet_char_budget=min(int(budget["snippet_char_budget"]) + 8000, 28_000),
+                    snippet_line_budget=retry_snippet_line_budget,
+                    snippet_char_budget=retry_snippet_char_budget,
+                    compact=token_limited_generation,
                 )
                 retry_payload = dict(payload)
                 retry_thinking_budget = self._thinking_budget_for_call(
@@ -12996,11 +14043,21 @@ class SourceCodeQAService:
                     quality_gate=retry_quality_gate,
                     retry=True,
                 )
-                retry_thinking_budget = self._normalize_thinking_budget_for_provider(retry_thinking_budget)
+                retry_thinking_budget = 0 if token_limited_generation else self._normalize_thinking_budget_for_provider(retry_thinking_budget)
+                retry_model = self._model_for_role_or_budget("repair", self.llm_budgets.get("deep") or budget)
+                if self.llm_provider_name == LLM_PROVIDER_VERTEX_AI:
+                    retry_max_output_tokens = 2_400 if token_limited_generation else min(max(int(budget["max_output_tokens"]) + 800, 3_200), 5_600)
+                else:
+                    retry_max_output_tokens = 2_400 if token_limited_generation else min(max(int(budget["max_output_tokens"]) + 500, 900), 1_600)
                 retry_payload["generationConfig"] = {
                     **payload["generationConfig"],
-                    "maxOutputTokens": min(max(int(budget["max_output_tokens"]) + 500, 900), 1_600),
-                    "thinkingConfig": self._thinking_config_for_provider(retry_thinking_budget),
+                    "maxOutputTokens": retry_max_output_tokens,
+                    "thinkingConfig": self._thinking_config_for_provider(
+                        retry_thinking_budget,
+                        model=retry_model,
+                        role="repair",
+                        budget_mode="deep",
+                    ),
                 }
                 retry_payload["contents"] = [
                     {
@@ -13019,14 +14076,14 @@ class SourceCodeQAService:
                 ]
                 retry_result = self.llm_provider.generate(
                     payload=retry_payload,
-                    primary_model=self._model_for_role_or_budget("repair", self.llm_budgets.get("deep") or budget),
+                    primary_model=retry_model,
                     fallback_model=self._llm_fallback_model(),
                 )
                 retry_answer = self.llm_provider.extract_text(retry_result.payload)
                 retry_structured_answer = self._parse_structured_answer(retry_answer)
                 retry_finish_reason = self._llm_finish_reason(retry_result.payload)
                 retry_check = self._answer_self_check(question, retry_answer, retry_evidence_summary, retry_quality_gate)
-                if retry_finish_reason.upper() in {"MAX_TOKENS", "SAFETY", "RECITATION"} or retry_finish_reason.lower() in {"length", "content_filter"}:
+                if self._finish_reason_needs_generation_repair(retry_finish_reason):
                     issues = list(retry_check.get("issues") or [])
                     issues.append(f"model finish reason requires caution: {retry_finish_reason}")
                     retry_check = {"status": "retry", "issues": list(dict.fromkeys(issues))}
@@ -13109,6 +14166,487 @@ class SourceCodeQAService:
             "evidence_pack": evidence_pack,
         }
 
+    def _build_codex_llm_answer(
+        self,
+        *,
+        entries: list[RepositoryEntry],
+        key: str,
+        pm_team: str,
+        country: str,
+        question: str,
+        matches: list[dict[str, Any]],
+        selected_matches: list[dict[str, Any]],
+        evidence_summary: dict[str, Any],
+        quality_gate: dict[str, Any],
+        evidence_pack: dict[str, Any],
+        llm_budget_mode: str,
+        routed_budget_mode: str,
+        budget: dict[str, Any],
+        llm_route: dict[str, Any],
+        selected_model: str,
+        followup_context: dict[str, Any] | None,
+        requested_answer_mode: str,
+    ) -> dict[str, Any]:
+        candidate_matches = self._select_llm_matches(
+            matches,
+            self.codex_top_path_limit,
+            question=question,
+        )
+        if not candidate_matches:
+            candidate_matches = selected_matches
+        candidate_paths = self._codex_candidate_paths(entries=entries, key=key, matches=candidate_matches)
+        llm_route = {
+            **llm_route,
+            "answer_model": selected_model,
+            "prompt_mode": CODEX_INVESTIGATION_PROMPT_MODE,
+            "candidate_paths": candidate_paths,
+            "candidate_repo_count": len({item.get("repo") for item in candidate_paths}),
+            "candidate_path_count": len(candidate_paths),
+            "codex_repair_enabled": self.codex_repair_enabled,
+        }
+        prompt_context = self._codex_investigation_brief(
+            pm_team=pm_team,
+            country=country,
+            question=question,
+            candidate_paths=candidate_paths,
+            evidence_pack=evidence_pack,
+            quality_gate=quality_gate,
+            followup_context=followup_context,
+        )
+        cache_key = self._answer_cache_key(
+            provider=self.llm_provider.name,
+            model=selected_model,
+            question=question,
+            answer_mode=requested_answer_mode,
+            llm_budget_mode=routed_budget_mode,
+            context=prompt_context,
+        )
+        cached = self._load_cached_answer(cache_key)
+        if cached is not None:
+            cached_answer = str(cached["answer"])
+            cached_structured = self._parse_structured_answer(cached_answer)
+            cached_claim_check = self._verify_answer_claims(cached_answer, evidence_summary, candidate_matches)
+            cached_validation = self._validate_codex_citations(cached_answer, candidate_paths, candidate_matches)
+            cached_claim_check = self._merge_codex_validation(cached_claim_check, cached_validation)
+            cached_judge = self._run_answer_judge(question, cached_answer, evidence_pack, cached_claim_check)
+            cached_final = self._finalize_llm_answer(
+                question=question,
+                answer=cached_answer,
+                structured_answer=cached_structured,
+                evidence_summary=evidence_summary,
+                quality_gate=cached.get("answer_quality") or quality_gate,
+                claim_check=cached_claim_check,
+                answer_judge=cached_judge,
+                finish_reason=cached.get("finish_reason") or "cache_hit",
+                selected_matches=candidate_matches,
+            )
+            answer_contract = cached_final["answer_contract"]
+            if cached_validation.get("status") != "ok":
+                answer_contract = self._mark_codex_answer_unreliable(answer_contract, cached_validation)
+            return {
+                "llm_answer": cached_final["answer"],
+                "llm_budget_mode": routed_budget_mode,
+                "llm_requested_budget_mode": llm_budget_mode,
+                "llm_route": llm_route,
+                "llm_provider": cached.get("provider") or self.llm_provider.name,
+                "llm_model": cached.get("model") or selected_model,
+                "llm_cached": True,
+                "llm_usage": self._normalize_llm_usage(cached.get("usage") or {}),
+                "llm_thinking_budget": 0,
+                "llm_latency_ms": 0,
+                "llm_attempts": 0,
+                "llm_attempt_log": [],
+                "llm_finish_reason": cached.get("finish_reason") or "cache_hit",
+                "answer_quality": cached.get("answer_quality") or quality_gate,
+                "answer_claim_check": cached_claim_check,
+                "answer_judge": cached_judge,
+                "structured_answer": cached_final["structured_answer"],
+                "answer_contract": answer_contract,
+                "evidence_pack": evidence_pack,
+            }
+        payload = self._codex_payload(prompt_context)
+        result = self.llm_provider.generate(
+            payload=payload,
+            primary_model=selected_model,
+            fallback_model=self._llm_fallback_model(),
+        )
+        answer = self.llm_provider.extract_text(result.payload)
+        structured_answer = self._parse_structured_answer(answer)
+        usage = self._normalize_llm_usage(result.usage or result.payload.get("usageMetadata") or {})
+        effective_model = result.model
+        attempts = result.attempts
+        llm_latency_ms = int(result.latency_ms or 0)
+        llm_attempt_log = [dict(item) for item in result.attempt_log]
+        finish_reason = self._llm_finish_reason(result.payload)
+        claim_check = self._verify_answer_claims(answer, evidence_summary, candidate_matches)
+        codex_validation = self._validate_codex_citations(answer, candidate_paths, candidate_matches)
+        claim_check = self._merge_codex_validation(claim_check, codex_validation)
+        answer_judge = self._run_answer_judge(question, answer, evidence_pack, claim_check)
+        repair_attempted = False
+        if self.codex_repair_enabled and codex_validation.get("status") != "ok":
+            repair_attempted = True
+            repair_payload = self._codex_payload(
+                self._codex_investigation_brief(
+                    pm_team=pm_team,
+                    country=country,
+                    question=question,
+                    candidate_paths=candidate_paths,
+                    evidence_pack=evidence_pack,
+                    quality_gate=quality_gate,
+                    followup_context=followup_context,
+                    repair_issues=codex_validation.get("issues") or [],
+                )
+            )
+            repair_result = self.llm_provider.generate(
+                payload=repair_payload,
+                primary_model=selected_model,
+                fallback_model=self._llm_fallback_model(),
+            )
+            repair_answer = self.llm_provider.extract_text(repair_result.payload)
+            repair_structured = self._parse_structured_answer(repair_answer)
+            repair_validation = self._validate_codex_citations(repair_answer, candidate_paths, candidate_matches)
+            repair_claim_check = self._merge_codex_validation(
+                self._verify_answer_claims(repair_answer, evidence_summary, candidate_matches),
+                repair_validation,
+            )
+            repair_judge = self._run_answer_judge(question, repair_answer, evidence_pack, repair_claim_check)
+            answer = repair_answer
+            structured_answer = repair_structured
+            codex_validation = repair_validation
+            claim_check = repair_claim_check
+            answer_judge = repair_judge
+            usage = self._merge_llm_usage(
+                usage,
+                self._normalize_llm_usage(repair_result.usage or repair_result.payload.get("usageMetadata") or {}),
+            )
+            effective_model = repair_result.model
+            attempts += repair_result.attempts
+            llm_latency_ms += int(repair_result.latency_ms or 0)
+            llm_attempt_log.extend(dict(item) for item in repair_result.attempt_log)
+            finish_reason = self._llm_finish_reason(repair_result.payload)
+        final = self._finalize_llm_answer(
+            question=question,
+            answer=answer,
+            structured_answer=structured_answer,
+            evidence_summary=evidence_summary,
+            quality_gate=quality_gate,
+            claim_check=claim_check,
+            answer_judge=answer_judge,
+            finish_reason=finish_reason,
+            selected_matches=candidate_matches,
+        )
+        answer_contract = final["answer_contract"]
+        if codex_validation.get("status") != "ok":
+            answer_contract = self._mark_codex_answer_unreliable(answer_contract, codex_validation)
+        llm_route = {
+            **llm_route,
+            "codex_citation_validation_status": codex_validation.get("status"),
+            "codex_repair_attempted": repair_attempted,
+            "codex_cited_path_count": codex_validation.get("cited_path_count", 0),
+        }
+        if codex_validation.get("status") == "ok":
+            self._store_cached_answer(
+                cache_key,
+                answer=final["answer"],
+                usage=usage,
+                answer_quality=quality_gate,
+                provider=self.llm_provider.name,
+                model=effective_model,
+                thinking_budget=0,
+                finish_reason=finish_reason,
+            )
+        return {
+            "llm_answer": final["answer"],
+            "llm_budget_mode": routed_budget_mode,
+            "llm_requested_budget_mode": llm_budget_mode,
+            "llm_route": llm_route,
+            "llm_provider": self.llm_provider.name,
+            "llm_cached": False,
+            "llm_usage": usage,
+            "llm_model": effective_model,
+            "llm_thinking_budget": 0,
+            "llm_attempts": attempts,
+            "llm_latency_ms": llm_latency_ms,
+            "llm_attempt_log": llm_attempt_log,
+            "llm_finish_reason": finish_reason,
+            "answer_quality": quality_gate,
+            "answer_self_check": self._answer_self_check(question, answer, evidence_summary, quality_gate),
+            "answer_claim_check": claim_check,
+            "answer_judge": answer_judge,
+            "structured_answer": final["structured_answer"],
+            "answer_contract": answer_contract,
+            "evidence_pack": evidence_pack,
+        }
+
+    def _codex_payload(self, prompt: str) -> dict[str, Any]:
+        return {
+            "codex_prompt_mode": CODEX_INVESTIGATION_PROMPT_MODE,
+            "contents": [{"parts": [{"text": prompt}]}],
+            "systemInstruction": {"parts": [{"text": self._codex_system_instruction()}]},
+            "generationConfig": {"temperature": 0.1, "responseMimeType": "application/json"},
+        }
+
+    @staticmethod
+    def _codex_system_instruction() -> str:
+        return (
+            "You are Codex running as a read-only code investigator for Source Code Q&A. "
+            "Use shell/file inspection to verify the answer from the synced repository workspace. "
+            "Do not edit files, install dependencies, create commits, deploy, or run mutating commands. "
+            "Prefer rg, sed, nl, and direct file reads. "
+            "Return concise JSON with direct_answer, claims, missing_evidence, and confidence. "
+            "Every concrete code claim must cite either an evidence id like S1 or a real file reference like path/to/File.java:10-20."
+        )
+
+    def _codex_candidate_paths(
+        self,
+        *,
+        entries: list[RepositoryEntry],
+        key: str,
+        matches: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        entries_by_name = {entry.display_name: entry for entry in entries}
+        fallback_entry = entries[0] if len(entries) == 1 else None
+        rows: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for index, match in enumerate(matches, start=1):
+            repo = str(match.get("repo") or "").strip()
+            path = str(match.get("path") or "").strip()
+            if not path:
+                continue
+            entry = entries_by_name.get(repo) or fallback_entry
+            repo_root = self._repo_path(key, entry) if entry is not None else self.repo_root
+            row_key = (repo, path)
+            if row_key in seen:
+                continue
+            seen.add(row_key)
+            rows.append(
+                {
+                    "id": f"S{len(rows) + 1}",
+                    "repo": repo or (entry.display_name if entry else ""),
+                    "repo_root": str(repo_root),
+                    "path": path,
+                    "absolute_path": str((repo_root / path).resolve()),
+                    "line_start": match.get("line_start"),
+                    "line_end": match.get("line_end"),
+                    "retrieval": match.get("retrieval") or "file_scan",
+                    "trace_stage": match.get("trace_stage") or "direct",
+                    "reason": str(match.get("reason") or "")[:500],
+                }
+            )
+        return rows
+
+    def _codex_investigation_brief(
+        self,
+        *,
+        pm_team: str,
+        country: str,
+        question: str,
+        candidate_paths: list[dict[str, Any]],
+        evidence_pack: dict[str, Any],
+        quality_gate: dict[str, Any],
+        followup_context: dict[str, Any] | None,
+        repair_issues: list[str] | None = None,
+    ) -> str:
+        lines = [
+            f"Prompt mode: {CODEX_INVESTIGATION_PROMPT_MODE}",
+            f"PM Team: {pm_team}",
+            f"Country: {country}",
+            f"Question: {question}",
+            "",
+            "Execution policy:",
+            "- Use only read-only shell/file inspection inside the synced repository workspace.",
+            "- Local retrieval has only narrowed the candidate repo/path range; verify by opening files yourself.",
+            "- Do not write files, run formatters, install packages, commit, push, deploy, or mutate runtime state.",
+            "- Prefer `rg`, `sed -n`, `nl -ba`, and direct file reads.",
+            "",
+            "Candidate repository workspaces and top paths:",
+        ]
+        for item in candidate_paths[: self.codex_top_path_limit]:
+            lines.extend(
+                [
+                    (
+                        f"- {item.get('id')} repo={item.get('repo')} root={item.get('repo_root')} "
+                        f"path={item.get('path')} lines={item.get('line_start')}-{item.get('line_end')}"
+                    ),
+                    f"  retrieval={item.get('retrieval')} trace_stage={item.get('trace_stage')} reason={item.get('reason')}",
+                ]
+            )
+        if followup_context:
+            lines.extend(["", "Follow-up context:"])
+            for label, key_name in (
+                ("Previous question", "question"),
+                ("Previous answer", "answer"),
+                ("Previous rendered answer", "rendered_answer"),
+                ("Previous summary", "summary"),
+                ("Previous trace id", "trace_id"),
+            ):
+                value = str(followup_context.get(key_name) or "").strip()
+                if value:
+                    lines.append(f"- {label}: {value[:900]}")
+            prior_paths = []
+            for match in followup_context.get("matches_snapshot") or []:
+                if isinstance(match, dict) and match.get("path"):
+                    prior_paths.append(f"{match.get('repo')}:{match.get('path')}:{match.get('line_start')}-{match.get('line_end')}")
+            if prior_paths:
+                lines.append(f"- Prior cited paths: {', '.join(prior_paths[:8])}")
+            prior_pack = followup_context.get("evidence_pack") or {}
+            if isinstance(prior_pack, dict):
+                summary_bits = []
+                for key_name in ("entry_points", "call_chain", "read_write_points", "tables", "apis", "missing_hops"):
+                    values = prior_pack.get(key_name) or []
+                    if values:
+                        summary_bits.append(f"{key_name}={values[:3]}")
+                if summary_bits:
+                    lines.append(f"- Prior evidence summary: {'; '.join(summary_bits)[:1200]}")
+            lines.append("- Treat this as a follow-up unless the current question clearly redirects scope.")
+        if repair_issues:
+            lines.extend(["", "Repair required before final answer:"])
+            lines.extend(f"- {issue}" for issue in repair_issues[:8])
+            lines.append("- Re-open the files as needed and return claims with valid citations.")
+        lines.extend(["", "Evidence pack navigation hints:"])
+        for key_name in ("entry_points", "call_chain", "read_write_points", "tables", "apis", "configs", "missing_hops"):
+            values = evidence_pack.get(key_name) or []
+            if values:
+                lines.append(f"- {key_name}: {values[:6]}")
+        lines.append(f"- Quality gate: {quality_gate.get('status')} confidence={quality_gate.get('confidence')} missing={quality_gate.get('missing') or []}")
+        lines.extend(
+            [
+                "",
+                "Final answer contract:",
+                '- Return JSON: {"direct_answer":"...","claims":[{"text":"...","citations":["S1"]}],"missing_evidence":[],"confidence":"high|medium|low"}.',
+                "- Use S ids from candidate paths when they support the claim, or direct file citations like src/Foo.java:10-20 after you verify the file exists.",
+                "- If evidence is missing, state the missing link instead of guessing.",
+            ]
+        )
+        return "\n".join(lines)
+
+    def _merge_codex_validation(self, claim_check: dict[str, Any], validation: dict[str, Any]) -> dict[str, Any]:
+        merged = dict(claim_check or {})
+        merged["codex_citation_validation"] = validation
+        if validation.get("status") != "ok":
+            issues = [*(merged.get("issues") or []), *(validation.get("issues") or [])]
+            merged["issues"] = list(dict.fromkeys(str(issue) for issue in issues if issue))
+            merged["status"] = "needs_citation"
+            unsupported = list(merged.get("unsupported_claims") or [])
+            unsupported.extend(validation.get("unsupported_claims") or [])
+            merged["unsupported_claims"] = list(dict.fromkeys(unsupported))[:8]
+        return merged
+
+    @staticmethod
+    def _mark_codex_answer_unreliable(answer_contract: dict[str, Any], validation: dict[str, Any]) -> dict[str, Any]:
+        contract = dict(answer_contract or {})
+        contract["status"] = "unreliable_llm_answer"
+        contract["confidence"] = "low"
+        contract["codex_citation_validation"] = validation
+        return contract
+
+    def _validate_codex_citations(
+        self,
+        answer: str,
+        candidate_paths: list[dict[str, Any]],
+        selected_matches: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        structured = self._parse_structured_answer(answer)
+        claims = [
+            claim for claim in structured.get("claims") or []
+            if isinstance(claim, dict) and str(claim.get("text") or "").strip()
+        ]
+        valid_s_ids = {str(index) for index in range(1, len(selected_matches) + 1)}
+        issues: list[str] = []
+        unsupported_claims: list[str] = []
+        direct_refs: list[dict[str, Any]] = []
+        checked_claims = 0
+        for claim in claims:
+            claim_text = str(claim.get("text") or "").strip()
+            lowered = claim_text.lower()
+            concrete = any(term in lowered for term in ANSWER_CONCRETE_SOURCE_HINTS + API_HINTS + CONFIG_HINTS + RULE_HINTS)
+            if not concrete:
+                continue
+            checked_claims += 1
+            s_ids = self._claim_citation_numbers(claim_text, claim)
+            direct_candidates = [
+                str(item or "").strip()
+                for item in claim.get("citations") or []
+                if str(item or "").strip() and not re.fullmatch(r"\[?S?\d+\]?", str(item or "").strip(), flags=re.IGNORECASE)
+            ]
+            direct_candidates.extend(self._extract_direct_file_refs(claim_text))
+            if s_ids and not s_ids <= valid_s_ids:
+                issues.append("Codex cited evidence ids outside the candidate path list")
+            valid_s = s_ids & valid_s_ids
+            valid_direct = []
+            invalid_direct = []
+            for raw_ref in direct_candidates:
+                resolved = self._resolve_codex_file_ref(raw_ref, candidate_paths)
+                if resolved.get("status") == "ok":
+                    valid_direct.append(resolved)
+                else:
+                    invalid_direct.append(raw_ref)
+            direct_refs.extend(valid_direct)
+            if invalid_direct:
+                issues.append(f"Codex returned invalid file references: {', '.join(invalid_direct[:4])}")
+            if not valid_s and not valid_direct:
+                unsupported_claims.append(claim_text[:220])
+        if unsupported_claims:
+            issues.append("Codex concrete claims need valid S-id or file:line citations")
+        return {
+            "status": "ok" if not issues else "needs_citation",
+            "checked_claims": checked_claims,
+            "issues": list(dict.fromkeys(issues)),
+            "unsupported_claims": unsupported_claims[:6],
+            "cited_path_count": len({item.get("absolute_path") for item in direct_refs if item.get("absolute_path")}),
+            "direct_file_refs": direct_refs[:12],
+        }
+
+    @staticmethod
+    def _extract_direct_file_refs(text: str) -> list[str]:
+        refs = []
+        for match in re.finditer(r"([A-Za-z0-9_./$@-]+\.[A-Za-z0-9_]+:\d+(?:-\d+)?)", str(text or "")):
+            refs.append(match.group(1))
+        return refs
+
+    def _resolve_codex_file_ref(self, raw_ref: str, candidate_paths: list[dict[str, Any]]) -> dict[str, Any]:
+        ref = str(raw_ref or "").strip().strip("[]`'\"")
+        match = re.match(r"^(?:(?P<repo>[^:]+):)?(?P<path>.+):(?P<start>\d+)(?:-(?P<end>\d+))?$", ref)
+        if not match:
+            return {"status": "invalid", "reason": "missing file line range", "ref": ref}
+        path = match.group("path").strip()
+        start = int(match.group("start"))
+        end = int(match.group("end") or start)
+        if start <= 0 or end < start:
+            return {"status": "invalid", "reason": "invalid line range", "ref": ref}
+        if path.startswith("/") or ".." in Path(path).parts:
+            return {"status": "invalid", "reason": "unsafe path", "ref": ref}
+        repo_hint = str(match.group("repo") or "").strip()
+        repo_roots = []
+        for item in candidate_paths:
+            if repo_hint and repo_hint not in {str(item.get("repo") or ""), Path(str(item.get("repo_root") or "")).name}:
+                continue
+            root = str(item.get("repo_root") or "").strip()
+            if root and root not in repo_roots:
+                repo_roots.append(root)
+        for root in repo_roots:
+            candidate = (Path(root) / path).resolve()
+            try:
+                candidate.relative_to(Path(root).resolve())
+            except ValueError:
+                continue
+            if not candidate.exists() or not candidate.is_file():
+                continue
+            try:
+                line_count = len(candidate.read_text(encoding="utf-8", errors="ignore").splitlines())
+            except OSError:
+                continue
+            if end <= line_count:
+                return {
+                    "status": "ok",
+                    "ref": ref,
+                    "path": path,
+                    "absolute_path": str(candidate),
+                    "line_start": start,
+                    "line_end": end,
+                }
+        return {"status": "invalid", "reason": "file or line range not found", "ref": ref}
+
     def _resolve_llm_budget(
         self,
         requested_budget_mode: str,
@@ -13117,6 +14655,13 @@ class SourceCodeQAService:
     ) -> tuple[str, dict[str, Any], dict[str, Any]]:
         requested = str(requested_budget_mode or "auto").strip().lower() or "auto"
         if requested in self.llm_budgets:
+            if self.llm_provider_name == LLM_PROVIDER_VERTEX_AI and requested == "cheap":
+                return "balanced", self.llm_budgets["balanced"], {
+                    "mode": "provider_quality_floor",
+                    "requested": requested,
+                    "selected": "balanced",
+                    "reason": "vertex_quality_floor",
+                }
             return requested, self.llm_budgets[requested], {"mode": "manual", "requested": requested, "reason": "user_selected"}
         intent = self._question_intent(question)
         trace_stages = {str(match.get("trace_stage") or "") for match in matches}
@@ -13124,6 +14669,21 @@ class SourceCodeQAService:
         lowered_question = str(question or "").lower()
         simple_lookup = self._is_simple_symbol_lookup_question(question)
         deep_reasons: list[str] = []
+        if self.llm_provider_name == LLM_PROVIDER_VERTEX_AI:
+            if intent.get("data_source"):
+                deep_reasons.append("data_source_trace")
+            if any(intent.get(key) for key in ("error", "impact_analysis", "module_dependency", "message_flow", "test_coverage", "operational_boundary", "static_qa")):
+                deep_reasons.append("vertex_complex_code_reasoning")
+            if "root cause" in lowered_question or "why" in lowered_question or "cross-repo" in lowered_question:
+                deep_reasons.append("root_cause_or_cross_repo")
+            if not simple_lookup and (len(matches) >= 8 or {"flow_graph", "entity_graph", "code_graph"} & retrievals):
+                deep_reasons.append("vertex_large_evidence_bundle")
+            if deep_reasons:
+                mode = "deep"
+            else:
+                mode = "balanced"
+                deep_reasons.append("vertex_quality_default")
+            return mode, self.llm_budgets[mode], {"mode": "auto", "requested": requested, "selected": mode, "reason": ",".join(deep_reasons)}
         if intent.get("data_source"):
             deep_reasons.append("data_source_trace")
         if intent.get("error") or "root cause" in lowered_question or "why" in lowered_question:
@@ -13225,9 +14785,11 @@ class SourceCodeQAService:
         domain_context: str = "",
         snippet_line_budget: int,
         snippet_char_budget: int,
+        compact: bool = False,
     ) -> str:
+        vertex_native = self.llm_provider_name == LLM_PROVIDER_VERTEX_AI
         sections = [
-            "Compressed evidence facts:",
+            "Evidence summary and guardrails:",
             f"- Quality gate: {quality_gate.get('status')} / confidence={quality_gate.get('confidence')} / missing={', '.join(quality_gate.get('missing') or []) or 'none'}",
         ]
         if domain_context:
@@ -13240,12 +14802,24 @@ class SourceCodeQAService:
                 sections.append(
                     f"  - {policy.get('name')}: {policy.get('status')} / required_any={', '.join(policy.get('required_any') or [])}"
                 )
+        snippet_context = self._build_llm_context(
+            matches,
+            snippet_line_budget=max(8, min(int(snippet_line_budget or 40), 320 if vertex_native else 180)),
+            snippet_char_budget=max(1200, min(int(snippet_char_budget or 5000), 100_000 if vertex_native else 28_000)),
+        )
+        if snippet_context and vertex_native:
+            sections.append("\nPrimary raw code evidence:")
+            sections.append(
+                "Use these snippets as the source of truth. The structured facts below are navigation hints, not a substitute for the code."
+            )
+            sections.append(snippet_context)
         if evidence_pack:
             sections.append(f"- Evidence pack v{evidence_pack.get('version')}:")
             typed_items = evidence_pack.get("items") or []
             if typed_items:
                 sections.append("  - Typed evidence items:")
-                for item in typed_items[:12]:
+                typed_limit = 6 if compact else 12
+                for item in typed_items[:typed_limit]:
                     location = ""
                     if item.get("source_id"):
                         location = f" [{item.get('source_id')}]"
@@ -13269,7 +14843,8 @@ class SourceCodeQAService:
                 values = evidence_pack.get(key) or []
                 if values:
                     sections.append(f"  - {label}:")
-                    for value in values[:8]:
+                    value_limit = 4 if compact else 8
+                    for value in values[:value_limit]:
                         sections.append(f"    - {value}")
         for label, key in (
             ("Entry points", "entry_points"),
@@ -13287,25 +14862,50 @@ class SourceCodeQAService:
             values = evidence_summary.get(key) or []
             if values:
                 sections.append(f"- {label}:")
-                sections.extend(f"  - {value}" for value in values[:10])
+                value_limit = 4 if compact else 10
+                sections.extend(f"  - {value}" for value in values[:value_limit])
         trace_paths = evidence_summary.get("trace_paths") or []
         if trace_paths:
             sections.append("- Trace paths:")
-            for path in trace_paths[:5]:
+            path_limit = 2 if compact else 5
+            for path in trace_paths[:path_limit]:
                 edge_text = " -> ".join(
                     f"{edge.get('edge_kind')}:{edge.get('to_name') or edge.get('to_file')}"
                     for edge in path.get("edges") or []
                 )
                 sections.append(f"  - {path.get('repo')}: {edge_text}")
-        snippet_context = self._build_llm_context(
-            matches,
-            snippet_line_budget=max(8, min(int(snippet_line_budget or 40), 180)),
-            snippet_char_budget=max(1200, min(int(snippet_char_budget or 5000), 28_000)),
-        )
-        if snippet_context:
+        if snippet_context and not vertex_native:
             sections.append("\nSecondary raw snippets for grounding:")
             sections.append(snippet_context)
         return "\n".join(sections)
+
+    def _llm_system_instruction(self) -> str:
+        if self.llm_provider_name == LLM_PROVIDER_VERTEX_AI:
+            return (
+                "You are a senior codebase analyst for an internal portal. "
+                "Answer only from the provided retrieval evidence. "
+                "Use primary raw code evidence as the source of truth, and use structured facts only to navigate, group, and verify the code. "
+                "Do not let compressed facts override a raw snippet. "
+                "Reason through call flow, data flow, and configuration links when the evidence supports it. "
+                "Never upgrade DTO/carrier evidence into a final data source. "
+                "Avoid speculative language such as likely, suggests, or appears unless explicitly marking missing evidence. "
+                "Prioritize the user's actual question, give the direct answer first, and keep the final response concise. "
+                "Use short citation tags for concrete code-backed claims. "
+                "Keep the final answer compact, but do not omit evidence that is necessary to answer the question. "
+                "If the evidence is insufficient for a confident answer, say exactly what is missing and the closest confirmed flow."
+            )
+        return (
+            "You are a codebase analyst for an internal portal. "
+            "Answer only from the provided retrieval evidence. "
+            "Treat the compressed evidence facts as the primary signal, and snippets as secondary grounding. "
+            "Follow the supplied domain guidance and answer blueprint, but never let domain hints override code evidence. "
+            "Never upgrade DTO/carrier evidence into a final data source. "
+            "Avoid speculative language such as likely, suggests, or appears unless explicitly marking missing evidence. "
+            "Prioritize answering the user's actual question directly and accurately. "
+            "Do not dump ranked references, but do cite concrete claims with provided citation ids. "
+            "If the evidence is insufficient for a confident answer, say what is missing and give the best next question to ask. "
+            "Keep the answer concise, practical, and business-readable."
+        )
 
     @staticmethod
     def _llm_user_prompt(
@@ -13337,7 +14937,7 @@ class SourceCodeQAService:
             "If a short prose answer is more appropriate, still keep citation tags on concrete claims.\n"
             "- Start with the direct answer.\n"
             "- Prefer agent trace and two-hop trace evidence when it clarifies downstream service, integration, repository, mapper, API, or table usage.\n"
-            "- Use compressed facts first; only use raw snippets to verify or disambiguate.\n"
+            "- Treat raw code snippets as the source of truth when they are provided as primary evidence; use compressed facts as navigation hints and consistency checks.\n"
             "- Follow the domain-specific evidence rules and answer blueprint when present.\n"
             "- Apply evidence priority: production code and mapper/client/SQL evidence beat config snapshots, tests, and docs/spec/generated files.\n"
             "- For data-source questions, a DTO/Input/Info class is not a final data source. Trace backward to the provider/builder/setter and then to repository/mapper/client/API/table when evidence exists.\n"
@@ -13353,6 +14953,43 @@ class SourceCodeQAService:
             "- Add short citation tags like [S1] next to concrete code-backed claims.\n"
             "- Avoid listing file paths or line ranges unless the user asks for code locations.\n"
             "- If unsure, explain the uncertainty instead of inventing details.\n"
+        )
+
+    def _vertex_draft_prompt(
+        self,
+        *,
+        pm_team: str,
+        country: str,
+        question: str,
+        context: str,
+    ) -> str:
+        return (
+            f"PM Team: {pm_team}\n"
+            f"Country: {country}\n"
+            f"Question: {question}\n\n"
+            "Internal retrieval evidence for grounding only:\n"
+            f"{context}\n\n"
+            "First-pass task for Vertex AI:\n"
+            "- Write a concise prose draft answer only; do not return JSON in this pass.\n"
+            "- Use raw code snippets as the source of truth and cite concrete claims with tags like [S1].\n"
+            "- Identify any missing upstream/downstream/source evidence explicitly.\n"
+            "- Do not turn DTO, request, input, or info classes into final data sources.\n"
+            "- This draft will be used to run a second retrieval pass before the final structured answer.\n"
+        )
+
+    @staticmethod
+    def _vertex_final_prompt(*, final_prompt: str, draft_answer: str) -> str:
+        draft = str(draft_answer or "").strip()
+        if len(draft) > 5000:
+            draft = f"{draft[:5000]}\n...[draft truncated]"
+        return (
+            f"{final_prompt}\n"
+            "Vertex first-pass draft for verification only:\n"
+            f"{draft or '(empty draft)'}\n\n"
+            "Final pass instruction:\n"
+            "- Return the required JSON object now.\n"
+            "- Use the first-pass draft only as a checklist; keep only claims supported by the updated evidence.\n"
+            "- Prefer the updated second-pass evidence over the draft when they differ.\n"
         )
 
     def _finalize_llm_answer(
@@ -13762,6 +15399,8 @@ class SourceCodeQAService:
         claim_check: dict[str, Any],
     ) -> dict[str, Any]:
         deterministic = self._judge_answer(question, answer, evidence_pack, claim_check)
+        if self.llm_provider_name == LLM_PROVIDER_CODEX_CLI_BRIDGE:
+            return deterministic
         if not self.llm_judge_enabled or not self.llm_ready():
             return deterministic
         cache_key = self._judge_cache_key(question, answer, evidence_pack, claim_check)
@@ -13877,6 +15516,13 @@ class SourceCodeQAService:
                 "missing_hops": evidence_pack.get("missing_hops") or [],
             },
         }
+        judge_model = self._model_for_role("judge", fallback=str(self.llm_budgets["cheap"]["model"]))
+        judge_thinking_config = self._thinking_config_for_provider(
+            0,
+            model=judge_model,
+            role="judge",
+            budget_mode="cheap",
+        )
         payload = {
             "contents": [
                 {
@@ -13907,12 +15553,12 @@ class SourceCodeQAService:
                 "maxOutputTokens": 500,
                 "responseMimeType": "application/json",
                 "responseSchema": self._llm_judge_response_schema(),
-                "thinkingConfig": {"thinkingBudget": 0},
+                "thinkingConfig": judge_thinking_config,
             },
         }
         result = self.llm_provider.generate(
             payload=payload,
-            primary_model=self._model_for_role("judge", fallback=str(self.llm_budgets["cheap"]["model"])),
+            primary_model=judge_model,
             fallback_model=self._llm_fallback_model(),
         )
         parsed = self._parse_judge_payload(self.llm_provider.extract_text(result.payload))
@@ -14049,9 +15695,35 @@ class SourceCodeQAService:
         evidence_summary: dict[str, Any],
         quality_gate: dict[str, Any],
         limit: int,
+        draft_answer: str = "",
+        answer_check: dict[str, Any] | None = None,
+        claim_check: dict[str, Any] | None = None,
+        answer_judge: dict[str, Any] | None = None,
         request_cache: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         agent_plan = self._build_agent_plan(question, evidence_summary, quality_gate)
+        if self.llm_provider_name == LLM_PROVIDER_VERTEX_AI:
+            vertex_terms = self._vertex_second_pass_terms(
+                question=question,
+                draft_answer=draft_answer,
+                evidence_summary=evidence_summary,
+                quality_gate=quality_gate,
+                answer_check=answer_check or {},
+                claim_check=claim_check or {},
+                answer_judge=answer_judge or {},
+                matches=matches,
+            )
+            if vertex_terms:
+                agent_plan = {
+                    "steps": [
+                        {
+                            "name": "vertex_answer_guided_retrieval",
+                            "purpose": "Use the first Vertex draft and evidence checks to retrieve missing concrete code evidence.",
+                            "terms": vertex_terms,
+                        }
+                    ],
+                    "provider": "vertex_answer_guided",
+                }
         if not agent_plan.get("steps"):
             agent_plan = {
                 "steps": [
@@ -14073,6 +15745,65 @@ class SourceCodeQAService:
             limit=max(int(limit or 12), 12),
             request_cache=request_cache,
         )
+
+    def _vertex_second_pass_terms(
+        self,
+        *,
+        question: str,
+        draft_answer: str,
+        evidence_summary: dict[str, Any],
+        quality_gate: dict[str, Any],
+        answer_check: dict[str, Any],
+        claim_check: dict[str, Any],
+        answer_judge: dict[str, Any],
+        matches: list[dict[str, Any]],
+    ) -> list[str]:
+        if self.llm_provider_name != LLM_PROVIDER_VERTEX_AI:
+            return []
+        texts = [
+            question,
+            draft_answer,
+            " ".join(str(item) for item in quality_gate.get("missing") or []),
+            " ".join(str(item) for item in answer_check.get("issues") or []),
+            " ".join(str(item) for item in claim_check.get("unsupported_claims") or []),
+            " ".join(str(item) for item in answer_judge.get("repair_targets") or []),
+        ]
+        for bucket in (
+            "entry_points",
+            "data_carriers",
+            "field_population",
+            "downstream_components",
+            "data_sources",
+            "api_or_config",
+            "rule_or_error_logic",
+            "impact_surfaces",
+            "test_coverage",
+            "operational_boundaries",
+        ):
+            texts.extend(str(item) for item in evidence_summary.get(bucket) or [])
+        for match in matches[:12]:
+            texts.append(str(match.get("path") or ""))
+            texts.append(str(match.get("reason") or ""))
+        terms: list[str] = []
+        for text in texts:
+            for token in re.findall(r"[A-Za-z][A-Za-z0-9_./:-]{2,}", str(text or "")):
+                cleaned = token.strip("._/-:").lower()
+                if len(cleaned) < 3 or cleaned in STOPWORDS or cleaned in LOW_VALUE_CALL_SYMBOLS:
+                    continue
+                if cleaned in {"answer", "evidence", "missing", "claim", "claims", "source", "sources"}:
+                    continue
+                if cleaned not in terms:
+                    terms.append(cleaned)
+        intent = evidence_summary.get("intent") or self._question_intent(question)
+        if intent.get("data_source"):
+            terms.extend(["repository", "mapper", "dao", "jdbc", "select", "from", "client", "provider"])
+        if intent.get("api"):
+            terms.extend(["controller", "requestmapping", "postmapping", "client", "endpoint"])
+        deduped: list[str] = []
+        for term in terms:
+            if term not in deduped:
+                deduped.append(term)
+        return deduped[:36]
 
     def _answer_cache_key(self, *, provider: str, model: str, question: str, answer_mode: str, llm_budget_mode: str, context: str) -> str:
         digest = hashlib.sha1(
@@ -14195,6 +15926,7 @@ class SourceCodeQAService:
                 "answer_quality": payload.get("answer_quality") or {},
                 "answer_claim_check": payload.get("answer_claim_check") or {},
                 "answer_judge": payload.get("answer_judge") or {},
+                "codex_cli_summary": self._codex_telemetry_summary(payload),
                 "tool_trace_summary": {
                     "steps": len(tool_trace),
                     "phases": sorted({str(step.get("phase") or "unknown") for step in tool_trace if isinstance(step, dict)}),
@@ -14232,6 +15964,30 @@ class SourceCodeQAService:
                 handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
         except OSError:
             return
+
+    @staticmethod
+    def _codex_telemetry_summary(payload: dict[str, Any]) -> dict[str, Any]:
+        if str(payload.get("llm_provider") or "") != LLM_PROVIDER_CODEX_CLI_BRIDGE:
+            return {}
+        llm_route = payload.get("llm_route") or {}
+        validation = ((payload.get("answer_claim_check") or {}).get("codex_citation_validation") or {})
+        attempts = payload.get("llm_attempt_log") or []
+        exit_codes = [
+            item.get("exit_code")
+            for item in attempts
+            if isinstance(item, dict) and item.get("exit_code") is not None
+        ]
+        return {
+            "prompt_mode": llm_route.get("prompt_mode"),
+            "candidate_repo_count": llm_route.get("candidate_repo_count"),
+            "candidate_path_count": llm_route.get("candidate_path_count"),
+            "cited_path_count": validation.get("cited_path_count", llm_route.get("codex_cited_path_count", 0)),
+            "citation_validation_status": validation.get("status"),
+            "repair_attempted": bool(llm_route.get("codex_repair_attempted")),
+            "cli_latency_ms": payload.get("llm_latency_ms"),
+            "exit_codes": exit_codes,
+            "timeout": any(bool(item.get("timeout")) for item in attempts if isinstance(item, dict)),
+        }
 
     def _select_llm_matches(self, matches: list[dict[str, Any]], limit: int, *, question: str = "") -> list[dict[str, Any]]:
         if not matches:

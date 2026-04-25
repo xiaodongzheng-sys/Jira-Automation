@@ -96,6 +96,31 @@ class MockSourceCodeQALLMProvider:
         return ""
 
 
+class MockSourceCodeQAEmbeddingProvider:
+    name = "mock_embedding"
+
+    def ready(self) -> bool:
+        return True
+
+    def public_config(self) -> dict[str, Any]:
+        return {"provider": self.name, "ready": True, "mode": "deterministic_eval"}
+
+    def embed_texts(self, texts: list[str], *, task_type: str | None = None) -> list[list[float]]:
+        del task_type
+        rows: list[list[float]] = []
+        for text in texts:
+            lowered = str(text or "").lower()
+            rows.append(
+                [
+                    float(lowered.count("issue") + lowered.count("jira")),
+                    float(lowered.count("repository") + lowered.count("mapper") + lowered.count("table")),
+                    float(lowered.count("api") + lowered.count("controller") + lowered.count("client")),
+                    float(len(set(re.findall(r"[a-zA-Z][a-zA-Z0-9_]{2,}", lowered))) % 17),
+                ]
+            )
+        return rows
+
+
 def _failure_bucket(message: str) -> str:
     lowered = message.lower()
     if "path" in lowered or "retrieval" in lowered or "trace stage" in lowered or "trace path" in lowered or "evidence pack" in lowered:
@@ -1058,27 +1083,32 @@ def _indexed_symbol_edges(service: SourceCodeQAService, key: str) -> list[dict[s
     return edges
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description="Run Source Code Q&A golden-answer retrieval evals.")
-    parser.add_argument(
-        "--cases",
-        action="append",
-        default=None,
-        help="JSONL eval case file. Can be passed multiple times.",
-    )
-    parser.add_argument("--data-root", default=None, help="Override TEAM_PORTAL_DATA_DIR for the indexed repositories.")
-    parser.add_argument("--fixture", action="store_true", help="Create deterministic fixture repositories before running cases.")
-    parser.add_argument("--mock-llm", action="store_true", help="Use a deterministic local LLM provider for LLM answer smoke cases.")
-    parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
-    args = parser.parse_args()
-
-    settings = Settings.from_env()
-    service = SourceCodeQAService(
-        data_root=Path(args.data_root) if args.data_root else settings.team_portal_data_dir,
+def _build_service_from_settings(
+    settings: Settings,
+    *,
+    data_root: Path,
+    profile: str = "current",
+) -> SourceCodeQAService:
+    llm_provider = settings.source_code_qa_llm_provider
+    embedding_provider = settings.source_code_qa_embedding_provider
+    embedding_model = settings.source_code_qa_embedding_model
+    if profile == "gemini":
+        llm_provider = "gemini"
+    elif profile == "vertex":
+        llm_provider = "vertex_ai"
+    elif profile == "vertex_embedding":
+        llm_provider = "vertex_ai"
+        embedding_provider = "vertex_ai"
+        if embedding_model.startswith("local-"):
+            embedding_model = "gemini-embedding-001"
+    elif profile != "current":
+        raise SystemExit(f"Unsupported compare profile: {profile}")
+    return SourceCodeQAService(
+        data_root=data_root,
         team_profiles=TEAM_PROFILE_DEFAULTS,
         gitlab_token=settings.source_code_qa_gitlab_token,
         gitlab_username=settings.source_code_qa_gitlab_username,
-        llm_provider=settings.source_code_qa_llm_provider,
+        llm_provider=llm_provider,
         gemini_api_key=settings.source_code_qa_gemini_api_key,
         gemini_api_base_url=settings.source_code_qa_gemini_api_base_url,
         openai_api_key=settings.source_code_qa_openai_api_key,
@@ -1091,31 +1121,117 @@ def main() -> int:
         gemini_fast_model=settings.source_code_qa_gemini_fast_model,
         gemini_deep_model=settings.source_code_qa_gemini_deep_model,
         gemini_fallback_model=settings.source_code_qa_gemini_fallback_model,
+        vertex_credentials_file=settings.source_code_qa_vertex_credentials_file,
+        vertex_project_id=settings.source_code_qa_vertex_project_id,
+        vertex_location=settings.source_code_qa_vertex_location,
+        vertex_model=settings.source_code_qa_vertex_model,
+        vertex_fast_model=settings.source_code_qa_vertex_fast_model,
+        vertex_deep_model=settings.source_code_qa_vertex_deep_model,
+        vertex_fallback_model=settings.source_code_qa_vertex_fallback_model,
         query_rewrite_model=settings.source_code_qa_query_rewrite_model,
         planner_model=settings.source_code_qa_planner_model,
         answer_model=settings.source_code_qa_answer_model,
         judge_model=settings.source_code_qa_judge_model,
         repair_model=settings.source_code_qa_repair_model,
         llm_judge_enabled=settings.source_code_qa_llm_judge_enabled,
-        semantic_index_model=settings.source_code_qa_embedding_model,
+        semantic_index_model=embedding_model,
         semantic_index_enabled=settings.source_code_qa_semantic_index_enabled,
-        embedding_provider=settings.source_code_qa_embedding_provider,
+        embedding_provider=embedding_provider,
         embedding_api_key=settings.source_code_qa_embedding_api_key,
         embedding_api_base_url=settings.source_code_qa_embedding_api_base_url,
         llm_cache_ttl_seconds=settings.source_code_qa_llm_cache_ttl_seconds,
         git_timeout_seconds=settings.source_code_qa_git_timeout_seconds,
         max_file_bytes=settings.source_code_qa_max_file_bytes,
     )
-    if args.fixture:
-        _build_fixture_repositories(service)
-    if args.mock_llm:
-        service.llm_provider = MockSourceCodeQALLMProvider()
-        service.llm_provider_name = service.llm_provider.name
-        service.answer_cache_root = service.answer_cache_root / "mock_llm_eval"
+
+
+def _summarize_results(results: list[dict[str, Any]]) -> dict[str, Any]:
+    failed = [result for result in results if result["status"] != "pass"]
+    failure_buckets: dict[str, int] = {}
+    route_buckets: dict[str, int] = {}
+    coverage_buckets: dict[str, dict[str, int]] = {}
+    team_buckets: dict[str, dict[str, int]] = {}
+    segment_buckets: dict[str, dict[str, int]] = {}
+    for result in results:
+        for bucket, count in (result.get("failure_buckets") or {}).items():
+            failure_buckets[str(bucket)] = failure_buckets.get(str(bucket), 0) + int(count)
+        route = result.get("llm_route") or {}
+        route_key = str(route.get("selected") or result.get("llm_budget_mode") or "retrieval_only")
+        route_buckets[route_key] = route_buckets.get(route_key, 0) + 1
+        category = str(result.get("category") or "uncategorized")
+        coverage = coverage_buckets.setdefault(category, {"total": 0, "failed": 0})
+        coverage["total"] += 1
+        if result["status"] != "pass":
+            coverage["failed"] += 1
+    return {
+        "status": "pass" if not failed else "fail",
+        "total": len(results),
+        "failed": len(failed),
+        "failure_buckets": failure_buckets,
+        "route_buckets": route_buckets,
+        "coverage_buckets": coverage_buckets,
+        "team_buckets": team_buckets,
+        "segment_buckets": segment_buckets,
+        "results": results,
+    }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Run Source Code Q&A golden-answer retrieval evals.")
+    parser.add_argument(
+        "--cases",
+        action="append",
+        default=None,
+        help="JSONL eval case file. Can be passed multiple times.",
+    )
+    parser.add_argument("--data-root", default=None, help="Override TEAM_PORTAL_DATA_DIR for the indexed repositories.")
+    parser.add_argument("--fixture", action="store_true", help="Create deterministic fixture repositories before running cases.")
+    parser.add_argument("--mock-llm", action="store_true", help="Use a deterministic local LLM provider for LLM answer smoke cases.")
+    parser.add_argument(
+        "--compare-profiles",
+        default="",
+        help="Comma-separated profiles to run side by side: current,gemini,vertex,vertex_embedding.",
+    )
+    parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    args = parser.parse_args()
+
+    settings = Settings.from_env()
+    base_data_root = Path(args.data_root) if args.data_root else settings.team_portal_data_dir
     case_paths = [Path(path) for path in (args.cases or ["evals/source_code_qa/golden.jsonl"])]
     cases: list[dict[str, Any]] = []
     for path in case_paths:
         cases.extend(_load_cases(path))
+    compare_profiles = [item.strip() for item in str(args.compare_profiles or "").split(",") if item.strip()]
+    if compare_profiles:
+        comparison: dict[str, Any] = {}
+        for profile in compare_profiles:
+            profile_root = base_data_root / f"source_code_qa_eval_{profile}"
+            service = _build_service_from_settings(settings, data_root=profile_root, profile=profile)
+            if args.mock_llm:
+                service.llm_provider = MockSourceCodeQALLMProvider()
+                service.llm_provider_name = service.llm_provider.name
+                if service.embedding_provider.name != "local_token_hybrid":
+                    service.embedding_provider = MockSourceCodeQAEmbeddingProvider()
+                service.answer_cache_root = service.answer_cache_root / "mock_llm_eval"
+            if args.fixture:
+                _build_fixture_repositories(service)
+            comparison[profile] = _summarize_results([_evaluate_case(service, case) for case in cases])
+        summary = {"status": "pass" if all(item["status"] == "pass" for item in comparison.values()) else "fail", "profiles": comparison}
+        if args.json:
+            print(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True))
+        else:
+            for profile, report in comparison.items():
+                print(f"{profile}: {report['status']} ({report['total'] - report['failed']}/{report['total']} passed)")
+        return 0 if summary["status"] == "pass" else 1
+    service = _build_service_from_settings(settings, data_root=base_data_root, profile="current")
+    if args.mock_llm:
+        service.llm_provider = MockSourceCodeQALLMProvider()
+        service.llm_provider_name = service.llm_provider.name
+        if service.embedding_provider.name != "local_token_hybrid":
+            service.embedding_provider = MockSourceCodeQAEmbeddingProvider()
+        service.answer_cache_root = service.answer_cache_root / "mock_llm_eval"
+    if args.fixture:
+        _build_fixture_repositories(service)
     results = [_evaluate_case(service, case) for case in cases]
     failed = [result for result in results if result["status"] != "pass"]
     failure_buckets: dict[str, int] = {}

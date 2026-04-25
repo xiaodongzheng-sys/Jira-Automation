@@ -402,6 +402,13 @@ def create_app() -> Flask:
         gemini_fast_model=settings.source_code_qa_gemini_fast_model,
         gemini_deep_model=settings.source_code_qa_gemini_deep_model,
         gemini_fallback_model=settings.source_code_qa_gemini_fallback_model,
+        vertex_credentials_file=settings.source_code_qa_vertex_credentials_file,
+        vertex_project_id=settings.source_code_qa_vertex_project_id,
+        vertex_location=settings.source_code_qa_vertex_location,
+        vertex_model=settings.source_code_qa_vertex_model,
+        vertex_fast_model=settings.source_code_qa_vertex_fast_model,
+        vertex_deep_model=settings.source_code_qa_vertex_deep_model,
+        vertex_fallback_model=settings.source_code_qa_vertex_fallback_model,
         query_rewrite_model=settings.source_code_qa_query_rewrite_model,
         planner_model=settings.source_code_qa_planner_model,
         answer_model=settings.source_code_qa_answer_model,
@@ -415,6 +422,9 @@ def create_app() -> Flask:
         embedding_api_base_url=settings.source_code_qa_embedding_api_base_url,
         llm_cache_ttl_seconds=settings.source_code_qa_llm_cache_ttl_seconds,
         llm_timeout_seconds=settings.source_code_qa_llm_timeout_seconds,
+        codex_timeout_seconds=settings.source_code_qa_codex_timeout_seconds,
+        codex_top_path_limit=settings.source_code_qa_codex_top_path_limit,
+        codex_repair_enabled=settings.source_code_qa_codex_repair_enabled,
         llm_max_retries=settings.source_code_qa_llm_max_retries,
         llm_backoff_seconds=settings.source_code_qa_llm_backoff_seconds,
         llm_max_backoff_seconds=settings.source_code_qa_llm_max_backoff_seconds,
@@ -643,6 +653,9 @@ def create_app() -> Flask:
             return access_gate
         try:
             service = _build_source_code_qa_service()
+            gemini_service = _build_source_code_qa_service("gemini")
+            codex_service = _build_source_code_qa_service("codex_cli_bridge")
+            vertex_service = _build_source_code_qa_service("vertex_ai")
             return jsonify(
                 {
                     "status": "ok",
@@ -651,6 +664,11 @@ def create_app() -> Flask:
                     "git_auth_ready": bool(settings.source_code_qa_gitlab_token),
                     "llm_ready": service.llm_ready(),
                     "llm_provider": settings.source_code_qa_llm_provider,
+                    "llm_providers": {
+                        "gemini": {"ready": gemini_service.llm_ready(), "label": "Gemini"},
+                        "codex_cli_bridge": {"ready": codex_service.llm_ready(), "label": "Codex"},
+                        "vertex_ai": {"ready": vertex_service.llm_ready(), "label": "Vertex AI"},
+                    },
                     "llm_model": service.llm_budgets["balanced"]["model"],
                     "llm_fast_model": service.llm_budgets["cheap"]["model"],
                     "llm_deep_model": service.llm_budgets["deep"]["model"],
@@ -734,7 +752,7 @@ def create_app() -> Flask:
             thread.start()
             return jsonify({"status": "queued", "job_id": job.job_id})
         try:
-            service = _build_source_code_qa_service()
+            service = _build_source_code_qa_service(payload.get("llm_provider"))
             auto_sync = service.ensure_synced_today(
                 pm_team=str(payload.get("pm_team") or ""),
                 country=str(payload.get("country") or ""),
@@ -1893,8 +1911,11 @@ def _can_manage_source_code_qa(settings: Settings) -> bool:
     return bool(email and email == settings.source_code_qa_owner_email.strip().lower())
 
 
-def _build_source_code_qa_service() -> SourceCodeQAService:
-    return current_app.config["SOURCE_CODE_QA_SERVICE"]
+def _build_source_code_qa_service(llm_provider: str | None = None) -> SourceCodeQAService:
+    service: SourceCodeQAService = current_app.config["SOURCE_CODE_QA_SERVICE"]
+    if llm_provider is None:
+        return service
+    return service.with_llm_provider(str(llm_provider or ""))
 
 
 def _read_json_file(path: Path) -> dict[str, Any]:
@@ -2243,7 +2264,7 @@ def _run_source_code_qa_query_job(app: Flask, job_id: str, payload: dict[str, An
             )
 
         try:
-            service = _build_source_code_qa_service()
+            service = _build_source_code_qa_service(payload.get("llm_provider"))
             pm_team = str(payload.get("pm_team") or "")
             country = str(payload.get("country") or "")
             progress_callback("auto_sync_check", "Checking whether repositories were refreshed today.", 0, 1)

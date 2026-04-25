@@ -8,7 +8,15 @@ import unittest
 from unittest.mock import patch
 from types import SimpleNamespace
 
-from bpmis_jira_tool.source_code_qa import LLMGenerateResult, RepositoryEntry, SourceCodeQAService
+from bpmis_jira_tool.errors import ToolError
+from bpmis_jira_tool.source_code_qa import (
+    CodexCliBridgeSourceCodeQALLMProvider,
+    LLMGenerateResult,
+    RepositoryEntry,
+    SourceCodeQAService,
+    VertexAIEmbeddingProvider,
+    VertexAISourceCodeQALLMProvider,
+)
 from bpmis_jira_tool.user_config import TEAM_PROFILE_DEFAULTS
 from bpmis_jira_tool.web import JobStore, create_app
 from scripts.promote_source_code_qa_eval_candidates import promote_candidates
@@ -83,6 +91,10 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertNotIn(b"Repository Mapping", teammate_response.data)
         self.assertIn(b"Ask The Codebase", teammate_response.data)
         self.assertNotIn(b"LLM Budget", teammate_response.data)
+        self.assertIn(b"data-source-llm-provider", teammate_response.data)
+        self.assertIn(b"Codex", teammate_response.data)
+        self.assertIn(b'value="gemini" disabled', teammate_response.data)
+        self.assertIn(b"Vertex AI", teammate_response.data)
 
     def test_config_save_is_owner_only_and_validates_https(self):
         with self.app.test_client() as client:
@@ -147,6 +159,102 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertEqual(captured["llm_budget_mode"], "auto")
         ensure_synced.assert_called_once()
         self.assertEqual(response.get_json()["auto_sync"]["status"], "fresh")
+
+    def test_query_api_uses_requested_llm_provider(self):
+        selected = []
+
+        def fake_query(**kwargs):
+            return {"status": "ok", "answer_mode": "auto", "matches": [], "llm_provider": "codex_cli_bridge"}
+
+        original = SourceCodeQAService.with_llm_provider
+
+        def fake_with_provider(service, provider):
+            selected.append(provider)
+            return original(service, provider)
+
+        with patch("bpmis_jira_tool.source_code_qa.SourceCodeQAService.with_llm_provider", new=fake_with_provider), patch(
+            "bpmis_jira_tool.source_code_qa.SourceCodeQAService.ensure_synced_today",
+            return_value={"attempted": False, "status": "fresh"},
+        ), patch("bpmis_jira_tool.source_code_qa.SourceCodeQAService.query", side_effect=fake_query):
+            with self.app.test_client() as client:
+                self._login(client, "teammate@npt.sg")
+                response = client.post(
+                    "/api/source-code-qa/query",
+                    json={
+                        "pm_team": "AF",
+                        "country": "All",
+                        "question": "where is createIssue",
+                        "answer_mode": "auto",
+                        "llm_provider": "codex_cli_bridge",
+                    },
+                )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("codex_cli_bridge", selected)
+
+    def test_query_api_accepts_vertex_ai_llm_provider(self):
+        selected = []
+
+        def fake_query(**kwargs):
+            return {"status": "ok", "answer_mode": "auto", "matches": [], "llm_provider": "vertex_ai"}
+
+        original = SourceCodeQAService.with_llm_provider
+
+        def fake_with_provider(service, provider):
+            selected.append(provider)
+            return original(service, provider)
+
+        with patch("bpmis_jira_tool.source_code_qa.SourceCodeQAService.with_llm_provider", new=fake_with_provider), patch(
+            "bpmis_jira_tool.source_code_qa.SourceCodeQAService.ensure_synced_today",
+            return_value={"attempted": False, "status": "fresh"},
+        ), patch("bpmis_jira_tool.source_code_qa.SourceCodeQAService.query", side_effect=fake_query):
+            with self.app.test_client() as client:
+                self._login(client, "teammate@npt.sg")
+                response = client.post(
+                    "/api/source-code-qa/query",
+                    json={
+                        "pm_team": "AF",
+                        "country": "All",
+                        "question": "where is createIssue",
+                        "answer_mode": "auto",
+                        "llm_provider": "vertex_ai",
+                    },
+                )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("vertex_ai", selected)
+
+    def test_query_api_invalid_llm_provider_falls_back_to_codex(self):
+        selected = []
+
+        def fake_query(**kwargs):
+            return {"status": "ok", "answer_mode": "auto", "matches": [], "llm_provider": "codex_cli_bridge"}
+
+        original = SourceCodeQAService.with_llm_provider
+
+        def fake_with_provider(service, provider):
+            selected.append(provider)
+            return original(service, provider)
+
+        with patch("bpmis_jira_tool.source_code_qa.SourceCodeQAService.with_llm_provider", new=fake_with_provider), patch(
+            "bpmis_jira_tool.source_code_qa.SourceCodeQAService.ensure_synced_today",
+            return_value={"attempted": False, "status": "fresh"},
+        ), patch("bpmis_jira_tool.source_code_qa.SourceCodeQAService.query", side_effect=fake_query):
+            with self.app.test_client() as client:
+                self._login(client, "teammate@npt.sg")
+                response = client.post(
+                    "/api/source-code-qa/query",
+                    json={
+                        "pm_team": "AF",
+                        "country": "All",
+                        "question": "where is createIssue",
+                        "answer_mode": "auto",
+                        "llm_provider": "not-real",
+                    },
+                )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(SourceCodeQAService.normalize_query_llm_provider(selected[-1]), "codex_cli_bridge")
 
     def test_query_api_ignores_client_llm_budget_selection(self):
         captured = {}
@@ -224,13 +332,13 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         payload = response.get_json()
         self.assertFalse(payload["llm_ready"])
-        self.assertEqual(payload["llm_provider"], "gemini")
-        self.assertEqual(payload["llm_policy"]["provider"]["provider"], "gemini")
-        self.assertEqual(payload["llm_policy"]["router"]["version"], 6)
-        self.assertEqual(payload["llm_policy"]["versions"]["cache"], 8)
-        self.assertEqual(payload["llm_policy"]["versions"]["runtime"], 1)
+        self.assertEqual(payload["llm_provider"], "codex_cli_bridge")
+        self.assertEqual(payload["llm_policy"]["provider"]["provider"], "codex_cli_bridge")
+        self.assertEqual(payload["llm_policy"]["router"]["version"], 7)
+        self.assertEqual(payload["llm_policy"]["versions"]["cache"], 11)
+        self.assertEqual(payload["llm_policy"]["versions"]["runtime"], 2)
         self.assertEqual(payload["llm_policy"]["runtime"]["max_retries"], 2)
-        self.assertEqual(payload["llm_policy"]["model_policy"]["answer"]["model"], "gemini-2.5-flash")
+        self.assertEqual(payload["llm_policy"]["model_policy"]["answer"]["model"], os.getenv("SOURCE_CODE_QA_CODEX_MODEL", "codex-cli"))
         self.assertTrue(payload["llm_policy"]["judge"]["enabled"])
         self.assertEqual(payload["llm_policy"]["planner_tools"]["version"], 1)
         self.assertEqual(payload["llm_policy"]["semantic_retrieval"]["model"], "local-token-hybrid-v1")
@@ -240,6 +348,12 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertEqual(payload["domain_knowledge"]["domains"]["CRMS"]["label"], "Credit Risk")
         self.assertIn("GRC", payload["domain_knowledge"]["domains"])
         self.assertEqual(payload["options"]["answer_modes"][0]["value"], "auto")
+        self.assertEqual(payload["options"]["llm_providers"][0]["value"], "codex_cli_bridge")
+        gemini_option = next(item for item in payload["options"]["llm_providers"] if item["value"] == "gemini")
+        self.assertTrue(gemini_option["disabled"])
+        self.assertEqual(gemini_option["label"], "Gemini (Unavailable)")
+        self.assertIn("codex_cli_bridge", payload["llm_providers"])
+        self.assertIn("vertex_ai", payload["llm_providers"])
         self.assertNotIn("llm_budget_modes", payload["options"])
 
     def test_sync_api_runs_as_background_job(self):
@@ -270,13 +384,23 @@ class SourceCodeQARouteTests(unittest.TestCase):
 
     def test_query_api_async_reports_real_backend_progress(self):
         captured = {}
+        selected = []
 
         def fake_query(**kwargs):
             captured.update(kwargs)
             kwargs["progress_callback"]("direct_search", "Searching direct matches in Repo One.", 1, 2)
             return {"status": "ok", "answer_mode": "retrieval_only", "summary": "done", "matches": []}
 
+        original = SourceCodeQAService.with_llm_provider
+
+        def fake_with_provider(service, provider):
+            selected.append(provider)
+            return original(service, provider)
+
         with patch(
+            "bpmis_jira_tool.source_code_qa.SourceCodeQAService.with_llm_provider",
+            new=fake_with_provider,
+        ), patch(
             "bpmis_jira_tool.source_code_qa.SourceCodeQAService.ensure_synced_today",
             return_value={"attempted": False, "status": "fresh"},
         ) as ensure_synced, patch(
@@ -292,6 +416,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
                         "country": "All",
                         "question": "where is createIssue",
                         "answer_mode": "auto",
+                        "llm_provider": "codex_cli_bridge",
                         "async": True,
                     },
                 )
@@ -309,6 +434,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertEqual(snapshot.get("state"), "completed")
         self.assertEqual(snapshot["results"][0]["summary"], "done")
         self.assertIn("progress_callback", captured)
+        self.assertIn("codex_cli_bridge", selected)
         ensure_synced.assert_called_once_with(pm_team="AF", country="All")
 
     def test_job_store_persists_background_job_snapshots(self):
@@ -5357,7 +5483,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertEqual(telemetry["llm_model"], "gemini-2.5-flash")
         self.assertIn(telemetry["llm_thinking_budget"], {512, 2048})
         self.assertEqual(telemetry["llm_route"]["mode"], "manual")
-        self.assertEqual(telemetry["versions"]["cache"], 8)
+        self.assertEqual(telemetry["versions"]["cache"], 11)
         self.assertIn("llm_latency_ms", telemetry)
         self.assertIn("llm_attempt_log", telemetry)
         self.assertIn("answer_contract", telemetry)
@@ -5365,6 +5491,88 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertIn("answer_judge", telemetry)
         self.assertEqual(payload["evidence_pack"]["version"], 2)
         self.assertIn("answer_judge", payload)
+
+    def test_gemini_max_tokens_uses_compact_repair_retry(self):
+        service = SourceCodeQAService(
+            data_root=Path(self.temp_dir.name),
+            team_profiles=TEAM_PROFILE_DEFAULTS,
+            gemini_api_key="gemini-key",
+            gitlab_token="secret-token",
+            git_timeout_seconds=5,
+            max_file_bytes=200_000,
+        )
+        service.save_mapping(
+            pm_team="AF",
+            country="All",
+            repositories=[{"display_name": "Portal Repo", "url": "https://git.example.com/team/portal.git"}],
+        )
+        entry = service.load_config()["mappings"]["AF:All"][0]
+        repo_path = service._repo_path("AF:All", type("Entry", (), entry)())
+        (repo_path / ".git").mkdir(parents=True)
+        source_file = repo_path / "bpmis" / "jira_client.py"
+        source_file.parent.mkdir(parents=True)
+        source_file.write_text(
+            "class BPMISClient:\n"
+            "    def batchCreateJiraIssue(self):\n"
+            "        return self.post('/api/v1/issues/batchCreateJiraIssue')\n",
+            encoding="utf-8",
+        )
+        capped_response = SimpleNamespace(
+            raise_for_status=lambda: None,
+            json=lambda: {
+                "candidates": [{"content": {"parts": [{"text": "{"}]}, "finishReason": "MAX_TOKENS"}],
+                "usageMetadata": {"promptTokenCount": 20000, "candidatesTokenCount": 312, "totalTokenCount": 20312},
+            },
+            text='{"ok":true}',
+        )
+        repaired_response = SimpleNamespace(
+            raise_for_status=lambda: None,
+            json=lambda: {
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [
+                                {
+                                    "text": (
+                                        '{"direct_answer":"BPMISClient defines batchCreateJiraIssue.",'
+                                        '"claims":[{"text":"BPMISClient defines batchCreateJiraIssue","citations":["S1"]}],'
+                                        '"missing_evidence":[],"confidence":"high"}'
+                                    )
+                                }
+                            ]
+                        },
+                        "finishReason": "STOP",
+                    }
+                ],
+                "usageMetadata": {"promptTokenCount": 4000, "candidatesTokenCount": 140, "totalTokenCount": 4140},
+            },
+            text='{"ok":true}',
+        )
+
+        with patch("bpmis_jira_tool.source_code_qa.requests.post", side_effect=[capped_response, repaired_response]) as mocked_post:
+            self._build_all_indexes(service)
+            payload = service.query(
+                pm_team="AF",
+                country="All",
+                question="where is batchCreateJiraIssue",
+                answer_mode="gemini_flash",
+                llm_budget_mode="balanced",
+            )
+
+        self.assertEqual(mocked_post.call_count, 2)
+        first_request = mocked_post.call_args_list[0].kwargs["json"]
+        retry_request = mocked_post.call_args_list[1].kwargs["json"]
+        self.assertEqual(first_request["generationConfig"]["thinkingConfig"]["thinkingBudget"], 512)
+        self.assertEqual(retry_request["generationConfig"]["thinkingConfig"]["thinkingBudget"], 0)
+        self.assertEqual(retry_request["generationConfig"]["maxOutputTokens"], 2400)
+        self.assertLess(
+            len(retry_request["contents"][0]["parts"][0]["text"]),
+            len(first_request["contents"][0]["parts"][0]["text"]) + 1,
+        )
+        self.assertIn("BPMISClient defines batchCreateJiraIssue", payload["llm_answer"])
+        self.assertEqual(payload["llm_finish_reason"], "STOP")
+        self.assertNotEqual(payload["answer_contract"]["status"], "unreliable_llm_answer")
+        self.assertEqual(payload["llm_thinking_budget"], 0)
 
     def test_simple_function_usage_no_hit_skips_llm_call(self):
         service = SourceCodeQAService(
@@ -5600,7 +5808,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         )
         cached = service._load_cached_answer(cache_key)
         self.assertIsNotNone(cached)
-        self.assertEqual(cached["versions"]["cache"], 8)
+        self.assertEqual(cached["versions"]["cache"], 11)
         cache_path = service.answer_cache_root / f"{cache_key}.json"
         stale_payload = json.loads(cache_path.read_text(encoding="utf-8"))
         stale_payload["versions"]["router"] = -1
@@ -5673,6 +5881,586 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertEqual(request_payload["model"], "code-balanced")
         self.assertEqual(request_payload["response_format"], {"type": "json_object"})
         self.assertEqual(request_payload["messages"][0]["role"], "system")
+
+    def test_vertex_ai_provider_returns_answer_with_service_account_token(self):
+        credentials_path = Path(self.temp_dir.name) / "vertex-service-account.json"
+        credentials_path.write_text(json.dumps({"project_id": "demo-project"}), encoding="utf-8")
+        provider = VertexAISourceCodeQALLMProvider(
+            credentials_file=str(credentials_path),
+            location="us-central1",
+            timeout_seconds=45,
+            max_retries=0,
+        )
+
+        class FakeCredentials:
+            token = ""
+
+            def refresh(self, request):
+                self.token = "ya29.vertex-token"
+
+        fake_response = SimpleNamespace(
+            ok=True,
+            json=lambda: {
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [
+                                {
+                                    "text": (
+                                        '{"direct_answer":"Vertex found the answer.",'
+                                        '"claims":[{"text":"Vertex found the answer","citations":["S1"]}],'
+                                        '"missing_evidence":[],"confidence":"high"}'
+                                    )
+                                }
+                            ]
+                        }
+                    }
+                ],
+                "usageMetadata": {"promptTokenCount": 11, "candidatesTokenCount": 7, "totalTokenCount": 18},
+            },
+            text='{"ok":true}',
+        )
+
+        with patch(
+            "bpmis_jira_tool.source_code_qa.service_account.Credentials.from_service_account_file",
+            return_value=FakeCredentials(),
+        ) as mocked_credentials, patch(
+            "bpmis_jira_tool.source_code_qa.requests.post",
+            return_value=fake_response,
+        ) as mocked_post:
+            result = provider.generate(
+                payload={"contents": [{"parts": [{"text": "Question: where is createIssue"}]}]},
+                primary_model="gemini-2.5-flash",
+                fallback_model="gemini-2.5-flash-lite",
+            )
+
+        self.assertEqual(result.model, "gemini-2.5-flash")
+        self.assertEqual(result.usage["totalTokenCount"], 18)
+        self.assertIn("Vertex found the answer", provider.extract_text(result.payload))
+        mocked_credentials.assert_called_once_with(
+            str(credentials_path),
+            scopes=["https://www.googleapis.com/auth/cloud-platform"],
+        )
+        self.assertIn(
+            "https://us-central1-aiplatform.googleapis.com/v1/projects/demo-project/locations/us-central1/publishers/google/models/gemini-2.5-flash:generateContent",
+            mocked_post.call_args.args[0],
+        )
+        self.assertEqual(mocked_post.call_args.kwargs["headers"]["Authorization"], "Bearer ya29.vertex-token")
+        self.assertEqual(mocked_post.call_args.kwargs["timeout"], 45)
+        self.assertEqual(mocked_post.call_args.kwargs["json"]["contents"][0]["role"], "user")
+
+    def test_vertex_ai_embedding_provider_uses_task_type_and_predict_endpoint(self):
+        credentials_path = Path(self.temp_dir.name) / "vertex-service-account.json"
+        credentials_path.write_text(json.dumps({"project_id": "demo-project"}), encoding="utf-8")
+        provider = VertexAIEmbeddingProvider(
+            credentials_file=str(credentials_path),
+            location="us-central1",
+            model="gemini-embedding-001",
+            output_dimensionality=768,
+        )
+
+        class FakeCredentials:
+            token = ""
+
+            def refresh(self, request):
+                self.token = "ya29.vertex-token"
+
+        fake_response = SimpleNamespace(
+            ok=True,
+            json=lambda: {"predictions": [{"embeddings": {"values": [0.1, 0.2, 0.3]}}]},
+            text='{"ok":true}',
+        )
+
+        with patch(
+            "bpmis_jira_tool.source_code_qa.service_account.Credentials.from_service_account_file",
+            return_value=FakeCredentials(),
+        ), patch(
+            "bpmis_jira_tool.source_code_qa.requests.post",
+            return_value=fake_response,
+        ) as mocked_post:
+            rows = provider.embed_texts(["find createIssue"], task_type="CODE_RETRIEVAL_QUERY")
+
+        self.assertEqual(rows, [[0.1, 0.2, 0.3]])
+        self.assertIn(
+            "https://us-central1-aiplatform.googleapis.com/v1/projects/demo-project/locations/us-central1/publishers/google/models/gemini-embedding-001:predict",
+            mocked_post.call_args.args[0],
+        )
+        request_payload = mocked_post.call_args.kwargs["json"]
+        self.assertEqual(request_payload["instances"][0]["task_type"], "CODE_RETRIEVAL_QUERY")
+        self.assertEqual(request_payload["parameters"]["outputDimensionality"], 768)
+        self.assertEqual(mocked_post.call_args.kwargs["headers"]["Authorization"], "Bearer ya29.vertex-token")
+
+    def test_vertex_ai_gemini_3_router_uses_preview_models_and_thinking_level(self):
+        service = SourceCodeQAService(
+            data_root=Path(self.temp_dir.name),
+            team_profiles=TEAM_PROFILE_DEFAULTS,
+            llm_provider="vertex_ai",
+            vertex_model="gemini-3.1-pro-preview",
+            vertex_fast_model="gemini-3-flash-preview",
+            vertex_deep_model="gemini-3.1-pro-preview",
+            vertex_fallback_model="gemini-3.1-pro-preview",
+            gitlab_token="secret-token",
+            git_timeout_seconds=5,
+            max_file_bytes=200_000,
+        )
+
+        self.assertEqual(service.llm_budgets["cheap"]["model"], "gemini-3-flash-preview")
+        self.assertEqual(service.llm_budgets["balanced"]["model"], "gemini-3.1-pro-preview")
+        self.assertEqual(service.llm_budgets["deep"]["model"], "gemini-3.1-pro-preview")
+        self.assertGreaterEqual(service.llm_budgets["balanced"]["match_limit"], 18)
+        self.assertGreaterEqual(service.llm_budgets["balanced"]["snippet_char_budget"], 48_000)
+        self.assertGreaterEqual(service.llm_budgets["balanced"]["max_output_tokens"], 2_800)
+        self.assertGreaterEqual(service.llm_budgets["deep"]["max_output_tokens"], 4_800)
+        self.assertEqual(service._llm_fallback_model(), "gemini-3.1-pro-preview")
+        routed_mode, routed_budget, route = service._resolve_llm_budget("cheap", "where is createIssue", [])
+        self.assertEqual(routed_mode, "balanced")
+        self.assertEqual(routed_budget["model"], "gemini-3.1-pro-preview")
+        self.assertEqual(route["reason"], "vertex_quality_floor")
+        auto_mode, _auto_budget, auto_route = service._resolve_llm_budget(
+            "auto",
+            "why does createIssue fail and what is the root cause",
+            [{"trace_stage": "direct", "retrieval": "file_scan", "score": 20}],
+        )
+        self.assertEqual(auto_mode, "deep")
+        self.assertIn("root_cause_or_cross_repo", auto_route["reason"])
+        self.assertEqual(service._llm_prompt_pressure_for_provider(50_000), "normal")
+        self.assertEqual(service._llm_prompt_pressure_for_provider(80_000), "compact")
+        embedding_service = SourceCodeQAService(
+            data_root=Path(self.temp_dir.name),
+            team_profiles=TEAM_PROFILE_DEFAULTS,
+            llm_provider="vertex_ai",
+            embedding_provider="vertex_ai",
+            semantic_index_model="local-token-hybrid-v1",
+            vertex_credentials_file="/tmp/missing.json",
+            vertex_project_id="demo-project",
+            vertex_location="us-central1",
+            gitlab_token="secret-token",
+            git_timeout_seconds=5,
+            max_file_bytes=200_000,
+        )
+        self.assertEqual(embedding_service.embedding_provider.public_config()["provider"], "vertex_ai")
+        self.assertEqual(embedding_service.embedding_provider.public_config()["model"], "gemini-embedding-001")
+        second_pass_terms = service._vertex_second_pass_terms(
+            question="what data source does createIssue use",
+            draft_answer="It mentions CreateIssueRequest but misses IssueRepository.",
+            evidence_summary={"intent": {"data_source": True}, "data_sources": ["IssueRepository reads issue_table [S1]"]},
+            quality_gate={"missing": ["repository mapper evidence"]},
+            answer_check={"issues": ["answer lacks repository source marker"]},
+            claim_check={"unsupported_claims": ["CreateIssueRequest is the final source"]},
+            answer_judge={"repair_targets": ["include table evidence"]},
+            matches=[{"path": "repository/IssueRepository.java", "reason": "semantic chunk matched"}],
+        )
+        self.assertIn("issuerepository", second_pass_terms)
+        self.assertIn("mapper", second_pass_terms)
+        self.assertEqual(
+            service._thinking_config_for_provider(
+                512,
+                model="gemini-3-flash-preview",
+                role="answer",
+                budget_mode="cheap",
+            ),
+            {"thinkingLevel": "MEDIUM"},
+        )
+        self.assertEqual(
+            service._thinking_config_for_provider(
+                2048,
+                model="gemini-3.1-pro-preview",
+                role="answer",
+                budget_mode="deep",
+            ),
+            {"thinkingLevel": "HIGH"},
+        )
+        self.assertEqual(
+            service._thinking_config_for_provider(
+                0,
+                model="gemini-3.1-pro-preview",
+                role="judge",
+                budget_mode="cheap",
+            ),
+            {"thinkingLevel": "HIGH"},
+        )
+
+    def test_vertex_ai_answer_uses_draft_retrieval_then_structured_final(self):
+        service = SourceCodeQAService(
+            data_root=Path(self.temp_dir.name),
+            team_profiles=TEAM_PROFILE_DEFAULTS,
+            llm_provider="vertex_ai",
+            vertex_credentials_file="/tmp/vertex-ready.json",
+            vertex_project_id="demo-project",
+            vertex_location="global",
+            vertex_model="gemini-3.1-pro-preview",
+            vertex_fast_model="gemini-3-flash-preview",
+            vertex_deep_model="gemini-3.1-pro-preview",
+            vertex_fallback_model="gemini-3.1-pro-preview",
+            gitlab_token="secret-token",
+            git_timeout_seconds=5,
+            max_file_bytes=200_000,
+        )
+        match = {
+            "repo": "Credit Risk",
+            "path": "src/CreditReviewCbsServiceImpl.java",
+            "line_start": 10,
+            "line_end": 20,
+            "trace_stage": "direct",
+            "retrieval": "file_scan",
+            "reason": "symbol match",
+            "score": 90,
+            "snippet": "class CreditReviewCbsServiceImpl { void retrieve() { cbsClient.queryReport(); } }",
+        }
+        draft_result = LLMGenerateResult(
+            payload={
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [
+                                {"text": "Draft: CreditReviewCbsServiceImpl calls cbsClient.queryReport [S1]."}
+                            ]
+                        }
+                    }
+                ],
+                "usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 4, "totalTokenCount": 14},
+            },
+            usage={"promptTokenCount": 10, "candidatesTokenCount": 4, "totalTokenCount": 14},
+            model="gemini-3.1-pro-preview",
+            attempts=1,
+            latency_ms=100,
+            attempt_log=({"model": "gemini-3.1-pro-preview", "status": "ok"},),
+        )
+        final_result = LLMGenerateResult(
+            payload={
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [
+                                {
+                                    "text": json.dumps(
+                                        {
+                                            "direct_answer": "The monthly credit review retrieves the CBS report through CreditReviewCbsServiceImpl calling cbsClient.queryReport [S1].",
+                                            "claims": [
+                                                {
+                                                    "text": "CreditReviewCbsServiceImpl calls cbsClient.queryReport",
+                                                    "citations": ["S1"],
+                                                }
+                                            ],
+                                            "missing_evidence": [],
+                                            "confidence": "high",
+                                        }
+                                    )
+                                }
+                            ]
+                        }
+                    }
+                ],
+                "usageMetadata": {"promptTokenCount": 20, "candidatesTokenCount": 8, "totalTokenCount": 28},
+            },
+            usage={"promptTokenCount": 20, "candidatesTokenCount": 8, "totalTokenCount": 28},
+            model="gemini-3.1-pro-preview",
+            attempts=1,
+            latency_ms=120,
+            attempt_log=({"model": "gemini-3.1-pro-preview", "status": "ok"},),
+        )
+
+        with patch.object(service.llm_provider, "ready", return_value=True), patch.object(
+            service.llm_provider,
+            "generate",
+            side_effect=[draft_result, final_result],
+        ) as mocked_generate, patch.object(
+            service,
+            "_expand_answer_retry_matches",
+            return_value=[match],
+        ) as mocked_second_pass:
+            payload = service._build_llm_answer(
+                entries=[],
+                key="CRMS:SG",
+                pm_team="CRMS",
+                country="SG",
+                question="When will system retrieve CBS report for monthly credit review?",
+                matches=[match],
+                llm_budget_mode="balanced",
+                requested_answer_mode="gemini_flash",
+                request_cache={},
+            )
+
+        self.assertEqual(mocked_generate.call_count, 2)
+        first_payload = mocked_generate.call_args_list[0].kwargs["payload"]
+        second_payload = mocked_generate.call_args_list[1].kwargs["payload"]
+        self.assertNotIn("responseSchema", first_payload["generationConfig"])
+        self.assertNotIn("responseMimeType", first_payload["generationConfig"])
+        self.assertIn("responseSchema", second_payload["generationConfig"])
+        self.assertEqual(second_payload["generationConfig"]["responseMimeType"], "application/json")
+        self.assertIn("First-pass task for Vertex AI", first_payload["contents"][0]["parts"][0]["text"])
+        self.assertIn("Vertex first-pass draft", second_payload["contents"][0]["parts"][0]["text"])
+        self.assertTrue(mocked_second_pass.called)
+        self.assertTrue(payload["llm_route"]["vertex_two_pass"])
+        self.assertTrue(payload["llm_route"]["vertex_second_pass"])
+        self.assertEqual(payload["llm_usage"]["total_tokens"], 42)
+        self.assertIn("CreditReviewCbsServiceImpl", payload["llm_answer"])
+        context = service._build_compressed_llm_context(
+            {"intent": {}, "entry_points": ["PortalController.createIssue [S1]"]},
+            {"status": "sufficient", "confidence": "high", "missing": []},
+            {"version": 2, "items": [{"type": "entry_point", "confidence": "high", "hop": "direct", "source_id": "S1", "claim": "PortalController calls BPMIS"}]},
+            [
+                {
+                    "repo": "Portal",
+                    "path": "src/PortalController.java",
+                    "line_start": 10,
+                    "line_end": 20,
+                    "trace_stage": "direct",
+                    "retrieval": "file_scan",
+                    "reason": "symbol match",
+                    "score": 10,
+                    "snippet": "class PortalController { void createIssue() { bpmis.batchCreateJiraIssue(); } }",
+                }
+            ],
+            snippet_line_budget=20,
+            snippet_char_budget=5_000,
+        )
+        self.assertLess(context.index("Primary raw code evidence:"), context.index("Evidence pack v2"))
+        self.assertIn("Use these snippets as the source of truth", context)
+
+    def test_codex_cli_bridge_provider_returns_answer(self):
+        provider = CodexCliBridgeSourceCodeQALLMProvider(
+            workspace_root=Path(self.temp_dir.name),
+            timeout_seconds=20,
+            codex_binary="codex",
+        )
+        calls = []
+
+        def fake_run(command, **kwargs):
+            calls.append((command, kwargs))
+            if "login" in command and "status" in command:
+                return SimpleNamespace(returncode=0, stdout="Logged in using ChatGPT\n", stderr="")
+            output_path = command[command.index("--output-last-message") + 1]
+            Path(output_path).write_text(
+                '{"direct_answer":"Codex found the answer.","claims":[{"text":"Codex found the answer","citations":["S1"]}],"missing_evidence":[],"confidence":"high"}',
+                encoding="utf-8",
+            )
+            return SimpleNamespace(returncode=0, stdout='{"type":"done"}\n', stderr="")
+
+        payload = {
+            "systemInstruction": {"parts": [{"text": "system"}]},
+            "contents": [{"parts": [{"text": "Question: where is createIssue"}]}],
+        }
+        with patch("bpmis_jira_tool.source_code_qa.shutil.which", return_value="/usr/local/bin/codex"), patch(
+            "bpmis_jira_tool.source_code_qa.subprocess.run",
+            side_effect=fake_run,
+        ):
+            result = provider.generate(payload=payload, primary_model="codex-cli", fallback_model="codex-cli")
+
+        self.assertIn("Codex found the answer", provider.extract_text(result.payload))
+        exec_command = calls[-1][0]
+        self.assertIn("--sandbox", exec_command)
+        self.assertIn("read-only", exec_command)
+        self.assertIn("--ephemeral", exec_command)
+        self.assertIn("--json", exec_command)
+        self.assertIn("--skip-git-repo-check", exec_command)
+        self.assertEqual(result.model, "codex-cli")
+        self.assertEqual(result.attempt_log[0]["exit_code"], 0)
+        self.assertEqual(result.attempt_log[0]["workspace_root"], self.temp_dir.name)
+        self.assertIn("--sandbox", result.attempt_log[0]["command"])
+
+    def test_codex_cli_provider_uses_configured_model(self):
+        with patch.dict(os.environ, {"SOURCE_CODE_QA_CODEX_MODEL": "gpt-5.5"}, clear=False):
+            service = SourceCodeQAService(
+                data_root=Path(self.temp_dir.name),
+                team_profiles=TEAM_PROFILE_DEFAULTS,
+                llm_provider="codex_cli_bridge",
+                gitlab_token="secret-token",
+                git_timeout_seconds=5,
+                max_file_bytes=200_000,
+            )
+
+        self.assertEqual(service.llm_budgets["cheap"]["model"], "gpt-5.5")
+        self.assertEqual(service.llm_budgets["balanced"]["model"], "gpt-5.5")
+        self.assertEqual(service.llm_budgets["deep"]["model"], "gpt-5.5")
+        self.assertEqual(service._llm_fallback_model(), "gpt-5.5")
+
+    def test_codex_cli_provider_uses_codex_specific_timeout(self):
+        service = SourceCodeQAService(
+            data_root=Path(self.temp_dir.name),
+            team_profiles=TEAM_PROFILE_DEFAULTS,
+            llm_provider="codex_cli_bridge",
+            llm_timeout_seconds=90,
+            codex_timeout_seconds=260,
+            gitlab_token="secret-token",
+            git_timeout_seconds=5,
+            max_file_bytes=200_000,
+        )
+
+        self.assertEqual(service.llm_provider.timeout_seconds, 260)
+
+    def test_codex_investigation_brief_uses_paths_not_long_snippet_context(self):
+        entry = RepositoryEntry("Portal Repo", "https://git.example.com/team/portal.git")
+        key = "AF:All"
+        repo_path = self.service._repo_path(key, entry)
+        (repo_path / ".git").mkdir(parents=True)
+        source_file = repo_path / "repository" / "IssueRepository.java"
+        source_file.parent.mkdir(parents=True)
+        source_file.write_text("class IssueRepository {\n  void find() {}\n}\n", encoding="utf-8")
+        matches = [
+            {
+                "repo": "Portal Repo",
+                "path": "repository/IssueRepository.java",
+                "line_start": 1,
+                "line_end": 3,
+                "retrieval": "persistent_index",
+                "trace_stage": "direct",
+                "reason": "IssueRepository matched query",
+                "snippet": "x" * 5000,
+            }
+        ]
+
+        candidate_paths = self.service._codex_candidate_paths(entries=[entry], key=key, matches=matches)
+        brief = self.service._codex_investigation_brief(
+            pm_team="AF",
+            country="All",
+            question="where is IssueRepository",
+            candidate_paths=candidate_paths,
+            evidence_pack={"entry_points": ["IssueRepository [S1]"]},
+            quality_gate={"status": "sufficient", "confidence": "high", "missing": []},
+            followup_context={
+                "question": "previous question",
+                "answer": "previous answer",
+                "matches_snapshot": [{"repo": "Portal Repo", "path": "repository/IssueRepository.java", "line_start": 1, "line_end": 3}],
+            },
+        )
+
+        self.assertIn("Prompt mode: codex_investigation_brief_v1", brief)
+        self.assertIn(str(repo_path), brief)
+        self.assertIn("path=repository/IssueRepository.java", brief)
+        self.assertIn("Follow-up context:", brief)
+        self.assertIn("previous question", brief)
+        self.assertNotIn("x" * 100, brief)
+
+    def test_codex_citation_validation_accepts_direct_file_reference(self):
+        entry = RepositoryEntry("Portal Repo", "https://git.example.com/team/portal.git")
+        key = "AF:All"
+        repo_path = self.service._repo_path(key, entry)
+        source_file = repo_path / "repository" / "IssueRepository.java"
+        source_file.parent.mkdir(parents=True)
+        source_file.write_text("line1\nline2\nline3\n", encoding="utf-8")
+        candidate_paths = self.service._codex_candidate_paths(
+            entries=[entry],
+            key=key,
+            matches=[{"repo": "Portal Repo", "path": "repository/IssueRepository.java", "line_start": 1, "line_end": 3}],
+        )
+        answer = (
+            '{"direct_answer":"IssueRepository reads issue_table.",'
+            '"claims":[{"text":"IssueRepository reads issue_table",'
+            '"citations":["repository/IssueRepository.java:1-3"]}],'
+            '"missing_evidence":[],"confidence":"high"}'
+        )
+
+        validation = self.service._validate_codex_citations(answer, candidate_paths, [{"repo": "Portal Repo", "path": "repository/IssueRepository.java"}])
+
+        self.assertEqual(validation["status"], "ok")
+        self.assertEqual(validation["cited_path_count"], 1)
+
+    def test_codex_answer_repairs_invalid_citations_once(self):
+        service = SourceCodeQAService(
+            data_root=Path(self.temp_dir.name),
+            team_profiles=TEAM_PROFILE_DEFAULTS,
+            llm_provider="codex_cli_bridge",
+            gitlab_token="secret-token",
+            git_timeout_seconds=5,
+            max_file_bytes=200_000,
+        )
+        entry = RepositoryEntry("Portal Repo", "https://git.example.com/team/portal.git")
+        key = "AF:All"
+        repo_path = service._repo_path(key, entry)
+        source_file = repo_path / "repository" / "IssueRepository.java"
+        source_file.parent.mkdir(parents=True)
+        source_file.write_text("class IssueRepository {\n  void find(){ jdbc.query(\"select * from issue_table\"); }\n}\n", encoding="utf-8")
+        matches = [
+            {
+                "repo": "Portal Repo",
+                "path": "repository/IssueRepository.java",
+                "line_start": 1,
+                "line_end": 3,
+                "retrieval": "persistent_index",
+                "trace_stage": "direct",
+                "reason": "repository and table matched",
+                "score": 10,
+                "snippet": "class IssueRepository { void find(){ jdbc.query(\"select * from issue_table\"); } }",
+            }
+        ]
+        calls = []
+
+        def fake_run(command, **kwargs):
+            calls.append((command, kwargs))
+            if "login" in command and "status" in command:
+                return SimpleNamespace(returncode=0, stdout="Logged in using ChatGPT\n", stderr="")
+            output_path = command[command.index("--output-last-message") + 1]
+            exec_count = len([item for item in calls if "exec" in item[0]])
+            if exec_count == 1:
+                Path(output_path).write_text(
+                    '{"direct_answer":"IssueRepository reads issue_table.",'
+                    '"claims":[{"text":"IssueRepository reads issue_table","citations":[]}],'
+                    '"missing_evidence":[],"confidence":"high"}',
+                    encoding="utf-8",
+                )
+            else:
+                Path(output_path).write_text(
+                    '{"direct_answer":"IssueRepository reads issue_table.",'
+                    '"claims":[{"text":"IssueRepository reads issue_table","citations":["S1"]}],'
+                    '"missing_evidence":[],"confidence":"high"}',
+                    encoding="utf-8",
+                )
+            return SimpleNamespace(returncode=0, stdout='{"type":"done"}\n', stderr="")
+
+        with patch("bpmis_jira_tool.source_code_qa.shutil.which", return_value="/usr/local/bin/codex"), patch(
+            "bpmis_jira_tool.source_code_qa.subprocess.run",
+            side_effect=fake_run,
+        ):
+            payload = service._build_llm_answer(
+                entries=[entry],
+                key=key,
+                pm_team="AF",
+                country="All",
+                question="what table does IssueRepository read",
+                matches=matches,
+                llm_budget_mode="auto",
+                followup_context={"question": "previous", "answer": "previous answer"},
+                requested_answer_mode="auto",
+            )
+
+        exec_calls = [item for item in calls if "exec" in item[0]]
+        self.assertEqual(len(exec_calls), 2)
+        self.assertEqual(payload["llm_route"]["prompt_mode"], "codex_investigation_brief_v1")
+        self.assertTrue(payload["llm_route"]["codex_repair_attempted"])
+        self.assertEqual(payload["answer_claim_check"]["codex_citation_validation"]["status"], "ok")
+        self.assertIn("IssueRepository reads issue_table", payload["llm_answer"])
+
+    def test_codex_cli_bridge_requires_chatgpt_login(self):
+        provider = CodexCliBridgeSourceCodeQALLMProvider(
+            workspace_root=Path(self.temp_dir.name),
+            timeout_seconds=20,
+            codex_binary="codex",
+        )
+        with patch("bpmis_jira_tool.source_code_qa.shutil.which", return_value="/usr/local/bin/codex"), patch(
+            "bpmis_jira_tool.source_code_qa.subprocess.run",
+            return_value=SimpleNamespace(returncode=0, stdout="Logged in using API key\n", stderr=""),
+        ):
+            self.assertFalse(provider.ready())
+
+    def test_codex_cli_bridge_nonzero_exit_falls_back(self):
+        provider = CodexCliBridgeSourceCodeQALLMProvider(
+            workspace_root=Path(self.temp_dir.name),
+            timeout_seconds=20,
+            codex_binary="codex",
+        )
+
+        def fake_run(command, **kwargs):
+            if command[:3] == ["codex", "login", "status"]:
+                return SimpleNamespace(returncode=0, stdout="Logged in using ChatGPT\n", stderr="")
+            return SimpleNamespace(returncode=2, stdout="", stderr="quota exhausted")
+
+        with patch("bpmis_jira_tool.source_code_qa.shutil.which", return_value="/usr/local/bin/codex"), patch(
+            "bpmis_jira_tool.source_code_qa.subprocess.run",
+            side_effect=fake_run,
+        ):
+            with self.assertRaisesRegex(ToolError, "Codex unavailable"):
+                provider.generate(payload={"contents": [{"parts": [{"text": "hi"}]}]}, primary_model="codex-cli", fallback_model="codex-cli")
 
     def test_auto_simple_lookup_uses_flash_lite_with_zero_thinking(self):
         service = SourceCodeQAService(
@@ -5752,6 +6540,80 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertEqual(service._normalize_thinking_budget_for_provider(0), 0)
         self.assertEqual(service._normalize_thinking_budget_for_provider(256), 512)
         self.assertEqual(service._normalize_thinking_budget_for_provider(999999), 24576)
+
+    def test_token_heavy_auto_route_uses_compact_deep_budget(self):
+        service = SourceCodeQAService(
+            data_root=Path(self.temp_dir.name),
+            team_profiles=TEAM_PROFILE_DEFAULTS,
+            gemini_api_key="gemini-key",
+            gitlab_token="secret-token",
+            git_timeout_seconds=5,
+            max_file_bytes=200_000,
+        )
+        service.save_mapping(
+            pm_team="AF",
+            country="All",
+            repositories=[{"display_name": "Portal Repo", "url": "https://git.example.com/team/portal.git"}],
+        )
+        entry = service.load_config()["mappings"]["AF:All"][0]
+        repo_path = service._repo_path("AF:All", type("Entry", (), entry)())
+        (repo_path / ".git").mkdir(parents=True)
+        repository_file = repo_path / "repository" / "IssueRepository.java"
+        repository_file.parent.mkdir(parents=True)
+        repository_file.write_text(
+            "public class IssueRepository {\n"
+            "    public Issue findIssue() {\n"
+            "        return jdbcTemplate.queryForObject(\"select * from issue_table\", mapper);\n"
+            "    }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        fake_response = SimpleNamespace(
+            ok=True,
+            json=lambda: {
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [
+                                {
+                                    "text": (
+                                        '{"direct_answer":"IssueRepository reads issue_table.",'
+                                        '"claims":[{"text":"IssueRepository reads issue_table","citations":["S1"]}],'
+                                        '"missing_evidence":[],"confidence":"high"}'
+                                    )
+                                }
+                            ]
+                        }
+                    }
+                ],
+                "usageMetadata": {"promptTokenCount": 12000, "candidatesTokenCount": 50, "totalTokenCount": 12050},
+            },
+            text='{"ok":true}',
+            raise_for_status=lambda: None,
+        )
+
+        with patch("bpmis_jira_tool.source_code_qa.requests.post", return_value=fake_response) as mocked_post, patch.object(
+            service,
+            "_estimate_llm_tokens",
+            side_effect=[25000, 12000],
+        ):
+            self._build_all_indexes(service)
+            payload = service.query(
+                pm_team="AF",
+                country="All",
+                question="what data source does issue creation use",
+                answer_mode="auto",
+                llm_budget_mode="auto",
+            )
+
+        self.assertEqual(payload["llm_budget_mode"], "compact_deep")
+        self.assertEqual(payload["llm_route"]["original_budget"], "deep")
+        self.assertEqual(payload["llm_route"]["token_pressure"]["status"], "tight")
+        self.assertIn("token_pressure_tight", payload["llm_route"]["reason"])
+        request_payload = mocked_post.call_args_list[0].kwargs["json"]
+        self.assertEqual(request_payload["generationConfig"]["thinkingConfig"]["thinkingBudget"], 0)
+        self.assertEqual(request_payload["generationConfig"]["maxOutputTokens"], 2400)
+        self.assertEqual(payload["llm_thinking_budget"], 0)
 
     def test_auto_answer_mode_routes_data_source_questions_to_deep_budget(self):
         service = SourceCodeQAService(

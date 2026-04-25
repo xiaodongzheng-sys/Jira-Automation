@@ -59,7 +59,7 @@ class Settings:
     source_code_qa_max_file_bytes: int = 500_000
     source_code_qa_gitlab_token: str | None = None
     source_code_qa_gitlab_username: str = "oauth2"
-    source_code_qa_llm_provider: str = "gemini"
+    source_code_qa_llm_provider: str = "codex_cli_bridge"
     source_code_qa_gemini_api_key: str | None = None
     source_code_qa_gemini_api_base_url: str = "https://generativelanguage.googleapis.com/v1beta"
     source_code_qa_openai_api_key: str | None = None
@@ -72,6 +72,13 @@ class Settings:
     source_code_qa_gemini_fast_model: str = "gemini-2.5-flash-lite"
     source_code_qa_gemini_deep_model: str = "gemini-2.5-flash"
     source_code_qa_gemini_fallback_model: str = "gemini-2.5-flash-lite"
+    source_code_qa_vertex_credentials_file: str | None = None
+    source_code_qa_vertex_project_id: str | None = None
+    source_code_qa_vertex_location: str = "global"
+    source_code_qa_vertex_model: str = "gemini-2.5-flash"
+    source_code_qa_vertex_fast_model: str = "gemini-2.5-flash-lite"
+    source_code_qa_vertex_deep_model: str = "gemini-2.5-flash"
+    source_code_qa_vertex_fallback_model: str = "gemini-2.5-flash-lite"
     source_code_qa_query_rewrite_model: str | None = None
     source_code_qa_planner_model: str | None = None
     source_code_qa_answer_model: str | None = None
@@ -85,6 +92,9 @@ class Settings:
     source_code_qa_semantic_index_enabled: bool = True
     source_code_qa_llm_cache_ttl_seconds: int = 1800
     source_code_qa_llm_timeout_seconds: int = 90
+    source_code_qa_codex_timeout_seconds: int = 240
+    source_code_qa_codex_top_path_limit: int = 30
+    source_code_qa_codex_repair_enabled: bool = True
     source_code_qa_llm_max_retries: int = 2
     source_code_qa_llm_backoff_seconds: float = 1.0
     source_code_qa_llm_max_backoff_seconds: float = 8.0
@@ -144,7 +154,7 @@ class Settings:
             source_code_qa_max_file_bytes=int(_env_str("SOURCE_CODE_QA_MAX_FILE_BYTES", "500000")),
             source_code_qa_gitlab_token=_env_str("SOURCE_CODE_QA_GITLAB_TOKEN"),
             source_code_qa_gitlab_username=_env_str("SOURCE_CODE_QA_GITLAB_USERNAME", "oauth2"),
-            source_code_qa_llm_provider=_env_str("SOURCE_CODE_QA_LLM_PROVIDER", "gemini"),
+            source_code_qa_llm_provider=_env_str("SOURCE_CODE_QA_LLM_PROVIDER", "codex_cli_bridge"),
             source_code_qa_gemini_api_key=_env_str("SOURCE_CODE_QA_GEMINI_API_KEY") or _env_str("GEMINI_API_KEY"),
             source_code_qa_gemini_api_base_url=_env_str("SOURCE_CODE_QA_GEMINI_API_BASE_URL", _env_str("GEMINI_API_BASE_URL", "https://generativelanguage.googleapis.com/v1beta")),
             source_code_qa_openai_api_key=_env_str("SOURCE_CODE_QA_OPENAI_API_KEY") or _env_str("OPENAI_API_KEY"),
@@ -157,6 +167,13 @@ class Settings:
             source_code_qa_gemini_fast_model=_env_str("SOURCE_CODE_QA_GEMINI_FAST_MODEL", "gemini-2.5-flash-lite"),
             source_code_qa_gemini_deep_model=_env_str("SOURCE_CODE_QA_GEMINI_DEEP_MODEL", _env_str("SOURCE_CODE_QA_GEMINI_MODEL", "gemini-2.5-flash")),
             source_code_qa_gemini_fallback_model=_env_str("SOURCE_CODE_QA_GEMINI_FALLBACK_MODEL", "gemini-2.5-flash-lite"),
+            source_code_qa_vertex_credentials_file=_env_str("SOURCE_CODE_QA_VERTEX_CREDENTIALS_FILE") or _env_str("GOOGLE_APPLICATION_CREDENTIALS"),
+            source_code_qa_vertex_project_id=_env_str("SOURCE_CODE_QA_VERTEX_PROJECT_ID") or _env_str("GOOGLE_CLOUD_PROJECT"),
+            source_code_qa_vertex_location=_env_str("SOURCE_CODE_QA_VERTEX_LOCATION", _env_str("GOOGLE_CLOUD_LOCATION", "global")),
+            source_code_qa_vertex_model=_env_str("SOURCE_CODE_QA_VERTEX_MODEL", "gemini-2.5-flash"),
+            source_code_qa_vertex_fast_model=_env_str("SOURCE_CODE_QA_VERTEX_FAST_MODEL", "gemini-2.5-flash-lite"),
+            source_code_qa_vertex_deep_model=_env_str("SOURCE_CODE_QA_VERTEX_DEEP_MODEL", _env_str("SOURCE_CODE_QA_VERTEX_MODEL", "gemini-2.5-flash")),
+            source_code_qa_vertex_fallback_model=_env_str("SOURCE_CODE_QA_VERTEX_FALLBACK_MODEL", "gemini-2.5-flash-lite"),
             source_code_qa_query_rewrite_model=_env_str("SOURCE_CODE_QA_QUERY_REWRITE_MODEL"),
             source_code_qa_planner_model=_env_str("SOURCE_CODE_QA_PLANNER_MODEL"),
             source_code_qa_answer_model=_env_str("SOURCE_CODE_QA_ANSWER_MODEL"),
@@ -170,6 +187,9 @@ class Settings:
             source_code_qa_semantic_index_enabled=_env_bool("SOURCE_CODE_QA_SEMANTIC_INDEX_ENABLED", True),
             source_code_qa_llm_cache_ttl_seconds=int(_env_str("SOURCE_CODE_QA_LLM_CACHE_TTL_SECONDS", "1800")),
             source_code_qa_llm_timeout_seconds=int(_env_str("SOURCE_CODE_QA_LLM_TIMEOUT_SECONDS", "90")),
+            source_code_qa_codex_timeout_seconds=int(_env_str("SOURCE_CODE_QA_CODEX_TIMEOUT_SECONDS", "240")),
+            source_code_qa_codex_top_path_limit=int(_env_str("SOURCE_CODE_QA_CODEX_TOP_PATH_LIMIT", "30")),
+            source_code_qa_codex_repair_enabled=_env_bool("SOURCE_CODE_QA_CODEX_REPAIR_ENABLED", True),
             source_code_qa_llm_max_retries=int(_env_str("SOURCE_CODE_QA_LLM_MAX_RETRIES", "2")),
             source_code_qa_llm_backoff_seconds=float(_env_str("SOURCE_CODE_QA_LLM_BACKOFF_SECONDS", "1.0")),
             source_code_qa_llm_max_backoff_seconds=float(_env_str("SOURCE_CODE_QA_LLM_MAX_BACKOFF_SECONDS", "8.0")),

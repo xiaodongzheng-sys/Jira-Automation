@@ -13,6 +13,7 @@
   const pmTeam = document.querySelector('[data-source-pm-team]');
   const country = document.querySelector('[data-source-country]');
   const answerMode = document.querySelector('[data-source-answer-mode]');
+  const llmProvider = document.querySelector('[data-source-llm-provider]');
   const countryWrap = document.querySelector('[data-source-country-wrap]');
   const configStatus = document.querySelector('[data-source-config-status]');
   const adminStatus = document.querySelector('[data-source-admin-status]');
@@ -40,6 +41,7 @@
   let config = { mappings: {} };
   let gitAuthReady = false;
   let llmReady = false;
+  let llmProviders = {};
   let llmPolicy = {};
   let indexHealthPayload = {};
   let releaseGatePayload = {};
@@ -76,6 +78,17 @@
   const currentCountry = () => (pmTeam.value === 'CRMS' ? country.value : 'All');
   const currentKey = () => `${pmTeam.value}:${currentCountry()}`;
   const currentRepoCount = () => (config.mappings?.[currentKey()] || []).length;
+  const defaultLlmProvider = () => (selectHasValue(llmProvider, 'codex_cli_bridge') ? 'codex_cli_bridge' : (llmProvider?.value || 'codex_cli_bridge'));
+  const providerOptionIsEnabled = (value) => {
+    if (!llmProvider) return false;
+    return Array.from(llmProvider.options || []).some((option) => option.value === value && !option.disabled);
+  };
+  const selectedLlmProvider = () => (providerOptionIsEnabled(llmProvider?.value) ? llmProvider.value : defaultLlmProvider());
+  const selectedProviderReady = () => {
+    const provider = selectedLlmProvider();
+    if (llmProviders[provider]) return Boolean(llmProviders[provider].ready);
+    return provider === (llmPolicy.provider?.provider || 'codex_cli_bridge') ? llmReady : false;
+  };
   const formatElapsed = (startedAt) => {
     const seconds = Math.max(0, (performance.now() - startedAt) / 1000);
     return seconds < 10 ? `${seconds.toFixed(1)}s` : `${Math.round(seconds)}s`;
@@ -159,14 +172,20 @@
     if (selectHasValue(answerMode, saved.answer_mode)) {
       answerMode.value = saved.answer_mode;
     }
+    if (providerOptionIsEnabled(saved.llm_provider)) {
+      llmProvider.value = saved.llm_provider;
+    } else if (providerOptionIsEnabled('codex_cli_bridge')) {
+      llmProvider.value = 'codex_cli_bridge';
+    }
   };
 
-  const rememberLastQueryConfig = (selectedAnswerMode) => {
+  const rememberLastQueryConfig = (selectedAnswerMode, selectedProvider) => {
     try {
       window.localStorage.setItem(preferenceKey, JSON.stringify({
         pm_team: pmTeam.value,
         country: currentCountry(),
         answer_mode: selectedAnswerMode,
+        llm_provider: selectedProvider,
       }));
     } catch (_error) {
       // Local storage can be blocked in private/browser-managed contexts.
@@ -223,7 +242,7 @@
         ${rows.slice(0, 6).map((row) => `
           <button class="source-qa-history-item" type="button" data-source-history-question="${escapeHtml(row.question)}">
             <span>${escapeHtml(row.question)}</span>
-            <small>${escapeHtml(row.pm_team || '')} · ${escapeHtml(row.country || 'All')} · ${escapeHtml(row.status || '')}</small>
+            <small>${escapeHtml(row.pm_team || '')} · ${escapeHtml(row.country || 'All')} · ${escapeHtml(row.llm_provider || row.answer_mode || '')} · ${escapeHtml(row.status || '')}</small>
           </button>
         `).join('')}
       </div>
@@ -255,16 +274,17 @@
 
   const updateAnswerModeState = () => {
     const answerModeValue = answerMode?.value || 'auto';
-    const llmSelected = answerModeValue !== 'retrieval_only' && llmReady;
+    const providerReady = selectedProviderReady();
+    const providerLabel = llmProvider?.selectedOptions?.[0]?.textContent || llmPolicy.provider?.provider || 'LLM';
+    const llmSelected = answerModeValue !== 'retrieval_only' && providerReady;
     if (queryButton) {
       queryButton.textContent = llmSelected ? 'Search + Generate Answer' : 'Search Code';
     }
     if (queryStatus) {
-      if (answerModeValue !== 'retrieval_only' && !llmReady) {
-        const provider = llmPolicy.provider?.provider || 'LLM';
-        queryStatus.textContent = `${provider} is unavailable; code search will still run.`;
+      if (answerModeValue !== 'retrieval_only' && !providerReady) {
+        queryStatus.textContent = `${providerLabel} is unavailable; code search will still run.`;
       } else if (llmSelected) {
-        queryStatus.textContent = 'Ready. Smart Answer will search first and call LLM only when useful.';
+        queryStatus.textContent = `Ready. Smart Answer will search first and call ${providerLabel} only when useful.`;
       } else if (!llmSelected) {
         queryStatus.textContent = 'Ready. Code search only.';
       }
@@ -373,6 +393,7 @@
       config = payload.config || { mappings: {} };
       gitAuthReady = Boolean(payload.git_auth_ready);
       llmReady = Boolean(payload.llm_ready);
+      llmProviders = payload.llm_providers || {};
       llmPolicy = payload.llm_policy || {};
       indexHealthPayload = payload.index_health || {};
       releaseGatePayload = payload.release_gate || {};
@@ -910,7 +931,8 @@
 
   const queryCode = async () => {
     const selectedAnswerMode = answerMode?.value || 'auto';
-    const effectiveAnswerMode = selectedAnswerMode !== 'retrieval_only' && !llmReady ? 'retrieval_only' : selectedAnswerMode;
+    const selectedProvider = selectedLlmProvider();
+    const effectiveAnswerMode = selectedAnswerMode !== 'retrieval_only' && !selectedProviderReady() ? 'retrieval_only' : selectedAnswerMode;
     if (activeMode) activeMode.textContent = effectiveAnswerMode;
     const progress = startQueryProgress('Submitting query to server...');
     if (queryButton) queryButton.disabled = true;
@@ -925,6 +947,7 @@
           country: currentCountry(),
           question: submittedQuestion,
           answer_mode: effectiveAnswerMode,
+          llm_provider: selectedProvider,
           llm_budget_mode: 'auto',
           conversation_context: conversationContext,
           async: true,
@@ -935,7 +958,7 @@
         : initialPayload;
       lastPayload = payload;
       conversationContext = buildConversationContext(payload, submittedQuestion);
-      rememberLastQueryConfig(effectiveAnswerMode);
+      rememberLastQueryConfig(effectiveAnswerMode, selectedProvider);
       summary.textContent = payload.summary || 'Search completed.';
       if (payload.llm_retryable_error?.retryable) {
         queryStatus.textContent = `LLM quota/rate limit hit; retry is still enabled. Code search completed in ${formatElapsed(progress.startedAt)}.`;
@@ -957,6 +980,7 @@
         pm_team: pmTeam.value,
         country: currentCountry(),
         answer_mode: payload.answer_mode || selectedAnswerMode,
+        llm_provider: payload.llm_provider || selectedProvider,
         status: payload.status,
         trace_id: payload.trace_id,
         summary: payload.summary,
@@ -1017,6 +1041,7 @@
     renderSelectedConfig();
   });
   answerMode?.addEventListener('change', updateAnswerModeState);
+  llmProvider?.addEventListener('change', updateAnswerModeState);
   saveButton?.addEventListener('click', saveConfig);
   syncButton?.addEventListener('click', syncRepos);
   queryButton?.addEventListener('click', queryCode);
