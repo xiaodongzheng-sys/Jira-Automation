@@ -679,29 +679,95 @@
   };
 
   const renderInlineCitationList = (citations = []) => {
-    const values = (citations || []).filter(Boolean).slice(0, 6);
+    const values = (citations || [])
+      .map((item) => normalizeCitation(item))
+      .filter(Boolean)
+      .slice(0, 6);
     if (!values.length) return '';
-    return `<span class="source-qa-citations">${values.map((item) => escapeHtml(item)).join(' ')}</span>`;
+    return `<span class="source-qa-citations" aria-label="Citations">${values.map((item) => `<span>${escapeHtml(item)}</span>`).join('')}</span>`;
+  };
+
+  const normalizeCitation = (value) => {
+    const raw = String(value || '').trim();
+    if (!raw) return '';
+    const match = raw.match(/S?\s*(\d+)/i);
+    return match ? `S${match[1]}` : raw.replace(/^\[|\]$/g, '');
+  };
+
+  const stripCitationTags = (text) => String(text || '')
+    .replace(/\s*\[S\d+\]/gi, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+
+  const extractCitationTags = (text) => {
+    const tags = [];
+    String(text || '').replace(/\[S(\d+)\]/gi, (_match, id) => {
+      const tag = `S${id}`;
+      if (!tags.includes(tag)) tags.push(tag);
+      return '';
+    });
+    return tags;
+  };
+
+  const isCitationOnlyText = (text) => {
+    const normalized = String(text || '').trim();
+    return Boolean(normalized) && /^(?:\[?S\d+\]?\s*)+$/i.test(normalized);
+  };
+
+  const cleanDirectAnswer = (directAnswer, fallbackAnswer, hasStructuredSections) => {
+    let text = String(directAnswer || fallbackAnswer || '').trim();
+    if (!text) return '';
+    if (hasStructuredSections) {
+      text = text.split(/\n\s*(?:[-*]\s+|Missing evidence:)/i)[0].trim();
+      text = text.split(/\s+-\s+(?=(?:The|If|Missing evidence|Specific details|Specific API|Confirmed|Missing)\b)/i)[0].trim();
+    }
+    return stripCitationTags(text);
+  };
+
+  const normalizedClaimsForDisplay = (claims = []) => {
+    const seen = new Set();
+    const items = [];
+    for (const claim of claims || []) {
+      const rawText = typeof claim === 'string' ? claim : claim?.text;
+      if (isCitationOnlyText(rawText)) continue;
+      const text = stripCitationTags(rawText);
+      if (!text || seen.has(text.toLowerCase())) continue;
+      const citationTags = [
+        ...(Array.isArray(claim?.citations) ? claim.citations : []),
+        ...extractCitationTags(rawText),
+      ];
+      items.push({ text, citations: Array.from(new Set(citationTags.map(normalizeCitation).filter(Boolean))) });
+      seen.add(text.toLowerCase());
+      if (items.length >= 8) break;
+    }
+    return items;
   };
 
   const renderReadableAnswerBody = (payload, answer) => {
     const structured = payload?.structured_answer || {};
-    const claims = Array.isArray(structured.claims) ? structured.claims : [];
-    const missing = Array.isArray(structured.missing_evidence) ? structured.missing_evidence : [];
-    if (structured.direct_answer || claims.length || missing.length) {
+    const claims = normalizedClaimsForDisplay(Array.isArray(structured.claims) ? structured.claims : []);
+    const missing = (Array.isArray(structured.missing_evidence) ? structured.missing_evidence : [])
+      .map((item) => String(item || '').trim())
+      .filter(Boolean)
+      .slice(0, 6);
+    const directAnswer = cleanDirectAnswer(structured.direct_answer, answer, Boolean(claims.length || missing.length));
+    if (directAnswer || claims.length || missing.length) {
       return `
         <section class="source-qa-answer-section source-qa-answer-direct">
-          <strong>Answer</strong>
-          <p>${escapeHtml(structured.direct_answer || answer)}</p>
+          <strong>Direct Answer</strong>
+          ${directAnswer ? `<p>${escapeHtml(directAnswer)}</p>` : '<p>No direct answer returned.</p>'}
         </section>
         ${claims.length ? `
           <section class="source-qa-answer-section">
             <strong>Evidence-backed Claims</strong>
-            <ul>
-              ${claims.slice(0, 8).map((claim) => `
-                <li>${escapeHtml(claim.text || claim)} ${renderInlineCitationList(claim.citations || [])}</li>
+            <div class="source-qa-claim-list">
+              ${claims.map((claim) => `
+                <div class="source-qa-claim-item">
+                  <p>${escapeHtml(claim.text)}</p>
+                  ${renderInlineCitationList(claim.citations || [])}
+                </div>
               `).join('')}
-            </ul>
+            </div>
           </section>
         ` : ''}
         ${missing.length ? `

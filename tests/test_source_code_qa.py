@@ -4907,6 +4907,41 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertEqual(fallback["format"], "prose_fallback")
         self.assertEqual(fallback["claims"][0]["citations"], ["S1"])
 
+    def test_finalizer_preserves_structured_json_for_display(self):
+        structured = {
+            "direct_answer": "Issue creation reads issue_table.",
+            "claims": [{"text": "IssueRepository reads issue_table", "citations": ["S1"]}],
+            "missing_evidence": ["No service caller evidence."],
+            "confidence": "medium",
+            "format": "json",
+        }
+
+        final = self.service._finalize_llm_answer(
+            question="what table does IssueRepository use",
+            answer=json.dumps(structured),
+            structured_answer=structured,
+            evidence_summary={
+                "intent": self.service._question_intent("what table does IssueRepository use"),
+                "data_sources": ["Portal Repo:repository/IssueRepository.java:1-5: issue_table"],
+            },
+            quality_gate={"status": "sufficient", "confidence": "medium", "missing": []},
+            claim_check={"status": "ok", "issues": []},
+            selected_matches=[
+                {
+                    "repo": "Portal Repo",
+                    "path": "repository/IssueRepository.java",
+                    "line_start": 1,
+                    "line_end": 5,
+                    "snippet": "jdbcTemplate.queryForObject(\"select * from issue_table\", mapper)",
+                }
+            ],
+        )
+
+        self.assertEqual(final["structured_answer"]["format"], "json")
+        self.assertEqual(final["structured_answer"]["direct_answer"], "Issue creation reads issue_table.")
+        self.assertEqual(final["structured_answer"]["claims"][0]["text"], "IssueRepository reads issue_table")
+        self.assertNotIn("Missing evidence:", final["structured_answer"]["direct_answer"])
+
     def test_eval_runner_checks_trace_paths_and_structured_claims(self):
         self.service.save_mapping(
             pm_team="AF",

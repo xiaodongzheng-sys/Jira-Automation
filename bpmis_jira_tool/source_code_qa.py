@@ -12719,7 +12719,13 @@ class SourceCodeQAService:
             final_answer = self._render_structured_answer(structured_answer, contract)
         elif weak_answer and confirmed_sources:
             final_answer = self._render_structured_answer(structured_answer, contract)
-        final_structured = self._parse_structured_answer(final_answer)
+        if structured_answer.get("format") == "json" and structured_answer.get("direct_answer") and not blocked:
+            final_structured = {
+                **structured_answer,
+                "missing_evidence": missing_links[:8] or structured_answer.get("missing_evidence") or [],
+            }
+        else:
+            final_structured = self._parse_structured_answer(final_answer)
         return {
             "answer": final_answer,
             "structured_answer": final_structured,
