@@ -3,10 +3,15 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
 from typing import Any
+
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 
 from bpmis_jira_tool.config import Settings
 
@@ -15,7 +20,10 @@ DEFAULT_CASES = ["evals/source_code_qa/golden.jsonl", "evals/source_code_qa/scen
 
 
 def _run_json_command(args: list[str]) -> tuple[dict[str, Any], str, str, int]:
-    completed = subprocess.run(args, capture_output=True, text=True, check=False)
+    env = dict(os.environ)
+    existing_pythonpath = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = str(ROOT_DIR) if not existing_pythonpath else f"{ROOT_DIR}{os.pathsep}{existing_pythonpath}"
+    completed = subprocess.run(args, cwd=ROOT_DIR, env=env, capture_output=True, text=True, check=False)
     stdout = completed.stdout or ""
     stderr = completed.stderr or ""
     payload: dict[str, Any] = {}

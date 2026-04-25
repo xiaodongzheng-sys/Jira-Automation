@@ -52,6 +52,7 @@ doctor() {
   local launchd_label="${TEAM_STACK_LAUNCHD_LABEL:-io.npt.jira-creation-stack}"
   local status_file
   local alert_file
+  local source_qa_eval_status_file
   local ok=0
   local guard_ok=1
   local portal_ok=1
@@ -79,6 +80,7 @@ doctor() {
   recommended_root="$(recommended_team_stack_root)"
   status_file="$data_dir/run/team_stack_status.json"
   alert_file="$data_dir/run/team_stack_alert.json"
+  source_qa_eval_status_file="$data_dir/run/source_code_qa_eval_status.json"
 
   echo "== Doctor =="
   echo "Repo root: $ROOT_DIR"
@@ -242,6 +244,46 @@ PY
     echo
   else
     echo "alert marker not present"
+  fi
+
+  echo
+  echo "== Source Code QA Eval =="
+  if [[ -f "$source_qa_eval_status_file" ]]; then
+    cat "$source_qa_eval_status_file"
+    echo
+    if [[ -x "$PYTHON_BIN" ]]; then
+      local source_qa_eval_state
+      source_qa_eval_state="$(
+        SOURCE_QA_EVAL_STATUS_FILE="$source_qa_eval_status_file" "$PYTHON_BIN" - <<'PY'
+import json
+import os
+import time
+
+status_file = os.environ["SOURCE_QA_EVAL_STATUS_FILE"]
+try:
+    with open(status_file, "r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+except (OSError, json.JSONDecodeError):
+    print("unknown")
+else:
+    updated_unix = payload.get("updated_unix")
+    if isinstance(updated_unix, int):
+        print(f"age={int(time.time()) - updated_unix}s")
+    print(f"state={payload.get('state') or 'unknown'}")
+PY
+      )"
+      if [[ -n "$source_qa_eval_state" ]]; then
+        while IFS= read -r line; do
+          [[ -n "$line" ]] || continue
+          echo "$line"
+          if [[ "$line" == "state=failed" ]]; then
+            ok=1
+          fi
+        done <<<"$source_qa_eval_state"
+      fi
+    fi
+  else
+    echo "latest eval status missing: $source_qa_eval_status_file"
   fi
 
   return "$ok"

@@ -24,12 +24,18 @@ STATUS_FILE="$DATA_DIR/run/team_stack_status.json"
 ALERT_FILE="$DATA_DIR/run/team_stack_alert.json"
 PORTAL_LOG_FILE="$DATA_DIR/logs/team_portal.log"
 NGROK_LOG_FILE="$DATA_DIR/logs/ngrok_tunnel.log"
+SOURCE_QA_EVAL_STATUS_FILE="$DATA_DIR/run/source_code_qa_eval_status.json"
+SOURCE_QA_EVAL_LAST_RUN_FILE="$DATA_DIR/run/source_code_qa_eval_last_run"
+SOURCE_QA_EVAL_LOG_FILE="$DATA_DIR/logs/source_code_qa_nightly_eval.log"
 CHECK_INTERVAL="${TEAM_STACK_GUARD_INTERVAL_SECONDS:-15}"
 START_READY_TIMEOUT_SECONDS="${TEAM_STACK_START_READY_TIMEOUT_SECONDS:-12}"
 USE_CAFFEINATE="${TEAM_STACK_USE_CAFFEINATE:-auto}"
 RESTART_WINDOW_SECONDS="${TEAM_STACK_RESTART_WINDOW_SECONDS:-60}"
 MAX_RESTART_BACKOFF_SECONDS="${TEAM_STACK_MAX_RESTART_BACKOFF_SECONDS:-30}"
 RESTART_ALERT_THRESHOLD="${TEAM_STACK_RESTART_ALERT_THRESHOLD:-3}"
+SOURCE_QA_EVAL_ENABLED="${SOURCE_CODE_QA_NIGHTLY_EVAL_ENABLED:-1}"
+SOURCE_QA_EVAL_INTERVAL_SECONDS="${SOURCE_CODE_QA_NIGHTLY_EVAL_INTERVAL_SECONDS:-86400}"
+SOURCE_QA_EVAL_MIN_START_DELAY_SECONDS="${SOURCE_CODE_QA_NIGHTLY_EVAL_MIN_START_DELAY_SECONDS:-60}"
 
 cd "$ROOT_DIR"
 echo $$ >"$PID_FILE"
@@ -117,6 +123,17 @@ clear_alert_marker_if_stable() {
   if [[ -f "$ALERT_FILE" ]] && (( portal_restart_count < RESTART_ALERT_THRESHOLD )) && (( ngrok_restart_count < RESTART_ALERT_THRESHOLD )); then
     rm -f "$ALERT_FILE"
   fi
+}
+
+source_qa_eval_enabled() {
+  case "$SOURCE_QA_EVAL_ENABLED" in
+    1|true|yes|on)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
 }
 
 compute_backoff() {
@@ -352,6 +369,63 @@ write_status_summary() {
 EOF
 }
 
+read_source_qa_eval_last_run() {
+  if [[ ! -f "$SOURCE_QA_EVAL_LAST_RUN_FILE" ]]; then
+    printf '0\n'
+    return
+  fi
+  local raw
+  raw="$(cat "$SOURCE_QA_EVAL_LAST_RUN_FILE" 2>/dev/null || true)"
+  if [[ "$raw" =~ ^[0-9]+$ ]]; then
+    printf '%s\n' "$raw"
+  else
+    printf '0\n'
+  fi
+}
+
+write_source_qa_eval_status() {
+  local state="$1"
+  local message="$2"
+  local exit_code="${3:-0}"
+  cat >"$SOURCE_QA_EVAL_STATUS_FILE" <<EOF
+{"state":"$(json_escape "$state")","updated_at":"$(date '+%Y-%m-%d %H:%M:%S')","updated_unix":$(date +%s),"exit_code":$exit_code,"interval_seconds":$SOURCE_QA_EVAL_INTERVAL_SECONDS,"log_file":"$(json_escape "$SOURCE_QA_EVAL_LOG_FILE")","message":"$(json_escape "$message")"}
+EOF
+}
+
+run_source_qa_eval_if_due() {
+  if ! source_qa_eval_enabled; then
+    return 0
+  fi
+  if ! portal_is_healthy; then
+    return 0
+  fi
+
+  local now
+  now="$(date +%s)"
+  if (( portal_last_start_at > 0 && now - portal_last_start_at < SOURCE_QA_EVAL_MIN_START_DELAY_SECONDS )); then
+    return 0
+  fi
+
+  local last_run
+  last_run="$(read_source_qa_eval_last_run)"
+  if (( now - last_run < SOURCE_QA_EVAL_INTERVAL_SECONDS )); then
+    return 0
+  fi
+
+  echo "$now" >"$SOURCE_QA_EVAL_LAST_RUN_FILE"
+  write_source_qa_eval_status "running" "Source Code QA nightly eval started."
+  log "Source Code QA nightly eval started."
+  touch "$SOURCE_QA_EVAL_LOG_FILE"
+  if PYTHONPATH="$ROOT_DIR" TEAM_PORTAL_DATA_DIR="$DATA_DIR" "$PYTHON_BIN" "$ROOT_DIR/scripts/run_source_code_qa_nightly_eval.py" --include-useful-feedback --json >>"$SOURCE_QA_EVAL_LOG_FILE" 2>&1; then
+    write_source_qa_eval_status "passed" "Source Code QA nightly eval passed."
+    log "Source Code QA nightly eval passed."
+  else
+    local exit_code=$?
+    write_source_qa_eval_status "failed" "Source Code QA nightly eval failed. Check the eval log." "$exit_code"
+    log "Source Code QA nightly eval failed (exit $exit_code)."
+  fi
+}
+
 log "Team stack guard started."
 start_caffeinate
 
@@ -359,6 +433,7 @@ while true; do
   ensure_portal_running
   if portal_is_healthy; then
     ensure_ngrok_running
+    run_source_qa_eval_if_due
   fi
   write_status_summary
 

@@ -28,7 +28,7 @@ ANSWER_MODE_AUTO = "auto"
 ANSWER_MODE = "retrieval_only"
 ANSWER_MODE_GEMINI = "gemini_flash"
 CONFIG_VERSION = 1
-CODE_INDEX_VERSION = 27
+CODE_INDEX_VERSION = 28
 LLM_PROVIDER_GEMINI = "gemini"
 LLM_PROVIDER_OPENAI_COMPATIBLE = "openai_compatible"
 LLM_PROMPT_VERSION = 5
@@ -2279,7 +2279,9 @@ class SourceCodeQAService:
             "tree_sitter_errors": int(metadata.get("tree_sitter_errors") or 0),
             "semantic_index_model": metadata.get("semantic_index_model") or DEFAULT_SEMANTIC_INDEX_MODEL,
             "git_revision": metadata.get("git_revision") or git_revision,
+            "file_fts_enabled": metadata.get("file_fts_enabled") == "1",
             "fts_enabled": metadata.get("fts_enabled") == "1",
+            "semantic_fts_enabled": metadata.get("semantic_fts_enabled") == "1",
             "updated_at": metadata.get("updated_at"),
         }
 
@@ -2453,6 +2455,7 @@ class SourceCodeQAService:
                     create index idx_semantic_chunks_file_path on semantic_chunks(file_path);
                     """
                 )
+                file_fts_enabled = self._try_create_file_fts(connection)
                 fts_enabled = self._try_create_fts(connection)
                 semantic_fts_enabled = self._try_create_semantic_fts(connection)
                 for file_path in self._iter_text_files(repo_path):
@@ -2474,6 +2477,20 @@ class SourceCodeQAService:
                             json.dumps(sorted(file_symbols), separators=(",", ":")),
                         ),
                     )
+                    if file_fts_enabled:
+                        connection.execute(
+                            "insert into files_fts(path, content) values (?, ?)",
+                            (
+                                relative_path,
+                                "\n".join(
+                                    [
+                                        relative_path,
+                                        relative_path.replace("/", " ").replace(".", " "),
+                                        " ".join(sorted(file_symbols)),
+                                    ]
+                                ),
+                            ),
+                        )
                     line_rows = []
                     for index, line in enumerate(lines, start=1):
                         lowered = line.lower()
@@ -2585,6 +2602,7 @@ class SourceCodeQAService:
                     "tree_sitter_errors": str(tree_sitter_errors),
                     "semantic_index_model": self.semantic_index_model,
                     "git_revision": git_revision,
+                    "file_fts_enabled": "1" if file_fts_enabled else "0",
                     "fts_enabled": "1" if fts_enabled else "0",
                     "semantic_fts_enabled": "1" if semantic_fts_enabled else "0",
                     "updated_at": self._now_iso(),
@@ -2609,6 +2627,7 @@ class SourceCodeQAService:
                 "tree_sitter_errors": tree_sitter_errors,
                 "semantic_index_model": self.semantic_index_model,
                 "git_revision": git_revision,
+                "file_fts_enabled": file_fts_enabled,
                 "fts_enabled": fts_enabled,
                 "semantic_fts_enabled": semantic_fts_enabled,
                 "updated_at": metadata["updated_at"],
@@ -2686,6 +2705,16 @@ class SourceCodeQAService:
             if token not in tokens:
                 tokens.append(token)
         return tokens[:220]
+
+    @staticmethod
+    def _try_create_file_fts(connection: sqlite3.Connection) -> bool:
+        try:
+            connection.execute(
+                "create virtual table files_fts using fts5(path unindexed, content)"
+            )
+            return True
+        except sqlite3.Error:
+            return False
 
     @staticmethod
     def _try_create_fts(connection: sqlite3.Connection) -> bool:
@@ -5065,17 +5094,35 @@ class SourceCodeQAService:
         def placeholders(values: list[str]) -> str:
             return ",".join("?" for _ in values)
 
-        for term in query_terms:
-            like = f"%{term}%"
+        file_fts_rows = self._file_fts_search_rows(
+            connection,
+            tokens,
+            focus_terms,
+            index_path=index_path,
+            request_cache=request_cache,
+        )
+        for row in file_fts_rows:
+            file_path = str(row.get("path") if isinstance(row, dict) else row["path"])
             try:
-                add_file_rows(
-                    connection.execute(
-                        "select * from files where lower_path like ? or symbols like ? order by path limit ?",
-                        (like, like, 40),
-                    ).fetchall()
-                )
+                file_row = connection.execute("select * from files where path = ?", (file_path,)).fetchone()
             except sqlite3.Error:
-                continue
+                file_row = None
+            if file_row is not None:
+                add_file_rows([file_row])
+        if not file_rows_by_path:
+            for term in query_terms:
+                like = f"%{term}%"
+                try:
+                    add_file_rows(
+                        connection.execute(
+                            "select * from files where lower_path like ? or symbols like ? order by path limit ?",
+                            (like, like, 40),
+                        ).fetchall()
+                    )
+                except sqlite3.Error:
+                    continue
+                if len(file_rows_by_path) >= MAX_TARGETED_INDEX_FILES:
+                    break
         for row in self._fts_search_rows(
             connection,
             tokens,
@@ -5281,6 +5328,55 @@ class SourceCodeQAService:
         if request_cache is not None:
             request_cache.setdefault("file_lines", {})[cache_key] = list(lines)
         return lines
+
+    def _file_fts_search_rows(
+        self,
+        connection: sqlite3.Connection,
+        tokens: list[str],
+        focus_terms: list[str],
+        *,
+        index_path: Path | None = None,
+        request_cache: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        terms = []
+        for term in [*tokens, *focus_terms]:
+            normalized = str(term or "").strip().lower()
+            if len(normalized) < 3 or normalized in STOPWORDS:
+                continue
+            if FTS_TOKEN_PATTERN.fullmatch(normalized):
+                terms.append(normalized.replace('"', ""))
+        terms = list(dict.fromkeys(terms))[:12]
+        if not terms:
+            return []
+        query = " OR ".join(f'"{term}"' for term in terms)
+        cache_key = ""
+        if request_cache is not None and index_path is not None:
+            cache_key = f"{self._index_fingerprint(index_path)}:{query}"
+            file_fts_cache = request_cache.setdefault("file_fts", {})
+            cached = file_fts_cache.get(cache_key)
+            if cached is not None:
+                self._increment_retrieval_stat(request_cache, "file_fts_hits")
+                return cached
+            self._increment_retrieval_stat(request_cache, "file_fts_misses")
+        try:
+            rows = list(
+                connection.execute(
+                    """
+                    select path, bm25(files_fts) as rank
+                    from files_fts
+                    where files_fts match ?
+                    order by rank
+                    limit 80
+                    """,
+                    (query,),
+                )
+            )
+        except sqlite3.Error:
+            return []
+        payload = [dict(row) for row in rows]
+        if request_cache is not None and cache_key:
+            request_cache.setdefault("file_fts", {})[cache_key] = payload
+        return payload
 
     def _fts_search_rows(
         self,
@@ -5609,6 +5705,7 @@ class SourceCodeQAService:
             "index_rows": {},
             "targeted_index_rows": {},
             "structure_like": {},
+            "file_fts": {},
             "fts": {},
             "semantic_fts": {},
             "trace_paths": {},
@@ -5629,6 +5726,8 @@ class SourceCodeQAService:
                 "file_lines_misses": 0,
                 "structure_like_hits": 0,
                 "structure_like_misses": 0,
+                "file_fts_hits": 0,
+                "file_fts_misses": 0,
                 "fts_hits": 0,
                 "fts_misses": 0,
                 "semantic_fts_hits": 0,
@@ -5666,6 +5765,7 @@ class SourceCodeQAService:
             "targeted_index_row_entries": len(request_cache.get("targeted_index_rows") or {}),
             "file_line_entries": len(request_cache.get("file_lines") or {}),
             "structure_like_entries": len(request_cache.get("structure_like") or {}),
+            "file_fts_entries": len(request_cache.get("file_fts") or {}),
             "fts_entries": len(request_cache.get("fts") or {}),
             "semantic_fts_entries": len(request_cache.get("semantic_fts") or {}),
             "trace_path_entries": len(request_cache.get("trace_paths") or {}),
