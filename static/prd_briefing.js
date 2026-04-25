@@ -259,9 +259,11 @@
       const imageCells = Array.from(table.querySelectorAll('td, th')).filter((cell) => cell.querySelector('img'));
       const hasMedia = imageCells.length > 0;
       const hasDenseColumns = maxColumns >= 5;
+      const hasMediaSplit = hasMedia && maxColumns === 2;
 
       table.classList.toggle('briefing-dense-table', hasDenseColumns);
       table.classList.toggle('briefing-media-table', hasMedia);
+      table.classList.toggle('briefing-media-split-table', hasMediaSplit);
       if (hasDenseColumns || hasMedia) {
         table.closest('.table-wrap')?.classList.add('briefing-natural-table-wrap');
       }
@@ -276,14 +278,16 @@
     if (!sectionDetailNode) return;
     sectionDetailNode.querySelectorAll('img').forEach((image) => {
       const applyClass = () => {
-        const ratio = image.naturalHeight ? image.naturalWidth / image.naturalHeight : 0;
+        const inMediaArea = Boolean(image.closest('.briefing-media-cell, .briefing-presentation-visual'));
         const contextText = image.closest('.briefing-presentation-copy, td, th, p, li')?.textContent?.toLowerCase() || '';
         const src = `${image.currentSrc || image.src || ''}`.toLowerCase();
+        const isSmallAsset = image.naturalWidth > 0 && image.naturalHeight > 0 && image.naturalWidth <= 180 && image.naturalHeight <= 180;
         const isIconLike =
-          image.closest('.briefing-presentation-copy')
-          || (ratio > 0.78 && ratio < 1.22)
+          !inMediaArea
+          && (image.closest('.briefing-presentation-copy')
+          || isSmallAsset
           || /arrow|expand|collapse|up|down|icon/.test(src)
-          || /expand|collapse|icon/.test(contextText);
+          || /expand|collapse|icon/.test(contextText));
         image.classList.toggle('briefing-inline-icon', Boolean(isIconLike));
       };
 

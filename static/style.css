@@ -2838,6 +2838,16 @@ select {
   min-width: 0 !important;
 }
 
+.briefing-original-content table.briefing-media-split-table td:first-child,
+.briefing-original-content table.briefing-media-split-table th:first-child {
+  width: 34% !important;
+}
+
+.briefing-original-content table.briefing-media-split-table td:last-child,
+.briefing-original-content table.briefing-media-split-table th:last-child {
+  width: 66% !important;
+}
+
 .briefing-original-content table.briefing-dense-table th,
 .briefing-original-content table.briefing-dense-table td {
   min-width: 0 !important;
@@ -2868,8 +2878,9 @@ select {
 }
 
 .briefing-original-content table.briefing-media-table .briefing-media-cell img {
-  width: min(100%, 620px);
-  max-width: 620px;
+  width: 100% !important;
+  max-width: 100% !important;
+  max-height: none;
 }
 
 .briefing-original-content .briefing-inline-icon,
@@ -2892,7 +2903,9 @@ select {
 
 .briefing-presentation-card {
   display: grid;
-  gap: 14px;
+  grid-template-columns: minmax(320px, 0.82fr) minmax(0, 1.18fr);
+  gap: 18px;
+  align-items: start;
   padding: 18px;
   border-radius: 20px;
   border: 1px solid var(--line);
@@ -2903,6 +2916,7 @@ select {
 .briefing-presentation-step {
   display: inline-flex;
   width: fit-content;
+  grid-column: 1 / -1;
   padding: 5px 10px;
   border-radius: 999px;
   background: rgba(27, 107, 92, 0.1);
@@ -2916,6 +2930,7 @@ select {
 .briefing-presentation-copy {
   display: grid;
   gap: 10px;
+  min-width: 0;
 }
 
 .briefing-presentation-copy p,
@@ -2927,10 +2942,11 @@ select {
   display: grid;
   gap: 12px;
   justify-items: start;
+  min-width: 0;
 }
 
 .briefing-presentation-visual img {
-  width: min(100%, 1100px);
+  width: 100%;
   max-width: 100%;
   border-radius: 16px;
   border: 1px solid var(--line);
@@ -3361,6 +3377,17 @@ audio {
   .briefing-outline-item {
     min-width: 200px;
     max-width: 240px;
+  }
+
+  .briefing-presentation-card {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .briefing-original-content table.briefing-media-split-table td:first-child,
+  .briefing-original-content table.briefing-media-split-table th:first-child,
+  .briefing-original-content table.briefing-media-split-table td:last-child,
+  .briefing-original-content table.briefing-media-split-table th:last-child {
+    width: 50% !important;
   }
 }
 
