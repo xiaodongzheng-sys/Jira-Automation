@@ -80,9 +80,12 @@
       const text = await response.text();
       const httpStatus = response.status ? `HTTP ${response.status}` : 'non-JSON response';
       const looksHtml = text.includes('<!DOCTYPE') || contentType.includes('text/html');
-      throw new Error(looksHtml
+      const error = new Error(looksHtml
         ? `${httpStatus}: the portal returned an HTML error/timeout page instead of JSON. Please retry; if it repeats, check server logs with the request time.`
         : `${httpStatus}: ${text.slice(0, 180)}`);
+      error.transientPortalHtml = looksHtml;
+      error.httpStatus = response.status || 0;
+      throw error;
     }
     const payload = await response.json();
     if (!response.ok) {
@@ -94,25 +97,46 @@
   const jobStatusUrl = (jobId) => jobsUrlTemplate.replace('__JOB_ID__', encodeURIComponent(jobId));
   const isTransientJobStatusError = (error) => {
     const message = String(error?.message || '');
-    return message.includes('HTML error/timeout page') || message.includes('non-JSON response');
+    return Boolean(error?.transientPortalHtml) || message.includes('HTML error/timeout page') || message.includes('non-JSON response');
+  };
+  const apiFetchJson = async (url, options = {}, retryOptions = {}) => {
+    const attempts = Number(retryOptions.attempts || 1);
+    let lastError = null;
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      try {
+        return await fetch(url, {
+          ...options,
+          headers: {
+            Accept: 'application/json',
+            ...(options.headers || {}),
+          },
+        }).then(readJson);
+      } catch (error) {
+        lastError = error;
+        if (!isTransientJobStatusError(error) || attempt >= attempts - 1) {
+          throw error;
+        }
+        await sleep(Number(retryOptions.delayMs || 500) + (attempt * Number(retryOptions.backoffMs || 350)));
+      }
+    }
+    throw lastError || new Error('Request failed.');
   };
   const readJobStatus = async (jobId) => {
     let lastError = null;
-    for (let attempt = 0; attempt < 5; attempt += 1) {
+    for (let attempt = 0; attempt < 30; attempt += 1) {
       try {
-        return await fetch(jobStatusUrl(jobId), {
-          method: 'GET',
-          headers: { Accept: 'application/json' },
-        }).then(readJson);
+        return await apiFetchJson(jobStatusUrl(jobId), { method: 'GET' });
       } catch (error) {
         lastError = error;
         if (!isTransientJobStatusError(error)) {
           throw error;
         }
-        await sleep(450 + (attempt * 350));
+        await sleep(Math.min(1800, 450 + (attempt * 150)));
       }
     }
-    throw lastError || new Error('Could not read job status.');
+    throw new Error(lastError?.message
+      ? `Could not reconnect to the job status API after retrying. Last error: ${lastError.message}`
+      : 'Could not reconnect to the job status API after retrying.');
   };
 
   const currentCountry = () => (pmTeam.value === 'CRMS' ? country.value : 'All');
@@ -551,7 +575,7 @@
 
   const loadConfig = async () => {
     try {
-      const payload = await fetch(configUrl).then(readJson);
+      const payload = await apiFetchJson(configUrl, {}, { attempts: 5 });
       config = payload.config || { mappings: {} };
       gitAuthReady = Boolean(payload.git_auth_ready);
       llmReady = Boolean(payload.llm_ready);
@@ -582,7 +606,7 @@
     if (!canManage) return;
     adminStatus.textContent = 'Saving repository mapping...';
     try {
-      const payload = await fetch(saveUrl, {
+      const payload = await apiFetchJson(saveUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -590,7 +614,7 @@
           country: currentCountry(),
           repositories: parseRepoLines(),
         }),
-      }).then(readJson);
+      }, { attempts: 3 });
       config = payload.config || config;
       adminStatus.textContent = `Saved ${payload.repositories?.length || 0} repositories for ${payload.key}.`;
       renderSelectedConfig();
@@ -611,11 +635,11 @@
     if (!canManage || !modelAvailabilityUrl) return;
     if (modelAvailabilityStatus) modelAvailabilityStatus.textContent = 'Saving model availability...';
     try {
-      const payload = await fetch(modelAvailabilityUrl, {
+      const payload = await apiFetchJson(modelAvailabilityUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ availability: collectModelAvailability() }),
-      }).then(readJson);
+      }, { attempts: 3 });
       modelAvailabilityPayload = payload.model_availability || {};
       updateLlmProviderOptions(payload.options?.llm_providers || []);
       renderModelAvailability();
@@ -651,13 +675,15 @@
       adminStatus.textContent = 'SOURCE_CODE_QA_GITLAB_TOKEN is missing on the server.';
       return;
     }
-    adminStatus.textContent = 'Syncing repositories. This can take a minute on first clone...';
+    const syncScope = `${pmTeam.value}:${currentCountry()}`;
+    adminStatus.textContent = `Syncing ${syncScope}. This can take a minute on first clone...`;
+    if (syncButton) syncButton.disabled = true;
     try {
-      const payload = await fetch(syncUrl, {
+      const payload = await apiFetchJson(syncUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ pm_team: pmTeam.value, country: currentCountry() }),
-      }).then(readJson);
+      }, { attempts: 5, delayMs: 700 });
       if (payload.status === 'queued' && payload.job_id) {
         await pollSyncJob(payload.job_id);
         return;
@@ -668,6 +694,8 @@
         : (payload.message || 'Sync completed with issues. Check status cards.');
     } catch (error) {
       adminStatus.textContent = error.message || 'Sync failed.';
+    } finally {
+      if (syncButton) syncButton.disabled = false;
     }
   };
 
@@ -1180,7 +1208,7 @@
     try {
       const session = await ensureActiveSession();
       renderOptimisticUserMessage(submittedQuestion);
-      const initialPayload = await fetch(queryUrl, {
+      const initialPayload = await apiFetchJson(queryUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1194,7 +1222,7 @@
           conversation_context: conversationContext,
           async: true,
         }),
-      }).then(readJson);
+      }, { attempts: 3 });
       const payload = initialPayload.status === 'queued' && initialPayload.job_id
         ? await pollQueryJob(initialPayload.job_id, progress)
         : initialPayload;
