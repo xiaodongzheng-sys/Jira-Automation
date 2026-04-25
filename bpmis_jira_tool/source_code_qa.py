@@ -31,10 +31,10 @@ CONFIG_VERSION = 1
 CODE_INDEX_VERSION = 29
 LLM_PROVIDER_GEMINI = "gemini"
 LLM_PROVIDER_OPENAI_COMPATIBLE = "openai_compatible"
-LLM_PROMPT_VERSION = 5
+LLM_PROMPT_VERSION = 6
 LLM_RESPONSE_SCHEMA_VERSION = 3
 LLM_ROUTER_VERSION = 6
-LLM_CACHE_VERSION = 7
+LLM_CACHE_VERSION = 8
 LLM_RUNTIME_VERSION = 1
 PLANNER_TOOL_DSL_VERSION = 1
 GEMINI_MIN_THINKING_BUDGET = 512
@@ -1547,10 +1547,9 @@ class SourceCodeQAService:
             if not isinstance(item, dict):
                 continue
             add(item.get("term"))
-            for alias in item.get("aliases") or []:
-                add(alias)
-            for code_term in item.get("code_terms") or []:
-                add(code_term)
+            for key in ("aliases", "code_terms"):
+                for value in item.get(key) or []:
+                    add(value)
         artifacts = pack.get("key_artifacts") if isinstance(pack.get("key_artifacts"), dict) else {}
         for values in artifacts.values():
             if isinstance(values, list):
@@ -1569,6 +1568,158 @@ class SourceCodeQAService:
             else:
                 add(question)
         return list(dict.fromkeys(terms))[:220]
+
+    def _llm_domain_context(
+        self,
+        *,
+        pm_team: str,
+        country: str,
+        question: str,
+        evidence_summary: dict[str, Any],
+    ) -> str:
+        team = str(pm_team or "").strip().upper()
+        pack = self._domain_knowledge_pack(team)
+        intent = evidence_summary.get("intent") or self._question_intent(question)
+        lines: list[str] = []
+        if pack:
+            label = str(pack.get("label") or team or "Domain").strip()
+            summary = str(pack.get("summary") or "").strip()
+            country_text = str(country or ALL_COUNTRY).strip() or ALL_COUNTRY
+            lines.append(f"Domain guidance: {label} / country={country_text}")
+            if summary:
+                lines.append(f"- Domain summary: {summary}")
+            matched_modules = self._matched_domain_modules(pack, question, evidence_summary)
+            if matched_modules:
+                lines.append("- Relevant domain modules:")
+                for module in matched_modules[:4]:
+                    flows = ", ".join(str(item) for item in module.get("business_flows") or [] if str(item).strip())
+                    hints = ", ".join(str(item) for item in module.get("code_hints") or [] if str(item).strip())
+                    detail = f"; flows={flows}" if flows else ""
+                    hint_text = f"; code_hints={hints}" if hints else ""
+                    lines.append(f"  - {module.get('name')}{detail}{hint_text}")
+            rules = [str(item).strip() for item in pack.get("evidence_rules") or [] if str(item).strip()]
+            if rules:
+                lines.append("- Domain evidence rules:")
+                lines.extend(f"  - {rule}" for rule in rules[:5])
+            artifact_lines = self._domain_artifact_lines(pack, intent)
+            if artifact_lines:
+                lines.append("- Domain artifact hints:")
+                lines.extend(f"  - {line}" for line in artifact_lines[:8])
+        blueprint = self._llm_answer_blueprint(intent)
+        if blueprint:
+            lines.append("- Answer blueprint:")
+            lines.extend(f"  - {item}" for item in blueprint)
+        lines.append("- Evidence priority: production code and mapper/client/SQL evidence > config snapshots > tests > docs/spec/generated files.")
+        lines.append("- When repos disagree, explain the stronger code-backed path first and put weaker or older evidence under missing/uncertain evidence.")
+        return "\n".join(lines)
+
+    def _matched_domain_modules(
+        self,
+        pack: dict[str, Any],
+        question: str,
+        evidence_summary: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        haystack = " ".join(
+            [
+                str(question or ""),
+                json.dumps(evidence_summary, ensure_ascii=False),
+            ]
+        ).lower()
+        scored: list[tuple[int, int, dict[str, Any]]] = []
+        for index, module in enumerate(pack.get("module_map") or []):
+            if not isinstance(module, dict):
+                continue
+            terms = [module.get("name")]
+            for key in ("aliases", "code_hints", "repo_hints", "business_flows"):
+                terms.extend(module.get(key) or [])
+            score = 0
+            for term in terms:
+                token = str(term or "").strip().lower()
+                if token and token in haystack:
+                    score += 3 if token == str(module.get("name") or "").strip().lower() else 1
+                    continue
+                term_tokens = [
+                    part
+                    for part in re.findall(r"[a-z0-9]+", token)
+                    if len(part) >= 3 and part not in STOPWORDS and part not in LOW_VALUE_FOCUS_TERMS
+                ]
+                if len(term_tokens) >= 2 and all(part in haystack for part in term_tokens[:4]):
+                    score += 1
+            if score:
+                scored.append((score, -index, module))
+        scored.sort(reverse=True)
+        if scored:
+            return [item for _score, _index, item in scored[:4]]
+        modules = [item for item in pack.get("module_map") or [] if isinstance(item, dict)]
+        return modules[:2]
+
+    @staticmethod
+    def _domain_artifact_lines(pack: dict[str, Any], intent: dict[str, Any]) -> list[str]:
+        artifacts = pack.get("key_artifacts") if isinstance(pack.get("key_artifacts"), dict) else {}
+        selected_keys: list[str] = []
+        if intent.get("data_source") or intent.get("module_dependency"):
+            selected_keys.extend(["tables", "apis"])
+        if intent.get("api"):
+            selected_keys.append("apis")
+        if intent.get("config") or intent.get("operational_boundary"):
+            selected_keys.append("configs")
+        if intent.get("rule_logic") or intent.get("impact_analysis"):
+            selected_keys.extend(["apis", "configs", "tables"])
+        if not selected_keys:
+            selected_keys.extend(["tables", "apis", "configs"])
+        lines: list[str] = []
+        for key in list(dict.fromkeys(selected_keys)):
+            for item in artifacts.get(key) or []:
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("name") or item.get("path") or "").strip()
+                purpose = str(item.get("purpose") or "").strip()
+                path = str(item.get("path") or "").strip()
+                if not name and not path:
+                    continue
+                label = f"{key[:-1]} {name or path}"
+                if path and path != name:
+                    label = f"{label} ({path})"
+                lines.append(f"{label}: {purpose}" if purpose else label)
+        return lines
+
+    @staticmethod
+    def _llm_answer_blueprint(intent: dict[str, Any]) -> list[str]:
+        if intent.get("data_source"):
+            return [
+                "Start with whether the final source/table/API is confirmed.",
+                "Then list confirmed carriers, provider/builder/setter trail, and concrete repository/mapper/client/table evidence.",
+                "If relation between two tables/entities is asked, separate co-occurrence in the same flow from proven upstream/downstream conversion.",
+            ]
+        if intent.get("api"):
+            return [
+                "Name the entry API/controller/client first.",
+                "Then summarize service path, downstream calls, configs/tables touched, and missing hops.",
+            ]
+        if intent.get("config") or intent.get("operational_boundary"):
+            return [
+                "Name the config key/annotation/lock first.",
+                "Then explain where it is loaded, what runtime boundary it controls, and which caller/service uses it.",
+            ]
+        if intent.get("static_qa"):
+            return [
+                "Rank findings by severity.",
+                "For each finding, state the risky line pattern, why it matters, and whether exploit/runtime impact is proven.",
+            ]
+        if intent.get("impact_analysis"):
+            return [
+                "Separate upstream callers from downstream dependencies.",
+                "Mention data tables/APIs/configs/tests only when directly supported by evidence.",
+            ]
+        if intent.get("test_coverage"):
+            return [
+                "Separate direct tests, mocks, assertions, and nearby production evidence.",
+                "Call out missing test evidence explicitly instead of inferring coverage.",
+            ]
+        return [
+            "Answer in one concise direct paragraph, then add evidence-backed bullets only when useful.",
+            "Prefer business-readable names while keeping citation tags on concrete claims.",
+        ]
 
     @staticmethod
     def _profile_terms(profile: dict[str, Any], *keys: str) -> list[str]:
@@ -11969,6 +12120,12 @@ class SourceCodeQAService:
             trace_paths=trace_paths,
             quality_gate=quality_gate,
         )
+        domain_context = self._llm_domain_context(
+            pm_team=pm_team,
+            country=country,
+            question=question,
+            evidence_summary=evidence_summary,
+        )
         answer_thinking_budget = self._thinking_budget_for_call(
             role="answer",
             budget_mode=routed_budget_mode,
@@ -11986,6 +12143,7 @@ class SourceCodeQAService:
             quality_gate,
             evidence_pack,
             selected_matches,
+            domain_context=domain_context,
             snippet_line_budget=budget["snippet_line_budget"],
             snippet_char_budget=budget["snippet_char_budget"],
         )
@@ -12054,6 +12212,7 @@ class SourceCodeQAService:
                             "You are a codebase analyst for an internal portal. "
                             "Answer only from the provided retrieval evidence. "
                             "Treat the compressed evidence facts as the primary signal, and snippets as secondary grounding. "
+                            "Follow the supplied domain guidance and answer blueprint, but never let domain hints override code evidence. "
                             "Never upgrade DTO/carrier evidence into a final data source. "
                             "Avoid speculative language such as likely, suggests, or appears unless explicitly marking missing evidence. "
                             "Prioritize answering the user's actual question directly and accurately. "
@@ -12131,11 +12290,18 @@ class SourceCodeQAService:
                     trace_paths=retry_trace_paths,
                     quality_gate=retry_quality_gate,
                 )
+                retry_domain_context = self._llm_domain_context(
+                    pm_team=pm_team,
+                    country=country,
+                    question=question,
+                    evidence_summary=retry_evidence_summary,
+                )
                 retry_context = self._build_compressed_llm_context(
                     retry_evidence_summary,
                     retry_quality_gate,
                     retry_evidence_pack,
                     retry_selected_matches,
+                    domain_context=retry_domain_context,
                     snippet_line_budget=min(int(budget["snippet_line_budget"]) + 60, 180),
                     snippet_char_budget=min(int(budget["snippet_char_budget"]) + 8000, 28_000),
                 )
@@ -12371,6 +12537,7 @@ class SourceCodeQAService:
         evidence_pack: dict[str, Any],
         matches: list[dict[str, Any]],
         *,
+        domain_context: str = "",
         snippet_line_budget: int,
         snippet_char_budget: int,
     ) -> str:
@@ -12378,6 +12545,9 @@ class SourceCodeQAService:
             "Compressed evidence facts:",
             f"- Quality gate: {quality_gate.get('status')} / confidence={quality_gate.get('confidence')} / missing={', '.join(quality_gate.get('missing') or []) or 'none'}",
         ]
+        if domain_context:
+            sections.append("\nDomain and answer-shape guidance:")
+            sections.append(str(domain_context).strip())
         policies = quality_gate.get("policies") or []
         if policies:
             sections.append("- Evidence policies:")
@@ -12483,6 +12653,8 @@ class SourceCodeQAService:
             "- Start with the direct answer.\n"
             "- Prefer agent trace and two-hop trace evidence when it clarifies downstream service, integration, repository, mapper, API, or table usage.\n"
             "- Use compressed facts first; only use raw snippets to verify or disambiguate.\n"
+            "- Follow the domain-specific evidence rules and answer blueprint when present.\n"
+            "- Apply evidence priority: production code and mapper/client/SQL evidence beat config snapshots, tests, and docs/spec/generated files.\n"
             "- For data-source questions, a DTO/Input/Info class is not a final data source. Trace backward to the provider/builder/setter and then to repository/mapper/client/API/table when evidence exists.\n"
             "- A DAO/Mapper import or field declaration is not enough; prefer method bodies, SQL, mapper XML, API client calls, or table names.\n"
             "- If only DTO fields are known, clearly say that these are carriers, not the upstream source.\n"

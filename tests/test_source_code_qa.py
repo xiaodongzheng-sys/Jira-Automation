@@ -227,7 +227,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertEqual(payload["llm_provider"], "gemini")
         self.assertEqual(payload["llm_policy"]["provider"]["provider"], "gemini")
         self.assertEqual(payload["llm_policy"]["router"]["version"], 6)
-        self.assertEqual(payload["llm_policy"]["versions"]["cache"], 7)
+        self.assertEqual(payload["llm_policy"]["versions"]["cache"], 8)
         self.assertEqual(payload["llm_policy"]["versions"]["runtime"], 1)
         self.assertEqual(payload["llm_policy"]["runtime"]["max_retries"], 2)
         self.assertEqual(payload["llm_policy"]["model_policy"]["answer"]["model"], "gemini-2.5-flash")
@@ -1437,6 +1437,35 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertEqual(knowledge["domains"]["CRMS"]["label"], "Credit Risk")
         self.assertGreaterEqual(knowledge["domains"]["AF"]["module_count"], 5)
         self.assertGreaterEqual(knowledge["domains"]["GRC"]["question_count"], 4)
+
+    def test_llm_domain_context_includes_team_rules_and_answer_blueprint(self):
+        crms_context = self.service._llm_domain_context(
+            pm_team="CRMS",
+            country="SG",
+            question="What is the logic to calculate income from MyInfo CPF and NOA?",
+            evidence_summary={"intent": self.service._question_intent("What data source is used for MyInfo income?")},
+        )
+        af_context = self.service._llm_domain_context(
+            pm_team="AF",
+            country="All",
+            question="Can you check the relation between dwd_antifraud_incoming_transfer_detailed_di and tmp_dwd_antifraud_incoming_transfer_detailed_df?",
+            evidence_summary={"intent": self.service._question_intent("what data source relation exists between two tables?")},
+        )
+        grc_context = self.service._llm_domain_context(
+            pm_team="GRC",
+            country="All",
+            question="GRC globallock 配置在哪里？",
+            evidence_summary={"intent": self.service._question_intent("where is globallock config?")},
+        )
+
+        self.assertIn("Domain guidance: Credit Risk", crms_context)
+        self.assertIn("SG MyInfo Income", crms_context)
+        self.assertIn("final source/table/API", crms_context)
+        self.assertIn("Domain guidance: Anti-Fraud", af_context)
+        self.assertIn("co-occurrence in the same flow", af_context)
+        self.assertIn("Domain guidance: Ops Risk", grc_context)
+        self.assertIn("mysql-isolate.globallock", grc_context)
+        self.assertIn("Evidence priority", grc_context)
 
     def test_index_health_payload_summarizes_ready_indexes(self):
         entry = RepositoryEntry(display_name="Portal Repo", url="https://git.example.com/team/portal.git")
@@ -4995,7 +5024,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertEqual(telemetry["llm_model"], "gemini-2.5-flash")
         self.assertIn(telemetry["llm_thinking_budget"], {512, 2048})
         self.assertEqual(telemetry["llm_route"]["mode"], "manual")
-        self.assertEqual(telemetry["versions"]["cache"], 7)
+        self.assertEqual(telemetry["versions"]["cache"], 8)
         self.assertIn("llm_latency_ms", telemetry)
         self.assertIn("llm_attempt_log", telemetry)
         self.assertIn("answer_contract", telemetry)
@@ -5031,7 +5060,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         )
         cached = service._load_cached_answer(cache_key)
         self.assertIsNotNone(cached)
-        self.assertEqual(cached["versions"]["cache"], 7)
+        self.assertEqual(cached["versions"]["cache"], 8)
         cache_path = service.answer_cache_root / f"{cache_key}.json"
         stale_payload = json.loads(cache_path.read_text(encoding="utf-8"))
         stale_payload["versions"]["router"] = -1
@@ -5251,7 +5280,15 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertIn("data_source_trace", payload["llm_route"]["reason"])
         self.assertIn("IssueRepository reads issue_table", payload["llm_answer"])
         self.assertIn("gemini-2.5-flash", mocked_post.call_args_list[0].args[0])
-        self.assertEqual(mocked_post.call_args_list[0].kwargs["json"]["generationConfig"]["thinkingConfig"]["thinkingBudget"], 1024)
+        request_payload = mocked_post.call_args_list[0].kwargs["json"]
+        self.assertEqual(request_payload["generationConfig"]["thinkingConfig"]["thinkingBudget"], 1024)
+        request_text = request_payload["contents"][0]["parts"][0]["text"]
+        system_text = request_payload["systemInstruction"]["parts"][0]["text"]
+        self.assertIn("Domain guidance: Anti-Fraud", request_text)
+        self.assertIn("Answer blueprint", request_text)
+        self.assertIn("final source/table/API", request_text)
+        self.assertIn("Evidence priority", request_text)
+        self.assertIn("domain guidance and answer blueprint", system_text)
         self.assertIn(payload["llm_thinking_budget"], {1024, 2048})
 
     def test_gemini_failure_falls_back_to_retrieval_only(self):
