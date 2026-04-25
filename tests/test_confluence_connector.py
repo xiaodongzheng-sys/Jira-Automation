@@ -94,6 +94,36 @@ class ConfluenceConnectorTests(unittest.TestCase):
         self.assertIn("<table>", sections[0].html_content)
         self.assertIn("<th>Field</th>", sections[0].html_content)
 
+    def test_parse_sections_removes_strikethrough_content(self):
+        html = """
+        <h2>Requirements <s>Old Heading</s></h2>
+        <p>Keep this <s>remove old text</s><span style="text-decoration: line-through;">remove styled text</span></p>
+        <ul><li>Keep item <del>delete item part</del></li></ul>
+        <table>
+          <tr><th>Field</th><th>Meaning</th></tr>
+          <tr><td>Status</td><td><strike>Old</strike>Required</td></tr>
+        </table>
+        """
+
+        sections = self.connector._parse_sections(
+            html=html,
+            base_url="https://confluence.shopee.io",
+            source_url="https://confluence.shopee.io/display/SPDB/Test",
+            session_id="session-1",
+        )
+
+        self.assertEqual(sections[0].section_path, "Requirements")
+        self.assertIn("Keep this", sections[0].content)
+        self.assertIn("Keep item", sections[0].content)
+        self.assertIn("Meaning: Required", sections[0].content)
+        self.assertNotIn("Old Heading", sections[0].content)
+        self.assertNotIn("remove old text", sections[0].content)
+        self.assertNotIn("remove styled text", sections[0].content)
+        self.assertNotIn("delete item part", sections[0].content)
+        self.assertNotIn("Old", sections[0].html_content)
+        self.assertNotIn("remove old text", sections[0].html_content)
+        self.assertNotIn("remove styled text", sections[0].html_content)
+
     def test_parse_sections_rewrites_image_src_to_proxy(self):
         html = """
         <h2>Screenshots</h2>

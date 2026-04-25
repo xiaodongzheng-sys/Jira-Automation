@@ -158,6 +158,7 @@ class ConfluenceConnector:
     def _parse_sections(self, *, html: str, base_url: str, source_url: str, session_id: str) -> list[ParsedSection]:
         soup = BeautifulSoup(html, "html.parser")
         wrapper = soup.body or soup
+        self._drop_struck_content(wrapper)
         sections: list[ParsedSection] = []
         current_title = "Overview"
         current_lines: list[str] = []
@@ -217,7 +218,7 @@ class ConfluenceConnector:
         return urljoin(base_url, src)
 
     def _extract_block_content(self, node: Tag, *, base_url: str) -> tuple[list[str], list[str], list[str]]:
-        if self._is_toc_block(node) or node.name in {"style", "script"}:
+        if self._is_struck_node(node) or self._is_toc_block(node) or node.name in {"style", "script"}:
             return [], [], []
 
         if node.name == "img":
@@ -315,6 +316,7 @@ class ConfluenceConnector:
             unwanted.decompose()
         for toc in fragment.find_all(class_="toc-macro"):
             toc.decompose()
+        self._drop_struck_content(fragment)
         for image in fragment.find_all("img"):
             src = (image.get("src") or "").strip()
             if src:
@@ -340,6 +342,19 @@ class ConfluenceConnector:
             return True
         text = self._clean_text(node.get_text(" ", strip=True))
         return bool(node.name == "h1" and "1. Project Management" in text and "1.1 Version Control" in text and "2. Introduction" in text)
+
+    def _drop_struck_content(self, node: Tag | BeautifulSoup) -> None:
+        for struck in list(node.find_all(self._is_struck_node)):
+            struck.decompose()
+
+    @staticmethod
+    def _is_struck_node(node: Tag) -> bool:
+        if not isinstance(node, Tag):
+            return False
+        if node.name in {"s", "strike", "del"}:
+            return True
+        style = re.sub(r"\s+", "", str(node.get("style") or "").casefold())
+        return "text-decoration:line-through" in style or "text-decoration-line:line-through" in style
 
     def _request(self, url: str, *, accept: str = "application/json", **kwargs: Any) -> requests.Response:
         last_response: requests.Response | None = None
