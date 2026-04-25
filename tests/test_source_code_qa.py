@@ -1072,6 +1072,51 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertTrue(telemetry)
         self.assertIn("IssueController", telemetry[-1])
 
+    def test_query_prioritizes_exact_table_lookup_before_broad_search(self):
+        self.service.save_mapping(
+            pm_team="AF",
+            country="All",
+            repositories=[{"display_name": "Anti Fraud Repo", "url": "https://git.example.com/team/anti-fraud.git"}],
+        )
+        entry = self.service.load_config()["mappings"]["AF:All"][0]
+        repo_path = self.service._repo_path("AF:All", type("Entry", (), entry)())
+        (repo_path / ".git").mkdir(parents=True)
+        mapper_file = repo_path / "mapper" / "IncomingTransferMapper.xml"
+        mapper_file.parent.mkdir(parents=True)
+        mapper_file.write_text(
+            "<mapper namespace=\"IncomingTransferMapper\">\n"
+            "  <select id=\"readDetail\">\n"
+            "    select * from bmart_antifraud.dwd_antifraud_incoming_transfer_detailed_di\n"
+            "    join tmp_dwd_antifraud_incoming_transfer_detailed_df on id = transfer_id\n"
+            "  </select>\n"
+            "</mapper>\n",
+            encoding="utf-8",
+        )
+        self._build_index_for_entry("AF:All", entry)
+
+        with patch.object(self.service, "_search_repo", wraps=self.service._search_repo) as broad_search:
+            payload = self.service.query(
+                pm_team="AF",
+                country="All",
+                question=(
+                    "relation between bmart_antifraud.dwd_antifraud_incoming_transfer_detailed_di "
+                    "and tmp_dwd_antifraud_incoming_transfer_detailed_df"
+                ),
+            )
+
+        self.assertEqual(payload["status"], "ok")
+        self.assertTrue(payload["exact_lookup"]["sufficient"])
+        self.assertEqual(
+            set(payload["exact_lookup"]["matched_terms"]),
+            {
+                "bmart_antifraud.dwd_antifraud_incoming_transfer_detailed_di",
+                "tmp_dwd_antifraud_incoming_transfer_detailed_df",
+            },
+        )
+        self.assertEqual(broad_search.call_count, 0)
+        self.assertIn("exact_table_path_lookup", {match.get("retrieval") for match in payload["matches"]})
+        self.assertGreaterEqual(payload["retrieval_runtime"].get("exact_lookup_hits", 0), 2)
+
     def test_index_rebuild_reuses_unchanged_file_rows(self):
         self.service.save_mapping(
             pm_team="AF",

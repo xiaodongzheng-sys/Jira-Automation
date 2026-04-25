@@ -200,6 +200,7 @@ HTTP_LITERAL_PATTERN = re.compile(r"[\"'](https?://[^\"']+|/[A-Za-z0-9_./{}:-]{2
 SQL_TABLE_PATTERN = re.compile(r"\b(?:from|join|update|into)\s+([A-Za-z_][A-Za-z0-9_.$]*)", re.IGNORECASE)
 SQL_READ_TABLE_PATTERN = re.compile(r"\b(?:from|join)\s+([A-Za-z_][A-Za-z0-9_.$]*)", re.IGNORECASE)
 SQL_WRITE_TABLE_PATTERN = re.compile(r"\b(?:insert\s+into|update|delete\s+from)\s+([A-Za-z_][A-Za-z0-9_.$]*)", re.IGNORECASE)
+EXACT_LOOKUP_TERM_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:[./:$-][A-Za-z0-9_][A-Za-z0-9_.:$-]*)+")
 PROPERTIES_KEY_PATTERN = re.compile(r"^\s*([A-Za-z0-9_.-]{3,})\s*[:=]")
 CONFIG_ASSIGNMENT_PATTERN = re.compile(r"^\s*([A-Za-z0-9_.-]{3,})\s*[:=]\s*(.+?)\s*$")
 CONFIG_PLACEHOLDER_PATTERN = re.compile(r"\$\{([A-Za-z0-9_.-]+)(?::[^}]*)?\}")
@@ -1734,66 +1735,94 @@ class SourceCodeQAService:
         request_cache = self._new_retrieval_request_cache()
         repo_status = self.repo_status(key)
         index_freshness = self._index_freshness_payload(repo_status)
+        exact_lookup_terms = self._extract_exact_lookup_terms(question)
+        exact_matches: list[dict[str, Any]] = []
         for entry in entries:
             repo_path = self._repo_path(key, entry)
             if not (repo_path / ".git").exists():
                 continue
-            matches.extend(self._search_repo(entry, repo_path, tokens, question=question, request_cache=request_cache))
-            for component in query_plan.get("components") or []:
-                component_terms = [str(term) for term in component.get("terms") or [] if str(term).strip()]
-                expanded_tokens: list[str] = []
-                for term in component_terms:
-                    expanded_tokens.extend(self._question_tokens(term))
-                expanded_tokens = list(dict.fromkeys(expanded_tokens))[:24]
-                if not expanded_tokens:
-                    continue
-                matches.extend(
-                    self._search_repo(
+            if exact_lookup_terms:
+                exact_matches.extend(
+                    self._exact_table_path_lookup_repo(
                         entry,
                         repo_path,
-                        expanded_tokens,
+                        exact_lookup_terms,
                         question=question,
-                        focus_terms=component_terms,
-                        trace_stage="query_decomposition",
                         request_cache=request_cache,
                     )
                 )
-            if query_plan.get("intent", {}).get("static_qa"):
-                matches.extend(
-                    self._tool_find_static_findings(
-                        entry,
-                        repo_path,
-                        tokens,
-                        question,
-                        0,
-                        request_cache=request_cache,
+        exact_lookup_matched_terms = sorted(
+            {
+                str((match.get("exact_lookup") or {}).get("term") or "").lower()
+                for match in exact_matches
+                if (match.get("exact_lookup") or {}).get("term")
+            }
+        )
+        exact_lookup_sufficient = self._exact_lookup_is_sufficient(exact_lookup_terms, exact_matches)
+        if exact_matches:
+            matches.extend(exact_matches)
+        if not exact_lookup_sufficient:
+            for entry in entries:
+                repo_path = self._repo_path(key, entry)
+                if not (repo_path / ".git").exists():
+                    continue
+                matches.extend(self._search_repo(entry, repo_path, tokens, question=question, request_cache=request_cache))
+                for component in query_plan.get("components") or []:
+                    component_terms = [str(term) for term in component.get("terms") or [] if str(term).strip()]
+                    expanded_tokens: list[str] = []
+                    for term in component_terms:
+                        expanded_tokens.extend(self._question_tokens(term))
+                    expanded_tokens = list(dict.fromkeys(expanded_tokens))[:24]
+                    if not expanded_tokens:
+                        continue
+                    matches.extend(
+                        self._search_repo(
+                            entry,
+                            repo_path,
+                            expanded_tokens,
+                            question=question,
+                            focus_terms=component_terms,
+                            trace_stage="query_decomposition",
+                            request_cache=request_cache,
+                        )
                     )
-                )
-            if query_plan.get("intent", {}).get("test_coverage"):
-                matches.extend(
-                    self._tool_find_test_coverage(
-                        entry,
-                        repo_path,
-                        tokens,
-                        question,
-                        0,
-                        request_cache=request_cache,
+                if query_plan.get("intent", {}).get("static_qa"):
+                    matches.extend(
+                        self._tool_find_static_findings(
+                            entry,
+                            repo_path,
+                            tokens,
+                            question,
+                            0,
+                            request_cache=request_cache,
+                        )
                     )
-                )
-            if query_plan.get("intent", {}).get("operational_boundary"):
-                matches.extend(
-                    self._tool_find_operational_boundaries(
-                        entry,
-                        repo_path,
-                        tokens,
-                        question,
-                        0,
-                        request_cache=request_cache,
+                if query_plan.get("intent", {}).get("test_coverage"):
+                    matches.extend(
+                        self._tool_find_test_coverage(
+                            entry,
+                            repo_path,
+                            tokens,
+                            question,
+                            0,
+                            request_cache=request_cache,
+                        )
                     )
-                )
+                if query_plan.get("intent", {}).get("operational_boundary"):
+                    matches.extend(
+                        self._tool_find_operational_boundaries(
+                            entry,
+                            repo_path,
+                            tokens,
+                            question,
+                            0,
+                            request_cache=request_cache,
+                        )
+                    )
         matches = self._rank_matches(question, matches, request_cache=request_cache)
         top_matches = matches[: max(1, min(int(limit or 12), 30))]
-        if top_matches and self._is_dependency_question(question):
+        should_expand_matches = not exact_lookup_sufficient
+        if top_matches and should_expand_matches and self._is_dependency_question(question):
             dependency_matches = self._expand_dependency_matches(
                 entries=entries,
                 key=key,
@@ -1813,7 +1842,7 @@ class SourceCodeQAService:
                         self._annotate_duplicate_tool_match(top_matches, item)
                 top_matches = self._rank_matches(question, top_matches, request_cache=request_cache)
                 top_matches = self._select_result_matches(top_matches, max(1, min(int(limit or 12), 30)), question=question)
-        if top_matches:
+        if top_matches and should_expand_matches:
             trace_matches = self._expand_two_hop_matches(
                 entries=entries,
                 key=key,
@@ -1833,7 +1862,7 @@ class SourceCodeQAService:
                         self._annotate_duplicate_tool_match(top_matches, item)
                 top_matches = self._rank_matches(question, top_matches, request_cache=request_cache)
                 top_matches = self._select_result_matches(top_matches, max(1, min(int(limit or 12), 30)), question=question)
-        if top_matches:
+        if top_matches and should_expand_matches:
             agent_matches = self._expand_agent_trace_matches(
                 entries=entries,
                 key=key,
@@ -1853,7 +1882,7 @@ class SourceCodeQAService:
                         self._annotate_duplicate_tool_match(top_matches, item)
                 top_matches = self._rank_matches(question, top_matches, request_cache=request_cache)
                 top_matches = self._select_result_matches(top_matches, max(1, min(int(limit or 12), 30)), question=question)
-        if top_matches:
+        if top_matches and should_expand_matches:
             tool_loop_matches = self._run_planner_tool_loop(
                 entries=entries,
                 key=key,
@@ -1874,7 +1903,7 @@ class SourceCodeQAService:
                         self._annotate_duplicate_tool_match(top_matches, item)
                 top_matches = self._rank_matches(question, top_matches, request_cache=request_cache)
                 top_matches = self._select_result_matches(top_matches, max(1, min(int(limit or 12), 30)), question=question)
-        if top_matches:
+        if top_matches and should_expand_matches:
             evidence_summary = self._compress_evidence_cached(question, top_matches, request_cache=request_cache)
             quality_gate = self._quality_gate_cached(question, evidence_summary, request_cache=request_cache)
             agent_plan = self._build_agent_plan(question, evidence_summary, quality_gate)
@@ -1890,7 +1919,7 @@ class SourceCodeQAService:
                 tool_trace=tool_trace,
                 request_cache=request_cache,
             )
-        if top_matches:
+        if top_matches and should_expand_matches:
             evidence_summary = self._compress_evidence_cached(question, top_matches, request_cache=request_cache)
             quality_gate = self._quality_gate_cached(question, evidence_summary, request_cache=request_cache)
             agent_plan = self._build_agent_plan(question, evidence_summary, quality_gate)
@@ -1907,7 +1936,7 @@ class SourceCodeQAService:
                     tool_trace=tool_trace,
                     request_cache=request_cache,
                 )
-        if top_matches and query_plan.get("intent", {}).get("impact_analysis"):
+        if top_matches and should_expand_matches and query_plan.get("intent", {}).get("impact_analysis"):
             impact_matches = self._expand_impact_matches(
                 entries=entries,
                 key=key,
@@ -1950,10 +1979,19 @@ class SourceCodeQAService:
             return payload
         evidence_summary = self._compress_evidence_cached(question, top_matches, request_cache=request_cache)
         quality_gate = self._quality_gate_cached(question, evidence_summary, request_cache=request_cache)
-        trace_paths = self._build_trace_paths(entries=entries, key=key, matches=top_matches, question=question, request_cache=request_cache)
+        trace_paths = [] if exact_lookup_sufficient else self._build_trace_paths(entries=entries, key=key, matches=top_matches, question=question, request_cache=request_cache)
         if trace_paths:
             evidence_summary["trace_paths"] = trace_paths
-        repo_graph = self._build_repo_dependency_graph(key=key, entries=entries, request_cache=request_cache)
+        repo_graph = (
+            {
+                "version": 2,
+                "nodes": [{"name": entry.display_name, "url": entry.url} for entry in entries],
+                "edges": [],
+                "skipped": "exact_lookup_sufficient",
+            }
+            if exact_lookup_sufficient
+            else self._build_repo_dependency_graph(key=key, entries=entries, request_cache=request_cache)
+        )
         evidence_pack = self._build_evidence_pack(
             question=question,
             evidence_summary=evidence_summary,
@@ -1976,6 +2014,12 @@ class SourceCodeQAService:
             "answer_quality": quality_gate,
             "agent_plan": self._build_agent_plan(question, evidence_summary, quality_gate),
             "query_plan": query_plan,
+            "exact_lookup": {
+                "terms": exact_lookup_terms,
+                "matched_terms": exact_lookup_matched_terms,
+                "match_count": len(exact_matches),
+                "sufficient": exact_lookup_sufficient,
+            },
             "tool_trace": tool_trace,
             "retrieval_runtime": self._retrieval_cache_stats(request_cache),
             "followup_context": followup_context,
@@ -6282,6 +6326,180 @@ class SourceCodeQAService:
         return rows[0] if rows else []
 
     @staticmethod
+    def _extract_exact_lookup_terms(question: str) -> list[str]:
+        terms: list[str] = []
+        text = str(question or "")
+        for match in EXACT_LOOKUP_TERM_PATTERN.finditer(text):
+            term = match.group(0).strip("`'\".,;()[]{}<>").lower()
+            if not term or term.startswith(("http://", "https://")):
+                continue
+            if len(term) < 8:
+                continue
+            if not any(separator in term for separator in (".", "/", ":")):
+                continue
+            if term not in terms:
+                terms.append(term)
+        for match in IDENTIFIER_PATTERN.finditer(text):
+            term = match.group(0).strip("`'\".,;()[]{}<>").lower()
+            if len(term) < 24 or term.count("_") < 3:
+                continue
+            if any(existing.endswith(f".{term}") for existing in terms):
+                continue
+            if term not in terms:
+                terms.append(term)
+        return terms[:8]
+
+    @staticmethod
+    def _exact_lookup_is_sufficient(terms: list[str], matches: list[dict[str, Any]]) -> bool:
+        if not terms or not matches:
+            return False
+        covered_terms = {
+            str((match.get("exact_lookup") or {}).get("term") or "").lower()
+            for match in matches
+            if (match.get("exact_lookup") or {}).get("term")
+        }
+        required_terms = {str(term).lower() for term in terms if term}
+        return bool(required_terms) and required_terms.issubset(covered_terms)
+
+    def _exact_table_path_lookup_repo(
+        self,
+        entry: RepositoryEntry,
+        repo_path: Path,
+        terms: list[str],
+        *,
+        question: str,
+        request_cache: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        matches: list[dict[str, Any]] = []
+        seen: set[tuple[str, int, str, str]] = set()
+        index_path = self._index_path(repo_path)
+        try:
+            self._ensure_repo_index_cached(entry, repo_path, request_cache=request_cache)
+            if request_cache is not None:
+                self._increment_retrieval_stat(request_cache, "exact_lookup_repos")
+            with sqlite3.connect(index_path) as connection:
+                connection.row_factory = sqlite3.Row
+                for term in terms[:8]:
+                    normalized = str(term or "").strip().lower()
+                    if not normalized:
+                        continue
+                    term_matches = 0
+
+                    def add_match(file_path: str, line_no: int, score: int, reason: str, source: str) -> None:
+                        nonlocal term_matches
+                        key = (str(file_path), int(line_no or 1), normalized, source)
+                        if key in seen:
+                            return
+                        seen.add(key)
+                        match = self._match_from_index_location(
+                            entry,
+                            connection,
+                            str(file_path),
+                            int(line_no or 1),
+                            score=score,
+                            reason=reason,
+                            question=question,
+                            trace_stage="exact_lookup",
+                            retrieval="exact_table_path_lookup",
+                            index_path=index_path,
+                            request_cache=request_cache,
+                        )
+                        if not match:
+                            return
+                        match["exact_lookup"] = {"term": normalized, "source": source}
+                        matches.append(match)
+                        term_matches += 1
+
+                    for row in connection.execute(
+                        """
+                        select * from references_index
+                        where lower_target = ?
+                        order by
+                            case kind
+                                when 'sql_table' then 0
+                                when 'db_read' then 1
+                                when 'db_write' then 2
+                                when 'runtime_sql' then 3
+                                else 4
+                            end,
+                            file_path,
+                            line_no
+                        limit 80
+                        """,
+                        (normalized,),
+                    ).fetchall():
+                        add_match(
+                            str(row["file_path"]),
+                            int(row["line_no"] or 1),
+                            282 if str(row["kind"]) == "sql_table" else 268,
+                            f"exact table/path lookup: {row['kind']} {row['target']}",
+                            "references_index",
+                        )
+                    if "/" in normalized or normalized.endswith((".java", ".py", ".xml", ".sql", ".yaml", ".yml", ".properties", ".ts", ".tsx", ".js", ".jsx")):
+                        for row in connection.execute(
+                            """
+                            select path from files
+                            where lower_path = ? or lower_path like ?
+                            order by case when lower_path = ? then 0 else 1 end, path
+                            limit 40
+                            """,
+                            (normalized, f"%{normalized}%", normalized),
+                        ).fetchall():
+                            add_match(
+                                str(row["path"]),
+                                1,
+                                260,
+                                f"exact path lookup: {normalized}",
+                                "files",
+                            )
+                    try:
+                        line_rows = connection.execute(
+                            """
+                            select lines.file_path, lines.line_no
+                            from line_tokens
+                            join lines on lines.file_path = line_tokens.file_path and lines.line_no = line_tokens.line_no
+                            where line_tokens.token = ?
+                            order by lines.file_path, lines.line_no
+                            limit 100
+                            """,
+                            (normalized,),
+                        ).fetchall()
+                    except sqlite3.Error:
+                        line_rows = []
+                    for row in line_rows:
+                        add_match(
+                            str(row["file_path"]),
+                            int(row["line_no"] or 1),
+                            248,
+                            f"exact line lookup: {normalized}",
+                            "line_tokens",
+                        )
+                    if term_matches == 0:
+                        for row in connection.execute(
+                            """
+                            select file_path, line_no from lines
+                            where lower_text like ?
+                            order by file_path, line_no
+                            limit 80
+                            """,
+                            (f"%{normalized}%",),
+                        ).fetchall():
+                            add_match(
+                                str(row["file_path"]),
+                                int(row["line_no"] or 1),
+                                236,
+                                f"exact line lookup: {normalized}",
+                                "lines",
+                            )
+                    if request_cache is not None:
+                        stat_key = "exact_lookup_hits" if term_matches else "exact_lookup_misses"
+                        self._increment_retrieval_stat(request_cache, stat_key)
+        except (OSError, sqlite3.Error):
+            return []
+        matches.sort(key=lambda item: int(item.get("score") or 0), reverse=True)
+        return matches[:160]
+
+    @staticmethod
     def _parse_embedding(raw_value: Any) -> list[float]:
         if not raw_value:
             return []
@@ -6359,6 +6577,9 @@ class SourceCodeQAService:
                 "rerank_misses": 0,
                 "question_feature_hits": 0,
                 "question_feature_misses": 0,
+                "exact_lookup_repos": 0,
+                "exact_lookup_hits": 0,
+                "exact_lookup_misses": 0,
             },
         }
 
@@ -10849,6 +11070,7 @@ class SourceCodeQAService:
         intent = self._question_intent(question) if question else {}
         buckets = {
             "direct": [match for match in matches if match.get("trace_stage") == "direct"],
+            "exact_lookup": [match for match in matches if match.get("trace_stage") == "exact_lookup"],
             "query_decomposition": [match for match in matches if match.get("trace_stage") == "query_decomposition"],
             "dependency": [match for match in matches if match.get("trace_stage") == "dependency"],
             "two_hop": [match for match in matches if match.get("trace_stage") == "two_hop"],
@@ -10913,6 +11135,7 @@ class SourceCodeQAService:
                         break
 
         for stage, stage_limit in (
+            ("exact_lookup", 8),
             ("direct", 2 if intent.get("impact_analysis") else 3),
             ("query_decomposition", 2 if intent.get("impact_analysis") else 3),
             ("dependency", 2 if intent.get("impact_analysis") else 3),

@@ -45,6 +45,7 @@
   let releaseGatePayload = {};
   let lastPayload = null;
   let conversationContext = null;
+  let activeQueryProgress = null;
   const preferenceKey = 'source-code-qa:last-query-config:v1';
   const historyKey = 'source-code-qa:question-history:v1';
 
@@ -70,6 +71,68 @@
 
   const currentCountry = () => (pmTeam.value === 'CRMS' ? country.value : 'All');
   const currentKey = () => `${pmTeam.value}:${currentCountry()}`;
+  const currentRepoCount = () => (config.mappings?.[currentKey()] || []).length;
+  const exactLookupTerms = (value) => {
+    const text = String(value || '');
+    const matches = text.match(/[A-Za-z_][A-Za-z0-9_]*(?:[./:$-][A-Za-z0-9_][A-Za-z0-9_.:$-]*)+/g) || [];
+    const terms = [];
+    matches.forEach((match) => {
+      const term = match.replace(/^[`'",.;()[\]{}<>]+|[`'",.;()[\]{}<>]+$/g, '').toLowerCase();
+      if (term.length >= 8 && !term.startsWith('http://') && !term.startsWith('https://') && !terms.includes(term)) {
+        terms.push(term);
+      }
+    });
+    (text.match(/[A-Za-z_][A-Za-z0-9_]{2,}/g) || []).forEach((match) => {
+      const term = match.replace(/^[`'",.;()[\]{}<>]+|[`'",.;()[\]{}<>]+$/g, '').toLowerCase();
+      if (term.length >= 24 && (term.match(/_/g) || []).length >= 3 && !terms.some((existing) => existing.endsWith(`.${term}`)) && !terms.includes(term)) {
+        terms.push(term);
+      }
+    });
+    return terms.slice(0, 8);
+  };
+
+  const formatElapsed = (startedAt) => {
+    const seconds = Math.max(0, (performance.now() - startedAt) / 1000);
+    return seconds < 10 ? `${seconds.toFixed(1)}s` : `${Math.round(seconds)}s`;
+  };
+
+  const stopQueryProgress = () => {
+    if (activeQueryProgress) {
+      window.clearInterval(activeQueryProgress);
+      activeQueryProgress = null;
+    }
+  };
+
+  const startQueryProgress = ({ effectiveAnswerMode, exactTerms }) => {
+    stopQueryProgress();
+    const startedAt = performance.now();
+    const repoCount = currentRepoCount();
+    const hasExactTerms = exactTerms.length > 0;
+    const stageForElapsed = () => {
+      const elapsedMs = performance.now() - startedAt;
+      if (hasExactTerms && elapsedMs < 3500) {
+        return `Checking exact table/path references for ${exactTerms.length} term${exactTerms.length === 1 ? '' : 's'}...`;
+      }
+      if (elapsedMs < 9000) {
+        return repoCount ? `Scanning ${repoCount} ${pmTeam.value} repos...` : 'Scanning local code index...';
+      }
+      if (elapsedMs < 18000) {
+        return 'Ranking matching files and snippets...';
+      }
+      if (effectiveAnswerMode !== 'retrieval_only' && elapsedMs >= 26000) {
+        return 'Asking LLM with the retrieved evidence...';
+      }
+      return 'Expanding trace evidence from top matches...';
+    };
+    const update = () => {
+      if (queryStatus) {
+        queryStatus.textContent = `${stageForElapsed()} elapsed ${formatElapsed(startedAt)}`;
+      }
+    };
+    update();
+    activeQueryProgress = window.setInterval(update, 500);
+    return startedAt;
+  };
 
   const buildFeedbackReplayContext = (payload) => ({
     trace_id: payload.trace_id || '',
@@ -761,9 +824,9 @@
     const selectedAnswerMode = answerMode?.value || 'auto';
     const effectiveAnswerMode = selectedAnswerMode !== 'retrieval_only' && !llmReady ? 'retrieval_only' : selectedAnswerMode;
     if (activeMode) activeMode.textContent = effectiveAnswerMode;
-    queryStatus.textContent = effectiveAnswerMode !== 'retrieval_only'
-      ? 'Searching local code and asking LLM...'
-      : 'Searching local code index...';
+    const exactTerms = exactLookupTerms(questionInput.value);
+    const startedAt = startQueryProgress({ effectiveAnswerMode, exactTerms });
+    if (queryButton) queryButton.disabled = true;
     try {
       const payload = await fetch(queryUrl, {
         method: 'POST',
@@ -781,7 +844,9 @@
       conversationContext = buildConversationContext(payload);
       rememberLastQueryConfig(effectiveAnswerMode);
       summary.textContent = payload.summary || 'Search completed.';
-      queryStatus.textContent = payload.status === 'ok' ? 'Search completed.' : payload.status;
+      queryStatus.textContent = payload.status === 'ok'
+        ? `Search completed in ${formatElapsed(startedAt)}.`
+        : `${payload.status} after ${formatElapsed(startedAt)}.`;
       if (activeMode) activeMode.textContent = payload.answer_mode || effectiveAnswerMode;
       renderUsageBadges(payload);
       renderFallbackNotice(payload);
@@ -806,13 +871,16 @@
         feedbackStatus.textContent = '';
       }
     } catch (error) {
-      queryStatus.textContent = error.message || 'Search failed.';
+      queryStatus.textContent = `${error.message || 'Search failed.'} elapsed ${formatElapsed(startedAt)}`;
       renderUsageBadges({});
       renderFallbackNotice({});
       renderLlmAnswer({});
       renderEvidenceSummary(null);
       renderDebugTrace(null);
       if (feedback) feedback.hidden = true;
+    } finally {
+      stopQueryProgress();
+      if (queryButton) queryButton.disabled = false;
     }
   };
 
