@@ -2299,7 +2299,7 @@ class SourceCodeQAService:
             return self._sync_result(entry, repo_path, "error", f"Git {action} failed. {detail[:800]}")
         try:
             index_info = self._build_repo_index(key, entry, repo_path)
-        except (OSError, sqlite3.Error) as error:
+        except (OSError, sqlite3.Error, ValueError, IndexError) as error:
             return self._sync_result(entry, repo_path, "error", f"Git {action} completed, but code index failed: {error}")
         return self._sync_result(
             entry,
@@ -4150,7 +4150,8 @@ class SourceCodeQAService:
             node_type = str(getattr(node, "type", ""))
             current_class_id = class_id
             current_method_id = method_id
-            signature = self._node_line(lines, node) or self._node_text(source, node).splitlines()[0][:500]
+            node_text_lines = self._node_text(source, node).splitlines()
+            signature = self._node_line(lines, node) or (node_text_lines[0][:500] if node_text_lines else node_type)
             node_line = line_no(node)
 
             if node_type in {"class_declaration", "interface_declaration", "enum_declaration"}:
