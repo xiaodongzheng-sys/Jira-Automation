@@ -896,6 +896,7 @@ class CodexCliBridgeSourceCodeQALLMProvider(SourceCodeQALLMProvider):
                 cwd=str(self.workspace_root),
                 text=True,
                 capture_output=True,
+                env=self._codex_env(),
                 timeout=10,
                 check=False,
             )
@@ -953,6 +954,7 @@ class CodexCliBridgeSourceCodeQALLMProvider(SourceCodeQALLMProvider):
                             cwd=str(self.workspace_root),
                             text=True,
                             capture_output=True,
+                            env=self._codex_env(),
                             timeout=self.timeout_seconds,
                             check=False,
                         )
@@ -997,6 +999,7 @@ class CodexCliBridgeSourceCodeQALLMProvider(SourceCodeQALLMProvider):
         process = subprocess.Popen(
             command,
             cwd=str(self.workspace_root),
+            env=self._codex_env(),
             text=True,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
@@ -1054,6 +1057,16 @@ class CodexCliBridgeSourceCodeQALLMProvider(SourceCodeQALLMProvider):
             stdout="".join(stdout_lines),
             stderr="".join(stderr_lines),
         )
+
+    def _codex_env(self) -> dict[str, str]:
+        env = dict(os.environ)
+        rg_path = shutil.which("rg")
+        if rg_path:
+            rg_dir = str(Path(rg_path).parent)
+            path_parts = [part for part in str(env.get("PATH") or "").split(os.pathsep) if part]
+            if rg_dir not in path_parts:
+                env["PATH"] = os.pathsep.join([rg_dir, *path_parts])
+        return env
 
     def extract_text(self, payload: dict[str, Any]) -> str:
         text = str(payload.get("text") or "").strip()
@@ -14701,7 +14714,8 @@ class SourceCodeQAService:
             "- Use only read-only shell/file inspection inside the synced repository workspace.",
             "- Local retrieval has only narrowed the candidate repo/path range; verify by opening files yourself.",
             "- Do not write files, run formatters, install packages, commit, push, deploy, or mutate runtime state.",
-            "- Prefer `rg`, `sed -n`, `nl -ba`, and direct file reads.",
+            "- Prefer `rg` when available; if it is unavailable, use `grep -R`, `find`, `sed -n`, `nl -ba`, and direct file reads.",
+            "- Candidate `root` values are absolute synced repo roots. Candidate `path` values are relative to that root; inspect files as root/path.",
             "",
             "Candidate repository workspaces and top paths:",
         ]

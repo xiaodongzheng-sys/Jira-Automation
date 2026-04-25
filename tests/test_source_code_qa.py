@@ -6461,6 +6461,34 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertEqual(result.attempt_log[0]["workspace_root"], self.temp_dir.name)
         self.assertIn("--sandbox", result.attempt_log[0]["command"])
 
+    def test_codex_cli_bridge_adds_rg_directory_to_exec_path(self):
+        provider = CodexCliBridgeSourceCodeQALLMProvider(
+            workspace_root=Path(self.temp_dir.name),
+            timeout_seconds=20,
+            codex_binary="codex",
+        )
+        exec_envs = []
+
+        def fake_run(command, **kwargs):
+            if "login" in command and "status" in command:
+                return SimpleNamespace(returncode=0, stdout="Logged in using ChatGPT\n", stderr="")
+            exec_envs.append(kwargs.get("env") or {})
+            output_path = command[command.index("--output-last-message") + 1]
+            Path(output_path).write_text(
+                '{"direct_answer":"ok","claims":[],"missing_evidence":[],"confidence":"high"}',
+                encoding="utf-8",
+            )
+            return SimpleNamespace(returncode=0, stdout='{"type":"done"}\n', stderr="")
+
+        with patch("bpmis_jira_tool.source_code_qa.shutil.which", return_value="/opt/tools/rg"), patch(
+            "bpmis_jira_tool.source_code_qa.subprocess.run",
+            side_effect=fake_run,
+        ):
+            provider.generate(payload={"contents": [{"parts": [{"text": "hi"}]}]}, primary_model="codex-cli", fallback_model="codex-cli")
+
+        self.assertTrue(exec_envs)
+        self.assertTrue(str(exec_envs[-1].get("PATH") or "").startswith("/opt/tools"))
+
     def test_codex_cli_bridge_streams_json_progress_events(self):
         provider = CodexCliBridgeSourceCodeQALLMProvider(
             workspace_root=Path(self.temp_dir.name),

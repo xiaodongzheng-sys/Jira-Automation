@@ -1081,6 +1081,16 @@
     `;
   };
 
+  const shouldHideCodexLiveMessage = (message) => {
+    const text = String(message || '').toLowerCase();
+    return text.includes('rg') && (
+      text.includes('not available')
+      || text.includes('hinted path')
+      || text.includes('current working directory')
+      || text.includes('runtime')
+    );
+  };
+
   const renderFallbackNotice = (payload) => {
     if (!fallbackNotice) return;
     const notice = payload?.fallback_notice;
@@ -1134,7 +1144,7 @@
         ? `${payload.message || 'Processing source-code question.'} (${payload.current || 0}/${payload.total})`
         : (payload.message || 'Processing source-code question.');
       progress.setMessage(progressText);
-      if (payload.stage === 'codex_stream' && payload.message) {
+      if (payload.stage === 'codex_stream' && payload.message && !shouldHideCodexLiveMessage(payload.message)) {
         renderLiveAnswer(payload.message, { title: 'Codex Live', meta: 'streaming CLI output' });
       }
       if (payload.state === 'completed') {
