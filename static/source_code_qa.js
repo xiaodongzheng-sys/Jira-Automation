@@ -496,6 +496,9 @@
   };
 
   const buildConversationContext = (payload, questionOverride = '') => ({
+    key: currentKey(),
+    pm_team: pmTeam.value,
+    country: currentCountry(),
     question: questionOverride || questionInput.value,
     matches: (payload?.matches || []).slice(0, 8).map((match) => ({
       path: match.path,
@@ -1005,9 +1008,13 @@
 
   pmTeam.addEventListener('change', () => {
     updateCountryVisibility();
+    conversationContext = null;
     renderSelectedConfig();
   });
-  country.addEventListener('change', renderSelectedConfig);
+  country.addEventListener('change', () => {
+    conversationContext = null;
+    renderSelectedConfig();
+  });
   answerMode?.addEventListener('change', updateAnswerModeState);
   saveButton?.addEventListener('click', saveConfig);
   syncButton?.addEventListener('click', syncRepos);

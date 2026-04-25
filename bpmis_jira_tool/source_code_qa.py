@@ -1872,9 +1872,24 @@ class SourceCodeQAService:
         self,
         question: str,
         conversation_context: dict[str, Any] | None,
+        *,
+        current_key: str | None = None,
     ) -> tuple[str, dict[str, Any]]:
         if not isinstance(conversation_context, dict):
             return question, {"used": False}
+        context_key = str(conversation_context.get("key") or "").strip()
+        if current_key and context_key and context_key != current_key:
+            return question, {"used": False, "reason": "scope_mismatch", "previous_key": context_key, "current_key": current_key}
+        if current_key and not context_key:
+            context_pm_team = str(conversation_context.get("pm_team") or "").strip()
+            context_country = str(conversation_context.get("country") or "").strip() or ALL_COUNTRY
+            if context_pm_team:
+                try:
+                    inferred_key = self.mapping_key(context_pm_team, context_country)
+                except ToolError:
+                    inferred_key = ""
+                if inferred_key and inferred_key != current_key:
+                    return question, {"used": False, "reason": "scope_mismatch", "previous_key": inferred_key, "current_key": current_key}
         lowered = question.lower()
         tokens = set(self._question_tokens(question))
         english_followup_markers = {"this", "that", "it", "them", "above", "previous", "same", "continue"}
@@ -2041,7 +2056,6 @@ class SourceCodeQAService:
         if not question:
             raise ToolError("Please enter a source-code question.")
         original_question = question
-        question, followup_context = self._apply_conversation_context(question, conversation_context)
         entries = self._load_entries_for_key(key)
         if not entries:
             payload = self._empty_query_payload(
@@ -2059,6 +2073,7 @@ class SourceCodeQAService:
                 started_at=started_at,
             )
             return payload
+        question, followup_context = self._apply_conversation_context(question, conversation_context, current_key=key)
         tokens = self._question_tokens(question)
         if not tokens:
             payload = self._empty_query_payload(

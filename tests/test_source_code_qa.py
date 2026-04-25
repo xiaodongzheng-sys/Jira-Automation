@@ -938,6 +938,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         augmented, followup = self.service._apply_conversation_context(
             "继续看下游影响",
             {
+                "key": "AF:All",
                 "question": "what is impacted if IssueService createIssue changes",
                 "matches": [],
                 "trace_paths": [],
@@ -951,11 +952,51 @@ class SourceCodeQAServiceTests(unittest.TestCase):
                     "impact_surfaces": ["downstream callee: IssueRepository.findIssue"],
                 },
             },
+            current_key="AF:All",
         )
 
         self.assertTrue(followup["used"])
         self.assertIn("issuerepository", augmented)
         self.assertIn("issue_table", augmented)
+
+    def test_followup_context_does_not_cross_repository_scope(self):
+        augmented, followup = self.service._apply_conversation_context(
+            "继续看这个表哪里写入",
+            {
+                "key": "AF:All",
+                "pm_team": "AF",
+                "country": "All",
+                "question": "what table does issue creation use",
+                "matches": [{"repo": "Anti Fraud", "path": "repository/IssueRepository.java", "snippet": "select * from issue_table"}],
+                "trace_paths": [],
+                "structured_answer": {},
+                "answer_contract": {"confirmed_sources": ["Anti Fraud:repository/IssueRepository.java:1-3: issue_table [S1]"]},
+                "evidence_pack": {"confirmed_facts": ["IssueRepository reads issue_table"]},
+            },
+            current_key="CRMS:SG",
+        )
+
+        self.assertFalse(followup["used"])
+        self.assertEqual(followup["reason"], "scope_mismatch")
+        self.assertEqual(augmented, "继续看这个表哪里写入")
+
+    def test_followup_context_rejects_legacy_scope_fields_when_changed(self):
+        augmented, followup = self.service._apply_conversation_context(
+            "continue checking this method",
+            {
+                "pm_team": "AF",
+                "country": "All",
+                "question": "where is createIssue",
+                "matches": [{"repo": "Anti Fraud", "path": "service/IssueService.java", "snippet": "createIssue()"}],
+                "trace_paths": [],
+                "structured_answer": {},
+            },
+            current_key="CRMS:ID",
+        )
+
+        self.assertFalse(followup["used"])
+        self.assertEqual(followup["reason"], "scope_mismatch")
+        self.assertEqual(augmented, "continue checking this method")
 
     def test_followup_context_does_not_match_substrings_inside_normal_questions(self):
         augmented, followup = self.service._apply_conversation_context(
