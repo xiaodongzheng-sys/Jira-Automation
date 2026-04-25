@@ -33,6 +33,7 @@
 
   const READER_MODE_STORAGE_KEY = 'prd_briefing_reader_mode';
   const NO_IMAGE_MODE_STORAGE_KEY = 'prd_briefing_no_image_mode';
+  const NO_IMAGE_MODE_POSITION_STORAGE_KEY = 'prd_briefing_no_image_mode_position';
 
   const isValidHttpUrl = (value) => /^https?:\/\/\S+/i.test(String(value || '').trim());
 
@@ -102,6 +103,99 @@
     if (enabled) {
       closeImageLightbox();
     }
+  };
+
+  const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
+
+  const applyNoImageTogglePosition = (position) => {
+    if (!noImageModeToggle || !position) return;
+    const margin = 12;
+    const rect = noImageModeToggle.getBoundingClientRect();
+    const width = rect.width || 118;
+    const height = rect.height || 44;
+    const maxLeft = Math.max(margin, window.innerWidth - width - margin);
+    const maxTop = Math.max(margin, window.innerHeight - height - margin);
+    const left = clamp(Number(position.left) || margin, margin, maxLeft);
+    const top = clamp(Number(position.top) || margin, margin, maxTop);
+    noImageModeToggle.style.left = `${left}px`;
+    noImageModeToggle.style.top = `${top}px`;
+    noImageModeToggle.style.right = 'auto';
+    noImageModeToggle.style.bottom = 'auto';
+  };
+
+  const saveNoImageTogglePosition = () => {
+    if (!noImageModeToggle) return;
+    const rect = noImageModeToggle.getBoundingClientRect();
+    try {
+      window.localStorage.setItem(NO_IMAGE_MODE_POSITION_STORAGE_KEY, JSON.stringify({
+        left: Math.round(rect.left),
+        top: Math.round(rect.top),
+      }));
+    } catch {}
+  };
+
+  const restoreNoImageTogglePosition = () => {
+    if (!noImageModeToggle) return;
+    try {
+      const saved = JSON.parse(window.localStorage.getItem(NO_IMAGE_MODE_POSITION_STORAGE_KEY) || 'null');
+      if (saved && Number.isFinite(Number(saved.left)) && Number.isFinite(Number(saved.top))) {
+        applyNoImageTogglePosition(saved);
+      }
+    } catch {}
+  };
+
+  const setupNoImageToggleDrag = () => {
+    if (!noImageModeToggle) return;
+    let dragState = null;
+    noImageModeToggle.addEventListener('pointerdown', (event) => {
+      if (event.button !== 0) return;
+      const rect = noImageModeToggle.getBoundingClientRect();
+      dragState = {
+        pointerId: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        left: rect.left,
+        top: rect.top,
+        moved: false,
+      };
+      noImageModeToggle.setPointerCapture?.(event.pointerId);
+      noImageModeToggle.classList.add('is-dragging');
+    });
+    noImageModeToggle.addEventListener('pointermove', (event) => {
+      if (!dragState || event.pointerId !== dragState.pointerId) return;
+      const deltaX = event.clientX - dragState.startX;
+      const deltaY = event.clientY - dragState.startY;
+      if (Math.abs(deltaX) + Math.abs(deltaY) > 4) {
+        dragState.moved = true;
+      }
+      if (!dragState.moved) return;
+      event.preventDefault();
+      applyNoImageTogglePosition({
+        left: dragState.left + deltaX,
+        top: dragState.top + deltaY,
+      });
+    });
+    const finishDrag = (event) => {
+      if (!dragState || event.pointerId !== dragState.pointerId) return;
+      noImageModeToggle.releasePointerCapture?.(event.pointerId);
+      noImageModeToggle.classList.remove('is-dragging');
+      if (dragState.moved) {
+        noImageModeToggle.dataset.suppressClick = 'true';
+        saveNoImageTogglePosition();
+        window.setTimeout(() => {
+          delete noImageModeToggle.dataset.suppressClick;
+        }, 250);
+      }
+      dragState = null;
+    };
+    noImageModeToggle.addEventListener('pointerup', finishDrag);
+    noImageModeToggle.addEventListener('pointercancel', finishDrag);
+    window.addEventListener('resize', () => {
+      if (!noImageModeToggle.style.left || !noImageModeToggle.style.top) return;
+      const rect = noImageModeToggle.getBoundingClientRect();
+      applyNoImageTogglePosition({ left: rect.left, top: rect.top });
+      saveNoImageTogglePosition();
+    });
   };
 
   const stopNarration = () => {
@@ -657,7 +751,11 @@
   }
 
   if (noImageModeToggle) {
-    noImageModeToggle.addEventListener('click', () => {
+    noImageModeToggle.addEventListener('click', (event) => {
+      if (noImageModeToggle.dataset.suppressClick === 'true') {
+        event.preventDefault();
+        return;
+      }
       state.noImageMode = !state.noImageMode;
       try {
         window.localStorage.setItem(NO_IMAGE_MODE_STORAGE_KEY, state.noImageMode ? '1' : '0');
@@ -716,4 +814,6 @@
   }
   renderReaderMode();
   renderNoImageMode();
+  restoreNoImageTogglePosition();
+  setupNoImageToggleDrag();
 })();
