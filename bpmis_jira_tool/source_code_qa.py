@@ -70,6 +70,7 @@ DEFAULT_CODEX_CLI_MODEL = "codex-cli"
 DEFAULT_CODEX_TIMEOUT_SECONDS = 240
 DEFAULT_CODEX_TOP_PATH_LIMIT = 30
 CODEX_INVESTIGATION_PROMPT_MODE = "codex_investigation_brief_v1"
+DEFAULT_INDEX_LOCK_STALE_SECONDS = 15 * 60
 MAX_CACHED_INDEX_LINES = 5_000
 MAX_CACHED_SEMANTIC_CHUNKS = 2_000
 MAX_TARGETED_INDEX_FILES = 220
@@ -4260,13 +4261,33 @@ class SourceCodeQAService:
         digest = hashlib.sha1(str(repo_path).encode("utf-8")).hexdigest()[:16]
         return self.lock_root / f"{digest}.lock"
 
+    def _index_lock_is_stale(self, lock_path: Path) -> bool:
+        stale_seconds = float(os.getenv("SOURCE_CODE_QA_INDEX_LOCK_STALE_SECONDS", str(DEFAULT_INDEX_LOCK_STALE_SECONDS)))
+        if stale_seconds <= 0:
+            return False
+        timestamp = 0.0
+        try:
+            raw_timestamp = lock_path.read_text(encoding="utf-8").splitlines()[0].strip()
+            timestamp = datetime.fromisoformat(raw_timestamp).timestamp()
+        except (IndexError, OSError, ValueError):
+            try:
+                timestamp = lock_path.stat().st_mtime
+            except OSError:
+                return True
+        return (time.time() - timestamp) > stale_seconds
+
     def _acquire_index_lock(self, repo_path: Path) -> Path:
         self.lock_root.mkdir(parents=True, exist_ok=True)
         lock_path = self._index_lock_path(repo_path)
-        try:
-            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        except FileExistsError as error:
-            raise ToolError("This repository is already being indexed. Please wait for the current sync to finish.") from error
+        for attempt in range(2):
+            try:
+                fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                break
+            except FileExistsError as error:
+                if attempt == 0 and self._index_lock_is_stale(lock_path):
+                    lock_path.unlink(missing_ok=True)
+                    continue
+                raise ToolError("This repository is already being indexed. Please wait for the current sync to finish.") from error
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(self._now_iso())
         return lock_path

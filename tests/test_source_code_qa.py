@@ -1134,6 +1134,27 @@ class SourceCodeQAServiceTests(unittest.TestCase):
 
         lock_path.unlink(missing_ok=True)
 
+    def test_index_lock_recovers_stale_lock(self):
+        self.service.save_mapping(
+            pm_team="AF",
+            country="All",
+            repositories=[{"display_name": "Portal Repo", "url": "https://git.example.com/team/portal.git"}],
+        )
+        entry = self.service.load_config()["mappings"]["AF:All"][0]
+        repo_path = self.service._repo_path("AF:All", type("Entry", (), entry)())
+        (repo_path / ".git").mkdir(parents=True)
+        source_file = repo_path / "bpmis" / "jira_client.py"
+        source_file.parent.mkdir(parents=True)
+        source_file.write_text("class BPMISClient:\n    pass\n", encoding="utf-8")
+        lock_path = self.service._index_lock_path(repo_path)
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path.write_text("2000-01-01T00:00:00+00:00", encoding="utf-8")
+
+        info = self.service._build_repo_index("AF:All", type("Entry", (), entry)(), repo_path)
+
+        self.assertEqual(info["state"], "ready")
+        self.assertFalse(lock_path.exists())
+
     def test_retrieval_query_returns_path_line_and_snippet(self):
         self.service.save_mapping(
             pm_team="AF",
