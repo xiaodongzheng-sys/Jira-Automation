@@ -28,7 +28,7 @@ ANSWER_MODE_AUTO = "auto"
 ANSWER_MODE = "retrieval_only"
 ANSWER_MODE_GEMINI = "gemini_flash"
 CONFIG_VERSION = 1
-CODE_INDEX_VERSION = 28
+CODE_INDEX_VERSION = 29
 LLM_PROVIDER_GEMINI = "gemini"
 LLM_PROVIDER_OPENAI_COMPATIBLE = "openai_compatible"
 LLM_PROMPT_VERSION = 5
@@ -192,6 +192,9 @@ ANNOTATION_ROUTE_PATTERN = re.compile(r"@(RequestMapping|GetMapping|PostMapping|
 FEIGN_CLIENT_PATTERN = re.compile(r"@FeignClient\s*\(([^)]*)\)")
 MYBATIS_NAMESPACE_PATTERN = re.compile(r"<mapper\b[^>]*\bnamespace\s*=\s*[\"']([^\"']+)[\"']", re.IGNORECASE)
 MYBATIS_STATEMENT_PATTERN = re.compile(r"<(select|insert|update|delete)\b[^>]*\bid\s*=\s*[\"']([^\"']+)[\"']", re.IGNORECASE)
+MYBATIS_RESULT_MAP_PATTERN = re.compile(r"<resultMap\b[^>]*\bid\s*=\s*[\"']([^\"']+)[\"'][^>]*", re.IGNORECASE)
+MYBATIS_INCLUDE_PATTERN = re.compile(r"<include\b[^>]*\brefid\s*=\s*[\"']([^\"']+)[\"']", re.IGNORECASE)
+MYBATIS_ATTR_REFERENCE_PATTERN = re.compile(r"\b(parameterType|resultType|resultMap|type|javaType|ofType)\s*=\s*[\"']([^\"']+)[\"']", re.IGNORECASE)
 HTTP_LITERAL_PATTERN = re.compile(r"[\"'](https?://[^\"']+|/[A-Za-z0-9_./{}:-]{2,})[\"']")
 SQL_TABLE_PATTERN = re.compile(r"\b(?:from|join|update|into)\s+([A-Za-z_][A-Za-z0-9_.$]*)", re.IGNORECASE)
 SQL_READ_TABLE_PATTERN = re.compile(r"\b(?:from|join)\s+([A-Za-z_][A-Za-z0-9_.$]*)", re.IGNORECASE)
@@ -2232,7 +2235,7 @@ class SourceCodeQAService:
         repo_path: Path,
     ) -> dict[str, Any]:
         info = self._repo_index_info(key, entry, repo_path)
-        if info.get("state") == "ready" or (info.get("state") == "stale" and info.get("schema_compatible")):
+        if info.get("state") == "ready" or (info.get("state") == "stale" and info.get("queryable")):
             return info
         raise SourceCodeQAIndexUnavailable(
             f"Code index for {entry.display_name} is {info.get('state') or 'unavailable'}; run Sync / Refresh first."
@@ -2256,13 +2259,16 @@ class SourceCodeQAService:
             "latest_mtime_ns": str(fingerprint["latest_mtime_ns"]),
             "total_size": str(fingerprint["total_size"]),
         }
-        schema_compatible = metadata.get("version") == str(CODE_INDEX_VERSION)
+        index_version = int(str(metadata.get("version") or "0")) if str(metadata.get("version") or "0").isdigit() else 0
+        schema_compatible = index_version == CODE_INDEX_VERSION
+        queryable = index_version >= 28
         state = "ready" if all(metadata.get(key) == value for key, value in expected.items()) else "stale"
         return {
             "state": state,
             "path": str(index_path),
             "schema_compatible": schema_compatible,
-            "queryable": schema_compatible,
+            "queryable": queryable,
+            "index_version": index_version,
             "files": int(metadata.get("indexed_files") or 0),
             "lines": int(metadata.get("indexed_lines") or 0),
             "definitions": int(metadata.get("indexed_definitions") or 0),
@@ -2274,6 +2280,7 @@ class SourceCodeQAService:
             "semantic_chunks": int(metadata.get("indexed_semantic_chunks") or 0),
             "reused_files": int(metadata.get("reused_files") or 0),
             "reparsed_files": int(metadata.get("reparsed_files") or 0),
+            "index_refresh_strategy": metadata.get("index_refresh_strategy") or "",
             "parser_backend": metadata.get("parser_backend") or "regex",
             "parser_languages": [
                 item
@@ -2371,6 +2378,19 @@ class SourceCodeQAService:
                         primary key (file_path, line_no)
                     );
                     create index idx_lines_file_path on lines(file_path);
+                    create table file_tokens (
+                        token text not null,
+                        file_path text not null,
+                        primary key (token, file_path)
+                    );
+                    create index idx_file_tokens_path on file_tokens(file_path);
+                    create table line_tokens (
+                        token text not null,
+                        file_path text not null,
+                        line_no integer not null,
+                        primary key (token, file_path, line_no)
+                    );
+                    create index idx_line_tokens_location on line_tokens(file_path, line_no);
                     create table definitions (
                         name text not null,
                         lower_name text not null,
@@ -2461,6 +2481,14 @@ class SourceCodeQAService:
                         embedding text not null
                     );
                     create index idx_semantic_chunks_file_path on semantic_chunks(file_path);
+                    create table semantic_chunk_tokens (
+                        token text not null,
+                        chunk_id text not null,
+                        file_path text not null,
+                        primary key (token, chunk_id)
+                    );
+                    create index idx_semantic_chunk_tokens_chunk on semantic_chunk_tokens(chunk_id);
+                    create index idx_semantic_chunk_tokens_file on semantic_chunk_tokens(file_path);
                     """
                 )
                 file_fts_enabled = self._try_create_file_fts(connection)
@@ -2526,19 +2554,26 @@ class SourceCodeQAService:
                                 ),
                             ),
                         )
+                    self._insert_file_tokens(connection, relative_path, relative_path, file_symbols)
                     line_rows = []
+                    line_token_rows: list[tuple[str, str, int]] = []
                     for index, line in enumerate(lines, start=1):
                         lowered = line.lower()
+                        line_symbols = self._line_symbols(lowered)
                         line_rows.append(
                             (
                                 relative_path,
                                 index,
                                 line,
                                 lowered,
-                                json.dumps(sorted(self._line_symbols(lowered)), separators=(",", ":")),
+                                json.dumps(sorted(line_symbols), separators=(",", ":")),
                                 1 if self._is_declaration_line(line) else 0,
                                 1 if PATHISH_PATTERN.search(line) else 0,
                             )
+                        )
+                        line_token_rows.extend(
+                            (token, relative_path, index)
+                            for token in self._index_tokens_for_text(line, line_symbols)
                         )
                     connection.executemany(
                         """
@@ -2546,6 +2581,10 @@ class SourceCodeQAService:
                         values (?, ?, ?, ?, ?, ?, ?)
                         """,
                         line_rows,
+                    )
+                    connection.executemany(
+                        "insert or ignore into line_tokens(token, file_path, line_no) values (?, ?, ?)",
+                        line_token_rows,
                     )
                     if fts_enabled:
                         connection.executemany(
@@ -2595,6 +2634,7 @@ class SourceCodeQAService:
                             "insert into semantic_chunks_fts(chunk_id, file_path, content) values (?, ?, ?)",
                             [(chunk[0], chunk[1], f"{chunk[4]}\n{chunk[6]}\n{chunk[7]}") for chunk in semantic_chunks],
                         )
+                    self._insert_semantic_chunk_tokens(connection, semantic_chunks)
                     connection.executemany(
                         """
                         insert into entity_edges(from_entity_id, from_file, from_line, edge_kind, to_name, lower_to_name, to_entity_id, to_file, to_line, evidence)
@@ -2633,6 +2673,7 @@ class SourceCodeQAService:
                     "indexed_semantic_chunks": str(indexed_semantic_chunks),
                     "reused_files": str(reused_files),
                     "reparsed_files": str(reparsed_files),
+                    "index_refresh_strategy": "delta_row_reuse" if reusable_index is not None else "full_rebuild",
                     "parser_backend": "tree_sitter+regex" if tree_sitter_files else "regex",
                     "parser_languages": ",".join(sorted(parser_languages)),
                     "tree_sitter_files": str(tree_sitter_files),
@@ -2660,6 +2701,7 @@ class SourceCodeQAService:
                 "semantic_chunks": indexed_semantic_chunks,
                 "reused_files": reused_files,
                 "reparsed_files": reparsed_files,
+                "index_refresh_strategy": metadata["index_refresh_strategy"],
                 "parser_backend": metadata["parser_backend"],
                 "parser_languages": sorted(parser_languages),
                 "tree_sitter_files": tree_sitter_files,
@@ -2765,6 +2807,22 @@ class SourceCodeQAService:
                     "insert into lines_fts(file_path, line_no, content) values (?, ?, ?)",
                     [(row["file_path"], row["line_no"], row["line_text"]) for row in line_rows],
                 )
+            file_token_rows = old_connection.execute(
+                "select token, file_path from file_tokens where file_path = ?",
+                (relative_path,),
+            ).fetchall()
+            new_connection.executemany(
+                "insert or ignore into file_tokens(token, file_path) values (?, ?)",
+                [tuple(row) for row in file_token_rows],
+            )
+            line_token_rows = old_connection.execute(
+                "select token, file_path, line_no from line_tokens where file_path = ?",
+                (relative_path,),
+            ).fetchall()
+            new_connection.executemany(
+                "insert or ignore into line_tokens(token, file_path, line_no) values (?, ?, ?)",
+                [tuple(row) for row in line_token_rows],
+            )
 
             definition_rows = old_connection.execute(
                 "select name, lower_name, kind, file_path, line_no, signature from definitions where file_path = ?",
@@ -2850,6 +2908,14 @@ class SourceCodeQAService:
                         for row in semantic_rows
                     ],
                 )
+            semantic_token_rows = old_connection.execute(
+                "select token, chunk_id, file_path from semantic_chunk_tokens where file_path = ?",
+                (relative_path,),
+            ).fetchall()
+            new_connection.executemany(
+                "insert or ignore into semantic_chunk_tokens(token, chunk_id, file_path) values (?, ?, ?)",
+                [tuple(row) for row in semantic_token_rows],
+            )
 
             new_connection.execute("release savepoint reuse_index_file")
             return {
@@ -2867,6 +2933,62 @@ class SourceCodeQAService:
             except sqlite3.Error:
                 pass
             return None
+
+    @staticmethod
+    def _index_tokens_for_text(text: str, symbols: set[str] | None = None) -> list[str]:
+        tokens: set[str] = set(symbols or set())
+        lowered = str(text or "").lower()
+        tokens.update(match.group(0).lower() for match in FTS_TOKEN_PATTERN.finditer(lowered))
+        tokens.update(match.group(0).lower() for match in IDENTIFIER_PATTERN.finditer(lowered))
+        cleaned = {
+            token.strip("._/-:")
+            for token in tokens
+            if len(token.strip("._/-:")) >= 3
+            and token.strip("._/-:") not in STOPWORDS
+            and token.strip("._/-:") not in LOW_VALUE_CALL_SYMBOLS
+        }
+        return sorted(cleaned)[:160]
+
+    @classmethod
+    def _insert_file_tokens(
+        cls,
+        connection: sqlite3.Connection,
+        relative_path: str,
+        content: str,
+        symbols: set[str],
+    ) -> None:
+        rows = [
+            (token, relative_path)
+            for token in cls._index_tokens_for_text(f"{relative_path}\n{content}", symbols)
+        ]
+        connection.executemany(
+            "insert or ignore into file_tokens(token, file_path) values (?, ?)",
+            rows,
+        )
+
+    @classmethod
+    def _insert_semantic_chunk_tokens(
+        cls,
+        connection: sqlite3.Connection,
+        chunks: list[tuple[str, str, int, int, str, str, str, str, str]],
+    ) -> None:
+        rows: list[tuple[str, str, str]] = []
+        for chunk in chunks:
+            chunk_id, file_path, _start, _end, chunk_text, _lower, tokens_json, symbols_json, _embedding = chunk
+            symbols: set[str] = set()
+            try:
+                symbols.update(str(item).lower() for item in json.loads(tokens_json or "[]"))
+                symbols.update(str(item).lower() for item in json.loads(symbols_json or "[]"))
+            except (TypeError, json.JSONDecodeError):
+                pass
+            rows.extend(
+                (token, chunk_id, file_path)
+                for token in cls._index_tokens_for_text(chunk_text, symbols)
+            )
+        connection.executemany(
+            "insert or ignore into semantic_chunk_tokens(token, chunk_id, file_path) values (?, ?, ?)",
+            rows,
+        )
 
     @staticmethod
     def _build_semantic_chunks(relative_path: str, lines: list[str]) -> list[tuple[str, str, int, int, str, str, str, str, str]]:
@@ -4094,6 +4216,28 @@ class SourceCodeQAService:
                 if mapper_short_name:
                     add_reference(mapper_short_name, "mapper_interface", line_no, stripped)
                     add_entity_edge(mapper_namespace_id, "mapper_interface", mapper_short_name, line_no, stripped)
+            result_map_match = MYBATIS_RESULT_MAP_PATTERN.search(line)
+            if result_map_match:
+                result_map_name = f"{mapper_namespace}.{result_map_match.group(1)}" if mapper_namespace else result_map_match.group(1)
+                add_definition(result_map_name, "mybatis_result_map", line_no, stripped)
+                result_map_id = self._entity_id(relative_path, "mybatis_result_map", result_map_name, line_no)
+                add_entity_edge(mapper_namespace_id, "result_map", result_map_name, line_no, stripped)
+                if mapper_namespace:
+                    mapper_short_name = mapper_namespace.rsplit(".", 1)[-1]
+                    short_result_map = f"{mapper_short_name}.{result_map_match.group(1)}"
+                    add_definition(short_result_map, "mybatis_result_map", line_no, stripped)
+                    add_entity_edge(result_map_id, "result_map_alias", short_result_map, line_no, stripped)
+            include_match = MYBATIS_INCLUDE_PATTERN.search(line)
+            if include_match:
+                include_ref = include_match.group(1)
+                add_reference(include_ref, "mybatis_include_refid", line_no, stripped)
+                add_entity_edge(current_method_id or mapper_namespace_id, "mybatis_include_refid", include_ref, line_no, stripped)
+            for attr_name, attr_value in MYBATIS_ATTR_REFERENCE_PATTERN.findall(line):
+                if not attr_value:
+                    continue
+                attr_kind = "mybatis_result_map_ref" if attr_name.lower() == "resultmap" else "mybatis_type_ref"
+                add_reference(attr_value, attr_kind, line_no, stripped)
+                add_entity_edge(current_method_id or mapper_namespace_id, attr_kind, attr_value, line_no, stripped)
             statement_match = MYBATIS_STATEMENT_PATTERN.search(line)
             if statement_match:
                 statement_name = f"{mapper_namespace}.{statement_match.group(2)}" if mapper_namespace else statement_match.group(2)
@@ -5342,20 +5486,36 @@ class SourceCodeQAService:
                 file_row = None
             if file_row is not None:
                 add_file_rows([file_row])
-        if not file_rows_by_path:
-            for term in query_terms:
-                like = f"%{term}%"
-                try:
-                    add_file_rows(
-                        connection.execute(
-                            "select * from files where lower_path like ? or symbols like ? order by path limit ?",
-                            (like, like, 40),
-                        ).fetchall()
-                    )
-                except sqlite3.Error:
-                    continue
-                if len(file_rows_by_path) >= MAX_TARGETED_INDEX_FILES:
-                    break
+        if not file_rows_by_path and query_terms:
+            token_lookup_supported = True
+            try:
+                add_file_rows(
+                    connection.execute(
+                        f"""
+                        select files.*
+                        from file_tokens
+                        join files on files.path = file_tokens.file_path
+                        where file_tokens.token in ({placeholders(query_terms)})
+                        group by files.path
+                        order by count(*) desc, files.path
+                        limit ?
+                        """,
+                        (*query_terms, MAX_TARGETED_INDEX_FILES),
+                    ).fetchall()
+                )
+            except sqlite3.Error:
+                token_lookup_supported = False
+            if not file_rows_by_path and not token_lookup_supported:
+                for term in query_terms[:12]:
+                    try:
+                        add_file_rows(
+                            connection.execute(
+                                "select * from files where lower_path like ? order by path limit ?",
+                                (f"%{term}%", MAX_TARGETED_INDEX_FILES),
+                            ).fetchall()
+                        )
+                    except sqlite3.Error:
+                        continue
         for row in self._fts_search_rows(
             connection,
             tokens,
@@ -5374,18 +5534,36 @@ class SourceCodeQAService:
                     add_line_rows([line_row])
             except sqlite3.Error:
                 continue
-        if not line_rows_by_key:
-            for term in query_terms[:8]:
-                like = f"%{term}%"
-                try:
-                    add_line_rows(
-                        connection.execute(
-                            "select * from lines where lower_text like ? or symbols like ? order by file_path, line_no limit ?",
-                            (like, like, 80),
-                        ).fetchall()
-                    )
-                except sqlite3.Error:
-                    continue
+        if not line_rows_by_key and query_terms:
+            token_lookup_supported = True
+            try:
+                add_line_rows(
+                    connection.execute(
+                        f"""
+                        select lines.*
+                        from line_tokens
+                        join lines on lines.file_path = line_tokens.file_path and lines.line_no = line_tokens.line_no
+                        where line_tokens.token in ({placeholders(query_terms[:12])})
+                        group by lines.file_path, lines.line_no
+                        order by count(*) desc, lines.file_path, lines.line_no
+                        limit ?
+                        """,
+                        (*query_terms[:12], MAX_TARGETED_INDEX_LINES),
+                    ).fetchall()
+                )
+            except sqlite3.Error:
+                token_lookup_supported = False
+            if not line_rows_by_key and not token_lookup_supported:
+                for term in query_terms[:12]:
+                    try:
+                        add_line_rows(
+                            connection.execute(
+                                "select * from lines where lower_text like ? order by file_path, line_no limit ?",
+                                (f"%{term}%", MAX_TARGETED_INDEX_LINES),
+                            ).fetchall()
+                        )
+                    except sqlite3.Error:
+                        continue
         line_file_paths = list(dict.fromkeys(file_path for file_path, _line_no in line_rows_by_key))
         for file_path in line_file_paths:
             if file_path in file_rows_by_path:
@@ -5461,20 +5639,40 @@ class SourceCodeQAService:
                     semantic_rows_by_id.setdefault(chunk_id, chunk_row)
                 if len(semantic_rows_by_id) >= MAX_TARGETED_SEMANTIC_CHUNKS:
                     break
-            if not semantic_rows_by_id:
-                for term in query_terms[:8]:
-                    try:
-                        rows = connection.execute(
-                            "select * from semantic_chunks where lower_text like ? or tokens like ? or symbols like ? order by file_path, start_line limit ?",
-                            (f"%{term}%", f"%{term}%", f"%{term}%", 80),
-                        ).fetchall()
-                    except sqlite3.Error:
-                        rows = []
-                    for row in rows:
-                        if len(semantic_rows_by_id) >= MAX_TARGETED_SEMANTIC_CHUNKS:
-                            break
-                        chunk_id = str(row["chunk_id"] if "chunk_id" in row.keys() else f"{row['file_path']}:{row['start_line']}")
-                        semantic_rows_by_id.setdefault(chunk_id, row)
+            if not semantic_rows_by_id and query_terms:
+                token_lookup_supported = True
+                try:
+                    rows = connection.execute(
+                        f"""
+                        select semantic_chunks.*
+                        from semantic_chunk_tokens
+                        join semantic_chunks on semantic_chunks.chunk_id = semantic_chunk_tokens.chunk_id
+                        where semantic_chunk_tokens.token in ({placeholders(query_terms[:12])})
+                        group by semantic_chunks.chunk_id
+                        order by count(*) desc, semantic_chunks.file_path, semantic_chunks.start_line
+                        limit ?
+                        """,
+                        (*query_terms[:12], MAX_TARGETED_SEMANTIC_CHUNKS),
+                    ).fetchall()
+                except sqlite3.Error:
+                    token_lookup_supported = False
+                    rows = []
+                if not rows and not token_lookup_supported:
+                    for term in query_terms[:12]:
+                        try:
+                            rows.extend(
+                                connection.execute(
+                                    "select * from semantic_chunks where lower_text like ? order by file_path, start_line limit ?",
+                                    (f"%{term}%", MAX_TARGETED_SEMANTIC_CHUNKS),
+                                ).fetchall()
+                            )
+                        except sqlite3.Error:
+                            continue
+                for row in rows:
+                    if len(semantic_rows_by_id) >= MAX_TARGETED_SEMANTIC_CHUNKS:
+                        break
+                    chunk_id = str(row["chunk_id"] if "chunk_id" in row.keys() else f"{row['file_path']}:{row['start_line']}")
+                    semantic_rows_by_id.setdefault(chunk_id, row)
             if file_rows_by_path and len(semantic_rows_by_id) < MAX_TARGETED_SEMANTIC_CHUNKS:
                 paths = list(file_rows_by_path)[:80]
                 try:

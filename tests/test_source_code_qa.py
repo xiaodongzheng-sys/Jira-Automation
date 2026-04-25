@@ -528,9 +528,12 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             connection.execute(
                 "create table lines (file_path text, line_no integer, line_text text, lower_text text, symbols text, is_declaration integer, has_pathish integer)"
             )
+            connection.execute("create table file_tokens (token text, file_path text)")
+            connection.execute("create table line_tokens (token text, file_path text, line_no integer)")
             connection.execute(
                 "create table semantic_chunks (chunk_id text, file_path text, start_line integer, end_line integer, chunk_text text, lower_text text, tokens text, symbols text, embedding text)"
             )
+            connection.execute("create table semantic_chunk_tokens (token text, chunk_id text, file_path text)")
             for index in range(300):
                 path = f"src/noise/Noise{index}.java"
                 connection.execute("insert into files values (?, ?, ?)", (path, path.lower(), "[]"))
@@ -539,12 +542,15 @@ class SourceCodeQAServiceTests(unittest.TestCase):
                     (path, 1, "class Noise {}", "class noise {}", "[]", 1, 0),
                 )
             connection.execute("insert into files values ('src/service/Late.java', 'src/service/late.java', '[]')")
+            connection.execute("insert into file_tokens values ('needlevalue', 'src/service/Late.java')")
             connection.execute(
                 "insert into lines values ('src/service/Late.java', 9001, 'return needleValue;', 'return needlevalue;', '[\"needlevalue\"]', 0, 0)"
             )
+            connection.execute("insert into line_tokens values ('needlevalue', 'src/service/Late.java', 9001)")
             connection.execute(
                 "insert into semantic_chunks values ('late-1', 'src/service/Late.java', 9001, 9001, 'return needleValue;', 'return needlevalue;', '[\"needlevalue\"]', '[\"needlevalue\"]', '[]')"
             )
+            connection.execute("insert into semantic_chunk_tokens values ('needlevalue', 'late-1', 'src/service/Late.java')")
             connection.commit()
         request_cache = self.service._new_retrieval_request_cache()
         with sqlite3.connect(index_path) as connection:
@@ -879,6 +885,41 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         index_info = self.service.repo_status("AF:All")[0]["index"]
         self.assertEqual(index_info["state"], "stale")
         self.assertTrue(index_info["schema_compatible"])
+        self.assertTrue(index_info["queryable"])
+
+    def test_query_can_use_previous_queryable_index_without_token_tables(self):
+        self.service.save_mapping(
+            pm_team="AF",
+            country="All",
+            repositories=[{"display_name": "Portal Repo", "url": "https://git.example.com/team/portal.git"}],
+        )
+        entry = self.service.load_config()["mappings"]["AF:All"][0]
+        repo_entry = type("Entry", (), entry)()
+        repo_path = self.service._repo_path("AF:All", repo_entry)
+        (repo_path / ".git").mkdir(parents=True)
+        source_file = repo_path / "bpmis" / "jira_client.py"
+        source_file.parent.mkdir(parents=True)
+        source_file.write_text(
+            "class BPMISClient:\n"
+            "    def batchCreateJiraIssue(self):\n"
+            "        return self.post('/api/v1/issues/batchCreateJiraIssue')\n",
+            encoding="utf-8",
+        )
+        self.service._build_repo_index("AF:All", repo_entry, repo_path)
+        index_path = self.service._index_path(repo_path)
+        with sqlite3.connect(index_path) as connection:
+            connection.execute("update metadata set value = '28' where key = 'version'")
+            connection.execute("drop table file_tokens")
+            connection.execute("drop table line_tokens")
+            connection.execute("drop table semantic_chunk_tokens")
+            connection.commit()
+
+        payload = self.service.query(pm_team="AF", country="All", question="where is batchCreateJiraIssue implemented")
+
+        self.assertEqual(payload["status"], "ok")
+        index_info = self.service.repo_status("AF:All")[0]["index"]
+        self.assertEqual(index_info["state"], "stale")
+        self.assertFalse(index_info["schema_compatible"])
         self.assertTrue(index_info["queryable"])
 
     def test_structure_index_extracts_definitions_references_and_telemetry(self):
@@ -1292,7 +1333,12 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         mapper_file.parent.mkdir(parents=True)
         mapper_file.write_text(
             "<mapper namespace=\"com.example.IssueMapper\">\n"
-            "  <select id=\"findIssue\">\n"
+            "  <resultMap id=\"IssueResult\" type=\"com.example.IssueEntity\">\n"
+            "    <result property=\"id\" column=\"id\" javaType=\"java.lang.Long\" />\n"
+            "  </resultMap>\n"
+            "  <sql id=\"BaseColumns\">id, name</sql>\n"
+            "  <select id=\"findIssue\" parameterType=\"com.example.IssueQuery\" resultMap=\"IssueResult\">\n"
+            "    <include refid=\"BaseColumns\" />\n"
             "    select * from issue_table\n"
             "  </select>\n"
             "</mapper>\n",
@@ -1310,6 +1356,10 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertIn(("downstream_api", "issue-service"), edge_rows)
         self.assertIn(("http_endpoint", "https://issue.example.com"), edge_rows)
         self.assertTrue(any(kind == "mapper_statement" and "findIssue" in target for kind, target in edge_rows))
+        self.assertTrue(any(kind == "result_map" and "IssueResult" in target for kind, target in edge_rows))
+        self.assertTrue(any(kind == "mybatis_result_map_ref" and target == "IssueResult" for kind, target in edge_rows))
+        self.assertTrue(any(kind == "mybatis_include_refid" and target == "BaseColumns" for kind, target in edge_rows))
+        self.assertTrue(any(kind == "mybatis_type_ref" and target == "com.example.IssueEntity" for kind, target in edge_rows))
         self.assertTrue(any(kind == "sql_table" and target == "issue_table" for kind, target in edge_rows))
 
     def test_cross_repo_graph_links_client_to_service_repo(self):
