@@ -4342,10 +4342,13 @@ select:focus {
 .source-qa-evidence-card {
   display: grid;
   gap: 12px;
+  max-width: 100%;
+  min-width: 0;
   padding: 16px;
   border: 1px solid #d9e4f0;
   border-radius: 18px;
   background: #f8fbff;
+  overflow: hidden;
 }
 
 .source-qa-evidence-head {
@@ -4353,26 +4356,32 @@ select:focus {
   justify-content: space-between;
   gap: 12px;
   align-items: start;
+  min-width: 0;
 }
 
 .source-qa-evidence-head span {
+  min-width: 0;
   color: #667085;
   font-size: 0.9rem;
   text-align: right;
+  overflow-wrap: anywhere;
 }
 
 .source-qa-evidence-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px;
+  min-width: 0;
 }
 
 .source-qa-evidence-grid section {
   min-width: 0;
+  max-width: 100%;
   padding: 12px;
   border: 1px solid #e4e7ec;
   border-radius: 8px;
   background: #ffffff;
+  overflow: hidden;
 }
 
 .source-qa-evidence-grid ul {
@@ -4380,6 +4389,12 @@ select:focus {
   padding-left: 18px;
   color: #475467;
   line-height: 1.5;
+}
+
+.source-qa-evidence-grid li {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .source-qa-llm-card {
@@ -4420,6 +4435,8 @@ select:focus {
   gap: 12px;
   color: #344054;
   line-height: 1.68;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .source-qa-answer-body p {
@@ -4427,10 +4444,12 @@ select:focus {
 }
 
 .source-qa-answer-section {
+  min-width: 0;
   padding: 14px;
   border: 1px solid #e4e7ec;
   border-radius: 8px;
   background: #ffffff;
+  overflow: hidden;
 }
 
 .source-qa-answer-section strong {
@@ -4446,6 +4465,8 @@ select:focus {
 
 .source-qa-answer-section li {
   margin: 5px 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .source-qa-answer-direct {
@@ -4460,10 +4481,18 @@ select:focus {
 
 .source-qa-citations {
   display: inline-flex;
+  flex-wrap: wrap;
   gap: 4px;
   margin-left: 4px;
   color: #165dff;
   font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 1100px) {
+  .source-qa-evidence-grid {
+    grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr));
+  }
 }
 
 .source-qa-llm-card pre {
