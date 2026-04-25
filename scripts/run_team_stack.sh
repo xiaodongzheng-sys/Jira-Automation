@@ -286,6 +286,14 @@ PY
     echo "latest eval status missing: $source_qa_eval_status_file"
   fi
 
+  echo
+  echo "== Source Code QA Ops Summary =="
+  if [[ -x "$PYTHON_BIN" && -f "$ROOT_DIR/scripts/source_code_qa_ops_summary.py" ]]; then
+    TEAM_PORTAL_DATA_DIR="$data_dir" "$PYTHON_BIN" "$ROOT_DIR/scripts/source_code_qa_ops_summary.py" || true
+  else
+    echo "ops summary unavailable"
+  fi
+
   return "$ok"
 }
 

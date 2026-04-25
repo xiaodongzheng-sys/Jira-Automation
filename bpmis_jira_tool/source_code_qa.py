@@ -2269,6 +2269,8 @@ class SourceCodeQAService:
             "edges": int(metadata.get("indexed_edges") or 0),
             "flow_edges": int(metadata.get("indexed_flow_edges") or 0),
             "semantic_chunks": int(metadata.get("indexed_semantic_chunks") or 0),
+            "reused_files": int(metadata.get("reused_files") or 0),
+            "reparsed_files": int(metadata.get("reparsed_files") or 0),
             "parser_backend": metadata.get("parser_backend") or "regex",
             "parser_languages": [
                 item
@@ -2336,7 +2338,10 @@ class SourceCodeQAService:
         indexed_semantic_chunks = 0
         tree_sitter_files = 0
         tree_sitter_errors = 0
+        reused_files = 0
+        reparsed_files = 0
         parser_languages: set[str] = set()
+        reusable_index = self._open_reusable_index(index_path)
         try:
             with sqlite3.connect(tmp_path) as connection:
                 connection.execute("pragma journal_mode=off")
@@ -2462,9 +2467,36 @@ class SourceCodeQAService:
                     relative_path = str(file_path.relative_to(repo_path))
                     try:
                         stat = file_path.stat()
+                    except OSError:
+                        continue
+                    copied_counts = self._copy_unchanged_index_file(
+                        reusable_index,
+                        connection,
+                        relative_path,
+                        stat,
+                        file_fts_enabled=file_fts_enabled,
+                        fts_enabled=fts_enabled,
+                        semantic_fts_enabled=semantic_fts_enabled,
+                    )
+                    if copied_counts is not None:
+                        indexed_files += 1
+                        indexed_lines += copied_counts["lines"]
+                        indexed_definitions += copied_counts["definitions"]
+                        indexed_references += copied_counts["references"]
+                        indexed_entities += copied_counts["entities"]
+                        indexed_entity_edges += copied_counts["entity_edges"]
+                        indexed_semantic_chunks += copied_counts["semantic_chunks"]
+                        reused_files += 1
+                        reused_language = self._tree_sitter_language_for_suffix(Path(relative_path).suffix.lower())
+                        if reused_language:
+                            parser_languages.add(reused_language)
+                            tree_sitter_files += 1
+                        continue
+                    try:
                         lines = file_path.read_text(encoding="utf-8", errors="ignore").splitlines()
                     except OSError:
                         continue
+                    reparsed_files += 1
                     file_symbols = self._collect_symbols(lines)
                     connection.execute(
                         "insert into files(path, lower_path, size, mtime_ns, line_count, symbols) values (?, ?, ?, ?, ?, ?)",
@@ -2596,6 +2628,8 @@ class SourceCodeQAService:
                     "indexed_edges": str(indexed_edges),
                     "indexed_flow_edges": str(indexed_flow_edges),
                     "indexed_semantic_chunks": str(indexed_semantic_chunks),
+                    "reused_files": str(reused_files),
+                    "reparsed_files": str(reparsed_files),
                     "parser_backend": "tree_sitter+regex" if tree_sitter_files else "regex",
                     "parser_languages": ",".join(sorted(parser_languages)),
                     "tree_sitter_files": str(tree_sitter_files),
@@ -2621,6 +2655,8 @@ class SourceCodeQAService:
                 "edges": indexed_edges,
                 "flow_edges": indexed_flow_edges,
                 "semantic_chunks": indexed_semantic_chunks,
+                "reused_files": reused_files,
+                "reparsed_files": reparsed_files,
                 "parser_backend": metadata["parser_backend"],
                 "parser_languages": sorted(parser_languages),
                 "tree_sitter_files": tree_sitter_files,
@@ -2633,7 +2669,201 @@ class SourceCodeQAService:
                 "updated_at": metadata["updated_at"],
             }
         finally:
+            if reusable_index is not None:
+                reusable_index.close()
             lock_path.unlink(missing_ok=True)
+
+    def _open_reusable_index(self, index_path: Path) -> sqlite3.Connection | None:
+        if not index_path.exists():
+            return None
+        connection: sqlite3.Connection | None = None
+        try:
+            connection = sqlite3.connect(index_path)
+            connection.row_factory = sqlite3.Row
+            metadata = dict(connection.execute("select key, value from metadata").fetchall())
+            if metadata.get("version") != str(CODE_INDEX_VERSION):
+                connection.close()
+                return None
+            return connection
+        except sqlite3.Error:
+            if connection is not None:
+                connection.close()
+            return None
+
+    @staticmethod
+    def _copy_unchanged_index_file(
+        old_connection: sqlite3.Connection | None,
+        new_connection: sqlite3.Connection,
+        relative_path: str,
+        stat: os.stat_result,
+        *,
+        file_fts_enabled: bool,
+        fts_enabled: bool,
+        semantic_fts_enabled: bool,
+    ) -> dict[str, int] | None:
+        if old_connection is None:
+            return None
+        try:
+            file_row = old_connection.execute("select * from files where path = ?", (relative_path,)).fetchone()
+            if file_row is None:
+                return None
+            if int(file_row["size"]) != int(stat.st_size) or int(file_row["mtime_ns"]) != int(stat.st_mtime_ns):
+                return None
+
+            new_connection.execute("savepoint reuse_index_file")
+            new_connection.execute(
+                "insert into files(path, lower_path, size, mtime_ns, line_count, symbols) values (?, ?, ?, ?, ?, ?)",
+                (
+                    file_row["path"],
+                    file_row["lower_path"],
+                    file_row["size"],
+                    file_row["mtime_ns"],
+                    file_row["line_count"],
+                    file_row["symbols"],
+                ),
+            )
+            if file_fts_enabled:
+                try:
+                    symbols = " ".join(json.loads(file_row["symbols"] or "[]"))
+                except (TypeError, json.JSONDecodeError):
+                    symbols = ""
+                new_connection.execute(
+                    "insert into files_fts(path, content) values (?, ?)",
+                    (
+                        relative_path,
+                        "\n".join(
+                            [
+                                relative_path,
+                                relative_path.replace("/", " ").replace(".", " "),
+                                symbols,
+                            ]
+                        ),
+                    ),
+                )
+
+            line_rows = old_connection.execute(
+                """
+                select file_path, line_no, line_text, lower_text, symbols, is_declaration, has_pathish
+                from lines
+                where file_path = ?
+                order by line_no
+                """,
+                (relative_path,),
+            ).fetchall()
+            new_connection.executemany(
+                """
+                insert into lines(file_path, line_no, line_text, lower_text, symbols, is_declaration, has_pathish)
+                values (?, ?, ?, ?, ?, ?, ?)
+                """,
+                [tuple(row) for row in line_rows],
+            )
+            if fts_enabled and line_rows:
+                new_connection.executemany(
+                    "insert into lines_fts(file_path, line_no, content) values (?, ?, ?)",
+                    [(row["file_path"], row["line_no"], row["line_text"]) for row in line_rows],
+                )
+
+            definition_rows = old_connection.execute(
+                "select name, lower_name, kind, file_path, line_no, signature from definitions where file_path = ?",
+                (relative_path,),
+            ).fetchall()
+            new_connection.executemany(
+                "insert into definitions(name, lower_name, kind, file_path, line_no, signature) values (?, ?, ?, ?, ?, ?)",
+                [tuple(row) for row in definition_rows],
+            )
+
+            reference_rows = old_connection.execute(
+                """
+                select target, lower_target, kind, file_path, line_no, context
+                from references_index
+                where file_path = ?
+                """,
+                (relative_path,),
+            ).fetchall()
+            new_connection.executemany(
+                """
+                insert into references_index(target, lower_target, kind, file_path, line_no, context)
+                values (?, ?, ?, ?, ?, ?)
+                """,
+                [tuple(row) for row in reference_rows],
+            )
+
+            entity_rows = old_connection.execute(
+                """
+                select entity_id, name, lower_name, kind, language, file_path, line_no, parent, signature
+                from code_entities
+                where file_path = ?
+                """,
+                (relative_path,),
+            ).fetchall()
+            new_connection.executemany(
+                """
+                insert or ignore into code_entities(entity_id, name, lower_name, kind, language, file_path, line_no, parent, signature)
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [tuple(row) for row in entity_rows],
+            )
+
+            raw_edge_rows = old_connection.execute(
+                """
+                select from_entity_id, from_file, from_line, edge_kind, to_name, lower_to_name, to_entity_id, to_file, to_line, evidence
+                from entity_edges
+                where from_file = ? and (to_entity_id = '' or to_file = '')
+                """,
+                (relative_path,),
+            ).fetchall()
+            new_connection.executemany(
+                """
+                insert into entity_edges(from_entity_id, from_file, from_line, edge_kind, to_name, lower_to_name, to_entity_id, to_file, to_line, evidence)
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [tuple(row) for row in raw_edge_rows],
+            )
+
+            semantic_rows = old_connection.execute(
+                """
+                select chunk_id, file_path, start_line, end_line, chunk_text, lower_text, tokens, symbols, embedding
+                from semantic_chunks
+                where file_path = ?
+                """,
+                (relative_path,),
+            ).fetchall()
+            new_connection.executemany(
+                """
+                insert into semantic_chunks(chunk_id, file_path, start_line, end_line, chunk_text, lower_text, tokens, symbols, embedding)
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [tuple(row) for row in semantic_rows],
+            )
+            if semantic_fts_enabled and semantic_rows:
+                new_connection.executemany(
+                    "insert into semantic_chunks_fts(chunk_id, file_path, content) values (?, ?, ?)",
+                    [
+                        (
+                            row["chunk_id"],
+                            row["file_path"],
+                            f"{row['chunk_text']}\n{row['tokens']}\n{row['symbols']}",
+                        )
+                        for row in semantic_rows
+                    ],
+                )
+
+            new_connection.execute("release savepoint reuse_index_file")
+            return {
+                "lines": len(line_rows),
+                "definitions": len(definition_rows),
+                "references": len(reference_rows),
+                "entities": len(entity_rows),
+                "entity_edges": len(raw_edge_rows),
+                "semantic_chunks": len(semantic_rows),
+            }
+        except (sqlite3.Error, KeyError, TypeError, ValueError):
+            try:
+                new_connection.execute("rollback to savepoint reuse_index_file")
+                new_connection.execute("release savepoint reuse_index_file")
+            except sqlite3.Error:
+                pass
+            return None
 
     @staticmethod
     def _build_semantic_chunks(relative_path: str, lines: list[str]) -> list[tuple[str, str, int, int, str, str, str, str, str]]:

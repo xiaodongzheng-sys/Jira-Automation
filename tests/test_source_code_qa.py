@@ -916,6 +916,118 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertTrue(telemetry)
         self.assertIn("IssueController", telemetry[-1])
 
+    def test_index_rebuild_reuses_unchanged_file_rows(self):
+        self.service.save_mapping(
+            pm_team="AF",
+            country="All",
+            repositories=[{"display_name": "Portal Repo", "url": "https://git.example.com/team/portal.git"}],
+        )
+        entry = self.service.load_config()["mappings"]["AF:All"][0]
+        repo_entry = type("Entry", (), entry)()
+        repo_path = self.service._repo_path("AF:All", repo_entry)
+        (repo_path / ".git").mkdir(parents=True)
+        alpha_file = repo_path / "service" / "AlphaService.java"
+        beta_file = repo_path / "service" / "BetaService.java"
+        alpha_file.parent.mkdir(parents=True)
+        alpha_file.write_text(
+            "public class AlphaService {\n"
+            "    public String alpha() { return \"alpha\"; }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        beta_file.write_text(
+            "public class BetaService {\n"
+            "    public String beta() { return \"beta\"; }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+
+        first_result = self.service._build_repo_index("AF:All", repo_entry, repo_path)
+        self.assertEqual(first_result["reused_files"], 0)
+        self.assertEqual(first_result["reparsed_files"], 2)
+
+        time.sleep(0.01)
+        beta_file.write_text(
+            "public class BetaServiceV2 {\n"
+            "    public String beta() { return \"beta-v2\"; }\n"
+            "    public String extra() { return \"extra\"; }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        os.utime(beta_file, None)
+
+        original_extract = self.service._extract_structure_rows
+        with patch.object(self.service, "_extract_structure_rows", wraps=original_extract) as mocked_extract:
+            second_result = self.service._build_repo_index("AF:All", repo_entry, repo_path)
+
+        self.assertEqual(mocked_extract.call_count, 1)
+        self.assertEqual(second_result["reused_files"], 1)
+        self.assertEqual(second_result["reparsed_files"], 1)
+        index_info = self.service._repo_index_info("AF:All", repo_entry, repo_path)
+        self.assertEqual(index_info["reused_files"], 1)
+        self.assertEqual(index_info["reparsed_files"], 1)
+
+        with sqlite3.connect(self.service._index_path(repo_path)) as connection:
+            names = {
+                row[0]
+                for row in connection.execute(
+                    "select name from definitions where name in ('AlphaService', 'BetaServiceV2')"
+                ).fetchall()
+            }
+            line_count = connection.execute("select count(*) from lines").fetchone()[0]
+        self.assertIn("AlphaService", names)
+        self.assertIn("BetaServiceV2", names)
+        self.assertGreaterEqual(line_count, 7)
+
+    def test_ops_summary_reports_recent_source_qa_signals(self):
+        from scripts.source_code_qa_ops_summary import build_summary
+
+        data_root = Path(self.temp_dir.name)
+        source_root = data_root / "source_code_qa"
+        run_root = data_root / "run"
+        source_root.mkdir(parents=True)
+        run_root.mkdir(parents=True)
+        (source_root / "telemetry.jsonl").write_text(
+            json.dumps(
+                {
+                    "created_at": "2026-04-25T10:00:00+08:00",
+                    "status": "ok",
+                    "latency_ms": 120,
+                    "llm_route": {"mode": "hybrid"},
+                    "answer_contract": {"status": "satisfied"},
+                }
+            )
+            + "\n"
+            + json.dumps(
+                {
+                    "created_at": "2026-04-25T10:01:00+08:00",
+                    "status": "no_match",
+                    "latency_ms": 360,
+                    "llm_route": {"mode": "retrieval"},
+                    "answer_contract": {"status": "insufficient_evidence"},
+                    "index_freshness": {"status": "stale_or_missing"},
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (source_root / "feedback.jsonl").write_text(
+            json.dumps({"created_at": "2026-04-25T10:02:00+08:00", "rating": "needs_deeper_trace"}) + "\n",
+            encoding="utf-8",
+        )
+        (run_root / "source_code_qa_eval_status.json").write_text(
+            json.dumps({"state": "passed", "updated_unix": int(time.time())}),
+            encoding="utf-8",
+        )
+
+        summary = "\n".join(build_summary(data_root, limit=20))
+
+        self.assertIn("telemetry_window=2", summary)
+        self.assertIn("query_status=ok=1, no_match=1", summary)
+        self.assertIn("no_match_rate=1/2", summary)
+        self.assertIn("feedback_window=1", summary)
+        self.assertIn("latest_eval_state=passed", summary)
+
     def test_planner_tool_loop_adds_code_graph_matches(self):
         self.service.save_mapping(
             pm_team="AF",
