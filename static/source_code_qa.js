@@ -38,7 +38,6 @@
   const feedbackStatus = document.querySelector('[data-source-feedback-status]');
   const evidenceSummary = document.querySelector('[data-source-evidence-summary]');
   const debugTrace = document.querySelector('[data-source-debug-trace]');
-  const questionHistory = document.querySelector('[data-source-question-history]');
   const indexHealth = document.querySelector('[data-source-index-health]');
   const releaseGate = document.querySelector('[data-source-release-gate]');
   const modelAvailability = document.querySelector('[data-source-model-availability]');
@@ -66,7 +65,6 @@
   let activeSessionId = '';
   let activeQueryProgress = null;
   const preferenceKey = 'source-code-qa:last-query-config:v1';
-  const historyKey = 'source-code-qa:question-history:v1';
 
   const escapeHtml = (value) => String(value ?? '')
     .replaceAll('&', '&amp;')
@@ -213,73 +211,6 @@
     } catch (_error) {
       // Local storage can be blocked in private/browser-managed contexts.
     }
-  };
-
-  const loadQuestionHistory = () => {
-    try {
-      const rows = JSON.parse(window.localStorage.getItem(historyKey) || '[]');
-      return Array.isArray(rows) ? rows : [];
-    } catch (_error) {
-      return [];
-    }
-  };
-
-  const saveQuestionHistory = (row) => {
-    const question = String(row?.question || '').trim();
-    if (!question) return;
-    try {
-      const rows = loadQuestionHistory()
-        .filter((item) => String(item.question || '').trim() !== question);
-      rows.unshift({
-        question,
-        pm_team: row.pm_team,
-        country: row.country,
-        answer_mode: row.answer_mode,
-        status: row.status,
-        trace_id: row.trace_id || '',
-        summary: String(row.summary || '').slice(0, 160),
-        asked_at: new Date().toISOString(),
-      });
-      window.localStorage.setItem(historyKey, JSON.stringify(rows.slice(0, 12)));
-      renderQuestionHistory();
-    } catch (_error) {
-      // Local history is a convenience only.
-    }
-  };
-
-  const renderQuestionHistory = () => {
-    if (!questionHistory) return;
-    const rows = loadQuestionHistory();
-    if (!rows.length) {
-      questionHistory.hidden = true;
-      questionHistory.innerHTML = '';
-      return;
-    }
-    questionHistory.hidden = false;
-    questionHistory.innerHTML = `
-      <div class="source-qa-history-head">
-        <strong>Recent Questions</strong>
-        <button class="button button-secondary source-qa-clear-history" type="button" data-source-clear-history>Clear</button>
-      </div>
-      <div class="source-qa-history-list">
-        ${rows.slice(0, 6).map((row) => `
-          <button class="source-qa-history-item" type="button" data-source-history-question="${escapeHtml(row.question)}">
-            <span>${escapeHtml(row.question)}</span>
-            <small>${escapeHtml(row.pm_team || '')} · ${escapeHtml(row.country || 'All')} · ${escapeHtml(row.llm_provider || row.answer_mode || '')} · ${escapeHtml(row.status || '')}</small>
-          </button>
-        `).join('')}
-      </div>
-    `;
-    questionHistory.querySelectorAll('[data-source-history-question]').forEach((button) => {
-      button.addEventListener('click', () => {
-        questionInput.value = button.dataset.sourceHistoryQuestion || '';
-        questionInput.focus();
-      });
-    });
-    questionHistory.querySelector('[data-source-clear-history]')?.addEventListener('click', () => {
-      window.localStorage.removeItem(historyKey);
-      renderQuestionHistory();
-    });
   };
 
   const providerLabel = (value) => {
@@ -1290,16 +1221,6 @@
         results.hidden = true;
         results.innerHTML = '';
       }
-      saveQuestionHistory({
-        question: submittedQuestion,
-        pm_team: pmTeam.value,
-        country: currentCountry(),
-        answer_mode: payload.answer_mode || selectedAnswerMode,
-        llm_provider: payload.llm_provider || selectedProvider,
-        status: payload.status,
-        trace_id: payload.trace_id,
-        summary: payload.summary,
-      });
       if (feedback) {
         feedback.hidden = payload.status !== 'ok';
       }
@@ -1391,7 +1312,6 @@
   });
 
   restoreLastQueryConfig();
-  renderQuestionHistory();
   applyActiveSession(null);
   updateAnswerModeState();
   loadConfig();
