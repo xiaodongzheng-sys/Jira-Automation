@@ -94,6 +94,7 @@ class PRDBriefingRouteTests(unittest.TestCase):
             self.assertIn("PRD Briefing Tool".encode("utf-8"), response.data)
             self.assertIn(b"page-shell-briefing", response.data)
             self.assertIn(b"data-image-lightbox", response.data)
+            self.assertNotIn("3 分钟".encode("utf-8"), response.data)
             self.assertNotIn(b"Team Knowledge Base", response.data)
 
     @patch("prd_briefing.blueprint._build_service", return_value=FakeBriefingService())

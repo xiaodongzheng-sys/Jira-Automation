@@ -3,7 +3,6 @@
   const chatForm = document.querySelector('[data-chat-form]');
   const statusNode = document.querySelector('[data-briefing-status]');
   const walkthroughStatusNode = document.querySelector('[data-walkthrough-status]');
-  const sessionOverviewNode = document.querySelector('[data-session-overview]');
   const sectionListNode = document.querySelector('[data-section-list]');
   const sectionDetailNode = document.querySelector('[data-section-detail]');
   const chatLogNode = document.querySelector('[data-chat-log]');
@@ -59,28 +58,6 @@
     walkthroughStatusNode.hidden = true;
     walkthroughStatusNode.innerHTML = '<p>这里会显示当前讲解生成状态。</p>';
     delete walkthroughStatusNode.dataset.tone;
-  };
-
-  const renderSessionOverview = (overview) => {
-    if (!sessionOverviewNode) return;
-    if (!overview || !overview.overview) {
-      sessionOverviewNode.innerHTML = '<div class="empty-state"><p>生成完成后，这里会出现“3 分钟看懂这个需求”。</p></div>';
-      return;
-    }
-    const backgroundGoal = escapeHtml(overview.background_goal || '');
-    const implementationOverview = escapeHtml(overview.implementation_overview || overview.overview || '');
-    sessionOverviewNode.innerHTML = `
-      <section class="briefing-overview-hero briefing-overview-hero-split">
-        <article class="briefing-overview-card briefing-overview-summary">
-          <p class="briefing-overview-kicker">业务背景和主要目的</p>
-          <p>${backgroundGoal || implementationOverview}</p>
-        </article>
-        <article class="briefing-overview-card briefing-overview-summary">
-          <p class="briefing-overview-kicker">需求概览和开发注意点</p>
-          <p>${implementationOverview}</p>
-        </article>
-      </section>
-    `;
   };
 
   const wait = (durationMs) => new Promise((resolve) => {
@@ -204,61 +181,8 @@
       if (!table || table.dataset.briefingEnhanced === 'true') return;
       const rows = Array.from(table.querySelectorAll('tr'));
       if (rows.length < 2) return;
-      const maxColumns = rows.reduce((largest, row) => Math.max(largest, row.querySelectorAll('th, td').length), 0);
       const bodyRows = rows.filter((row) => row.querySelectorAll('td').length >= 2);
       if (!bodyRows.length) return;
-      const headerCells = Array.from(rows.find((row) => row.querySelectorAll('th').length >= Math.min(maxColumns, 3))?.querySelectorAll('th') || []);
-      const hasDenseMediaRows = maxColumns >= 5 && bodyRows.some((row) => row.querySelector('img'));
-      if (hasDenseMediaRows) {
-        table.dataset.briefingEnhanced = 'true';
-        wrapper.classList.add('briefing-dense-media-table');
-        const cards = document.createElement('div');
-        cards.className = 'briefing-table-row-cards';
-
-        bodyRows.forEach((row, index) => {
-          const cells = Array.from(row.querySelectorAll('td'));
-          const mediaCells = cells.filter((cell) => cell.querySelector('img'));
-          if (!mediaCells.length) return;
-          const detailCells = cells.filter((cell) => !cell.querySelector('img'));
-          const card = document.createElement('article');
-          card.className = 'briefing-table-row-card';
-
-          const detailPane = document.createElement('div');
-          detailPane.className = 'briefing-table-row-details';
-          const title = document.createElement('div');
-          title.className = 'briefing-presentation-step';
-          title.textContent = `Row ${index + 1}`;
-          detailPane.appendChild(title);
-
-          detailCells.forEach((cell) => {
-            const cellIndex = cells.indexOf(cell);
-            const value = (cell.innerHTML || '').trim();
-            const text = (cell.textContent || '').trim();
-            if (!value && !text) return;
-            const item = document.createElement('div');
-            item.className = 'briefing-table-row-field';
-            const label = document.createElement('strong');
-            label.textContent = (headerCells[cellIndex]?.textContent || `Column ${cellIndex + 1}`).trim();
-            const content = document.createElement('div');
-            content.innerHTML = value || text;
-            item.appendChild(label);
-            item.appendChild(content);
-            detailPane.appendChild(item);
-          });
-
-          const mediaPane = document.createElement('div');
-          mediaPane.className = 'briefing-table-row-media';
-          mediaPane.innerHTML = mediaCells.map((cell) => cell.innerHTML).join('');
-          card.appendChild(detailPane);
-          card.appendChild(mediaPane);
-          cards.appendChild(card);
-        });
-
-        if (!cards.children.length) return;
-        wrapper.insertAdjacentElement('afterend', cards);
-        wrapper.classList.add('is-replaced');
-        return;
-      }
       const screenshotLikeRows = bodyRows.filter((row) => {
         const cells = row.querySelectorAll('td');
         if (cells.length < 2) return false;
@@ -331,7 +255,7 @@
     if (!sectionDetailNode) return;
     sectionDetailNode.querySelectorAll('img').forEach((image) => {
       const applyClass = () => {
-        const inMediaArea = Boolean(image.closest('.briefing-media-cell, .briefing-presentation-visual, .briefing-table-row-media'));
+        const inMediaArea = Boolean(image.closest('.briefing-media-cell, .briefing-presentation-visual'));
         const contextText = image.closest('.briefing-presentation-copy, td, th, p, li')?.textContent?.toLowerCase() || '';
         const src = `${image.currentSrc || image.src || ''}`.toLowerCase();
         const isSmallAsset = image.naturalWidth > 0 && image.naturalHeight > 0 && image.naturalWidth <= 180 && image.naturalHeight <= 180;
@@ -604,7 +528,6 @@
     state.currentSectionIndex = 0;
     state.currentBlockIndex = 0;
     setStatus(`已生成《${payload.session.title}》的中文开发讲解。`, 'success');
-    renderSessionOverview(payload.session_overview || null);
     renderSections();
     renderMessages(payload.messages || []);
   };
