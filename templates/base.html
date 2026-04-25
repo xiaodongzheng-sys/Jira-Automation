@@ -8,7 +8,7 @@
     {% block extra_head %}{% endblock %}
   </head>
   <body>
-    <main class="page-shell">
+    <main class="page-shell{% block page_shell_class %}{% endblock %}">
       {% if user_identity is defined %}
         <section class="session-bar" aria-label="Current session">
           <div class="session-copy">

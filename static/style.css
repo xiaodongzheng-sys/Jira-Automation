@@ -32,6 +32,11 @@ body {
   padding: 40px 20px 60px;
 }
 
+.page-shell-briefing {
+  max-width: min(100vw - 32px, 1680px);
+  padding-inline: 16px;
+}
+
 .session-bar {
   display: flex;
   align-items: center;
@@ -2593,7 +2598,9 @@ select {
   padding: 0 30px 28px;
   background: rgba(255, 255, 255, 0.46);
   min-height: 800px;
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
+  min-width: 0;
 }
 
 .briefing-section-card p {
@@ -2652,6 +2659,7 @@ select {
   background: rgba(255, 255, 255, 0.5);
   transition: border-color 180ms ease, background 180ms ease, box-shadow 180ms ease;
   scroll-margin-top: 96px;
+  min-width: 0;
 }
 
 .briefing-source-section.is-narrating-source {
@@ -2699,6 +2707,7 @@ select {
   margin-bottom: 18px;
   overflow-wrap: anywhere;
   min-width: 0;
+  max-width: 100%;
 }
 
 .briefing-original-content p {
@@ -2719,14 +2728,14 @@ select {
 }
 
 .briefing-original-content table {
-  width: max-content;
-  min-width: 0;
-  max-width: none;
+  width: 100% !important;
+  min-width: 0 !important;
+  max-width: 100% !important;
   margin: 8px 0;
   border-collapse: collapse;
   border: 1px solid var(--line);
   background: rgba(255, 255, 255, 0.78);
-  table-layout: auto;
+  table-layout: fixed;
 }
 
 .briefing-original-content col,
@@ -2736,14 +2745,16 @@ select {
 
 .briefing-original-content th,
 .briefing-original-content td {
-  min-width: 96px;
+  width: auto !important;
+  min-width: 0 !important;
+  max-width: 100%;
   padding: 8px 10px;
   border: 1px solid var(--line);
   vertical-align: top;
   text-transform: none;
   letter-spacing: normal;
-  word-break: normal;
-  overflow-wrap: normal;
+  word-break: break-word;
+  overflow-wrap: anywhere;
   white-space: normal;
   line-height: 1.5;
 }
@@ -2786,10 +2797,11 @@ select {
 
 .briefing-original-content .table-wrap,
 .briefing-original-content .confluence-embedded-file-wrapper {
-  overflow-x: auto;
+  overflow-x: hidden;
   width: 100%;
   max-width: 100%;
   position: relative;
+  min-width: 0;
 }
 
 .briefing-original-content .table-wrap.is-replaced {
@@ -2814,20 +2826,21 @@ select {
 
 .briefing-original-content table.briefing-dense-table,
 .briefing-original-content table.briefing-media-table {
-  width: max-content;
+  width: 100% !important;
 }
 
 .briefing-original-content table.briefing-dense-table {
-  min-width: max-content;
+  min-width: 0 !important;
+  font-size: 0.9rem;
 }
 
 .briefing-original-content table.briefing-media-table {
-  min-width: 100%;
+  min-width: 0 !important;
 }
 
 .briefing-original-content table.briefing-dense-table th,
 .briefing-original-content table.briefing-dense-table td {
-  min-width: 128px;
+  min-width: 0 !important;
   padding: 7px 9px;
 }
 
@@ -2837,21 +2850,21 @@ select {
 
 .briefing-original-content table.briefing-dense-table th:nth-child(1),
 .briefing-original-content table.briefing-dense-table td:nth-child(1) {
-  min-width: 128px;
+  min-width: 0 !important;
 }
 
 .briefing-original-content table.briefing-dense-table th:nth-child(2),
 .briefing-original-content table.briefing-dense-table td:nth-child(2) {
-  min-width: 92px;
+  min-width: 0 !important;
 }
 
 .briefing-original-content table.briefing-dense-table th:nth-child(3),
 .briefing-original-content table.briefing-dense-table td:nth-child(3) {
-  min-width: 160px;
+  min-width: 0 !important;
 }
 
 .briefing-original-content table.briefing-media-table .briefing-media-cell {
-  min-width: 460px;
+  min-width: 0 !important;
 }
 
 .briefing-original-content table.briefing-media-table .briefing-media-cell img {

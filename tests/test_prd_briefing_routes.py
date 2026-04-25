@@ -92,6 +92,7 @@ class PRDBriefingRouteTests(unittest.TestCase):
             response = client.get("/prd-briefing/")
             self.assertEqual(response.status_code, 200)
             self.assertIn("PRD Briefing Tool".encode("utf-8"), response.data)
+            self.assertIn(b"page-shell-briefing", response.data)
             self.assertIn(b"data-image-lightbox", response.data)
             self.assertNotIn(b"Team Knowledge Base", response.data)
 

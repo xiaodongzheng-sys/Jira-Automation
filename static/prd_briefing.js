@@ -176,7 +176,8 @@
 
   const addHorizontalHints = () => {
     if (!sectionDetailNode) return;
-    const wrappers = sectionDetailNode.querySelectorAll('.table-wrap, .confluence-embedded-file-wrapper');
+    sectionDetailNode.querySelectorAll('.briefing-scroll-hint').forEach((hint) => hint.remove());
+    const wrappers = sectionDetailNode.querySelectorAll('.confluence-embedded-file-wrapper');
     wrappers.forEach((wrapper) => {
       wrapper.classList.add('briefing-horizontal-scroll');
       const hasOverflow = wrapper.scrollWidth > wrapper.clientWidth + 8;
