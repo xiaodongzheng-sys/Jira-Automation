@@ -10136,11 +10136,98 @@ class SourceCodeQAService:
             "module_dependency": any(term in lowered for term in MODULE_DEPENDENCY_HINTS),
             "error": any(term in lowered for term in ERROR_HINTS),
             "rule_logic": any(term in lowered for term in RULE_HINTS),
-            "static_qa": any(term in lowered for term in STATIC_QA_HINTS),
+            "static_qa": self._question_static_qa_intent(question),
             "impact_analysis": any(term in lowered for term in IMPACT_ANALYSIS_HINTS),
             "test_coverage": any(term in lowered for term in TEST_COVERAGE_HINTS),
-            "operational_boundary": any(term in lowered for term in OPERATIONAL_BOUNDARY_HINTS),
+            "operational_boundary": self._question_operational_boundary_intent(question),
         }
+
+    @staticmethod
+    def _question_static_qa_intent(question: str) -> bool:
+        lowered = f" {str(question or '').lower()} "
+        explicit_hints = (
+            "static qa",
+            "static analysis",
+            "code quality",
+            "code smell",
+            "security",
+            "vulnerability",
+            "vulnerabilities",
+            "unsafe",
+            "hardcoded",
+            "secret",
+            "password",
+            "token",
+            "sql injection",
+            "injection",
+            "empty catch",
+            "swallow",
+            "broad exception",
+            "todo",
+            "fixme",
+            "静态",
+            "代码质量",
+            "安全",
+            "漏洞",
+            "硬编码",
+            "密码",
+            "令牌",
+            "注入",
+        )
+        if any(term in lowered for term in explicit_hints):
+            return True
+        # Domain labels such as "Credit Risk" and "Ops Risk" are not static-QA asks.
+        domain_neutral = lowered.replace(" credit risk ", " ").replace(" ops risk ", " ")
+        if re.search(r"\b(?:risk|risks|bug|bugs|smell|smells)\b", domain_neutral):
+            return any(term in domain_neutral for term in (" code ", " static ", " quality ", " finding", "issue", "安全", "代码"))
+        return False
+
+    @staticmethod
+    def _question_operational_boundary_intent(question: str) -> bool:
+        lowered = f" {str(question or '').lower()} "
+        explicit_hints = (
+            "transaction",
+            "transactional",
+            "rollback",
+            "commit",
+            "cache",
+            "cached",
+            "cacheable",
+            "cacheevict",
+            "async",
+            "asynchronous",
+            "retry",
+            "retryable",
+            "circuit breaker",
+            "circuitbreaker",
+            "rate limit",
+            "ratelimiter",
+            "bulkhead",
+            "timeout",
+            "timelimiter",
+            "schedulerlock",
+            "preauthorize",
+            "postauthorize",
+            "authorization",
+            "permission boundary",
+            "事务",
+            "回滚",
+            "提交",
+            "缓存",
+            "异步",
+            "重试",
+            "熔断",
+            "限流",
+            "超时",
+            "鉴权",
+            "授权",
+            "权限边界",
+        )
+        if any(term in lowered for term in explicit_hints):
+            return True
+        # Avoid treating table/config names like bcf_global_lock or globallock as a
+        # boundary ask. Standalone "lock" questions still need boundary evidence.
+        return bool(re.search(r"\b(?:lock|locks|locking)\b", lowered) or any(term in lowered for term in (" 锁 ", " 加锁 ", " 解锁 ")))
 
     def _build_query_decomposition(self, question: str, domain_profile: dict[str, Any] | None = None) -> dict[str, Any]:
         intent = self._question_intent(question)
@@ -11304,7 +11391,33 @@ class SourceCodeQAService:
             add(match)
             if len(selected) >= limit:
                 break
-        selected.sort(key=lambda item: item["score"], reverse=True)
+
+        def result_sort_key(item: dict[str, Any]) -> tuple[int, int, int]:
+            retrieval = str(item.get("retrieval") or "")
+            trace_stage = str(item.get("trace_stage") or "")
+            path = str(item.get("path") or "").lower()
+            snippet = str(item.get("snippet") or "").lower()
+            priority = 0
+            if trace_stage == "exact_lookup" or retrieval == "exact_table_path_lookup":
+                priority = max(priority, 70)
+            if intent.get("static_qa") and (retrieval == "static_qa" or item.get("static_qa")):
+                priority = max(priority, 60)
+            if intent.get("test_coverage") and (retrieval == "test_coverage" or item.get("test_coverage") or self._is_test_file_path(path)):
+                priority = max(priority, 60)
+            if intent.get("operational_boundary") and (retrieval == "operational_boundary" or item.get("operational_boundary")):
+                priority = max(priority, 60)
+            if intent.get("impact_analysis") and retrieval in {"planner_caller", "planner_callee", "flow_graph", "entity_graph", "code_graph"}:
+                priority = max(priority, 45)
+            if intent.get("api") and (any(term in path for term in ("controller", "client", "api", "routes")) or any(term in snippet for term in ("requestmapping", "postmapping", "getmapping", "route("))):
+                priority = max(priority, 35)
+            if intent.get("data_source") and (any(term in path for term in ("repository", "mapper", "dao")) or re.search(r"\bselect\b.+\bfrom\b", snippet)):
+                priority = max(priority, 35)
+            return (priority, int(item.get("rerank_score", item.get("score", 0)) or 0), int(item.get("score") or 0))
+
+        if any(intent.get(key) for key in ("static_qa", "test_coverage", "operational_boundary")) and not intent.get("impact_analysis"):
+            selected.sort(key=result_sort_key, reverse=True)
+        else:
+            selected.sort(key=lambda item: item["score"], reverse=True)
         return selected
 
     def _build_llm_answer(

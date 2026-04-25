@@ -839,6 +839,20 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertTrue(intent["operational_boundary"])
         self.assertTrue(any("影响" in token for token in self.service._question_tokens("IssueService 改了会影响哪些下游")))
 
+    def test_domain_labels_do_not_trigger_unrelated_quality_intents(self):
+        crms_intent = self.service._question_intent("which SG Credit Risk API runs credit application precheck")
+        self.assertTrue(crms_intent["api"])
+        self.assertFalse(crms_intent["static_qa"])
+
+        grc_config_intent = self.service._question_intent("GRC globallock config is where and which table backs it")
+        self.assertTrue(grc_config_intent["config"])
+        self.assertTrue(grc_config_intent["data_source"])
+        self.assertFalse(grc_config_intent["operational_boundary"])
+
+        grc_table_intent = self.service._question_intent("where does GRC read and write bcf_global_lock table")
+        self.assertTrue(grc_table_intent["data_source"])
+        self.assertFalse(grc_table_intent["operational_boundary"])
+
     def test_chinese_data_source_query_uses_source_trace(self):
         _build_fixture_repositories(self.service)
         self._build_all_indexes()
@@ -4588,6 +4602,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         payload = self.service.query(pm_team="AF", country="All", question="what static QA security risks exist")
 
         self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["matches"][0]["path"], "service/RiskyIssueService.java")
         self.assertTrue(any(match.get("retrieval") == "static_qa" for match in payload["matches"]))
         evidence_text = json.dumps(payload["evidence_pack"], ensure_ascii=False)
         self.assertIn("hardcoded_secret", evidence_text)
@@ -4626,6 +4641,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             question="is IssueService createIssue covered by tests",
         )
 
+        self.assertEqual(payload["matches"][0]["path"], "src/test/java/IssueServiceTest.java")
         paths = {match["path"] for match in payload["matches"]}
         self.assertIn("src/test/java/IssueServiceTest.java", paths)
         self.assertTrue(any(match.get("retrieval") == "test_coverage" for match in payload["matches"]))
@@ -4646,6 +4662,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             question="is IssueService createIssue transactional or cached",
         )
 
+        self.assertEqual(payload["matches"][0]["path"], "service/IssueService.java")
         paths = {match["path"] for match in payload["matches"]}
         self.assertIn("service/IssueService.java", paths)
         self.assertTrue(any(match.get("retrieval") == "operational_boundary" for match in payload["matches"]))
