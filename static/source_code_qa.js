@@ -289,6 +289,8 @@
       if (answerModeValue !== 'retrieval_only' && !llmReady) {
         const provider = llmPolicy.provider?.provider || 'LLM';
         queryStatus.textContent = `${provider} is unavailable; code search will still run.`;
+      } else if (llmSelected) {
+        queryStatus.textContent = 'Ready to ask LLM.';
       } else if (!llmSelected) {
         queryStatus.textContent = 'Ready.';
       }
