@@ -842,6 +842,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             flow_edge_count = connection.execute("select count(*) from flow_edges").fetchone()[0]
             semantic_chunk_count = connection.execute("select count(*) from semantic_chunks").fetchone()[0]
             fts_count = connection.execute("select count(*) from lines_fts").fetchone()[0]
+            semantic_fts_count = connection.execute("select count(*) from semantic_chunks_fts").fetchone()[0]
         self.assertGreaterEqual(definition_count, 3)
         self.assertGreaterEqual(reference_count, 3)
         self.assertGreaterEqual(entity_count, 3)
@@ -850,6 +851,8 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertGreaterEqual(flow_edge_count, 1)
         self.assertGreaterEqual(semantic_chunk_count, 2)
         self.assertGreaterEqual(fts_count, 1)
+        self.assertGreaterEqual(semantic_fts_count, 1)
+        self.assertEqual(metadata["semantic_fts_enabled"], "1")
         self.assertEqual(metadata["parser_backend"], "tree_sitter+regex")
         self.assertIn("java", metadata["parser_languages"])
         self.assertGreaterEqual(int(metadata["tree_sitter_files"]), 2)

@@ -2454,6 +2454,7 @@ class SourceCodeQAService:
                     """
                 )
                 fts_enabled = self._try_create_fts(connection)
+                semantic_fts_enabled = self._try_create_semantic_fts(connection)
                 for file_path in self._iter_text_files(repo_path):
                     relative_path = str(file_path.relative_to(repo_path))
                     try:
@@ -2537,6 +2538,11 @@ class SourceCodeQAService:
                         """,
                         semantic_chunks,
                     )
+                    if semantic_fts_enabled and semantic_chunks:
+                        connection.executemany(
+                            "insert into semantic_chunks_fts(chunk_id, file_path, content) values (?, ?, ?)",
+                            [(chunk[0], chunk[1], f"{chunk[4]}\n{chunk[6]}\n{chunk[7]}") for chunk in semantic_chunks],
+                        )
                     connection.executemany(
                         """
                         insert into entity_edges(from_entity_id, from_file, from_line, edge_kind, to_name, lower_to_name, to_entity_id, to_file, to_line, evidence)
@@ -2580,6 +2586,7 @@ class SourceCodeQAService:
                     "semantic_index_model": self.semantic_index_model,
                     "git_revision": git_revision,
                     "fts_enabled": "1" if fts_enabled else "0",
+                    "semantic_fts_enabled": "1" if semantic_fts_enabled else "0",
                     "updated_at": self._now_iso(),
                 }
                 connection.executemany("insert into metadata(key, value) values (?, ?)", metadata.items())
@@ -2603,6 +2610,7 @@ class SourceCodeQAService:
                 "semantic_index_model": self.semantic_index_model,
                 "git_revision": git_revision,
                 "fts_enabled": fts_enabled,
+                "semantic_fts_enabled": semantic_fts_enabled,
                 "updated_at": metadata["updated_at"],
             }
         finally:
@@ -2684,6 +2692,16 @@ class SourceCodeQAService:
         try:
             connection.execute(
                 "create virtual table lines_fts using fts5(file_path unindexed, line_no unindexed, content)"
+            )
+            return True
+        except sqlite3.Error:
+            return False
+
+    @staticmethod
+    def _try_create_semantic_fts(connection: sqlite3.Connection) -> bool:
+        try:
+            connection.execute(
+                "create virtual table semantic_chunks_fts using fts5(chunk_id unindexed, file_path unindexed, content)"
             )
             return True
         except sqlite3.Error:
@@ -5056,32 +5074,6 @@ class SourceCodeQAService:
                         (like, like, 40),
                     ).fetchall()
                 )
-                add_line_rows(
-                    connection.execute(
-                        "select * from lines where lower_text like ? or symbols like ? order by file_path, line_no limit ?",
-                        (like, like, 80),
-                    ).fetchall()
-                )
-            except sqlite3.Error:
-                continue
-        line_file_paths = list(dict.fromkeys(file_path for file_path, _line_no in line_rows_by_key))
-        for file_path in line_file_paths:
-            if file_path in file_rows_by_path:
-                continue
-            try:
-                file_row = connection.execute("select * from files where path = ?", (file_path,)).fetchone()
-            except sqlite3.Error:
-                file_row = None
-            if file_row is not None:
-                add_file_rows([file_row])
-        intent_file_patterns: list[str] = []
-        if intent.get("config"):
-            intent_file_patterns.extend(["%.properties", "%.yaml", "%.yml", "%.conf", "%.toml"])
-        if intent.get("module_dependency"):
-            intent_file_patterns.extend(["%pom.xml", "%build.gradle", "%build.gradle.kts", "%settings.gradle", "%settings.gradle.kts", "%package.json"])
-        for pattern in intent_file_patterns:
-            try:
-                add_file_rows(connection.execute("select * from files where lower_path like ? order by path limit 40", (pattern,)).fetchall())
             except sqlite3.Error:
                 continue
         for row in self._fts_search_rows(
@@ -5100,6 +5092,38 @@ class SourceCodeQAService:
                 line_row = connection.execute("select * from lines where file_path = ? and line_no = ?", (file_path, line_no)).fetchone()
                 if line_row is not None:
                     add_line_rows([line_row])
+            except sqlite3.Error:
+                continue
+        if not line_rows_by_key:
+            for term in query_terms[:8]:
+                like = f"%{term}%"
+                try:
+                    add_line_rows(
+                        connection.execute(
+                            "select * from lines where lower_text like ? or symbols like ? order by file_path, line_no limit ?",
+                            (like, like, 80),
+                        ).fetchall()
+                    )
+                except sqlite3.Error:
+                    continue
+        line_file_paths = list(dict.fromkeys(file_path for file_path, _line_no in line_rows_by_key))
+        for file_path in line_file_paths:
+            if file_path in file_rows_by_path:
+                continue
+            try:
+                file_row = connection.execute("select * from files where path = ?", (file_path,)).fetchone()
+            except sqlite3.Error:
+                file_row = None
+            if file_row is not None:
+                add_file_rows([file_row])
+        intent_file_patterns: list[str] = []
+        if intent.get("config"):
+            intent_file_patterns.extend(["%.properties", "%.yaml", "%.yml", "%.conf", "%.toml"])
+        if intent.get("module_dependency"):
+            intent_file_patterns.extend(["%pom.xml", "%build.gradle", "%build.gradle.kts", "%settings.gradle", "%settings.gradle.kts", "%package.json"])
+        for pattern in intent_file_patterns:
+            try:
+                add_file_rows(connection.execute("select * from files where lower_path like ? order by path limit 40", (pattern,)).fetchall())
             except sqlite3.Error:
                 continue
         for term in query_terms:
@@ -5141,19 +5165,36 @@ class SourceCodeQAService:
             except sqlite3.Error:
                 pass
         if self.semantic_index_enabled:
-            for term in query_terms[:12]:
+            for row in self._semantic_fts_search_rows(
+                connection,
+                tokens,
+                focus_terms,
+                index_path=index_path,
+                request_cache=request_cache,
+            ):
+                chunk_id = str(row.get("chunk_id") if isinstance(row, dict) else row["chunk_id"])
                 try:
-                    rows = connection.execute(
-                        "select * from semantic_chunks where lower_text like ? or tokens like ? or symbols like ? order by file_path, start_line limit ?",
-                        (f"%{term}%", f"%{term}%", f"%{term}%", 80),
-                    ).fetchall()
+                    chunk_row = connection.execute("select * from semantic_chunks where chunk_id = ?", (chunk_id,)).fetchone()
                 except sqlite3.Error:
-                    rows = []
-                for row in rows:
-                    if len(semantic_rows_by_id) >= MAX_TARGETED_SEMANTIC_CHUNKS:
-                        break
-                    chunk_id = str(row["chunk_id"] if "chunk_id" in row.keys() else f"{row['file_path']}:{row['start_line']}")
-                    semantic_rows_by_id.setdefault(chunk_id, row)
+                    chunk_row = None
+                if chunk_row is not None:
+                    semantic_rows_by_id.setdefault(chunk_id, chunk_row)
+                if len(semantic_rows_by_id) >= MAX_TARGETED_SEMANTIC_CHUNKS:
+                    break
+            if not semantic_rows_by_id:
+                for term in query_terms[:8]:
+                    try:
+                        rows = connection.execute(
+                            "select * from semantic_chunks where lower_text like ? or tokens like ? or symbols like ? order by file_path, start_line limit ?",
+                            (f"%{term}%", f"%{term}%", f"%{term}%", 80),
+                        ).fetchall()
+                    except sqlite3.Error:
+                        rows = []
+                    for row in rows:
+                        if len(semantic_rows_by_id) >= MAX_TARGETED_SEMANTIC_CHUNKS:
+                            break
+                        chunk_id = str(row["chunk_id"] if "chunk_id" in row.keys() else f"{row['file_path']}:{row['start_line']}")
+                        semantic_rows_by_id.setdefault(chunk_id, row)
             if file_rows_by_path and len(semantic_rows_by_id) < MAX_TARGETED_SEMANTIC_CHUNKS:
                 paths = list(file_rows_by_path)[:80]
                 try:
@@ -5290,6 +5331,55 @@ class SourceCodeQAService:
             request_cache.setdefault("fts", {})[cache_key] = payload
         return payload
 
+    def _semantic_fts_search_rows(
+        self,
+        connection: sqlite3.Connection,
+        tokens: list[str],
+        focus_terms: list[str],
+        *,
+        index_path: Path | None = None,
+        request_cache: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        terms = []
+        for term in [*tokens, *focus_terms]:
+            normalized = str(term or "").strip().lower()
+            if len(normalized) < 3 or normalized in STOPWORDS:
+                continue
+            if FTS_TOKEN_PATTERN.fullmatch(normalized):
+                terms.append(normalized.replace('"', ""))
+        terms = list(dict.fromkeys(terms))[:12]
+        if not terms:
+            return []
+        query = " OR ".join(f'"{term}"' for term in terms)
+        cache_key = ""
+        if request_cache is not None and index_path is not None:
+            cache_key = f"{self._index_fingerprint(index_path)}:{query}"
+            semantic_fts_cache = request_cache.setdefault("semantic_fts", {})
+            cached = semantic_fts_cache.get(cache_key)
+            if cached is not None:
+                self._increment_retrieval_stat(request_cache, "semantic_fts_hits")
+                return cached
+            self._increment_retrieval_stat(request_cache, "semantic_fts_misses")
+        try:
+            rows = list(
+                connection.execute(
+                    """
+                    select chunk_id, file_path, bm25(semantic_chunks_fts) as rank
+                    from semantic_chunks_fts
+                    where semantic_chunks_fts match ?
+                    order by rank
+                    limit 120
+                    """,
+                    (query,),
+                )
+            )
+        except sqlite3.Error:
+            return []
+        payload = [dict(row) for row in rows]
+        if request_cache is not None and cache_key:
+            request_cache.setdefault("semantic_fts", {})[cache_key] = payload
+        return payload
+
     def _cached_structure_like_rows(
         self,
         connection: sqlite3.Connection,
@@ -5320,9 +5410,31 @@ class SourceCodeQAService:
             self._increment_retrieval_stat(request_cache, "structure_like_misses")
         try:
             rows = connection.execute(
-                f"select * from {table} where {lower_column} like ? limit ?",
-                (f"%{normalized}%", int(limit or 40)),
+                f"select * from {table} where {lower_column} = ? limit ?",
+                (normalized, int(limit or 40)),
             ).fetchall()
+            if len(rows) < int(limit or 40):
+                seen = {(str(row["file_path"]), int(row["line_no"]), str(row[lower_column])) for row in rows}
+                prefix_rows = connection.execute(
+                    f"select * from {table} where {lower_column} like ? limit ?",
+                    (f"{normalized}%", max(0, int(limit or 40) - len(rows))),
+                ).fetchall()
+                for row in prefix_rows:
+                    key = (str(row["file_path"]), int(row["line_no"]), str(row[lower_column]))
+                    if key not in seen:
+                        rows.append(row)
+                        seen.add(key)
+            if len(rows) < max(8, int(limit or 40) // 3):
+                seen = {(str(row["file_path"]), int(row["line_no"]), str(row[lower_column])) for row in rows}
+                contains_rows = connection.execute(
+                    f"select * from {table} where {lower_column} like ? limit ?",
+                    (f"%{normalized}%", max(0, int(limit or 40) - len(rows))),
+                ).fetchall()
+                for row in contains_rows:
+                    key = (str(row["file_path"]), int(row["line_no"]), str(row[lower_column]))
+                    if key not in seen:
+                        rows.append(row)
+                        seen.add(key)
         except sqlite3.Error:
             rows = []
         payload = [dict(row) for row in rows]
@@ -5498,6 +5610,7 @@ class SourceCodeQAService:
             "targeted_index_rows": {},
             "structure_like": {},
             "fts": {},
+            "semantic_fts": {},
             "trace_paths": {},
             "evidence": {},
             "quality": {},
@@ -5518,6 +5631,8 @@ class SourceCodeQAService:
                 "structure_like_misses": 0,
                 "fts_hits": 0,
                 "fts_misses": 0,
+                "semantic_fts_hits": 0,
+                "semantic_fts_misses": 0,
                 "trace_paths_hits": 0,
                 "trace_paths_misses": 0,
                 "evidence_hits": 0,
@@ -5552,6 +5667,7 @@ class SourceCodeQAService:
             "file_line_entries": len(request_cache.get("file_lines") or {}),
             "structure_like_entries": len(request_cache.get("structure_like") or {}),
             "fts_entries": len(request_cache.get("fts") or {}),
+            "semantic_fts_entries": len(request_cache.get("semantic_fts") or {}),
             "trace_path_entries": len(request_cache.get("trace_paths") or {}),
             "evidence_entries": len(request_cache.get("evidence") or {}),
             "quality_entries": len(request_cache.get("quality") or {}),
