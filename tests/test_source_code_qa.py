@@ -1030,6 +1030,54 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertFalse(followup["used"])
         self.assertEqual(augmented, "Is fdMaturityDate used in any function?")
 
+    def test_followup_context_does_not_cross_explicit_repo_scope(self):
+        repositories = [
+            RepositoryEntry(display_name="Anti Fraud API", url="https://git.example.com/team/anti-fraud-api.git"),
+            RepositoryEntry(display_name="GRC Portal", url="https://git.example.com/team/grc-portal.git"),
+        ]
+
+        augmented, followup = self.service._apply_conversation_context(
+            "继续看 GRC Portal 这个方法",
+            {
+                "key": "AF:All",
+                "repo_scope": ["Anti Fraud API"],
+                "question": "where is createIssue",
+                "matches": [{"repo": "Anti Fraud API", "path": "service/IssueService.java", "snippet": "createIssue()"}],
+                "trace_paths": [],
+                "structured_answer": {},
+            },
+            current_key="AF:All",
+            current_repositories=repositories,
+        )
+
+        self.assertFalse(followup["used"])
+        self.assertEqual(followup["reason"], "repo_scope_mismatch")
+        self.assertEqual(augmented, "继续看 GRC Portal 这个方法")
+
+    def test_followup_context_keeps_same_explicit_repo_scope(self):
+        repositories = [
+            RepositoryEntry(display_name="Anti Fraud API", url="https://git.example.com/team/anti-fraud-api.git"),
+            RepositoryEntry(display_name="GRC Portal", url="https://git.example.com/team/grc-portal.git"),
+        ]
+
+        augmented, followup = self.service._apply_conversation_context(
+            "继续看 Anti Fraud 这个方法下游",
+            {
+                "key": "AF:All",
+                "repo_scope": ["Anti Fraud API"],
+                "question": "where is createIssue",
+                "matches": [{"repo": "Anti Fraud API", "path": "service/IssueService.java", "snippet": "createIssue()"}],
+                "trace_paths": [],
+                "structured_answer": {"claims": [{"text": "IssueService handles createIssue."}]},
+                "answer_contract": {"confirmed_sources": ["Anti Fraud API:service/IssueService.java:1-3 [S1]"]},
+            },
+            current_key="AF:All",
+            current_repositories=repositories,
+        )
+
+        self.assertTrue(followup["used"])
+        self.assertIn("issueservice", augmented)
+
     def test_question_specific_terms_cover_cbs_credit_review_questions(self):
         terms = self.service._question_specific_retrieval_terms(
             "When will system query CBS report when performing monthly credit review?"

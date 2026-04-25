@@ -500,6 +500,7 @@
     pm_team: pmTeam.value,
     country: currentCountry(),
     question: questionOverride || questionInput.value,
+    repo_scope: Array.from(new Set((payload?.matches || []).map((match) => match.repo).filter(Boolean))).slice(0, 8),
     matches: (payload?.matches || []).slice(0, 8).map((match) => ({
       path: match.path,
       snippet: match.snippet,

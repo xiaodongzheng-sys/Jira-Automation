@@ -1874,6 +1874,7 @@ class SourceCodeQAService:
         conversation_context: dict[str, Any] | None,
         *,
         current_key: str | None = None,
+        current_repositories: list[RepositoryEntry] | None = None,
     ) -> tuple[str, dict[str, Any]]:
         if not isinstance(conversation_context, dict):
             return question, {"used": False}
@@ -1890,6 +1891,9 @@ class SourceCodeQAService:
                     inferred_key = ""
                 if inferred_key and inferred_key != current_key:
                     return question, {"used": False, "reason": "scope_mismatch", "previous_key": inferred_key, "current_key": current_key}
+        repo_scope = self._conversation_repo_scope(question, conversation_context, current_repositories or [])
+        if repo_scope.get("mismatch"):
+            return question, {"used": False, "reason": "repo_scope_mismatch", **repo_scope}
         lowered = question.lower()
         tokens = set(self._question_tokens(question))
         english_followup_markers = {"this", "that", "it", "them", "above", "previous", "same", "continue"}
@@ -1935,6 +1939,92 @@ class SourceCodeQAService:
             return question, {"used": False}
         augmented = f"{question}\n\nPrevious Source Code Q&A context terms: {' '.join(context_terms)}"
         return augmented, {"used": True, "terms": context_terms, "previous_question": str(conversation_context.get("question") or "")[:180]}
+
+    def _conversation_repo_scope(
+        self,
+        question: str,
+        conversation_context: dict[str, Any],
+        current_repositories: list[RepositoryEntry],
+    ) -> dict[str, Any]:
+        if not current_repositories:
+            return {"mismatch": False}
+        mentioned = self._mentioned_repository_aliases(question, current_repositories)
+        if not mentioned:
+            return {"mismatch": False}
+        previous_aliases = self._conversation_context_repository_aliases(conversation_context)
+        if not previous_aliases:
+            return {
+                "mismatch": True,
+                "mentioned_repositories": sorted(mentioned),
+                "previous_repositories": [],
+            }
+        if mentioned & previous_aliases:
+            return {"mismatch": False, "mentioned_repositories": sorted(mentioned & previous_aliases)}
+        return {
+            "mismatch": True,
+            "mentioned_repositories": sorted(mentioned),
+            "previous_repositories": sorted(previous_aliases),
+        }
+
+    def _mentioned_repository_aliases(self, question: str, repositories: list[RepositoryEntry]) -> set[str]:
+        normalized_question = self._repo_scope_normalize(question)
+        mentioned: set[str] = set()
+        if not normalized_question:
+            return mentioned
+        for entry in repositories:
+            aliases = self._repository_scope_aliases(entry.display_name, entry.url)
+            if any(self._repo_alias_in_text(alias, normalized_question) for alias in aliases):
+                mentioned.update(aliases)
+        return mentioned
+
+    def _conversation_context_repository_aliases(self, conversation_context: dict[str, Any]) -> set[str]:
+        aliases: set[str] = set()
+        raw_names: list[str] = []
+        for item in conversation_context.get("repo_scope") or []:
+            raw_names.append(str(item or ""))
+        for match in conversation_context.get("matches") or []:
+            raw_names.append(str(match.get("repo") or ""))
+        for raw_name in raw_names:
+            aliases.update(self._repository_scope_aliases(raw_name, ""))
+        return aliases
+
+    @classmethod
+    def _repository_scope_aliases(cls, display_name: str, url: str) -> set[str]:
+        raw_values = [display_name]
+        if url:
+            path = urlsplit(str(url)).path.rstrip("/")
+            if path:
+                raw_values.append(Path(path).name.removesuffix(".git"))
+                parent = Path(path).parent.name
+                if parent:
+                    raw_values.append(f"{parent} {Path(path).name.removesuffix('.git')}")
+        aliases: set[str] = set()
+        for raw_value in raw_values:
+            normalized = cls._repo_scope_normalize(raw_value)
+            if cls._repo_scope_alias_is_useful(normalized):
+                aliases.add(normalized)
+            for token in normalized.split():
+                if cls._repo_scope_alias_is_useful(token):
+                    aliases.add(token)
+        return aliases
+
+    @staticmethod
+    def _repo_scope_normalize(value: str) -> str:
+        return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", str(value or "").casefold())).strip()
+
+    @staticmethod
+    def _repo_scope_alias_is_useful(alias: str) -> bool:
+        if not alias:
+            return False
+        if alias in {"repo", "repository", "project", "code", "source", "service", "backend", "frontend", "master", "portal"}:
+            return False
+        return len(alias) >= 4 or alias in {"af", "grc", "crms"}
+
+    @staticmethod
+    def _repo_alias_in_text(alias: str, normalized_text: str) -> bool:
+        if not alias or not normalized_text:
+            return False
+        return bool(re.search(rf"(?<![a-z0-9]){re.escape(alias)}(?![a-z0-9])", normalized_text))
 
     def _all_profile_terms(self, *keys: str) -> list[str]:
         terms: list[str] = []
@@ -2073,7 +2163,12 @@ class SourceCodeQAService:
                 started_at=started_at,
             )
             return payload
-        question, followup_context = self._apply_conversation_context(question, conversation_context, current_key=key)
+        question, followup_context = self._apply_conversation_context(
+            question,
+            conversation_context,
+            current_key=key,
+            current_repositories=entries,
+        )
         tokens = self._question_tokens(question)
         if not tokens:
             payload = self._empty_query_payload(
