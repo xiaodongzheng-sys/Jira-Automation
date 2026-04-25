@@ -2887,7 +2887,7 @@ body.briefing-no-image-mode .briefing-original-content img,
 body.briefing-no-image-mode .briefing-image-grid,
 body.briefing-no-image-mode .briefing-presentation-visual,
 body.briefing-no-image-mode .briefing-original-content .confluence-embedded-file-wrapper,
-body.briefing-no-image-mode .briefing-original-content table.briefing-media-table .briefing-media-cell {
+body.briefing-no-image-mode .briefing-original-content table.briefing-media-table .briefing-pure-media-cell {
   display: none !important;
 }
 
@@ -2896,8 +2896,8 @@ body.briefing-no-image-mode .briefing-original-content table.briefing-media-spli
   table-layout: auto;
 }
 
-body.briefing-no-image-mode .briefing-original-content table.briefing-media-split-table td:not(.briefing-media-cell),
-body.briefing-no-image-mode .briefing-original-content table.briefing-media-split-table th:not(.briefing-media-cell) {
+body.briefing-no-image-mode .briefing-original-content table.briefing-media-split-table td:not(.briefing-pure-media-cell),
+body.briefing-no-image-mode .briefing-original-content table.briefing-media-split-table th:not(.briefing-pure-media-cell) {
   width: 100% !important;
 }
 

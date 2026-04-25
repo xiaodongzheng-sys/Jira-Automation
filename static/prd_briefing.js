@@ -399,6 +399,8 @@
 
       imageCells.forEach((cell) => {
         cell.classList.add('briefing-media-cell');
+        const text = (cell.innerText || cell.textContent || '').replace(/\s+/g, ' ').trim();
+        cell.classList.toggle('briefing-pure-media-cell', text.length === 0);
       });
     });
   };
