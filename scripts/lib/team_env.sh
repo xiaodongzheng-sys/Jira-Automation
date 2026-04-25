@@ -137,6 +137,30 @@ for key in keys:
 PY
 }
 
+export_env_file() {
+  if [[ ! -f "$ENV_FILE" || ! -x "$PYTHON_BIN" ]]; then
+    return 0
+  fi
+  while IFS= read -r -d '' pair; do
+    if [[ -n "$pair" ]]; then
+      export "$pair"
+    fi
+  done < <("$PYTHON_BIN" - <<PY
+import os
+import re
+import sys
+from dotenv import dotenv_values
+
+values = dotenv_values("$ENV_FILE")
+name_pattern = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+for key, value in values.items():
+    if not key or value is None or not name_pattern.match(str(key)):
+        continue
+    os.write(1, f"{key}={value}".encode("utf-8") + b"\0")
+PY
+)
+}
+
 resolve_team_data_dir() {
   local data_dir="${1:-}"
   data_dir="${data_dir:-$ROOT_DIR/.team-portal}"

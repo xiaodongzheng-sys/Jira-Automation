@@ -4,6 +4,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT_DIR/scripts/lib/team_env.sh"
+export_env_file
 PORTAL_FOREGROUND_SCRIPT="$ROOT_DIR/scripts/run_team_portal_foreground.sh"
 NGROK_FOREGROUND_SCRIPT="$ROOT_DIR/scripts/run_ngrok_tunnel_foreground.sh"
 DATA_DIR="$(resolve_team_data_dir "${TEAM_PORTAL_DATA_DIR:-$(read_env_value TEAM_PORTAL_DATA_DIR)}")"
