@@ -204,8 +204,61 @@
       if (!table || table.dataset.briefingEnhanced === 'true') return;
       const rows = Array.from(table.querySelectorAll('tr'));
       if (rows.length < 2) return;
+      const maxColumns = rows.reduce((largest, row) => Math.max(largest, row.querySelectorAll('th, td').length), 0);
       const bodyRows = rows.filter((row) => row.querySelectorAll('td').length >= 2);
       if (!bodyRows.length) return;
+      const headerCells = Array.from(rows.find((row) => row.querySelectorAll('th').length >= Math.min(maxColumns, 3))?.querySelectorAll('th') || []);
+      const hasDenseMediaRows = maxColumns >= 5 && bodyRows.some((row) => row.querySelector('img'));
+      if (hasDenseMediaRows) {
+        table.dataset.briefingEnhanced = 'true';
+        wrapper.classList.add('briefing-dense-media-table');
+        const cards = document.createElement('div');
+        cards.className = 'briefing-table-row-cards';
+
+        bodyRows.forEach((row, index) => {
+          const cells = Array.from(row.querySelectorAll('td'));
+          const mediaCells = cells.filter((cell) => cell.querySelector('img'));
+          if (!mediaCells.length) return;
+          const detailCells = cells.filter((cell) => !cell.querySelector('img'));
+          const card = document.createElement('article');
+          card.className = 'briefing-table-row-card';
+
+          const detailPane = document.createElement('div');
+          detailPane.className = 'briefing-table-row-details';
+          const title = document.createElement('div');
+          title.className = 'briefing-presentation-step';
+          title.textContent = `Row ${index + 1}`;
+          detailPane.appendChild(title);
+
+          detailCells.forEach((cell) => {
+            const cellIndex = cells.indexOf(cell);
+            const value = (cell.innerHTML || '').trim();
+            const text = (cell.textContent || '').trim();
+            if (!value && !text) return;
+            const item = document.createElement('div');
+            item.className = 'briefing-table-row-field';
+            const label = document.createElement('strong');
+            label.textContent = (headerCells[cellIndex]?.textContent || `Column ${cellIndex + 1}`).trim();
+            const content = document.createElement('div');
+            content.innerHTML = value || text;
+            item.appendChild(label);
+            item.appendChild(content);
+            detailPane.appendChild(item);
+          });
+
+          const mediaPane = document.createElement('div');
+          mediaPane.className = 'briefing-table-row-media';
+          mediaPane.innerHTML = mediaCells.map((cell) => cell.innerHTML).join('');
+          card.appendChild(detailPane);
+          card.appendChild(mediaPane);
+          cards.appendChild(card);
+        });
+
+        if (!cards.children.length) return;
+        wrapper.insertAdjacentElement('afterend', cards);
+        wrapper.classList.add('is-replaced');
+        return;
+      }
       const screenshotLikeRows = bodyRows.filter((row) => {
         const cells = row.querySelectorAll('td');
         if (cells.length < 2) return false;
@@ -278,7 +331,7 @@
     if (!sectionDetailNode) return;
     sectionDetailNode.querySelectorAll('img').forEach((image) => {
       const applyClass = () => {
-        const inMediaArea = Boolean(image.closest('.briefing-media-cell, .briefing-presentation-visual'));
+        const inMediaArea = Boolean(image.closest('.briefing-media-cell, .briefing-presentation-visual, .briefing-table-row-media'));
         const contextText = image.closest('.briefing-presentation-copy, td, th, p, li')?.textContent?.toLowerCase() || '';
         const src = `${image.currentSrc || image.src || ''}`.toLowerCase();
         const isSmallAsset = image.naturalWidth > 0 && image.naturalHeight > 0 && image.naturalWidth <= 180 && image.naturalHeight <= 180;
