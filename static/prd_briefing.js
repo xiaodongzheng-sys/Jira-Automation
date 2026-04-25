@@ -46,6 +46,15 @@
 
   const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
 
+  const normalizeDecorativeText = (value) => String(value || '')
+    .replace(/[\u200b-\u200d\ufeff]/g, '')
+    .replace(/\s+/g, '');
+
+  const isDecorativeArrowText = (value) => {
+    const text = normalizeDecorativeText(value);
+    return Boolean(text) && /^[↓↑←→↕↔↘↙↖↗⇩⇧⇦⇨⇣⇡⇠⇢⇓⇑⇒⇐▼▲◀▶▾▴⌄⌃⌵⏷⏶\-–—|.,:;()]+$/.test(text);
+  };
+
   const setStatus = (message, tone = 'neutral') => {
     if (!statusNode) return;
     statusNode.innerHTML = `<p>${escapeHtml(message)}</p>`;
@@ -470,8 +479,21 @@
       imageCells.forEach((cell) => {
         cell.classList.add('briefing-media-cell');
         const text = (cell.innerText || cell.textContent || '').replace(/\s+/g, ' ').trim();
-        cell.classList.toggle('briefing-pure-media-cell', text.length === 0);
+        cell.classList.toggle('briefing-pure-media-cell', text.length === 0 || isDecorativeArrowText(text));
       });
+    });
+  };
+
+  const hideDecorativeArrowArtifacts = () => {
+    if (!sectionDetailNode) return;
+    sectionDetailNode.querySelectorAll('.briefing-decorative-arrow-only').forEach((node) => {
+      node.classList.remove('briefing-decorative-arrow-only');
+    });
+    sectionDetailNode.querySelectorAll('.briefing-original-content p, .briefing-original-content li, .briefing-original-content td, .briefing-original-content th, .briefing-presentation-copy p, .briefing-presentation-copy li').forEach((node) => {
+      const hasMedia = Boolean(node.querySelector('img, video, svg, canvas'));
+      if (!hasMedia && isDecorativeArrowText(node.innerText || node.textContent || '')) {
+        node.classList.add('briefing-decorative-arrow-only');
+      }
     });
   };
 
@@ -668,6 +690,7 @@
     classifyTableLayouts();
     addHorizontalHints();
     classifySectionImages();
+    hideDecorativeArrowArtifacts();
     sectionDetailNode.querySelectorAll('img').forEach((image) => {
       image.setAttribute('tabindex', '0');
       image.setAttribute('role', 'button');

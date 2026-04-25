@@ -2883,6 +2883,10 @@ select {
   max-height: none;
 }
 
+.briefing-decorative-arrow-only {
+  display: none !important;
+}
+
 body.briefing-no-image-mode .briefing-original-content img,
 body.briefing-no-image-mode .briefing-image-grid,
 body.briefing-no-image-mode .briefing-presentation-visual,
