@@ -3,11 +3,12 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import re
 import sys
 from typing import Any
 
 from bpmis_jira_tool.config import Settings
-from bpmis_jira_tool.source_code_qa import ANSWER_MODE, SourceCodeQAService
+from bpmis_jira_tool.source_code_qa import ANSWER_MODE, LLMGenerateResult, SourceCodeQAService
 from bpmis_jira_tool.user_config import TEAM_PROFILE_DEFAULTS
 
 
@@ -37,6 +38,62 @@ def _case_text(payload: dict[str, Any]) -> str:
             ]
         )
     return "\n".join(parts).lower()
+
+
+class MockSourceCodeQALLMProvider:
+    name = "mock_llm"
+
+    def ready(self) -> bool:
+        return True
+
+    def public_config(self) -> dict[str, Any]:
+        return {"provider": self.name, "ready": True, "mode": "deterministic_eval"}
+
+    def generate(
+        self,
+        *,
+        payload: dict[str, Any],
+        primary_model: str,
+        fallback_model: str,
+    ) -> LLMGenerateResult:
+        del fallback_model
+        prompt = ""
+        for content in payload.get("contents") or []:
+            for part in content.get("parts") or []:
+                prompt += "\n" + str(part.get("text") or "")
+        citation_match = re.search(r"Citation:\s*\[S(\d+)\].*?File:\s*([^\n]+)", prompt, flags=re.DOTALL)
+        citation = f"S{citation_match.group(1)}" if citation_match else "S1"
+        path = citation_match.group(2).strip() if citation_match else "the top cited file"
+        question_match = re.search(r"Question:\s*(.+)", prompt)
+        question = question_match.group(1).strip() if question_match else "the question"
+        direct_answer = f"Based on the indexed evidence, {question} is answered by {path} [{citation}]."
+        answer = {
+            "direct_answer": direct_answer,
+            "claims": [{"text": direct_answer, "citations": [citation]}],
+            "missing_evidence": [],
+            "confidence": "high",
+        }
+        text = json.dumps(answer, ensure_ascii=False)
+        return LLMGenerateResult(
+            payload={
+                "candidates": [{"content": {"parts": [{"text": text}]}, "finishReason": "STOP"}],
+                "usageMetadata": {"promptTokenCount": 100, "candidatesTokenCount": 40, "totalTokenCount": 140},
+            },
+            usage={"promptTokenCount": 100, "candidatesTokenCount": 40, "totalTokenCount": 140},
+            model=primary_model or "mock-answer-model",
+            attempts=1,
+            latency_ms=1,
+            attempt_log=({"model": primary_model or "mock-answer-model", "attempt": 1, "status": "ok", "retryable": False, "latency_ms": 1},),
+        )
+
+    def extract_text(self, payload: dict[str, Any]) -> str:
+        candidates = payload.get("candidates") or []
+        for candidate in candidates:
+            for part in (candidate.get("content") or {}).get("parts") or []:
+                text = str(part.get("text") or "").strip()
+                if text:
+                    return text
+        return ""
 
 
 def _failure_bucket(message: str) -> str:
@@ -644,6 +701,15 @@ def _evaluate_case(service: SourceCodeQAService, case: dict[str, Any]) -> dict[s
         failures.append(
             f"answer contract expected {expected_contract_status!r}, got {(payload.get('answer_contract') or {}).get('status')!r}"
         )
+    expected_answer_mode = case.get("expected_answer_mode")
+    if expected_answer_mode and payload.get("answer_mode") != expected_answer_mode:
+        failures.append(f"answer mode expected {expected_answer_mode!r}, got {payload.get('answer_mode')!r}")
+    expected_llm_provider = case.get("expected_llm_provider")
+    if expected_llm_provider and payload.get("llm_provider") != expected_llm_provider:
+        failures.append(f"llm provider expected {expected_llm_provider!r}, got {payload.get('llm_provider')!r}")
+    expected_llm_cached = case.get("expected_llm_cached")
+    if expected_llm_cached is not None and bool(payload.get("llm_cached")) != bool(expected_llm_cached):
+        failures.append(f"llm cached expected {bool(expected_llm_cached)!r}, got {bool(payload.get('llm_cached'))!r}")
     expected_policy_statuses = case.get("expected_answer_policy_statuses") or {}
     policies = {
         str(policy.get("name") or ""): str(policy.get("status") or "")
@@ -801,6 +867,7 @@ def main() -> int:
     )
     parser.add_argument("--data-root", default=None, help="Override TEAM_PORTAL_DATA_DIR for the indexed repositories.")
     parser.add_argument("--fixture", action="store_true", help="Create deterministic fixture repositories before running cases.")
+    parser.add_argument("--mock-llm", action="store_true", help="Use a deterministic local LLM provider for LLM answer smoke cases.")
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     args = parser.parse_args()
 
@@ -840,6 +907,10 @@ def main() -> int:
     )
     if args.fixture:
         _build_fixture_repositories(service)
+    if args.mock_llm:
+        service.llm_provider = MockSourceCodeQALLMProvider()
+        service.llm_provider_name = service.llm_provider.name
+        service.answer_cache_root = service.answer_cache_root / "mock_llm_eval"
     case_paths = [Path(path) for path in (args.cases or ["evals/source_code_qa/golden.jsonl"])]
     cases: list[dict[str, Any]] = []
     for path in case_paths:

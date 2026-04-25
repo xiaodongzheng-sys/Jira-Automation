@@ -844,6 +844,43 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertFalse(self.service._index_path(repo_path).exists())
         self.assertEqual(payload["index_freshness"]["status"], "stale_or_missing")
 
+    def test_query_can_use_stale_but_schema_compatible_index(self):
+        self.service.save_mapping(
+            pm_team="AF",
+            country="All",
+            repositories=[{"display_name": "Portal Repo", "url": "https://git.example.com/team/portal.git"}],
+        )
+        entry = self.service.load_config()["mappings"]["AF:All"][0]
+        repo_entry = type("Entry", (), entry)()
+        repo_path = self.service._repo_path("AF:All", repo_entry)
+        (repo_path / ".git").mkdir(parents=True)
+        source_file = repo_path / "bpmis" / "jira_client.py"
+        source_file.parent.mkdir(parents=True)
+        source_file.write_text(
+            "class BPMISClient:\n"
+            "    def batchCreateJiraIssue(self):\n"
+            "        return self.post('/api/v1/issues/batchCreateJiraIssue')\n",
+            encoding="utf-8",
+        )
+        self.service._build_repo_index("AF:All", repo_entry, repo_path)
+        index_path = self.service._index_path(repo_path)
+        indexed_mtime = index_path.stat().st_mtime_ns
+
+        time.sleep(0.01)
+        (repo_path / "new_module.py").write_text("class NewModule: pass\n", encoding="utf-8")
+
+        payload = self.service.query(pm_team="AF", country="All", question="where is batchCreateJiraIssue implemented")
+
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["index_freshness"]["status"], "stale_or_missing")
+        self.assertIn("Portal Repo", payload["index_freshness"]["stale_repos"])
+        self.assertIn("persistent_index", {match.get("retrieval") for match in payload["matches"]})
+        self.assertEqual(index_path.stat().st_mtime_ns, indexed_mtime)
+        index_info = self.service.repo_status("AF:All")[0]["index"]
+        self.assertEqual(index_info["state"], "stale")
+        self.assertTrue(index_info["schema_compatible"])
+        self.assertTrue(index_info["queryable"])
+
     def test_structure_index_extracts_definitions_references_and_telemetry(self):
         self.service.save_mapping(
             pm_team="AF",
@@ -1026,7 +1063,59 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertIn("query_status=ok=1, no_match=1", summary)
         self.assertIn("no_match_rate=1/2", summary)
         self.assertIn("feedback_window=1", summary)
+        self.assertIn("review_queue=0", summary)
         self.assertIn("latest_eval_state=passed", summary)
+
+    def test_review_queue_collects_feedback_and_telemetry_risks(self):
+        from scripts.source_code_qa_review_queue import build_review_queue
+
+        data_root = Path(self.temp_dir.name)
+        source_root = data_root / "source_code_qa"
+        source_root.mkdir(parents=True)
+        (source_root / "feedback.jsonl").write_text(
+            json.dumps(
+                {
+                    "timestamp": "2026-04-25T10:05:00+08:00",
+                    "rating": "wrong_file",
+                    "pm_team": "AF",
+                    "country": "All",
+                    "question_preview": "where is batch create",
+                    "question_sha1": "abc123",
+                    "trace_id": "trace-feedback",
+                    "replay_context": {
+                        "answer_contract": {"status": "grounded"},
+                        "matches_snapshot": [{"path": "wrong/File.java"}],
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (source_root / "telemetry.jsonl").write_text(
+            json.dumps(
+                {
+                    "timestamp": "2026-04-25T10:06:00+08:00",
+                    "status": "no_match",
+                    "key": "AF:All",
+                    "question_preview": "where is missing flow",
+                    "question_sha1": "def456",
+                    "trace_id": "trace-telemetry",
+                    "top_paths": [],
+                    "index_freshness": {"status": "fresh"},
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        queue = build_review_queue(data_root)
+
+        self.assertEqual(len(queue), 2)
+        self.assertEqual(queue[0]["priority"], "high")
+        self.assertEqual({item["source"] for item in queue}, {"feedback", "telemetry"})
+        feedback_item = next(item for item in queue if item["source"] == "feedback")
+        self.assertEqual(feedback_item["observed_paths"], ["wrong/File.java"])
+        self.assertEqual(feedback_item["draft_eval"]["draft_status"], "needs_human_expected_evidence")
 
     def test_planner_tool_loop_adds_code_graph_matches(self):
         self.service.save_mapping(

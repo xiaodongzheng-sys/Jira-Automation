@@ -48,6 +48,19 @@ def run_nightly_eval(*, output_dir: Path, cases: list[str], fixture: bool, inclu
     for case_path in cases:
         eval_args.extend(["--cases", case_path])
     eval_payload, eval_stdout, eval_stderr, eval_returncode = _run_json_command(eval_args)
+    llm_smoke_data_root = output_dir / "llm_smoke_data"
+    llm_smoke_args = [
+        sys.executable,
+        "scripts/run_source_code_qa_evals.py",
+        "--json",
+        "--fixture",
+        "--mock-llm",
+        "--data-root",
+        str(llm_smoke_data_root),
+        "--cases",
+        "evals/source_code_qa/llm_smoke.jsonl",
+    ]
+    llm_smoke_payload, llm_smoke_stdout, llm_smoke_stderr, llm_smoke_returncode = _run_json_command(llm_smoke_args)
 
     feedback_output = output_dir / f"feedback_candidates_{timestamp}.jsonl"
     feedback_args = [
@@ -60,9 +73,26 @@ def run_nightly_eval(*, output_dir: Path, cases: list[str], fixture: bool, inclu
     if include_useful_feedback:
         feedback_args.append("--include-useful")
     feedback_payload, feedback_stdout, feedback_stderr, feedback_returncode = _run_json_command(feedback_args)
+    review_output = output_dir / f"review_queue_{timestamp}.jsonl"
+    review_args = [
+        sys.executable,
+        "scripts/source_code_qa_review_queue.py",
+        "--json",
+        "--output",
+        str(review_output),
+    ]
+    review_payload, review_stdout, review_stderr, review_returncode = _run_json_command(review_args)
 
     report = {
-        "status": "pass" if eval_returncode == 0 and eval_payload.get("status") == "pass" else "fail",
+        "status": "pass"
+        if (
+            eval_returncode == 0
+            and eval_payload.get("status") == "pass"
+            and llm_smoke_returncode == 0
+            and llm_smoke_payload.get("status") == "pass"
+            and review_returncode == 0
+        )
+        else "fail",
         "timestamp": timestamp,
         "fixture": fixture,
         "cases": cases,
@@ -83,11 +113,29 @@ def run_nightly_eval(*, output_dir: Path, cases: list[str], fixture: bool, inclu
             "draft_statuses": feedback_payload.get("draft_statuses") or {},
             "output": str(feedback_output),
         },
+        "llm_smoke": {
+            "returncode": llm_smoke_returncode,
+            "status": llm_smoke_payload.get("status"),
+            "total": llm_smoke_payload.get("total"),
+            "failed": llm_smoke_payload.get("failed"),
+            "route_buckets": llm_smoke_payload.get("route_buckets") or {},
+        },
+        "review_queue": {
+            "returncode": review_returncode,
+            "status": review_payload.get("status"),
+            "review_items": review_payload.get("review_items"),
+            "high_priority": review_payload.get("high_priority"),
+            "output": str(review_output),
+        },
         "raw": {
             "eval_stdout": eval_stdout[-20000:],
             "eval_stderr": eval_stderr[-8000:],
+            "llm_smoke_stdout": llm_smoke_stdout[-12000:],
+            "llm_smoke_stderr": llm_smoke_stderr[-4000:],
             "feedback_stdout": feedback_stdout[-12000:],
             "feedback_stderr": feedback_stderr[-4000:],
+            "review_stdout": review_stdout[-12000:],
+            "review_stderr": review_stderr[-4000:],
         },
     }
     report_path = output_dir / f"source_code_qa_eval_{timestamp}.json"
@@ -121,12 +169,16 @@ def main() -> int:
         print(json.dumps(report, indent=2, ensure_ascii=False))
     else:
         eval_summary = report.get("eval") or {}
+        llm_smoke_summary = report.get("llm_smoke") or {}
         feedback_summary = report.get("feedback_candidates") or {}
+        review_summary = report.get("review_queue") or {}
         print(
             "Source Code Q&A nightly eval: "
             f"{report['status']} ({int(eval_summary.get('total') or 0) - int(eval_summary.get('failed') or 0)}/{eval_summary.get('total')} passed)"
         )
+        print(f"LLM smoke: {llm_smoke_summary.get('status')} ({int(llm_smoke_summary.get('total') or 0) - int(llm_smoke_summary.get('failed') or 0)}/{llm_smoke_summary.get('total')} passed)")
         print(f"Feedback candidates: {feedback_summary.get('candidates')} -> {feedback_summary.get('output')}")
+        print(f"Review queue: {review_summary.get('review_items')} -> {review_summary.get('output')}")
         print(f"Report: {report['report_path']}")
     return 0 if report["status"] == "pass" else 1
 

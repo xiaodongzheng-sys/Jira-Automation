@@ -66,6 +66,7 @@ def build_summary(data_root: Path, *, limit: int = 200) -> list[str]:
     source_root = data_root / "source_code_qa"
     telemetry_rows = _read_tail_jsonl(source_root / "telemetry.jsonl", limit)
     feedback_rows = _read_tail_jsonl(source_root / "feedback.jsonl", limit)
+    review_rows = _read_tail_jsonl(source_root / "review_queue.jsonl", limit)
     eval_status = _read_json(data_root / "run" / "source_code_qa_eval_status.json")
 
     lines: list[str] = []
@@ -98,6 +99,12 @@ def build_summary(data_root: Path, *, limit: int = 200) -> list[str]:
         lines.append(f"feedback_window={len(feedback_rows)} newest={newest_feedback} ratings={_counter_text(feedback_counts)}")
     else:
         lines.append("feedback_window=0")
+
+    if review_rows:
+        priorities = Counter(str(row.get("priority") or "unknown") for row in review_rows)
+        lines.append(f"review_queue={len(review_rows)} priorities={_counter_text(priorities)}")
+    else:
+        lines.append("review_queue=0")
 
     state = eval_status.get("state") or "missing"
     updated_unix = eval_status.get("updated_unix")

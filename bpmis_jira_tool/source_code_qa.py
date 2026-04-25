@@ -2232,7 +2232,7 @@ class SourceCodeQAService:
         repo_path: Path,
     ) -> dict[str, Any]:
         info = self._repo_index_info(key, entry, repo_path)
-        if info.get("state") == "ready":
+        if info.get("state") == "ready" or (info.get("state") == "stale" and info.get("schema_compatible")):
             return info
         raise SourceCodeQAIndexUnavailable(
             f"Code index for {entry.display_name} is {info.get('state') or 'unavailable'}; run Sync / Refresh first."
@@ -2242,24 +2242,27 @@ class SourceCodeQAService:
         del key, entry
         index_path = self._index_path(repo_path)
         if not index_path.exists():
-            return {"state": "missing", "path": str(index_path)}
+            return {"state": "missing", "path": str(index_path), "schema_compatible": False, "queryable": False}
         fingerprint = self._repo_fingerprint(repo_path)
         git_revision = self._repo_git_revision(repo_path)
         try:
             with sqlite3.connect(index_path) as connection:
                 metadata = dict(connection.execute("select key, value from metadata").fetchall())
         except sqlite3.Error:
-            return {"state": "stale", "path": str(index_path)}
+            return {"state": "stale", "path": str(index_path), "schema_compatible": False, "queryable": False}
         expected = {
             "version": str(CODE_INDEX_VERSION),
             "file_count": str(fingerprint["file_count"]),
             "latest_mtime_ns": str(fingerprint["latest_mtime_ns"]),
             "total_size": str(fingerprint["total_size"]),
         }
+        schema_compatible = metadata.get("version") == str(CODE_INDEX_VERSION)
         state = "ready" if all(metadata.get(key) == value for key, value in expected.items()) else "stale"
         return {
             "state": state,
             "path": str(index_path),
+            "schema_compatible": schema_compatible,
+            "queryable": schema_compatible,
             "files": int(metadata.get("indexed_files") or 0),
             "lines": int(metadata.get("indexed_lines") or 0),
             "definitions": int(metadata.get("indexed_definitions") or 0),

@@ -52,7 +52,19 @@ For a repeatable local quality check, run:
 PYTHONPATH=. ./.venv/bin/python scripts/run_source_code_qa_nightly_eval.py --include-useful-feedback
 ```
 
-The job writes timestamped reports under `TEAM_PORTAL_DATA_DIR/source_code_qa/eval_runs/` plus `latest.json`. It runs the deterministic fixture evals and regenerates feedback candidates, so it can be launched manually or scheduled by the host without adding a new portal workflow.
+The job writes timestamped reports under `TEAM_PORTAL_DATA_DIR/source_code_qa/eval_runs/` plus `latest.json`. It runs the deterministic fixture evals, runs a deterministic mock-LLM answer smoke eval, regenerates feedback candidates, and writes a local review queue, so it can be launched manually or scheduled by the host without adding a new portal workflow.
+
+Build the review queue directly when triaging misses:
+
+```bash
+PYTHONPATH=. ./.venv/bin/python scripts/source_code_qa_review_queue.py --json
+```
+
+Run only the LLM answer smoke eval without calling an external model:
+
+```bash
+PYTHONPATH=. ./.venv/bin/python scripts/run_source_code_qa_evals.py --fixture --mock-llm --cases evals/source_code_qa/llm_smoke.jsonl
+```
 
 Use `--fixture` when you want a deterministic miniature repo set for regression checks. It creates AF and CRMS fixture repositories under the selected data root, then runs the same eval cases against generated code instead of depending on whatever repos happen to be synced locally.
 
