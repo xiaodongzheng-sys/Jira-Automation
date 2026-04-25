@@ -1060,13 +1060,46 @@ class CodexCliBridgeSourceCodeQALLMProvider(SourceCodeQALLMProvider):
 
     def _codex_env(self) -> dict[str, str]:
         env = dict(os.environ)
-        rg_path = shutil.which("rg")
-        if rg_path:
-            rg_dir = str(Path(rg_path).parent)
-            path_parts = [part for part in str(env.get("PATH") or "").split(os.pathsep) if part]
-            if rg_dir not in path_parts:
-                env["PATH"] = os.pathsep.join([rg_dir, *path_parts])
+        path_parts = [part for part in str(env.get("PATH") or "").split(os.pathsep) if part]
+        for tool_dir in self._codex_tool_path_dirs():
+            if tool_dir not in path_parts:
+                path_parts.insert(0, tool_dir)
+        if path_parts:
+            env["PATH"] = os.pathsep.join(path_parts)
         return env
+
+    @staticmethod
+    def _codex_tool_path_dirs() -> list[str]:
+        dirs: list[str] = []
+        detected = shutil.which("rg")
+        if detected:
+            dirs.append(str(Path(detected).parent))
+        for candidate in (
+            "/Applications/Codex.app/Contents/Resources/rg",
+            "/opt/homebrew/bin/rg",
+            "/usr/local/bin/rg",
+            "/usr/bin/rg",
+        ):
+            if Path(candidate).exists():
+                tool_dir = str(Path(candidate).parent)
+                if tool_dir not in dirs:
+                    dirs.append(tool_dir)
+        return dirs
+
+    @staticmethod
+    def _codex_rg_hint() -> str:
+        detected = shutil.which("rg")
+        if detected:
+            return str(detected)
+        for candidate in (
+            "/Applications/Codex.app/Contents/Resources/rg",
+            "/opt/homebrew/bin/rg",
+            "/usr/local/bin/rg",
+            "/usr/bin/rg",
+        ):
+            if Path(candidate).exists():
+                return candidate
+        return ""
 
     def extract_text(self, payload: dict[str, Any]) -> str:
         text = str(payload.get("text") or "").strip()
@@ -1101,6 +1134,7 @@ class CodexCliBridgeSourceCodeQALLMProvider(SourceCodeQALLMProvider):
             "Codex CLI bridge policy:\n"
             "- Read only from the provided repository workspace and retrieval evidence.\n"
             "- Do not modify files, create commits, deploy, install dependencies, or run write commands.\n"
+            f"- Tool availability: `rg` is expected on PATH. If not, call it by absolute path: {CodexCliBridgeSourceCodeQALLMProvider._codex_rg_hint() or 'not detected; use grep -R/find fallback'}.\n"
             "- Return a concise answer in the requested JSON shape when possible.\n\n"
             f"{user_text}"
         ).strip()
