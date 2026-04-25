@@ -4372,6 +4372,160 @@ select:focus {
   gap: 24px;
 }
 
+.source-qa-chat-shell {
+  display: grid;
+  grid-template-columns: minmax(220px, 280px) minmax(0, 1fr);
+  gap: 20px;
+  align-items: start;
+}
+
+.source-qa-session-sidebar {
+  position: sticky;
+  top: 18px;
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  padding: 16px;
+  border: 1px solid #e4e7ec;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.source-qa-session-sidebar-head {
+  display: grid;
+  gap: 12px;
+}
+
+.source-qa-session-sidebar-head h2 {
+  margin: 0;
+}
+
+.source-qa-session-list {
+  display: grid;
+  gap: 8px;
+  max-height: 520px;
+  overflow: auto;
+}
+
+.source-qa-session-item {
+  display: grid;
+  gap: 4px;
+  width: 100%;
+  padding: 11px 12px;
+  border: 1px solid #e4e7ec;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #344054;
+  text-align: left;
+  cursor: pointer;
+}
+
+.source-qa-session-item:hover,
+.source-qa-session-item.is-active {
+  border-color: #84c5ff;
+  background: #f5fbff;
+}
+
+.source-qa-session-item.is-active {
+  box-shadow: inset 3px 0 0 #165dff;
+}
+
+.source-qa-session-item span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-weight: 800;
+}
+
+.source-qa-session-item small {
+  color: #667085;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.source-qa-chat-main {
+  display: grid;
+  gap: 18px;
+  min-width: 0;
+}
+
+.source-qa-session-context-card {
+  min-width: 0;
+}
+
+.source-qa-session-messages {
+  display: grid;
+  gap: 12px;
+  max-height: 460px;
+  overflow: auto;
+}
+
+.source-qa-message {
+  display: grid;
+  gap: 8px;
+  max-width: min(820px, 100%);
+  min-width: 0;
+  padding: 13px 14px;
+  border: 1px solid #e4e7ec;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.source-qa-message-user {
+  justify-self: end;
+  border-color: #b7dfc2;
+  background: #f4fbf6;
+}
+
+.source-qa-message-assistant {
+  justify-self: start;
+  background: #f8fbff;
+}
+
+.source-qa-message-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: start;
+  min-width: 0;
+}
+
+.source-qa-message-head span {
+  color: #667085;
+  font-size: 0.86rem;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+.source-qa-message p {
+  margin: 0;
+  color: #344054;
+  line-height: 1.58;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.source-qa-message-citations {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.source-qa-message-citations span {
+  max-width: 100%;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: #edf4ff;
+  color: #165dff;
+  font-size: 0.84rem;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.source-qa-composer {
+  display: grid;
+  gap: 12px;
+}
+
 .source-qa-admin,
 .source-qa-workspace {
   margin-bottom: 24px;
@@ -4718,6 +4872,18 @@ select:focus {
 }
 
 @media (max-width: 1100px) {
+  .source-qa-chat-shell {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .source-qa-session-sidebar {
+    position: static;
+  }
+
+  .source-qa-session-list {
+    max-height: 260px;
+  }
+
   .source-qa-evidence-grid {
     grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr));
   }

@@ -200,6 +200,172 @@ class JobStore:
         return asdict(job) if job else None
 
 
+class SourceCodeQASessionStore:
+    def __init__(self, storage_path: Path | None = None) -> None:
+        self.storage_path = storage_path
+        self._sessions: dict[str, dict[str, Any]] = self._load()
+        self._lock = threading.Lock()
+
+    def _load(self) -> dict[str, dict[str, Any]]:
+        if self.storage_path is None or not self.storage_path.exists():
+            return {}
+        try:
+            payload = json.loads(self.storage_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        sessions: dict[str, dict[str, Any]] = {}
+        for session_id, raw_session in (payload.get("sessions") or {}).items():
+            if isinstance(raw_session, dict):
+                sessions[str(session_id)] = raw_session
+        return sessions
+
+    def _persist_locked(self) -> None:
+        if self.storage_path is None:
+            return
+        try:
+            self.storage_path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "updated_at": time.time(),
+                "sessions": self._sessions,
+            }
+            temp_path = self.storage_path.with_name(f".{self.storage_path.name}.{os.getpid()}.tmp")
+            temp_path.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True), encoding="utf-8")
+            os.replace(temp_path, self.storage_path)
+        except OSError:
+            return
+
+    @staticmethod
+    def _now() -> str:
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+    @staticmethod
+    def _title_from_question(question: str) -> str:
+        normalized = re.sub(r"\s+", " ", str(question or "").strip())
+        if not normalized:
+            return "New Source Code Chat"
+        return normalized[:72] + ("..." if len(normalized) > 72 else "")
+
+    def create(
+        self,
+        *,
+        owner_email: str,
+        pm_team: str,
+        country: str,
+        llm_provider: str,
+        title: str = "",
+    ) -> dict[str, Any]:
+        now = self._now()
+        session_payload = {
+            "id": uuid.uuid4().hex,
+            "owner_email": str(owner_email or "").strip().lower(),
+            "title": str(title or "").strip() or "New Source Code Chat",
+            "pm_team": str(pm_team or "").strip() or "AF",
+            "country": str(country or "").strip() or ALL_COUNTRY,
+            "llm_provider": SourceCodeQAService.normalize_query_llm_provider(llm_provider),
+            "created_at": now,
+            "updated_at": now,
+            "messages": [],
+            "last_context": None,
+            "last_trace_id": "",
+        }
+        with self._lock:
+            self._sessions[session_payload["id"]] = session_payload
+            self._persist_locked()
+            return dict(session_payload)
+
+    def list(self, *, owner_email: str, limit: int = 30) -> list[dict[str, Any]]:
+        owner = str(owner_email or "").strip().lower()
+        with self._lock:
+            sessions = [
+                self._public_session(session_payload, include_messages=False)
+                for session_payload in self._sessions.values()
+                if str(session_payload.get("owner_email") or "").strip().lower() == owner
+            ]
+        sessions.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
+        return sessions[: max(1, min(int(limit or 30), 100))]
+
+    def get(self, session_id: str, *, owner_email: str) -> dict[str, Any] | None:
+        owner = str(owner_email or "").strip().lower()
+        with self._lock:
+            session_payload = self._sessions.get(str(session_id or ""))
+            if not session_payload:
+                return None
+            if str(session_payload.get("owner_email") or "").strip().lower() != owner:
+                return None
+            return self._public_session(session_payload, include_messages=True)
+
+    def get_context(self, session_id: str, *, owner_email: str) -> dict[str, Any] | None:
+        session_payload = self.get(session_id, owner_email=owner_email)
+        context = session_payload.get("last_context") if session_payload else None
+        return context if isinstance(context, dict) else None
+
+    def append_exchange(
+        self,
+        session_id: str,
+        *,
+        owner_email: str,
+        pm_team: str,
+        country: str,
+        llm_provider: str,
+        question: str,
+        result: dict[str, Any],
+        context: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        owner = str(owner_email or "").strip().lower()
+        now = self._now()
+        with self._lock:
+            session_payload = self._sessions.get(str(session_id or ""))
+            if not session_payload:
+                return None
+            if str(session_payload.get("owner_email") or "").strip().lower() != owner:
+                return None
+            title = str(session_payload.get("title") or "").strip()
+            if not title or title == "New Source Code Chat":
+                session_payload["title"] = self._title_from_question(question)
+            session_payload["pm_team"] = str(pm_team or "").strip() or session_payload.get("pm_team") or "AF"
+            session_payload["country"] = str(country or "").strip() or session_payload.get("country") or ALL_COUNTRY
+            session_payload["llm_provider"] = SourceCodeQAService.normalize_query_llm_provider(llm_provider)
+            session_payload["updated_at"] = now
+            session_payload["last_context"] = context
+            session_payload["last_trace_id"] = str(result.get("trace_id") or "")
+            messages = list(session_payload.get("messages") or [])
+            messages.extend(
+                [
+                    {
+                        "role": "user",
+                        "text": str(question or ""),
+                        "created_at": now,
+                    },
+                    {
+                        "role": "assistant",
+                        "text": str(result.get("llm_answer") or result.get("summary") or ""),
+                        "created_at": now,
+                        "payload": _compact_source_code_qa_session_payload(result),
+                    },
+                ]
+            )
+            session_payload["messages"] = messages[-80:]
+            self._persist_locked()
+            return self._public_session(session_payload, include_messages=True)
+
+    def _public_session(self, session_payload: dict[str, Any], *, include_messages: bool) -> dict[str, Any]:
+        public_payload = {
+            "id": session_payload.get("id") or "",
+            "title": session_payload.get("title") or "New Source Code Chat",
+            "pm_team": session_payload.get("pm_team") or "",
+            "country": session_payload.get("country") or ALL_COUNTRY,
+            "llm_provider": session_payload.get("llm_provider") or "codex_cli_bridge",
+            "created_at": session_payload.get("created_at") or "",
+            "updated_at": session_payload.get("updated_at") or "",
+            "last_context": session_payload.get("last_context") if include_messages else None,
+            "last_trace_id": session_payload.get("last_trace_id") or "",
+            "message_count": len(session_payload.get("messages") or []),
+        }
+        if include_messages:
+            public_payload["messages"] = list(session_payload.get("messages") or [])
+        return public_payload
+
+
 def _safe_email_identity(user_identity: dict[str, str | None] | None = None) -> str:
     if not user_identity:
         return ""
@@ -383,6 +549,7 @@ def create_app() -> Flask:
     app.config["SETTINGS"] = settings
     app.config["CONFIG_STORE"] = config_store
     app.config["JOB_STORE"] = JobStore(data_root / "run" / "jobs.json")
+    app.config["SOURCE_CODE_QA_SESSION_STORE"] = SourceCodeQASessionStore(data_root / "source_code_qa" / "sessions.json")
     app.config["PRD_BRIEFING_STORE"] = BriefingStore(data_root / "prd_briefing")
     app.config["SOURCE_CODE_QA_SERVICE"] = SourceCodeQAService(
         data_root=data_root,
@@ -734,6 +901,42 @@ def create_app() -> Flask:
         thread.start()
         return jsonify({"status": "queued", "job_id": job.job_id})
 
+    @app.route("/api/source-code-qa/sessions", methods=["GET", "POST"])
+    def source_code_qa_sessions_api():
+        access_gate = _require_source_code_qa_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        store: SourceCodeQASessionStore = current_app.config["SOURCE_CODE_QA_SESSION_STORE"]
+        owner_email = _current_google_email() or "local"
+        if request.method == "GET":
+            limit = request.args.get("limit", "30")
+            try:
+                limit_value = int(limit)
+            except ValueError:
+                limit_value = 30
+            return jsonify({"status": "ok", "sessions": store.list(owner_email=owner_email, limit=limit_value)})
+
+        payload = request.get_json(silent=True) or {}
+        session_payload = store.create(
+            owner_email=owner_email,
+            pm_team=str(payload.get("pm_team") or ""),
+            country=str(payload.get("country") or ""),
+            llm_provider=str(payload.get("llm_provider") or ""),
+            title=str(payload.get("title") or ""),
+        )
+        return jsonify({"status": "ok", "session": session_payload})
+
+    @app.get("/api/source-code-qa/sessions/<session_id>")
+    def source_code_qa_session_api(session_id: str):
+        access_gate = _require_source_code_qa_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        store: SourceCodeQASessionStore = current_app.config["SOURCE_CODE_QA_SESSION_STORE"]
+        session_payload = store.get(session_id, owner_email=_current_google_email() or "local")
+        if session_payload is None:
+            return jsonify({"status": "error", "message": "Source Code Q&A session was not found."}), HTTPStatus.NOT_FOUND
+        return jsonify({"status": "ok", "session": session_payload})
+
     @app.post("/api/source-code-qa/query")
     def source_code_qa_query_api():
         access_gate = _require_source_code_qa_access(settings, api=True)
@@ -744,15 +947,23 @@ def create_app() -> Flask:
             job_store: JobStore = current_app.config["JOB_STORE"]
             job = job_store.create("source-code-qa-query", title="Source Code Q&A Query")
             app_obj = current_app._get_current_object()
+            async_payload = dict(payload)
+            async_payload["_session_owner_email"] = _current_google_email() or "local"
             thread = threading.Thread(
                 target=_run_source_code_qa_query_job,
-                args=(app_obj, job.job_id, dict(payload)),
+                args=(app_obj, job.job_id, async_payload),
                 daemon=True,
             )
             thread.start()
             return jsonify({"status": "queued", "job_id": job.job_id})
         try:
             service = _build_source_code_qa_service(payload.get("llm_provider"))
+            session_store: SourceCodeQASessionStore = current_app.config["SOURCE_CODE_QA_SESSION_STORE"]
+            session_id = str(payload.get("session_id") or "").strip()
+            owner_email = _current_google_email() or "local"
+            conversation_context = payload.get("conversation_context") if isinstance(payload.get("conversation_context"), dict) else None
+            if conversation_context is None and session_id:
+                conversation_context = session_store.get_context(session_id, owner_email=owner_email)
             auto_sync = service.ensure_synced_today(
                 pm_team=str(payload.get("pm_team") or ""),
                 country=str(payload.get("country") or ""),
@@ -763,9 +974,23 @@ def create_app() -> Flask:
                 question=str(payload.get("question") or ""),
                 answer_mode=str(payload.get("answer_mode") or "retrieval_only"),
                 llm_budget_mode="auto",
-                conversation_context=payload.get("conversation_context") if isinstance(payload.get("conversation_context"), dict) else None,
+                conversation_context=conversation_context,
             )
             result["auto_sync"] = auto_sync
+            if session_id:
+                session_payload = session_store.append_exchange(
+                    session_id,
+                    owner_email=owner_email,
+                    pm_team=str(payload.get("pm_team") or ""),
+                    country=str(payload.get("country") or ""),
+                    llm_provider=str(payload.get("llm_provider") or ""),
+                    question=str(payload.get("question") or ""),
+                    result=result,
+                    context=_build_source_code_qa_session_context(result, payload),
+                )
+                if session_payload is not None:
+                    result["session"] = session_payload
+                    result["session_id"] = session_id
             return jsonify(result)
         except ToolError as error:
             return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
@@ -1918,6 +2143,80 @@ def _build_source_code_qa_service(llm_provider: str | None = None) -> SourceCode
     return service.with_llm_provider(str(llm_provider or ""))
 
 
+def _compact_source_code_qa_session_payload(result: dict[str, Any]) -> dict[str, Any]:
+    structured = result.get("structured_answer") if isinstance(result.get("structured_answer"), dict) else {}
+    answer_claim_check = result.get("answer_claim_check") if isinstance(result.get("answer_claim_check"), dict) else {}
+    llm_route = result.get("llm_route") if isinstance(result.get("llm_route"), dict) else {}
+    return {
+        "status": result.get("status") or "",
+        "trace_id": result.get("trace_id") or "",
+        "summary": result.get("summary") or "",
+        "llm_answer": result.get("llm_answer") or "",
+        "llm_provider": result.get("llm_provider") or "",
+        "llm_model": result.get("llm_model") or "",
+        "llm_route": {
+            "mode": llm_route.get("mode") or "",
+            "provider": llm_route.get("provider") or "",
+            "prompt_mode": llm_route.get("prompt_mode") or "",
+            "candidate_paths": (llm_route.get("candidate_paths") or [])[:30],
+        },
+        "structured_answer": {
+            "direct_answer": structured.get("direct_answer") or "",
+            "claims": (structured.get("claims") or [])[:8],
+            "citations": (structured.get("citations") or [])[:12],
+            "missing_evidence": (structured.get("missing_evidence") or [])[:8],
+            "confidence": structured.get("confidence") or "",
+        },
+        "answer_contract": result.get("answer_contract") or {},
+        "answer_quality": result.get("answer_quality") or {},
+        "codex_cli_summary": result.get("codex_cli_summary") or {},
+        "codex_citation_validation": answer_claim_check.get("codex_citation_validation") or {},
+        "matches": [
+            {
+                "repo": match.get("repo"),
+                "path": match.get("path"),
+                "line_start": match.get("line_start"),
+                "line_end": match.get("line_end"),
+                "retrieval": match.get("retrieval"),
+                "trace_stage": match.get("trace_stage"),
+                "reason": match.get("reason"),
+                "score": match.get("score"),
+            }
+            for match in (result.get("matches") or [])[:10]
+            if isinstance(match, dict)
+        ],
+    }
+
+
+def _build_source_code_qa_session_context(result: dict[str, Any], request_payload: dict[str, Any]) -> dict[str, Any]:
+    compact = _compact_source_code_qa_session_payload(result)
+    matches = compact.get("matches") or []
+    return {
+        "key": f"{request_payload.get('pm_team') or ''}:{request_payload.get('country') or ALL_COUNTRY}",
+        "pm_team": request_payload.get("pm_team") or "",
+        "country": request_payload.get("country") or ALL_COUNTRY,
+        "question": request_payload.get("question") or "",
+        "trace_id": compact.get("trace_id") or "",
+        "summary": compact.get("summary") or "",
+        "answer": compact.get("llm_answer") or "",
+        "rendered_answer": compact.get("llm_answer") or "",
+        "llm_provider": compact.get("llm_provider") or "",
+        "llm_model": compact.get("llm_model") or "",
+        "llm_route": compact.get("llm_route") or {},
+        "codex_cli_summary": compact.get("codex_cli_summary") or {},
+        "codex_citation_validation": compact.get("codex_citation_validation") or {},
+        "codex_candidate_paths": (compact.get("llm_route") or {}).get("candidate_paths") or [],
+        "repo_scope": list(dict.fromkeys([match.get("repo") for match in matches if match.get("repo")]))[:8],
+        "matches": matches[:8],
+        "matches_snapshot": matches[:10],
+        "trace_paths": (result.get("trace_paths") or [])[:5],
+        "structured_answer": compact.get("structured_answer") or {},
+        "answer_contract": compact.get("answer_contract") or {},
+        "evidence_pack": result.get("evidence_pack") or {},
+        "answer_quality": compact.get("answer_quality") or {},
+    }
+
+
 def _read_json_file(path: Path) -> dict[str, Any]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -2267,6 +2566,12 @@ def _run_source_code_qa_query_job(app: Flask, job_id: str, payload: dict[str, An
             service = _build_source_code_qa_service(payload.get("llm_provider"))
             pm_team = str(payload.get("pm_team") or "")
             country = str(payload.get("country") or "")
+            session_store: SourceCodeQASessionStore = app.config["SOURCE_CODE_QA_SESSION_STORE"]
+            session_id = str(payload.get("session_id") or "").strip()
+            owner_email = str(payload.get("_session_owner_email") or "").strip().lower() or "local"
+            conversation_context = payload.get("conversation_context") if isinstance(payload.get("conversation_context"), dict) else None
+            if conversation_context is None and session_id:
+                conversation_context = session_store.get_context(session_id, owner_email=owner_email)
             progress_callback("auto_sync_check", "Checking whether repositories were refreshed today.", 0, 1)
             auto_sync = service.ensure_synced_today(pm_team=pm_team, country=country)
             if auto_sync.get("attempted"):
@@ -2279,10 +2584,24 @@ def _run_source_code_qa_query_job(app: Flask, job_id: str, payload: dict[str, An
                 question=str(payload.get("question") or ""),
                 answer_mode=str(payload.get("answer_mode") or "retrieval_only"),
                 llm_budget_mode="auto",
-                conversation_context=payload.get("conversation_context") if isinstance(payload.get("conversation_context"), dict) else None,
+                conversation_context=conversation_context,
                 progress_callback=progress_callback,
             )
             result["auto_sync"] = auto_sync
+            if session_id:
+                session_payload = session_store.append_exchange(
+                    session_id,
+                    owner_email=owner_email,
+                    pm_team=pm_team,
+                    country=country,
+                    llm_provider=str(payload.get("llm_provider") or ""),
+                    question=str(payload.get("question") or ""),
+                    result=result,
+                    context=_build_source_code_qa_session_context(result, payload),
+                )
+                if session_payload is not None:
+                    result["session"] = session_payload
+                    result["session_id"] = session_id
             status = str(result.get("status") or "ok")
             job_store.complete(
                 job_id,

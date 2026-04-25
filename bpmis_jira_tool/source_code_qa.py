@@ -2733,6 +2733,15 @@ class SourceCodeQAService:
         for key_name in ("confirmed_facts", "inferred_facts", "missing_facts", "tables", "apis", "configs", "impact_surfaces"):
             for value in evidence_pack.get(key_name) or []:
                 terms.extend(IDENTIFIER_PATTERN.findall(str(value or "")))
+        if self.llm_provider_name == LLM_PROVIDER_CODEX_CLI_BRIDGE:
+            for item in conversation_context.get("codex_candidate_paths") or (conversation_context.get("llm_route") or {}).get("candidate_paths") or []:
+                if isinstance(item, dict):
+                    terms.extend(IDENTIFIER_PATTERN.findall(str(item.get("path") or "")))
+                    terms.extend(IDENTIFIER_PATTERN.findall(str(item.get("reason") or ""))[:6])
+            validation = conversation_context.get("codex_citation_validation") or {}
+            for item in validation.get("direct_file_refs") or []:
+                if isinstance(item, dict):
+                    terms.extend(IDENTIFIER_PATTERN.findall(str(item.get("path") or "")))
         deduped: list[str] = []
         for term in terms:
             lowered_term = term.lower()
@@ -2744,7 +2753,60 @@ class SourceCodeQAService:
         if not context_terms:
             return question, {"used": False}
         augmented = f"{question}\n\nPrevious Source Code Q&A context terms: {' '.join(context_terms)}"
-        return augmented, {"used": True, "terms": context_terms, "previous_question": str(conversation_context.get("question") or "")[:180]}
+        return augmented, self._conversation_followup_payload(conversation_context, context_terms)
+
+    @staticmethod
+    def _conversation_followup_payload(conversation_context: dict[str, Any], context_terms: list[str]) -> dict[str, Any]:
+        return {
+            "used": True,
+            "terms": context_terms,
+            "previous_question": str(conversation_context.get("question") or "")[:180],
+            "question": str(conversation_context.get("question") or "")[:500],
+            "answer": str(conversation_context.get("answer") or conversation_context.get("rendered_answer") or "")[:2000],
+            "rendered_answer": str(conversation_context.get("rendered_answer") or conversation_context.get("answer") or "")[:2000],
+            "summary": str(conversation_context.get("summary") or "")[:500],
+            "trace_id": str(conversation_context.get("trace_id") or "")[:80],
+            "llm_provider": str(conversation_context.get("llm_provider") or "")[:80],
+            "llm_model": str(conversation_context.get("llm_model") or "")[:120],
+            "llm_route": conversation_context.get("llm_route") if isinstance(conversation_context.get("llm_route"), dict) else {},
+            "codex_cli_summary": conversation_context.get("codex_cli_summary") if isinstance(conversation_context.get("codex_cli_summary"), dict) else {},
+            "codex_citation_validation": (
+                conversation_context.get("codex_citation_validation")
+                if isinstance(conversation_context.get("codex_citation_validation"), dict)
+                else {}
+            ),
+            "codex_candidate_paths": [
+                item for item in (conversation_context.get("codex_candidate_paths") or [])[:30]
+                if isinstance(item, dict)
+            ],
+            "matches": [
+                item for item in (conversation_context.get("matches") or [])[:10]
+                if isinstance(item, dict)
+            ],
+            "matches_snapshot": [
+                item for item in (conversation_context.get("matches_snapshot") or conversation_context.get("matches") or [])[:10]
+                if isinstance(item, dict)
+            ],
+            "trace_paths": [
+                item for item in (conversation_context.get("trace_paths") or [])[:5]
+                if isinstance(item, dict)
+            ],
+            "structured_answer": (
+                conversation_context.get("structured_answer")
+                if isinstance(conversation_context.get("structured_answer"), dict)
+                else {}
+            ),
+            "answer_contract": (
+                conversation_context.get("answer_contract")
+                if isinstance(conversation_context.get("answer_contract"), dict)
+                else {}
+            ),
+            "evidence_pack": (
+                conversation_context.get("evidence_pack")
+                if isinstance(conversation_context.get("evidence_pack"), dict)
+                else {}
+            ),
+        }
 
     def _conversation_repo_scope(
         self,
@@ -14195,6 +14257,7 @@ class SourceCodeQAService:
         if not candidate_matches:
             candidate_matches = selected_matches
         candidate_paths = self._codex_candidate_paths(entries=entries, key=key, matches=candidate_matches)
+        candidate_paths = self._merge_codex_followup_candidate_paths(candidate_paths, followup_context)
         llm_route = {
             **llm_route,
             "answer_model": selected_model,
@@ -14243,6 +14306,17 @@ class SourceCodeQAService:
             answer_contract = cached_final["answer_contract"]
             if cached_validation.get("status") != "ok":
                 answer_contract = self._mark_codex_answer_unreliable(answer_contract, cached_validation)
+            cached_summary = {
+                "prompt_mode": llm_route.get("prompt_mode"),
+                "candidate_repo_count": llm_route.get("candidate_repo_count"),
+                "candidate_path_count": llm_route.get("candidate_path_count"),
+                "cited_path_count": cached_validation.get("cited_path_count", 0),
+                "citation_validation_status": cached_validation.get("status"),
+                "repair_attempted": False,
+                "cli_latency_ms": 0,
+                "exit_codes": [],
+                "timeout": False,
+            }
             return {
                 "llm_answer": cached_final["answer"],
                 "llm_budget_mode": routed_budget_mode,
@@ -14263,6 +14337,7 @@ class SourceCodeQAService:
                 "structured_answer": cached_final["structured_answer"],
                 "answer_contract": answer_contract,
                 "evidence_pack": evidence_pack,
+                "codex_cli_summary": cached_summary,
             }
         payload = self._codex_payload(prompt_context)
         result = self.llm_provider.generate(
@@ -14355,6 +14430,17 @@ class SourceCodeQAService:
                 thinking_budget=0,
                 finish_reason=finish_reason,
             )
+        codex_cli_summary = {
+            "prompt_mode": llm_route.get("prompt_mode"),
+            "candidate_repo_count": llm_route.get("candidate_repo_count"),
+            "candidate_path_count": llm_route.get("candidate_path_count"),
+            "cited_path_count": codex_validation.get("cited_path_count", 0),
+            "citation_validation_status": codex_validation.get("status"),
+            "repair_attempted": repair_attempted,
+            "cli_latency_ms": llm_latency_ms,
+            "exit_codes": [item.get("exit_code") for item in llm_attempt_log if item.get("exit_code") is not None],
+            "timeout": any(bool(item.get("timeout")) for item in llm_attempt_log),
+        }
         return {
             "llm_answer": final["answer"],
             "llm_budget_mode": routed_budget_mode,
@@ -14376,6 +14462,7 @@ class SourceCodeQAService:
             "structured_answer": final["structured_answer"],
             "answer_contract": answer_contract,
             "evidence_pack": evidence_pack,
+            "codex_cli_summary": codex_cli_summary,
         }
 
     def _codex_payload(self, prompt: str) -> dict[str, Any]:
@@ -14435,6 +14522,56 @@ class SourceCodeQAService:
             )
         return rows
 
+    def _merge_codex_followup_candidate_paths(
+        self,
+        candidate_paths: list[dict[str, Any]],
+        followup_context: dict[str, Any] | None,
+    ) -> list[dict[str, Any]]:
+        if not followup_context:
+            return candidate_paths
+        merged = list(candidate_paths)
+        seen = {(str(item.get("repo") or ""), str(item.get("path") or "")) for item in merged}
+        prior_items = [
+            *((followup_context.get("codex_candidate_paths") or []) if isinstance(followup_context.get("codex_candidate_paths"), list) else []),
+            *(((followup_context.get("llm_route") or {}).get("candidate_paths") or []) if isinstance(followup_context.get("llm_route"), dict) else []),
+        ]
+        for prior in prior_items:
+            if not isinstance(prior, dict) or len(merged) >= self.codex_top_path_limit:
+                break
+            repo = str(prior.get("repo") or "").strip()
+            path = str(prior.get("path") or "").strip()
+            root = str(prior.get("repo_root") or "").strip()
+            if not path or path.startswith("/") or ".." in Path(path).parts:
+                continue
+            key = (repo, path)
+            if key in seen:
+                continue
+            if root:
+                root_path = Path(root).expanduser().resolve()
+                file_path = (root_path / path).resolve()
+                try:
+                    file_path.relative_to(root_path)
+                except ValueError:
+                    continue
+                if not file_path.exists() or not file_path.is_file():
+                    continue
+            merged.append(
+                {
+                    "id": f"S{len(merged) + 1}",
+                    "repo": repo,
+                    "repo_root": root,
+                    "path": path,
+                    "absolute_path": str((Path(root) / path).resolve()) if root else str(prior.get("absolute_path") or ""),
+                    "line_start": prior.get("line_start"),
+                    "line_end": prior.get("line_end"),
+                    "retrieval": "previous_codex_context",
+                    "trace_stage": "followup_memory",
+                    "reason": str(prior.get("reason") or "previous Codex investigation path")[:500],
+                }
+            )
+            seen.add(key)
+        return merged
+
     def _codex_investigation_brief(
         self,
         *,
@@ -14489,6 +14626,29 @@ class SourceCodeQAService:
                     prior_paths.append(f"{match.get('repo')}:{match.get('path')}:{match.get('line_start')}-{match.get('line_end')}")
             if prior_paths:
                 lines.append(f"- Prior cited paths: {', '.join(prior_paths[:8])}")
+            prior_candidates = followup_context.get("codex_candidate_paths") or (followup_context.get("llm_route") or {}).get("candidate_paths") or []
+            if prior_candidates:
+                lines.append("- Previous Codex candidate paths:")
+                for item in [candidate for candidate in prior_candidates if isinstance(candidate, dict)][:8]:
+                    lines.append(
+                        f"  - {item.get('repo')} root={item.get('repo_root')} path={item.get('path')} "
+                        f"lines={item.get('line_start')}-{item.get('line_end')}"
+                    )
+            validation = followup_context.get("codex_citation_validation") or {}
+            if validation:
+                lines.append(
+                    f"- Previous citation validation: status={validation.get('status')} "
+                    f"cited_path_count={validation.get('cited_path_count', 0)}"
+                )
+                direct_refs = validation.get("direct_file_refs") or []
+                for item in [ref for ref in direct_refs if isinstance(ref, dict)][:6]:
+                    lines.append(f"  - verified file ref: {item.get('path')}:{item.get('line_start')}-{item.get('line_end')}")
+            codex_summary = followup_context.get("codex_cli_summary") or {}
+            if codex_summary:
+                lines.append(
+                    f"- Previous Codex run: prompt_mode={codex_summary.get('prompt_mode')} "
+                    f"paths={codex_summary.get('candidate_path_count')} repair={codex_summary.get('repair_attempted')}"
+                )
             prior_pack = followup_context.get("evidence_pack") or {}
             if isinstance(prior_pack, dict):
                 summary_bits = []

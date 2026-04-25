@@ -7,6 +7,7 @@
   const syncUrl = root.dataset.syncUrl;
   const queryUrl = root.dataset.queryUrl;
   const feedbackUrl = root.dataset.feedbackUrl;
+  const sessionsUrl = root.dataset.sessionsUrl;
   const canManage = root.dataset.canManage === 'true';
   const options = JSON.parse(root.dataset.options || '{}');
 
@@ -38,6 +39,13 @@
   const questionHistory = document.querySelector('[data-source-question-history]');
   const indexHealth = document.querySelector('[data-source-index-health]');
   const releaseGate = document.querySelector('[data-source-release-gate]');
+  const newSessionButton = document.querySelector('[data-source-new-session]');
+  const sessionList = document.querySelector('[data-source-session-list]');
+  const sessionTitle = document.querySelector('[data-source-session-title]');
+  const sessionContext = document.querySelector('[data-source-session-context]');
+  const sessionProvider = document.querySelector('[data-source-session-provider]');
+  const sessionScope = document.querySelector('[data-source-session-scope]');
+  const sessionMessages = document.querySelector('[data-source-session-messages]');
   let config = { mappings: {} };
   let gitAuthReady = false;
   let llmReady = false;
@@ -47,6 +55,9 @@
   let releaseGatePayload = {};
   let lastPayload = null;
   let conversationContext = null;
+  let sourceSessions = [];
+  let activeSession = null;
+  let activeSessionId = '';
   let activeQueryProgress = null;
   const preferenceKey = 'source-code-qa:last-query-config:v1';
   const historyKey = 'source-code-qa:question-history:v1';
@@ -257,6 +268,159 @@
       window.localStorage.removeItem(historyKey);
       renderQuestionHistory();
     });
+  };
+
+  const providerLabel = (value) => {
+    const option = Array.from(llmProvider?.options || []).find((item) => item.value === value);
+    return option ? option.textContent.replace(/\s*\(Unavailable\)\s*/i, '').trim() : (value || 'Codex');
+  };
+
+  const formatSessionTime = (value) => {
+    if (!value) return '';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return value;
+    return date.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+  };
+
+  const renderSessionList = () => {
+    if (!sessionList) return;
+    if (!sourceSessions.length) {
+      sessionList.innerHTML = '<div class="source-qa-empty">No chats yet.</div>';
+      return;
+    }
+    sessionList.innerHTML = sourceSessions.map((item) => {
+      const activeClass = item.id === activeSessionId ? ' is-active' : '';
+      const scope = [item.pm_team || '', item.country || 'All', providerLabel(item.llm_provider)].filter(Boolean).join(' · ');
+      return `
+        <button class="source-qa-session-item${activeClass}" type="button" data-source-session-id="${escapeHtml(item.id)}">
+          <span>${escapeHtml(item.title || 'New Source Code Chat')}</span>
+          <small>${escapeHtml(scope)} · ${escapeHtml(formatSessionTime(item.updated_at))}</small>
+        </button>
+      `;
+    }).join('');
+    sessionList.querySelectorAll('[data-source-session-id]').forEach((button) => {
+      button.addEventListener('click', () => loadSession(button.dataset.sourceSessionId || ''));
+    });
+  };
+
+  const summarizeSessionContext = (session) => {
+    const context = session?.last_context || {};
+    if (!context?.trace_id && !context?.question) {
+      return 'Choose Codex or Vertex, then ask a question. Codex can reuse confirmed files from this session.';
+    }
+    const priorQuestion = context.question ? `Previous: ${String(context.question).slice(0, 140)}` : '';
+    const paths = [
+      ...((context.codex_candidate_paths || []).map((item) => item.path || item.repo).filter(Boolean)),
+      ...((context.matches_snapshot || context.matches || []).map((item) => item.path).filter(Boolean)),
+    ];
+    const uniquePaths = Array.from(new Set(paths)).slice(0, 3);
+    const pathText = uniquePaths.length ? `Confirmed paths: ${uniquePaths.join(', ')}` : '';
+    return [priorQuestion, pathText].filter(Boolean).join(' · ') || 'Session context is ready for follow-up questions.';
+  };
+
+  const renderSessionMessages = (session) => {
+    if (!sessionMessages) return;
+    const messages = session?.messages || [];
+    if (!messages.length) {
+      sessionMessages.innerHTML = '<div class="source-qa-empty">Start a chat to build a reusable investigation context.</div>';
+      return;
+    }
+    sessionMessages.innerHTML = messages.slice(-20).map((message) => {
+      const payload = message.payload || {};
+      const meta = message.role === 'assistant'
+        ? [payload.llm_provider ? providerLabel(payload.llm_provider) : '', payload.llm_model || '', payload.trace_id ? `trace ${payload.trace_id}` : ''].filter(Boolean).join(' · ')
+        : formatSessionTime(message.created_at);
+      const text = message.role === 'assistant'
+        ? (payload.structured_answer?.direct_answer || message.text || payload.summary || 'Answer completed.')
+        : message.text;
+      const citations = (payload.structured_answer?.citations || payload.matches || [])
+        .slice(0, 4)
+        .map((item) => typeof item === 'string' ? item : item.path)
+        .filter(Boolean);
+      return `
+        <article class="source-qa-message source-qa-message-${escapeHtml(message.role || 'assistant')}">
+          <div class="source-qa-message-head">
+            <strong>${message.role === 'user' ? 'You' : 'Assistant'}</strong>
+            <span>${escapeHtml(meta)}</span>
+          </div>
+          <p>${escapeHtml(text)}</p>
+          ${citations.length ? `<div class="source-qa-message-citations">${citations.map((item) => `<span>${escapeHtml(item)}</span>`).join('')}</div>` : ''}
+        </article>
+      `;
+    }).join('');
+    sessionMessages.scrollTop = sessionMessages.scrollHeight;
+  };
+
+  const applyActiveSession = (session) => {
+    activeSession = session || null;
+    activeSessionId = session?.id || '';
+    if (sessionTitle) sessionTitle.textContent = session?.title || 'New Source Code Chat';
+    if (sessionContext) sessionContext.textContent = summarizeSessionContext(session);
+    if (sessionProvider) sessionProvider.textContent = providerLabel(session?.llm_provider || selectedLlmProvider());
+    if (sessionScope) sessionScope.textContent = [session?.pm_team || pmTeam.value, session?.country || currentCountry()].filter(Boolean).join(' · ');
+    if (session?.last_context && typeof session.last_context === 'object') {
+      conversationContext = session.last_context;
+    } else if (!session) {
+      conversationContext = null;
+    }
+    renderSessionMessages(session);
+    renderSessionList();
+  };
+
+  const loadSessions = async () => {
+    if (!sessionsUrl) return;
+    try {
+      const payload = await fetch(sessionsUrl).then(readJson);
+      sourceSessions = payload.sessions || [];
+      if (activeSessionId && sourceSessions.some((item) => item.id === activeSessionId)) {
+        renderSessionList();
+        return;
+      }
+      if (!activeSessionId && sourceSessions.length) {
+        await loadSession(sourceSessions[0].id);
+        return;
+      }
+      renderSessionList();
+    } catch (_error) {
+      if (sessionList) sessionList.innerHTML = '<div class="source-qa-empty">Chat history could not be loaded.</div>';
+    }
+  };
+
+  const loadSession = async (sessionId) => {
+    if (!sessionsUrl || !sessionId) return null;
+    try {
+      const payload = await fetch(`${sessionsUrl}/${encodeURIComponent(sessionId)}`).then(readJson);
+      applyActiveSession(payload.session || null);
+      return payload.session || null;
+    } catch (error) {
+      if (queryStatus) queryStatus.textContent = error.message || 'Session could not be loaded.';
+      return null;
+    }
+  };
+
+  const createSession = async () => {
+    if (!sessionsUrl) return null;
+    const payload = await fetch(sessionsUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        pm_team: pmTeam.value,
+        country: currentCountry(),
+        llm_provider: selectedLlmProvider(),
+      }),
+    }).then(readJson);
+    const session = payload.session || null;
+    if (session) {
+      sourceSessions = [session, ...sourceSessions.filter((item) => item.id !== session.id)].slice(0, 30);
+      conversationContext = null;
+      applyActiveSession(session);
+    }
+    return session;
+  };
+
+  const ensureActiveSession = async () => {
+    if (activeSessionId) return activeSession;
+    return createSession();
   };
 
   const updateCountryVisibility = () => {
@@ -521,6 +685,16 @@
     pm_team: pmTeam.value,
     country: currentCountry(),
     question: questionOverride || questionInput.value,
+    trace_id: payload?.trace_id || '',
+    summary: payload?.summary || '',
+    answer: payload?.llm_answer || '',
+    rendered_answer: payload?.llm_answer || '',
+    llm_provider: payload?.llm_provider || '',
+    llm_model: payload?.llm_model || '',
+    llm_route: payload?.llm_route || {},
+    codex_cli_summary: payload?.codex_cli_summary || {},
+    codex_citation_validation: payload?.answer_claim_check?.codex_citation_validation || {},
+    codex_candidate_paths: (payload?.llm_route?.candidate_paths || []).slice(0, 30),
     repo_scope: Array.from(new Set((payload?.matches || []).map((match) => match.repo).filter(Boolean))).slice(0, 8),
     matches: (payload?.matches || []).slice(0, 8).map((match) => ({
       path: match.path,
@@ -528,6 +702,20 @@
       repo: match.repo,
       reason: match.reason,
       retrieval: match.retrieval,
+      trace_stage: match.trace_stage,
+      line_start: match.line_start,
+      line_end: match.line_end,
+      score: match.score,
+    })),
+    matches_snapshot: (payload?.matches || []).slice(0, 10).map((match) => ({
+      path: match.path,
+      repo: match.repo,
+      reason: match.reason,
+      retrieval: match.retrieval,
+      trace_stage: match.trace_stage,
+      line_start: match.line_start,
+      line_end: match.line_end,
+      score: match.score,
     })),
     trace_paths: (payload?.trace_paths || []).slice(0, 5),
     structured_answer: payload?.structured_answer || {},
@@ -939,10 +1127,12 @@
     const submittedQuestion = questionInput.value;
     renderPendingQuery(submittedQuestion, effectiveAnswerMode);
     try {
+      const session = await ensureActiveSession();
       const initialPayload = await fetch(queryUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          session_id: session?.id || '',
           pm_team: pmTeam.value,
           country: currentCountry(),
           question: submittedQuestion,
@@ -958,6 +1148,14 @@
         : initialPayload;
       lastPayload = payload;
       conversationContext = buildConversationContext(payload, submittedQuestion);
+      if (payload.session) {
+        activeSession = payload.session;
+        activeSessionId = payload.session.id || activeSessionId;
+        sourceSessions = [payload.session, ...sourceSessions.filter((item) => item.id !== payload.session.id)].slice(0, 30);
+        applyActiveSession(payload.session);
+      } else if (activeSessionId) {
+        await loadSession(activeSessionId);
+      }
       rememberLastQueryConfig(effectiveAnswerMode, selectedProvider);
       summary.textContent = payload.summary || 'Search completed.';
       if (payload.llm_retryable_error?.retryable) {
@@ -1034,14 +1232,37 @@
   pmTeam.addEventListener('change', () => {
     updateCountryVisibility();
     conversationContext = null;
+    if (sessionScope) sessionScope.textContent = [pmTeam.value, currentCountry()].filter(Boolean).join(' · ');
     renderSelectedConfig();
   });
   country.addEventListener('change', () => {
     conversationContext = null;
+    if (sessionScope) sessionScope.textContent = [pmTeam.value, currentCountry()].filter(Boolean).join(' · ');
     renderSelectedConfig();
   });
   answerMode?.addEventListener('change', updateAnswerModeState);
-  llmProvider?.addEventListener('change', updateAnswerModeState);
+  llmProvider?.addEventListener('change', () => {
+    updateAnswerModeState();
+    if (sessionProvider) sessionProvider.textContent = providerLabel(selectedLlmProvider());
+  });
+  newSessionButton?.addEventListener('click', async () => {
+    if (queryStatus) queryStatus.textContent = 'Starting a new chat...';
+    try {
+      await createSession();
+      if (questionInput) questionInput.value = '';
+      if (summary) summary.textContent = 'No question asked yet.';
+      if (results) results.innerHTML = '<div class="source-qa-empty">Ask a question to generate an answer. Retrieval details stay in the background unless Codex is unavailable.</div>';
+      renderUsageBadges({});
+      renderFallbackNotice({});
+      renderLlmAnswer({});
+      renderEvidenceSummary(null);
+      renderDebugTrace(null);
+      if (feedback) feedback.hidden = true;
+      if (queryStatus) queryStatus.textContent = 'New chat ready.';
+    } catch (error) {
+      if (queryStatus) queryStatus.textContent = error.message || 'Could not start a new chat.';
+    }
+  });
   saveButton?.addEventListener('click', saveConfig);
   syncButton?.addEventListener('click', syncRepos);
   queryButton?.addEventListener('click', queryCode);
@@ -1051,6 +1272,8 @@
 
   restoreLastQueryConfig();
   renderQuestionHistory();
+  applyActiveSession(null);
   updateAnswerModeState();
   loadConfig();
+  loadSessions();
 })();

@@ -18,7 +18,7 @@ from bpmis_jira_tool.source_code_qa import (
     VertexAISourceCodeQALLMProvider,
 )
 from bpmis_jira_tool.user_config import TEAM_PROFILE_DEFAULTS
-from bpmis_jira_tool.web import JobStore, create_app
+from bpmis_jira_tool.web import JobStore, SourceCodeQASessionStore, create_app
 from scripts.promote_source_code_qa_eval_candidates import promote_candidates
 from scripts.run_source_code_qa_evals import _build_fixture_repositories, _evaluate_case
 from scripts.source_code_qa_feedback_to_eval import build_eval_candidates
@@ -92,6 +92,9 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertIn(b"Ask The Codebase", teammate_response.data)
         self.assertNotIn(b"LLM Budget", teammate_response.data)
         self.assertIn(b"data-source-llm-provider", teammate_response.data)
+        self.assertIn(b"data-source-session-list", teammate_response.data)
+        self.assertIn(b"data-source-new-session", teammate_response.data)
+        self.assertIn(b"data-source-session-messages", teammate_response.data)
         self.assertIn(b"Codex", teammate_response.data)
         self.assertIn(b'value="gemini" disabled', teammate_response.data)
         self.assertIn(b"Vertex AI", teammate_response.data)
@@ -123,6 +126,78 @@ class SourceCodeQARouteTests(unittest.TestCase):
         payload = valid.get_json()
         self.assertEqual(payload["key"], "AF:All")
         self.assertEqual(payload["repositories"][0]["display_name"], "Repo One")
+
+    def test_source_code_qa_session_api_creates_lists_and_loads_session(self):
+        with self.app.test_client() as client:
+            self._login(client, "teammate@npt.sg")
+            created = client.post(
+                "/api/source-code-qa/sessions",
+                json={"pm_team": "AF", "country": "All", "llm_provider": "vertex_ai"},
+            )
+            self.assertEqual(created.status_code, 200)
+            session_payload = created.get_json()["session"]
+            listed = client.get("/api/source-code-qa/sessions")
+            loaded = client.get(f"/api/source-code-qa/sessions/{session_payload['id']}")
+
+        self.assertEqual(listed.status_code, 200)
+        self.assertEqual(loaded.status_code, 200)
+        self.assertEqual(listed.get_json()["sessions"][0]["id"], session_payload["id"])
+        self.assertEqual(loaded.get_json()["session"]["llm_provider"], "vertex_ai")
+
+    def test_query_api_uses_session_context_and_appends_exchange(self):
+        captured = {}
+
+        def fake_query(**kwargs):
+            captured.update(kwargs)
+            return {
+                "status": "ok",
+                "answer_mode": "auto",
+                "summary": "answer summary",
+                "llm_answer": "direct answer",
+                "llm_provider": "codex_cli_bridge",
+                "llm_model": "codex-cli",
+                "trace_id": "trace-123",
+                "structured_answer": {"direct_answer": "direct answer", "claims": [], "citations": [], "missing_evidence": [], "confidence": "high"},
+                "matches": [{"repo": "Repo", "path": "src/App.java", "line_start": 1, "line_end": 3, "score": 9, "reason": "hit"}],
+            }
+
+        with self.app.test_client() as client:
+            self._login(client, "teammate@npt.sg")
+            created = client.post("/api/source-code-qa/sessions", json={"pm_team": "AF", "country": "All", "llm_provider": "codex_cli_bridge"})
+            session_id = created.get_json()["session"]["id"]
+            store: SourceCodeQASessionStore = self.app.config["SOURCE_CODE_QA_SESSION_STORE"]
+            store.append_exchange(
+                session_id,
+                owner_email="teammate@npt.sg",
+                pm_team="AF",
+                country="All",
+                llm_provider="codex_cli_bridge",
+                question="first question",
+                result={"status": "ok", "summary": "first", "llm_answer": "first answer", "trace_id": "trace-1", "matches": []},
+                context={"question": "first question", "trace_id": "trace-1", "matches_snapshot": [{"path": "src/First.java"}]},
+            )
+            with patch("bpmis_jira_tool.source_code_qa.SourceCodeQAService.ensure_synced_today", return_value={"attempted": False, "status": "fresh"}), patch(
+                "bpmis_jira_tool.source_code_qa.SourceCodeQAService.query",
+                side_effect=fake_query,
+            ):
+                response = client.post(
+                    "/api/source-code-qa/query",
+                    json={
+                        "session_id": session_id,
+                        "pm_team": "AF",
+                        "country": "All",
+                        "question": "follow up",
+                        "answer_mode": "auto",
+                        "llm_provider": "codex_cli_bridge",
+                    },
+                )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(captured["conversation_context"]["trace_id"], "trace-1")
+        self.assertEqual(payload["session_id"], session_id)
+        self.assertEqual(payload["session"]["message_count"], 4)
+        self.assertEqual(payload["session"]["last_context"]["question"], "follow up")
 
     def test_query_empty_config_is_controlled(self):
         with self.app.test_client() as client:
@@ -1065,7 +1140,18 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             "继续看下游影响",
             {
                 "key": "AF:All",
+                "trace_id": "trace-prev",
                 "question": "what is impacted if IssueService createIssue changes",
+                "answer": "Previous answer mentions IssueRepository.",
+                "codex_candidate_paths": [
+                    {
+                        "repo": "Portal Repo",
+                        "repo_root": "/tmp/portal",
+                        "path": "repository/IssueRepository.java",
+                        "line_start": 3,
+                        "line_end": 5,
+                    }
+                ],
                 "matches": [],
                 "trace_paths": [],
                 "structured_answer": {},
@@ -1084,6 +1170,72 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertTrue(followup["used"])
         self.assertIn("issuerepository", augmented)
         self.assertIn("issue_table", augmented)
+        self.assertEqual(followup["trace_id"], "trace-prev")
+        self.assertIn("Previous answer", followup["answer"])
+        self.assertEqual(followup["codex_candidate_paths"][0]["path"], "repository/IssueRepository.java")
+
+    def test_codex_followup_terms_do_not_affect_non_codex_provider(self):
+        augmented, followup = self.service._apply_conversation_context(
+            "continue with this",
+            {
+                "key": "AF:All",
+                "question": "previous Codex question",
+                "matches": [],
+                "trace_paths": [],
+                "structured_answer": {},
+                "answer_contract": {},
+                "evidence_pack": {},
+                "codex_candidate_paths": [
+                    {
+                        "repo": "Portal Repo",
+                        "repo_root": "/tmp/portal",
+                        "path": "repository/CodexOnlyRepository.java",
+                        "reason": "previous Codex-only path",
+                    }
+                ],
+                "codex_citation_validation": {
+                    "direct_file_refs": [{"path": "repository/CodexOnlyRepository.java"}],
+                },
+            },
+            current_key="AF:All",
+        )
+
+        self.assertFalse(followup["used"])
+        self.assertEqual(augmented, "continue with this")
+
+    def test_codex_followup_terms_are_used_for_codex_provider(self):
+        service = SourceCodeQAService(
+            data_root=Path(self.temp_dir.name),
+            team_profiles=TEAM_PROFILE_DEFAULTS,
+            llm_provider="codex_cli_bridge",
+            gitlab_token="secret-token",
+            git_timeout_seconds=5,
+            max_file_bytes=200_000,
+        )
+        augmented, followup = service._apply_conversation_context(
+            "continue with this",
+            {
+                "key": "AF:All",
+                "question": "previous Codex question",
+                "matches": [],
+                "trace_paths": [],
+                "structured_answer": {},
+                "answer_contract": {},
+                "evidence_pack": {},
+                "codex_candidate_paths": [
+                    {
+                        "repo": "Portal Repo",
+                        "repo_root": "/tmp/portal",
+                        "path": "repository/CodexOnlyRepository.java",
+                        "reason": "previous Codex-only path",
+                    }
+                ],
+            },
+            current_key="AF:All",
+        )
+
+        self.assertTrue(followup["used"])
+        self.assertIn("codexonlyrepository", augmented)
 
     def test_followup_context_does_not_cross_repository_scope(self):
         augmented, followup = self.service._apply_conversation_context(
@@ -6321,6 +6473,15 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             followup_context={
                 "question": "previous question",
                 "answer": "previous answer",
+                "codex_candidate_paths": [
+                    {"repo": "Portal Repo", "repo_root": str(repo_path), "path": "service/PriorService.java", "line_start": 5, "line_end": 9}
+                ],
+                "codex_citation_validation": {
+                    "status": "ok",
+                    "cited_path_count": 1,
+                    "direct_file_refs": [{"path": "service/PriorService.java", "line_start": 5, "line_end": 9}],
+                },
+                "codex_cli_summary": {"prompt_mode": "codex_investigation_brief_v1", "candidate_path_count": 1, "repair_attempted": False},
                 "matches_snapshot": [{"repo": "Portal Repo", "path": "repository/IssueRepository.java", "line_start": 1, "line_end": 3}],
             },
         )
@@ -6330,7 +6491,45 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertIn("path=repository/IssueRepository.java", brief)
         self.assertIn("Follow-up context:", brief)
         self.assertIn("previous question", brief)
+        self.assertIn("Previous Codex candidate paths:", brief)
+        self.assertIn("service/PriorService.java", brief)
+        self.assertIn("Previous citation validation: status=ok", brief)
+        self.assertIn("Previous Codex run: prompt_mode=codex_investigation_brief_v1", brief)
         self.assertNotIn("x" * 100, brief)
+
+    def test_codex_followup_candidate_paths_are_carried_forward(self):
+        entry = RepositoryEntry("Portal Repo", "https://git.example.com/team/portal.git")
+        key = "AF:All"
+        repo_path = self.service._repo_path(key, entry)
+        current_file = repo_path / "controller" / "IssueController.java"
+        prior_file = repo_path / "repository" / "IssueRepository.java"
+        current_file.parent.mkdir(parents=True)
+        prior_file.parent.mkdir(parents=True)
+        current_file.write_text("class IssueController {}\n", encoding="utf-8")
+        prior_file.write_text("class IssueRepository {}\n", encoding="utf-8")
+        current = self.service._codex_candidate_paths(
+            entries=[entry],
+            key=key,
+            matches=[{"repo": "Portal Repo", "path": "controller/IssueController.java", "line_start": 1, "line_end": 1}],
+        )
+
+        merged = self.service._merge_codex_followup_candidate_paths(
+            current,
+            {
+                "codex_candidate_paths": [
+                    {
+                        "repo": "Portal Repo",
+                        "repo_root": str(repo_path),
+                        "path": "repository/IssueRepository.java",
+                        "line_start": 1,
+                        "line_end": 1,
+                    }
+                ]
+            },
+        )
+
+        self.assertEqual([item["path"] for item in merged], ["controller/IssueController.java", "repository/IssueRepository.java"])
+        self.assertEqual(merged[1]["retrieval"], "previous_codex_context")
 
     def test_codex_citation_validation_accepts_direct_file_reference(self):
         entry = RepositoryEntry("Portal Repo", "https://git.example.com/team/portal.git")

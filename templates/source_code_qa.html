@@ -9,6 +9,7 @@
     data-sync-url="{{ url_for('source_code_qa_sync_api') }}"
     data-query-url="{{ url_for('source_code_qa_query_api') }}"
     data-feedback-url="{{ url_for('source_code_qa_feedback_api') }}"
+    data-sessions-url="{{ url_for('source_code_qa_sessions_api') }}"
     data-can-manage="{{ 'true' if can_manage_source_code_qa else 'false' }}"
     data-options='{{ options | tojson }}'
   >
@@ -82,50 +83,80 @@
   </div>
 
   <section class="workspace-panel source-qa-panel is-active" data-tab-panel="ask-search">
-    <section class="grid source-qa-workspace">
-      <article class="panel panel-wide">
-        <div class="panel-head">
+    <section class="source-qa-chat-shell">
+      <aside class="source-qa-session-sidebar" aria-label="Source Code Q&A chat history">
+        <div class="source-qa-session-sidebar-head">
+          <div>
+            <p class="eyebrow">History</p>
+            <h2>Chats</h2>
+          </div>
+          <button class="button button-secondary" type="button" data-source-new-session>New Chat</button>
+        </div>
+        <div class="source-qa-session-list" data-source-session-list>
+          <div class="source-qa-empty">No chats yet.</div>
+        </div>
+      </aside>
+
+      <section class="source-qa-chat-main">
+        <article class="panel panel-wide source-qa-session-context-card">
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow">Current Session</p>
+              <h2 data-source-session-title>New Source Code Chat</h2>
+              <p class="card-help" data-source-session-context>Choose Codex or Vertex, then ask a question. Codex can reuse confirmed files from this session.</p>
+            </div>
+            <div class="source-qa-metadata">
+              <span class="field-badge source-qa-meta-badge" data-source-session-provider>Codex</span>
+              <span class="field-badge source-qa-meta-badge" data-source-session-scope>All</span>
+            </div>
+          </div>
+          <div class="source-qa-session-messages" data-source-session-messages>
+            <div class="source-qa-empty">Start a chat to build a reusable investigation context.</div>
+          </div>
+        </article>
+
+        <section class="panel panel-wide">
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow">Results</p>
+              <h2>Answer</h2>
+              <p class="card-help" data-source-summary>No question asked yet.</p>
+            </div>
+            <div class="source-qa-metadata">
+              <span class="field-badge source-qa-meta-badge" data-source-active-cache hidden>live</span>
+              <span class="field-badge source-qa-meta-badge" data-source-active-usage hidden>tokens</span>
+            </div>
+          </div>
+          <div class="source-qa-fallback-notice" data-source-fallback-notice hidden></div>
+          <div class="source-qa-llm-answer" data-source-llm-answer hidden></div>
+          <div class="source-qa-evidence-summary" data-source-evidence-summary hidden></div>
+          <div class="source-qa-debug-trace" data-source-debug-trace hidden></div>
+          <div class="source-qa-feedback" data-source-feedback hidden>
+            <button class="button button-secondary" type="button" data-source-feedback-rating="useful">Useful</button>
+            <button class="button button-secondary" type="button" data-source-feedback-rating="wrong_file">Wrong File</button>
+            <button class="button button-secondary" type="button" data-source-feedback-rating="too_vague">Too Vague</button>
+            <button class="button button-secondary" type="button" data-source-feedback-rating="needs_deeper_trace">Needs Deeper Trace</button>
+            <span class="microcopy" data-source-feedback-status></span>
+          </div>
+          <div class="source-qa-results" data-source-results>
+            <div class="source-qa-empty">Ask a question to generate an answer. Retrieval details stay in the background unless Codex is unavailable.</div>
+          </div>
+        </section>
+
+        <article class="panel panel-wide source-qa-composer">
           <div>
             <p class="eyebrow">Question</p>
             <h2>Ask The Codebase</h2>
             <p class="card-help">Use concrete terms: API path, class name, table, field, error code, or business keyword.</p>
           </div>
-        </div>
-        <textarea data-source-question rows="6" placeholder="Example: where is Jira issue batch creation handled?"></textarea>
-        <div class="button-row source-qa-actions">
-          <button class="button" type="button" data-source-query>Search Code</button>
-          <span class="microcopy" data-source-query-status>Ready.</span>
-        </div>
-        <div class="source-qa-history" data-source-question-history hidden></div>
-      </article>
-    </section>
-
-    <section class="panel panel-wide">
-        <div class="panel-head">
-          <div>
-            <p class="eyebrow">Results</p>
-            <h2>Answer</h2>
-            <p class="card-help" data-source-summary>No question asked yet.</p>
+          <textarea data-source-question rows="4" placeholder="Example: where is Jira issue batch creation handled?"></textarea>
+          <div class="button-row source-qa-actions">
+            <button class="button" type="button" data-source-query>Search Code</button>
+            <span class="microcopy" data-source-query-status>Ready.</span>
           </div>
-        <div class="source-qa-metadata">
-          <span class="field-badge source-qa-meta-badge" data-source-active-cache hidden>live</span>
-          <span class="field-badge source-qa-meta-badge" data-source-active-usage hidden>tokens</span>
-        </div>
-      </div>
-      <div class="source-qa-fallback-notice" data-source-fallback-notice hidden></div>
-      <div class="source-qa-llm-answer" data-source-llm-answer hidden></div>
-      <div class="source-qa-evidence-summary" data-source-evidence-summary hidden></div>
-      <div class="source-qa-debug-trace" data-source-debug-trace hidden></div>
-      <div class="source-qa-feedback" data-source-feedback hidden>
-        <button class="button button-secondary" type="button" data-source-feedback-rating="useful">Useful</button>
-        <button class="button button-secondary" type="button" data-source-feedback-rating="wrong_file">Wrong File</button>
-        <button class="button button-secondary" type="button" data-source-feedback-rating="too_vague">Too Vague</button>
-        <button class="button button-secondary" type="button" data-source-feedback-rating="needs_deeper_trace">Needs Deeper Trace</button>
-        <span class="microcopy" data-source-feedback-status></span>
-      </div>
-      <div class="source-qa-results" data-source-results>
-        <div class="source-qa-empty">Ask a question to generate an answer. Retrieval details stay in the background unless Codex is unavailable.</div>
-      </div>
+          <div class="source-qa-history" data-source-question-history hidden></div>
+        </article>
+      </section>
     </section>
   </section>
 
