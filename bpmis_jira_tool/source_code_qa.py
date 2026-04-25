@@ -2727,23 +2727,32 @@ class SourceCodeQAService:
         index_path = self._index_path(repo_path)
         if not index_path.exists():
             return {"state": "missing", "path": str(index_path), "schema_compatible": False, "queryable": False}
-        fingerprint = self._repo_fingerprint(repo_path)
         git_revision = self._repo_git_revision(repo_path)
         try:
             with sqlite3.connect(index_path) as connection:
                 metadata = dict(connection.execute("select key, value from metadata").fetchall())
         except sqlite3.Error:
             return {"state": "stale", "path": str(index_path), "schema_compatible": False, "queryable": False}
-        expected = {
-            "version": str(CODE_INDEX_VERSION),
-            "file_count": str(fingerprint["file_count"]),
-            "latest_mtime_ns": str(fingerprint["latest_mtime_ns"]),
-            "total_size": str(fingerprint["total_size"]),
-        }
         index_version = int(str(metadata.get("version") or "0")) if str(metadata.get("version") or "0").isdigit() else 0
         schema_compatible = index_version == CODE_INDEX_VERSION
         queryable = index_version >= 28
-        state = "ready" if all(metadata.get(key) == value for key, value in expected.items()) else "stale"
+        state = "stale"
+        if (
+            schema_compatible
+            and git_revision
+            and metadata.get("git_revision") == git_revision
+            and self._repo_worktree_clean(repo_path)
+        ):
+            state = "ready"
+        else:
+            fingerprint = self._repo_fingerprint(repo_path)
+            expected = {
+                "version": str(CODE_INDEX_VERSION),
+                "file_count": str(fingerprint["file_count"]),
+                "latest_mtime_ns": str(fingerprint["latest_mtime_ns"]),
+                "total_size": str(fingerprint["total_size"]),
+            }
+            state = "ready" if all(metadata.get(key) == value for key, value in expected.items()) else "stale"
         return {
             "state": state,
             "path": str(index_path),
@@ -2777,6 +2786,20 @@ class SourceCodeQAService:
             "semantic_fts_enabled": metadata.get("semantic_fts_enabled") == "1",
             "updated_at": metadata.get("updated_at"),
         }
+
+    @staticmethod
+    def _repo_worktree_clean(repo_path: Path) -> bool:
+        try:
+            completed = subprocess.run(
+                ["git", "-C", str(repo_path), "status", "--porcelain", "--untracked-files=all"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False
+        return completed.returncode == 0 and not (completed.stdout or "").strip()
 
     def _repo_fingerprint(self, repo_path: Path) -> dict[str, int]:
         file_count = 0
@@ -5590,6 +5613,14 @@ class SourceCodeQAService:
         trace_stage_bonus = 90 if trace_stage == "two_hop" or trace_stage == "query_decomposition" or trace_stage.startswith(TOOL_LOOP_TRACE_PREFIX) or trace_stage.startswith("agent_trace") or trace_stage.startswith("agent_plan") or trace_stage == QUALITY_GATE_TRACE_STAGE else 0
         normalized_focus_terms = [term.lower() for term in (focus_terms or []) if term]
         query_terms = list(dict.fromkeys([*tokens, *normalized_focus_terms]))
+        large_index = self._is_large_index_file(index_path)
+        structure_term_limit = 8 if trace_stage == "direct" or not large_index else 2
+        structure_query_terms = self._structure_lookup_query_terms(
+            tokens,
+            normalized_focus_terms,
+            large_index=large_index,
+            limit=structure_term_limit,
+        )
         intent = self._question_retrieval_features(question, request_cache=request_cache).get("intent") or {}
         simple_intent = (
             any((intent or {}).get(key) for key in ("rule_logic", "api", "config"))
@@ -5615,6 +5646,7 @@ class SourceCodeQAService:
                 focus_terms=normalized_focus_terms,
                 intent=intent,
                 request_cache=request_cache,
+                structure_term_limit=structure_term_limit,
             )
             file_rows = index_rows["files"]
             file_rows_by_path = index_rows["files_by_path"]
@@ -5648,7 +5680,7 @@ class SourceCodeQAService:
                         "best_score": path_score + symbol_score + repo_score + trace_stage_bonus,
                         "structure_hits": [],
                     }
-            for term in query_terms:
+            for term in structure_query_terms:
                 if len(term) < 3:
                     continue
                 for row in self._cached_structure_like_rows(
@@ -5933,6 +5965,47 @@ class SourceCodeQAService:
             rows_cache[cache_key] = payload
         return payload
 
+    @staticmethod
+    def _is_large_index_file(index_path: Path) -> bool:
+        try:
+            return index_path.stat().st_size >= 100_000_000
+        except OSError:
+            return False
+
+    @staticmethod
+    def _structure_lookup_query_terms(
+        tokens: list[str],
+        focus_terms: list[str] | None,
+        *,
+        large_index: bool,
+        limit: int,
+    ) -> list[str]:
+        normalized_focus_terms = [str(term or "").strip().lower() for term in (focus_terms or []) if str(term or "").strip()]
+        focus_term_set = set(normalized_focus_terms)
+        ordered_terms = list(dict.fromkeys([*normalized_focus_terms, *(str(token or "").strip().lower() for token in tokens)]))
+        terms: list[str] = []
+        plain_terms_kept = 0
+        for term in ordered_terms:
+            normalized = str(term or "").strip().lower()
+            if not normalized or normalized in terms:
+                continue
+            if len(normalized) < 3 or normalized in STOPWORDS or normalized in LOW_VALUE_CALL_SYMBOLS:
+                continue
+            if not large_index:
+                terms.append(normalized)
+            else:
+                has_separator = any(separator in normalized for separator in ("_", ".", "/", "-"))
+                is_focus_term = normalized in focus_term_set
+                meaningful_plain_term = 4 <= len(normalized) <= 18 and normalized not in LOW_VALUE_FOCUS_TERMS
+                if has_separator or is_focus_term:
+                    terms.append(normalized)
+                elif meaningful_plain_term and plain_terms_kept < 4:
+                    terms.append(normalized)
+                    plain_terms_kept += 1
+            if len(terms) >= max(1, int(limit or 16)):
+                break
+        return terms
+
     def _targeted_index_rows(
         self,
         connection: sqlite3.Connection,
@@ -5942,12 +6015,13 @@ class SourceCodeQAService:
         focus_terms: list[str],
         intent: dict[str, Any],
         request_cache: dict[str, Any] | None = None,
+        structure_term_limit: int = 16,
     ) -> dict[str, Any]:
         try:
             indexed_file_count = int(connection.execute("select count(*) from files").fetchone()[0] or 0)
         except sqlite3.Error:
             indexed_file_count = 0
-        large_index = indexed_file_count >= 2000
+        large_index = indexed_file_count >= 2000 or self._is_large_index_file(index_path)
         focus_term_set = {str(term).lower() for term in focus_terms}
         query_terms = []
         for term in list(dict.fromkeys([*(str(token).lower() for token in tokens), *focus_term_set])):
@@ -5963,6 +6037,12 @@ class SourceCodeQAService:
             query_terms.append(term)
             if len(query_terms) >= 24:
                 break
+        structure_query_terms = self._structure_lookup_query_terms(
+            query_terms,
+            focus_terms,
+            large_index=large_index,
+            limit=structure_term_limit,
+        )
         simple_intent = (
             any((intent or {}).get(key) for key in ("rule_logic", "api", "config"))
             and not any(
@@ -6122,7 +6202,7 @@ class SourceCodeQAService:
                 add_file_rows(connection.execute("select * from files where lower_path like ? order by path limit 40", (pattern,)).fetchall())
             except sqlite3.Error:
                 continue
-        for term in query_terms:
+        for term in structure_query_terms:
             for table, lower_column in (("definitions", "lower_name"), ("references_index", "lower_target")):
                 for row in self._cached_structure_like_rows(
                     connection,
@@ -6491,7 +6571,15 @@ class SourceCodeQAService:
                     if key not in seen:
                         rows.append(row)
                         seen.add(key)
-            if len(rows) < max(8, int(limit or 40) // 3):
+            large_index = self._is_large_index_file(index_path)
+            allow_contains_lookup = (
+                not large_index
+                or (
+                    len(normalized) >= 12
+                    and any(separator in normalized for separator in ("_", ".", "/", "-"))
+                )
+            )
+            if allow_contains_lookup and len(rows) < max(8, int(limit or 40) // 3):
                 seen = {(str(row["file_path"]), int(row["line_no"]), str(row[lower_column])) for row in rows}
                 contains_rows = connection.execute(
                     f"select * from {table} where {lower_column} like ? limit ?",
@@ -9720,27 +9808,39 @@ class SourceCodeQAService:
 
     @staticmethod
     def _trace_path_edges_for_seed(connection: sqlite3.Connection, seed_path: str) -> list[dict[str, Any]]:
-        rows = connection.execute(
-            """
-            select * from flow_edges
-            where from_file = ? or to_file = ?
-            order by
-                case edge_kind
-                    when 'sql_table' then 0
-                    when 'client' then 1
-                    when 'mapper' then 2
-                    when 'dao' then 3
-                    when 'repository' then 4
-                    when 'field_population' then 5
-                    when 'service' then 6
-                    when 'route' then 7
-                    else 7
-                end,
-                from_line
-            limit 30
-            """,
-            (seed_path, seed_path),
-        ).fetchall()
+        edge_rank = {
+            "sql_table": 0,
+            "client": 1,
+            "mapper": 2,
+            "dao": 3,
+            "repository": 4,
+            "field_population": 5,
+            "service": 6,
+            "route": 7,
+        }
+        rows: list[sqlite3.Row] = []
+        seen: set[tuple[str, int, str, int, str]] = set()
+        for clause, params in (
+            ("from_file = ?", (seed_path,)),
+            ("to_file = ? and from_file <> ?", (seed_path, seed_path)),
+        ):
+            for row in connection.execute(
+                f"select * from flow_edges where {clause} limit 30",
+                params,
+            ).fetchall():
+                key = (
+                    str(row["from_file"] or ""),
+                    int(row["from_line"] or 0),
+                    str(row["to_file"] or ""),
+                    int(row["to_line"] or 0),
+                    str(row["edge_kind"] or ""),
+                )
+                if key in seen:
+                    continue
+                rows.append(row)
+                seen.add(key)
+        rows.sort(key=lambda row: (edge_rank.get(str(row["edge_kind"] or ""), 7), int(row["from_line"] or 0)))
+        rows = rows[:30]
         edges: list[dict[str, Any]] = []
         for row in rows:
             edge = dict(row)
