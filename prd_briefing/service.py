@@ -338,8 +338,7 @@ class PRDBriefingService:
         self.walkthrough_prewarm_enabled = walkthrough_prewarm_enabled
 
     def create_session(self, *, owner_key: str, page_ref: str, mode: str) -> dict[str, Any]:
-        placeholder_session_id = "pending"
-        page = self.confluence.ingest_page(page_ref, placeholder_session_id)
+        page = self.confluence.ingest_page(page_ref, "pending")
         session_id = self.store.create_session(
             owner_key=owner_key,
             confluence_page_id=page.page_id,
@@ -348,12 +347,11 @@ class PRDBriefingService:
             mode=mode,
             title=page.title,
         )
-        page = self.confluence.ingest_page(page_ref, session_id)
         source_id = self.store.upsert_source(
             owner_key=owner_key,
             session_id=session_id,
             source_type="prd",
-            external_id=page.page_id,
+            external_id=f"{page.page_id}:{session_id}",
             title=page.title,
             language=page.language,
             source_url=page.source_url,
@@ -1000,90 +998,6 @@ class PRDBriefingService:
         sections: list[dict[str, Any]],
     ) -> dict[str, Any]:
         prioritized_sections = select_sections_for_overview(sections)
-        section_digest = [
-            {
-                "section_path": section["section_path"],
-                "content_excerpt": truncate_for_prompt(section.get("content", ""), 1200),
-            }
-            for section in prioritized_sections[:10]
-        ]
-        if self.text_client.is_configured():
-            try:
-                model_id = str(getattr(self.text_client, "model_id", getattr(self.openai_client, "chat_model", "text_model")))
-                payload = json.dumps(
-                    {
-                        "title": session["title"],
-                        "section_digest": section_digest,
-                    },
-                    ensure_ascii=False,
-                    sort_keys=True,
-                )
-                cached = self.store.get_cached_script(
-                    owner_key=owner_key,
-                    audience=DEVELOPER_AUDIENCE,
-                    model_id=model_id,
-                    prompt_version=SESSION_BRIEF_PROMPT_VERSION,
-                    section_payload=payload,
-                )
-                if cached:
-                    parsed_cached = parse_developer_overview_payload(cached.strip())
-                    if parsed_cached.get("overview"):
-                        return parsed_cached
-                legacy_cached = self.store.get_cached_script_any_model(
-                    owner_key=owner_key,
-                    audience=DEVELOPER_AUDIENCE,
-                    prompt_version=SESSION_BRIEF_PROMPT_VERSION,
-                    section_payload=payload,
-                )
-                if legacy_cached:
-                    parsed_legacy = parse_developer_overview_payload(legacy_cached.strip())
-                    if parsed_legacy.get("overview"):
-                        self.store.cache_script(
-                            owner_key=owner_key,
-                            audience=DEVELOPER_AUDIENCE,
-                            model_id=model_id,
-                            prompt_version=SESSION_BRIEF_PROMPT_VERSION,
-                            section_payload=payload,
-                            script=legacy_cached,
-                        )
-                        return parsed_legacy
-                system_prompt = (
-                    "你在帮中国开发团队快速理解一份英文 PRD。"
-                    "请基于提供的 PRD 细节，产出高质量、自然、全中文的开发摘要。"
-                    "目标不是翻译全文，而是帮助开发快速抓住：为什么要做、主要在改什么、关键流程和规则是什么、实现时最要注意什么。"
-                    "不要泛泛而谈，不要复述 PRD 标题，不要输出列表之外的额外解释。"
-                    "除非是页面名、按钮名、Tab 名、字段名本身来自 PRD，否则尽量不要混用英文。"
-                    "如果必须保留英文术语，也只保留最关键的那 1 到 3 个。"
-                    "语气要像 PM 在跟开发做需求 walkthrough，讲重点、讲流转、讲规则、讲实现关注点。"
-                    "返回 JSON。"
-                )
-                user_prompt = (
-                    f"PRD 标题：{session['title']}\n\n"
-                    f"相关 section 摘要：\n{payload}\n\n"
-                    "请返回 JSON，对象里只有两个 key：background_goal 和 implementation_overview。\n"
-                    "要求：\n"
-                    "1. background_goal：2 到 4 句，全中文，讲清楚业务背景、为什么要做、这次需求想解决什么问题。\n"
-                    "2. implementation_overview：8 到 12 句，全中文，详细讲清楚关键页面、关键操作、状态变化、字段规则、默认值、显示条件、提交或审批逻辑、模板或页面之间的依赖关系，以及开发实现时尤其要注意的地方。\n"
-                    "3. 两段都不要泛泛而谈，要尽量基于实际 PRD 细节。\n"
-                    "4. 除非是 PRD 原文中的必要页面名、按钮名或字段名，否则尽量不要夹英文。\n"
-                    "5. 不要输出 markdown，不要输出代码块。"
-                )
-                summary = self.text_client.create_answer(system_prompt=system_prompt, user_prompt=user_prompt).strip()
-                summary = strip_code_fences(summary)
-                parsed_summary = parse_developer_overview_payload(summary)
-                if not parsed_summary.get("overview"):
-                    raise RuntimeError("Text model returned an invalid developer overview payload.")
-                self.store.cache_script(
-                    owner_key=owner_key,
-                    audience=DEVELOPER_AUDIENCE,
-                    model_id=model_id,
-                    prompt_version=SESSION_BRIEF_PROMPT_VERSION,
-                    section_payload=payload,
-                    script=summary,
-                )
-                return parsed_summary
-            except Exception:  # noqa: BLE001
-                pass
         return build_two_part_fallback_overview(session["title"], prioritized_sections)
 
 
