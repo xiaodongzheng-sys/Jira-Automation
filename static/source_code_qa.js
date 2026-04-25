@@ -218,17 +218,16 @@
 
   const updateAnswerModeState = () => {
     const answerModeValue = answerMode?.value || 'auto';
-    const llmSelected = answerModeValue !== 'retrieval_only';
+    const llmSelected = answerModeValue !== 'retrieval_only' && llmReady;
     if (queryButton) {
       queryButton.textContent = llmSelected ? 'Search + Generate Answer' : 'Search Code';
     }
     if (queryStatus) {
-      if (answerModeValue === 'gemini_flash' && !llmReady) {
-        queryStatus.textContent = 'LLM mode is not configured on the server yet.';
+      if (answerModeValue !== 'retrieval_only' && !llmReady) {
+        const provider = llmPolicy.provider?.provider || 'LLM';
+        queryStatus.textContent = `${provider} is unavailable; code search will still run.`;
       } else if (!llmSelected) {
         queryStatus.textContent = 'Ready.';
-      } else if (answerModeValue === 'auto' && !llmReady) {
-        queryStatus.textContent = 'Auto mode will use code-search results until LLM credentials are configured.';
       }
     }
   };
@@ -760,12 +759,9 @@
 
   const queryCode = async () => {
     const selectedAnswerMode = answerMode?.value || 'auto';
-    if (selectedAnswerMode === 'gemini_flash' && !llmReady) {
-      queryStatus.textContent = 'LLM mode is not configured on the server yet.';
-      return;
-    }
-    if (activeMode) activeMode.textContent = selectedAnswerMode;
-    queryStatus.textContent = selectedAnswerMode !== 'retrieval_only'
+    const effectiveAnswerMode = selectedAnswerMode !== 'retrieval_only' && !llmReady ? 'retrieval_only' : selectedAnswerMode;
+    if (activeMode) activeMode.textContent = effectiveAnswerMode;
+    queryStatus.textContent = effectiveAnswerMode !== 'retrieval_only'
       ? 'Searching local code and asking LLM...'
       : 'Searching local code index...';
     try {
@@ -776,17 +772,17 @@
           pm_team: pmTeam.value,
           country: currentCountry(),
           question: questionInput.value,
-          answer_mode: selectedAnswerMode,
+          answer_mode: effectiveAnswerMode,
           llm_budget_mode: 'auto',
           conversation_context: conversationContext,
         }),
       }).then(readJson);
       lastPayload = payload;
       conversationContext = buildConversationContext(payload);
-      rememberLastQueryConfig(selectedAnswerMode);
+      rememberLastQueryConfig(effectiveAnswerMode);
       summary.textContent = payload.summary || 'Search completed.';
       queryStatus.textContent = payload.status === 'ok' ? 'Search completed.' : payload.status;
-      if (activeMode) activeMode.textContent = payload.answer_mode || selectedAnswerMode;
+      if (activeMode) activeMode.textContent = payload.answer_mode || effectiveAnswerMode;
       renderUsageBadges(payload);
       renderFallbackNotice(payload);
       renderStatus(payload.repo_status || []);
