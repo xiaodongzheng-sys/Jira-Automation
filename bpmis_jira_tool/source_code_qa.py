@@ -1629,6 +1629,50 @@ class SourceCodeQAService:
             self._finish_sync_job(key, job["job_id"], status="failed", results=[])
             raise
 
+    def ensure_synced_today(self, *, pm_team: str, country: str) -> dict[str, Any]:
+        key = self.mapping_key(pm_team, country)
+        entries = self._load_entries_for_key(key)
+        if not entries:
+            return {"attempted": False, "status": "empty_config", "reason": "no repositories configured", "key": key}
+        repo_status = self.repo_status(key)
+        freshness = self._index_freshness_payload(repo_status)
+        today = datetime.now().astimezone().date()
+        newest_indexed_at = str(freshness.get("newest_indexed_at") or "").strip()
+        synced_today = False
+        if newest_indexed_at:
+            try:
+                synced_today = datetime.fromisoformat(newest_indexed_at).astimezone().date() == today
+            except ValueError:
+                synced_today = False
+        needs_sync = freshness.get("status") != "fresh" or not synced_today
+        if not needs_sync:
+            return {
+                "attempted": False,
+                "status": "fresh",
+                "reason": "already synced today",
+                "key": key,
+                "index_freshness": freshness,
+            }
+        if not self.gitlab_token:
+            return {
+                "attempted": False,
+                "status": "skipped",
+                "reason": "SOURCE_CODE_QA_GITLAB_TOKEN is not configured",
+                "key": key,
+                "index_freshness": freshness,
+            }
+        try:
+            result = self.sync(pm_team=pm_team, country=country)
+        except ToolError as error:
+            return {
+                "attempted": True,
+                "status": "failed",
+                "reason": str(error),
+                "key": key,
+                "index_freshness": freshness,
+            }
+        return {"attempted": True, "status": str(result.get("status") or "ok"), "reason": "synced before query", "key": key, "sync": result}
+
     def query(
         self,
         *,

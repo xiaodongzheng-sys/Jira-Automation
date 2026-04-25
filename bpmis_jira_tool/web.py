@@ -708,7 +708,12 @@ def create_app() -> Flask:
             return access_gate
         payload = request.get_json(silent=True) or {}
         try:
-            result = _build_source_code_qa_service().query(
+            service = _build_source_code_qa_service()
+            auto_sync = service.ensure_synced_today(
+                pm_team=str(payload.get("pm_team") or ""),
+                country=str(payload.get("country") or ""),
+            )
+            result = service.query(
                 pm_team=str(payload.get("pm_team") or ""),
                 country=str(payload.get("country") or ""),
                 question=str(payload.get("question") or ""),
@@ -716,6 +721,7 @@ def create_app() -> Flask:
                 llm_budget_mode="auto",
                 conversation_context=payload.get("conversation_context") if isinstance(payload.get("conversation_context"), dict) else None,
             )
+            result["auto_sync"] = auto_sync
             return jsonify(result)
         except ToolError as error:
             return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST

@@ -132,7 +132,10 @@ class SourceCodeQARouteTests(unittest.TestCase):
             captured.update(kwargs)
             return {"status": "ok", "answer_mode": "retrieval_only", "matches": []}
 
-        with patch("bpmis_jira_tool.source_code_qa.SourceCodeQAService.query", side_effect=fake_query):
+        with patch("bpmis_jira_tool.source_code_qa.SourceCodeQAService.query", side_effect=fake_query), patch(
+            "bpmis_jira_tool.source_code_qa.SourceCodeQAService.ensure_synced_today",
+            return_value={"attempted": False, "status": "fresh"},
+        ) as ensure_synced:
             with self.app.test_client() as client:
                 self._login(client, "teammate@npt.sg")
                 response = client.post(
@@ -142,6 +145,8 @@ class SourceCodeQARouteTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(captured["llm_budget_mode"], "auto")
+        ensure_synced.assert_called_once()
+        self.assertEqual(response.get_json()["auto_sync"]["status"], "fresh")
 
     def test_query_api_ignores_client_llm_budget_selection(self):
         captured = {}
@@ -150,7 +155,10 @@ class SourceCodeQARouteTests(unittest.TestCase):
             captured.update(kwargs)
             return {"status": "ok", "answer_mode": "auto", "matches": []}
 
-        with patch("bpmis_jira_tool.source_code_qa.SourceCodeQAService.query", side_effect=fake_query):
+        with patch("bpmis_jira_tool.source_code_qa.SourceCodeQAService.query", side_effect=fake_query), patch(
+            "bpmis_jira_tool.source_code_qa.SourceCodeQAService.ensure_synced_today",
+            return_value={"attempted": False, "status": "fresh"},
+        ):
             with self.app.test_client() as client:
                 self._login(client, "teammate@npt.sg")
                 response = client.post(
@@ -166,6 +174,25 @@ class SourceCodeQARouteTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(captured["llm_budget_mode"], "auto")
+
+    def test_query_api_syncs_before_answer_when_not_refreshed_today(self):
+        with patch(
+            "bpmis_jira_tool.source_code_qa.SourceCodeQAService.ensure_synced_today",
+            return_value={"attempted": True, "status": "ok", "reason": "synced before query"},
+        ) as ensure_synced, patch(
+            "bpmis_jira_tool.source_code_qa.SourceCodeQAService.query",
+            return_value={"status": "ok", "answer_mode": "retrieval_only", "matches": []},
+        ):
+            with self.app.test_client() as client:
+                self._login(client, "teammate@npt.sg")
+                response = client.post(
+                    "/api/source-code-qa/query",
+                    json={"pm_team": "AF", "country": "All", "question": "where is createIssue"},
+                )
+
+        self.assertEqual(response.status_code, 200)
+        ensure_synced.assert_called_once_with(pm_team="AF", country="All")
+        self.assertTrue(response.get_json()["auto_sync"]["attempted"])
 
     def test_config_api_reports_llm_not_ready_by_default(self):
         with self.app.test_client() as client:
@@ -430,6 +457,39 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertEqual(payload["status"], "partial")
         self.assertIn("timed out", payload["results"][0]["message"])
         self.assertEqual(payload["job"]["status"], "partial")
+
+    def test_ensure_synced_today_runs_sync_for_missing_or_old_index(self):
+        self.service.save_mapping(
+            pm_team="AF",
+            country="All",
+            repositories=[{"display_name": "Repo One", "url": "https://git.example.com/team/repo.git"}],
+        )
+
+        with patch.object(self.service, "sync", return_value={"status": "ok", "results": []}) as sync:
+            payload = self.service.ensure_synced_today(pm_team="AF", country="All")
+
+        self.assertTrue(payload["attempted"])
+        self.assertEqual(payload["status"], "ok")
+        sync.assert_called_once_with(pm_team="AF", country="All")
+
+    def test_ensure_synced_today_skips_fresh_same_day_index(self):
+        entry = RepositoryEntry(display_name="Repo One", url="https://git.example.com/team/repo.git")
+        self.service.save_mapping(
+            pm_team="AF",
+            country="All",
+            repositories=[{"display_name": entry.display_name, "url": entry.url}],
+        )
+        repo_path = self.service._repo_path("AF:All", entry)
+        (repo_path / ".git").mkdir(parents=True)
+        (repo_path / "IssueService.java").write_text("class IssueService {}\n", encoding="utf-8")
+        self.service._build_repo_index("AF:All", entry, repo_path)
+
+        with patch.object(self.service, "sync", return_value={"status": "ok"}) as sync:
+            payload = self.service.ensure_synced_today(pm_team="AF", country="All")
+
+        self.assertFalse(payload["attempted"])
+        self.assertEqual(payload["status"], "fresh")
+        sync.assert_not_called()
 
     def test_search_repo_request_cache_reuses_identical_search(self):
         entry = RepositoryEntry(display_name="Portal Repo", url="https://git.example.com/team/portal.git")
@@ -1174,6 +1234,26 @@ class SourceCodeQAServiceTests(unittest.TestCase):
 
         self.assertEqual(gate["status"], "fail")
         self.assertIn("min_eval_cases", gate["failed_checks"])
+
+    def test_nightly_fixture_eval_uses_isolated_data_root(self):
+        from scripts.run_source_code_qa_nightly_eval import run_nightly_eval
+
+        calls = []
+
+        def fake_run(args):
+            calls.append(args)
+            if any(str(arg).endswith("source_code_qa_evals.py") for arg in args):
+                return {"status": "pass", "total": 1, "failed": 0}, "{}", "", 0
+            return {"status": "ok", "review_items": 0}, "{}", "", 0
+
+        output_dir = Path(self.temp_dir.name) / "eval_runs"
+        with patch("scripts.run_source_code_qa_nightly_eval._run_json_command", side_effect=fake_run):
+            report = run_nightly_eval(output_dir=output_dir, cases=["evals/source_code_qa/golden.jsonl"], fixture=True, include_useful_feedback=False)
+
+        self.assertEqual(report["status"], "pass")
+        eval_call = calls[0]
+        self.assertIn("--data-root", eval_call)
+        self.assertEqual(Path(eval_call[eval_call.index("--data-root") + 1]), output_dir / "fixture_data")
 
     def test_review_queue_collects_feedback_and_telemetry_risks(self):
         from scripts.source_code_qa_review_queue import build_review_queue

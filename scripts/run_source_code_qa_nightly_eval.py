@@ -39,13 +39,16 @@ def _run_json_command(args: list[str]) -> tuple[dict[str, Any], str, str, int]:
 def run_nightly_eval(*, output_dir: Path, cases: list[str], fixture: bool, include_useful_feedback: bool) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    fixture_data_root = output_dir / "fixture_data"
+    if fixture:
+        shutil.rmtree(fixture_data_root, ignore_errors=True)
     eval_args = [
         sys.executable,
         "scripts/run_source_code_qa_evals.py",
         "--json",
     ]
     if fixture:
-        eval_args.append("--fixture")
+        eval_args.extend(["--fixture", "--data-root", str(fixture_data_root)])
     for case_path in cases:
         eval_args.extend(["--cases", case_path])
     eval_payload, eval_stdout, eval_stderr, eval_returncode = _run_json_command(eval_args)
