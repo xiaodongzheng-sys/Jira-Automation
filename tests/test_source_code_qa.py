@@ -1122,6 +1122,23 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertEqual({match["repo"] for match in payload["matches"]}, {"GRC Portal"})
         self.assertIn("grcPortalOnly", "\n".join(match["snippet"] for match in payload["matches"]))
 
+    def test_repository_scope_prefers_specific_alias_over_generic_token(self):
+        repositories = [
+            RepositoryEntry(display_name="Anti Fraud API", url="https://git.example.com/team/anti-fraud-api.git"),
+            RepositoryEntry(display_name="GRC Portal", url="https://git.example.com/team/grc-portal.git"),
+            RepositoryEntry(display_name="Audit Admin", url="https://git.example.com/team/audit-admin.git"),
+        ]
+
+        selected, scope = self.service._filter_entries_for_question_repository_scope(
+            "where is fraud rule handled in GRC Portal",
+            repositories,
+        )
+
+        self.assertTrue(scope["active"])
+        self.assertEqual([entry.display_name for entry in selected], ["GRC Portal"])
+        self.assertEqual(scope["selected_repositories"], ["GRC Portal"])
+        self.assertNotIn("Anti Fraud API", scope["selected_repositories"])
+
     def test_question_specific_terms_cover_cbs_credit_review_questions(self):
         terms = self.service._question_specific_retrieval_terms(
             "When will system query CBS report when performing monthly credit review?"

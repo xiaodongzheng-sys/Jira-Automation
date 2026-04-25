@@ -1998,6 +1998,19 @@ class SourceCodeQAService:
                 continue
             selected.append(entry)
             matched_aliases[entry.display_name] = direct_matches[:8]
+        if matched_aliases:
+            specific_repo_names = {
+                repo_name
+                for repo_name, aliases in matched_aliases.items()
+                if any(cls_alias for cls_alias in aliases if self._repo_scope_alias_is_specific(cls_alias))
+            }
+            if specific_repo_names:
+                selected = [entry for entry in selected if entry.display_name in specific_repo_names]
+                matched_aliases = {
+                    repo_name: aliases
+                    for repo_name, aliases in matched_aliases.items()
+                    if repo_name in specific_repo_names
+                }
         if not selected or len(selected) == len(repositories):
             return list(repositories), {
                 "active": False,
@@ -2051,9 +2064,18 @@ class SourceCodeQAService:
     def _repo_scope_alias_is_useful(alias: str) -> bool:
         if not alias:
             return False
-        if alias in {"repo", "repository", "project", "code", "source", "service", "backend", "frontend", "master", "portal"}:
+        if alias in {"repo", "repository", "project", "code", "source", "service", "backend", "frontend", "master", "portal", "team", "group", "git", "gitlab"}:
             return False
         return len(alias) >= 4 or alias in {"af", "grc", "crms"}
+
+    @staticmethod
+    def _repo_scope_alias_is_specific(alias: str) -> bool:
+        normalized = SourceCodeQAService._repo_scope_normalize(alias)
+        if not normalized:
+            return False
+        if " " in normalized:
+            return True
+        return normalized in {"af", "grc", "crms"} or len(normalized) >= 8
 
     @staticmethod
     def _repo_alias_in_text(alias: str, normalized_text: str) -> bool:
