@@ -555,6 +555,52 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertEqual(payload["matches"][0]["path"], "bpmis/jira_client.py")
         self.assertIn("batchCreateJiraIssue", payload["matches"][0]["snippet"])
 
+    def test_chinese_business_intent_detection(self):
+        intent = self.service._question_intent("IssueService 改了会影响哪些下游，测试有没有覆盖，事务缓存边界是什么")
+
+        self.assertTrue(intent["impact_analysis"])
+        self.assertTrue(intent["test_coverage"])
+        self.assertTrue(intent["operational_boundary"])
+        self.assertTrue(any("影响" in token for token in self.service._question_tokens("IssueService 改了会影响哪些下游")))
+
+    def test_chinese_data_source_query_uses_source_trace(self):
+        _build_fixture_repositories(self.service)
+
+        payload = self.service.query(
+            pm_team="CRMS",
+            country="ID",
+            question="Term Loan Pre Check 1 的数据源是哪张表",
+        )
+
+        self.assertEqual(payload["status"], "ok")
+        self.assertIn("repository/CustomerRepository.java", {match["path"] for match in payload["matches"]})
+        self.assertEqual(payload["answer_quality"]["policies"][0]["name"], "data_source")
+        self.assertEqual(payload["answer_quality"]["policies"][0]["status"], "satisfied")
+        self.assertIn("cr_customer_profile", json.dumps(payload["evidence_pack"], ensure_ascii=False))
+
+    def test_followup_context_uses_evidence_boundaries(self):
+        augmented, followup = self.service._apply_conversation_context(
+            "继续看下游影响",
+            {
+                "question": "what is impacted if IssueService createIssue changes",
+                "matches": [],
+                "trace_paths": [],
+                "structured_answer": {},
+                "answer_contract": {
+                    "confirmed_sources": ["Portal Repo:repository/IssueRepository.java:3-5: issue_table [S1]"],
+                    "missing_links": ["consumer caller evidence"],
+                },
+                "evidence_pack": {
+                    "confirmed_facts": ["IssueRepository writes issue_table"],
+                    "impact_surfaces": ["downstream callee: IssueRepository.findIssue"],
+                },
+            },
+        )
+
+        self.assertTrue(followup["used"])
+        self.assertIn("issuerepository", augmented)
+        self.assertIn("issue_table", augmented)
+
     def test_query_builds_persistent_index_and_citations(self):
         self.service.save_mapping(
             pm_team="AF",
@@ -4180,7 +4226,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             )
 
         self.assertEqual(payload["answer_mode"], "retrieval_only")
-        self.assertIn("Showing retrieval-only results instead", payload["fallback_notice"]["message"])
+        self.assertIn("Showing code-search results instead", payload["fallback_notice"]["message"])
         self.assertTrue(payload["matches"])
 
     def test_gemini_503_retries_and_falls_back_to_lite_model(self):

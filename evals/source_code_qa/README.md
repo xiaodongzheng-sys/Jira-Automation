@@ -43,3 +43,5 @@ Eval summaries also include `failure_buckets` (`retrieval`, `answer_policy`, `an
 LLM and semantic retrieval can be switched without changing eval cases. `SOURCE_CODE_QA_LLM_PROVIDER=gemini` keeps the default Gemini route, while `SOURCE_CODE_QA_LLM_PROVIDER=openai_compatible` uses OpenAI-compatible `/chat/completions` settings. Semantic retrieval defaults to `local-token-hybrid-v1`; set `SOURCE_CODE_QA_EMBEDDING_PROVIDER=openai_compatible` and a non-local `SOURCE_CODE_QA_EMBEDDING_MODEL` to persist real embedding vectors in the chunk index.
 
 The fixture now contains Java, Python, TypeScript, and two AF repos so the eval runner can validate Tree-sitter parser coverage, symbol edges, Feign/service-name matching, and HTTP-path cross-repo graph edges deterministically.
+
+The scenario matrix also includes Chinese business-language prompts for data-source, impact, test-coverage, and operational-boundary questions. Keep these multilingual cases green so business users can ask naturally without knowing the English retrieval vocabulary.

@@ -32,6 +32,7 @@
   const fallbackNotice = document.querySelector('[data-source-fallback-notice]');
   const feedback = document.querySelector('[data-source-feedback]');
   const feedbackStatus = document.querySelector('[data-source-feedback-status]');
+  const evidenceSummary = document.querySelector('[data-source-evidence-summary]');
   const debugTrace = document.querySelector('[data-source-debug-trace]');
   let config = { mappings: {} };
   let gitAuthReady = false;
@@ -128,7 +129,7 @@
       } else if (!llmSelected) {
         queryStatus.textContent = 'Ready.';
       } else if (answerModeValue === 'auto' && !llmReady) {
-        queryStatus.textContent = 'Auto mode will use retrieval-only results until LLM credentials are configured.';
+        queryStatus.textContent = 'Auto mode will use code-search results until LLM credentials are configured.';
       }
     }
   };
@@ -309,10 +310,14 @@
       path: match.path,
       snippet: match.snippet,
       repo: match.repo,
+      reason: match.reason,
+      retrieval: match.retrieval,
     })),
     trace_paths: (payload?.trace_paths || []).slice(0, 5),
     structured_answer: payload?.structured_answer || {},
     answer_contract: payload?.answer_contract || {},
+    evidence_pack: payload?.evidence_pack || {},
+    answer_quality: payload?.answer_quality || {},
   });
 
   const shouldOpenEvidence = (payload) => {
@@ -417,6 +422,68 @@
           </section>
         </div>
       </details>
+    `;
+  };
+
+  const renderEvidenceSummary = (payload) => {
+    if (!evidenceSummary) return;
+    if (!payload || payload.status !== 'ok') {
+      evidenceSummary.hidden = true;
+      evidenceSummary.innerHTML = '';
+      return;
+    }
+    const pack = payload.evidence_pack || {};
+    const quality = payload.answer_quality || {};
+    const contract = payload.answer_contract || {};
+    const confirmed = [
+      ...(pack.confirmed_facts || []),
+      ...(contract.confirmed_sources || []),
+    ].filter(Boolean).slice(0, 5);
+    const inferred = [
+      ...(pack.inferred_facts || []),
+      ...(contract.data_carriers || []),
+      ...(contract.field_population || []),
+    ].filter(Boolean).slice(0, 5);
+    const missing = [
+      ...(pack.missing_facts || []),
+      ...(pack.evidence_limits || []),
+      ...(contract.missing_links || []),
+      ...(quality.missing || []),
+    ].filter(Boolean).slice(0, 5);
+    const policies = (quality.policies || [])
+      .slice(0, 4)
+      .map((policy) => `${policy.name}: ${policy.status}`);
+    const freshness = payload.index_freshness?.status
+      ? `Index: ${payload.index_freshness.status}`
+      : '';
+    const confidence = quality.confidence ? `Confidence: ${quality.confidence}` : '';
+    const meta = [quality.status ? `Quality: ${quality.status}` : '', confidence, freshness, ...policies]
+      .filter(Boolean)
+      .join(' · ');
+    if (!confirmed.length && !inferred.length && !missing.length && !meta) {
+      evidenceSummary.hidden = true;
+      evidenceSummary.innerHTML = '';
+      return;
+    }
+    const list = (title, items, emptyText) => `
+      <section>
+        <strong>${escapeHtml(title)}</strong>
+        <ul>${items.length ? items.map((item) => `<li>${escapeHtml(item)}</li>`).join('') : `<li>${escapeHtml(emptyText)}</li>`}</ul>
+      </section>
+    `;
+    evidenceSummary.hidden = false;
+    evidenceSummary.innerHTML = `
+      <div class="source-qa-evidence-card">
+        <div class="source-qa-evidence-head">
+          <strong>Evidence Boundary</strong>
+          <span>${escapeHtml(meta || 'Evidence summary')}</span>
+        </div>
+        <div class="source-qa-evidence-grid">
+          ${list('Confirmed', confirmed, 'No confirmed source facts extracted yet.')}
+          ${list('Inferred', inferred, 'No inferred carrier or call-chain facts extracted.')}
+          ${list('Missing', missing, 'No missing evidence reported.')}
+        </div>
+      </div>
     `;
   };
 
@@ -527,6 +594,7 @@
       renderFallbackNotice(payload);
       renderStatus(payload.repo_status || []);
       renderLlmAnswer(payload);
+      renderEvidenceSummary(payload);
       renderDebugTrace(payload);
       renderMatches(payload.matches || [], { compact: Boolean(payload.llm_answer), open: shouldOpenEvidence(payload) });
       if (feedback) {
@@ -540,6 +608,7 @@
       renderUsageBadges({});
       renderFallbackNotice({});
       renderLlmAnswer({});
+      renderEvidenceSummary(null);
       renderDebugTrace(null);
       if (feedback) feedback.hidden = true;
     }

@@ -363,6 +363,8 @@ DATA_SOURCE_HINTS = (
     "datasource", "data source", "source", "sources", "upstream", "table", "jdbc",
     "queryfor", "select", " from ", "repository", "mapper", "dao", "client",
     "integration", "provider", "gateway", "api", "userinfo", "customerinfo",
+    "数据源", "来源", "上游", "表", "数据库", "查哪张表", "从哪里来", "哪里取数",
+    "读取", "写入",
 )
 CONCRETE_SOURCE_HINTS = (
     "repository", "mapper", "dao", "jdbc", "queryfor", "select", " from ",
@@ -375,29 +377,36 @@ ANSWER_CONCRETE_SOURCE_HINTS = (
     "resttemplate", "webclient",
 )
 API_HINTS = ("api", "endpoint", "route", "controller", "requestmapping", "getmapping", "postmapping", "http", "url", "path")
+API_HINTS = (*API_HINTS, "接口", "端点", "路由", "入口", "请求", "调用")
 CONFIG_HINTS = ("config", "configuration", "property", "properties", "yaml", "yml", "env", "setting", "feature", "flag")
+CONFIG_HINTS = (*CONFIG_HINTS, "配置", "开关", "参数", "环境变量", "属性", "在哪里配", "怎么配置")
 MODULE_DEPENDENCY_HINTS = (
     "dependency", "dependencies", "depend on", "module", "maven", "gradle", "pom",
     "artifact", "artifactid", "groupid", "package.json", "npm", "yarn", "pnpm",
+    "依赖", "模块", "哪个包", "哪个模块",
 )
-ERROR_HINTS = ("error", "exception", "failed", "failure", "stacktrace", "status", "code", "timeout")
-RULE_HINTS = ("rule", "condition", "logic", "validate", "validation", "permission", "access", "approval", "eligible")
+ERROR_HINTS = ("error", "exception", "failed", "failure", "stacktrace", "status", "code", "timeout", "报错", "异常", "失败", "超时", "错误")
+RULE_HINTS = ("rule", "condition", "logic", "validate", "validation", "permission", "access", "approval", "eligible", "规则", "条件", "逻辑", "校验", "权限", "审批", "准入")
 STATIC_QA_HINTS = (
     "static qa", "static analysis", "code quality", "code smell", "smell", "bug", "bugs",
     "risk", "risks", "security", "vulnerability", "vulnerabilities", "unsafe",
     "hardcoded", "secret", "password", "token", "sql injection", "injection",
     "empty catch", "swallow", "broad exception", "todo", "fixme",
+    "静态", "代码质量", "风险", "安全", "漏洞", "硬编码", "密码", "令牌", "注入",
 )
 IMPACT_ANALYSIS_HINTS = (
     "impact", "impacted", "affect", "affected", "blast radius", "blast-radius",
     "change impact", "if change", "if changed", "who calls", "callers",
     "callees", "upstream", "downstream", "usage", "usages", "dependents",
     "depends on", "what breaks", "regression", "side effect", "side effects",
+    "影响", "影响面", "改了会", "谁调用", "调用方", "被谁用", "上游", "下游",
+    "依赖方", "会坏", "回归", "副作用",
 )
 TEST_COVERAGE_HINTS = (
     "test", "tests", "tested", "testing", "coverage", "covered", "unit test",
     "integration test", "spec", "specs", "junit", "pytest", "jest", "mocha",
     "assert", "mockito", "mock", "verify",
+    "测试", "覆盖", "单测", "集成测试", "断言", "mock", "有没有测",
 )
 OPERATIONAL_BOUNDARY_HINTS = (
     "transaction", "transactional", "rollback", "commit", "cache", "cached",
@@ -405,6 +414,8 @@ OPERATIONAL_BOUNDARY_HINTS = (
     "circuit breaker", "circuitbreaker", "rate limit", "ratelimiter",
     "bulkhead", "timeout", "timelimiter", "lock", "schedulerlock",
     "preauthorize", "postauthorize", "authorization", "permission boundary",
+    "事务", "回滚", "提交", "缓存", "异步", "重试", "熔断", "限流", "超时",
+    "锁", "鉴权", "授权", "权限边界",
 )
 FIELD_POPULATION_HINTS = (
     "set", "get", "build", "populate", "provider", "factory", "converter",
@@ -1080,7 +1091,7 @@ class SourceCodeQAService:
             "all_country": ALL_COUNTRY,
             "answer_modes": [
                 {"value": ANSWER_MODE_AUTO, "label": "Auto"},
-                {"value": ANSWER_MODE, "label": "Retrieval Only"},
+                {"value": ANSWER_MODE, "label": "Code Search"},
                 {"value": ANSWER_MODE_GEMINI, "label": "LLM"},
             ],
         }
@@ -1447,6 +1458,14 @@ class SourceCodeQAService:
         for claim in structured.get("claims") or []:
             if isinstance(claim, dict):
                 terms.extend(IDENTIFIER_PATTERN.findall(str(claim.get("text") or "")))
+        answer_contract = conversation_context.get("answer_contract") or {}
+        for key_name in ("confirmed_sources", "data_carriers", "field_population", "missing_links"):
+            for value in answer_contract.get(key_name) or []:
+                terms.extend(IDENTIFIER_PATTERN.findall(str(value or "")))
+        evidence_pack = conversation_context.get("evidence_pack") or {}
+        for key_name in ("confirmed_facts", "inferred_facts", "missing_facts", "tables", "apis", "configs", "impact_surfaces"):
+            for value in evidence_pack.get(key_name) or []:
+                terms.extend(IDENTIFIER_PATTERN.findall(str(value or "")))
         deduped: list[str] = []
         for term in terms:
             lowered_term = term.lower()
@@ -1815,7 +1834,7 @@ class SourceCodeQAService:
             if normalized_answer_mode == ANSWER_MODE_AUTO and not self.llm_ready():
                 payload["fallback_notice"] = {
                     "title": "Auto LLM unavailable",
-                    "message": "Auto mode is using retrieval-only results because Source Code Q&A LLM credentials are not configured.",
+                    "message": "Auto mode is using code-search results because Source Code Q&A LLM credentials are not configured.",
                     "fallback_mode": ANSWER_MODE,
                 }
                 self._record_query_telemetry(
@@ -1844,7 +1863,7 @@ class SourceCodeQAService:
             except ToolError as error:
                 payload["fallback_notice"] = {
                     "title": "LLM unavailable",
-                    "message": f"{error} Showing retrieval-only results instead.",
+                    "message": f"{error} Showing code-search results instead.",
                     "fallback_mode": ANSWER_MODE,
                 }
         self._record_query_telemetry(
@@ -5397,6 +5416,7 @@ class SourceCodeQAService:
     def _question_tokens_cached(question: str) -> tuple[str, ...]:
         lowered_question = question.lower()
         raw_tokens = re.findall(r"[a-zA-Z0-9_./:-]{1,}", lowered_question)
+        raw_tokens.extend(re.findall(r"[\u4e00-\u9fff]{2,}", lowered_question))
         tokens = []
         for token in raw_tokens:
             token = token.strip("./:-_")
@@ -6425,6 +6445,56 @@ class SourceCodeQAService:
                 self._ensure_repo_index_cached(entry, repo_path, request_cache=request_cache)
                 with sqlite3.connect(index_path) as connection:
                     connection.row_factory = sqlite3.Row
+                    def resolve_target_location(target_name: str) -> tuple[str, int] | None:
+                        normalized = str(target_name or "").strip()
+                        if not normalized:
+                            return None
+                        candidates = list(dict.fromkeys(
+                            item.lower()
+                            for item in (
+                                normalized,
+                                normalized.split(".")[-1],
+                                re.sub(r"\b(get|set|find|create|update|delete|read|write)\b", "", normalized, flags=re.IGNORECASE).strip("."),
+                            )
+                            if item
+                        ))
+                        for candidate in candidates:
+                            row = connection.execute(
+                                """
+                                select file_path, line_no from definitions
+                                where lower_name = ?
+                                order by
+                                    case
+                                        when kind like '%class%' or kind in ('class', 'interface') then 0
+                                        when kind like '%method%' then 1
+                                        else 2
+                                    end,
+                                    line_no
+                                limit 1
+                                """,
+                                (candidate,),
+                            ).fetchone()
+                            if row:
+                                return str(row["file_path"] or ""), int(row["line_no"] or 1)
+                            row = connection.execute(
+                                """
+                                select file_path, line_no from code_entities
+                                where lower_name = ?
+                                order by
+                                    case
+                                        when kind like '%class%' or kind in ('class', 'interface') then 0
+                                        when kind like '%method%' then 1
+                                        else 2
+                                    end,
+                                    line_no
+                                limit 1
+                                """,
+                                (candidate,),
+                            ).fetchone()
+                            if row:
+                                return str(row["file_path"] or ""), int(row["line_no"] or 1)
+                        return None
+
                     for seed_path in seed_paths:
                         seed_exact = Path(seed_path).stem.lower() in question_tokens
                         rows = connection.execute(
@@ -6445,11 +6515,27 @@ class SourceCodeQAService:
                             (seed_path, seed_path, seed_path, seed_path, seed_path, seed_path),
                         ).fetchall()
                         for row in rows:
-                            upstream = str(row["to_file"] or "") == seed_path and str(row["from_file"] or "") != seed_path
-                            file_path = str(row["from_file"] if upstream else row["to_file"] or row["from_file"])
+                            raw_upstream = str(row["to_file"] or "") == seed_path and str(row["from_file"] or "") != seed_path
+                            from_kind = str(row["from_kind"] or "").lower()
+                            upstream = raw_upstream and from_kind not in {
+                                "repository",
+                                "mapper",
+                                "dao",
+                                "client",
+                                "integration",
+                                "gateway",
+                            }
+                            if raw_upstream and not upstream:
+                                file_path = str(row["from_file"] or "")
+                            else:
+                                file_path = str(row["from_file"] if upstream else row["to_file"] or row["from_file"])
                             if not file_path:
                                 continue
-                            line_no = int(row["from_line"] if upstream else row["to_line"] or row["from_line"] or 1)
+                            line_no = int(row["from_line"] if upstream or (raw_upstream and not upstream) else row["to_line"] or row["from_line"] or 1)
+                            if not upstream and not str(row["to_file"] or "").strip():
+                                resolved = resolve_target_location(str(row["to_name"] or ""))
+                                if resolved and resolved[0]:
+                                    file_path, line_no = resolved
                             edge_key = (
                                 entry.display_name,
                                 file_path,
@@ -8532,16 +8618,16 @@ class SourceCodeQAService:
 
         add("entry_point", ["controller", "service", "engine", "handler", "consumer", *question_terms])
         if intent.get("api"):
-            add("api_surface", ["requestmapping", "postmapping", "getmapping", "route", "endpoint", "client", *question_terms])
+            add("api_surface", ["requestmapping", "postmapping", "getmapping", "route", "endpoint", "client", "接口", "路由", "入口", *question_terms])
         if intent.get("data_source"):
-            add("source_trace", ["repository", "mapper", "dao", "select", "from", "jdbcTemplate", "client", "integration", *question_terms])
-            add("carrier_backtrace", ["provider", "builder", "converter", "assembler", *profile_terms[:16], *question_terms])
+            add("source_trace", ["repository", "mapper", "dao", "select", "from", "jdbcTemplate", "client", "integration", "数据源", "上游", "读取", "写入", *question_terms])
+            add("carrier_backtrace", ["provider", "builder", "converter", "assembler", "来源", "取数", *profile_terms[:16], *question_terms])
         if intent.get("config"):
-            add("configuration", ["properties", "yaml", "configuration", "feature", "config", *question_terms])
+            add("configuration", ["properties", "yaml", "configuration", "feature", "config", "配置", "开关", "参数", *question_terms])
         if intent.get("module_dependency"):
-            add("module_dependency", ["pom.xml", "build.gradle", "package.json", "maven", "gradle", "npm", "dependency", "artifactId", "groupId", *question_terms])
+            add("module_dependency", ["pom.xml", "build.gradle", "package.json", "maven", "gradle", "npm", "dependency", "artifactId", "groupId", "依赖", "模块", *question_terms])
         if intent.get("rule_logic") or intent.get("error"):
-            add("decision_logic", ["validate", "rule", "condition", "exception", "status", "approval", *question_terms])
+            add("decision_logic", ["validate", "rule", "condition", "exception", "status", "approval", "规则", "校验", "异常", "审批", *question_terms])
         if intent.get("static_qa"):
             add(
                 "static_qa",
@@ -8557,18 +8643,18 @@ class SourceCodeQAService:
                 [
                     "controller", "handler", "consumer", "service", "repository", "mapper",
                     "dao", "client", "route", "endpoint", "table", "topic", "config",
-                    "caller", "callee", "dependency", *question_terms,
+                    "caller", "callee", "dependency", "影响", "调用方", "下游", "上游", *question_terms,
                 ],
             )
         if intent.get("test_coverage"):
-            add("test_coverage", ["test", "assert", "verify", "mock", "should", "junit", "pytest", "jest", *question_terms])
+            add("test_coverage", ["test", "assert", "verify", "mock", "should", "junit", "pytest", "jest", "测试", "覆盖", "断言", *question_terms])
         if intent.get("operational_boundary"):
             add(
                 "operational_boundary",
                 [
                     "Transactional", "Cacheable", "CacheEvict", "CachePut", "Async",
                     "Retryable", "CircuitBreaker", "RateLimiter", "Bulkhead",
-                    "TimeLimiter", "SchedulerLock", "PreAuthorize", *question_terms,
+                    "TimeLimiter", "SchedulerLock", "PreAuthorize", "事务", "缓存", "异步", "重试", "熔断", "限流", "鉴权", *question_terms,
                 ],
             )
 
