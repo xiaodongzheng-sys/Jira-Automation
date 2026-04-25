@@ -44,6 +44,8 @@
     .replaceAll('"', '&quot;')
     .replaceAll("'", '&#39;');
 
+  const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
+
   const setStatus = (message, tone = 'neutral') => {
     if (!statusNode) return;
     statusNode.innerHTML = `<p>${escapeHtml(message)}</p>`;
@@ -107,22 +109,79 @@
 
   const captureReadingAnchor = () => {
     if (!sectionDetailNode) return null;
-    const viewportAnchorY = Math.min(160, Math.max(80, window.innerHeight * 0.18));
+    const viewportTop = 0;
+    const viewportBottom = window.innerHeight || document.documentElement.clientHeight || 0;
+    const viewportAnchorY = Math.round(viewportBottom * 0.42);
     const sections = Array.from(sectionDetailNode.querySelectorAll('[data-source-section-index]'));
     if (!sections.length) return null;
     let best = null;
     sections.forEach((node) => {
       const rect = node.getBoundingClientRect();
+      const visibleTop = Math.max(rect.top, viewportTop);
+      const visibleBottom = Math.min(rect.bottom, viewportBottom);
+      const visibleHeight = Math.max(0, visibleBottom - visibleTop);
       const containsAnchor = rect.top <= viewportAnchorY && rect.bottom >= viewportAnchorY;
-      const distance = containsAnchor ? 0 : Math.min(Math.abs(rect.top - viewportAnchorY), Math.abs(rect.bottom - viewportAnchorY));
-      if (!best || distance < best.distance) {
+      const distance = containsAnchor
+        ? 0
+        : Math.min(Math.abs(rect.top - viewportAnchorY), Math.abs(rect.bottom - viewportAnchorY));
+      if (
+        !best
+        || (containsAnchor && !best.containsAnchor)
+        || (containsAnchor === best.containsAnchor && visibleHeight > best.visibleHeight)
+        || (containsAnchor === best.containsAnchor && visibleHeight === best.visibleHeight && distance < best.distance)
+      ) {
         best = {
           index: node.dataset.sourceSectionIndex,
+          node,
           top: rect.top,
+          anchorY: viewportAnchorY,
+          containsAnchor,
+          visibleHeight,
           distance,
         };
       }
     });
+    if (best?.node) {
+      const readableNodes = Array.from(best.node.querySelectorAll([
+        '.briefing-source-heading',
+        'h1',
+        'h2',
+        'h3',
+        'h4',
+        'h5',
+        'h6',
+        'p',
+        'li',
+        'td',
+        'th',
+        'blockquote',
+        'pre',
+      ].join(','))).filter((node) => {
+        const text = (node.innerText || node.textContent || '').replace(/\s+/g, ' ').trim();
+        const rect = node.getBoundingClientRect();
+        return text.length > 0 && rect.width > 0 && rect.height > 0;
+      });
+      let readableAnchor = null;
+      readableNodes.forEach((node) => {
+        const rect = node.getBoundingClientRect();
+        const containsAnchor = rect.top <= viewportAnchorY && rect.bottom >= viewportAnchorY;
+        const distance = containsAnchor ? 0 : Math.min(Math.abs(rect.top - viewportAnchorY), Math.abs(rect.bottom - viewportAnchorY));
+        if (!readableAnchor || distance < readableAnchor.distance) {
+          readableAnchor = {
+            node,
+            top: rect.top,
+            offset: clamp(viewportAnchorY - rect.top, 0, Math.max(0, rect.height)),
+            distance,
+          };
+        }
+      });
+      if (readableAnchor) {
+        best.readableNode = readableAnchor.node;
+        best.readableTop = readableAnchor.top;
+        best.readableOffset = readableAnchor.offset;
+      }
+      delete best.node;
+    }
     return best;
   };
 
@@ -131,6 +190,18 @@
     const node = Array.from(sectionDetailNode.querySelectorAll('[data-source-section-index]'))
       .find((item) => String(item.dataset.sourceSectionIndex) === String(anchor.index));
     if (!node) return;
+    if (anchor.readableNode && node.contains(anchor.readableNode)) {
+      const readableRect = anchor.readableNode.getBoundingClientRect();
+      if (readableRect.width > 0 && readableRect.height > 0) {
+        const offset = clamp(Number(anchor.readableOffset) || 0, 0, readableRect.height);
+        window.scrollBy({
+          top: readableRect.top + offset - anchor.anchorY,
+          left: 0,
+          behavior: 'auto',
+        });
+        return;
+      }
+    }
     const rect = node.getBoundingClientRect();
     window.scrollBy({
       top: rect.top - anchor.top,
@@ -144,10 +215,9 @@
     window.requestAnimationFrame(() => {
       restoreReadingAnchor(anchor);
       window.setTimeout(() => restoreReadingAnchor(anchor), 120);
+      window.setTimeout(() => restoreReadingAnchor(anchor), 320);
     });
   };
-
-  const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
 
   const applyNoImageTogglePosition = (position) => {
     if (!noImageModeToggle || !position) return;
