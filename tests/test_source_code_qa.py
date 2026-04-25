@@ -98,6 +98,8 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertIn(b"Codex", teammate_response.data)
         self.assertIn(b'value="gemini" disabled', teammate_response.data)
         self.assertIn(b"Vertex AI", teammate_response.data)
+        self.assertIn(b"Model Availability", owner_response.data)
+        self.assertNotIn(b"Model Availability", teammate_response.data)
 
     def test_config_save_is_owner_only_and_validates_https(self):
         with self.app.test_client() as client:
@@ -126,6 +128,53 @@ class SourceCodeQARouteTests(unittest.TestCase):
         payload = valid.get_json()
         self.assertEqual(payload["key"], "AF:All")
         self.assertEqual(payload["repositories"][0]["display_name"], "Repo One")
+
+    def test_model_availability_is_owner_only_and_disables_provider_option(self):
+        with self.app.test_client() as client:
+            self._login(client, "teammate@npt.sg")
+            forbidden = client.post(
+                "/api/source-code-qa/model-availability",
+                json={"availability": {"codex_cli_bridge": True, "gemini": False, "vertex_ai": False}},
+            )
+            self._login(client, "xiaodong.zheng@npt.sg")
+            saved = client.post(
+                "/api/source-code-qa/model-availability",
+                json={"availability": {"codex_cli_bridge": True, "gemini": False, "vertex_ai": False}},
+            )
+            self._login(client, "teammate@npt.sg")
+            config_response = client.get("/api/source-code-qa/config")
+            page_response = client.get("/source-code-qa")
+
+        self.assertEqual(forbidden.status_code, 403)
+        self.assertEqual(saved.status_code, 200)
+        payload = config_response.get_json()
+        vertex_option = next(item for item in payload["options"]["llm_providers"] if item["value"] == "vertex_ai")
+        codex_option = next(item for item in payload["options"]["llm_providers"] if item["value"] == "codex_cli_bridge")
+        self.assertTrue(vertex_option["disabled"])
+        self.assertFalse(codex_option["disabled"])
+        self.assertIn(b'value="vertex_ai" disabled', page_response.data)
+
+    def test_query_api_rejects_unavailable_model_provider(self):
+        with self.app.test_client() as client:
+            self._login(client, "xiaodong.zheng@npt.sg")
+            client.post(
+                "/api/source-code-qa/model-availability",
+                json={"availability": {"codex_cli_bridge": True, "gemini": False, "vertex_ai": False}},
+            )
+            self._login(client, "teammate@npt.sg")
+            response = client.post(
+                "/api/source-code-qa/query",
+                json={
+                    "pm_team": "AF",
+                    "country": "All",
+                    "question": "where is createIssue",
+                    "answer_mode": "auto",
+                    "llm_provider": "vertex_ai",
+                },
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()["message"], "Selected Source Code Q&A model is unavailable.")
 
     def test_source_code_qa_session_api_creates_lists_and_loads_session(self):
         with self.app.test_client() as client:

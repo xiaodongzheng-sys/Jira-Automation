@@ -4526,6 +4526,30 @@ select:focus {
   gap: 12px;
 }
 
+.source-qa-model-availability {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+}
+
+.source-qa-model-toggle {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  padding: 12px 14px;
+  border: 1px solid #e4e7ec;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #344054;
+  font-weight: 800;
+}
+
+.source-qa-model-toggle input {
+  width: 18px;
+  height: 18px;
+  margin: 0;
+}
+
 .source-qa-admin,
 .source-qa-workspace {
   margin-bottom: 24px;

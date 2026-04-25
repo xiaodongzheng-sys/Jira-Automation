@@ -10,6 +10,7 @@
     data-query-url="{{ url_for('source_code_qa_query_api') }}"
     data-feedback-url="{{ url_for('source_code_qa_feedback_api') }}"
     data-sessions-url="{{ url_for('source_code_qa_sessions_api') }}"
+    data-model-availability-url="{{ url_for('source_code_qa_model_availability_api') }}"
     data-can-manage="{{ 'true' if can_manage_source_code_qa else 'false' }}"
     data-options='{{ options | tojson }}'
   >
@@ -180,6 +181,28 @@
           <textarea class="mapping-textarea source-qa-repos" data-source-repos-input spellcheck="false" placeholder="https://gitlab.example.com/group/repo.git"></textarea>
           <div class="source-qa-status" data-source-admin-status>
             Save URLs first, then run Sync / Refresh. HTTPS auth uses a server-side GitLab token and never runs during user questions.
+          </div>
+        </section>
+
+        <section class="panel panel-wide source-qa-admin">
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow">Owner Admin</p>
+              <h2>Model Availability</h2>
+              <p class="card-help">Turn a model off to make it unavailable in the user-facing Model selector.</p>
+            </div>
+            <button class="button button-secondary" type="button" data-source-save-model-availability>Save Model Availability</button>
+          </div>
+          <div class="source-qa-model-availability" data-source-model-availability>
+            {% for provider in options.llm_providers %}
+              <label class="source-qa-model-toggle">
+                <input type="checkbox" value="{{ provider.value }}" {% if not provider.disabled %}checked{% endif %}>
+                <span>{{ provider.label | replace(' (Unavailable)', '') }}</span>
+              </label>
+            {% endfor %}
+          </div>
+          <div class="source-qa-status" data-source-model-availability-status>
+            Model availability controls only the Source Code Q&amp;A selector. Backend credentials and quota are still checked at answer time.
           </div>
         </section>
 

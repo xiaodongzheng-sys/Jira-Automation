@@ -366,6 +366,63 @@ class SourceCodeQASessionStore:
         return public_payload
 
 
+class SourceCodeQAModelAvailabilityStore:
+    DEFAULT_AVAILABILITY = {
+        "codex_cli_bridge": True,
+        "gemini": False,
+        "vertex_ai": True,
+    }
+
+    def __init__(self, storage_path: Path | None = None) -> None:
+        self.storage_path = storage_path
+        self._lock = threading.Lock()
+        self._availability = self._load()
+
+    def _load(self) -> dict[str, bool]:
+        availability = dict(self.DEFAULT_AVAILABILITY)
+        if self.storage_path is None or not self.storage_path.exists():
+            return availability
+        try:
+            payload = json.loads(self.storage_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return availability
+        raw_availability = payload.get("availability") if isinstance(payload, dict) else {}
+        if isinstance(raw_availability, dict):
+            for provider in availability:
+                if provider in raw_availability:
+                    availability[provider] = bool(raw_availability[provider])
+        return availability
+
+    def _persist_locked(self) -> None:
+        if self.storage_path is None:
+            return
+        try:
+            self.storage_path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "updated_at": time.time(),
+                "availability": self._availability,
+            }
+            temp_path = self.storage_path.with_name(f".{self.storage_path.name}.{os.getpid()}.tmp")
+            temp_path.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True), encoding="utf-8")
+            os.replace(temp_path, self.storage_path)
+        except OSError:
+            return
+
+    def get(self) -> dict[str, bool]:
+        with self._lock:
+            return dict(self._availability)
+
+    def save(self, availability: dict[str, Any]) -> dict[str, bool]:
+        with self._lock:
+            next_availability = dict(self.DEFAULT_AVAILABILITY)
+            for provider in next_availability:
+                if provider in availability:
+                    next_availability[provider] = bool(availability[provider])
+            self._availability = next_availability
+            self._persist_locked()
+            return dict(self._availability)
+
+
 def _safe_email_identity(user_identity: dict[str, str | None] | None = None) -> str:
     if not user_identity:
         return ""
@@ -550,6 +607,9 @@ def create_app() -> Flask:
     app.config["CONFIG_STORE"] = config_store
     app.config["JOB_STORE"] = JobStore(data_root / "run" / "jobs.json")
     app.config["SOURCE_CODE_QA_SESSION_STORE"] = SourceCodeQASessionStore(data_root / "source_code_qa" / "sessions.json")
+    app.config["SOURCE_CODE_QA_MODEL_AVAILABILITY_STORE"] = SourceCodeQAModelAvailabilityStore(
+        data_root / "source_code_qa" / "model_availability.json"
+    )
     app.config["PRD_BRIEFING_STORE"] = BriefingStore(data_root / "prd_briefing")
     app.config["SOURCE_CODE_QA_SERVICE"] = SourceCodeQAService(
         data_root=data_root,
@@ -805,7 +865,7 @@ def create_app() -> Flask:
             "source_code_qa.html",
             page_title="Source Code Q&A",
             user_identity=user_identity,
-            options=service.options_payload(),
+            options=_source_code_qa_options_payload(service),
             team_profiles=TEAM_PROFILE_DEFAULTS,
             country_options=list(CRMS_COUNTRIES),
             all_country=ALL_COUNTRY,
@@ -823,6 +883,7 @@ def create_app() -> Flask:
             gemini_service = _build_source_code_qa_service("gemini")
             codex_service = _build_source_code_qa_service("codex_cli_bridge")
             vertex_service = _build_source_code_qa_service("vertex_ai")
+            model_availability = _source_code_qa_model_availability()
             return jsonify(
                 {
                     "status": "ok",
@@ -832,9 +893,9 @@ def create_app() -> Flask:
                     "llm_ready": service.llm_ready(),
                     "llm_provider": settings.source_code_qa_llm_provider,
                     "llm_providers": {
-                        "gemini": {"ready": gemini_service.llm_ready(), "label": "Gemini"},
-                        "codex_cli_bridge": {"ready": codex_service.llm_ready(), "label": "Codex"},
-                        "vertex_ai": {"ready": vertex_service.llm_ready(), "label": "Vertex AI"},
+                        "gemini": {"ready": gemini_service.llm_ready(), "label": "Gemini", "available": model_availability["gemini"]},
+                        "codex_cli_bridge": {"ready": codex_service.llm_ready(), "label": "Codex", "available": model_availability["codex_cli_bridge"]},
+                        "vertex_ai": {"ready": vertex_service.llm_ready(), "label": "Vertex AI", "available": model_availability["vertex_ai"]},
                     },
                     "llm_model": service.llm_budgets["balanced"]["model"],
                     "llm_fast_model": service.llm_budgets["cheap"]["model"],
@@ -844,7 +905,8 @@ def create_app() -> Flask:
                     "index_health": service.index_health_payload(),
                     "release_gate": _source_code_qa_release_gate_payload(settings),
                     "domain_knowledge": service.domain_knowledge_payload(),
-                    "options": service.options_payload(),
+                    "model_availability": model_availability,
+                    "options": _source_code_qa_options_payload(service),
                     "config": service.load_config(),
                 }
             )
@@ -881,6 +943,23 @@ def create_app() -> Flask:
             return jsonify({"status": "ok", **result})
         except ToolError as error:
             return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
+
+    @app.post("/api/source-code-qa/model-availability")
+    def source_code_qa_model_availability_api():
+        access_gate = _require_source_code_qa_manage_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        payload = request.get_json(silent=True) or {}
+        raw_availability = payload.get("availability") if isinstance(payload.get("availability"), dict) else {}
+        store: SourceCodeQAModelAvailabilityStore = current_app.config["SOURCE_CODE_QA_MODEL_AVAILABILITY_STORE"]
+        availability = store.save(raw_availability)
+        return jsonify(
+            {
+                "status": "ok",
+                "model_availability": availability,
+                "options": _source_code_qa_options_payload(_build_source_code_qa_service()),
+            }
+        )
 
     @app.post("/api/source-code-qa/sync")
     def source_code_qa_sync_api():
@@ -944,6 +1023,8 @@ def create_app() -> Flask:
             return access_gate
         payload = request.get_json(silent=True) or {}
         if payload.get("async"):
+            if not _source_code_qa_provider_available(payload.get("llm_provider")):
+                return jsonify({"status": "error", "message": "Selected Source Code Q&A model is unavailable."}), HTTPStatus.BAD_REQUEST
             job_store: JobStore = current_app.config["JOB_STORE"]
             job = job_store.create("source-code-qa-query", title="Source Code Q&A Query")
             app_obj = current_app._get_current_object()
@@ -957,6 +1038,8 @@ def create_app() -> Flask:
             thread.start()
             return jsonify({"status": "queued", "job_id": job.job_id})
         try:
+            if not _source_code_qa_provider_available(payload.get("llm_provider")):
+                raise ToolError("Selected Source Code Q&A model is unavailable.")
             service = _build_source_code_qa_service(payload.get("llm_provider"))
             session_store: SourceCodeQASessionStore = current_app.config["SOURCE_CODE_QA_SESSION_STORE"]
             session_id = str(payload.get("session_id") or "").strip()
@@ -2143,6 +2226,33 @@ def _build_source_code_qa_service(llm_provider: str | None = None) -> SourceCode
     return service.with_llm_provider(str(llm_provider or ""))
 
 
+def _source_code_qa_model_availability() -> dict[str, bool]:
+    store: SourceCodeQAModelAvailabilityStore = current_app.config["SOURCE_CODE_QA_MODEL_AVAILABILITY_STORE"]
+    return store.get()
+
+
+def _source_code_qa_options_payload(service: SourceCodeQAService) -> dict[str, Any]:
+    options = service.options_payload()
+    availability = _source_code_qa_model_availability()
+    providers = []
+    for provider in options.get("llm_providers") or []:
+        provider_payload = dict(provider)
+        value = str(provider_payload.get("value") or "")
+        available = bool(availability.get(value, False))
+        provider_payload["available"] = available
+        provider_payload["disabled"] = not available
+        base_label = str(provider_payload.get("label") or value).replace(" (Unavailable)", "")
+        provider_payload["label"] = base_label if available else f"{base_label} (Unavailable)"
+        providers.append(provider_payload)
+    options["llm_providers"] = providers
+    return options
+
+
+def _source_code_qa_provider_available(llm_provider: str | None) -> bool:
+    provider = SourceCodeQAService.normalize_query_llm_provider(llm_provider)
+    return bool(_source_code_qa_model_availability().get(provider, False))
+
+
 def _compact_source_code_qa_session_payload(result: dict[str, Any]) -> dict[str, Any]:
     structured = result.get("structured_answer") if isinstance(result.get("structured_answer"), dict) else {}
     answer_claim_check = result.get("answer_claim_check") if isinstance(result.get("answer_claim_check"), dict) else {}
@@ -2563,6 +2673,8 @@ def _run_source_code_qa_query_job(app: Flask, job_id: str, payload: dict[str, An
             )
 
         try:
+            if not _source_code_qa_provider_available(payload.get("llm_provider")):
+                raise ToolError("Selected Source Code Q&A model is unavailable.")
             service = _build_source_code_qa_service(payload.get("llm_provider"))
             pm_team = str(payload.get("pm_team") or "")
             country = str(payload.get("country") or "")

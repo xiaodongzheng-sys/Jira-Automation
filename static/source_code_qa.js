@@ -8,6 +8,7 @@
   const queryUrl = root.dataset.queryUrl;
   const feedbackUrl = root.dataset.feedbackUrl;
   const sessionsUrl = root.dataset.sessionsUrl;
+  const modelAvailabilityUrl = root.dataset.modelAvailabilityUrl;
   const canManage = root.dataset.canManage === 'true';
   const options = JSON.parse(root.dataset.options || '{}');
 
@@ -39,6 +40,9 @@
   const questionHistory = document.querySelector('[data-source-question-history]');
   const indexHealth = document.querySelector('[data-source-index-health]');
   const releaseGate = document.querySelector('[data-source-release-gate]');
+  const modelAvailability = document.querySelector('[data-source-model-availability]');
+  const modelAvailabilityStatus = document.querySelector('[data-source-model-availability-status]');
+  const saveModelAvailabilityButton = document.querySelector('[data-source-save-model-availability]');
   const newSessionButton = document.querySelector('[data-source-new-session]');
   const sessionList = document.querySelector('[data-source-session-list]');
   const sessionTitle = document.querySelector('[data-source-session-title]');
@@ -50,6 +54,7 @@
   let gitAuthReady = false;
   let llmReady = false;
   let llmProviders = {};
+  let modelAvailabilityPayload = {};
   let llmPolicy = {};
   let indexHealthPayload = {};
   let releaseGatePayload = {};
@@ -89,7 +94,13 @@
   const currentCountry = () => (pmTeam.value === 'CRMS' ? country.value : 'All');
   const currentKey = () => `${pmTeam.value}:${currentCountry()}`;
   const currentRepoCount = () => (config.mappings?.[currentKey()] || []).length;
-  const defaultLlmProvider = () => (selectHasValue(llmProvider, 'codex_cli_bridge') ? 'codex_cli_bridge' : (llmProvider?.value || 'codex_cli_bridge'));
+  const defaultLlmProvider = () => {
+    if (!llmProvider) return 'codex_cli_bridge';
+    const enabledPreferred = Array.from(llmProvider.options || []).find((option) => !option.disabled && option.value === 'codex_cli_bridge');
+    if (enabledPreferred) return enabledPreferred.value;
+    const firstEnabled = Array.from(llmProvider.options || []).find((option) => !option.disabled);
+    return firstEnabled?.value || 'codex_cli_bridge';
+  };
   const providerOptionIsEnabled = (value) => {
     if (!llmProvider) return false;
     return Array.from(llmProvider.options || []).some((option) => option.value === value && !option.disabled);
@@ -518,6 +529,28 @@
     `;
   };
 
+  const renderModelAvailability = () => {
+    if (!modelAvailability) return;
+    modelAvailability.querySelectorAll('input[type="checkbox"]').forEach((input) => {
+      input.checked = Boolean(modelAvailabilityPayload[input.value]);
+    });
+  };
+
+  const updateLlmProviderOptions = (providerOptions = []) => {
+    if (!llmProvider || !Array.isArray(providerOptions) || !providerOptions.length) return;
+    const previousValue = llmProvider.value;
+    llmProvider.innerHTML = providerOptions.map((provider) => `
+      <option value="${escapeHtml(provider.value)}" ${provider.disabled ? 'disabled' : ''}>${escapeHtml(provider.label)}</option>
+    `).join('');
+    if (providerOptionIsEnabled(previousValue)) {
+      llmProvider.value = previousValue;
+    } else {
+      llmProvider.value = defaultLlmProvider();
+    }
+    updateAnswerModeState();
+    if (sessionProvider) sessionProvider.textContent = providerLabel(selectedLlmProvider());
+  };
+
   const renderSelectedConfig = () => {
     const entries = config.mappings?.[currentKey()] || [];
     const count = entries.length;
@@ -558,9 +591,12 @@
       gitAuthReady = Boolean(payload.git_auth_ready);
       llmReady = Boolean(payload.llm_ready);
       llmProviders = payload.llm_providers || {};
+      modelAvailabilityPayload = payload.model_availability || {};
       llmPolicy = payload.llm_policy || {};
       indexHealthPayload = payload.index_health || {};
       releaseGatePayload = payload.release_gate || {};
+      updateLlmProviderOptions(payload.options?.llm_providers || []);
+      renderModelAvailability();
       if (!gitAuthReady && adminStatus) {
         adminStatus.textContent = 'Set SOURCE_CODE_QA_GITLAB_TOKEN on the server before running Sync / Refresh.';
       } else if (adminStatus && llmPolicy.provider) {
@@ -595,6 +631,32 @@
       renderSelectedConfig();
     } catch (error) {
       adminStatus.textContent = error.message || 'Save failed.';
+    }
+  };
+
+  const collectModelAvailability = () => {
+    const availability = {};
+    modelAvailability?.querySelectorAll('input[type="checkbox"]').forEach((input) => {
+      availability[input.value] = input.checked;
+    });
+    return availability;
+  };
+
+  const saveModelAvailability = async () => {
+    if (!canManage || !modelAvailabilityUrl) return;
+    if (modelAvailabilityStatus) modelAvailabilityStatus.textContent = 'Saving model availability...';
+    try {
+      const payload = await fetch(modelAvailabilityUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ availability: collectModelAvailability() }),
+      }).then(readJson);
+      modelAvailabilityPayload = payload.model_availability || {};
+      updateLlmProviderOptions(payload.options?.llm_providers || []);
+      renderModelAvailability();
+      if (modelAvailabilityStatus) modelAvailabilityStatus.textContent = 'Model availability saved.';
+    } catch (error) {
+      if (modelAvailabilityStatus) modelAvailabilityStatus.textContent = error.message || 'Save failed.';
     }
   };
 
@@ -1264,6 +1326,7 @@
     }
   });
   saveButton?.addEventListener('click', saveConfig);
+  saveModelAvailabilityButton?.addEventListener('click', saveModelAvailability);
   syncButton?.addEventListener('click', syncRepos);
   queryButton?.addEventListener('click', queryCode);
   document.querySelectorAll('[data-source-feedback-rating]').forEach((button) => {
