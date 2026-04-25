@@ -574,6 +574,12 @@ def _build_fixture_repositories(service: SourceCodeQAService) -> None:
         "    }\n"
         "}\n",
     )
+    for key, raw_entry, repo_path in (
+        ("AF:All", af_entries[0], af_repo),
+        ("AF:All", af_entries[1], issue_service_repo),
+        ("CRMS:ID", cr_entry, cr_repo),
+    ):
+        service._build_repo_index(key, type("Entry", (), raw_entry)(), repo_path)
 
 
 def _evaluate_case(service: SourceCodeQAService, case: dict[str, Any]) -> dict[str, Any]:

@@ -273,6 +273,21 @@ class SourceCodeQAServiceTests(unittest.TestCase):
     def tearDown(self):
         self.temp_dir.cleanup()
 
+    def _build_index_for_entry(self, key, entry):
+        repo_entry = type("Entry", (), entry)()
+        repo_path = self.service._repo_path(key, repo_entry)
+        self.service._build_repo_index(key, repo_entry, repo_path)
+        return repo_path
+
+    def _build_all_indexes(self, service=None):
+        target_service = service or self.service
+        for key, entries in (target_service.load_config().get("mappings") or {}).items():
+            for entry in entries:
+                repo_entry = type("Entry", (), entry)()
+                repo_path = target_service._repo_path(key, repo_entry)
+                if (repo_path / ".git").exists():
+                    target_service._build_repo_index(key, repo_entry, repo_path)
+
     def test_sync_subprocess_timeout_is_controlled(self):
         self.service.save_mapping(
             pm_team="AF",
@@ -305,7 +320,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             "retrieval": "persistent_index",
         }
 
-        with patch.object(self.service, "_ensure_repo_index") as mocked_ensure, patch.object(
+        with patch.object(self.service, "_require_ready_repo_index", return_value={"state": "ready"}) as mocked_ensure, patch.object(
             self.service,
             "_search_repo_index",
             return_value=[dict(match)],
@@ -444,7 +459,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertIsNotNone(uncached)
         self.assertIsNotNone(cached)
         self.assertEqual(cached["snippet"], uncached["snippet"])
-        self.assertEqual(request_cache["stats"]["index_rows_misses"], 1)
+        self.assertEqual(request_cache["stats"]["file_lines_misses"], 1)
 
     def test_trace_paths_are_reused_within_request_cache(self):
         entry = RepositoryEntry(display_name="Portal Repo", url="https://git.example.com/team/portal.git")
@@ -486,7 +501,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             }
         ]
         request_cache = self.service._new_retrieval_request_cache()
-        with patch.object(self.service, "_ensure_repo_index") as mocked_ensure:
+        with patch.object(self.service, "_require_ready_repo_index", return_value={"state": "ready"}) as mocked_ensure:
             first = self.service._build_trace_paths(
                 entries=[entry],
                 key=key,
@@ -547,6 +562,8 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             "        return self.post('/api/v1/issues/batchCreateJiraIssue')\n",
             encoding="utf-8",
         )
+        self._build_index_for_entry("AF:All", entry)
+        self._build_all_indexes()
 
         payload = self.service.query(pm_team="AF", country="All", question="batchCreateJiraIssue BPMIS API")
 
@@ -565,6 +582,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
 
     def test_chinese_data_source_query_uses_source_trace(self):
         _build_fixture_repositories(self.service)
+        self._build_all_indexes()
 
         payload = self.service.query(
             pm_team="CRMS",
@@ -601,7 +619,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertIn("issuerepository", augmented)
         self.assertIn("issue_table", augmented)
 
-    def test_query_builds_persistent_index_and_citations(self):
+    def test_query_uses_ready_persistent_index_and_citations(self):
         self.service.save_mapping(
             pm_team="AF",
             country="All",
@@ -618,6 +636,8 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             "        return self.post('/api/v1/issues/batchCreateJiraIssue')\n",
             encoding="utf-8",
         )
+        self._build_index_for_entry("AF:All", entry)
+        self._build_all_indexes()
 
         payload = self.service.query(pm_team="AF", country="All", question="where is batchCreateJiraIssue implemented")
 
@@ -629,6 +649,25 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertEqual(payload["index_freshness"]["status"], "fresh")
         self.assertIn("git_revisions", payload["index_freshness"])
         self.assertEqual(self.service.repo_status("AF:All")[0]["index"]["state"], "ready")
+
+    def test_query_does_not_build_missing_index_synchronously(self):
+        self.service.save_mapping(
+            pm_team="AF",
+            country="All",
+            repositories=[{"display_name": "Portal Repo", "url": "https://git.example.com/team/portal.git"}],
+        )
+        entry = self.service.load_config()["mappings"]["AF:All"][0]
+        repo_path = self.service._repo_path("AF:All", type("Entry", (), entry)())
+        (repo_path / ".git").mkdir(parents=True)
+        source_file = repo_path / "bpmis" / "jira_client.py"
+        source_file.parent.mkdir(parents=True)
+        source_file.write_text("class BPMISClient: pass\n", encoding="utf-8")
+
+        payload = self.service.query(pm_team="AF", country="All", question="where is BPMISClient")
+
+        self.assertEqual(payload["status"], "no_match")
+        self.assertFalse(self.service._index_path(repo_path).exists())
+        self.assertEqual(payload["index_freshness"]["status"], "stale_or_missing")
 
     def test_structure_index_extracts_definitions_references_and_telemetry(self):
         self.service.save_mapping(
@@ -662,6 +701,8 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             "}\n",
             encoding="utf-8",
         )
+        self._build_index_for_entry("AF:All", entry)
+        self._build_all_indexes()
 
         payload = self.service.query(pm_team="AF", country="All", question="where is IssueController createIssue API")
 
@@ -735,6 +776,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             "}\n",
             encoding="utf-8",
         )
+        self._build_all_indexes()
 
         payload = self.service.query(pm_team="AF", country="All", question="trace issue create API data source")
 
@@ -768,6 +810,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             "        return client.batchCreateJiraIssue()\n",
             encoding="utf-8",
         )
+        self._build_all_indexes()
 
         payload = self.service.query(pm_team="AF", country="All", question="where does create_issue call BPMIS")
         index_path = self.service._index_path(repo_path)
@@ -822,6 +865,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             "}\n",
             encoding="utf-8",
         )
+        self._build_all_indexes()
 
         payload = self.service.query(pm_team="AF", country="All", question="which API flow reaches issue data source table")
 
@@ -872,6 +916,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             "</mapper>\n",
             encoding="utf-8",
         )
+        self._build_all_indexes()
 
         payload = self.service.query(pm_team="AF", country="All", question="trace create issue API to downstream service and table")
         index_path = self.service._index_path(repo_path)
@@ -915,6 +960,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             "public class IssueController { public Issue createIssue() { return new Issue(); } }\n",
             encoding="utf-8",
         )
+        self._build_all_indexes()
 
         payload = self.service.query(pm_team="AF", country="All", question="which service does issue client call")
 
@@ -2335,6 +2381,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             "}\n",
             encoding="utf-8",
         )
+        self._build_all_indexes()
 
         payload = self.service.query(pm_team="AF", country="All", question="which service handles issue create API")
         edge = next(
@@ -2400,6 +2447,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             "}\n",
             encoding="utf-8",
         )
+        self._build_all_indexes()
 
         payload = self.service.query(pm_team="AF", country="All", question="which service does feign issue client call")
         edge = next(
@@ -2458,6 +2506,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             "}\n",
             encoding="utf-8",
         )
+        self._build_all_indexes()
 
         payload = self.service.query(pm_team="AF", country="All", question="which service does feign issue client call")
         edge = next(
@@ -2511,6 +2560,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             "</project>\n",
             encoding="utf-8",
         )
+        self._build_all_indexes()
 
         payload = self.service.query(pm_team="AF", country="All", question="which repo does portal-web depend on")
         edge = next(
@@ -2675,6 +2725,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             json.dumps({"name": "@example/issue-sdk"}, indent=2),
             encoding="utf-8",
         )
+        self._build_all_indexes()
 
         payload = self.service.query(pm_team="AF", country="All", question="which npm package does portal-web depend on")
         edge = next(
@@ -2725,6 +2776,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             "}\n",
             encoding="utf-8",
         )
+        self._build_all_indexes()
 
         payload = self.service.query(pm_team="AF", country="All", question="which service consumes issue created event")
         edge = next(
@@ -2780,6 +2832,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             encoding="utf-8",
         )
         (service_path / "application.properties").write_text("issue.topic.name=issue.created\n", encoding="utf-8")
+        self._build_all_indexes()
 
         payload = self.service.query(pm_team="AF", country="All", question="which service consumes configured issue topic")
         edge = next(
@@ -2819,6 +2872,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             "<project><groupId>com.example</groupId><artifactId>fraud-ledger-api</artifactId></project>",
             encoding="utf-8",
         )
+        self._build_all_indexes()
 
         payload = self.service.query(pm_team="AF", country="All", question="which repo provides fraud-ledger-api dependency")
         edge = next(
@@ -2864,6 +2918,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             "}\n",
             encoding="utf-8",
         )
+        self._build_all_indexes()
 
         payload = self.service.query(pm_team="AF", country="All", question="which repo reads shared_issue_table after it is written")
         edge = next(
@@ -2959,6 +3014,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             "}\n",
             encoding="utf-8",
         )
+        self._build_all_indexes()
 
         payload = self.service.query(pm_team="AF", country="All", question="what data source is used for ledger")
 
@@ -2991,6 +3047,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             "        return self.post('/api/v1/issues/batchCreateJiraIssue', json=payload)\n",
             encoding="utf-8",
         )
+        self._build_all_indexes()
 
         payload = self.service.query(pm_team="AF", country="All", question="where is batchCreateJiraIssue implemented")
 
@@ -3047,6 +3104,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             "}\n",
             encoding="utf-8",
         )
+        self._build_all_indexes()
 
         payload = self.service.query(
             pm_team="AF",
@@ -3094,6 +3152,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             "}\n",
             encoding="utf-8",
         )
+        self._build_all_indexes()
 
         payload = self.service.query(
             pm_team="CRMS",
@@ -3151,6 +3210,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             "}\n",
             encoding="utf-8",
         )
+        self._build_all_indexes()
 
         base_matches = self.service._search_repo(
             type("Entry", (), entry)(),
@@ -3330,6 +3390,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             "}\n",
             encoding="utf-8",
         )
+        self._build_all_indexes()
 
         base_matches = self.service._search_repo(
             type("Entry", (), entry)(),
@@ -3709,6 +3770,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             "}\n",
             encoding="utf-8",
         )
+        self._build_all_indexes()
 
         payload = self.service.query(pm_team="AF", country="All", question="what static QA security risks exist")
 
@@ -3723,6 +3785,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
 
     def test_impact_analysis_query_finds_upstream_and_downstream_surfaces(self):
         _build_fixture_repositories(self.service)
+        self._build_all_indexes()
 
         payload = self.service.query(
             pm_team="AF",
@@ -3742,6 +3805,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
 
     def test_test_coverage_query_finds_tests_and_assertions(self):
         _build_fixture_repositories(self.service)
+        self._build_all_indexes()
 
         payload = self.service.query(
             pm_team="AF",
@@ -3761,6 +3825,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
 
     def test_operational_boundary_query_finds_transaction_and_cache_annotations(self):
         _build_fixture_repositories(self.service)
+        self._build_all_indexes()
 
         payload = self.service.query(
             pm_team="AF",
@@ -3831,6 +3896,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             "}\n",
             encoding="utf-8",
         )
+        self._build_all_indexes()
 
         result = _evaluate_case(
             self.service,
@@ -3902,6 +3968,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         )
 
         with patch("bpmis_jira_tool.source_code_qa.requests.post", return_value=fake_response) as mocked_post:
+            self._build_all_indexes(service)
             payload = service.query(
                 pm_team="AF",
                 country="All",
@@ -4018,6 +4085,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         )
 
         with patch("bpmis_jira_tool.source_code_qa.requests.post", return_value=fake_response) as mocked_post:
+            self._build_all_indexes(service)
             payload = service.query(
                 pm_team="AF",
                 country="All",
@@ -4086,6 +4154,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         )
 
         with patch("bpmis_jira_tool.source_code_qa.requests.post", return_value=fake_response) as mocked_post:
+            self._build_all_indexes(service)
             payload = service.query(
                 pm_team="AF",
                 country="All",
@@ -4166,6 +4235,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         )
 
         with patch("bpmis_jira_tool.source_code_qa.requests.post", return_value=fake_response) as mocked_post:
+            self._build_all_indexes(service)
             payload = service.query(
                 pm_team="AF",
                 country="All",
@@ -4217,6 +4287,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
                 raise requests.HTTPError(response=self)
 
         with patch("bpmis_jira_tool.source_code_qa.requests.post", return_value=FakeErrorResponse()):
+            self._build_all_indexes(service)
             payload = service.query(
                 pm_team="AF",
                 country="All",
@@ -4280,6 +4351,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             "bpmis_jira_tool.source_code_qa.requests.post",
             side_effect=[RetryableResponse(), RetryableResponse(), RetryableResponse(), success_response],
         ) as mocked_post:
+            self._build_all_indexes(service)
             payload = service.query(
                 pm_team="AF",
                 country="All",

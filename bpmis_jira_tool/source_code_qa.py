@@ -46,6 +46,9 @@ DEFAULT_LLM_TIMEOUT_SECONDS = 90
 DEFAULT_LLM_MAX_RETRIES = 2
 DEFAULT_LLM_BACKOFF_SECONDS = 1.0
 DEFAULT_LLM_MAX_BACKOFF_SECONDS = 8.0
+MAX_CACHED_INDEX_LINES = 5_000
+MAX_CACHED_SEMANTIC_CHUNKS = 2_000
+SYNC_JOB_LOCK_TIMEOUT_SECONDS = 5.0
 DEFAULT_LLM_BUDGETS = {
     "cheap": {
         "match_limit": 4,
@@ -490,6 +493,10 @@ ANSWER_POLICY_REGISTRY = {
 class RepositoryEntry:
     display_name: str
     url: str
+
+
+class SourceCodeQAIndexUnavailable(sqlite3.OperationalError):
+    """Raised when a user query cannot use a ready, prebuilt code index."""
 
 
 @dataclass(frozen=True)
@@ -2030,7 +2037,10 @@ class SourceCodeQAService:
 
     def sync_job_status(self, key: str) -> dict[str, Any]:
         try:
-            payload = json.loads(self.sync_jobs_path.read_text(encoding="utf-8")) if self.sync_jobs_path.exists() else {}
+            try:
+                payload = json.loads(self.sync_jobs_path.read_text(encoding="utf-8")) if self.sync_jobs_path.exists() else {}
+            except json.JSONDecodeError:
+                payload = {}
         except (OSError, json.JSONDecodeError):
             payload = {}
         return payload.get(key) if isinstance(payload.get(key), dict) else {"status": "idle", "key": key}
@@ -2056,15 +2066,34 @@ class SourceCodeQAService:
         self._write_sync_job(key, job)
 
     def _write_sync_job(self, key: str, job: dict[str, Any]) -> None:
+        lock_path = self.sync_jobs_path.with_suffix(".lock")
+        acquired = False
+        started_at = time.monotonic()
         try:
             self.sync_jobs_path.parent.mkdir(parents=True, exist_ok=True)
+            while True:
+                try:
+                    fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                        handle.write(self._now_iso())
+                    acquired = True
+                    break
+                except FileExistsError:
+                    if time.monotonic() - started_at >= SYNC_JOB_LOCK_TIMEOUT_SECONDS:
+                        return
+                    time.sleep(0.05)
             payload = json.loads(self.sync_jobs_path.read_text(encoding="utf-8")) if self.sync_jobs_path.exists() else {}
             if not isinstance(payload, dict):
                 payload = {}
             payload[key] = job
-            self.sync_jobs_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+            temp_path = self.sync_jobs_path.with_suffix(f".{os.getpid()}.tmp")
+            temp_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+            os.replace(temp_path, self.sync_jobs_path)
         except OSError:
             return
+        finally:
+            if acquired:
+                lock_path.unlink(missing_ok=True)
 
     def _index_path(self, repo_path: Path) -> Path:
         digest = hashlib.sha1(str(repo_path).encode("utf-8")).hexdigest()[:16]
@@ -2096,6 +2125,20 @@ class SourceCodeQAService:
         if info.get("state") == "ready":
             return info
         return self._build_repo_index(key or "", entry, repo_path)
+
+    def _require_ready_repo_index(
+        self,
+        *,
+        key: str | None,
+        entry: RepositoryEntry,
+        repo_path: Path,
+    ) -> dict[str, Any]:
+        info = self._repo_index_info(key, entry, repo_path)
+        if info.get("state") == "ready":
+            return info
+        raise SourceCodeQAIndexUnavailable(
+            f"Code index for {entry.display_name} is {info.get('state') or 'unavailable'}; run Sync / Refresh first."
+        )
 
     def _repo_index_info(self, key: str | None, entry: RepositoryEntry, repo_path: Path) -> dict[str, Any]:
         del key, entry
@@ -4551,7 +4594,6 @@ class SourceCodeQAService:
             file_rows = index_rows["files"]
             file_rows_by_path = index_rows["files_by_path"]
             line_rows = index_rows["lines"]
-            lines_by_path = index_rows["lines_by_path"]
             file_symbols_by_path = index_rows.get("file_symbols_by_path") or {}
             line_symbols_by_key = index_rows.get("line_symbols_by_key") or {}
             for file_row in file_rows:
@@ -4742,7 +4784,12 @@ class SourceCodeQAService:
             for relative_path, hit in file_hits.items():
                 if not hit.get("best_score"):
                     continue
-                lines = lines_by_path.get(relative_path) or []
+                lines = self._cached_file_lines(
+                    connection,
+                    index_path,
+                    str(relative_path),
+                    request_cache=request_cache,
+                )
                 if not lines:
                     continue
                 start, end = self._best_snippet_window(lines, int(hit["best_line"]))
@@ -4790,7 +4837,10 @@ class SourceCodeQAService:
                 return cached
         self._increment_retrieval_stat(request_cache, "index_rows_misses")
         file_rows = connection.execute("select * from files").fetchall()
-        line_rows = connection.execute("select * from lines").fetchall()
+        line_rows = connection.execute(
+            "select * from lines order by file_path, line_no limit ?",
+            (MAX_CACHED_INDEX_LINES,),
+        ).fetchall()
         files_by_path = {str(row["path"]): row for row in file_rows}
         file_symbols_by_path = {
             str(row["path"]): set(json.loads(row["symbols"] or "[]"))
@@ -4811,7 +4861,10 @@ class SourceCodeQAService:
         semantic_chunks: list[dict[str, Any]] | None = None
         if self.semantic_index_enabled:
             try:
-                semantic_rows = connection.execute("select * from semantic_chunks").fetchall()
+                semantic_rows = connection.execute(
+                    "select * from semantic_chunks order by file_path, start_line limit ?",
+                    (MAX_CACHED_SEMANTIC_CHUNKS,),
+                ).fetchall()
                 semantic_chunks = [
                     {
                         "chunk_id": str(row["chunk_id"] if "chunk_id" in row.keys() else f"{row['file_path']}:{row['start_line']}"),
@@ -4837,10 +4890,42 @@ class SourceCodeQAService:
             "line_symbols_by_key": line_symbols_by_key,
             "lines_by_path": normalized_lines_by_path,
             "semantic_chunks": semantic_chunks if semantic_chunks is not None else semantic_rows,
+            "bounded": {
+                "max_lines": MAX_CACHED_INDEX_LINES,
+                "max_semantic_chunks": MAX_CACHED_SEMANTIC_CHUNKS,
+            },
         }
         if request_cache is not None:
             rows_cache[cache_key] = payload
         return payload
+
+    def _cached_file_lines(
+        self,
+        connection: sqlite3.Connection,
+        index_path: Path,
+        file_path: str,
+        *,
+        request_cache: dict[str, Any] | None = None,
+    ) -> list[str]:
+        normalized_path = str(file_path or "")
+        if not normalized_path:
+            return []
+        if request_cache is not None:
+            cache_key = f"{self._index_fingerprint(index_path)}:{normalized_path}"
+            file_cache = request_cache.setdefault("file_lines", {})
+            cached = file_cache.get(cache_key)
+            if cached is not None:
+                self._increment_retrieval_stat(request_cache, "file_lines_hits")
+                return list(cached)
+            self._increment_retrieval_stat(request_cache, "file_lines_misses")
+        rows = connection.execute(
+            "select line_text from lines where file_path = ? order by line_no",
+            (normalized_path,),
+        ).fetchall()
+        lines = [str(row["line_text"] if isinstance(row, sqlite3.Row) else row[0]) for row in rows]
+        if request_cache is not None:
+            request_cache.setdefault("file_lines", {})[cache_key] = list(lines)
+        return lines
 
     def _fts_search_rows(
         self,
@@ -5104,6 +5189,8 @@ class SourceCodeQAService:
                 "index_ensure_misses": 0,
                 "index_rows_hits": 0,
                 "index_rows_misses": 0,
+                "file_lines_hits": 0,
+                "file_lines_misses": 0,
                 "structure_like_hits": 0,
                 "structure_like_misses": 0,
                 "fts_hits": 0,
@@ -5138,6 +5225,7 @@ class SourceCodeQAService:
             "elapsed_ms": elapsed_ms,
             "search_entries": len(request_cache.get("search") or {}),
             "index_row_entries": len(request_cache.get("index_rows") or {}),
+            "file_line_entries": len(request_cache.get("file_lines") or {}),
             "structure_like_entries": len(request_cache.get("structure_like") or {}),
             "fts_entries": len(request_cache.get("fts") or {}),
             "trace_path_entries": len(request_cache.get("trace_paths") or {}),
@@ -5196,7 +5284,7 @@ class SourceCodeQAService:
         request_cache: dict[str, Any] | None = None,
     ) -> None:
         if request_cache is None:
-            self._ensure_repo_index(key=None, entry=entry, repo_path=repo_path)
+            self._require_ready_repo_index(key=None, entry=entry, repo_path=repo_path)
             return
         ensured_indexes = request_cache.setdefault("ensured_indexes", set())
         ensured_key = str(repo_path)
@@ -5204,7 +5292,7 @@ class SourceCodeQAService:
             self._increment_retrieval_stat(request_cache, "index_ensure_hits")
             return
         self._increment_retrieval_stat(request_cache, "index_ensure_misses")
-        self._ensure_repo_index(key=None, entry=entry, repo_path=repo_path)
+        self._require_ready_repo_index(key=None, entry=entry, repo_path=repo_path)
         ensured_indexes.add(ensured_key)
 
     def _search_repo(
@@ -5248,32 +5336,7 @@ class SourceCodeQAService:
                 request_cache.setdefault("search", {})[cache_key] = self._clone_jsonish(matches)
             return matches
         except (OSError, sqlite3.Error):
-            cache_key = self._search_cache_key(
-                entry,
-                repo_path,
-                tokens,
-                question=question,
-                focus_terms=focus_terms,
-                trace_stage=trace_stage,
-            )
-            if request_cache is not None:
-                search_cache = request_cache.setdefault("search", {})
-                cached = search_cache.get(cache_key)
-                if cached is not None:
-                    self._increment_retrieval_stat(request_cache, "search_hits")
-                    return self._clone_jsonish(cached)
-                self._increment_retrieval_stat(request_cache, "search_misses")
-            matches = self._search_repo_files(
-                entry,
-                repo_path,
-                tokens,
-                question=question,
-                focus_terms=focus_terms,
-                trace_stage=trace_stage,
-            )
-            if request_cache is not None:
-                request_cache.setdefault("search", {})[cache_key] = self._clone_jsonish(matches)
-            return matches
+            return []
 
     def _search_repo_files(
         self,
@@ -7108,8 +7171,12 @@ class SourceCodeQAService:
     ) -> dict[str, Any] | None:
         lines: list[str] = []
         if index_path is not None and request_cache is not None:
-            index_rows = self._cached_index_rows(connection, index_path, request_cache=request_cache)
-            lines = list((index_rows.get("lines_by_path") or {}).get(file_path) or [])
+            lines = self._cached_file_lines(
+                connection,
+                index_path,
+                file_path,
+                request_cache=request_cache,
+            )
         if not lines:
             rows = connection.execute(
                 "select line_text from lines where file_path = ? order by line_no",
