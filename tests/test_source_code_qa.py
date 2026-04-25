@@ -5068,6 +5068,115 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertEqual(payload["evidence_pack"]["version"], 2)
         self.assertIn("answer_judge", payload)
 
+    def test_simple_function_usage_no_hit_skips_llm_call(self):
+        service = SourceCodeQAService(
+            data_root=Path(self.temp_dir.name),
+            team_profiles=TEAM_PROFILE_DEFAULTS,
+            gemini_api_key="gemini-key",
+            gitlab_token="secret-token",
+            git_timeout_seconds=5,
+            max_file_bytes=200_000,
+        )
+        service.save_mapping(
+            pm_team="AF",
+            country="All",
+            repositories=[{"display_name": "Risk Config", "url": "https://git.example.com/team/risk-config.git"}],
+        )
+        entry = service.load_config()["mappings"]["AF:All"][0]
+        repo_path = service._repo_path("AF:All", type("Entry", (), entry)())
+        (repo_path / ".git").mkdir(parents=True)
+        config_file = repo_path / "anti-fraud-service" / "apollo.properties"
+        config_file.parent.mkdir(parents=True)
+        config_file.write_text(
+            "dbp.antifraud.function.F44={\"functionName\":\"Compare\",\"field\":\"fdMaturityDate\"}\n",
+            encoding="utf-8",
+        )
+        spec_file = repo_path / "spec" / "fields.md"
+        spec_file.parent.mkdir(parents=True)
+        spec_file.write_text("fdMaturityDate is exposed as a rule form field.\n", encoding="utf-8")
+        self._build_all_indexes(service)
+
+        with patch("bpmis_jira_tool.source_code_qa.requests.post", side_effect=AssertionError("LLM should not be called")):
+            payload = service.query(
+                pm_team="AF",
+                country="All",
+                question="Is fdMaturityDate used in any function?",
+                answer_mode="gemini_flash",
+                llm_budget_mode="balanced",
+            )
+
+        self.assertEqual(payload["answer_mode"], "retrieval_only")
+        self.assertTrue(payload["llm_cost_skip"]["skipped"])
+        self.assertEqual(payload["llm_provider"], "local")
+        self.assertEqual(payload["llm_usage"], {})
+        self.assertIn("not in a function or method usage context", payload["llm_answer"])
+        self.assertEqual(payload["answer_contract"]["status"], "local_no_function_usage_hit")
+
+    def test_simple_function_usage_with_method_body_still_calls_llm(self):
+        service = SourceCodeQAService(
+            data_root=Path(self.temp_dir.name),
+            team_profiles=TEAM_PROFILE_DEFAULTS,
+            gemini_api_key="gemini-key",
+            gitlab_token="secret-token",
+            git_timeout_seconds=5,
+            max_file_bytes=200_000,
+        )
+        service.save_mapping(
+            pm_team="AF",
+            country="All",
+            repositories=[{"display_name": "Risk Service", "url": "https://git.example.com/team/risk-service.git"}],
+        )
+        entry = service.load_config()["mappings"]["AF:All"][0]
+        repo_path = service._repo_path("AF:All", type("Entry", (), entry)())
+        (repo_path / ".git").mkdir(parents=True)
+        source_file = repo_path / "src" / "main" / "java" / "LoanChecker.java"
+        source_file.parent.mkdir(parents=True)
+        source_file.write_text(
+            "public class LoanChecker {\n"
+            "    public boolean validate() {\n"
+            "        return fdMaturityDate != null;\n"
+            "    }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        self._build_all_indexes(service)
+        fake_response = SimpleNamespace(
+            raise_for_status=lambda: None,
+            json=lambda: {
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [
+                                {
+                                    "text": (
+                                        '{"direct_answer":"fdMaturityDate is used in LoanChecker.validate.",'
+                                        '"claims":[{"text":"LoanChecker.validate checks fdMaturityDate","citations":["S1"]}],'
+                                        '"missing_evidence":[],"confidence":"high"}'
+                                    )
+                                }
+                            ]
+                        }
+                    }
+                ],
+                "usageMetadata": {"promptTokenCount": 90, "candidatesTokenCount": 20},
+            },
+            text='{"ok":true}',
+        )
+
+        with patch("bpmis_jira_tool.source_code_qa.requests.post", return_value=fake_response) as mocked_post:
+            payload = service.query(
+                pm_team="AF",
+                country="All",
+                question="Is fdMaturityDate used in any function?",
+                answer_mode="gemini_flash",
+                llm_budget_mode="balanced",
+            )
+
+        self.assertEqual(payload["answer_mode"], "gemini_flash")
+        self.assertNotIn("llm_cost_skip", payload)
+        self.assertIn("LoanChecker.validate", payload["llm_answer"])
+        mocked_post.assert_called()
+
     def test_llm_answer_cache_requires_current_versions(self):
         service = SourceCodeQAService(
             data_root=Path(self.temp_dir.name),

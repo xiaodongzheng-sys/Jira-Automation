@@ -201,6 +201,55 @@ SQL_TABLE_PATTERN = re.compile(r"\b(?:from|join|update|into)\s+([A-Za-z_][A-Za-z
 SQL_READ_TABLE_PATTERN = re.compile(r"\b(?:from|join)\s+([A-Za-z_][A-Za-z0-9_.$]*)", re.IGNORECASE)
 SQL_WRITE_TABLE_PATTERN = re.compile(r"\b(?:insert\s+into|update|delete\s+from)\s+([A-Za-z_][A-Za-z0-9_.$]*)", re.IGNORECASE)
 EXACT_LOOKUP_TERM_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:[./:$-][A-Za-z0-9_][A-Za-z0-9_.:$-]*)+")
+CODE_USAGE_SUFFIXES = {".java", ".kt", ".kts", ".py", ".js", ".jsx", ".ts", ".tsx", ".go", ".rb", ".php", ".cs", ".scala"}
+NON_FUNCTION_USAGE_SUFFIXES = {".md", ".txt", ".properties", ".yaml", ".yml", ".json", ".jsonl", ".xml", ".toml", ".conf", ".sql"}
+USAGE_QUERY_HINTS = (
+    " used ",
+    " usage ",
+    " reference ",
+    " references ",
+    " referenced ",
+    " called ",
+    " caller ",
+    " call ",
+    " where is ",
+    " where used ",
+    "用到",
+    "使用",
+    "引用",
+    "调用",
+    "在哪里",
+    "在哪",
+)
+FUNCTION_USAGE_QUERY_HINTS = (" function", " method", "函数", "方法")
+COMPLEX_REASONING_QUERY_HINTS = (
+    "logic",
+    "calculate",
+    "calculation",
+    "relationship",
+    "relation",
+    "between",
+    "flow",
+    "source",
+    "upstream",
+    "downstream",
+    "impact",
+    "test",
+    "config",
+    "why",
+    "how",
+    "逻辑",
+    "计算",
+    "关系",
+    "链路",
+    "来源",
+    "上下游",
+    "影响",
+    "测试",
+    "配置",
+    "为什么",
+    "如何",
+)
 PROPERTIES_KEY_PATTERN = re.compile(r"^\s*([A-Za-z0-9_.-]{3,})\s*[:=]")
 CONFIG_ASSIGNMENT_PATTERN = re.compile(r"^\s*([A-Za-z0-9_.-]{3,})\s*[:=]\s*(.+?)\s*$")
 CONFIG_PLACEHOLDER_PATTERN = re.compile(r"\$\{([A-Za-z0-9_.-]+)(?::[^}]*)?\}")
@@ -2393,7 +2442,23 @@ class SourceCodeQAService:
         }
         normalized_answer_mode = str(answer_mode or ANSWER_MODE).strip() or ANSWER_MODE
         if normalized_answer_mode in {ANSWER_MODE_GEMINI, ANSWER_MODE_AUTO}:
-            if normalized_answer_mode == ANSWER_MODE_AUTO and not self.llm_ready():
+            local_no_hit_answer = self._llm_cost_skip_for_local_no_hit(
+                question=question,
+                matches=top_matches,
+                evidence_summary=evidence_summary,
+                evidence_pack=evidence_pack,
+                quality_gate=quality_gate,
+            )
+            if local_no_hit_answer:
+                payload.update(local_no_hit_answer)
+                payload["answer_mode"] = ANSWER_MODE
+                payload["fallback_notice"] = {
+                    "title": "LLM skipped by local retrieval gate",
+                    "message": "The local index found no function/method usage evidence for this simple symbol lookup, so the portal returned a deterministic answer without calling the LLM.",
+                    "fallback_mode": ANSWER_MODE,
+                }
+                report("completed", "LLM skipped: local no-hit gate answered from retrieval.", 0, 0)
+            elif normalized_answer_mode == ANSWER_MODE_AUTO and not self.llm_ready():
                 payload["fallback_notice"] = {
                     "title": "Auto LLM unavailable",
                     "message": "Auto mode is using code-search results because Source Code Q&A LLM credentials are not configured.",
@@ -2408,46 +2473,47 @@ class SourceCodeQAService:
                     started_at=started_at,
                 )
                 return payload
-            try:
-                report("llm_generation", "Calling LLM with retrieved evidence.", 0, 0)
-                llm_payload = self._build_llm_answer(
-                    entries=entries,
-                    key=key,
-                    pm_team=pm_team,
-                    country=country,
-                    question=question,
-                    matches=top_matches,
-                    llm_budget_mode=llm_budget_mode,
-                    requested_answer_mode=normalized_answer_mode,
-                    request_cache=request_cache,
-                )
-                payload.update(llm_payload)
-                payload["evidence_outline"] = self._build_evidence_outline(payload.get("evidence_pack") or evidence_pack, top_matches)
-                payload["answer_mode"] = normalized_answer_mode
-                report("completed", "LLM answer generated.", 0, 0)
-            except ToolError as error:
-                if self._is_retryable_llm_rate_limit(error):
-                    retry_after = self._llm_retry_after_seconds(error)
-                    retry_hint = f" Provider suggested retry after {retry_after:g}s." if retry_after is not None else ""
+            else:
+                try:
+                    report("llm_generation", "Calling LLM with retrieved evidence.", 0, 0)
+                    llm_payload = self._build_llm_answer(
+                        entries=entries,
+                        key=key,
+                        pm_team=pm_team,
+                        country=country,
+                        question=question,
+                        matches=top_matches,
+                        llm_budget_mode=llm_budget_mode,
+                        requested_answer_mode=normalized_answer_mode,
+                        request_cache=request_cache,
+                    )
+                    payload.update(llm_payload)
+                    payload["evidence_outline"] = self._build_evidence_outline(payload.get("evidence_pack") or evidence_pack, top_matches)
                     payload["answer_mode"] = normalized_answer_mode
-                    payload["llm_retryable_error"] = {
-                        "retryable": True,
-                        "code": "rate_limited",
-                        "status_code": getattr(error, "status_code", None),
-                        "provider_status": str(getattr(error, "provider_status", "") or "RESOURCE_EXHAUSTED"),
-                        "retry_after_seconds": retry_after,
-                    }
-                    payload["fallback_notice"] = {
-                        "title": "LLM rate limit, retry allowed",
-                        "message": f"{error} LLM mode remains enabled; you can retry this question when quota is available.{retry_hint} Showing code-search results for this attempt.",
-                        "fallback_mode": normalized_answer_mode,
-                    }
-                else:
-                    payload["fallback_notice"] = {
-                        "title": "LLM unavailable",
-                        "message": f"{error} Showing code-search results instead.",
-                        "fallback_mode": ANSWER_MODE,
-                    }
+                    report("completed", "LLM answer generated.", 0, 0)
+                except ToolError as error:
+                    if self._is_retryable_llm_rate_limit(error):
+                        retry_after = self._llm_retry_after_seconds(error)
+                        retry_hint = f" Provider suggested retry after {retry_after:g}s." if retry_after is not None else ""
+                        payload["answer_mode"] = normalized_answer_mode
+                        payload["llm_retryable_error"] = {
+                            "retryable": True,
+                            "code": "rate_limited",
+                            "status_code": getattr(error, "status_code", None),
+                            "provider_status": str(getattr(error, "provider_status", "") or "RESOURCE_EXHAUSTED"),
+                            "retry_after_seconds": retry_after,
+                        }
+                        payload["fallback_notice"] = {
+                            "title": "LLM rate limit, retry allowed",
+                            "message": f"{error} LLM mode remains enabled; you can retry this question when quota is available.{retry_hint} Showing code-search results for this attempt.",
+                            "fallback_mode": normalized_answer_mode,
+                        }
+                    else:
+                        payload["fallback_notice"] = {
+                            "title": "LLM unavailable",
+                            "message": f"{error} Showing code-search results instead.",
+                            "fallback_mode": ANSWER_MODE,
+                        }
         if not (normalized_answer_mode in {ANSWER_MODE_GEMINI, ANSWER_MODE_AUTO} and payload.get("llm_answer")):
             report("completed", "Code evidence retrieval completed.", 0, 0)
         self._record_query_telemetry(
@@ -6903,6 +6969,228 @@ class SourceCodeQAService:
             if term not in terms:
                 terms.append(term)
         return terms[:8]
+
+    def _llm_cost_skip_for_local_no_hit(
+        self,
+        *,
+        question: str,
+        matches: list[dict[str, Any]],
+        evidence_summary: dict[str, Any],
+        evidence_pack: dict[str, Any],
+        quality_gate: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        symbols = self._simple_function_usage_symbols(question)
+        if not symbols:
+            return None
+        exact_hit_count = sum(
+            1
+            for match in matches
+            if self._match_contains_any_symbol(match, symbols)
+        )
+        if exact_hit_count and any(self._match_has_function_usage_evidence(match, symbols) for match in matches):
+            return None
+
+        display_symbols = ", ".join(f"`{symbol}`" for symbol in symbols[:3])
+        if exact_hit_count:
+            direct_answer = (
+                f"I found references to {display_symbols}, but not in a function or method usage context in the current local index."
+            )
+            missing = [f"Function or method body usage evidence for {display_symbols}."]
+            claims = [
+                {
+                    "text": f"Local retrieval found {exact_hit_count} exact symbol reference{'s' if exact_hit_count != 1 else ''}, but none looked like function/method usage.",
+                    "citations": ["S1"] if matches else [],
+                }
+            ]
+            confidence = "medium"
+        else:
+            direct_answer = f"I did not find exact local index references to {display_symbols}, so there is no retrieved evidence that it is used in a function."
+            missing = [f"Any exact code reference to {display_symbols}."]
+            claims = []
+            confidence = "medium"
+
+        closest = []
+        for index, match in enumerate(matches[:4], start=1):
+            if not self._match_contains_any_symbol(match, symbols):
+                continue
+            closest.append(
+                {
+                    "text": f"Closest reference: {self._evidence_label(match)}.",
+                    "citations": [f"S{index}"],
+                }
+            )
+        claims.extend(closest[:3])
+        answer = direct_answer
+        structured_answer = {
+            "direct_answer": direct_answer,
+            "claims": claims,
+            "missing_evidence": missing,
+            "confidence": confidence,
+            "format": "deterministic_local_gate",
+        }
+        local_quality = dict(quality_gate or {})
+        local_quality.update(
+            {
+                "status": "local_no_function_usage_hit",
+                "confidence": confidence,
+                "missing": list(dict.fromkeys([*(quality_gate or {}).get("missing", []), *missing]))[:8],
+            }
+        )
+        return {
+            "llm_answer": answer,
+            "llm_budget_mode": "skipped",
+            "llm_requested_budget_mode": "skipped",
+            "llm_route": {"mode": "local_cost_gate", "reason": "simple_symbol_usage_no_function_hit"},
+            "llm_provider": "local",
+            "llm_model": "deterministic-no-hit-gate",
+            "llm_cached": False,
+            "llm_usage": {},
+            "llm_thinking_budget": 0,
+            "llm_latency_ms": 0,
+            "llm_attempt_log": [],
+            "llm_finish_reason": "llm_skipped_local_no_hit",
+            "llm_cost_skip": {
+                "skipped": True,
+                "reason": "simple_symbol_usage_no_function_hit",
+                "symbols": symbols,
+                "exact_hit_count": exact_hit_count,
+            },
+            "answer_quality": local_quality,
+            "answer_claim_check": {"status": "skipped", "issues": []},
+            "answer_judge": {"status": "skipped", "reason": "local deterministic no-hit gate"},
+            "structured_answer": structured_answer,
+            "answer_contract": {
+                "confidence": confidence,
+                "status": "local_no_function_usage_hit",
+                "missing_evidence": missing,
+                "evidence_mode": "deterministic_local_retrieval",
+            },
+            "evidence_pack": {
+                **(evidence_pack if isinstance(evidence_pack, dict) else {}),
+                "local_cost_gate": {
+                    "reason": "simple_symbol_usage_no_function_hit",
+                    "symbols": symbols,
+                    "exact_hit_count": exact_hit_count,
+                },
+            },
+        }
+
+    @staticmethod
+    def _simple_function_usage_symbols(question: str) -> list[str]:
+        text = str(question or "")
+        lowered = f" {text.lower()} "
+        has_usage_hint = any(hint in lowered for hint in USAGE_QUERY_HINTS)
+        has_function_hint = any(hint in lowered for hint in FUNCTION_USAGE_QUERY_HINTS)
+        if not (has_usage_hint and has_function_hint):
+            return []
+        if any(hint in lowered for hint in COMPLEX_REASONING_QUERY_HINTS):
+            return []
+        noise = {
+            "any",
+            "function",
+            "functions",
+            "method",
+            "methods",
+            "used",
+            "usage",
+            "referenced",
+            "called",
+            "check",
+        }
+        symbols: list[str] = []
+        for raw in IDENTIFIER_PATTERN.findall(text):
+            candidate = raw.strip("`'\".,;()[]{}<>")
+            lowered_candidate = candidate.lower()
+            if len(candidate) < 4 or lowered_candidate in STOPWORDS or lowered_candidate in LOW_VALUE_CALL_SYMBOLS or lowered_candidate in noise:
+                continue
+            if candidate not in symbols:
+                symbols.append(candidate)
+        return symbols[:4]
+
+    @staticmethod
+    def _match_contains_any_symbol(match: dict[str, Any], symbols: list[str]) -> bool:
+        haystack = f"{match.get('path') or ''}\n{match.get('snippet') or ''}".lower()
+        return any(symbol.lower() in haystack for symbol in symbols)
+
+    @classmethod
+    def _match_has_function_usage_evidence(cls, match: dict[str, Any], symbols: list[str]) -> bool:
+        path = str(match.get("path") or "")
+        suffix = Path(path).suffix.lower()
+        if suffix in NON_FUNCTION_USAGE_SUFFIXES or suffix not in CODE_USAGE_SUFFIXES:
+            return False
+        lines = str(match.get("snippet") or "").splitlines()
+        for index, line in enumerate(lines):
+            line_lower = line.lower()
+            if not any(symbol.lower() in line_lower for symbol in symbols):
+                continue
+            if cls._line_is_ui_or_config_literal(line):
+                continue
+            window = lines[max(0, index - 6) : min(len(lines), index + 4)]
+            window_text = "\n".join(window)
+            window_lower = window_text.lower()
+            for symbol in symbols:
+                lowered_symbol = symbol.lower()
+                accessor = cls._accessor_suffix(symbol).lower()
+                if re.search(rf"\b(?:get|set|is){re.escape(accessor)}\s*\(", window_lower):
+                    return True
+                if re.search(rf"(?<![A-Za-z0-9_]){re.escape(lowered_symbol)}\s*\(", line_lower):
+                    return True
+                if re.search(rf"\.\s*{re.escape(lowered_symbol)}\b", line_lower):
+                    return True
+            if cls._window_has_function_boundary(window) and cls._line_looks_like_executable_code(line):
+                return True
+        return False
+
+    @staticmethod
+    def _accessor_suffix(symbol: str) -> str:
+        parts = [part for part in re.split(r"[_\W]+", str(symbol or "")) if part]
+        if len(parts) > 1:
+            return "".join(part[:1].upper() + part[1:] for part in parts)
+        value = str(symbol or "")
+        return value[:1].upper() + value[1:]
+
+    @staticmethod
+    def _line_is_ui_or_config_literal(line: str) -> bool:
+        lowered = str(line or "").lower()
+        return any(
+            marker in lowered
+            for marker in (
+                "label",
+                "placeholder",
+                "tooltip",
+                "title",
+                "rules",
+                "columns",
+                "field:",
+                "name:",
+                "prop:",
+                "key:",
+                "value:",
+            )
+        )
+
+    @staticmethod
+    def _line_looks_like_executable_code(line: str) -> bool:
+        stripped = str(line or "").strip()
+        lowered = stripped.lower()
+        return bool(
+            re.search(r"\b(if|for|while|switch|case|return|throw|new)\b", lowered)
+            or "=" in stripped
+            or "." in stripped
+            or "->" in stripped
+            or "=>" in stripped
+        )
+
+    @staticmethod
+    def _window_has_function_boundary(lines: list[str]) -> bool:
+        for line in lines:
+            if JAVA_METHOD_DEF_PATTERN.search(line) or PY_DEF_PATTERN.search(line) or JS_DEF_PATTERN.search(line):
+                return True
+            if re.search(r"\b(?:public|private|protected)\s+[A-Za-z0-9_<>, ?\[\]]+\s+[A-Za-z_][A-Za-z0-9_]*\s*\(", line):
+                return True
+            if re.search(r"\b(?:async\s+)?[A-Za-z_][A-Za-z0-9_]*\s*=\s*(?:async\s*)?\([^)]*\)\s*=>", line):
+                return True
+        return False
 
     @staticmethod
     def _exact_lookup_is_sufficient(terms: list[str], matches: list[dict[str, Any]]) -> bool:

@@ -797,7 +797,7 @@
       payload?.llm_model ? `model: ${payload.llm_model}` : '',
       payload?.llm_thinking_budget !== undefined ? `thinking: ${payload.llm_thinking_budget}` : '',
       payload?.llm_route?.mode === 'auto' ? `route: ${payload.llm_route.reason}` : '',
-      payload?.llm_cached ? 'cache hit' : 'live call',
+      payload?.llm_cost_skip?.skipped ? 'LLM skipped' : (payload?.llm_cached ? 'cache hit' : 'live call'),
       usage?.promptTokenCount || usage?.prompt_tokens ? `prompt: ${usage.promptTokenCount || usage.prompt_tokens}` : '',
       usage?.candidatesTokenCount || usage?.completion_tokens ? `output: ${usage.candidatesTokenCount || usage.completion_tokens}` : '',
       usage?.totalTokenCount || usage?.total_tokens ? `total: ${usage.totalTokenCount || usage.total_tokens}` : '',
