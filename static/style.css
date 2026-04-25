@@ -3087,17 +3087,21 @@ body.briefing-no-image-mode .briefing-presentation-card {
 
 .briefing-floating-toggle {
   position: fixed;
-  right: 24px;
-  top: 92px;
+  left: 50vw;
+  top: 50vh;
+  transform: translate(-50%, -50%);
   z-index: 10000;
-  min-height: 44px;
-  padding: 0 18px;
-  border: 1px solid rgba(27, 107, 92, 0.28);
+  min-height: 54px;
+  padding: 0 24px;
+  border: 2px solid rgba(255, 255, 255, 0.92);
   border-radius: 999px;
-  background: rgba(27, 107, 92, 0.94);
+  background: #0f766e;
   color: #fff;
-  box-shadow: 0 16px 34px rgba(27, 107, 92, 0.24);
-  font-weight: 800;
+  box-shadow:
+    0 0 0 4px rgba(15, 118, 110, 0.18),
+    0 20px 44px rgba(15, 23, 42, 0.28);
+  font-size: 15px;
+  font-weight: 900;
   letter-spacing: 0;
   cursor: pointer;
   touch-action: none;
@@ -3106,17 +3110,25 @@ body.briefing-no-image-mode .briefing-presentation-card {
 }
 
 .briefing-floating-toggle:hover {
-  background: rgba(21, 91, 78, 0.98);
+  background: #115e59;
+  box-shadow:
+    0 0 0 5px rgba(15, 118, 110, 0.22),
+    0 24px 52px rgba(15, 23, 42, 0.32);
 }
 
 .briefing-floating-toggle[aria-pressed="true"] {
-  background: rgba(28, 37, 65, 0.94);
-  border-color: rgba(28, 37, 65, 0.28);
+  background: #1f2937;
+  border-color: rgba(255, 255, 255, 0.92);
+  box-shadow:
+    0 0 0 4px rgba(31, 41, 55, 0.2),
+    0 20px 44px rgba(15, 23, 42, 0.3);
 }
 
 .briefing-floating-toggle.is-dragging {
   cursor: grabbing;
-  box-shadow: 0 20px 42px rgba(28, 37, 65, 0.32);
+  box-shadow:
+    0 0 0 5px rgba(31, 41, 55, 0.18),
+    0 26px 58px rgba(15, 23, 42, 0.34);
 }
 
 .briefing-scroll-hint {

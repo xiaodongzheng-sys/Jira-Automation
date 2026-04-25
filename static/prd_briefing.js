@@ -163,6 +163,7 @@
     noImageModeToggle.style.top = `${top}px`;
     noImageModeToggle.style.right = 'auto';
     noImageModeToggle.style.bottom = 'auto';
+    noImageModeToggle.style.transform = 'none';
   };
 
   const saveNoImageTogglePosition = () => {
