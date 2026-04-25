@@ -363,6 +363,26 @@
     sessionMessages.scrollTop = sessionMessages.scrollHeight;
   };
 
+  const renderOptimisticUserMessage = (question) => {
+    if (!sessionMessages) return;
+    const text = String(question || '').trim();
+    if (!text) return;
+    const empty = sessionMessages.querySelector('.source-qa-empty');
+    if (empty) {
+      sessionMessages.innerHTML = '';
+    }
+    sessionMessages.insertAdjacentHTML('beforeend', `
+      <article class="source-qa-message source-qa-message-user">
+        <div class="source-qa-message-head">
+          <strong>You</strong>
+          <span>now</span>
+        </div>
+        <p>${escapeHtml(text)}</p>
+      </article>
+    `);
+    sessionMessages.scrollTop = sessionMessages.scrollHeight;
+  };
+
   const applyActiveSession = (session) => {
     activeSession = session || null;
     activeSessionId = session?.id || '';
@@ -1220,6 +1240,7 @@
     renderPendingQuery(submittedQuestion, effectiveAnswerMode);
     try {
       const session = await ensureActiveSession();
+      renderOptimisticUserMessage(submittedQuestion);
       const initialPayload = await fetch(queryUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

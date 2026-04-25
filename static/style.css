@@ -4526,6 +4526,10 @@ select:focus {
   gap: 12px;
 }
 
+.source-qa-chat-composer {
+  margin-top: 6px;
+}
+
 .source-qa-model-availability {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));

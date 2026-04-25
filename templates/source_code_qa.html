@@ -114,9 +114,18 @@
           <div class="source-qa-session-messages" data-source-session-messages>
             <div class="source-qa-empty">Start a chat to build a reusable investigation context.</div>
           </div>
+          <div class="source-qa-live-answer" data-source-live-answer hidden></div>
+          <div class="source-qa-chat-composer source-qa-composer">
+            <textarea data-source-question rows="4" placeholder="Example: where is Jira issue batch creation handled?"></textarea>
+            <div class="button-row source-qa-actions">
+              <button class="button" type="button" data-source-query>Search Code</button>
+              <span class="microcopy" data-source-query-status>Ready.</span>
+            </div>
+            <div class="source-qa-history" data-source-question-history hidden></div>
+          </div>
         </article>
 
-        <section class="panel panel-wide">
+        <section class="panel panel-wide" hidden>
           <div class="panel-head">
             <div>
               <p class="eyebrow">Results</p>
@@ -129,7 +138,6 @@
             </div>
           </div>
           <div class="source-qa-fallback-notice" data-source-fallback-notice hidden></div>
-          <div class="source-qa-live-answer" data-source-live-answer hidden></div>
           <div class="source-qa-llm-answer" data-source-llm-answer hidden></div>
           <div class="source-qa-evidence-summary" data-source-evidence-summary hidden></div>
           <div class="source-qa-debug-trace" data-source-debug-trace hidden></div>
@@ -145,19 +153,6 @@
           </div>
         </section>
 
-        <article class="panel panel-wide source-qa-composer">
-          <div>
-            <p class="eyebrow">Question</p>
-            <h2>Ask The Codebase</h2>
-            <p class="card-help">Use concrete terms: API path, class name, table, field, error code, or business keyword.</p>
-          </div>
-          <textarea data-source-question rows="4" placeholder="Example: where is Jira issue batch creation handled?"></textarea>
-          <div class="button-row source-qa-actions">
-            <button class="button" type="button" data-source-query>Search Code</button>
-            <span class="microcopy" data-source-query-status>Ready.</span>
-          </div>
-          <div class="source-qa-history" data-source-question-history hidden></div>
-        </article>
       </section>
     </section>
   </section>

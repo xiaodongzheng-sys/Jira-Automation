@@ -89,7 +89,8 @@ class SourceCodeQARouteTests(unittest.TestCase):
 
         self.assertIn(b"Repository Mapping", owner_response.data)
         self.assertNotIn(b"Repository Mapping", teammate_response.data)
-        self.assertIn(b"Ask The Codebase", teammate_response.data)
+        self.assertIn(b"data-source-question", teammate_response.data)
+        self.assertIn(b"data-source-live-answer", teammate_response.data)
         self.assertNotIn(b"LLM Budget", teammate_response.data)
         self.assertIn(b"data-source-llm-provider", teammate_response.data)
         self.assertIn(b"data-source-session-list", teammate_response.data)
