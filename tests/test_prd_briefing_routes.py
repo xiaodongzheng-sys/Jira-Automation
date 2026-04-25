@@ -28,6 +28,19 @@ class FakeBriefingService:
                 "open_questions": ["question"],
             },
             "sections": [{"section_path": "Overview", "content": "Body", "html_content": "<p>Body</p>", "image_refs": [], "walkthrough_cached": True, "walkthrough_audio_cached": True}],
+            "briefing_blocks": [
+                {
+                    "block_id": "block-1-feature",
+                    "title": "核心功能说明",
+                    "briefing_goal": "Goal",
+                    "merged_summary": "Summary",
+                    "section_indexes": [0],
+                    "source_refs": [{"section_index": 0, "section_path": "Overview"}],
+                    "developer_focus": ["focus"],
+                    "walkthrough_cached": True,
+                    "walkthrough_audio_cached": True,
+                }
+            ],
             "messages": [],
         }
 
@@ -44,7 +57,14 @@ class FakeBriefingService:
         }
 
     def narrate_section(self, **kwargs):
-        return {"script": "Section script", "audio_url": None, "cached": True, "audio_cached": True}
+        return {
+            "script": "Section script",
+            "audio_url": None,
+            "cached": True,
+            "audio_cached": True,
+            "briefing_block_id": kwargs.get("briefing_block_id"),
+            "section_indexes": [0],
+        }
 
 
 class PRDBriefingRouteTests(unittest.TestCase):
@@ -92,6 +112,22 @@ class PRDBriefingRouteTests(unittest.TestCase):
             payload = response.get_json()
             self.assertEqual(payload["session"]["session_id"], "session-1")
             self.assertEqual(payload["session"]["audience"], "developer_zh")
+            self.assertEqual(payload["briefing_blocks"][0]["block_id"], "block-1-feature")
+
+    @patch("prd_briefing.blueprint._build_service", return_value=FakeBriefingService())
+    def test_narrate_endpoint_accepts_briefing_block_id(self, _mock_service):
+        with self.app.test_client() as client:
+            with client.session_transaction() as session:
+                session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong Zheng"}
+                session["google_credentials"] = {"token": "x"}
+            response = client.post(
+                "/prd-briefing/api/session/session-1/narrate",
+                json={"briefing_block_id": "block-1-feature", "include_audio": False},
+            )
+            self.assertEqual(response.status_code, 200)
+            payload = response.get_json()
+            self.assertEqual(payload["briefing_block_id"], "block-1-feature")
+            self.assertEqual(payload["section_indexes"], [0])
 
     @patch("prd_briefing.blueprint._build_service", return_value=FakeBriefingService())
     def test_answer_endpoint_returns_grounded_payload(self, _mock_service):

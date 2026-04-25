@@ -7,6 +7,7 @@ import json
 from prd_briefing.confluence import IngestedConfluencePage, ParsedSection
 from prd_briefing.service import (
     PRDBriefingService,
+    build_pm_briefing_blocks,
     build_heuristic_session_overview,
     overview_is_low_signal,
     parse_session_overview,
@@ -112,6 +113,9 @@ class PRDBriefingServiceTests(unittest.TestCase):
         self.assertIn("<p>", payload["sections"][0]["html_content"])
         self.assertTrue(payload["sections"][0]["briefing_notes"])
         self.assertTrue(payload["sections"][0]["briefing_summary"])
+        self.assertIn("briefing_blocks", payload)
+        self.assertTrue(payload["briefing_blocks"])
+        self.assertIn("section_indexes", payload["briefing_blocks"][0])
 
     def test_answer_question_uses_prd_context(self):
         payload = self.service.create_session(
@@ -197,6 +201,78 @@ class PRDBriefingServiceTests(unittest.TestCase):
 
         self.assertEqual(first["script"], "LLM answer")
         self.assertEqual(second["script"], "LLM answer")
+        self.assertFalse(first["cached"])
+        self.assertTrue(second["cached"])
+        self.assertEqual(self.openai_client.answer_calls, 1)
+
+    def test_pm_briefing_blocks_filter_metadata_and_merge_related_sections(self):
+        sections = [
+            {"section_path": "1.1 Version Control", "content": "Version v0.1 PIC someone@example.com"},
+            {"section_path": "3.5.1 Search Layout", "content": "The page shows search criteria and default fields. User can click Search button."},
+            {"section_path": "3.5.2 Detail Fields", "content": "The detail page displays readonly fields and required form values."},
+            {"section_path": "3.6.1 Submit Review", "content": "User can submit for review and status changes from Draft to Pending Review."},
+            {"section_path": "3.6.2 Reopen", "content": "User can click Reopen and status changes back to Draft."},
+        ]
+
+        blocks = build_pm_briefing_blocks(sections)
+
+        self.assertFalse(any(0 in block["section_indexes"] for block in blocks))
+        ui_block = next(block for block in blocks if block["title"] == "页面布局和字段规则")
+        state_block = next(block for block in blocks if block["title"] == "状态流转和操作动作")
+        self.assertEqual(ui_block["section_indexes"], [1, 2])
+        self.assertEqual(state_block["section_indexes"], [3, 4])
+        self.assertTrue(ui_block["source_refs"])
+
+    def test_narrate_briefing_block_uses_block_payload_cache(self):
+        self.openai_client.is_configured = lambda: True
+        page = IngestedConfluencePage(
+            page_id="456",
+            title="Assessment PRD",
+            source_url="https://example.atlassian.net/wiki/pages/456",
+            updated_at="2026-04-16T10:00:00Z",
+            language="en",
+            sections=[
+                ParsedSection(
+                    title="Search Layout",
+                    section_path="3.5.1 Search Layout",
+                    content="The page shows search criteria and default fields. User can click Search button.",
+                    html_content="<p>The page shows search criteria and default fields.</p>",
+                    image_refs=[],
+                ),
+                ParsedSection(
+                    title="Detail Fields",
+                    section_path="3.5.2 Detail Fields",
+                    content="The detail page displays readonly fields and required form values.",
+                    html_content="<p>The detail page displays readonly fields and required form values.</p>",
+                    image_refs=[],
+                ),
+            ],
+        )
+        self.service.confluence = FakeConnector(page)
+        payload = self.service.create_session(
+            owner_key="anon:block-test",
+            page_ref="https://example.atlassian.net/wiki/pages/456",
+            mode="walkthrough",
+        )
+        block_id = payload["briefing_blocks"][0]["block_id"]
+        self.openai_client.answer_calls = 0
+
+        first = self.service.narrate_section(
+            session_id=payload["session"]["session_id"],
+            owner_key="anon:block-test",
+            briefing_block_id=block_id,
+            include_audio=False,
+        )
+        second = self.service.narrate_section(
+            session_id=payload["session"]["session_id"],
+            owner_key="anon:block-test",
+            briefing_block_id=block_id,
+            include_audio=False,
+        )
+
+        self.assertEqual(first["script"], "LLM answer")
+        self.assertEqual(first["briefing_block_id"], block_id)
+        self.assertEqual(first["section_indexes"], [0, 1])
         self.assertFalse(first["cached"])
         self.assertTrue(second["cached"])
         self.assertEqual(self.openai_client.answer_calls, 1)

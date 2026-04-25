@@ -87,6 +87,7 @@ def create_prd_briefing_blueprint() -> Blueprint:
                 session_id=session_id,
                 owner_key=owner_key,
                 section_index=int(payload.get("section_index") or 0),
+                briefing_block_id=str(payload.get("briefing_block_id") or "").strip() or None,
                 include_audio=bool(payload.get("include_audio", True)),
             )
             return jsonify(data)

@@ -24,6 +24,7 @@ DEVELOPER_AUDIENCE = "developer_zh"
 DEVELOPER_LANGUAGE = "Mandarin Chinese"
 
 WALKTHROUGH_SCRIPT_PROMPT_VERSION = "v1_openai_only_pm_briefing"
+WALKTHROUGH_BLOCK_PROMPT_VERSION = "v1_pm_briefing_block"
 SESSION_BRIEF_PROMPT_VERSION = "v7_two_part_chinese_summary"
 WALKTHROUGH_PREWARM_LIMIT = 12
 
@@ -385,6 +386,8 @@ class PRDBriefingService:
         prd_chunks = self.store.list_session_prd_chunks(session_id, owner_key)
         sections = self._build_sections(prd_chunks)
         sections = [self._annotate_section_cache(owner_key=owner_key, section=section) for section in sections]
+        briefing_blocks = self._build_briefing_blocks(sections)
+        briefing_blocks = [self._annotate_block_cache(owner_key=owner_key, block=block) for block in briefing_blocks]
         session_overview = self._build_session_overview(
             owner_key=owner_key,
             session=session,
@@ -394,6 +397,7 @@ class PRDBriefingService:
             "session": session,
             "session_overview": session_overview,
             "sections": sections,
+            "briefing_blocks": briefing_blocks,
             "messages": self.store.list_recent_messages(session_id, limit=20),
         }
 
@@ -440,12 +444,49 @@ class PRDBriefingService:
             "audio_url": payload.audio_url,
         }
 
-    def narrate_section(self, *, session_id: str, owner_key: str, section_index: int, include_audio: bool = True) -> dict[str, Any]:
+    def narrate_section(
+        self,
+        *,
+        session_id: str,
+        owner_key: str,
+        section_index: int = 0,
+        briefing_block_id: str | None = None,
+        include_audio: bool = True,
+    ) -> dict[str, Any]:
         session = self.store.get_session(session_id, owner_key)
         if not session:
             raise ValueError("Briefing session was not found.")
         prd_chunks = self.store.list_session_prd_chunks(session_id, owner_key)
         sections = self._build_sections(prd_chunks)
+        if briefing_block_id:
+            blocks = self._build_briefing_blocks(sections)
+            block = next((item for item in blocks if item.get("block_id") == briefing_block_id), None)
+            if not block:
+                raise ValueError("Briefing block is out of range.")
+            script, cached = self._compose_walkthrough_block(owner_key=owner_key, block=block)
+            audio_cached = bool(
+                self.voice_service.get_cached_audio_for_text(
+                    owner_key=owner_key,
+                    text=script,
+                    language_code="zh",
+                )
+            )
+            audio_path = None
+            if include_audio:
+                audio_path = self.voice_service.synthesize(
+                    session_id=session_id,
+                    text=script,
+                    language_code="zh",
+                    owner_key=owner_key,
+                )
+            return {
+                "script": script,
+                "audio_url": f"/prd-briefing/assets/{audio_path}" if audio_path else None,
+                "cached": cached,
+                "audio_cached": audio_cached,
+                "briefing_block_id": block["block_id"],
+                "section_indexes": block["section_indexes"],
+            }
         if section_index < 0 or section_index >= len(sections):
             raise ValueError("Section index is out of range.")
         section = sections[section_index]
@@ -514,6 +555,7 @@ class PRDBriefingService:
     def _build_sections(self, prd_chunks: list[ChunkRecord]) -> list[dict[str, Any]]:
         return [
             {
+                "section_index": index,
                 "section_path": chunk.section_path,
                 "content": chunk.content,
                 "html_content": chunk.html_content,
@@ -524,8 +566,11 @@ class PRDBriefingService:
                     for ref in chunk.image_refs
                 ],
             }
-            for chunk in prd_chunks
+            for index, chunk in enumerate(prd_chunks)
         ]
+
+    def _build_briefing_blocks(self, sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return build_pm_briefing_blocks(sections)
 
     def _compose_walkthrough_section(self, *, owner_key: str, section: dict[str, Any]) -> tuple[str, bool]:
         prompt = (
@@ -600,6 +645,67 @@ class PRDBriefingService:
         )
         return script, False
 
+    def _compose_walkthrough_block(self, *, owner_key: str, block: dict[str, Any]) -> tuple[str, bool]:
+        prompt = (
+            f"You are a product manager briefing related PRD sections to software engineers in {DEVELOPER_LANGUAGE}. "
+            "The input is already grouped into one product briefing block, so explain the merged capability instead of reading each Confluence section separately. "
+            "Be concrete about user flow, page behavior, field or status rules, backend/system responsibilities, dependencies, and implementation risks. "
+            "Do not read the PRD word for word. Keep the tone like a live PM walkthrough for developers."
+        )
+        source_lines = []
+        for ref in block.get("source_refs") or []:
+            source_lines.append(
+                f"[{int(ref.get('section_index', 0)) + 1}] {ref.get('section_path')}\n{ref.get('content_excerpt', '')}"
+            )
+        body = (
+            f"Briefing block: {block['title']}\n\n"
+            f"Briefing goal:\n{block.get('briefing_goal', '')}\n\n"
+            f"Merged summary:\n{block.get('merged_summary', '')}\n\n"
+            f"Developer focus:\n- " + "\n- ".join(block.get("developer_focus") or []) + "\n\n"
+            f"Related PRD source sections:\n\n" + "\n\n".join(source_lines) + "\n\n"
+            "Write a natural spoken script of around 7 to 12 sentences in Mandarin. "
+            "Start with why this merged module matters. Then explain the user/system flow in order. "
+            "Call out the related PRD sections by their product meaning, but do not mechanically enumerate section numbers. "
+            "End with what developers should double-check before implementation or QA."
+        )
+        if not self.text_client.is_configured():
+            raise RuntimeError("Walkthrough script generation now requires a configured OpenAI text model.")
+        cache_lookup = self._build_walkthrough_block_cache_lookup(
+            owner_key=owner_key,
+            block=block,
+            prompt=prompt,
+            body=body,
+        )
+        model_id = cache_lookup["model_id"]
+        block_payload = cache_lookup["block_payload"]
+        cached_script = cache_lookup["cached_script"]
+        if cached_script:
+            return cached_script, True
+        legacy_cached_script = cache_lookup["legacy_cached_script"]
+        if legacy_cached_script:
+            self.store.cache_script(
+                owner_key=owner_key,
+                audience=DEVELOPER_AUDIENCE,
+                model_id=model_id,
+                prompt_version=WALKTHROUGH_BLOCK_PROMPT_VERSION,
+                section_payload=block_payload,
+                script=legacy_cached_script,
+            )
+            return legacy_cached_script, True
+        try:
+            script = self.text_client.create_answer(system_prompt=prompt, user_prompt=body)
+        except Exception as error:  # noqa: BLE001
+            raise RuntimeError(f"Text model could not generate the walkthrough script: {error}") from error
+        self.store.cache_script(
+            owner_key=owner_key,
+            audience=DEVELOPER_AUDIENCE,
+            model_id=model_id,
+            prompt_version=WALKTHROUGH_BLOCK_PROMPT_VERSION,
+            section_payload=block_payload,
+            script=script,
+        )
+        return script, False
+
     def _prewarm_walkthrough_scripts(
         self,
         *,
@@ -608,12 +714,12 @@ class PRDBriefingService:
     ) -> None:
         if not self.text_client.is_configured():
             return
-        prioritized_sections = select_sections_for_overview(sections)
-        for section in prioritized_sections[:WALKTHROUGH_PREWARM_LIMIT]:
+        briefing_blocks = self._build_briefing_blocks(sections)
+        for block in briefing_blocks[:WALKTHROUGH_PREWARM_LIMIT]:
             try:
-                self._compose_walkthrough_section(
+                self._compose_walkthrough_block(
                     owner_key=owner_key,
-                    section=section,
+                    block=block,
                 )
             except Exception:  # noqa: BLE001
                 continue
@@ -645,6 +751,25 @@ class PRDBriefingService:
         annotated = dict(section)
         try:
             cache_lookup = self._build_walkthrough_cache_lookup(owner_key=owner_key, section=section)
+            cached_script = cache_lookup["cached_script"] or cache_lookup["legacy_cached_script"]
+            annotated["walkthrough_cached"] = bool(cached_script)
+            annotated["walkthrough_audio_cached"] = bool(
+                cached_script
+                and self.voice_service.get_cached_audio_for_text(
+                    owner_key=owner_key,
+                    text=cached_script,
+                    language_code="zh",
+                )
+            )
+        except Exception:  # noqa: BLE001
+            annotated["walkthrough_cached"] = False
+            annotated["walkthrough_audio_cached"] = False
+        return annotated
+
+    def _annotate_block_cache(self, *, owner_key: str, block: dict[str, Any]) -> dict[str, Any]:
+        annotated = dict(block)
+        try:
+            cache_lookup = self._build_walkthrough_block_cache_lookup(owner_key=owner_key, block=block)
             cached_script = cache_lookup["cached_script"] or cache_lookup["legacy_cached_script"]
             annotated["walkthrough_cached"] = bool(cached_script)
             annotated["walkthrough_audio_cached"] = bool(
@@ -727,6 +852,77 @@ class PRDBriefingService:
         return {
             "model_id": model_id,
             "section_payload": section_payload,
+            "cached_script": cached_script,
+            "legacy_cached_script": legacy_cached_script,
+        }
+
+    def _build_walkthrough_block_cache_lookup(
+        self,
+        *,
+        owner_key: str,
+        block: dict[str, Any],
+        prompt: str | None = None,
+        body: str | None = None,
+    ) -> dict[str, Any]:
+        prompt = prompt or (
+            f"You are a product manager briefing related PRD sections to software engineers in {DEVELOPER_LANGUAGE}. "
+            "The input is already grouped into one product briefing block, so explain the merged capability instead of reading each Confluence section separately. "
+            "Be concrete about user flow, page behavior, field or status rules, backend/system responsibilities, dependencies, and implementation risks. "
+            "Do not read the PRD word for word. Keep the tone like a live PM walkthrough for developers."
+        )
+        source_payload = [
+            {
+                "section_index": ref.get("section_index"),
+                "section_path": ref.get("section_path"),
+                "content_excerpt": ref.get("content_excerpt", ""),
+            }
+            for ref in block.get("source_refs") or []
+        ]
+        body = body or json.dumps(
+            {
+                "block_id": block.get("block_id"),
+                "title": block.get("title"),
+                "briefing_goal": block.get("briefing_goal"),
+                "merged_summary": block.get("merged_summary"),
+                "developer_focus": block.get("developer_focus") or [],
+                "source_refs": source_payload,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        model_id = str(getattr(self.text_client, "model_id", getattr(self.openai_client, "chat_model", "text_model")))
+        block_payload = json.dumps(
+            {
+                "payload_type": "briefing_block",
+                "block_id": block.get("block_id"),
+                "title": block.get("title"),
+                "briefing_goal": block.get("briefing_goal"),
+                "merged_summary": block.get("merged_summary"),
+                "developer_focus": block.get("developer_focus") or [],
+                "section_indexes": block.get("section_indexes") or [],
+                "source_refs": source_payload,
+                "prompt": prompt,
+                "body": body,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        cached_script = self.store.get_cached_script(
+            owner_key=owner_key,
+            audience=DEVELOPER_AUDIENCE,
+            model_id=model_id,
+            prompt_version=WALKTHROUGH_BLOCK_PROMPT_VERSION,
+            section_payload=block_payload,
+        )
+        legacy_cached_script = self.store.get_cached_script_any_model(
+            owner_key=owner_key,
+            audience=DEVELOPER_AUDIENCE,
+            prompt_version=WALKTHROUGH_BLOCK_PROMPT_VERSION,
+            section_payload=block_payload,
+        )
+        return {
+            "model_id": model_id,
+            "block_payload": block_payload,
             "cached_script": cached_script,
             "legacy_cached_script": legacy_cached_script,
         }
@@ -1275,6 +1471,118 @@ def has_feature_level_signal(value: str) -> bool:
             "tab",
         )
     )
+
+
+BRIEFING_CATEGORY_META = {
+    "workflow": {
+        "title": "主流程和页面跳转",
+        "goal": "帮助开发先理解用户从入口到完成操作的主路径，以及页面之间怎么衔接。",
+    },
+    "ui_rules": {
+        "title": "页面布局和字段规则",
+        "goal": "把页面结构、字段展示、默认值、显隐、只读和必填规则合并讲清楚。",
+    },
+    "state_actions": {
+        "title": "状态流转和操作动作",
+        "goal": "集中说明提交、复核、审批、撤回、重开等动作会如何改变状态和可用操作。",
+    },
+    "reporting": {
+        "title": "报表、下载和历史记录",
+        "goal": "说明报表下载、历史记录、审计输出等功能对前后端实现的要求。",
+    },
+    "permission_edge": {
+        "title": "权限、校验和异常边界",
+        "goal": "把权限条件、强校验、失败路径和边界 case 单独拎出来，避免实现时漏规则。",
+    },
+    "feature": {
+        "title": "核心功能说明",
+        "goal": "合并 PRD 里真正影响开发实现的功能说明，过滤低价值背景和元数据。",
+    },
+}
+
+
+def build_pm_briefing_blocks(sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    candidates: list[tuple[int, dict[str, Any], str, int]] = []
+    for index, section in enumerate(sections):
+        section_path = str(section.get("section_path", "")).strip()
+        content = str(section.get("content", "")).strip()
+        score = section_overview_score(section_path, content)
+        if looks_like_metadata_noise(section_path) and score < 8:
+            continue
+        if score < 3 and not has_feature_level_signal(f"{section_path} {content}"):
+            continue
+        candidates.append((index, section, classify_briefing_category(section_path, content), score))
+
+    if not candidates and sections:
+        ranked = [
+            (index, section, "feature", section_overview_score(str(section.get("section_path", "")), str(section.get("content", ""))))
+            for index, section in enumerate(sections)
+        ]
+        candidates = sorted(ranked, key=lambda item: item[3], reverse=True)[: min(3, len(ranked))]
+
+    grouped: dict[str, list[tuple[int, dict[str, Any], int]]] = {}
+    category_order: list[str] = []
+    for index, section, category, score in candidates:
+        if category not in grouped:
+            grouped[category] = []
+            category_order.append(category)
+        grouped[category].append((index, section, score))
+
+    blocks: list[dict[str, Any]] = []
+    for category in category_order:
+        entries = sorted(grouped[category], key=lambda item: item[0])
+        meta = BRIEFING_CATEGORY_META.get(category, BRIEFING_CATEGORY_META["feature"])
+        section_indexes = [index for index, _section, _score in entries]
+        block_sections = [section for _index, section, _score in entries]
+        source_refs = [
+            {
+                "section_index": index,
+                "section_path": str(section.get("section_path", "")).strip(),
+                "content_excerpt": truncate_for_prompt(str(section.get("content", "")), 700),
+            }
+            for index, section, _score in entries
+        ]
+        developer_focus = [localize_detail_point_zh(item) for item in extract_detail_points(block_sections, category="developer")]
+        merged_summary = build_block_summary(meta["title"], block_sections)
+        blocks.append(
+            {
+                "block_id": f"block-{len(blocks) + 1}-{category}",
+                "title": meta["title"],
+                "briefing_goal": meta["goal"],
+                "merged_summary": merged_summary,
+                "section_indexes": section_indexes,
+                "source_refs": source_refs,
+                "developer_focus": developer_focus,
+                "walkthrough_cached": False,
+                "walkthrough_audio_cached": False,
+            }
+        )
+    return blocks
+
+
+def classify_briefing_category(section_path: str, content: str) -> str:
+    text = f"{section_path} {content}".lower()
+    if any(token in text for token in ("report", "download", "export", "history", "audit")):
+        return "reporting"
+    if any(token in text for token in ("status", "submit", "review", "approval", "approve", "withdraw", "reopen", "closed", "verified", "draft")):
+        return "state_actions"
+    if any(token in text for token in ("layout", "field", "form", "search", "criteria", "column", "tab", "button", "display", "show", "visible", "hidden", "readonly", "default")):
+        return "ui_rules"
+    if any(token in text for token in ("permission", "role", "validation", "required", "must", "cannot", "only", "error", "fail", "exception")):
+        return "permission_edge"
+    if any(token in text for token in ("workflow", "flow", "navigation", "journey", "click", "navigate", "entry")):
+        return "workflow"
+    return "feature"
+
+
+def build_block_summary(title: str, sections: list[dict[str, Any]]) -> str:
+    focus_sentences = extract_candidate_sentences(sections, limit=3)
+    if focus_sentences:
+        return f"{title}：{'；'.join(focus_sentences[:3])}。"
+    titles = [str(section.get("section_path", "")).strip() for section in sections if str(section.get("section_path", "")).strip()]
+    if titles:
+        return f"{title}：建议把 {'、'.join(titles[:4])} 作为同一个产品能力一起 briefing。"
+    return f"{title}：系统已把相关 PRD 内容合并成一个产品 briefing 模块。"
 
 
 def select_sections_for_overview(sections: list[dict[str, Any]]) -> list[dict[str, Any]]:

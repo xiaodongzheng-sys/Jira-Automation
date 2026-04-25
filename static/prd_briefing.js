@@ -21,7 +21,9 @@
   let state = {
     sessionId: null,
     sections: [],
+    briefingBlocks: [],
     currentSectionIndex: 0,
+    currentBlockIndex: 0,
     messages: [],
     isNarrating: false,
     currentAudio: null,
@@ -116,8 +118,43 @@
       state.currentAudio.currentTime = 0;
       state.currentAudio = null;
     }
+    clearSourceHighlights();
     state.isNarrating = false;
     if (narrateButton) narrateButton.disabled = !state.sessionId;
+  };
+
+  const activeBlock = () => {
+    if (!state.briefingBlocks.length) return null;
+    return state.briefingBlocks[state.currentBlockIndex] || state.briefingBlocks[0] || null;
+  };
+
+  const activeSection = () => state.sections[state.currentSectionIndex] || state.sections[0] || null;
+
+  const activeSectionIndexes = () => {
+    const block = activeBlock();
+    if (block) return (block.section_indexes || []).map((value) => Number(value)).filter(Number.isFinite);
+    return [state.currentSectionIndex];
+  };
+
+  const clearSourceHighlights = () => {
+    if (!sectionDetailNode) return;
+    sectionDetailNode.querySelectorAll('.briefing-source-section.is-narrating-source').forEach((node) => {
+      node.classList.remove('is-narrating-source');
+    });
+  };
+
+  const highlightActiveSources = () => {
+    if (!sectionDetailNode) return;
+    clearSourceHighlights();
+    const indexes = new Set(activeSectionIndexes());
+    let first = null;
+    sectionDetailNode.querySelectorAll('[data-source-section-index]').forEach((node) => {
+      const index = Number(node.dataset.sourceSectionIndex || '-1');
+      const active = indexes.has(index);
+      node.classList.toggle('is-narrating-source', active);
+      if (active && !first) first = node;
+    });
+    first?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   };
 
   const closeImageLightbox = () => {
@@ -269,57 +306,67 @@
       const response = await fetch(`/prd-briefing/api/session/${state.sessionId}/narrate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ section_index: state.currentSectionIndex, include_audio: true }),
+        body: JSON.stringify({
+          briefing_block_id: activeBlock()?.block_id || null,
+          section_index: state.currentSectionIndex,
+          include_audio: true,
+        }),
       });
       const payload = await parseJsonResponse(response);
-      if (!response.ok) throw new Error(payload.message || '当前 section 无法生成讲解。');
+      if (!response.ok) throw new Error(payload.message || '当前模块无法生成讲解。');
       if (payload.cached) {
-        setWalkthroughStatus('命中缓存，正在整理这一节的中文讲解并准备播放…', 'neutral');
+        setWalkthroughStatus('命中缓存，正在整理当前模块的中文讲解并准备播放…', 'neutral');
         await wait(CACHED_NARRATION_DELAY_MS);
       }
       if (payload.audio_url) {
         const audio = new Audio(payload.audio_url);
         state.currentAudio = audio;
+        highlightActiveSources();
         audio.addEventListener('ended', () => {
           state.currentAudio = null;
           state.isNarrating = false;
+          clearSourceHighlights();
           if (narrateButton) narrateButton.disabled = false;
         }, { once: true });
         audio.addEventListener('error', () => {
           state.currentAudio = null;
           state.isNarrating = false;
+          clearSourceHighlights();
           if (narrateButton) narrateButton.disabled = false;
         }, { once: true });
         await audio.play().catch(() => {
           state.currentAudio = null;
           state.isNarrating = false;
+          clearSourceHighlights();
           if (narrateButton) narrateButton.disabled = false;
         });
       } else {
         state.isNarrating = false;
+        clearSourceHighlights();
         if (narrateButton) {
           narrateButton.disabled = false;
-          narrateButton.textContent = '开始中文讲解这一节';
+          narrateButton.textContent = '开始中文讲解这个模块';
         }
         throw new Error('服务端语音当前不可用，浏览器机械音兜底已关闭。');
       }
       setStatus(
         payload.audio_url
-          ? (payload.cached ? '已命中缓存并准备好当前 section 的中文讲解。' : '当前 section 的中文讲解已经生成。')
+          ? (payload.cached ? '已命中缓存并准备好当前模块的中文讲解。' : '当前模块的中文讲解已经生成。')
           : '服务端语音当前不可用。',
         'success',
       );
       setWalkthroughStatus(
         payload.cached
-          ? '已命中缓存，当前 section 的中文讲解已经准备好并开始播放。'
-          : '当前 section 的中文讲解已经生成并开始播放。',
+          ? '已命中缓存，当前模块的中文讲解已经准备好并开始播放，相关 PRD 原文已高亮。'
+          : '当前模块的中文讲解已经生成并开始播放，相关 PRD 原文已高亮。',
         'success',
       );
     } catch (error) {
       state.isNarrating = false;
+      clearSourceHighlights();
       if (narrateButton) {
         narrateButton.disabled = false;
-        narrateButton.textContent = '开始中文讲解这一节';
+        narrateButton.textContent = '开始中文讲解这个模块';
       }
       const raw = error.message || '当前 section 无法生成讲解。';
       const hasOpenAI = raw.includes('OpenAI');
@@ -337,42 +384,79 @@
     if (!sectionListNode || !sectionDetailNode) return;
     if (!state.sections.length) {
       clearWalkthroughStatus();
-      sectionListNode.innerHTML = '<div class="empty-state"><p>生成完成后，这里会出现 PRD section 导航。</p></div>';
-      sectionDetailNode.innerHTML = '<div class="empty-state"><p>请选择一个 section 查看原文内容和中文开发讲解。</p></div>';
+      sectionListNode.innerHTML = '<div class="empty-state"><p>生成完成后，这里会出现 PM briefing 模块导航。</p></div>';
+      sectionDetailNode.innerHTML = '<div class="empty-state"><p>请选择一个 briefing 模块查看合并讲解和 PRD 原文。</p></div>';
       narrateButton.disabled = true;
-      narrateButton.textContent = '开始中文讲解这一节';
+      narrateButton.textContent = '开始中文讲解这个模块';
       return;
     }
-    sectionListNode.innerHTML = state.sections.map((section, index) => `
-      <button class="briefing-outline-item ${index === state.currentSectionIndex ? 'is-active' : ''}" type="button" data-section-index="${index}">
+    const blocks = state.briefingBlocks.length ? state.briefingBlocks : state.sections.map((section, index) => ({
+      block_id: `section-${index}`,
+      title: section.section_path,
+      briefing_goal: '按原 PRD section 生成讲解。',
+      merged_summary: section.briefing_summary || section.content || '',
+      section_indexes: [index],
+      source_refs: [{ section_index: index, section_path: section.section_path }],
+      developer_focus: section.briefing_notes || [],
+      walkthrough_cached: section.walkthrough_cached,
+      walkthrough_audio_cached: section.walkthrough_audio_cached,
+    }));
+    sectionListNode.innerHTML = blocks.map((block, index) => `
+      <button class="briefing-outline-item ${index === state.currentBlockIndex ? 'is-active' : ''}" type="button" data-block-index="${index}">
         <span>${index + 1}</span>
-        <strong>${escapeHtml(section.section_path)}</strong>
+        <strong>${escapeHtml(block.title)}</strong>
+        <small>${escapeHtml((block.section_indexes || []).length)} 个 PRD section</small>
         <div class="briefing-cache-pill-row">
-          ${section.walkthrough_cached ? '<em class="briefing-cache-pill">文案已缓存</em>' : ''}
-          ${section.walkthrough_audio_cached ? '<em class="briefing-cache-pill briefing-cache-pill-secondary">音频已缓存</em>' : ''}
+          ${block.walkthrough_cached ? '<em class="briefing-cache-pill">文案已缓存</em>' : ''}
+          ${block.walkthrough_audio_cached ? '<em class="briefing-cache-pill briefing-cache-pill-secondary">音频已缓存</em>' : ''}
         </div>
       </button>
     `).join('');
-    const section = state.sections[state.currentSectionIndex];
-    const hasOriginalHtml = Boolean(section.html_content && section.html_content.trim());
-    const images = !hasOriginalHtml
-      ? (section.image_refs || []).map((src) => `<img src="${escapeHtml(src)}" alt="${escapeHtml(section.section_path)}">`).join('')
-      : '';
-    const contentMarkup = section.html_content && section.html_content.trim()
-      ? section.html_content
-      : (section.content || '')
-        .split('\n')
-        .map((line) => line.trim())
-        .filter(Boolean)
-        .map((line) => `<p>${escapeHtml(line)}</p>`)
-        .join('');
+    const block = blocks[state.currentBlockIndex] || blocks[0];
+    const sourceIndexes = (block.section_indexes || []).map((value) => Number(value)).filter(Number.isFinite);
+    const renderSourceSection = (sectionIndex) => {
+      const section = state.sections[sectionIndex];
+      if (!section) return '';
+      const hasOriginalHtml = Boolean(section.html_content && section.html_content.trim());
+      const images = !hasOriginalHtml
+        ? (section.image_refs || []).map((src) => `<img src="${escapeHtml(src)}" alt="${escapeHtml(section.section_path)}">`).join('')
+        : '';
+      const contentMarkup = section.html_content && section.html_content.trim()
+        ? section.html_content
+        : (section.content || '')
+          .split('\n')
+          .map((line) => line.trim())
+          .filter(Boolean)
+          .map((line) => `<p>${escapeHtml(line)}</p>`)
+          .join('');
+      return `
+        <section class="briefing-source-section" data-source-section-index="${sectionIndex}">
+          <div class="briefing-source-heading">
+            <span>PRD ${sectionIndex + 1}</span>
+            <strong>${escapeHtml(section.section_path)}</strong>
+          </div>
+          <div class="briefing-original-content">${contentMarkup || `<p>${escapeHtml(section.content || '')}</p>`}</div>
+          ${images ? `<div class="briefing-image-grid">${images}</div>` : ''}
+        </section>
+      `;
+    };
+    const sourceMarkup = (sourceIndexes.length ? sourceIndexes : [state.currentSectionIndex])
+      .map(renderSourceSection)
+      .join('');
     sectionDetailNode.innerHTML = `
       <div class="briefing-section-heading">
-        <h3>${escapeHtml(section.section_path)}</h3>
-        <span class="briefing-section-meta">第 ${state.currentSectionIndex + 1} / ${state.sections.length} 节</span>
+        <h3>${escapeHtml(block.title)}</h3>
+        <span class="briefing-section-meta">第 ${state.currentBlockIndex + 1} / ${blocks.length} 个 briefing 模块</span>
       </div>
-      <div class="briefing-original-content">${contentMarkup || `<p>${escapeHtml(section.content || '')}</p>`}</div>
-      ${images ? `<div class="briefing-image-grid">${images}</div>` : ''}
+      <article class="briefing-block-summary">
+        <p class="briefing-overview-kicker">PM Briefing Goal</p>
+        <p>${escapeHtml(block.briefing_goal || '')}</p>
+        <p>${escapeHtml(block.merged_summary || '')}</p>
+        ${(block.developer_focus || []).length ? `
+          <ul>${(block.developer_focus || []).slice(0, 4).map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</ul>
+        ` : ''}
+      </article>
+      <div class="briefing-source-stack">${sourceMarkup}</div>
     `;
     enhancePresentationTables();
     classifyTableLayouts();
@@ -381,8 +465,8 @@
     sectionDetailNode.querySelectorAll('img').forEach((image) => {
       image.setAttribute('tabindex', '0');
       image.setAttribute('role', 'button');
-      image.setAttribute('aria-label', `${section.section_path} 图片预览`);
-      const openPreview = () => openImageLightbox(image.currentSrc || image.src, image.alt || section.section_path);
+      image.setAttribute('aria-label', `${block.title} 图片预览`);
+      const openPreview = () => openImageLightbox(image.currentSrc || image.src, image.alt || block.title);
       image.addEventListener('click', openPreview);
       image.addEventListener('keydown', (event) => {
         if (event.key === 'Enter' || event.key === ' ') {
@@ -391,16 +475,17 @@
         }
       });
     });
-    sectionListNode.querySelectorAll('[data-section-index]').forEach((button) => {
+    sectionListNode.querySelectorAll('[data-block-index]').forEach((button) => {
       button.addEventListener('click', () => {
         stopNarration();
-        state.currentSectionIndex = Number(button.dataset.sectionIndex || 0);
+        state.currentBlockIndex = Number(button.dataset.blockIndex || 0);
+        const selectedBlock = blocks[state.currentBlockIndex] || null;
+        state.currentSectionIndex = Number((selectedBlock?.section_indexes || [0])[0] || 0);
         renderSections();
-        if (state.sections[state.currentSectionIndex]?.walkthrough_cached) {
-          const selected = state.sections[state.currentSectionIndex];
-          const detail = selected.walkthrough_audio_cached
-            ? '这一节的文案和音频都已命中缓存，点击“开始中文讲解这一节”时不会重新调用文本模型或语音生成。'
-            : '这一节的文案已命中缓存，点击“开始中文讲解这一节”时不会重新调用文本模型。';
+        if (selectedBlock?.walkthrough_cached) {
+          const detail = selectedBlock.walkthrough_audio_cached
+            ? '这个模块的文案和音频都已命中缓存，点击“开始中文讲解这个模块”时不会重新调用文本模型或语音生成。'
+            : '这个模块的文案已命中缓存，点击“开始中文讲解这个模块”时不会重新调用文本模型。';
           setWalkthroughStatus(detail, 'success');
         } else {
           clearWalkthroughStatus();
@@ -408,7 +493,7 @@
       });
     });
     narrateButton.disabled = state.isNarrating;
-    if (!state.isNarrating) narrateButton.textContent = '开始中文讲解这一节';
+    if (!state.isNarrating) narrateButton.textContent = '开始中文讲解这个模块';
   };
 
   const renderMessages = (messages = []) => {
@@ -457,7 +542,9 @@
     stopNarration();
     state.sessionId = payload.session.session_id;
     state.sections = payload.sections || [];
+    state.briefingBlocks = payload.briefing_blocks || [];
     state.currentSectionIndex = 0;
+    state.currentBlockIndex = 0;
     setStatus(`已生成《${payload.session.title}》的中文开发讲解。`, 'success');
     renderSessionOverview(payload.session_overview || null);
     renderSections();
