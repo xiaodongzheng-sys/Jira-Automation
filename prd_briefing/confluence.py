@@ -159,6 +159,7 @@ class ConfluenceConnector:
         soup = BeautifulSoup(html, "html.parser")
         wrapper = soup.body or soup
         self._drop_struck_content(wrapper)
+        self._drop_marker_only_blocks(wrapper)
         sections: list[ParsedSection] = []
         current_title = "Overview"
         current_lines: list[str] = []
@@ -280,9 +281,12 @@ class ConfluenceConnector:
             return []
         rows: list[list[str]] = []
         for tr in table.find_all("tr"):
+            cells_for_display = tr.find_all(["th", "td"], recursive=False)
+            if cells_for_display and all(not self._cell_has_displayable_content(cell) for cell in cells_for_display):
+                continue
             cells = [
                 self._clean_text(cell.get_text(" ", strip=True))
-                for cell in tr.find_all(["th", "td"], recursive=False)
+                for cell in cells_for_display
             ]
             cleaned = [cell for cell in cells if cell]
             if cleaned:
@@ -321,6 +325,7 @@ class ConfluenceConnector:
         for toc in fragment.find_all(class_="toc-macro"):
             toc.decompose()
         self._drop_struck_content(fragment)
+        self._drop_marker_only_blocks(fragment)
         self._drop_empty_tables(fragment)
         for image in fragment.find_all("img"):
             src = (image.get("src") or "").strip()
@@ -361,12 +366,26 @@ class ConfluenceConnector:
                 else:
                     table.decompose()
 
+    def _drop_marker_only_blocks(self, node: Tag | BeautifulSoup) -> None:
+        for row in list(node.find_all("tr")):
+            cells = row.find_all(["td", "th"], recursive=False)
+            if cells and all(not self._cell_has_displayable_content(cell) for cell in cells):
+                row.decompose()
+        for item in list(node.find_all(["p", "li"])):
+            if item.find(["img", "table"]) is not None:
+                continue
+            if not self._is_meaningful_cell_text(item.get_text(" ", strip=True)):
+                item.decompose()
+
     def _table_has_displayable_content(self, table: Tag) -> bool:
-        if table.find("img") is not None:
-            return True
         data_cells = table.find_all("td")
         cells = data_cells or table.find_all(["td", "th"])
-        return any(self._is_meaningful_cell_text(cell.get_text(" ", strip=True)) for cell in cells)
+        return any(self._cell_has_displayable_content(cell) for cell in cells)
+
+    def _cell_has_displayable_content(self, cell: Tag) -> bool:
+        if cell.find("img") is not None:
+            return True
+        return self._is_meaningful_cell_text(cell.get_text(" ", strip=True))
 
     def _is_meaningful_cell_text(self, value: str) -> bool:
         text = self._clean_text(value)

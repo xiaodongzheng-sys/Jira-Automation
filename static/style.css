@@ -2883,7 +2883,8 @@ select {
   max-height: none;
 }
 
-.briefing-decorative-arrow-only {
+.briefing-decorative-arrow-only,
+.briefing-decorative-marker-row {
   display: none !important;
 }
 

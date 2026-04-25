@@ -55,6 +55,13 @@
     return Boolean(text) && /^[↓↑←→↕↔↘↙↖↗⇩⇧⇦⇨⇣⇡⇠⇢⇓⇑⇒⇐▼▲◀▶▾▴⌄⌃⌵⏷⏶\-–—|.,:;()]+$/.test(text);
   };
 
+  const isDecorativeMarkerText = (value) => {
+    const text = normalizeDecorativeText(value);
+    if (!text) return true;
+    if (isDecorativeArrowText(text)) return true;
+    return /^(?:[0-9]+|[ivxlcdmIVXLCDM]+|[a-zA-Z])[.)、:]?(?:(?:[0-9]+|[ivxlcdmIVXLCDM]+|[a-zA-Z])[.)、:]?)*$/.test(text);
+  };
+
   const setStatus = (message, tone = 'neutral') => {
     if (!statusNode) return;
     statusNode.innerHTML = `<p>${escapeHtml(message)}</p>`;
@@ -486,10 +493,28 @@
 
   const hideDecorativeArrowArtifacts = () => {
     if (!sectionDetailNode) return;
-    sectionDetailNode.querySelectorAll('.briefing-decorative-arrow-only').forEach((node) => {
+    sectionDetailNode.querySelectorAll('.briefing-decorative-arrow-only, .briefing-decorative-marker-row').forEach((node) => {
       node.classList.remove('briefing-decorative-arrow-only');
+      node.classList.remove('briefing-decorative-marker-row');
     });
-    sectionDetailNode.querySelectorAll('.briefing-original-content p, .briefing-original-content li, .briefing-original-content td, .briefing-original-content th, .briefing-presentation-copy p, .briefing-presentation-copy li').forEach((node) => {
+    sectionDetailNode.querySelectorAll('.briefing-original-content tr').forEach((row) => {
+      const cells = Array.from(row.querySelectorAll(':scope > td, :scope > th'));
+      if (!cells.length) return;
+      const isMarkerOnlyRow = cells.every((cell) => {
+        const hasMedia = Boolean(cell.querySelector('img, video, svg, canvas'));
+        return !hasMedia && isDecorativeMarkerText(cell.innerText || cell.textContent || '');
+      });
+      if (isMarkerOnlyRow) {
+        row.classList.add('briefing-decorative-marker-row');
+      }
+    });
+    sectionDetailNode.querySelectorAll('.briefing-original-content p, .briefing-original-content li, .briefing-presentation-copy p, .briefing-presentation-copy li').forEach((node) => {
+      const hasMedia = Boolean(node.querySelector('img, video, svg, canvas'));
+      if (!hasMedia && isDecorativeMarkerText(node.innerText || node.textContent || '')) {
+        node.classList.add('briefing-decorative-arrow-only');
+      }
+    });
+    sectionDetailNode.querySelectorAll('.briefing-original-content td, .briefing-original-content th').forEach((node) => {
       const hasMedia = Boolean(node.querySelector('img, video, svg, canvas'));
       if (!hasMedia && isDecorativeArrowText(node.innerText || node.textContent || '')) {
         node.classList.add('briefing-decorative-arrow-only');

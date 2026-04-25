@@ -153,6 +153,34 @@ class ConfluenceConnectorTests(unittest.TestCase):
         self.assertNotIn("Removed step", sections[0].html_content)
         self.assertNotIn("1.", sections[0].content)
 
+    def test_parse_sections_drops_marker_only_rows_after_strikethrough(self):
+        html = """
+        <h2>Requirements</h2>
+        <table>
+          <tr><th>Requirement</th><th>UI Reference</th></tr>
+          <tr><td>Keep this requirement.</td><td><img src="/download/attachments/123/keep.png" /></td></tr>
+          <tr>
+            <td><ol><li><s>Removed first option</s></li><li><s>Removed second option</s></li></ol></td>
+            <td>↓<br/>↓</td>
+          </tr>
+          <tr><td>Keep another requirement.</td><td>Required</td></tr>
+        </table>
+        """
+
+        sections = self.connector._parse_sections(
+            html=html,
+            base_url="https://confluence.shopee.io",
+            source_url="https://confluence.shopee.io/display/SPDB/Test",
+            session_id="session-1",
+        )
+
+        self.assertIn("<table", sections[0].html_content)
+        self.assertIn("Keep this requirement.", sections[0].html_content)
+        self.assertIn("Keep another requirement.", sections[0].html_content)
+        self.assertNotIn("Removed first option", sections[0].html_content)
+        self.assertNotIn("<td><ol></ol></td>", sections[0].html_content)
+        self.assertNotIn("↓", sections[0].html_content)
+
     def test_parse_sections_rewrites_image_src_to_proxy(self):
         html = """
         <h2>Screenshots</h2>
