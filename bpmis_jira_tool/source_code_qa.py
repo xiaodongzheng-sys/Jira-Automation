@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import ast
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 import functools
 import hashlib
 import json
@@ -71,6 +71,8 @@ DEFAULT_CODEX_TIMEOUT_SECONDS = 240
 DEFAULT_CODEX_TOP_PATH_LIMIT = 30
 CODEX_INVESTIGATION_PROMPT_MODE = "codex_investigation_brief_v1"
 DEFAULT_INDEX_LOCK_STALE_SECONDS = 15 * 60
+DEFAULT_AUTO_SYNC_START_DATE = date(2026, 5, 8)
+DEFAULT_AUTO_SYNC_INTERVAL_DAYS = 14
 MAX_CACHED_INDEX_LINES = 5_000
 MAX_CACHED_SEMANTIC_CHUNKS = 2_000
 MAX_TARGETED_INDEX_FILES = 220
@@ -3145,6 +3147,35 @@ class SourceCodeQAService:
             self._finish_sync_job(key, job["job_id"], status="failed", results=[])
             raise
 
+    def _today(self) -> date:
+        return datetime.now().astimezone().date()
+
+    def _auto_sync_start_date(self) -> date:
+        raw_value = str(os.getenv("SOURCE_CODE_QA_AUTO_SYNC_START_DATE") or "").strip()
+        if raw_value:
+            try:
+                return date.fromisoformat(raw_value)
+            except ValueError:
+                return DEFAULT_AUTO_SYNC_START_DATE
+        return DEFAULT_AUTO_SYNC_START_DATE
+
+    def _auto_sync_interval_days(self) -> int:
+        raw_value = str(os.getenv("SOURCE_CODE_QA_AUTO_SYNC_INTERVAL_DAYS") or "").strip()
+        if raw_value:
+            try:
+                return max(1, int(raw_value))
+            except ValueError:
+                return DEFAULT_AUTO_SYNC_INTERVAL_DAYS
+        return DEFAULT_AUTO_SYNC_INTERVAL_DAYS
+
+    def _latest_completed_scheduled_sync_date(self, today: date) -> date:
+        start_date = self._auto_sync_start_date()
+        interval_days = self._auto_sync_interval_days()
+        if today < start_date:
+            return start_date
+        periods = (today - start_date).days // interval_days
+        return start_date + timedelta(days=periods * interval_days)
+
     def ensure_synced_today(self, *, pm_team: str, country: str) -> dict[str, Any]:
         key = self.mapping_key(pm_team, country)
         entries = self._load_entries_for_key(key)
@@ -3152,22 +3183,35 @@ class SourceCodeQAService:
             return {"attempted": False, "status": "empty_config", "reason": "no repositories configured", "key": key}
         repo_status = self.repo_status(key)
         freshness = self._index_freshness_payload(repo_status)
-        today = datetime.now().astimezone().date()
+        today = self._today()
+        scheduled_sync_date = self._latest_completed_scheduled_sync_date(today)
+        if today < scheduled_sync_date:
+            return {
+                "attempted": False,
+                "status": "scheduled",
+                "reason": f"next scheduled repository sync is {scheduled_sync_date.isoformat()}",
+                "key": key,
+                "index_freshness": freshness,
+                "next_sync_date": scheduled_sync_date.isoformat(),
+                "sync_interval_days": self._auto_sync_interval_days(),
+            }
         newest_indexed_at = str(freshness.get("newest_indexed_at") or "").strip()
-        synced_today = False
+        last_synced_date = None
         if newest_indexed_at:
             try:
-                synced_today = datetime.fromisoformat(newest_indexed_at).astimezone().date() == today
+                last_synced_date = datetime.fromisoformat(newest_indexed_at).astimezone().date()
             except ValueError:
-                synced_today = False
-        needs_sync = freshness.get("status") != "fresh" or not synced_today
+                last_synced_date = None
+        needs_sync = freshness.get("status") != "fresh" or last_synced_date is None or last_synced_date < scheduled_sync_date
         if not needs_sync:
             return {
                 "attempted": False,
                 "status": "fresh",
-                "reason": "already synced today",
+                "reason": f"already synced for scheduled date {scheduled_sync_date.isoformat()}",
                 "key": key,
                 "index_freshness": freshness,
+                "next_sync_date": (scheduled_sync_date + timedelta(days=self._auto_sync_interval_days())).isoformat(),
+                "sync_interval_days": self._auto_sync_interval_days(),
             }
         if not self.gitlab_token:
             return {
@@ -3187,7 +3231,15 @@ class SourceCodeQAService:
                 "key": key,
                 "index_freshness": freshness,
             }
-        return {"attempted": True, "status": str(result.get("status") or "ok"), "reason": "synced before query", "key": key, "sync": result}
+        return {
+            "attempted": True,
+            "status": str(result.get("status") or "ok"),
+            "reason": f"synced for scheduled date {scheduled_sync_date.isoformat()}",
+            "key": key,
+            "sync": result,
+            "next_sync_date": (scheduled_sync_date + timedelta(days=self._auto_sync_interval_days())).isoformat(),
+            "sync_interval_days": self._auto_sync_interval_days(),
+        }
 
     def query(
         self,

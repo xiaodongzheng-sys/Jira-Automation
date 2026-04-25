@@ -1,5 +1,6 @@
 import json
 import os
+from datetime import date, timedelta
 from pathlib import Path
 import sqlite3
 import tempfile
@@ -788,21 +789,45 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertIn("timed out", payload["results"][0]["message"])
         self.assertEqual(payload["job"]["status"], "partial")
 
-    def test_ensure_synced_today_runs_sync_for_missing_or_old_index(self):
+    def test_ensure_synced_today_skips_before_scheduled_start_date(self):
         self.service.save_mapping(
             pm_team="AF",
             country="All",
             repositories=[{"display_name": "Repo One", "url": "https://git.example.com/team/repo.git"}],
         )
 
-        with patch.object(self.service, "sync", return_value={"status": "ok", "results": []}) as sync:
+        with patch.object(self.service, "_today", return_value=date(2026, 4, 25)), patch.object(
+            self.service,
+            "sync",
+            return_value={"status": "ok", "results": []},
+        ) as sync:
+            payload = self.service.ensure_synced_today(pm_team="AF", country="All")
+
+        self.assertFalse(payload["attempted"])
+        self.assertEqual(payload["status"], "scheduled")
+        self.assertEqual(payload["next_sync_date"], "2026-05-08")
+        sync.assert_not_called()
+
+    def test_ensure_synced_today_runs_sync_on_scheduled_start_date(self):
+        self.service.save_mapping(
+            pm_team="AF",
+            country="All",
+            repositories=[{"display_name": "Repo One", "url": "https://git.example.com/team/repo.git"}],
+        )
+
+        with patch.object(self.service, "_today", return_value=date(2026, 5, 8)), patch.object(
+            self.service,
+            "sync",
+            return_value={"status": "ok", "results": []},
+        ) as sync:
             payload = self.service.ensure_synced_today(pm_team="AF", country="All")
 
         self.assertTrue(payload["attempted"])
         self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["next_sync_date"], "2026-05-22")
         sync.assert_called_once_with(pm_team="AF", country="All")
 
-    def test_ensure_synced_today_skips_fresh_same_day_index(self):
+    def test_ensure_synced_today_skips_fresh_current_schedule_window(self):
         entry = RepositoryEntry(display_name="Repo One", url="https://git.example.com/team/repo.git")
         self.service.save_mapping(
             pm_team="AF",
@@ -813,12 +838,24 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         (repo_path / ".git").mkdir(parents=True)
         (repo_path / "IssueService.java").write_text("class IssueService {}\n", encoding="utf-8")
         self.service._build_repo_index("AF:All", entry, repo_path)
+        scheduled_time = date(2026, 5, 8)
+        index_path = self.service._index_path(repo_path)
+        with sqlite3.connect(index_path) as connection:
+            connection.execute(
+                "update metadata set value = ? where key = 'updated_at'",
+                [f"{scheduled_time.isoformat()}T01:00:00+00:00"],
+            )
 
-        with patch.object(self.service, "sync", return_value={"status": "ok"}) as sync:
+        with patch.object(self.service, "_today", return_value=scheduled_time + timedelta(days=3)), patch.object(
+            self.service,
+            "sync",
+            return_value={"status": "ok"},
+        ) as sync:
             payload = self.service.ensure_synced_today(pm_team="AF", country="All")
 
         self.assertFalse(payload["attempted"])
         self.assertEqual(payload["status"], "fresh")
+        self.assertEqual(payload["next_sync_date"], "2026-05-22")
         sync.assert_not_called()
 
     def test_search_repo_request_cache_reuses_identical_search(self):

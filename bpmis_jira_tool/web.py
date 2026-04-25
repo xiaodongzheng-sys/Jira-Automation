@@ -2696,12 +2696,12 @@ def _run_source_code_qa_query_job(app: Flask, job_id: str, payload: dict[str, An
             conversation_context = payload.get("conversation_context") if isinstance(payload.get("conversation_context"), dict) else None
             if conversation_context is None and session_id:
                 conversation_context = session_store.get_context(session_id, owner_email=owner_email)
-            progress_callback("auto_sync_check", "Checking whether repositories were refreshed today.", 0, 1)
+            progress_callback("auto_sync_check", "Checking repository sync schedule.", 0, 1)
             auto_sync = service.ensure_synced_today(pm_team=pm_team, country=country)
             if auto_sync.get("attempted"):
                 progress_callback("auto_sync_completed", "Repository auto-sync completed; starting code search.", 1, 1)
             else:
-                progress_callback("auto_sync_completed", "Repository indexes are fresh; starting code search.", 1, 1)
+                progress_callback("auto_sync_completed", "Repository indexes do not need scheduled sync; starting code search.", 1, 1)
             result = service.query(
                 pm_team=pm_team,
                 country=country,
