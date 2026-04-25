@@ -50,6 +50,8 @@
     .replace(/[\u200b-\u200d\ufeff]/g, '')
     .replace(/\s+/g, '');
 
+  const fastNodeText = (node) => String(node?.textContent || '').replace(/\s+/g, ' ').trim();
+
   const isDecorativeArrowText = (value) => {
     const text = normalizeDecorativeText(value);
     return Boolean(text) && /^[↓↑←→↕↔↘↙↖↗⇩⇧⇦⇨⇣⇡⇠⇢⇓⇑⇒⇐▼▲◀▶▾▴⌄⌃⌵⏷⏶\-–—|.,:;()]+$/.test(text);
@@ -85,6 +87,12 @@
   const wait = (durationMs) => new Promise((resolve) => {
     window.setTimeout(resolve, durationMs);
   });
+
+  const setSessionSubmitLoading = (isLoading) => {
+    if (!sessionSubmitButton) return;
+    sessionSubmitButton.disabled = isLoading;
+    sessionSubmitButton.textContent = isLoading ? '正在生成…' : '生成中文开发讲解';
+  };
 
   const parseJsonResponse = async (response) => {
     const contentType = String(response.headers.get('content-type') || '').toLowerCase();
@@ -485,7 +493,7 @@
 
       imageCells.forEach((cell) => {
         cell.classList.add('briefing-media-cell');
-        const text = (cell.innerText || cell.textContent || '').replace(/\s+/g, ' ').trim();
+        const text = fastNodeText(cell);
         cell.classList.toggle('briefing-pure-media-cell', text.length === 0 || isDecorativeArrowText(text));
       });
     });
@@ -498,11 +506,11 @@
       node.classList.remove('briefing-decorative-marker-row');
     });
     sectionDetailNode.querySelectorAll('.briefing-original-content tr').forEach((row) => {
-      const cells = Array.from(row.querySelectorAll(':scope > td, :scope > th'));
+      const cells = Array.from(row.children).filter((child) => child.matches?.('td, th'));
       if (!cells.length) return;
       const isMarkerOnlyRow = cells.every((cell) => {
         const hasMedia = Boolean(cell.querySelector('img, video, svg, canvas'));
-        return !hasMedia && isDecorativeMarkerText(cell.innerText || cell.textContent || '');
+        return !hasMedia && isDecorativeMarkerText(fastNodeText(cell));
       });
       if (isMarkerOnlyRow) {
         row.classList.add('briefing-decorative-marker-row');
@@ -510,13 +518,13 @@
     });
     sectionDetailNode.querySelectorAll('.briefing-original-content p, .briefing-original-content li, .briefing-presentation-copy p, .briefing-presentation-copy li').forEach((node) => {
       const hasMedia = Boolean(node.querySelector('img, video, svg, canvas'));
-      if (!hasMedia && isDecorativeMarkerText(node.innerText || node.textContent || '')) {
+      if (!hasMedia && isDecorativeMarkerText(fastNodeText(node))) {
         node.classList.add('briefing-decorative-arrow-only');
       }
     });
     sectionDetailNode.querySelectorAll('.briefing-original-content td, .briefing-original-content th').forEach((node) => {
       const hasMedia = Boolean(node.querySelector('img, video, svg, canvas'));
-      if (!hasMedia && isDecorativeArrowText(node.innerText || node.textContent || '')) {
+      if (!hasMedia && isDecorativeArrowText(fastNodeText(node))) {
         node.classList.add('briefing-decorative-arrow-only');
       }
     });
@@ -813,10 +821,7 @@
         setStatus('请输入有效的 Confluence 页面链接。', 'error');
         return;
       }
-      if (sessionSubmitButton) {
-        sessionSubmitButton.disabled = true;
-        sessionSubmitButton.textContent = '正在生成…';
-      }
+      setSessionSubmitLoading(true);
       setStatus('正在读取 Confluence PRD，并生成中文开发讲解…');
       try {
         const response = await fetch('/prd-briefing/api/session', {
@@ -829,14 +834,14 @@
         });
         const payload = await parseJsonResponse(response);
         if (!response.ok) throw new Error(payload.message || '当前无法生成 PRD 讲解。');
+        setSessionSubmitLoading(false);
+        setStatus('已读取 PRD，正在渲染页面…');
+        await wait(0);
         applySessionPayload(payload);
       } catch (error) {
         setStatus(error.message || '当前无法生成 PRD 讲解。', 'error');
       } finally {
-        if (sessionSubmitButton) {
-          sessionSubmitButton.disabled = false;
-          sessionSubmitButton.textContent = '生成中文开发讲解';
-        }
+        setSessionSubmitLoading(false);
       }
     });
   }
