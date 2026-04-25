@@ -124,6 +124,35 @@ class ConfluenceConnectorTests(unittest.TestCase):
         self.assertNotIn("remove old text", sections[0].html_content)
         self.assertNotIn("remove styled text", sections[0].html_content)
 
+    def test_parse_sections_drops_table_when_strikethrough_leaves_only_markers(self):
+        html = """
+        <h2>Requirements</h2>
+        <p>Keep visible requirement.</p>
+        <div class="table-wrap">
+          <table>
+            <tr><th><s>Function</s></th><th><s>Steps</s></th></tr>
+            <tr><td><s>Old function</s></td><td><ol><li><s>Removed step</s></li></ol></td></tr>
+            <tr><td><span style="text-decoration: line-through;">Removed field</span></td><td>1.<br/>2.<br/>3.</td></tr>
+            <tr><td>○</td><td>o</td></tr>
+          </table>
+        </div>
+        <p>Keep after table.</p>
+        """
+
+        sections = self.connector._parse_sections(
+            html=html,
+            base_url="https://confluence.shopee.io",
+            source_url="https://confluence.shopee.io/display/SPDB/Test",
+            session_id="session-1",
+        )
+
+        self.assertEqual(len(sections), 1)
+        self.assertIn("Keep visible requirement.", sections[0].content)
+        self.assertIn("Keep after table.", sections[0].content)
+        self.assertNotIn("<table", sections[0].html_content)
+        self.assertNotIn("Removed step", sections[0].html_content)
+        self.assertNotIn("1.", sections[0].content)
+
     def test_parse_sections_rewrites_image_src_to_proxy(self):
         html = """
         <h2>Screenshots</h2>

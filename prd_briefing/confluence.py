@@ -243,6 +243,8 @@ class ConfluenceConnector:
 
         if node.name == "table" or "table-wrap" in (node.get("class") or []):
             table = node if node.name == "table" else node.find("table")
+            if table and not self._table_has_displayable_content(table):
+                return [], [], []
             block = self._render_html_fragment(node, base_url=base_url)
             return (self._extract_table_lines(table) if table else []), ([block] if block else []), []
 
@@ -274,6 +276,8 @@ class ConfluenceConnector:
         return lines, blocks, images
 
     def _extract_table_lines(self, table: Tag) -> list[str]:
+        if not self._table_has_displayable_content(table):
+            return []
         rows: list[list[str]] = []
         for tr in table.find_all("tr"):
             cells = [
@@ -317,6 +321,7 @@ class ConfluenceConnector:
         for toc in fragment.find_all(class_="toc-macro"):
             toc.decompose()
         self._drop_struck_content(fragment)
+        self._drop_empty_tables(fragment)
         for image in fragment.find_all("img"):
             src = (image.get("src") or "").strip()
             if src:
@@ -346,6 +351,39 @@ class ConfluenceConnector:
     def _drop_struck_content(self, node: Tag | BeautifulSoup) -> None:
         for struck in list(node.find_all(self._is_struck_node)):
             struck.decompose()
+
+    def _drop_empty_tables(self, node: Tag | BeautifulSoup) -> None:
+        for table in list(node.find_all("table")):
+            if not self._table_has_displayable_content(table):
+                wrapper = table.find_parent(class_="table-wrap")
+                if wrapper is not None:
+                    wrapper.decompose()
+                else:
+                    table.decompose()
+
+    def _table_has_displayable_content(self, table: Tag) -> bool:
+        if table.find("img") is not None:
+            return True
+        data_cells = table.find_all("td")
+        cells = data_cells or table.find_all(["td", "th"])
+        return any(self._is_meaningful_cell_text(cell.get_text(" ", strip=True)) for cell in cells)
+
+    def _is_meaningful_cell_text(self, value: str) -> bool:
+        text = self._clean_text(value)
+        if not text:
+            return False
+        text = re.sub(r"[\s\u00a0]+", "", text)
+        if not text:
+            return False
+        if re.fullmatch(r"(?:[0-9]+[.)、]?)+", text):
+            return False
+        if re.fullmatch(r"[a-zA-Z][.)、]?", text):
+            return False
+        if re.fullmatch(r"[ivxlcdmIVXLCDM]+[.)、]", text):
+            return False
+        if re.fullmatch(r"[•·▪▫◦○oO]+", text):
+            return False
+        return bool(re.search(r"[\w\u4e00-\u9fff]", text))
 
     @staticmethod
     def _is_struck_node(node: Tag) -> bool:
