@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from bpmis_jira_tool.source_code_qa import LLMGenerateResult, RepositoryEntry, SourceCodeQAService
 from bpmis_jira_tool.user_config import TEAM_PROFILE_DEFAULTS
 from bpmis_jira_tool.web import create_app
+from scripts.promote_source_code_qa_eval_candidates import promote_candidates
 from scripts.run_source_code_qa_evals import _build_fixture_repositories, _evaluate_case
 from scripts.source_code_qa_feedback_to_eval import build_eval_candidates
 
@@ -315,6 +316,57 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertEqual(len(candidates), 1)
         self.assertEqual(candidates[0]["expected_paths"], ["controller/IssueController.java"])
         self.assertEqual(candidates[0]["draft_status"], "ready_positive_smoke")
+
+    def test_reviewed_feedback_candidates_promote_to_real_eval_cases(self):
+        merged, summary = promote_candidates(
+            [
+                {
+                    "id": "feedback-needs_deeper_trace-abc1234567",
+                    "pm_team": "AF",
+                    "country": "All",
+                    "question": "where does createIssue load data from",
+                    "answer_mode": "retrieval_only",
+                    "draft_status": "approved",
+                    "expected_paths": ["repository/IssueRepository.java"],
+                    "observed_paths": ["controller/IssueController.java"],
+                    "review_context": {"trace_id": "trace-abc"},
+                },
+                {
+                    "id": "feedback-too_vague-def1234567",
+                    "pm_team": "AF",
+                    "country": "All",
+                    "question": "where is createIssue",
+                    "draft_status": "needs_human_expected_evidence",
+                    "expected_paths": [],
+                },
+            ],
+            [],
+        )
+
+        self.assertEqual(summary["promoted"], 1)
+        self.assertEqual(summary["rejected"], 1)
+        self.assertEqual(merged[0]["expected_paths"], ["repository/IssueRepository.java"])
+        self.assertNotIn("review_context", merged[0])
+        self.assertNotIn("observed_paths", merged[0])
+
+    def test_positive_smoke_candidates_can_be_promoted_when_allowed(self):
+        merged, summary = promote_candidates(
+            [
+                {
+                    "id": "feedback-useful-def1234567",
+                    "pm_team": "AF",
+                    "country": "All",
+                    "question": "where is createIssue",
+                    "draft_status": "ready_positive_smoke",
+                    "expected_paths": ["controller/IssueController.java"],
+                }
+            ],
+            [],
+            allow_positive_smoke=True,
+        )
+
+        self.assertEqual(summary["promoted"], 1)
+        self.assertEqual(merged[0]["id"], "feedback-useful-def1234567")
 
 
 class SourceCodeQAServiceTests(unittest.TestCase):
@@ -3994,6 +4046,53 @@ class SourceCodeQAServiceTests(unittest.TestCase):
 
         self.assertEqual(check["status"], "needs_citation")
         self.assertTrue(check["unsupported_claims"])
+
+    def test_claim_verifier_requires_citation_to_support_claim_terms(self):
+        evidence_summary = {
+            "data_sources": ["Portal Repo:repository/IssueRepository.java:3-5: select * from issue_table"],
+            "api_or_config": [],
+        }
+        selected_matches = [
+            {
+                "repo": "Portal Repo",
+                "path": "controller/IssueController.java",
+                "line_start": 1,
+                "line_end": 5,
+                "snippet": "public class IssueController { public void createIssue() {} }",
+            }
+        ]
+
+        check = self.service._verify_answer_claims(
+            '{"direct_answer":"Uses issue_table","claims":[{"text":"IssueRepository reads issue_table","citations":["S1"]}],"missing_evidence":[],"confidence":"high"}',
+            evidence_summary,
+            selected_matches,
+        )
+
+        self.assertEqual(check["status"], "needs_citation")
+        self.assertIn("IssueRepository reads issue_table", check["unsupported_claims"][0])
+
+    def test_claim_verifier_accepts_structured_supported_citation(self):
+        evidence_summary = {
+            "data_sources": ["Portal Repo:repository/IssueRepository.java:3-5: select * from issue_table"],
+            "api_or_config": [],
+        }
+        selected_matches = [
+            {
+                "repo": "Portal Repo",
+                "path": "repository/IssueRepository.java",
+                "line_start": 1,
+                "line_end": 5,
+                "snippet": "class IssueRepository { void read(){ jdbcTemplate.queryForObject(\"select * from issue_table\", mapper); } }",
+            }
+        ]
+
+        check = self.service._verify_answer_claims(
+            '{"direct_answer":"Uses issue_table","claims":[{"text":"IssueRepository reads issue_table","citations":["S1"]}],"missing_evidence":[],"confidence":"high"}',
+            evidence_summary,
+            selected_matches,
+        )
+
+        self.assertEqual(check["status"], "ok")
 
     def test_structured_answer_parser_accepts_json_and_fallback_prose(self):
         parsed = self.service._parse_structured_answer(

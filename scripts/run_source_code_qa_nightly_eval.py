@@ -17,6 +17,7 @@ from bpmis_jira_tool.config import Settings
 
 
 DEFAULT_CASES = ["evals/source_code_qa/golden.jsonl", "evals/source_code_qa/scenario_matrix.jsonl"]
+OPTIONAL_CASES = ["evals/source_code_qa/golden_real.jsonl"]
 
 
 def _run_json_command(args: list[str]) -> tuple[dict[str, Any], str, str, int]:
@@ -107,9 +108,12 @@ def main() -> int:
 
     settings = Settings.from_env()
     output_dir = Path(args.output_dir) if args.output_dir else settings.team_portal_data_dir / "source_code_qa" / "eval_runs"
+    case_paths = list(args.cases or DEFAULT_CASES)
+    if args.cases is None:
+        case_paths.extend(path for path in OPTIONAL_CASES if (ROOT_DIR / path).exists())
     report = run_nightly_eval(
         output_dir=output_dir,
-        cases=list(args.cases or DEFAULT_CASES),
+        cases=case_paths,
         fixture=not args.no_fixture,
         include_useful_feedback=bool(args.include_useful_feedback),
     )

@@ -33,6 +33,15 @@ Review the generated candidates before promoting them into `golden.jsonl`. Negat
 
 Feedback candidates preserve replay context from the original answer: trace id, answer mode, LLM route/model, answer contract status, observed answer preview, evidence count, and observed paths. Negative feedback is intentionally marked `draft_status=needs_human_expected_evidence`; do not promote it as a blocking golden eval until a reviewer adds the corrected `expected_paths`, `required_terms`, `forbidden_terms`, or policy expectations. Positive `useful` feedback can be used as `ready_positive_smoke` coverage because the observed paths are expected to remain present.
 
+After review, promote approved candidates into the real-question eval file:
+
+```bash
+python3 scripts/promote_source_code_qa_eval_candidates.py --input evals/source_code_qa/feedback_candidates.jsonl --output evals/source_code_qa/golden_real.jsonl
+python3 scripts/promote_source_code_qa_eval_candidates.py --allow-positive-smoke --json
+```
+
+Use `draft_status=approved` for negative-feedback candidates after adding objective checks. The promotion command rejects unapproved or assertion-free candidates, deduplicates by id/question, and writes `golden_real.jsonl`. The nightly eval automatically includes `golden_real.jsonl` when the file exists.
+
 `scenario_matrix.jsonl` is the coverage checklist for promoting new cases. Keep at least one positive and one negative case for symbol lookup, API flow, data-source tracing, config lookup, error/root-cause, cross-repo flow, and follow-up context before calling a release broadly improved.
 
 Use this before and after retrieval, prompt, model, or indexing changes. The goal is to improve whole classes of source-code questions without tuning for one-off examples.

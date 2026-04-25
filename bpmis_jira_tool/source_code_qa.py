@@ -11043,20 +11043,36 @@ class SourceCodeQAService:
         selected_matches: list[dict[str, Any]],
     ) -> dict[str, Any]:
         evidence_text = json.dumps(evidence_summary, ensure_ascii=False).lower()
-        valid_citations = {f"s{index}" for index in range(1, len(selected_matches) + 1)}
+        valid_citation_numbers = {str(index) for index in range(1, len(selected_matches) + 1)}
         issues: list[str] = []
         checked_claims = 0
         unsupported_claims: list[str] = []
-        for claim in self._split_answer_claims(answer):
+        structured = self._parse_structured_answer(answer)
+        parsed_claims = [
+            item
+            for item in structured.get("claims") or []
+            if isinstance(item, dict) and str(item.get("text") or "").strip()
+        ]
+        if not parsed_claims:
+            parsed_claims = [
+                {"text": claim, "citations": [f"S{number}" for number in re.findall(r"\[S(\d+)\]", claim)]}
+                for claim in self._split_answer_claims(answer)
+            ]
+        for parsed_claim in parsed_claims:
+            claim = str(parsed_claim.get("text") or "").strip()
             lowered = claim.lower()
             concrete = any(term in lowered for term in ANSWER_CONCRETE_SOURCE_HINTS + API_HINTS + CONFIG_HINTS + RULE_HINTS)
             if not concrete:
                 continue
             checked_claims += 1
-            citations = {token.lower() for token in re.findall(r"\[S(\d+)\]", claim)}
-            if citations and not citations <= {item.removeprefix("s") for item in valid_citations}:
+            citations = self._claim_citation_numbers(claim, parsed_claim)
+            if citations and not citations <= valid_citation_numbers:
                 issues.append("answer cites evidence ids outside the provided context")
-            if not citations and not any(phrase in lowered for phrase in ANSWER_SELF_CHECK_WEAK_PHRASES):
+            valid_citations = citations & valid_citation_numbers
+            if not valid_citations and not any(phrase in lowered for phrase in ANSWER_SELF_CHECK_WEAK_PHRASES):
+                unsupported_claims.append(claim[:220])
+                continue
+            if valid_citations and not self._claim_supported_by_citations(claim, valid_citations, selected_matches):
                 unsupported_claims.append(claim[:220])
                 continue
             expected_terms = self._answer_expected_terms(evidence_summary, "data_sources")
@@ -11071,6 +11087,39 @@ class SourceCodeQAService:
             "unsupported_claims": unsupported_claims[:5],
             "issues": list(dict.fromkeys(issues)),
         }
+
+    @staticmethod
+    def _claim_citation_numbers(claim: str, parsed_claim: dict[str, Any]) -> set[str]:
+        numbers = {token for token in re.findall(r"\[S(\d+)\]", str(claim or ""))}
+        for raw_item in parsed_claim.get("citations") or []:
+            item = str(raw_item or "").strip()
+            match = re.fullmatch(r"\[?S?(\d+)\]?", item, flags=re.IGNORECASE)
+            if match:
+                numbers.add(match.group(1))
+        return numbers
+
+    @staticmethod
+    def _claim_supported_by_citations(claim: str, citation_numbers: set[str], selected_matches: list[dict[str, Any]]) -> bool:
+        claim_terms = [
+            term.lower()
+            for term in IDENTIFIER_PATTERN.findall(str(claim or ""))
+            if len(term) >= 4 and term.lower() not in STOPWORDS and term.lower() not in LOW_VALUE_CALL_SYMBOLS
+        ]
+        if not claim_terms:
+            return True
+        for number in citation_numbers:
+            try:
+                match = selected_matches[int(number) - 1]
+            except (IndexError, ValueError):
+                continue
+            evidence_text = " ".join(
+                str(match.get(key) or "")
+                for key in ("path", "snippet", "reason", "retrieval", "trace_stage")
+            ).lower()
+            overlap = {term for term in claim_terms if term in evidence_text}
+            if len(overlap) >= 1:
+                return True
+        return False
 
     def _judge_answer(
         self,
