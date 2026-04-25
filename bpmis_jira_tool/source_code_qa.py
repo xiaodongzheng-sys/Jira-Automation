@@ -370,6 +370,7 @@ LOW_VALUE_CALL_SYMBOLS = {
 }
 LOW_VALUE_FOCUS_TERMS = {
     "term", "loan", "precheck", "pre", "check", "data", "source", "sources",
+    "credit", "risk", "sg", "ph", "id", "used", "uses", "using",
 }
 DATA_SOURCE_HINTS = (
     "datasource", "data source", "source", "sources", "upstream", "table", "jdbc",
@@ -1810,10 +1811,12 @@ class SourceCodeQAService:
         tool_trace: list[dict[str, Any]] = []
         matches: list[dict[str, Any]] = []
         request_cache = self._new_retrieval_request_cache()
+        result_limit = max(1, min(int(limit or 12), 30))
         repo_status = self.repo_status(key)
         index_freshness = self._index_freshness_payload(repo_status)
         exact_lookup_terms = self._extract_exact_lookup_terms(question)
         exact_matches: list[dict[str, Any]] = []
+        latency_guarded_query_expansion = False
         synced_entries = [(entry, self._repo_path(key, entry)) for entry in entries if (self._repo_path(key, entry) / ".git").exists()]
         intent = query_plan.get("intent") if isinstance(query_plan.get("intent"), dict) else {}
         simple_quality_trace = (
@@ -1823,7 +1826,6 @@ class SourceCodeQAService:
                 for intent_key in (
                     "data_source",
                     "module_dependency",
-                    "message_flow",
                     "static_qa",
                     "impact_analysis",
                     "test_coverage",
@@ -1857,24 +1859,88 @@ class SourceCodeQAService:
                 if (match.get("exact_lookup") or {}).get("term")
             }
         )
-        exact_lookup_sufficient = self._exact_lookup_is_sufficient(exact_lookup_terms, exact_matches)
+        cross_repo_context = self._requires_cross_repo_context(question)
+        exact_lookup_sufficient = self._exact_lookup_is_sufficient(exact_lookup_terms, exact_matches) and not cross_repo_context
         if exact_matches:
             matches.extend(exact_matches)
+        elif exact_lookup_terms:
+            report("completed", "Exact references were not found in the current indexes.", 0, 0)
+            payload = self._empty_query_payload(
+                key,
+                repo_status=repo_status,
+                index_freshness=index_freshness,
+                status="no_match",
+                summary="No exact table/path references were found in the indexed repositories.",
+                trace_id=trace_id,
+            )
+            payload["exact_lookup_terms"] = exact_lookup_terms
+            self._record_query_telemetry(
+                key=key,
+                question=question,
+                answer_mode=answer_mode,
+                llm_budget_mode=llm_budget_mode,
+                payload=payload,
+                started_at=started_at,
+            )
+            return payload
         if not exact_lookup_sufficient:
             report("direct_search", f"Searching direct matches across {len(synced_entries)} repos.", 0, len(synced_entries))
+            skip_broad_query_decomposition = False
             for index, (entry, repo_path) in enumerate(synced_entries, start=1):
                 matches.extend(self._search_repo(entry, repo_path, tokens, question=question, request_cache=request_cache))
                 report("direct_search", f"Searching direct matches in {entry.display_name}.", index, len(synced_entries))
-            skip_broad_query_decomposition = False
+                if matches and simple_quality_trace and index >= 3 and (len(matches) >= 80 or time.time() - started_at >= 4.0):
+                    direct_ranked = self._rank_matches(question, matches, request_cache=request_cache)
+                    direct_top = self._select_result_matches(direct_ranked, max(1, min(int(limit or 12), 30)), question=question)
+                    direct_evidence_summary = self._compress_evidence_cached(question, direct_top, request_cache=request_cache)
+                    direct_quality_gate = self._quality_gate_cached(question, direct_evidence_summary, request_cache=request_cache)
+                    if (
+                        direct_quality_gate.get("status") == "sufficient"
+                        and direct_quality_gate.get("confidence") in {"medium", "high"}
+                        and (len(synced_entries) >= 5 or time.time() - started_at >= 6.0)
+                    ):
+                        skip_broad_query_decomposition = True
+                        self._increment_retrieval_stat(request_cache, "direct_scan_early_stops")
+                        report(
+                            "quality_gate",
+                            "Direct matches are sufficient; stopping repository scan early.",
+                            index,
+                            len(synced_entries),
+                        )
+                        break
+                    if time.time() - started_at >= 6.0 and len(matches) >= max(60, result_limit * 5):
+                        skip_broad_query_decomposition = True
+                        self._increment_retrieval_stat(request_cache, "simple_latency_guards")
+                        report(
+                            "quality_gate",
+                            "Direct scan has enough candidate evidence; stopping early to keep the response responsive.",
+                            index,
+                            len(synced_entries),
+                        )
+                        break
             if matches and simple_quality_trace:
                 direct_ranked = self._rank_matches(question, matches, request_cache=request_cache)
                 direct_top = self._select_result_matches(direct_ranked, max(1, min(int(limit or 12), 30)), question=question)
                 direct_evidence_summary = self._compress_evidence_cached(question, direct_top, request_cache=request_cache)
                 direct_quality_gate = self._quality_gate_cached(question, direct_evidence_summary, request_cache=request_cache)
-                if direct_quality_gate.get("status") == "sufficient" and direct_quality_gate.get("confidence") in {"medium", "high"}:
+                if (
+                    direct_quality_gate.get("status") == "sufficient"
+                    and direct_quality_gate.get("confidence") in {"medium", "high"}
+                    and (len(synced_entries) >= 5 or time.time() - started_at >= 6.0)
+                ):
                     skip_broad_query_decomposition = True
                     self._increment_retrieval_stat(request_cache, "direct_quality_short_circuits")
                     report("quality_gate", "Direct matches are sufficient; skipping broader evidence expansion.", len(synced_entries), len(synced_entries))
+            if matches and not skip_broad_query_decomposition and time.time() - started_at >= 7.0 and len(matches) >= max(36, result_limit * 3):
+                skip_broad_query_decomposition = True
+                latency_guarded_query_expansion = True
+                self._increment_retrieval_stat(request_cache, "query_decomposition_latency_guards")
+                report(
+                    "quality_gate",
+                    "Direct scan has enough candidate evidence; skipping query expansion to keep the response responsive.",
+                    len(synced_entries),
+                    len(synced_entries),
+                )
             if not skip_broad_query_decomposition:
                 report("query_decomposition", "Expanding query terms from domain and intent profile.", 0, len(synced_entries))
             for index, (entry, repo_path) in enumerate(synced_entries, start=1):
@@ -1935,7 +2001,6 @@ class SourceCodeQAService:
                     )
         report("ranking", "Ranking matched files and snippets.", 0, 0)
         matches = self._rank_matches(question, matches, request_cache=request_cache)
-        result_limit = max(1, min(int(limit or 12), 30))
         top_matches = (
             self._select_result_matches(matches, result_limit, question=question)
             if exact_matches
@@ -1945,10 +2010,22 @@ class SourceCodeQAService:
         if top_matches and should_expand_matches and simple_quality_trace:
             early_evidence_summary = self._compress_evidence_cached(question, top_matches, request_cache=request_cache)
             early_quality_gate = self._quality_gate_cached(question, early_evidence_summary, request_cache=request_cache)
-            if early_quality_gate.get("status") == "sufficient" and early_quality_gate.get("confidence") in {"medium", "high"}:
+            if (
+                early_quality_gate.get("status") == "sufficient"
+                and early_quality_gate.get("confidence") in {"medium", "high"}
+                and (len(synced_entries) >= 5 or time.time() - started_at >= 6.0)
+            ):
                 should_expand_matches = False
                 self._increment_retrieval_stat(request_cache, "early_quality_short_circuits")
                 report("quality_gate", "Ranked evidence is sufficient; skipping deeper local expansion.", 0, 0)
+        if top_matches and should_expand_matches and latency_guarded_query_expansion:
+            should_expand_matches = False
+            self._increment_retrieval_stat(request_cache, "deep_expansion_latency_guards")
+            report("quality_gate", "Skipping deeper expansion because retrieval already hit the latency guard.", 0, 0)
+        if top_matches and should_expand_matches and time.time() - started_at >= 8.0:
+            should_expand_matches = False
+            self._increment_retrieval_stat(request_cache, "deep_expansion_latency_guards")
+            report("quality_gate", "Skipping deeper expansion because retrieval already has enough evidence and hit the latency guard.", 0, 0)
         if top_matches and should_expand_matches and self._is_dependency_question(question):
             report("dependency_expansion", "Expanding dependency evidence from top matches.", 0, 0)
             dependency_matches = self._expand_dependency_matches(
@@ -5521,7 +5598,6 @@ class SourceCodeQAService:
                 for key in (
                     "data_source",
                     "module_dependency",
-                    "message_flow",
                     "static_qa",
                     "impact_analysis",
                     "test_coverage",
@@ -5867,11 +5943,26 @@ class SourceCodeQAService:
         intent: dict[str, Any],
         request_cache: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        query_terms = [
-            term
-            for term in list(dict.fromkeys([*(str(token).lower() for token in tokens), *(str(term).lower() for term in focus_terms)]))
-            if len(term) >= 3 and term not in STOPWORDS
-        ][:24]
+        try:
+            indexed_file_count = int(connection.execute("select count(*) from files").fetchone()[0] or 0)
+        except sqlite3.Error:
+            indexed_file_count = 0
+        large_index = indexed_file_count >= 2000
+        focus_term_set = {str(term).lower() for term in focus_terms}
+        query_terms = []
+        for term in list(dict.fromkeys([*(str(token).lower() for token in tokens), *focus_term_set])):
+            if len(term) < 3 or term in STOPWORDS:
+                continue
+            if large_index and term in LOW_VALUE_FOCUS_TERMS:
+                continue
+            if large_index and "_" not in term and "/" not in term and "." not in term:
+                if len(term) > 28:
+                    continue
+                if len(term) > 14 and term not in focus_term_set:
+                    continue
+            query_terms.append(term)
+            if len(query_terms) >= 24:
+                break
         simple_intent = (
             any((intent or {}).get(key) for key in ("rule_logic", "api", "config"))
             and not any(
@@ -6560,6 +6651,12 @@ class SourceCodeQAService:
                 terms.append(term)
         for match in IDENTIFIER_PATTERN.finditer(text):
             term = match.group(0).strip("`'\".,;()[]{}<>").lower()
+            if len(term) >= 8 and "_" in term and any(marker in term for marker in ("table", "dwd", "dim", "tmp", "ads", "ods", "snapshot")):
+                if any(existing.endswith(f".{term}") for existing in terms):
+                    continue
+                if term not in terms:
+                    terms.append(term)
+                continue
             if len(term) < 24 or term.count("_") < 3:
                 continue
             if any(existing.endswith(f".{term}") for existing in terms):
@@ -6704,21 +6801,26 @@ class SourceCodeQAService:
                             )
                     if term_matches == 0:
                         for lookup_value in lookup_values:
-                            for row in connection.execute(
-                                """
-                                select file_path, line_no from lines
-                                where lower_text like ?
-                                order by file_path, line_no
-                                limit 80
-                                """,
-                                (f"%{lookup_value}%",),
-                            ).fetchall():
+                            fts_query = f'"{lookup_value.replace(chr(34), chr(34) + chr(34))}"'
+                            try:
+                                fallback_rows = connection.execute(
+                                    """
+                                    select file_path, line_no from lines_fts
+                                    where lines_fts match ?
+                                    order by file_path, line_no
+                                    limit 80
+                                    """,
+                                    (fts_query,),
+                                ).fetchall()
+                            except sqlite3.Error:
+                                fallback_rows = []
+                            for row in fallback_rows:
                                 add_match(
                                     str(row["file_path"]),
                                     int(row["line_no"] or 1),
                                     236,
-                                    f"exact line lookup: {lookup_value}",
-                                    "lines",
+                                    f"exact indexed text lookup: {lookup_value}",
+                                    "lines_fts",
                                     lookup_value,
                                 )
                     if request_cache is not None:
@@ -6813,6 +6915,10 @@ class SourceCodeQAService:
                 "direct_quality_short_circuits": 0,
                 "early_quality_short_circuits": 0,
                 "simple_file_hit_prunes": 0,
+                "direct_scan_early_stops": 0,
+                "simple_latency_guards": 0,
+                "query_decomposition_latency_guards": 0,
+                "deep_expansion_latency_guards": 0,
             },
         }
 
@@ -7164,6 +7270,30 @@ class SourceCodeQAService:
     def _is_dependency_question(question: str) -> bool:
         lowered = question.lower()
         return any(term in lowered for term in DEPENDENCY_QUESTION_TERMS)
+
+    @staticmethod
+    def _requires_cross_repo_context(question: str) -> bool:
+        lowered = f" {str(question or '').lower()} "
+        return any(
+            term in lowered
+            for term in (
+                " which repo",
+                " which repository",
+                " which service",
+                " cross repo",
+                " cross-repo",
+                " downstream",
+                " upstream",
+                " consume",
+                " consumes",
+                " producer",
+                " publisher",
+                " after it is written",
+                " after written",
+                " read ",
+                " written ",
+            )
+        )
 
     @staticmethod
     def _is_test_file_path(path: str) -> bool:
@@ -10259,10 +10389,43 @@ class SourceCodeQAService:
             for term in exact_terms
             if term.count("_") >= 2 and any(marker in term for marker in ("dwd_", "dim_", "ads_", "tmp_", "_df", "_di", "table"))
         ]
+        api_intent = any(term in lowered for term in API_HINTS)
+        explicit_data_source_intent = any(
+            term in lowered
+            for term in (
+                "data source",
+                "data sources",
+                "source table",
+                "upstream",
+                "table",
+                "database",
+                "jdbc",
+                "select",
+                "repository",
+                "mapper",
+                "dao",
+                " read ",
+                " write ",
+                " written ",
+                "persisted",
+                "数据源",
+                "来源",
+                "上游",
+                "表",
+                "数据库",
+                "读取",
+                "写入",
+            )
+        )
+        table_relation_intent = len(table_like_terms) >= 1 and any(term in lowered for term in (" relation ", " between ", " relationship ", "source", "table", "数据", "表", "关系"))
+        data_source_intent = (
+            explicit_data_source_intent
+            or table_relation_intent
+            or (any(term in lowered for term in DATA_SOURCE_HINTS) and not api_intent)
+        )
         return {
-            "data_source": any(term in lowered for term in DATA_SOURCE_HINTS)
-            or (len(table_like_terms) >= 1 and any(term in lowered for term in (" relation ", " between ", " relationship ", "source", "table", "数据", "表", "关系"))),
-            "api": any(term in lowered for term in API_HINTS),
+            "data_source": data_source_intent,
+            "api": api_intent,
             "config": any(term in lowered for term in CONFIG_HINTS),
             "module_dependency": any(term in lowered for term in MODULE_DEPENDENCY_HINTS),
             "message_flow": self._question_message_flow_intent(question),
