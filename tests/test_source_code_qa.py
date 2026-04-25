@@ -957,6 +957,47 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertIn("issuerepository", augmented)
         self.assertIn("issue_table", augmented)
 
+    def test_followup_context_does_not_match_substrings_inside_normal_questions(self):
+        augmented, followup = self.service._apply_conversation_context(
+            "When will system query CBS report when performing monthly credit review?",
+            {
+                "question": "Which table stores payslip extracted fields?",
+                "matches": [{"path": "CardIncomeScreeningFlowStatusDAO-ext.xml", "snippet": "process_info"}],
+                "trace_paths": [],
+                "structured_answer": {"claims": [{"text": "Payslip fields are stored in process_info."}]},
+                "answer_contract": {"confirmed_sources": ["card_income_screening_flow_status_tab"]},
+                "evidence_pack": {"confirmed_facts": ["extract_record_tab response_body"]},
+            },
+        )
+
+        self.assertFalse(followup["used"])
+        self.assertEqual(augmented, "When will system query CBS report when performing monthly credit review?")
+
+    def test_followup_context_does_not_pollute_specific_short_lookup(self):
+        augmented, followup = self.service._apply_conversation_context(
+            "Is fdMaturityDate used in any function?",
+            {
+                "question": "Where is F44 configured?",
+                "matches": [{"path": "apollo.properties", "snippet": "dbp.antifraud.function.F44"}],
+                "trace_paths": [],
+                "structured_answer": {},
+                "answer_contract": {"confirmed_sources": ["dbp.antifraud.function.F44"]},
+                "evidence_pack": {},
+            },
+        )
+
+        self.assertFalse(followup["used"])
+        self.assertEqual(augmented, "Is fdMaturityDate used in any function?")
+
+    def test_question_specific_terms_cover_cbs_credit_review_questions(self):
+        terms = self.service._question_specific_retrieval_terms(
+            "When will system query CBS report when performing monthly credit review?"
+        )
+
+        self.assertIn("CreditReviewCbsServiceImpl", terms)
+        self.assertIn("CreditReviewCbsBureauReportProvider", terms)
+        self.assertIn("CR_CBS_REPORT", terms)
+
     def test_query_uses_ready_persistent_index_and_citations(self):
         self.service.save_mapping(
             pm_team="AF",

@@ -495,8 +495,8 @@
     results.innerHTML = body;
   };
 
-  const buildConversationContext = (payload) => ({
-    question: questionInput.value,
+  const buildConversationContext = (payload, questionOverride = '') => ({
+    question: questionOverride || questionInput.value,
     matches: (payload?.matches || []).slice(0, 8).map((match) => ({
       path: match.path,
       snippet: match.snippet,
@@ -820,6 +820,26 @@
     `;
   };
 
+  const renderPendingQuery = (question, answerModeLabel) => {
+    const trimmedQuestion = String(question || '').trim();
+    if (summary) {
+      summary.textContent = trimmedQuestion
+        ? `Running current question: ${trimmedQuestion.slice(0, 180)}${trimmedQuestion.length > 180 ? '...' : ''}`
+        : 'Running current question.';
+    }
+    if (results) {
+      results.innerHTML = '<div class="source-qa-empty">Current query is running. Previous answer is hidden so it cannot be mistaken for this run.</div>';
+    }
+    if (activeMode) activeMode.textContent = answerModeLabel || 'auto';
+    renderUsageBadges({});
+    renderFallbackNotice({});
+    renderLlmAnswer({});
+    renderEvidenceSummary(null);
+    renderDebugTrace(null);
+    if (feedback) feedback.hidden = true;
+    if (feedbackStatus) feedbackStatus.textContent = '';
+  };
+
   const renderFallbackNotice = (payload) => {
     if (!fallbackNotice) return;
     const notice = payload?.fallback_notice;
@@ -890,6 +910,8 @@
     if (activeMode) activeMode.textContent = effectiveAnswerMode;
     const progress = startQueryProgress('Submitting query to server...');
     if (queryButton) queryButton.disabled = true;
+    const submittedQuestion = questionInput.value;
+    renderPendingQuery(submittedQuestion, effectiveAnswerMode);
     try {
       const initialPayload = await fetch(queryUrl, {
         method: 'POST',
@@ -897,7 +919,7 @@
         body: JSON.stringify({
           pm_team: pmTeam.value,
           country: currentCountry(),
-          question: questionInput.value,
+          question: submittedQuestion,
           answer_mode: effectiveAnswerMode,
           llm_budget_mode: 'auto',
           conversation_context: conversationContext,
@@ -908,7 +930,7 @@
         ? await pollQueryJob(initialPayload.job_id, progress)
         : initialPayload;
       lastPayload = payload;
-      conversationContext = buildConversationContext(payload);
+      conversationContext = buildConversationContext(payload, submittedQuestion);
       rememberLastQueryConfig(effectiveAnswerMode);
       summary.textContent = payload.summary || 'Search completed.';
       if (payload.llm_retryable_error?.retryable) {
@@ -927,7 +949,7 @@
       renderDebugTrace(payload);
       renderMatches(payload.matches || [], { compact: Boolean(payload.llm_answer), open: shouldOpenEvidence(payload) });
       saveQuestionHistory({
-        question: questionInput.value,
+        question: submittedQuestion,
         pm_team: pmTeam.value,
         country: currentCountry(),
         answer_mode: payload.answer_mode || selectedAnswerMode,
@@ -966,7 +988,7 @@
           rating,
           pm_team: pmTeam.value,
           country: currentCountry(),
-          question: questionInput.value,
+          question: lastPayload.original_question || conversationContext?.question || questionInput.value,
           trace_id: lastPayload.trace_id || '',
           answer_mode: lastPayload.answer_mode || '',
           llm_budget_mode: lastPayload.llm_budget_mode || lastPayload.llm_requested_budget_mode || '',

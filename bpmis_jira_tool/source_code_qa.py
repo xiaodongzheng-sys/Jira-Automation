@@ -1805,6 +1805,26 @@ class SourceCodeQAService:
     @staticmethod
     def _question_specific_retrieval_terms(question: str) -> list[str]:
         lowered = f" {str(question or '').lower()} "
+        cbs_markers = (" cbs ", "cbs report", "bureau report", "credit bureau")
+        credit_review_markers = ("credit review", "monthly credit", "monthly review", "performing monthly", "review")
+        if any(marker in lowered for marker in cbs_markers) and any(marker in lowered for marker in credit_review_markers):
+            return [
+                "CreditReviewCbsService",
+                "CreditReviewCbsServiceImpl",
+                "CreditReviewCbsBureauReportProvider",
+                "CreditReviewCBSDataDTO",
+                "CreditReviewCBSReqDTO",
+                "CreditReviewHighRiskRetailStrategy",
+                "CreditReviewHighRiskSmeStrategy",
+                "CreditReviewRetailStrategy1",
+                "RetailStrategy2CbsProvider",
+                "CR_CBS_REPORT",
+                "CbsSyncService",
+                "SyncCBSReport4ManualEnquiryXxlJob",
+                "CbsReportCacheRepository",
+                "requestRetailCBSData",
+                "CRMS_CBS_BATCH_JOB",
+            ]
         income_doc_markers = (
             "payslip",
             "pay slip",
@@ -1856,11 +1876,16 @@ class SourceCodeQAService:
         if not isinstance(conversation_context, dict):
             return question, {"used": False}
         lowered = question.lower()
-        followup_markers = (
-            "this", "that", "it", "them", "above", "previous", "same", "continue",
-            "这个", "那个", "上面", "继续", "它", "他们", "这个方法", "这个表",
+        tokens = set(self._question_tokens(question))
+        english_followup_markers = {"this", "that", "it", "them", "above", "previous", "same", "continue"}
+        english_followup_phrases = ("this method", "this table", "that method", "that table")
+        chinese_followup_markers = ("这个", "那个", "上面", "继续", "它", "他们", "这个方法", "这个表")
+        has_followup_marker = (
+            bool(tokens & english_followup_markers)
+            or any(re.search(rf"\b{re.escape(marker)}\b", lowered) for marker in english_followup_phrases)
+            or any(marker in lowered for marker in chinese_followup_markers)
         )
-        is_followup = len(self._question_tokens(question)) <= 8 or any(marker in lowered for marker in followup_markers)
+        is_followup = has_followup_marker
         if not is_followup:
             return question, {"used": False}
         terms: list[str] = []
@@ -11365,6 +11390,11 @@ class SourceCodeQAService:
             snippet_specific_hits = [term for term in specific_terms if term in snippet]
             score += min(len(path_specific_hits), 4) * 120
             score += min(len(snippet_specific_hits), 4) * 95
+        if "cbs" in lowered_question and "credit review" in lowered_question:
+            if "creditreview" in path and ("cbs" in path or "cbs" in snippet):
+                score += 120
+            if "bulk" in path and "creditreview" not in path:
+                score -= 50
         if trace_stage == "query_decomposition":
             score += 20
         if retrieval in {"flow_graph", "code_graph"}:
@@ -11413,6 +11443,11 @@ class SourceCodeQAService:
                 score += 42
             if any(term in snippet for term in ("password", "secret", "token", "printstacktrace", "runtime", "processbuilder", "todo", "fixme")):
                 score += 20
+        if not intent.get("test_coverage"):
+            if self._is_test_file_path(path):
+                score -= 80
+            elif "/src/main/" in path or any(term in path for term in ("service", "provider", "strategy", "repository", "mapper", "client", "controller", "cron", "job")):
+                score += 28
         if intent.get("impact_analysis"):
             if retrieval in {"planner_caller", "planner_callee", "flow_graph", "entity_graph", "code_graph"}:
                 score += 38
