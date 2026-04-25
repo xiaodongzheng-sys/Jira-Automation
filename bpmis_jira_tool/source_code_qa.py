@@ -1872,7 +1872,12 @@ class SourceCodeQAService:
                         )
                     )
         matches = self._rank_matches(question, matches, request_cache=request_cache)
-        top_matches = matches[: max(1, min(int(limit or 12), 30))]
+        result_limit = max(1, min(int(limit or 12), 30))
+        top_matches = (
+            self._select_result_matches(matches, result_limit, question=question)
+            if exact_matches
+            else matches[:result_limit]
+        )
         should_expand_matches = not exact_lookup_sufficient
         if top_matches and should_expand_matches and self._is_dependency_question(question):
             dependency_matches = self._expand_dependency_matches(
@@ -6470,8 +6475,13 @@ class SourceCodeQAService:
                     if not normalized:
                         continue
                     term_matches = 0
+                    lookup_values = [normalized]
+                    if "." in normalized:
+                        suffix = normalized.rsplit(".", 1)[-1].strip()
+                        if len(suffix) >= 8 and suffix.count("_") >= 2 and suffix not in lookup_values:
+                            lookup_values.append(suffix)
 
-                    def add_match(file_path: str, line_no: int, score: int, reason: str, source: str) -> None:
+                    def add_match(file_path: str, line_no: int, score: int, reason: str, source: str, lookup_value: str) -> None:
                         nonlocal term_matches
                         key = (str(file_path), int(line_no or 1), normalized, source)
                         if key in seen:
@@ -6492,91 +6502,97 @@ class SourceCodeQAService:
                         )
                         if not match:
                             return
-                        match["exact_lookup"] = {"term": normalized, "source": source}
+                        match["exact_lookup"] = {"term": normalized, "lookup_value": lookup_value, "source": source}
                         matches.append(match)
                         term_matches += 1
 
-                    for row in connection.execute(
-                        """
-                        select * from references_index
-                        where lower_target = ?
-                        order by
-                            case kind
-                                when 'sql_table' then 0
-                                when 'db_read' then 1
-                                when 'db_write' then 2
-                                when 'runtime_sql' then 3
-                                else 4
-                            end,
-                            file_path,
-                            line_no
-                        limit 80
-                        """,
-                        (normalized,),
-                    ).fetchall():
-                        add_match(
-                            str(row["file_path"]),
-                            int(row["line_no"] or 1),
-                            282 if str(row["kind"]) == "sql_table" else 268,
-                            f"exact table/path lookup: {row['kind']} {row['target']}",
-                            "references_index",
-                        )
-                    if "/" in normalized or normalized.endswith((".java", ".py", ".xml", ".sql", ".yaml", ".yml", ".properties", ".ts", ".tsx", ".js", ".jsx")):
+                    for lookup_value in lookup_values:
                         for row in connection.execute(
                             """
-                            select path from files
-                            where lower_path = ? or lower_path like ?
-                            order by case when lower_path = ? then 0 else 1 end, path
-                            limit 40
-                            """,
-                            (normalized, f"%{normalized}%", normalized),
-                        ).fetchall():
-                            add_match(
-                                str(row["path"]),
-                                1,
-                                260,
-                                f"exact path lookup: {normalized}",
-                                "files",
-                            )
-                    try:
-                        line_rows = connection.execute(
-                            """
-                            select lines.file_path, lines.line_no
-                            from line_tokens
-                            join lines on lines.file_path = line_tokens.file_path and lines.line_no = line_tokens.line_no
-                            where line_tokens.token = ?
-                            order by lines.file_path, lines.line_no
-                            limit 100
-                            """,
-                            (normalized,),
-                        ).fetchall()
-                    except sqlite3.Error:
-                        line_rows = []
-                    for row in line_rows:
-                        add_match(
-                            str(row["file_path"]),
-                            int(row["line_no"] or 1),
-                            248,
-                            f"exact line lookup: {normalized}",
-                            "line_tokens",
-                        )
-                    if term_matches == 0:
-                        for row in connection.execute(
-                            """
-                            select file_path, line_no from lines
-                            where lower_text like ?
-                            order by file_path, line_no
+                            select * from references_index
+                            where lower_target = ?
+                            order by
+                                case kind
+                                    when 'sql_table' then 0
+                                    when 'db_read' then 1
+                                    when 'db_write' then 2
+                                    when 'runtime_sql' then 3
+                                    else 4
+                                end,
+                                file_path,
+                                line_no
                             limit 80
                             """,
-                            (f"%{normalized}%",),
+                            (lookup_value,),
                         ).fetchall():
                             add_match(
                                 str(row["file_path"]),
                                 int(row["line_no"] or 1),
-                                236,
-                                f"exact line lookup: {normalized}",
-                                "lines",
+                                282 if str(row["kind"]) == "sql_table" else 268,
+                                f"exact table/path lookup: {row['kind']} {row['target']}",
+                                "references_index",
+                                lookup_value,
                             )
+                        if "/" in lookup_value or lookup_value.endswith((".java", ".py", ".xml", ".sql", ".yaml", ".yml", ".properties", ".ts", ".tsx", ".js", ".jsx")):
+                            for row in connection.execute(
+                                """
+                                select path from files
+                                where lower_path = ? or lower_path like ?
+                                order by case when lower_path = ? then 0 else 1 end, path
+                                limit 40
+                                """,
+                                (lookup_value, f"%{lookup_value}%", lookup_value),
+                            ).fetchall():
+                                add_match(
+                                    str(row["path"]),
+                                    1,
+                                    260,
+                                    f"exact path lookup: {lookup_value}",
+                                    "files",
+                                    lookup_value,
+                                )
+                        try:
+                            line_rows = connection.execute(
+                                """
+                                select lines.file_path, lines.line_no
+                                from line_tokens
+                                join lines on lines.file_path = line_tokens.file_path and lines.line_no = line_tokens.line_no
+                                where line_tokens.token = ?
+                                order by lines.file_path, lines.line_no
+                                limit 100
+                                """,
+                                (lookup_value,),
+                            ).fetchall()
+                        except sqlite3.Error:
+                            line_rows = []
+                        for row in line_rows:
+                            add_match(
+                                str(row["file_path"]),
+                                int(row["line_no"] or 1),
+                                248,
+                                f"exact line lookup: {lookup_value}",
+                                "line_tokens",
+                                lookup_value,
+                            )
+                    if term_matches == 0:
+                        for lookup_value in lookup_values:
+                            for row in connection.execute(
+                                """
+                                select file_path, line_no from lines
+                                where lower_text like ?
+                                order by file_path, line_no
+                                limit 80
+                                """,
+                                (f"%{lookup_value}%",),
+                            ).fetchall():
+                                add_match(
+                                    str(row["file_path"]),
+                                    int(row["line_no"] or 1),
+                                    236,
+                                    f"exact line lookup: {lookup_value}",
+                                    "lines",
+                                    lookup_value,
+                                )
                     if request_cache is not None:
                         stat_key = "exact_lookup_hits" if term_matches else "exact_lookup_misses"
                         self._increment_retrieval_stat(request_cache, stat_key)
@@ -10106,8 +10122,15 @@ class SourceCodeQAService:
 
     def _question_intent(self, question: str) -> dict[str, Any]:
         lowered = f" {question.lower()} "
+        exact_terms = self._extract_exact_lookup_terms(question)
+        table_like_terms = [
+            term
+            for term in exact_terms
+            if term.count("_") >= 2 and any(marker in term for marker in ("dwd_", "dim_", "ads_", "tmp_", "_df", "_di", "table"))
+        ]
         return {
-            "data_source": any(term in lowered for term in DATA_SOURCE_HINTS),
+            "data_source": any(term in lowered for term in DATA_SOURCE_HINTS)
+            or (len(table_like_terms) >= 1 and any(term in lowered for term in (" relation ", " between ", " relationship ", "source", "table", "数据", "表", "关系"))),
             "api": any(term in lowered for term in API_HINTS),
             "config": any(term in lowered for term in CONFIG_HINTS),
             "module_dependency": any(term in lowered for term in MODULE_DEPENDENCY_HINTS),
@@ -10291,6 +10314,17 @@ class SourceCodeQAService:
         trace_stage = str(match.get("trace_stage") or "")
         question_tokens = set(question_features.get("tokens") or [])
         path_stem = Path(path).stem.lower()
+        exact_lookup = match.get("exact_lookup") or {}
+        if trace_stage == "exact_lookup" or retrieval == "exact_table_path_lookup":
+            score += 260
+            exact_term = str(exact_lookup.get("term") or "").lower()
+            exact_lookup_value = str(exact_lookup.get("lookup_value") or exact_term).lower()
+            if exact_term and (exact_term in snippet or exact_term in path):
+                score += 120
+            elif exact_lookup_value and (exact_lookup_value in snippet or exact_lookup_value in path):
+                score += 90
+            if any(marker in path for marker in ("repository", "mapper", "dao", "job", "service", "config", "properties", "yml", "yaml", "sql", "xml")):
+                score += 35
         if path_stem and path_stem in question_tokens:
             score += 80
         if trace_stage == "query_decomposition":
@@ -10600,9 +10634,29 @@ class SourceCodeQAService:
             path = str(match.get("path") or "")
             snippet = str(match.get("snippet") or "")
             snippet_lower = snippet.lower()
+            exact_lookup = match.get("exact_lookup") or {}
             adders["citation_map"](
                 f"{source_id}: {label} / {match.get('retrieval') or 'file_scan'} / {match.get('trace_stage') or 'direct'}"
             )
+            if exact_lookup:
+                term = str(exact_lookup.get("term") or "").strip()
+                lookup_value = str(exact_lookup.get("lookup_value") or term).strip()
+                display_term = term or lookup_value
+                if display_term:
+                    claim = f"{display_term} is referenced in {label}"
+                    adders["tables"](f"{display_term} ({label})")
+                    adders["read_write_points"](claim)
+                    add_item("table", claim, source_id=source_id, match=match, confidence="high", hop="source")
+                    if lookup_value and lookup_value != display_term:
+                        adders["read_write_points"](f"{label}: matched unqualified table name {lookup_value}")
+                        add_item(
+                            "read_write",
+                            f"{label}: matched unqualified table name {lookup_value}",
+                            source_id=source_id,
+                            match=match,
+                            confidence="high",
+                            hop="source",
+                        )
             if any(term in path.lower() for term in ("controller", "consumer", "handler", "service", "engine", "strategy")):
                 adders["entry_points"](f"{label}: {self._compact_path(path)}")
                 add_item("entry_point", f"{label}: {self._compact_path(path)}", source_id=source_id, match=match, hop="entry")
@@ -11181,6 +11235,16 @@ class SourceCodeQAService:
                 return
             selected.append(match)
             seen.add(key)
+
+        exact_terms_seen: set[str] = set()
+        for match in buckets["exact_lookup"]:
+            exact_lookup = match.get("exact_lookup") or {}
+            term = str(exact_lookup.get("term") or "").lower()
+            if term and term in exact_terms_seen:
+                continue
+            add(match)
+            if term:
+                exact_terms_seen.add(term)
 
         if intent.get("impact_analysis"):
             ranked_matches = sorted(matches, key=lambda item: item.get("rerank_score", item.get("score", 0)), reverse=True)
@@ -12610,6 +12674,7 @@ class SourceCodeQAService:
         limit = max(1, int(limit or 1))
         intent = self._question_intent(question) if question else {}
         buckets = {
+            "exact_lookup": [match for match in matches if match.get("trace_stage") == "exact_lookup"],
             "direct": [match for match in matches if match.get("trace_stage") == "direct"],
             "query_decomposition": [match for match in matches if match.get("trace_stage") == "query_decomposition"],
             "dependency": [match for match in matches if match.get("trace_stage") == "dependency"],
@@ -12637,13 +12702,13 @@ class SourceCodeQAService:
         # Keep a balanced evidence bundle: entry point, purpose-specific logic,
         # and downstream/common builders. This improves answer accuracy more than
         # sending only the highest raw scores.
-        stage_order = ("direct", "query_decomposition", "dependency", "two_hop", "tool_loop", "agent_trace", "agent_plan", "quality_gate")
+        stage_order = ("exact_lookup", "direct", "query_decomposition", "dependency", "two_hop", "tool_loop", "agent_trace", "agent_plan", "quality_gate")
         if intent.get("impact_analysis"):
-            stage_order = ("direct", "impact_analysis", "tool_loop", "query_decomposition", "dependency", "two_hop", "agent_trace", "agent_plan", "quality_gate")
+            stage_order = ("exact_lookup", "direct", "impact_analysis", "tool_loop", "query_decomposition", "dependency", "two_hop", "agent_trace", "agent_plan", "quality_gate")
         if intent.get("test_coverage"):
-            stage_order = ("direct", "test_coverage", "query_decomposition", "tool_loop", "dependency", "two_hop", "agent_trace", "agent_plan", "quality_gate")
+            stage_order = ("exact_lookup", "direct", "test_coverage", "query_decomposition", "tool_loop", "dependency", "two_hop", "agent_trace", "agent_plan", "quality_gate")
         if intent.get("operational_boundary"):
-            stage_order = ("direct", "operational_boundary", "query_decomposition", "tool_loop", "dependency", "two_hop", "agent_trace", "agent_plan", "quality_gate")
+            stage_order = ("exact_lookup", "direct", "operational_boundary", "query_decomposition", "tool_loop", "dependency", "two_hop", "agent_trace", "agent_plan", "quality_gate")
         for stage in stage_order:
             stage_take = 1 if intent.get("data_source") else 2
             for match in buckets[stage][:stage_take]:
