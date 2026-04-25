@@ -2303,6 +2303,35 @@ class SourceCodeQAService:
                 started_at=started_at,
             )
             return payload
+        queryable_entries = [
+            (entry, repo_path)
+            for entry, repo_path in synced_entries
+            if (
+                (index_info := self._repo_index_info(key, entry, repo_path)).get("state") == "ready"
+                or (index_info.get("state") == "stale" and index_info.get("queryable"))
+            )
+        ]
+        if not queryable_entries:
+            self._increment_retrieval_stat(request_cache, "index_not_ready_scopes")
+            payload = self._empty_query_payload(
+                key,
+                repo_status=repo_status,
+                index_freshness=index_freshness,
+                status="index_not_ready",
+                summary="Synced repositories exist in the selected scope, but none has a ready queryable index. Run Sync / Refresh before trusting code answers.",
+                trace_id=trace_id,
+            )
+            payload["repository_scope"] = repository_scope
+            payload["retrieval_runtime"] = self._retrieval_cache_stats(request_cache)
+            self._record_query_telemetry(
+                key=key,
+                question=question,
+                answer_mode=answer_mode,
+                llm_budget_mode=llm_budget_mode,
+                payload=payload,
+                started_at=started_at,
+            )
+            return payload
         intent = query_plan.get("intent") if isinstance(query_plan.get("intent"), dict) else {}
         simple_quality_trace = (
             any(intent.get(intent_key) for intent_key in ("rule_logic", "api", "config"))
@@ -7766,6 +7795,7 @@ class SourceCodeQAService:
                 "question_feature_hits": 0,
                 "question_feature_misses": 0,
                 "repository_scope_filters": 0,
+                "index_not_ready_scopes": 0,
                 "exact_lookup_repos": 0,
                 "exact_lookup_hits": 0,
                 "exact_lookup_misses": 0,
