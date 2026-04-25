@@ -133,20 +133,36 @@ def _build_fixture_repositories(service: SourceCodeQAService) -> None:
         repositories=[{"display_name": "Credit Risk", "url": "https://git.example.com/team/credit-risk.git"}],
     )
     service.save_mapping(
+        pm_team="CRMS",
+        country="SG",
+        repositories=[{"display_name": "Credit Risk SG", "url": "https://git.example.com/team/credit-risk-sg.git"}],
+    )
+    service.save_mapping(
+        pm_team="CRMS",
+        country="PH",
+        repositories=[{"display_name": "Credit Risk PH", "url": "https://git.example.com/team/credit-risk-ph.git"}],
+    )
+    service.save_mapping(
         pm_team="GRC",
         country="All",
         repositories=[{"display_name": "Ops Risk", "url": "https://git.example.com/team/ops-risk.git"}],
     )
     af_entries = service.load_config()["mappings"]["AF:All"]
     cr_entry = service.load_config()["mappings"]["CRMS:ID"][0]
+    cr_sg_entry = service.load_config()["mappings"]["CRMS:SG"][0]
+    cr_ph_entry = service.load_config()["mappings"]["CRMS:PH"][0]
     grc_entry = service.load_config()["mappings"]["GRC:All"][0]
     af_repo = service._repo_path("AF:All", type("Entry", (), af_entries[0])())
     issue_service_repo = service._repo_path("AF:All", type("Entry", (), af_entries[1])())
     cr_repo = service._repo_path("CRMS:ID", type("Entry", (), cr_entry)())
+    cr_sg_repo = service._repo_path("CRMS:SG", type("Entry", (), cr_sg_entry)())
+    cr_ph_repo = service._repo_path("CRMS:PH", type("Entry", (), cr_ph_entry)())
     grc_repo = service._repo_path("GRC:All", type("Entry", (), grc_entry)())
     (af_repo / ".git").mkdir(parents=True, exist_ok=True)
     (issue_service_repo / ".git").mkdir(parents=True, exist_ok=True)
     (cr_repo / ".git").mkdir(parents=True, exist_ok=True)
+    (cr_sg_repo / ".git").mkdir(parents=True, exist_ok=True)
+    (cr_ph_repo / ".git").mkdir(parents=True, exist_ok=True)
     (grc_repo / ".git").mkdir(parents=True, exist_ok=True)
 
     _write_text(
@@ -660,6 +676,86 @@ def _build_fixture_repositories(service: SourceCodeQAService) -> None:
         "}\n",
     )
     _write_text(
+        cr_sg_repo / "controller" / "SgCreditApplicationController.java",
+        "@RestController\n"
+        "@RequestMapping(\"/api/sg/credit/applications\")\n"
+        "public class SgCreditApplicationController {\n"
+        "    private SgCreditDecisionService sgCreditDecisionService;\n"
+        "    @PostMapping(\"/precheck\")\n"
+        "    public SgCreditDecision runPrecheck(SgCreditApplicationRequest request) {\n"
+        "        return sgCreditDecisionService.runSgPrecheck(request);\n"
+        "    }\n"
+        "}\n",
+    )
+    _write_text(
+        cr_sg_repo / "service" / "SgCreditDecisionService.java",
+        "public class SgCreditDecisionService {\n"
+        "    private SgBureauRepository sgBureauRepository;\n"
+        "    private SgExposureRepository sgExposureRepository;\n"
+        "    public SgCreditDecision runSgPrecheck(SgCreditApplicationRequest request) {\n"
+        "        SgBureauProfile bureau = sgBureauRepository.loadBureauProfile(request.getCustomerId());\n"
+        "        SgExposure exposure = sgExposureRepository.loadExposure(request.getCustomerId());\n"
+        "        return new SgCreditDecision(bureau, exposure);\n"
+        "    }\n"
+        "}\n",
+    )
+    _write_text(
+        cr_sg_repo / "repository" / "SgBureauRepository.java",
+        "public class SgBureauRepository {\n"
+        "    public SgBureauProfile loadBureauProfile(String customerId) {\n"
+        "        return jdbcTemplate.queryForObject(\"select * from cr_sg_bureau_profile where customer_id = ?\", mapper, customerId);\n"
+        "    }\n"
+        "}\n",
+    )
+    _write_text(
+        cr_sg_repo / "repository" / "SgExposureRepository.java",
+        "public class SgExposureRepository {\n"
+        "    public SgExposure loadExposure(String customerId) {\n"
+        "        return jdbcTemplate.queryForObject(\"select * from cr_sg_customer_exposure where customer_id = ?\", mapper, customerId);\n"
+        "    }\n"
+        "}\n",
+    )
+    _write_text(
+        cr_ph_repo / "controller" / "PhCreditApplicationController.java",
+        "@RestController\n"
+        "@RequestMapping(\"/api/ph/credit/applications\")\n"
+        "public class PhCreditApplicationController {\n"
+        "    private PhCreditDecisionService phCreditDecisionService;\n"
+        "    @PostMapping(\"/precheck\")\n"
+        "    public PhCreditDecision runPrecheck(PhCreditApplicationRequest request) {\n"
+        "        return phCreditDecisionService.runPhPrecheck(request);\n"
+        "    }\n"
+        "}\n",
+    )
+    _write_text(
+        cr_ph_repo / "service" / "PhCreditDecisionService.java",
+        "public class PhCreditDecisionService {\n"
+        "    private PhIncomeRepository phIncomeRepository;\n"
+        "    private PhDelinquencyRepository phDelinquencyRepository;\n"
+        "    public PhCreditDecision runPhPrecheck(PhCreditApplicationRequest request) {\n"
+        "        PhIncomeSnapshot income = phIncomeRepository.loadIncomeSnapshot(request.getCustomerId());\n"
+        "        PhDelinquencySnapshot delinquency = phDelinquencyRepository.loadDelinquencySnapshot(request.getCustomerId());\n"
+        "        return new PhCreditDecision(income, delinquency);\n"
+        "    }\n"
+        "}\n",
+    )
+    _write_text(
+        cr_ph_repo / "repository" / "PhIncomeRepository.java",
+        "public class PhIncomeRepository {\n"
+        "    public PhIncomeSnapshot loadIncomeSnapshot(String customerId) {\n"
+        "        return jdbcTemplate.queryForObject(\"select * from cr_ph_income_snapshot where customer_id = ?\", mapper, customerId);\n"
+        "    }\n"
+        "}\n",
+    )
+    _write_text(
+        cr_ph_repo / "repository" / "PhDelinquencyRepository.java",
+        "public class PhDelinquencyRepository {\n"
+        "    public PhDelinquencySnapshot loadDelinquencySnapshot(String customerId) {\n"
+        "        return jdbcTemplate.queryForObject(\"select * from cr_ph_delinquency_snapshot where customer_id = ?\", mapper, customerId);\n"
+        "    }\n"
+        "}\n",
+    )
+    _write_text(
         grc_repo / "config" / "application.yml",
         "mysql-isolate:\n"
         "  globallock:\n"
@@ -737,6 +833,8 @@ def _build_fixture_repositories(service: SourceCodeQAService) -> None:
         ("AF:All", af_entries[0], af_repo),
         ("AF:All", af_entries[1], issue_service_repo),
         ("CRMS:ID", cr_entry, cr_repo),
+        ("CRMS:SG", cr_sg_entry, cr_sg_repo),
+        ("CRMS:PH", cr_ph_entry, cr_ph_repo),
         ("GRC:All", grc_entry, grc_repo),
     ):
         service._build_repo_index(key, type("Entry", (), raw_entry)(), repo_path)
@@ -1024,6 +1122,7 @@ def main() -> int:
     route_buckets: dict[str, int] = {}
     coverage_buckets: dict[str, dict[str, int]] = {}
     team_buckets: dict[str, dict[str, int]] = {}
+    segment_buckets: dict[str, dict[str, int]] = {}
     for result in results:
         for bucket, count in (result.get("failure_buckets") or {}).items():
             failure_buckets[str(bucket)] = failure_buckets.get(str(bucket), 0) + int(count)
@@ -1041,6 +1140,14 @@ def main() -> int:
         team_bucket["total"] += 1
         if result["status"] != "pass":
             team_bucket["failed"] += 1
+        country = str(case.get("country") or "All").strip().upper()
+        if team != "CRMS":
+            country = "ALL"
+        segment = f"{team}:{country}"
+        segment_bucket = segment_buckets.setdefault(segment, {"total": 0, "failed": 0})
+        segment_bucket["total"] += 1
+        if result["status"] != "pass":
+            segment_bucket["failed"] += 1
     summary = {
         "status": "pass" if not failed else "fail",
         "total": len(results),
@@ -1049,6 +1156,7 @@ def main() -> int:
         "route_buckets": route_buckets,
         "coverage_buckets": coverage_buckets,
         "team_buckets": team_buckets,
+        "segment_buckets": segment_buckets,
         "results": results,
     }
 
@@ -1072,6 +1180,14 @@ def main() -> int:
                 + ", ".join(
                     f"{key}={value['total'] - value['failed']}/{value['total']}"
                     for key, value in sorted(team_buckets.items())
+                )
+            )
+        if segment_buckets:
+            print(
+                "Segment buckets: "
+                + ", ".join(
+                    f"{key}={value['total'] - value['failed']}/{value['total']}"
+                    for key, value in sorted(segment_buckets.items())
                 )
             )
         for result in results:

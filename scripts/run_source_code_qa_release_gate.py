@@ -21,10 +21,13 @@ from scripts.run_source_code_qa_nightly_eval import DEFAULT_CASES, OPTIONAL_CASE
 
 DEFAULT_THRESHOLDS = {
     "max_eval_failed": 0,
+    "max_eval_failed_per_segment": 0,
     "max_eval_failed_per_team": 0,
     "max_llm_smoke_failed": 0,
     "min_eval_cases": 20,
+    "min_eval_cases_per_segment": 2,
     "min_eval_cases_per_team": 4,
+    "required_eval_segments": ["AF:ALL", "CRMS:ID", "CRMS:SG", "CRMS:PH", "GRC:ALL"],
     "required_eval_teams": ["AF", "CRMS", "GRC"],
     "require_review_queue": True,
 }
@@ -46,24 +49,40 @@ def evaluate_release_gate(report: dict[str, Any], thresholds: dict[str, Any] | N
     eval_failed = int(eval_summary.get("failed") or 0)
     smoke_failed = int(smoke_summary.get("failed") or 0)
     team_buckets = eval_summary.get("team_buckets") or {}
+    segment_buckets = {str(key).upper(): value for key, value in (eval_summary.get("segment_buckets") or {}).items()}
     required_teams = [str(team).upper() for team in (rules.get("required_eval_teams") or [])]
+    required_segments = [str(segment).upper() for segment in (rules.get("required_eval_segments") or [])]
     min_cases_per_team = int(rules["min_eval_cases_per_team"])
+    min_cases_per_segment = int(rules["min_eval_cases_per_segment"])
     max_failed_per_team = int(rules["max_eval_failed_per_team"])
+    max_failed_per_segment = int(rules["max_eval_failed_per_segment"])
     missing_or_thin_teams = [
         team
         for team in required_teams
         if int((team_buckets.get(team) or {}).get("total") or 0) < min_cases_per_team
+    ]
+    missing_or_thin_segments = [
+        segment
+        for segment in required_segments
+        if int((segment_buckets.get(segment) or {}).get("total") or 0) < min_cases_per_segment
     ]
     failing_teams = [
         team
         for team in required_teams
         if int((team_buckets.get(team) or {}).get("failed") or 0) > max_failed_per_team
     ]
+    failing_segments = [
+        segment
+        for segment in required_segments
+        if int((segment_buckets.get(segment) or {}).get("failed") or 0) > max_failed_per_segment
+    ]
     checks = {
         "nightly_status": report.get("status") == "pass",
         "eval_failed": eval_failed <= int(rules["max_eval_failed"]),
         "eval_team_coverage": not missing_or_thin_teams,
         "eval_failed_per_team": not failing_teams,
+        "eval_segment_coverage": not missing_or_thin_segments,
+        "eval_failed_per_segment": not failing_segments,
         "llm_smoke_failed": smoke_failed <= int(rules["max_llm_smoke_failed"]),
         "min_eval_cases": eval_total >= int(rules["min_eval_cases"]),
         "review_queue_generated": (not rules["require_review_queue"]) or int(review_summary.get("returncode") or 0) == 0,
@@ -80,8 +99,11 @@ def evaluate_release_gate(report: dict[str, Any], thresholds: dict[str, Any] | N
         "report_path": report.get("report_path"),
         "eval": eval_summary,
         "team_buckets": team_buckets,
+        "segment_buckets": segment_buckets,
         "missing_or_thin_teams": missing_or_thin_teams,
+        "missing_or_thin_segments": missing_or_thin_segments,
         "failing_teams": failing_teams,
+        "failing_segments": failing_segments,
         "llm_smoke": smoke_summary,
     }
 
@@ -125,12 +147,19 @@ def main() -> int:
     parser.add_argument("--no-fixture", action="store_true", help="Run against synced repos instead of deterministic fixtures.")
     parser.add_argument("--include-useful-feedback", action="store_true", help="Include useful feedback as positive smoke-test candidates.")
     parser.add_argument("--min-eval-cases", type=int, default=DEFAULT_THRESHOLDS["min_eval_cases"])
+    parser.add_argument("--min-eval-cases-per-segment", type=int, default=DEFAULT_THRESHOLDS["min_eval_cases_per_segment"])
     parser.add_argument("--min-eval-cases-per-team", type=int, default=DEFAULT_THRESHOLDS["min_eval_cases_per_team"])
     parser.add_argument(
         "--required-eval-team",
         action="append",
         default=None,
         help="Required PM team code for deterministic eval coverage. Can be passed multiple times.",
+    )
+    parser.add_argument(
+        "--required-eval-segment",
+        action="append",
+        default=None,
+        help="Required PM team/country segment, for example CRMS:SG. Can be passed multiple times.",
     )
     parser.add_argument("--json", action="store_true", help="Print gate JSON.")
     args = parser.parse_args()
@@ -147,7 +176,9 @@ def main() -> int:
         include_useful_feedback=bool(args.include_useful_feedback),
         thresholds={
             "min_eval_cases": int(args.min_eval_cases),
+            "min_eval_cases_per_segment": int(args.min_eval_cases_per_segment),
             "min_eval_cases_per_team": int(args.min_eval_cases_per_team),
+            "required_eval_segments": args.required_eval_segment or DEFAULT_THRESHOLDS["required_eval_segments"],
             "required_eval_teams": args.required_eval_team or DEFAULT_THRESHOLDS["required_eval_teams"],
         },
     )

@@ -1270,11 +1270,17 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         gate = evaluate_release_gate(
             {
                 "status": "pass",
-                "eval": {"status": "pass", "total": 4, "failed": 0, "team_buckets": {"AF": {"total": 4, "failed": 0}}},
+                "eval": {
+                    "status": "pass",
+                    "total": 4,
+                    "failed": 0,
+                    "team_buckets": {"AF": {"total": 4, "failed": 0}},
+                    "segment_buckets": {"AF:ALL": {"total": 4, "failed": 0}},
+                },
                 "llm_smoke": {"status": "pass", "failed": 0},
                 "review_queue": {"returncode": 0},
             },
-            thresholds={"min_eval_cases": 10, "required_eval_teams": ["AF"]},
+            thresholds={"min_eval_cases": 10, "required_eval_teams": ["AF"], "required_eval_segments": ["AF:ALL"]},
         )
 
         self.assertEqual(gate["status"], "fail")
@@ -1294,6 +1300,10 @@ class SourceCodeQAServiceTests(unittest.TestCase):
                         "AF": {"total": 4, "failed": 0},
                         "CRMS": {"total": 4, "failed": 0},
                     },
+                    "segment_buckets": {
+                        "AF:ALL": {"total": 4, "failed": 0},
+                        "CRMS:ID": {"total": 4, "failed": 0},
+                    },
                 },
                 "llm_smoke": {"status": "pass", "failed": 0},
                 "review_queue": {"returncode": 0},
@@ -1301,6 +1311,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             thresholds={
                 "min_eval_cases": 8,
                 "min_eval_cases_per_team": 4,
+                "required_eval_segments": ["AF:ALL", "CRMS:ID"],
                 "required_eval_teams": ["AF", "CRMS", "GRC"],
             },
         )
@@ -1309,7 +1320,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertIn("eval_team_coverage", gate["failed_checks"])
         self.assertEqual(gate["missing_or_thin_teams"], ["GRC"])
 
-    def test_release_gate_evaluator_accepts_all_required_teams(self):
+    def test_release_gate_evaluator_requires_country_segment_coverage(self):
         from scripts.run_source_code_qa_release_gate import evaluate_release_gate
 
         gate = evaluate_release_gate(
@@ -1324,6 +1335,48 @@ class SourceCodeQAServiceTests(unittest.TestCase):
                         "CRMS": {"total": 4, "failed": 0},
                         "GRC": {"total": 4, "failed": 0},
                     },
+                    "segment_buckets": {
+                        "AF:ALL": {"total": 4, "failed": 0},
+                        "CRMS:ID": {"total": 4, "failed": 0},
+                        "GRC:ALL": {"total": 4, "failed": 0},
+                    },
+                },
+                "llm_smoke": {"status": "pass", "failed": 0},
+                "review_queue": {"returncode": 0},
+            },
+            thresholds={
+                "min_eval_cases": 12,
+                "min_eval_cases_per_segment": 2,
+                "required_eval_segments": ["AF:ALL", "CRMS:ID", "CRMS:SG", "CRMS:PH", "GRC:ALL"],
+            },
+        )
+
+        self.assertEqual(gate["status"], "fail")
+        self.assertIn("eval_segment_coverage", gate["failed_checks"])
+        self.assertEqual(gate["missing_or_thin_segments"], ["CRMS:SG", "CRMS:PH"])
+
+    def test_release_gate_evaluator_accepts_all_required_teams(self):
+        from scripts.run_source_code_qa_release_gate import evaluate_release_gate
+
+        gate = evaluate_release_gate(
+            {
+                "status": "pass",
+                "eval": {
+                    "status": "pass",
+                    "total": 12,
+                    "failed": 0,
+                    "team_buckets": {
+                        "AF": {"total": 4, "failed": 0},
+                        "CRMS": {"total": 6, "failed": 0},
+                        "GRC": {"total": 4, "failed": 0},
+                    },
+                    "segment_buckets": {
+                        "AF:ALL": {"total": 4, "failed": 0},
+                        "CRMS:ID": {"total": 2, "failed": 0},
+                        "CRMS:SG": {"total": 2, "failed": 0},
+                        "CRMS:PH": {"total": 2, "failed": 0},
+                        "GRC:ALL": {"total": 4, "failed": 0},
+                    },
                 },
                 "llm_smoke": {"status": "pass", "failed": 0},
                 "review_queue": {"returncode": 0},
@@ -1333,6 +1386,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
 
         self.assertEqual(gate["status"], "pass")
         self.assertEqual(gate["missing_or_thin_teams"], [])
+        self.assertEqual(gate["missing_or_thin_segments"], [])
 
     def test_nightly_fixture_eval_uses_isolated_data_root(self):
         from scripts.run_source_code_qa_nightly_eval import run_nightly_eval
@@ -1342,7 +1396,13 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         def fake_run(args):
             calls.append(args)
             if any(str(arg).endswith("source_code_qa_evals.py") for arg in args):
-                return {"status": "pass", "total": 1, "failed": 0, "team_buckets": {"AF": {"total": 1, "failed": 0}}}, "{}", "", 0
+                return {
+                    "status": "pass",
+                    "total": 1,
+                    "failed": 0,
+                    "team_buckets": {"AF": {"total": 1, "failed": 0}},
+                    "segment_buckets": {"AF:ALL": {"total": 1, "failed": 0}},
+                }, "{}", "", 0
             return {"status": "ok", "review_items": 0}, "{}", "", 0
 
         output_dir = Path(self.temp_dir.name) / "eval_runs"
@@ -1351,6 +1411,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
 
         self.assertEqual(report["status"], "pass")
         self.assertEqual(report["eval"]["team_buckets"]["AF"]["total"], 1)
+        self.assertEqual(report["eval"]["segment_buckets"]["AF:ALL"]["total"], 1)
         eval_call = calls[0]
         self.assertIn("--data-root", eval_call)
         self.assertEqual(Path(eval_call[eval_call.index("--data-root") + 1]), output_dir / "fixture_data")

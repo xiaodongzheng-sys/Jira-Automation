@@ -109,6 +109,7 @@ def run_nightly_eval(*, output_dir: Path, cases: list[str], fixture: bool, inclu
             "failure_buckets": eval_payload.get("failure_buckets") or {},
             "coverage_buckets": eval_payload.get("coverage_buckets") or {},
             "team_buckets": eval_payload.get("team_buckets") or {},
+            "segment_buckets": eval_payload.get("segment_buckets") or {},
             "route_buckets": eval_payload.get("route_buckets") or {},
         },
         "feedback_candidates": {
