@@ -41,6 +41,13 @@
           "repo_hints": ["credit-risk-model", "credit-risk"],
           "code_hints": ["get_monthly_income", "get_myinfo_monthly_income", "get_myinfo_features_online", "monthlyIncome", "cpfContributions"],
           "business_flows": ["MyInfo payload parsing", "monthlyIncome conversion", "CPF contribution feature derivation", "NOA/notice-of-assessment income feature lookup"]
+        },
+        {
+          "name": "PH Card Income Document Extraction",
+          "aliases": ["credit card payslip extraction", "LLM extracted payslip fields", "Ops extracted fields", "card income screening", "income document review"],
+          "repo_hints": ["credit-risk"],
+          "code_hints": ["ExtractRecordDO", "ExtractInfoResultConsumer", "extract_record_tab", "response_body", "PayslipProcessStrategy", "CardIncomeScreenProcessInfo", "CardIncomeScreeningFlowStatusDO", "card_income_screening_flow_status_tab", "process_info", "CardIncomeDocAdminServiceImpl"],
+          "business_flows": ["Intel Extract/LLM result persistence", "payslip result mapping", "Ops draft/review process_info persistence", "credit card income screening datasource"]
         }
       ],
       "terminology": [
@@ -63,13 +70,20 @@
           "term": "MyInfoIncome",
           "aliases": ["MyInfo income", "monthly income", "CPF", "cpf contribution", "NOA", "notice of assessment"],
           "code_terms": ["monthlyIncome", "get_monthly_income", "get_myinfo_monthly_income", "get_myinfo_features_online", "cpfContributions"]
+        },
+        {
+          "term": "CardIncomeExtraction",
+          "aliases": ["Credit Card LLM payslip", "Ops extracted fields", "income doc extraction", "card income screening"],
+          "code_terms": ["ExtractRecordDO", "ExtractRecordRepository", "ExtractRecordDAO", "extract_record_tab", "response_body", "PayslipProcessStrategy", "CardIncomeScreeningFlowStatusDO", "CardIncomeScreeningFlowStatusDAO", "card_income_screening_flow_status_tab", "process_info"]
         }
       ],
       "key_artifacts": {
         "tables": [
           {"name": "cr_data_source_result", "purpose": "expected concrete source when data-source trace reaches persistence"},
           {"name": "customer_info", "purpose": "customer information persistence hint"},
-          {"name": "loan_info", "purpose": "loan information persistence hint"}
+          {"name": "loan_info", "purpose": "loan information persistence hint"},
+          {"name": "extract_record_tab", "purpose": "PH card-income Intel Extract/LLM raw result persistence; response_body stores the extracted payload"},
+          {"name": "card_income_screening_flow_status_tab", "purpose": "PH card-income Ops screening status and process_info JSON persistence"}
         ],
         "apis": [
           {"name": "underwriting initiation API", "path": "/underwriting", "purpose": "entry point hint"},
@@ -81,12 +95,12 @@
         ]
       },
       "retrieval_terms": {
-        "data_carriers": ["DataSourceResult", "UnderwritingContext", "UnderwritingInitiationDTO", "UnderwritingBasicInfo", "CustomerInfo", "LoanInfo", "CreditRiskInfo", "FeatureData", "myInfoData", "cpfContributions", "monthlyIncome"],
-        "source_terms": ["TermLoanPreCheckEngine", "Layer4TermLoanPreCheckEngineStrategy", "DataSourceResultRepository", "CustomerInfoDAO", "CustomerInfoMapper", "LoanInfoDAO", "LoanInfoMapper", "CreditRiskInfoDAO", "CreditRiskInfoMapper", "FeatureProvider", "get_monthly_income", "get_myinfo_monthly_income", "get_myinfo_features_online"],
+        "data_carriers": ["DataSourceResult", "UnderwritingContext", "UnderwritingInitiationDTO", "UnderwritingBasicInfo", "CustomerInfo", "LoanInfo", "CreditRiskInfo", "FeatureData", "myInfoData", "cpfContributions", "monthlyIncome", "ExtractRecordDO", "CardIncomeScreenProcessInfo", "CardIncomeScreeningFlowStatusDO", "PayslipExtractResult"],
+        "source_terms": ["TermLoanPreCheckEngine", "Layer4TermLoanPreCheckEngineStrategy", "DataSourceResultRepository", "CustomerInfoDAO", "CustomerInfoMapper", "LoanInfoDAO", "LoanInfoMapper", "CreditRiskInfoDAO", "CreditRiskInfoMapper", "FeatureProvider", "ExtractRecordRepository", "ExtractRecordDAO", "ExtractInfoResultConsumer", "CardIncomeScreeningFlowStatusRepository", "CardIncomeScreeningFlowStatusDAO", "CardIncomeDocAdminServiceImpl", "PayslipProcessStrategy", "IntelExtractResultWrap", "get_monthly_income", "get_myinfo_monthly_income", "get_myinfo_features_online"],
         "api_terms": ["UnderwritingController", "PreCheckController", "TermLoanPreCheckController", "RequestMapping", "PostMapping"],
         "config_terms": ["feature", "strategy", "precheck", "risk-config", "rule-config", "yaml", "properties"],
         "logic_terms": ["precheck", "eligibility", "approval", "underwriting", "rule", "condition", "risk", "strategy", "monthlyIncome", "myinfo", "cpf", "noa"],
-        "field_population_terms": ["setDataSourceResult", "setCustomerInfo", "setLoanInfo", "setCreditRiskInfo", "setUnderwritingBasicInfo", "monthlyIncome", "myinfo_monthly_income", "cpfContributions"]
+        "field_population_terms": ["setDataSourceResult", "setCustomerInfo", "setLoanInfo", "setCreditRiskInfo", "setUnderwritingBasicInfo", "monthlyIncome", "myinfo_monthly_income", "cpfContributions", "response_body", "process_info", "mapResultToProcessInfo", "submitScreenInfo", "saveDraft", "opsReviewResult", "payslipGrossPay", "payslipPayrollFrequency"]
       },
       "evidence_rules": [
         "For data-source questions, DTO/Input/Info evidence is only a carrier; prefer repository, mapper XML, SQL, client, API, or table evidence.",
@@ -98,7 +112,8 @@
         {"question": "UnderwritingBasicInfo 是在哪里组装和填充的？", "expected_terms": ["UnderwritingBasicInfo", "Provider", "setUnderwritingBasicInfo"]},
         {"question": "某个 precheck rule 改了会影响哪些下游数据源？", "expected_terms": ["PreCheck", "rule", "impact", "Mapper", "Client"]},
         {"question": "CreditRiskInfo 字段来自哪张表或哪个 client？", "expected_terms": ["CreditRiskInfo", "DAO", "Mapper", "table", "client"]},
-        {"question": "What is the logic to calculate income from MyInfo CPF and NOA?", "expected_terms": ["monthlyIncome", "get_myinfo_monthly_income", "get_monthly_income", "cpfContributions"]}
+        {"question": "What is the logic to calculate income from MyInfo CPF and NOA?", "expected_terms": ["monthlyIncome", "get_myinfo_monthly_income", "get_monthly_income", "cpfContributions"]},
+        {"question": "Which table stores the Credit Card LLM extracted payslip fields? And which table stores the Ops extracted fields?", "expected_terms": ["extract_record_tab", "response_body", "card_income_screening_flow_status_tab", "process_info", "PayslipProcessStrategy"]}
       ]
     },
     "AF": {

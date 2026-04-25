@@ -1786,6 +1786,7 @@ class SourceCodeQAService:
     ) -> list[str]:
         intent = self._question_intent(question)
         profile_terms: list[str] = []
+        profile_terms.extend(self._question_specific_retrieval_terms(question))
         if intent.get("data_source"):
             profile_terms.extend(self._profile_terms(profile, "data_carriers", "source_terms", "field_population_terms", "knowledge_terms"))
         if intent.get("api"):
@@ -1800,6 +1801,52 @@ class SourceCodeQAService:
                 if token not in expanded:
                     expanded.append(token)
         return expanded[:40]
+
+    @staticmethod
+    def _question_specific_retrieval_terms(question: str) -> list[str]:
+        lowered = f" {str(question or '').lower()} "
+        income_doc_markers = (
+            "payslip",
+            "pay slip",
+            "income doc",
+            "income document",
+            "credit card",
+            "card income",
+            "ops extracted",
+            "ops field",
+            "llm extracted",
+            "extract field",
+        )
+        extraction_markers = (" extract", "extracted", "llm", "ops", "field", "fields", "table", "stores", "stored")
+        if not any(marker in lowered for marker in income_doc_markers):
+            return []
+        if not any(marker in lowered for marker in extraction_markers):
+            return []
+        return [
+            "ExtractRecord",
+            "ExtractRecordDO",
+            "ExtractRecordDAO",
+            "ExtractRecordRepository",
+            "ExtractInfoResultConsumer",
+            "extract_record_tab",
+            "response_body",
+            "IntelExtractResultWrap",
+            "IesResultDTO",
+            "PayslipProcessStrategy",
+            "PayslipExtractResult",
+            "CardIncomeScreenProcessInfo",
+            "CardIncomeScreeningFlowStatus",
+            "CardIncomeScreeningFlowStatusDO",
+            "CardIncomeScreeningFlowStatusDAO",
+            "card_income_screening_flow_status_tab",
+            "process_info",
+            "CardIncomeDocAdminServiceImpl",
+            "submitScreenInfo",
+            "saveDraft",
+            "opsReviewResult",
+            "payslipGrossPay",
+            "payslipPayrollFrequency",
+        ]
 
     def _apply_conversation_context(
         self,
@@ -2014,6 +2061,14 @@ class SourceCodeQAService:
         repo_status = self.repo_status(key)
         index_freshness = self._index_freshness_payload(repo_status)
         exact_lookup_terms = self._extract_exact_lookup_terms(question)
+        question_specific_terms = self._question_specific_retrieval_terms(question)
+        if question_specific_terms:
+            specific_exact_terms = [
+                str(term or "").strip().lower()
+                for term in question_specific_terms
+                if "_" in str(term or "") and any(marker in str(term or "").lower() for marker in ("_tab", "_table", "process_info", "response_body"))
+            ]
+            exact_lookup_terms = list(dict.fromkeys([*exact_lookup_terms, *specific_exact_terms]))[:12]
         exact_matches: list[dict[str, Any]] = []
         latency_guarded_query_expansion = False
         synced_entries = [(entry, self._repo_path(key, entry)) for entry in entries if (self._repo_path(key, entry) / ".git").exists()]
@@ -2082,6 +2137,28 @@ class SourceCodeQAService:
                 started_at=started_at,
             )
             return payload
+        if question_specific_terms and not exact_lookup_sufficient:
+            specific_tokens: list[str] = []
+            for term in question_specific_terms:
+                lowered_term = str(term or "").strip().lower()
+                if lowered_term:
+                    specific_tokens.append(lowered_term)
+                specific_tokens.extend(self._question_tokens(str(term or "")))
+            specific_tokens = list(dict.fromkeys(term for term in specific_tokens if len(term) >= 3))[:32]
+            report("focused_search", "Checking domain-specific storage and processing symbols.", 0, len(synced_entries))
+            for index, (entry, repo_path) in enumerate(synced_entries, start=1):
+                matches.extend(
+                    self._search_repo(
+                        entry,
+                        repo_path,
+                        specific_tokens,
+                        question=question,
+                        focus_terms=question_specific_terms,
+                        trace_stage="focused_search",
+                        request_cache=request_cache,
+                    )
+                )
+                report("focused_search", f"Checked domain-specific symbols in {entry.display_name}.", index, len(synced_entries))
         if not exact_lookup_sufficient:
             report("direct_search", f"Searching direct matches across {len(synced_entries)} repos.", 0, len(synced_entries))
             skip_broad_query_decomposition = False
@@ -11205,6 +11282,11 @@ class SourceCodeQAService:
         features = {
             "intent": self._question_intent(question),
             "tokens": set(self._question_tokens(question)),
+            "specific_terms": {
+                term.lower()
+                for term in self._question_specific_retrieval_terms(question)
+                if len(str(term or "").strip()) >= 4
+            },
         }
         if request_cache is not None:
             request_cache.setdefault("question_features", {})[question] = features
@@ -11261,6 +11343,7 @@ class SourceCodeQAService:
         trace_stage = str(match.get("trace_stage") or "")
         lowered_question = str(question or "").lower()
         question_tokens = set(question_features.get("tokens") or [])
+        specific_terms = set(question_features.get("specific_terms") or [])
         path_stem = Path(path).stem.lower()
         exact_lookup = match.get("exact_lookup") or {}
         if trace_stage == "exact_lookup" or retrieval == "exact_table_path_lookup":
@@ -11275,6 +11358,13 @@ class SourceCodeQAService:
                 score += 35
         if path_stem and path_stem in question_tokens:
             score += 80
+        if trace_stage == "focused_search":
+            score += 90
+        if specific_terms:
+            path_specific_hits = [term for term in specific_terms if term in path]
+            snippet_specific_hits = [term for term in specific_terms if term in snippet]
+            score += min(len(path_specific_hits), 4) * 120
+            score += min(len(snippet_specific_hits), 4) * 95
         if trace_stage == "query_decomposition":
             score += 20
         if retrieval in {"flow_graph", "code_graph"}:
@@ -12233,6 +12323,7 @@ class SourceCodeQAService:
         buckets = {
             "direct": [match for match in matches if match.get("trace_stage") == "direct"],
             "exact_lookup": [match for match in matches if match.get("trace_stage") == "exact_lookup"],
+            "focused_search": [match for match in matches if match.get("trace_stage") == "focused_search"],
             "query_decomposition": [match for match in matches if match.get("trace_stage") == "query_decomposition"],
             "dependency": [match for match in matches if match.get("trace_stage") == "dependency"],
             "two_hop": [match for match in matches if match.get("trace_stage") == "two_hop"],
@@ -12245,28 +12336,36 @@ class SourceCodeQAService:
             "quality_gate": [match for match in matches if match.get("trace_stage") == QUALITY_GATE_TRACE_STAGE],
         }
         for bucket in buckets.values():
-            bucket.sort(key=lambda item: item["score"], reverse=True)
+            bucket.sort(key=lambda item: item.get("rerank_score", item["score"]), reverse=True)
         selected: list[dict[str, Any]] = []
         seen: set[tuple[Any, Any, Any, Any]] = set()
+        exact_terms_seen: set[str] = set()
 
         def add(match: dict[str, Any] | None) -> None:
             if not match or len(selected) >= limit:
                 return
+            if match.get("trace_stage") == "exact_lookup" or match.get("retrieval") == "exact_table_path_lookup":
+                exact_lookup = match.get("exact_lookup") or {}
+                exact_term = str(exact_lookup.get("term") or exact_lookup.get("lookup_value") or "").lower()
+                if exact_term and exact_term in exact_terms_seen:
+                    return
             key = (match.get("repo"), match.get("path"), match.get("line_start"), match.get("line_end"))
             if key in seen:
                 return
             selected.append(match)
             seen.add(key)
+            if match.get("trace_stage") == "exact_lookup" or match.get("retrieval") == "exact_table_path_lookup":
+                exact_lookup = match.get("exact_lookup") or {}
+                exact_term = str(exact_lookup.get("term") or exact_lookup.get("lookup_value") or "").lower()
+                if exact_term:
+                    exact_terms_seen.add(exact_term)
 
-        exact_terms_seen: set[str] = set()
         for match in buckets["exact_lookup"]:
             exact_lookup = match.get("exact_lookup") or {}
             term = str(exact_lookup.get("term") or "").lower()
             if term and term in exact_terms_seen:
                 continue
             add(match)
-            if term:
-                exact_terms_seen.add(term)
 
         if intent.get("impact_analysis"):
             ranked_matches = sorted(matches, key=lambda item: item.get("rerank_score", item.get("score", 0)), reverse=True)
@@ -12307,7 +12406,7 @@ class SourceCodeQAService:
                         break
 
         for stage, stage_limit in (
-            ("exact_lookup", 8),
+            ("focused_search", 6),
             ("direct", 2 if intent.get("impact_analysis") else 3),
             ("query_decomposition", 2 if intent.get("impact_analysis") else 3),
             ("dependency", 2 if intent.get("impact_analysis") else 3),
@@ -12371,7 +12470,7 @@ class SourceCodeQAService:
                 priority = max(priority, 35)
             return (priority, int(item.get("rerank_score", item.get("score", 0)) or 0), int(item.get("score") or 0))
 
-        if any(intent.get(key) for key in ("static_qa", "test_coverage", "operational_boundary", "module_dependency", "message_flow")) and not intent.get("impact_analysis"):
+        if any(intent.get(key) for key in ("data_source", "static_qa", "test_coverage", "operational_boundary", "module_dependency", "message_flow")) and not intent.get("impact_analysis"):
             selected.sort(key=result_sort_key, reverse=True)
         else:
             selected.sort(key=lambda item: item["score"], reverse=True)
@@ -12455,6 +12554,8 @@ class SourceCodeQAService:
                 evidence_summary=evidence_summary,
                 quality_gate=cached.get("answer_quality") or quality_gate,
                 claim_check=cached_claim_check,
+                answer_judge=cached_judge,
+                finish_reason=cached.get("finish_reason") or "cache_hit",
                 selected_matches=selected_matches,
             )
             return {
@@ -12673,6 +12774,8 @@ class SourceCodeQAService:
             evidence_summary=evidence_summary,
             quality_gate=quality_gate,
             claim_check=claim_check,
+            answer_judge=answer_judge,
+            finish_reason=finish_reason,
             selected_matches=selected_matches,
         )
         answer = final["answer"]
@@ -12967,6 +13070,8 @@ class SourceCodeQAService:
         quality_gate: dict[str, Any],
         claim_check: dict[str, Any],
         selected_matches: list[dict[str, Any]],
+        answer_judge: dict[str, Any] | None = None,
+        finish_reason: str | None = None,
     ) -> dict[str, Any]:
         intent = evidence_summary.get("intent") or self._question_intent(question)
         confirmed_sources = [
@@ -12998,7 +13103,23 @@ class SourceCodeQAService:
             "policies": quality_gate.get("policies") or [],
         }
         final_answer = str(answer or "").strip()
-        if blocked:
+        unreliable_llm_output = self._unreliable_llm_output(
+            answer=answer,
+            structured_answer=structured_answer,
+            claim_check=claim_check,
+            answer_judge=answer_judge or {},
+            finish_reason=finish_reason,
+        )
+        if unreliable_llm_output:
+            contract["status"] = "unreliable_llm_answer"
+            contract["confidence"] = "low"
+            final_answer = self._build_unreliable_llm_answer(
+                contract=contract,
+                answer_judge=answer_judge or {},
+                claim_check=claim_check,
+                finish_reason=finish_reason,
+            )
+        elif blocked:
             final_answer = self._build_missing_source_answer(contract)
         elif structured_answer.get("format") == "json" and structured_answer.get("direct_answer"):
             final_answer = self._render_structured_answer(structured_answer, contract)
@@ -13006,18 +13127,70 @@ class SourceCodeQAService:
             final_answer = self._render_structured_answer(structured_answer, contract)
         elif weak_answer and confirmed_sources:
             final_answer = self._render_structured_answer(structured_answer, contract)
-        if structured_answer.get("format") == "json" and structured_answer.get("direct_answer") and not blocked:
+        if structured_answer.get("format") == "json" and structured_answer.get("direct_answer") and not blocked and not unreliable_llm_output:
             final_structured = {
                 **structured_answer,
                 "missing_evidence": missing_links[:8] or structured_answer.get("missing_evidence") or [],
             }
         else:
             final_structured = self._parse_structured_answer(final_answer)
+            if unreliable_llm_output:
+                final_structured = {**final_structured, "confidence": "low"}
         return {
             "answer": final_answer,
             "structured_answer": final_structured,
             "answer_contract": contract,
         }
+
+    @staticmethod
+    def _unreliable_llm_output(
+        *,
+        answer: str,
+        structured_answer: dict[str, Any],
+        claim_check: dict[str, Any],
+        answer_judge: dict[str, Any],
+        finish_reason: str | None,
+    ) -> bool:
+        reason = str(finish_reason or "").strip()
+        broken_jsonish = structured_answer.get("format") == "prose_fallback" and str(answer or "").lstrip().startswith("{")
+        capped = reason.upper() in {"MAX_TOKENS", "SAFETY", "RECITATION"} or reason.lower() in {"length", "content_filter"}
+        judge_status = str((answer_judge or {}).get("status") or "").lower()
+        unsupported = str((claim_check or {}).get("status") or "").lower() not in {"", "ok"}
+        return bool(broken_jsonish or capped or (judge_status in {"repair", "insufficient_evidence"} and unsupported))
+
+    @staticmethod
+    def _build_unreliable_llm_answer(
+        *,
+        contract: dict[str, Any],
+        answer_judge: dict[str, Any],
+        claim_check: dict[str, Any],
+        finish_reason: str | None,
+    ) -> str:
+        lines = [
+            "I could not produce a reliable final answer from this LLM attempt.",
+            "",
+        ]
+        reason = str(finish_reason or "").strip()
+        if reason:
+            lines.append("Why:")
+            lines.append(f"- Model finish reason: {reason}.")
+        for issue in list(answer_judge.get("issues") or [])[:3]:
+            if "Why:" not in lines:
+                lines.append("Why:")
+            lines.append(f"- Evidence judge: {issue}")
+        for issue in list(claim_check.get("issues") or [])[:2]:
+            if "Why:" not in lines:
+                lines.append("Why:")
+            lines.append(f"- Claim check: {issue}")
+        missing = contract.get("missing_links") or []
+        if missing:
+            lines.append("")
+            lines.append("Missing evidence:")
+            for item in missing[:4]:
+                lines.append(f"- {item}")
+        lines.append("")
+        lines.append("Please retry after the index is refreshed or ask with the exact table/class names; the portal should not treat the current LLM output as a confirmed answer.")
+        return "\n".join(lines)
 
     @staticmethod
     def _append_fact_citation(fact: str, selected_matches: list[dict[str, Any]]) -> str:

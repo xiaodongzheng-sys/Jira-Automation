@@ -5177,6 +5177,104 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertIn("LoanChecker.validate", payload["llm_answer"])
         mocked_post.assert_called()
 
+    def test_crms_ph_card_income_extraction_question_prioritizes_storage_tables(self):
+        service = SourceCodeQAService(
+            data_root=Path(self.temp_dir.name),
+            team_profiles=TEAM_PROFILE_DEFAULTS,
+            gitlab_token="secret-token",
+            git_timeout_seconds=5,
+            max_file_bytes=200_000,
+        )
+        service.save_mapping(
+            pm_team="CRMS",
+            country="PH",
+            repositories=[{"display_name": "credit-risk", "url": "https://git.example.com/team/credit-risk.git"}],
+        )
+        entry = service.load_config()["mappings"]["CRMS:PH"][0]
+        repo_path = service._repo_path("CRMS:PH", type("Entry", (), entry)())
+        (repo_path / ".git").mkdir(parents=True)
+        extract_mapper = repo_path / "credit-risk-infra" / "src" / "main" / "resources" / "mapper" / "ExtractRecordDAO-ext.xml"
+        extract_mapper.parent.mkdir(parents=True)
+        extract_mapper.write_text(
+            "<mapper>\n"
+            "  <update id=\"updateByBizIdAndSceneSelectiveCas\">\n"
+            "    update extract_record_tab set response_body = #{updateDO.responseBody} where biz_id = #{bizId}\n"
+            "  </update>\n"
+            "</mapper>\n",
+            encoding="utf-8",
+        )
+        status_mapper = repo_path / "credit-risk-infra" / "src" / "main" / "resources" / "mapper" / "CardIncomeScreeningFlowStatusDAO-ext.xml"
+        status_mapper.parent.mkdir(parents=True, exist_ok=True)
+        status_mapper.write_text(
+            "<mapper>\n"
+            "  <update id=\"updateAllByVersionAndStatusCas\">\n"
+            "    update card_income_screening_flow_status_tab set process_info = #{updateDO.processInfo} where underwriting_id = #{underwritingId}\n"
+            "  </update>\n"
+            "</mapper>\n",
+            encoding="utf-8",
+        )
+        strategy_file = repo_path / "credit-risk-infra" / "src" / "main" / "java" / "PayslipProcessStrategy.java"
+        strategy_file.parent.mkdir(parents=True)
+        strategy_file.write_text(
+            "class PayslipProcessStrategy {\n"
+            "  void process(IesResultDTO result, CardIncomeScreenProcessInfo info) {\n"
+            "    info.getPayslip().setGrossPay(result.getResult().getGrossPay());\n"
+            "  }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        noise_file = repo_path / "credit-risk-experian" / "src" / "main" / "java" / "ExperianEvaluator.java"
+        noise_file.parent.mkdir(parents=True)
+        noise_file.write_text("class ExperianEvaluator { void query() {} }\n", encoding="utf-8")
+        self._build_all_indexes(service)
+
+        payload = service.query(
+            pm_team="CRMS",
+            country="PH",
+            question="Which table stores the Credit Card LLM extracted payslip fields? And which table stores the Ops extracted fields?",
+            answer_mode="retrieval_only",
+        )
+
+        paths = [match["path"] for match in payload["matches"][:8]]
+        self.assertTrue(any("ExtractRecordDAO-ext.xml" in path for path in paths), paths)
+        self.assertTrue(any("CardIncomeScreeningFlowStatusDAO-ext.xml" in path for path in paths), paths)
+        self.assertIn("extract_record_tab", payload["exact_lookup"]["matched_terms"])
+        self.assertIn("card_income_screening_flow_status_tab", payload["exact_lookup"]["matched_terms"])
+
+    def test_malformed_or_capped_llm_answer_is_downgraded(self):
+        question = "Which table stores the Credit Card LLM extracted payslip fields?"
+        raw_answer = '{ "direct_answer": "The provided evidence does not specify the table"'
+        structured = self.service._parse_structured_answer(raw_answer)
+
+        final = self.service._finalize_llm_answer(
+            question=question,
+            answer=raw_answer,
+            structured_answer=structured,
+            evidence_summary={
+                "intent": self.service._question_intent(question),
+                "data_sources": ["credit-risk:mapper/ExtractRecordDAO-ext.xml:1-3: update extract_record_tab set response_body = ..."],
+            },
+            quality_gate={"status": "sufficient", "confidence": "high", "missing": []},
+            claim_check={"status": "needs_citation", "issues": ["concrete answer claims need citation-backed evidence"]},
+            selected_matches=[
+                {
+                    "repo": "credit-risk",
+                    "path": "mapper/ExtractRecordDAO-ext.xml",
+                    "line_start": 1,
+                    "line_end": 3,
+                    "snippet": "update extract_record_tab set response_body = #{updateDO.responseBody}",
+                }
+            ],
+            answer_judge={"status": "repair", "issues": ["answer omits typed table/API/client source evidence"]},
+            finish_reason="MAX_TOKENS",
+        )
+
+        self.assertFalse(final["answer"].lstrip().startswith("{"))
+        self.assertIn("could not produce a reliable final answer", final["answer"])
+        self.assertEqual(final["answer_contract"]["status"], "unreliable_llm_answer")
+        self.assertEqual(final["answer_contract"]["confidence"], "low")
+        self.assertEqual(final["structured_answer"]["confidence"], "low")
+
     def test_llm_answer_cache_requires_current_versions(self):
         service = SourceCodeQAService(
             data_root=Path(self.temp_dir.name),
