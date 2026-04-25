@@ -14733,13 +14733,19 @@ class SourceCodeQAService:
             if row_key in seen:
                 continue
             seen.add(row_key)
+            path_status = self._codex_candidate_path_status(repo_root, path)
+            resolved_path = str(path_status.get("path") or path)
             rows.append(
                 {
                     "id": f"S{len(rows) + 1}",
                     "repo": repo or (entry.display_name if entry else ""),
                     "repo_root": str(repo_root),
-                    "path": path,
-                    "absolute_path": str((repo_root / path).resolve()),
+                    "path": resolved_path,
+                    "original_path": path if resolved_path != path else "",
+                    "absolute_path": str((repo_root / resolved_path).resolve()),
+                    "file_exists": bool(path_status.get("file_exists")),
+                    "path_status": path_status.get("status") or "unknown",
+                    "alternative_paths": path_status.get("alternative_paths") or [],
                     "line_start": match.get("line_start"),
                     "line_end": match.get("line_end"),
                     "retrieval": match.get("retrieval") or "file_scan",
@@ -14748,6 +14754,51 @@ class SourceCodeQAService:
                 }
             )
         return rows
+
+    def _codex_candidate_path_status(self, repo_root: Path, path: str) -> dict[str, Any]:
+        relative_path = str(path or "").strip()
+        if not relative_path or relative_path.startswith("/") or ".." in Path(relative_path).parts:
+            return {"path": relative_path, "file_exists": False, "status": "invalid"}
+        file_path = (repo_root / relative_path).resolve()
+        try:
+            file_path.relative_to(repo_root.resolve())
+        except ValueError:
+            return {"path": relative_path, "file_exists": False, "status": "invalid"}
+        if file_path.exists() and file_path.is_file():
+            return {"path": relative_path, "file_exists": True, "status": "exact"}
+        basename = Path(relative_path).name.lower()
+        if not basename:
+            return {"path": relative_path, "file_exists": False, "status": "missing"}
+        candidates: list[str] = []
+        index_path = self._index_path(repo_root)
+        if index_path.exists():
+            try:
+                with sqlite3.connect(index_path) as connection:
+                    rows = connection.execute(
+                        """
+                        select path from files
+                        where lower_path = ? or lower_path like ?
+                        order by length(path), path
+                        limit 6
+                        """,
+                        [basename, f"%/{basename}"],
+                    ).fetchall()
+                candidates = [str(row[0]) for row in rows if row and row[0]]
+            except sqlite3.Error:
+                candidates = []
+        if len(candidates) == 1:
+            return {
+                "path": candidates[0],
+                "file_exists": True,
+                "status": "resolved_by_filename",
+                "alternative_paths": candidates,
+            }
+        return {
+            "path": relative_path,
+            "file_exists": False,
+            "status": "ambiguous_filename" if candidates else "missing",
+            "alternative_paths": candidates,
+        }
 
     def _merge_codex_followup_candidate_paths(
         self,
@@ -14827,11 +14878,17 @@ class SourceCodeQAService:
             "Candidate repository workspaces and top paths:",
         ]
         for item in candidate_paths[: self.codex_top_path_limit]:
+            original_path = str(item.get("original_path") or "").strip()
+            path_note = f" original_path={original_path}" if original_path else ""
+            alternatives = item.get("alternative_paths") or []
+            alternative_note = f" alternatives={alternatives[:5]}" if alternatives else ""
             lines.extend(
                 [
                     (
                         f"- {item.get('id')} repo={item.get('repo')} root={item.get('repo_root')} "
-                        f"path={item.get('path')} lines={item.get('line_start')}-{item.get('line_end')}"
+                        f"path={item.get('path')}{path_note} file_exists={item.get('file_exists')} "
+                        f"path_status={item.get('path_status')}{alternative_note} "
+                        f"lines={item.get('line_start')}-{item.get('line_end')}"
                     ),
                     f"  retrieval={item.get('retrieval')} trace_stage={item.get('trace_stage')} reason={item.get('reason')}",
                 ]

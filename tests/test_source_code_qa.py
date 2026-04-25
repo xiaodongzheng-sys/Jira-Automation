@@ -6719,6 +6719,8 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertIn("Prompt mode: codex_investigation_brief_v1", brief)
         self.assertIn(str(repo_path), brief)
         self.assertIn("path=repository/IssueRepository.java", brief)
+        self.assertIn("file_exists=True", brief)
+        self.assertIn("path_status=exact", brief)
         self.assertIn("Follow-up context:", brief)
         self.assertIn("previous question", brief)
         self.assertIn("Previous Codex candidate paths:", brief)
@@ -6726,6 +6728,34 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertIn("Previous citation validation: status=ok", brief)
         self.assertIn("Previous Codex run: prompt_mode=codex_investigation_brief_v1", brief)
         self.assertNotIn("x" * 100, brief)
+
+    def test_codex_candidate_paths_resolve_stale_path_by_filename(self):
+        entry = RepositoryEntry("Portal Repo", "https://git.example.com/team/portal.git")
+        key = "AF:All"
+        repo_path = self.service._repo_path(key, entry)
+        (repo_path / ".git").mkdir(parents=True)
+        source_file = repo_path / "src" / "main" / "java" / "IssueRepository.java"
+        source_file.parent.mkdir(parents=True)
+        source_file.write_text("class IssueRepository {}\n", encoding="utf-8")
+        self.service._build_repo_index(key, entry, repo_path)
+
+        candidate_paths = self.service._codex_candidate_paths(
+            entries=[entry],
+            key=key,
+            matches=[
+                {
+                    "repo": "Portal Repo",
+                    "path": "repository/IssueRepository.java",
+                    "line_start": 1,
+                    "line_end": 1,
+                }
+            ],
+        )
+
+        self.assertEqual(candidate_paths[0]["path"], "src/main/java/IssueRepository.java")
+        self.assertEqual(candidate_paths[0]["original_path"], "repository/IssueRepository.java")
+        self.assertTrue(candidate_paths[0]["file_exists"])
+        self.assertEqual(candidate_paths[0]["path_status"], "resolved_by_filename")
 
     def test_codex_followup_candidate_paths_are_carried_forward(self):
         entry = RepositoryEntry("Portal Repo", "https://git.example.com/team/portal.git")
