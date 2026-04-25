@@ -500,7 +500,7 @@
       queryStatus.textContent = 'LLM mode is not configured on the server yet.';
       return;
     }
-    activeMode.textContent = selectedAnswerMode;
+    if (activeMode) activeMode.textContent = selectedAnswerMode;
     queryStatus.textContent = selectedAnswerMode !== 'retrieval_only'
       ? 'Searching local code and asking LLM...'
       : 'Searching local code index...';
@@ -522,7 +522,7 @@
       rememberLastQueryConfig(selectedAnswerMode);
       summary.textContent = payload.summary || 'Search completed.';
       queryStatus.textContent = payload.status === 'ok' ? 'Search completed.' : payload.status;
-      activeMode.textContent = payload.answer_mode || selectedAnswerMode;
+      if (activeMode) activeMode.textContent = payload.answer_mode || selectedAnswerMode;
       renderUsageBadges(payload);
       renderFallbackNotice(payload);
       renderStatus(payload.repo_status || []);
