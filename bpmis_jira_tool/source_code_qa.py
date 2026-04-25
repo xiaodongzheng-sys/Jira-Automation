@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import queue
 import re
 import shutil
 import sqlite3
@@ -914,6 +915,7 @@ class CodexCliBridgeSourceCodeQALLMProvider(SourceCodeQALLMProvider):
         if not self.ready():
             raise ToolError("Codex is unavailable. Run `codex login` with ChatGPT on this server before using Codex mode.")
         self.workspace_root.mkdir(parents=True, exist_ok=True)
+        progress_callback = payload.get("_progress_callback") if callable(payload.get("_progress_callback")) else None
         prompt = self._prompt_from_gemini_payload(payload)
         started_at = time.time()
         attempt_started = time.time()
@@ -938,15 +940,22 @@ class CodexCliBridgeSourceCodeQALLMProvider(SourceCodeQALLMProvider):
                 command[2:2] = ["--model", model]
             try:
                 with self._run_lock:
-                    result = subprocess.run(
-                        command,
-                        input=prompt,
-                        cwd=str(self.workspace_root),
-                        text=True,
-                        capture_output=True,
-                        timeout=self.timeout_seconds,
-                        check=False,
-                    )
+                    if progress_callback:
+                        result = self._run_codex_streaming(
+                            command=command,
+                            prompt=prompt,
+                            progress_callback=progress_callback,
+                        )
+                    else:
+                        result = subprocess.run(
+                            command,
+                            input=prompt,
+                            cwd=str(self.workspace_root),
+                            text=True,
+                            capture_output=True,
+                            timeout=self.timeout_seconds,
+                            check=False,
+                        )
             except subprocess.TimeoutExpired as error:
                 raise ToolError(f"Codex unavailable; used code search fallback. Codex CLI timed out after {self.timeout_seconds}s.") from error
             except OSError as error:
@@ -982,6 +991,68 @@ class CodexCliBridgeSourceCodeQALLMProvider(SourceCodeQALLMProvider):
                     "command": self._command_summary(command),
                 },
             ),
+        )
+
+    def _run_codex_streaming(self, *, command: list[str], prompt: str, progress_callback: Any) -> Any:
+        process = subprocess.Popen(
+            command,
+            cwd=str(self.workspace_root),
+            text=True,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            bufsize=1,
+        )
+        output_queue: queue.Queue[tuple[str, str]] = queue.Queue()
+
+        def read_pipe(name: str, pipe: Any) -> None:
+            try:
+                for line in iter(pipe.readline, ""):
+                    output_queue.put((name, line))
+            finally:
+                try:
+                    pipe.close()
+                except Exception:
+                    pass
+
+        stdout_thread = threading.Thread(target=read_pipe, args=("stdout", process.stdout), daemon=True)
+        stderr_thread = threading.Thread(target=read_pipe, args=("stderr", process.stderr), daemon=True)
+        stdout_thread.start()
+        stderr_thread.start()
+        if process.stdin is not None:
+            process.stdin.write(prompt)
+            process.stdin.close()
+
+        started_at = time.time()
+        stdout_lines: list[str] = []
+        stderr_lines: list[str] = []
+        last_message = ""
+        while process.poll() is None or not output_queue.empty():
+            if time.time() - started_at > self.timeout_seconds:
+                process.kill()
+                raise subprocess.TimeoutExpired(command, self.timeout_seconds)
+            try:
+                stream_name, line = output_queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            if stream_name == "stdout":
+                stdout_lines.append(line)
+                message = self._extract_progress_json_event_message(line)
+                if message and message != last_message:
+                    last_message = message
+                    try:
+                        progress_callback("codex_stream", message[-900:], 0, 0)
+                    except Exception:
+                        pass
+            else:
+                stderr_lines.append(line)
+        stdout_thread.join(timeout=0.2)
+        stderr_thread.join(timeout=0.2)
+        return subprocess.CompletedProcess(
+            command,
+            process.returncode,
+            stdout="".join(stdout_lines),
+            stderr="".join(stderr_lines),
         )
 
     def extract_text(self, payload: dict[str, Any]) -> str:
@@ -1041,6 +1112,34 @@ class CodexCliBridgeSourceCodeQALLMProvider(SourceCodeQALLMProvider):
                 if isinstance(content, str) and content.strip():
                     answer = content.strip()
         return answer
+
+    @staticmethod
+    def _extract_progress_json_event_message(output: str) -> str:
+        try:
+            event = json.loads(str(output or ""))
+        except json.JSONDecodeError:
+            return ""
+        if not isinstance(event, dict):
+            return ""
+        candidates: list[str] = []
+        for key in ("message", "text", "output_text", "delta"):
+            value = event.get(key)
+            if isinstance(value, str) and value.strip():
+                candidates.append(value.strip())
+        item = event.get("item")
+        if isinstance(item, dict):
+            for key in ("text", "message", "output_text", "delta", "content"):
+                value = item.get(key)
+                if isinstance(value, str) and value.strip():
+                    candidates.append(value.strip())
+            content = item.get("content")
+            if isinstance(content, list):
+                for part in content:
+                    if isinstance(part, dict):
+                        value = part.get("text") or part.get("output_text")
+                        if isinstance(value, str) and value.strip():
+                            candidates.append(value.strip())
+        return candidates[-1] if candidates else ""
 
     @staticmethod
     def _sanitize_cli_output(output: str) -> str:
@@ -3697,6 +3796,7 @@ class SourceCodeQAService:
                         followup_context=followup_context,
                         requested_answer_mode=normalized_answer_mode,
                         request_cache=request_cache,
+                        progress_callback=progress_callback,
                     )
                     payload.update(llm_payload)
                     payload["evidence_outline"] = self._build_evidence_outline(payload.get("evidence_pack") or evidence_pack, top_matches)
@@ -13654,6 +13754,7 @@ class SourceCodeQAService:
         followup_context: dict[str, Any] | None = None,
         requested_answer_mode: str = ANSWER_MODE_GEMINI,
         request_cache: dict[str, Any] | None = None,
+        progress_callback: Any | None = None,
     ) -> dict[str, Any]:
         if not self.llm_ready():
             raise ToolError(self.llm_unavailable_message())
@@ -13691,6 +13792,7 @@ class SourceCodeQAService:
                 selected_model=selected_model,
                 followup_context=followup_context,
                 requested_answer_mode=requested_answer_mode,
+                progress_callback=progress_callback,
             )
         domain_context = self._llm_domain_context(
             pm_team=pm_team,
@@ -14248,6 +14350,7 @@ class SourceCodeQAService:
         selected_model: str,
         followup_context: dict[str, Any] | None,
         requested_answer_mode: str,
+        progress_callback: Any | None = None,
     ) -> dict[str, Any]:
         candidate_matches = self._select_llm_matches(
             matches,
@@ -14339,7 +14442,7 @@ class SourceCodeQAService:
                 "evidence_pack": evidence_pack,
                 "codex_cli_summary": cached_summary,
             }
-        payload = self._codex_payload(prompt_context)
+        payload = self._codex_payload(prompt_context, progress_callback=progress_callback)
         result = self.llm_provider.generate(
             payload=payload,
             primary_model=selected_model,
@@ -14370,7 +14473,8 @@ class SourceCodeQAService:
                     quality_gate=quality_gate,
                     followup_context=followup_context,
                     repair_issues=codex_validation.get("issues") or [],
-                )
+                ),
+                progress_callback=progress_callback,
             )
             repair_result = self.llm_provider.generate(
                 payload=repair_payload,
@@ -14465,13 +14569,16 @@ class SourceCodeQAService:
             "codex_cli_summary": codex_cli_summary,
         }
 
-    def _codex_payload(self, prompt: str) -> dict[str, Any]:
-        return {
+    def _codex_payload(self, prompt: str, *, progress_callback: Any | None = None) -> dict[str, Any]:
+        payload = {
             "codex_prompt_mode": CODEX_INVESTIGATION_PROMPT_MODE,
             "contents": [{"parts": [{"text": prompt}]}],
             "systemInstruction": {"parts": [{"text": self._codex_system_instruction()}]},
             "generationConfig": {"temperature": 0.1, "responseMimeType": "application/json"},
         }
+        if progress_callback:
+            payload["_progress_callback"] = progress_callback
+        return payload
 
     @staticmethod
     def _codex_system_instruction() -> str:

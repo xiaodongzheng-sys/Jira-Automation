@@ -6460,6 +6460,86 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertEqual(result.attempt_log[0]["workspace_root"], self.temp_dir.name)
         self.assertIn("--sandbox", result.attempt_log[0]["command"])
 
+    def test_codex_cli_bridge_streams_json_progress_events(self):
+        provider = CodexCliBridgeSourceCodeQALLMProvider(
+            workspace_root=Path(self.temp_dir.name),
+            timeout_seconds=20,
+            codex_binary="codex",
+        )
+        streamed = []
+
+        class FakePipe:
+            def __init__(self, lines):
+                self.lines = list(lines)
+                self.exhausted = False
+
+            def readline(self):
+                if self.lines:
+                    return self.lines.pop(0)
+                self.exhausted = True
+                return ""
+
+            def close(self):
+                self.exhausted = True
+
+        class FakeStdin:
+            def write(self, _value):
+                return None
+
+            def close(self):
+                return None
+
+        class FakeProcess:
+            def __init__(self, *_args, **_kwargs):
+                self.stdout = FakePipe(['{"message":"Reading src/App.java"}\n', '{"type":"done"}\n'])
+                self.stderr = FakePipe([])
+                self.stdin = FakeStdin()
+                self.returncode = 0
+
+            def poll(self):
+                if self.stdout.exhausted and self.stderr.exhausted:
+                    return self.returncode
+                return None
+
+            def kill(self):
+                self.returncode = -9
+                self.stdout.exhausted = True
+                self.stderr.exhausted = True
+
+        def fake_run(command, **_kwargs):
+            if "login" in command and "status" in command:
+                return SimpleNamespace(returncode=0, stdout="Logged in using ChatGPT\n", stderr="")
+            raise AssertionError("streaming path should use Popen for codex exec")
+
+        def progress(stage, message, _current, _total):
+            streamed.append((stage, message))
+
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as output_file:
+            output_file.write('{"direct_answer":"Final answer","claims":[],"missing_evidence":[],"confidence":"high"}')
+            output_path = output_file.name
+
+        def fake_named_temp(*_args, **_kwargs):
+            return open(output_path, "r+", encoding="utf-8")
+
+        with patch("bpmis_jira_tool.source_code_qa.shutil.which", return_value="/usr/local/bin/codex"), patch(
+            "bpmis_jira_tool.source_code_qa.subprocess.run",
+            side_effect=fake_run,
+        ), patch("bpmis_jira_tool.source_code_qa.subprocess.Popen", side_effect=FakeProcess), patch(
+            "bpmis_jira_tool.source_code_qa.tempfile.NamedTemporaryFile",
+            side_effect=fake_named_temp,
+        ):
+            try:
+                result = provider.generate(
+                    payload={"contents": [{"parts": [{"text": "hi"}]}], "_progress_callback": progress},
+                    primary_model="codex-cli",
+                    fallback_model="codex-cli",
+                )
+            finally:
+                Path(output_path).unlink(missing_ok=True)
+
+        self.assertIn(("codex_stream", "Reading src/App.java"), streamed)
+        self.assertIn("Final answer", provider.extract_text(result.payload))
+
     def test_codex_cli_provider_uses_configured_model(self):
         with patch.dict(os.environ, {"SOURCE_CODE_QA_CODEX_MODEL": "gpt-5.5"}, clear=False):
             service = SourceCodeQAService(

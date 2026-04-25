@@ -33,6 +33,7 @@
   const activeCache = document.querySelector('[data-source-active-cache]');
   const activeUsage = document.querySelector('[data-source-active-usage]');
   const fallbackNotice = document.querySelector('[data-source-fallback-notice]');
+  const liveAnswer = document.querySelector('[data-source-live-answer]');
   const feedback = document.querySelector('[data-source-feedback]');
   const feedbackStatus = document.querySelector('[data-source-feedback-status]');
   const evidenceSummary = document.querySelector('[data-source-evidence-summary]');
@@ -1103,16 +1104,42 @@
         : 'Running current question.';
     }
     if (results) {
-      results.innerHTML = '<div class="source-qa-empty">Current query is running. Previous answer is hidden so it cannot be mistaken for this run.</div>';
+      results.hidden = true;
+      results.innerHTML = '';
     }
     if (activeMode) activeMode.textContent = answerModeLabel || 'auto';
     renderUsageBadges({});
     renderFallbackNotice({});
     renderLlmAnswer({});
+    if (selectedLlmProvider() === 'codex_cli_bridge') {
+      renderLiveAnswer('Codex is preparing the read-only investigation...', { pending: true });
+    } else {
+      renderLiveAnswer('');
+    }
     renderEvidenceSummary(null);
     renderDebugTrace(null);
     if (feedback) feedback.hidden = true;
     if (feedbackStatus) feedbackStatus.textContent = '';
+  };
+
+  const renderLiveAnswer = (message, options = {}) => {
+    if (!liveAnswer) return;
+    const text = String(message || '').trim();
+    if (!text) {
+      liveAnswer.hidden = true;
+      liveAnswer.innerHTML = '';
+      return;
+    }
+    liveAnswer.hidden = false;
+    liveAnswer.innerHTML = `
+      <div class="source-qa-live-card${options.pending ? ' is-pending' : ''}">
+        <div class="source-qa-live-head">
+          <strong>${escapeHtml(options.title || 'Codex Live')}</strong>
+          <span>${escapeHtml(options.meta || 'read-only investigation')}</span>
+        </div>
+        <pre>${escapeHtml(text)}</pre>
+      </div>
+    `;
   };
 
   const renderFallbackNotice = (payload) => {
@@ -1168,6 +1195,9 @@
         ? `${payload.message || 'Processing source-code question.'} (${payload.current || 0}/${payload.total})`
         : (payload.message || 'Processing source-code question.');
       progress.setMessage(progressText);
+      if (payload.stage === 'codex_stream' && payload.message) {
+        renderLiveAnswer(payload.message, { title: 'Codex Live', meta: 'streaming CLI output' });
+      }
       if (payload.state === 'completed') {
         return (payload.results || [])[0] || {};
       }
@@ -1231,10 +1261,14 @@
       renderUsageBadges(payload);
       renderFallbackNotice(payload);
       renderStatus(payload.repo_status || []);
+      renderLiveAnswer('');
       renderLlmAnswer(payload);
-      renderEvidenceSummary(payload);
-      renderDebugTrace(payload);
-      renderMatches(payload.matches || [], { compact: Boolean(payload.llm_answer), open: shouldOpenEvidence(payload) });
+      renderEvidenceSummary(null);
+      renderDebugTrace(null);
+      if (results) {
+        results.hidden = true;
+        results.innerHTML = '';
+      }
       saveQuestionHistory({
         question: submittedQuestion,
         pm_team: pmTeam.value,
@@ -1255,6 +1289,7 @@
       queryStatus.textContent = `${error.message || 'Search failed.'} elapsed ${formatElapsed(progress.startedAt)}`;
       renderUsageBadges({});
       renderFallbackNotice({});
+      renderLiveAnswer('');
       renderLlmAnswer({});
       renderEvidenceSummary(null);
       renderDebugTrace(null);
@@ -1317,6 +1352,7 @@
       renderUsageBadges({});
       renderFallbackNotice({});
       renderLlmAnswer({});
+      renderLiveAnswer('');
       renderEvidenceSummary(null);
       renderDebugTrace(null);
       if (feedback) feedback.hidden = true;
