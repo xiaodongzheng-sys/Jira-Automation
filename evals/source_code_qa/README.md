@@ -37,6 +37,14 @@ Feedback candidates preserve replay context from the original answer: trace id, 
 
 Use this before and after retrieval, prompt, model, or indexing changes. The goal is to improve whole classes of source-code questions without tuning for one-off examples.
 
+For a repeatable local quality check, run:
+
+```bash
+PYTHONPATH=. ./.venv/bin/python scripts/run_source_code_qa_nightly_eval.py --include-useful-feedback
+```
+
+The job writes timestamped reports under `TEAM_PORTAL_DATA_DIR/source_code_qa/eval_runs/` plus `latest.json`. It runs the deterministic fixture evals and regenerates feedback candidates, so it can be launched manually or scheduled by the host without adding a new portal workflow.
+
 Use `--fixture` when you want a deterministic miniature repo set for regression checks. It creates AF and CRMS fixture repositories under the selected data root, then runs the same eval cases against generated code instead of depending on whatever repos happen to be synced locally.
 
 The JSON output includes LLM routing and quality metadata (`llm_provider`, `llm_model`, `llm_route`, `llm_budget_mode`, `answer_claim_check`, and `answer_contract`) so regressions can be grouped by provider, budget, and evidence policy rather than inspected case by case.

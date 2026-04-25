@@ -469,6 +469,71 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertEqual(request_cache["stats"]["index_rows_hits"], 1)
         self.assertEqual(request_cache["stats"]["index_rows_misses"], 1)
 
+    def test_targeted_index_rows_keep_late_matches_without_loading_broad_snapshot(self):
+        index_path = Path(self.temp_dir.name) / "targeted.sqlite3"
+        with sqlite3.connect(index_path) as connection:
+            connection.execute("create table files (path text, lower_path text, symbols text)")
+            connection.execute(
+                "create table lines (file_path text, line_no integer, line_text text, lower_text text, symbols text, is_declaration integer, has_pathish integer)"
+            )
+            connection.execute(
+                "create table semantic_chunks (chunk_id text, file_path text, start_line integer, end_line integer, chunk_text text, lower_text text, tokens text, symbols text, embedding text)"
+            )
+            for index in range(300):
+                path = f"src/noise/Noise{index}.java"
+                connection.execute("insert into files values (?, ?, ?)", (path, path.lower(), "[]"))
+                connection.execute(
+                    "insert into lines values (?, ?, ?, ?, ?, ?, ?)",
+                    (path, 1, "class Noise {}", "class noise {}", "[]", 1, 0),
+                )
+            connection.execute("insert into files values ('src/service/Late.java', 'src/service/late.java', '[]')")
+            connection.execute(
+                "insert into lines values ('src/service/Late.java', 9001, 'return needleValue;', 'return needlevalue;', '[\"needlevalue\"]', 0, 0)"
+            )
+            connection.execute(
+                "insert into semantic_chunks values ('late-1', 'src/service/Late.java', 9001, 9001, 'return needleValue;', 'return needlevalue;', '[\"needlevalue\"]', '[\"needlevalue\"]', '[]')"
+            )
+            connection.commit()
+        request_cache = self.service._new_retrieval_request_cache()
+        with sqlite3.connect(index_path) as connection:
+            connection.row_factory = sqlite3.Row
+            rows = self.service._targeted_index_rows(
+                connection,
+                index_path,
+                tokens=["needlevalue"],
+                focus_terms=[],
+                intent={},
+                request_cache=request_cache,
+            )
+
+        self.assertIn("src/service/Late.java", rows["files_by_path"])
+        self.assertTrue(any(row["file_path"] == "src/service/Late.java" for row in rows["lines"]))
+        self.assertLessEqual(len(rows["files"]), 220)
+        self.assertLessEqual(len(rows["lines"]), 1200)
+        self.assertEqual(request_cache["stats"]["targeted_index_rows_misses"], 1)
+
+    def test_evidence_outline_summarizes_support_and_primary_sources(self):
+        outline = self.service._build_evidence_outline(
+            {
+                "items": [
+                    {"type": "table", "source_id": "S1", "support_level": "confirmed", "claim": "issue_table"},
+                    {"type": "call_chain", "source_id": "S2", "support_level": "inferred", "claim": "IssueService"},
+                ],
+                "confirmed_facts": ["issue_table"],
+                "inferred_facts": ["IssueService"],
+                "evidence_limits": ["No runtime trace."],
+            },
+            [
+                {"repo": "Portal Repo", "path": "repository/IssueRepository.java", "line_start": 1, "line_end": 3, "retrieval": "persistent_index"},
+                {"repo": "Portal Repo", "path": "service/IssueService.java", "line_start": 5, "line_end": 8, "retrieval": "code_graph"},
+            ],
+        )
+
+        self.assertEqual(outline["type_counts"]["table"], 1)
+        self.assertEqual(outline["support_counts"]["confirmed"], 1)
+        self.assertEqual(outline["primary_sources"][0]["evidence_items"], 1)
+        self.assertEqual(outline["evidence_limits"], ["No runtime trace."])
+
     def test_match_from_index_location_uses_cached_lines_without_changing_snippet(self):
         entry = RepositoryEntry(display_name="Portal Repo", url="https://git.example.com/team/portal.git")
         index_path = Path(self.temp_dir.name) / "index.sqlite3"

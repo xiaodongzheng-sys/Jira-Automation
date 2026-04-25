@@ -49,6 +49,9 @@ DEFAULT_LLM_BACKOFF_SECONDS = 1.0
 DEFAULT_LLM_MAX_BACKOFF_SECONDS = 8.0
 MAX_CACHED_INDEX_LINES = 5_000
 MAX_CACHED_SEMANTIC_CHUNKS = 2_000
+MAX_TARGETED_INDEX_FILES = 220
+MAX_TARGETED_INDEX_LINES = 1_200
+MAX_TARGETED_SEMANTIC_CHUNKS = 320
 SYNC_JOB_LOCK_TIMEOUT_SECONDS = 5.0
 DEFAULT_LLM_BUDGETS = {
     "cheap": {
@@ -1831,6 +1834,7 @@ class SourceCodeQAService:
             "trace_paths": trace_paths,
             "repo_graph": repo_graph,
             "evidence_pack": evidence_pack,
+            "evidence_outline": self._build_evidence_outline(evidence_pack, top_matches),
             "repo_status": repo_status,
             "index_freshness": index_freshness,
             "answer_quality": quality_gate,
@@ -1872,6 +1876,7 @@ class SourceCodeQAService:
                     request_cache=request_cache,
                 )
                 payload.update(llm_payload)
+                payload["evidence_outline"] = self._build_evidence_outline(payload.get("evidence_pack") or evidence_pack, top_matches)
                 payload["answer_mode"] = normalized_answer_mode
             except ToolError as error:
                 payload["fallback_notice"] = {
@@ -4683,7 +4688,14 @@ class SourceCodeQAService:
         file_hits: dict[str, dict[str, Any]] = {}
         with sqlite3.connect(index_path) as connection:
             connection.row_factory = sqlite3.Row
-            index_rows = self._cached_index_rows(connection, index_path, request_cache=request_cache)
+            index_rows = self._targeted_index_rows(
+                connection,
+                index_path,
+                tokens=tokens,
+                focus_terms=normalized_focus_terms,
+                intent=intent,
+                request_cache=request_cache,
+            )
             file_rows = index_rows["files"]
             file_rows_by_path = index_rows["files_by_path"]
             line_rows = index_rows["lines"]
@@ -4992,6 +5004,215 @@ class SourceCodeQAService:
             rows_cache[cache_key] = payload
         return payload
 
+    def _targeted_index_rows(
+        self,
+        connection: sqlite3.Connection,
+        index_path: Path,
+        *,
+        tokens: list[str],
+        focus_terms: list[str],
+        intent: dict[str, Any],
+        request_cache: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        query_terms = [
+            term
+            for term in list(dict.fromkeys([*(str(token).lower() for token in tokens), *(str(term).lower() for term in focus_terms)]))
+            if len(term) >= 3 and term not in STOPWORDS
+        ][:24]
+        intent_key = ",".join(sorted(key for key, enabled in (intent or {}).items() if enabled))
+        cache_key = f"{self._index_fingerprint(index_path)}:targeted:{'|'.join(query_terms)}:{intent_key}"
+        if request_cache is not None:
+            rows_cache = request_cache.setdefault("targeted_index_rows", {})
+            cached = rows_cache.get(cache_key)
+            if cached is not None:
+                self._increment_retrieval_stat(request_cache, "targeted_index_rows_hits")
+                return cached
+            self._increment_retrieval_stat(request_cache, "targeted_index_rows_misses")
+        file_rows_by_path: dict[str, sqlite3.Row] = {}
+        line_rows_by_key: dict[tuple[str, int], sqlite3.Row] = {}
+        semantic_rows_by_id: dict[str, sqlite3.Row] = {}
+
+        def add_file_rows(rows: list[sqlite3.Row]) -> None:
+            for row in rows:
+                if len(file_rows_by_path) >= MAX_TARGETED_INDEX_FILES:
+                    break
+                file_rows_by_path.setdefault(str(row["path"]), row)
+
+        def add_line_rows(rows: list[sqlite3.Row]) -> None:
+            for row in rows:
+                if len(line_rows_by_key) >= MAX_TARGETED_INDEX_LINES:
+                    break
+                line_rows_by_key.setdefault((str(row["file_path"]), int(row["line_no"])), row)
+
+        def placeholders(values: list[str]) -> str:
+            return ",".join("?" for _ in values)
+
+        for term in query_terms:
+            like = f"%{term}%"
+            try:
+                add_file_rows(
+                    connection.execute(
+                        "select * from files where lower_path like ? or symbols like ? order by path limit ?",
+                        (like, like, 40),
+                    ).fetchall()
+                )
+                add_line_rows(
+                    connection.execute(
+                        "select * from lines where lower_text like ? or symbols like ? order by file_path, line_no limit ?",
+                        (like, like, 80),
+                    ).fetchall()
+                )
+            except sqlite3.Error:
+                continue
+        line_file_paths = list(dict.fromkeys(file_path for file_path, _line_no in line_rows_by_key))
+        for file_path in line_file_paths:
+            if file_path in file_rows_by_path:
+                continue
+            try:
+                file_row = connection.execute("select * from files where path = ?", (file_path,)).fetchone()
+            except sqlite3.Error:
+                file_row = None
+            if file_row is not None:
+                add_file_rows([file_row])
+        intent_file_patterns: list[str] = []
+        if intent.get("config"):
+            intent_file_patterns.extend(["%.properties", "%.yaml", "%.yml", "%.conf", "%.toml"])
+        if intent.get("module_dependency"):
+            intent_file_patterns.extend(["%pom.xml", "%build.gradle", "%build.gradle.kts", "%settings.gradle", "%settings.gradle.kts", "%package.json"])
+        for pattern in intent_file_patterns:
+            try:
+                add_file_rows(connection.execute("select * from files where lower_path like ? order by path limit 40", (pattern,)).fetchall())
+            except sqlite3.Error:
+                continue
+        for row in self._fts_search_rows(
+            connection,
+            tokens,
+            focus_terms,
+            index_path=index_path,
+            request_cache=request_cache,
+        ):
+            file_path = str(row.get("file_path") if isinstance(row, dict) else row["file_path"])
+            line_no = int(row.get("line_no") if isinstance(row, dict) else row["line_no"])
+            try:
+                file_row = connection.execute("select * from files where path = ?", (file_path,)).fetchone()
+                if file_row is not None:
+                    add_file_rows([file_row])
+                line_row = connection.execute("select * from lines where file_path = ? and line_no = ?", (file_path, line_no)).fetchone()
+                if line_row is not None:
+                    add_line_rows([line_row])
+            except sqlite3.Error:
+                continue
+        for term in query_terms:
+            for table, lower_column in (("definitions", "lower_name"), ("references_index", "lower_target")):
+                for row in self._cached_structure_like_rows(
+                    connection,
+                    index_path,
+                    table=table,
+                    lower_column=lower_column,
+                    term=term,
+                    limit=40,
+                    request_cache=request_cache,
+                ):
+                    file_path = str(row.get("file_path") or "")
+                    line_no = int(row.get("line_no") or 1)
+                    try:
+                        file_row = connection.execute("select * from files where path = ?", (file_path,)).fetchone()
+                        if file_row is not None:
+                            add_file_rows([file_row])
+                        line_row = connection.execute("select * from lines where file_path = ? and line_no = ?", (file_path, line_no)).fetchone()
+                        if line_row is not None:
+                            add_line_rows([line_row])
+                    except sqlite3.Error:
+                        continue
+        if file_rows_by_path and len(line_rows_by_key) < MAX_TARGETED_INDEX_LINES:
+            paths = list(file_rows_by_path)[:80]
+            try:
+                add_line_rows(
+                    connection.execute(
+                        f"select * from lines where file_path in ({placeholders(paths)}) order by file_path, line_no limit ?",
+                        (*paths, MAX_TARGETED_INDEX_LINES - len(line_rows_by_key)),
+                    ).fetchall()
+                )
+            except sqlite3.Error:
+                pass
+        if not file_rows_by_path:
+            try:
+                add_file_rows(connection.execute("select * from files order by path limit ?", (min(MAX_TARGETED_INDEX_FILES, 80),)).fetchall())
+            except sqlite3.Error:
+                pass
+        if self.semantic_index_enabled:
+            for term in query_terms[:12]:
+                try:
+                    rows = connection.execute(
+                        "select * from semantic_chunks where lower_text like ? or tokens like ? or symbols like ? order by file_path, start_line limit ?",
+                        (f"%{term}%", f"%{term}%", f"%{term}%", 80),
+                    ).fetchall()
+                except sqlite3.Error:
+                    rows = []
+                for row in rows:
+                    if len(semantic_rows_by_id) >= MAX_TARGETED_SEMANTIC_CHUNKS:
+                        break
+                    chunk_id = str(row["chunk_id"] if "chunk_id" in row.keys() else f"{row['file_path']}:{row['start_line']}")
+                    semantic_rows_by_id.setdefault(chunk_id, row)
+            if file_rows_by_path and len(semantic_rows_by_id) < MAX_TARGETED_SEMANTIC_CHUNKS:
+                paths = list(file_rows_by_path)[:80]
+                try:
+                    rows = connection.execute(
+                        f"select * from semantic_chunks where file_path in ({placeholders(paths)}) order by file_path, start_line limit ?",
+                        (*paths, MAX_TARGETED_SEMANTIC_CHUNKS - len(semantic_rows_by_id)),
+                    ).fetchall()
+                except sqlite3.Error:
+                    rows = []
+                for row in rows:
+                    chunk_id = str(row["chunk_id"] if "chunk_id" in row.keys() else f"{row['file_path']}:{row['start_line']}")
+                    semantic_rows_by_id.setdefault(chunk_id, row)
+        file_rows = list(file_rows_by_path.values())
+        line_rows = sorted(line_rows_by_key.values(), key=lambda row: (str(row["file_path"]), int(row["line_no"])))
+        files_by_path = {str(row["path"]): row for row in file_rows}
+        file_symbols_by_path = {str(row["path"]): set(json.loads(row["symbols"] or "[]")) for row in file_rows}
+        line_symbols_by_key: dict[tuple[str, int], set[str]] = {}
+        lines_by_path: dict[str, list[tuple[int, str]]] = {}
+        for row in line_rows:
+            file_path = str(row["file_path"])
+            line_no = int(row["line_no"])
+            line_symbols_by_key[(file_path, line_no)] = set(json.loads(row["symbols"] or "[]"))
+            lines_by_path.setdefault(file_path, []).append((line_no, str(row["line_text"])))
+        semantic_chunks = [
+            {
+                "chunk_id": str(row["chunk_id"] if "chunk_id" in row.keys() else f"{row['file_path']}:{row['start_line']}"),
+                "file_path": str(row["file_path"] or ""),
+                "start_line": int(row["start_line"] or 1),
+                "end_line": int(row["end_line"] or row["start_line"] or 1),
+                "chunk_text": str(row["chunk_text"] or ""),
+                "lower_text": str(row["lower_text"] or ""),
+                "tokens_set": set(json.loads(row["tokens"] or "[]")),
+                "symbols_set": set(json.loads(row["symbols"] or "[]")),
+                "embedding_values": self._parse_embedding(row["embedding"] if "embedding" in row.keys() else ""),
+            }
+            for row in semantic_rows_by_id.values()
+        ] if self.semantic_index_enabled else []
+        payload = {
+            "files": file_rows,
+            "files_by_path": files_by_path,
+            "file_symbols_by_path": file_symbols_by_path,
+            "lines": line_rows,
+            "line_symbols_by_key": line_symbols_by_key,
+            "lines_by_path": {
+                file_path: [line_text for _, line_text in sorted(rows, key=lambda item: item[0])]
+                for file_path, rows in lines_by_path.items()
+            },
+            "semantic_chunks": semantic_chunks,
+            "bounded": {
+                "max_files": MAX_TARGETED_INDEX_FILES,
+                "max_lines": MAX_TARGETED_INDEX_LINES,
+                "max_semantic_chunks": MAX_TARGETED_SEMANTIC_CHUNKS,
+                "targeted": True,
+            },
+        }
+        if request_cache is not None:
+            rows_cache[cache_key] = payload
+        return payload
+
     def _cached_file_lines(
         self,
         connection: sqlite3.Connection,
@@ -5177,6 +5398,12 @@ class SourceCodeQAService:
                 score += 18
             matched_terms = list(dict.fromkeys([*sorted(overlap), *phrase_hits]))[:6]
             reason = f"semantic chunk matched: {', '.join(matched_terms)}" if matched_terms else f"semantic embedding matched: {embedding_score:.2f}"
+            if trace_stage == "dependency":
+                reason = f"dependency trace; {reason}"
+            elif trace_stage == "two_hop":
+                reason = f"two-hop trace; {reason}"
+            elif trace_stage == "query_decomposition":
+                reason = f"query decomposition; {reason}"
             matches.append(
                 {
                     "repo": entry.display_name,
@@ -5268,6 +5495,7 @@ class SourceCodeQAService:
             "search": {},
             "ensured_indexes": set(),
             "index_rows": {},
+            "targeted_index_rows": {},
             "structure_like": {},
             "fts": {},
             "trace_paths": {},
@@ -5282,6 +5510,8 @@ class SourceCodeQAService:
                 "index_ensure_misses": 0,
                 "index_rows_hits": 0,
                 "index_rows_misses": 0,
+                "targeted_index_rows_hits": 0,
+                "targeted_index_rows_misses": 0,
                 "file_lines_hits": 0,
                 "file_lines_misses": 0,
                 "structure_like_hits": 0,
@@ -5318,6 +5548,7 @@ class SourceCodeQAService:
             "elapsed_ms": elapsed_ms,
             "search_entries": len(request_cache.get("search") or {}),
             "index_row_entries": len(request_cache.get("index_rows") or {}),
+            "targeted_index_row_entries": len(request_cache.get("targeted_index_rows") or {}),
             "file_line_entries": len(request_cache.get("file_lines") or {}),
             "structure_like_entries": len(request_cache.get("structure_like") or {}),
             "fts_entries": len(request_cache.get("fts") or {}),
@@ -9736,6 +9967,48 @@ class SourceCodeQAService:
                 }
             )
         return citations
+
+    @staticmethod
+    def _build_evidence_outline(evidence_pack: dict[str, Any], matches: list[dict[str, Any]]) -> dict[str, Any]:
+        items = [item for item in evidence_pack.get("items") or [] if isinstance(item, dict)]
+        type_counts: dict[str, int] = {}
+        support_counts: dict[str, int] = {}
+        for item in items:
+            item_type = str(item.get("type") or "unknown")
+            support = str(item.get("support_level") or "unknown")
+            type_counts[item_type] = type_counts.get(item_type, 0) + 1
+            support_counts[support] = support_counts.get(support, 0) + 1
+        source_counts: dict[str, int] = {}
+        for item in items:
+            source_id = str(item.get("source_id") or "").strip()
+            if source_id:
+                source_counts[source_id] = source_counts.get(source_id, 0) + 1
+        primary_sources: list[dict[str, Any]] = []
+        for index, match in enumerate(matches[:10], start=1):
+            source_id = f"S{index}"
+            primary_sources.append(
+                {
+                    "id": source_id,
+                    "repo": match.get("repo"),
+                    "path": match.get("path"),
+                    "line_start": match.get("line_start"),
+                    "line_end": match.get("line_end"),
+                    "retrieval": match.get("retrieval") or "file_scan",
+                    "trace_stage": match.get("trace_stage") or "direct",
+                    "evidence_items": source_counts.get(source_id, 0),
+                    "reason": match.get("reason"),
+                }
+            )
+        return {
+            "version": 1,
+            "type_counts": dict(sorted(type_counts.items())),
+            "support_counts": dict(sorted(support_counts.items())),
+            "primary_sources": primary_sources,
+            "confirmed_facts": evidence_pack.get("confirmed_facts") or [],
+            "inferred_facts": evidence_pack.get("inferred_facts") or [],
+            "missing_facts": evidence_pack.get("missing_facts") or [],
+            "evidence_limits": evidence_pack.get("evidence_limits") or [],
+        }
 
     def _select_result_matches(self, matches: list[dict[str, Any]], limit: int, *, question: str = "") -> list[dict[str, Any]]:
         limit = max(1, int(limit or 1))
