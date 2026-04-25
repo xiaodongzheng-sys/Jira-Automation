@@ -175,6 +175,28 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(captured["llm_budget_mode"], "auto")
 
+    def test_query_api_returns_json_for_unexpected_failures(self):
+        with patch(
+            "bpmis_jira_tool.source_code_qa.SourceCodeQAService.ensure_synced_today",
+            return_value={"attempted": False, "status": "fresh"},
+        ), patch(
+            "bpmis_jira_tool.source_code_qa.SourceCodeQAService.query",
+            side_effect=RuntimeError("boom"),
+        ):
+            with self.app.test_client() as client:
+                self._login(client, "teammate@npt.sg")
+                response = client.post(
+                    "/api/source-code-qa/query",
+                    json={"pm_team": "CRMS", "country": "SG", "question": "where is income logic"},
+                )
+
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(response.content_type, "application/json")
+        payload = response.get_json()
+        self.assertEqual(payload["status"], "error")
+        self.assertEqual(payload["error_category"], "source_code_qa_internal")
+        self.assertTrue(payload["error_retryable"])
+
     def test_query_api_syncs_before_answer_when_not_refreshed_today(self):
         with patch(
             "bpmis_jira_tool.source_code_qa.SourceCodeQAService.ensure_synced_today",
@@ -1202,6 +1224,47 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         evidence_text = json.dumps(payload["evidence_pack"], ensure_ascii=False)
         self.assertIn("dwd_antifraud_incoming_transfer_detailed_di", evidence_text)
         self.assertIn("tmp_dwd_antifraud_incoming_transfer_detailed_df", evidence_text)
+
+    def test_myinfo_income_logic_does_not_trigger_data_source_from_preposition(self):
+        intent = self.service._question_intent("What is the logic to calculate income from MyInfo CPF and NOA?")
+
+        self.assertTrue(intent["rule_logic"])
+        self.assertFalse(intent["data_source"])
+
+    def test_sufficient_myinfo_income_logic_skips_agent_plan(self):
+        self.service.save_mapping(
+            pm_team="CRMS",
+            country="SG",
+            repositories=[{"display_name": "credit-risk-model", "url": "https://git.example.com/team/credit-risk-model.git"}],
+        )
+        entry = self.service.load_config()["mappings"]["CRMS:SG"][0]
+        repo_path = self.service._repo_path("CRMS:SG", type("Entry", (), entry)())
+        (repo_path / ".git").mkdir(parents=True)
+        feature_file = repo_path / "feature" / "retail_feature_engineering.py"
+        feature_file.parent.mkdir(parents=True)
+        feature_file.write_text(
+            "class RetailFeatureEngineering:\n"
+            "    @classmethod\n"
+            "    def get_myinfo_monthly_income(self, myInfoData, **kwargs):\n"
+            "        myInfoData_dict = myInfoData.copy()\n"
+            "        myinfo_monthly_income = self.convert_to_float(myInfoData_dict.get('monthlyIncome'))\n"
+            "        if np.isnan(myinfo_monthly_income):\n"
+            "            myinfo_monthly_income = 0\n"
+            "        return myinfo_monthly_income\n",
+            encoding="utf-8",
+        )
+        self._build_index_for_entry("CRMS:SG", entry)
+
+        with patch.object(self.service, "_run_agent_plan", wraps=self.service._run_agent_plan) as agent_plan:
+            payload = self.service.query(
+                pm_team="CRMS",
+                country="SG",
+                question="What is the logic to calculate income from MyInfo CPF and NOA?",
+            )
+
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(agent_plan.call_count, 0)
+        self.assertTrue(any(match["path"] == "feature/retail_feature_engineering.py" for match in payload["matches"]))
 
     def test_index_rebuild_reuses_unchanged_file_rows(self):
         self.service.save_mapping(

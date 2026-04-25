@@ -665,6 +665,21 @@ def create_app() -> Flask:
             )
         except ToolError as error:
             return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
+        except Exception as error:  # noqa: BLE001 - keep API clients on JSON even for unexpected failures.
+            request_id = getattr(g, "request_id", "")
+            current_app.logger.exception("Source Code Q&A config failed unexpectedly")
+            return (
+                jsonify(
+                    {
+                        "status": "error",
+                        "message": "Source Code Q&A config failed unexpectedly. Please refresh; if it repeats, share the request ID.",
+                        "request_id": request_id,
+                        "error_category": "source_code_qa_internal",
+                        "error_retryable": True,
+                    }
+                ),
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
 
     @app.post("/api/source-code-qa/config")
     def source_code_qa_save_config_api():
@@ -725,6 +740,21 @@ def create_app() -> Flask:
             return jsonify(result)
         except ToolError as error:
             return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
+        except Exception as error:  # noqa: BLE001 - keep API clients on JSON even for unexpected failures.
+            request_id = getattr(g, "request_id", "")
+            current_app.logger.exception("Source Code Q&A query failed unexpectedly")
+            return (
+                jsonify(
+                    {
+                        "status": "error",
+                        "message": "Source Code Q&A failed unexpectedly. Please retry; if it repeats, share the request ID.",
+                        "request_id": request_id,
+                        "error_category": "source_code_qa_internal",
+                        "error_retryable": True,
+                    }
+                ),
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
 
     @app.post("/api/source-code-qa/feedback")
     def source_code_qa_feedback_api():

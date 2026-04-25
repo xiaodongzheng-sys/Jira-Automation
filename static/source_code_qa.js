@@ -60,7 +60,11 @@
     const contentType = response.headers.get('content-type') || '';
     if (!contentType.includes('application/json')) {
       const text = await response.text();
-      throw new Error(text.includes('<!DOCTYPE') ? 'The portal returned an HTML error page. Please refresh and try again.' : text.slice(0, 180));
+      const httpStatus = response.status ? `HTTP ${response.status}` : 'non-JSON response';
+      const looksHtml = text.includes('<!DOCTYPE') || contentType.includes('text/html');
+      throw new Error(looksHtml
+        ? `${httpStatus}: the portal returned an HTML error/timeout page instead of JSON. Please retry; if it repeats, check server logs with the request time.`
+        : `${httpStatus}: ${text.slice(0, 180)}`);
     }
     const payload = await response.json();
     if (!response.ok) {

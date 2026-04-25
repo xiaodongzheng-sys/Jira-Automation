@@ -34,6 +34,13 @@
           "repo_hints": ["credit-risk", "feature"],
           "code_hints": ["FeatureData", "FeatureProvider", "FeatureDataProvider", "FeatureConfig"],
           "business_flows": ["feature fetch", "feature config", "rule input"]
+        },
+        {
+          "name": "SG MyInfo Income",
+          "aliases": ["MyInfo income", "monthly income", "CPF income", "NOA income", "Singpass MyInfo income", "myinfo monthly income"],
+          "repo_hints": ["credit-risk-model", "credit-risk"],
+          "code_hints": ["get_monthly_income", "get_myinfo_monthly_income", "get_myinfo_features_online", "monthlyIncome", "cpfContributions"],
+          "business_flows": ["MyInfo payload parsing", "monthlyIncome conversion", "CPF contribution feature derivation", "NOA/notice-of-assessment income feature lookup"]
         }
       ],
       "terminology": [
@@ -51,6 +58,11 @@
           "term": "PreCheck",
           "aliases": ["pre check", "pre-check", "贷前检查", "准入检查"],
           "code_terms": ["PreCheck", "TermLoanPreCheck", "PreCheckEngine", "PreCheckStrategy"]
+        },
+        {
+          "term": "MyInfoIncome",
+          "aliases": ["MyInfo income", "monthly income", "CPF", "cpf contribution", "NOA", "notice of assessment"],
+          "code_terms": ["monthlyIncome", "get_monthly_income", "get_myinfo_monthly_income", "get_myinfo_features_online", "cpfContributions"]
         }
       ],
       "key_artifacts": {
@@ -69,12 +81,12 @@
         ]
       },
       "retrieval_terms": {
-        "data_carriers": ["DataSourceResult", "UnderwritingContext", "UnderwritingInitiationDTO", "UnderwritingBasicInfo", "CustomerInfo", "LoanInfo", "CreditRiskInfo", "FeatureData"],
-        "source_terms": ["TermLoanPreCheckEngine", "Layer4TermLoanPreCheckEngineStrategy", "DataSourceResultRepository", "CustomerInfoDAO", "CustomerInfoMapper", "LoanInfoDAO", "LoanInfoMapper", "CreditRiskInfoDAO", "CreditRiskInfoMapper", "FeatureProvider"],
+        "data_carriers": ["DataSourceResult", "UnderwritingContext", "UnderwritingInitiationDTO", "UnderwritingBasicInfo", "CustomerInfo", "LoanInfo", "CreditRiskInfo", "FeatureData", "myInfoData", "cpfContributions", "monthlyIncome"],
+        "source_terms": ["TermLoanPreCheckEngine", "Layer4TermLoanPreCheckEngineStrategy", "DataSourceResultRepository", "CustomerInfoDAO", "CustomerInfoMapper", "LoanInfoDAO", "LoanInfoMapper", "CreditRiskInfoDAO", "CreditRiskInfoMapper", "FeatureProvider", "get_monthly_income", "get_myinfo_monthly_income", "get_myinfo_features_online"],
         "api_terms": ["UnderwritingController", "PreCheckController", "TermLoanPreCheckController", "RequestMapping", "PostMapping"],
         "config_terms": ["feature", "strategy", "precheck", "risk-config", "rule-config", "yaml", "properties"],
-        "logic_terms": ["precheck", "eligibility", "approval", "underwriting", "rule", "condition", "risk", "strategy"],
-        "field_population_terms": ["setDataSourceResult", "setCustomerInfo", "setLoanInfo", "setCreditRiskInfo", "setUnderwritingBasicInfo"]
+        "logic_terms": ["precheck", "eligibility", "approval", "underwriting", "rule", "condition", "risk", "strategy", "monthlyIncome", "myinfo", "cpf", "noa"],
+        "field_population_terms": ["setDataSourceResult", "setCustomerInfo", "setLoanInfo", "setCreditRiskInfo", "setUnderwritingBasicInfo", "monthlyIncome", "myinfo_monthly_income", "cpfContributions"]
       },
       "evidence_rules": [
         "For data-source questions, DTO/Input/Info evidence is only a carrier; prefer repository, mapper XML, SQL, client, API, or table evidence.",
@@ -85,7 +97,8 @@
         {"question": "Term Loan PreCheck 的 DataSourceResult 数据从哪里来？", "expected_terms": ["TermLoanPreCheck", "DataSourceResult", "Repository", "Mapper"]},
         {"question": "UnderwritingBasicInfo 是在哪里组装和填充的？", "expected_terms": ["UnderwritingBasicInfo", "Provider", "setUnderwritingBasicInfo"]},
         {"question": "某个 precheck rule 改了会影响哪些下游数据源？", "expected_terms": ["PreCheck", "rule", "impact", "Mapper", "Client"]},
-        {"question": "CreditRiskInfo 字段来自哪张表或哪个 client？", "expected_terms": ["CreditRiskInfo", "DAO", "Mapper", "table", "client"]}
+        {"question": "CreditRiskInfo 字段来自哪张表或哪个 client？", "expected_terms": ["CreditRiskInfo", "DAO", "Mapper", "table", "client"]},
+        {"question": "What is the logic to calculate income from MyInfo CPF and NOA?", "expected_terms": ["monthlyIncome", "get_myinfo_monthly_income", "get_monthly_income", "cpfContributions"]}
       ]
     },
     "AF": {

@@ -373,8 +373,10 @@ LOW_VALUE_FOCUS_TERMS = {
 }
 DATA_SOURCE_HINTS = (
     "datasource", "data source", "source", "sources", "upstream", "table", "jdbc",
-    "queryfor", "select", " from ", "repository", "mapper", "dao", "client",
+    "queryfor", "select", "repository", "mapper", "dao", "client",
     "integration", "provider", "gateway", "api", "userinfo", "customerinfo",
+    " read from ", " write to ", " written to ", " comes from ",
+    " loaded from ", " fetched from ", " persisted to ",
     "数据源", "来源", "上游", "表", "数据库", "查哪张表", "从哪里来", "哪里取数",
     "读取", "写入",
 )
@@ -1891,6 +1893,28 @@ class SourceCodeQAService:
             else matches[:result_limit]
         )
         should_expand_matches = not exact_lookup_sufficient
+        intent = query_plan.get("intent") if isinstance(query_plan.get("intent"), dict) else {}
+        simple_quality_trace = (
+            any(intent.get(key) for key in ("rule_logic", "api", "config"))
+            and not any(
+                intent.get(key)
+                for key in (
+                    "data_source",
+                    "module_dependency",
+                    "message_flow",
+                    "static_qa",
+                    "impact_analysis",
+                    "test_coverage",
+                    "operational_boundary",
+                )
+            )
+        )
+        if top_matches and should_expand_matches and simple_quality_trace:
+            early_evidence_summary = self._compress_evidence_cached(question, top_matches, request_cache=request_cache)
+            early_quality_gate = self._quality_gate_cached(question, early_evidence_summary, request_cache=request_cache)
+            if early_quality_gate.get("status") == "sufficient" and early_quality_gate.get("confidence") in {"medium", "high"}:
+                should_expand_matches = False
+                self._increment_retrieval_stat(request_cache, "early_quality_short_circuits")
         if top_matches and should_expand_matches and self._is_dependency_question(question):
             dependency_matches = self._expand_dependency_matches(
                 entries=entries,
@@ -1976,18 +2000,19 @@ class SourceCodeQAService:
             evidence_summary = self._compress_evidence_cached(question, top_matches, request_cache=request_cache)
             quality_gate = self._quality_gate_cached(question, evidence_summary, request_cache=request_cache)
             agent_plan = self._build_agent_plan(question, evidence_summary, quality_gate)
-            top_matches = self._run_agent_plan(
-                entries=entries,
-                key=key,
-                question=question,
-                matches=top_matches,
-                evidence_summary=evidence_summary,
-                quality_gate=quality_gate,
-                agent_plan=agent_plan,
-                limit=limit,
-                tool_trace=tool_trace,
-                request_cache=request_cache,
-            )
+            if quality_gate.get("status") != "sufficient" and agent_plan.get("steps"):
+                top_matches = self._run_agent_plan(
+                    entries=entries,
+                    key=key,
+                    question=question,
+                    matches=top_matches,
+                    evidence_summary=evidence_summary,
+                    quality_gate=quality_gate,
+                    agent_plan=agent_plan,
+                    limit=limit,
+                    tool_trace=tool_trace,
+                    request_cache=request_cache,
+                )
         if top_matches and should_expand_matches:
             evidence_summary = self._compress_evidence_cached(question, top_matches, request_cache=request_cache)
             quality_gate = self._quality_gate_cached(question, evidence_summary, request_cache=request_cache)
@@ -2048,7 +2073,7 @@ class SourceCodeQAService:
             return payload
         evidence_summary = self._compress_evidence_cached(question, top_matches, request_cache=request_cache)
         quality_gate = self._quality_gate_cached(question, evidence_summary, request_cache=request_cache)
-        trace_paths = [] if exact_lookup_sufficient else self._build_trace_paths(entries=entries, key=key, matches=top_matches, question=question, request_cache=request_cache)
+        trace_paths = [] if exact_lookup_sufficient or not should_expand_matches else self._build_trace_paths(entries=entries, key=key, matches=top_matches, question=question, request_cache=request_cache)
         if trace_paths:
             evidence_summary["trace_paths"] = trace_paths
         repo_graph = (
@@ -2058,7 +2083,7 @@ class SourceCodeQAService:
                 "edges": [],
                 "skipped": "exact_lookup_sufficient",
             }
-            if exact_lookup_sufficient
+            if exact_lookup_sufficient or not should_expand_matches
             else self._build_repo_dependency_graph(key=key, entries=entries, request_cache=request_cache)
         )
         evidence_pack = self._build_evidence_pack(
