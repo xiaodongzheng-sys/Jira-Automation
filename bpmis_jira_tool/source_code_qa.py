@@ -1977,6 +1977,41 @@ class SourceCodeQAService:
                 mentioned.update(aliases)
         return mentioned
 
+    def _filter_entries_for_question_repository_scope(
+        self,
+        question: str,
+        repositories: list[RepositoryEntry],
+    ) -> tuple[list[RepositoryEntry], dict[str, Any]]:
+        normalized_question = self._repo_scope_normalize(question)
+        if not normalized_question or len(repositories) <= 1:
+            return list(repositories), {
+                "active": False,
+                "selected_repositories": [entry.display_name for entry in repositories],
+                "available_repository_count": len(repositories),
+            }
+        selected: list[RepositoryEntry] = []
+        matched_aliases: dict[str, list[str]] = {}
+        for entry in repositories:
+            aliases = self._repository_scope_aliases(entry.display_name, entry.url)
+            direct_matches = sorted(alias for alias in aliases if self._repo_alias_in_text(alias, normalized_question))
+            if not direct_matches:
+                continue
+            selected.append(entry)
+            matched_aliases[entry.display_name] = direct_matches[:8]
+        if not selected or len(selected) == len(repositories):
+            return list(repositories), {
+                "active": False,
+                "selected_repositories": [entry.display_name for entry in repositories],
+                "available_repository_count": len(repositories),
+                "matched_aliases": matched_aliases,
+            }
+        return selected, {
+            "active": True,
+            "selected_repositories": [entry.display_name for entry in selected],
+            "available_repository_count": len(repositories),
+            "matched_aliases": matched_aliases,
+        }
+
     def _conversation_context_repository_aliases(self, conversation_context: dict[str, Any]) -> set[str]:
         aliases: set[str] = set()
         raw_names: list[str] = []
@@ -2163,6 +2198,7 @@ class SourceCodeQAService:
                 started_at=started_at,
             )
             return payload
+        query_entries, repository_scope = self._filter_entries_for_question_repository_scope(original_question, entries)
         question, followup_context = self._apply_conversation_context(
             question,
             conversation_context,
@@ -2193,6 +2229,16 @@ class SourceCodeQAService:
         matches: list[dict[str, Any]] = []
         request_cache = self._new_retrieval_request_cache()
         result_limit = max(1, min(int(limit or 12), 30))
+        cross_repo_context = self._requires_cross_repo_context(question)
+        if cross_repo_context and repository_scope.get("active"):
+            repository_scope = {
+                **repository_scope,
+                "active": False,
+                "skipped": "cross_repo_context",
+                "seed_repositories": repository_scope.get("selected_repositories") or [],
+                "selected_repositories": [entry.display_name for entry in entries],
+            }
+            query_entries = entries
         repo_status = self.repo_status(key)
         index_freshness = self._index_freshness_payload(repo_status)
         exact_lookup_terms = self._extract_exact_lookup_terms(question)
@@ -2206,7 +2252,15 @@ class SourceCodeQAService:
             exact_lookup_terms = list(dict.fromkeys([*exact_lookup_terms, *specific_exact_terms]))[:12]
         exact_matches: list[dict[str, Any]] = []
         latency_guarded_query_expansion = False
-        synced_entries = [(entry, self._repo_path(key, entry)) for entry in entries if (self._repo_path(key, entry) / ".git").exists()]
+        synced_entries = [(entry, self._repo_path(key, entry)) for entry in query_entries if (self._repo_path(key, entry) / ".git").exists()]
+        if repository_scope.get("active"):
+            self._increment_retrieval_stat(request_cache, "repository_scope_filters")
+            report(
+                "repository_scope",
+                "Question names specific repositories; limiting retrieval scope.",
+                len(query_entries),
+                len(entries),
+            )
         intent = query_plan.get("intent") if isinstance(query_plan.get("intent"), dict) else {}
         simple_quality_trace = (
             any(intent.get(intent_key) for intent_key in ("rule_logic", "api", "config"))
@@ -2248,7 +2302,6 @@ class SourceCodeQAService:
                 if (match.get("exact_lookup") or {}).get("term")
             }
         )
-        cross_repo_context = self._requires_cross_repo_context(question)
         exact_lookup_sufficient = self._exact_lookup_is_sufficient(exact_lookup_terms, exact_matches) and not cross_repo_context
         if exact_matches:
             matches.extend(exact_matches)
@@ -2263,6 +2316,7 @@ class SourceCodeQAService:
                 trace_id=trace_id,
             )
             payload["exact_lookup_terms"] = exact_lookup_terms
+            payload["repository_scope"] = repository_scope
             self._record_query_telemetry(
                 key=key,
                 question=question,
@@ -2443,7 +2497,7 @@ class SourceCodeQAService:
         if top_matches and should_expand_matches and self._is_dependency_question(question):
             report("dependency_expansion", "Expanding dependency evidence from top matches.", 0, 0)
             dependency_matches = self._expand_dependency_matches(
-                entries=entries,
+                entries=query_entries,
                 key=key,
                 question=question,
                 base_matches=top_matches,
@@ -2464,7 +2518,7 @@ class SourceCodeQAService:
         if top_matches and should_expand_matches:
             report("two_hop_expansion", "Expanding two-hop evidence from top matches.", 0, 0)
             trace_matches = self._expand_two_hop_matches(
-                entries=entries,
+                entries=query_entries,
                 key=key,
                 question=question,
                 base_matches=top_matches,
@@ -2485,7 +2539,7 @@ class SourceCodeQAService:
         if top_matches and should_expand_matches:
             report("agent_trace", "Tracing related entities from top matches.", 0, 0)
             agent_matches = self._expand_agent_trace_matches(
-                entries=entries,
+                entries=query_entries,
                 key=key,
                 question=question,
                 base_matches=top_matches,
@@ -2506,7 +2560,7 @@ class SourceCodeQAService:
         if top_matches and should_expand_matches:
             report("tool_loop", "Running targeted local investigation tools.", 0, 0)
             tool_loop_matches = self._run_planner_tool_loop(
-                entries=entries,
+                entries=query_entries,
                 key=key,
                 question=question,
                 base_matches=top_matches,
@@ -2533,7 +2587,7 @@ class SourceCodeQAService:
             if quality_gate.get("status") != "sufficient" and agent_plan.get("steps"):
                 report("agent_plan", "Running additional local plan because evidence is incomplete.", 0, 0)
                 top_matches = self._run_agent_plan(
-                    entries=entries,
+                    entries=query_entries,
                     key=key,
                     question=question,
                     matches=top_matches,
@@ -2551,7 +2605,7 @@ class SourceCodeQAService:
             if quality_gate.get("status") != "sufficient" and agent_plan.get("steps"):
                 report("agent_plan", "Running final local plan to fill missing evidence.", 0, 0)
                 top_matches = self._run_agent_plan(
-                    entries=entries,
+                    entries=query_entries,
                     key=key,
                     question=question,
                     matches=top_matches,
@@ -2565,7 +2619,7 @@ class SourceCodeQAService:
         if top_matches and should_expand_matches and query_plan.get("intent", {}).get("impact_analysis"):
             report("impact_analysis", "Expanding impact analysis evidence.", 0, 0)
             impact_matches = self._expand_impact_matches(
-                entries=entries,
+                entries=query_entries,
                 key=key,
                 question=question,
                 base_matches=top_matches,
@@ -2595,6 +2649,7 @@ class SourceCodeQAService:
                 summary="No confident match. Try exact symbols, route paths, table names, or error codes.",
                 trace_id=trace_id,
             )
+            payload["repository_scope"] = repository_scope
             self._record_query_telemetry(
                 key=key,
                 question=question,
@@ -2607,18 +2662,18 @@ class SourceCodeQAService:
         report("evidence_pack", "Building evidence pack and answer context.", 0, 0)
         evidence_summary = self._compress_evidence_cached(question, top_matches, request_cache=request_cache)
         quality_gate = self._quality_gate_cached(question, evidence_summary, request_cache=request_cache)
-        trace_paths = [] if exact_lookup_sufficient or not should_expand_matches else self._build_trace_paths(entries=entries, key=key, matches=top_matches, question=question, request_cache=request_cache)
+        trace_paths = [] if exact_lookup_sufficient or not should_expand_matches else self._build_trace_paths(entries=query_entries, key=key, matches=top_matches, question=question, request_cache=request_cache)
         if trace_paths:
             evidence_summary["trace_paths"] = trace_paths
         repo_graph = (
             {
                 "version": 2,
-                "nodes": [{"name": entry.display_name, "url": entry.url} for entry in entries],
+                "nodes": [{"name": entry.display_name, "url": entry.url} for entry in query_entries],
                 "edges": [],
                 "skipped": "exact_lookup_sufficient",
             }
             if exact_lookup_sufficient or not should_expand_matches
-            else self._build_repo_dependency_graph(key=key, entries=entries, request_cache=request_cache)
+            else self._build_repo_dependency_graph(key=key, entries=query_entries, request_cache=request_cache)
         )
         evidence_pack = self._build_evidence_pack(
             question=question,
@@ -2651,6 +2706,7 @@ class SourceCodeQAService:
             "tool_trace": tool_trace,
             "retrieval_runtime": self._retrieval_cache_stats(request_cache),
             "followup_context": followup_context,
+            "repository_scope": repository_scope,
             "original_question": original_question,
             "trace_id": trace_id,
         }
@@ -2691,7 +2747,7 @@ class SourceCodeQAService:
                 try:
                     report("llm_generation", "Calling LLM with retrieved evidence.", 0, 0)
                     llm_payload = self._build_llm_answer(
-                        entries=entries,
+                        entries=query_entries,
                         key=key,
                         pm_team=pm_team,
                         country=country,
@@ -7667,6 +7723,7 @@ class SourceCodeQAService:
                 "rerank_misses": 0,
                 "question_feature_hits": 0,
                 "question_feature_misses": 0,
+                "repository_scope_filters": 0,
                 "exact_lookup_repos": 0,
                 "exact_lookup_hits": 0,
                 "exact_lookup_misses": 0,

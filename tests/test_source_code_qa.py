@@ -1078,6 +1078,50 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertTrue(followup["used"])
         self.assertIn("issueservice", augmented)
 
+    def test_query_limits_retrieval_to_explicit_repository_scope(self):
+        self.service.save_mapping(
+            pm_team="AF",
+            country="All",
+            repositories=[
+                {"display_name": "Anti Fraud API", "url": "https://git.example.com/team/anti-fraud-api.git"},
+                {"display_name": "GRC Portal", "url": "https://git.example.com/team/grc-portal.git"},
+            ],
+        )
+        entries = self.service.load_config()["mappings"]["AF:All"]
+        anti_entry = entries[0]
+        grc_entry = entries[1]
+        anti_path = self.service._repo_path("AF:All", type("Entry", (), anti_entry)())
+        grc_path = self.service._repo_path("AF:All", type("Entry", (), grc_entry)())
+        (anti_path / ".git").mkdir(parents=True)
+        (grc_path / ".git").mkdir(parents=True)
+        anti_file = anti_path / "service" / "IssueService.java"
+        grc_file = grc_path / "service" / "IssueService.java"
+        anti_file.parent.mkdir(parents=True)
+        grc_file.parent.mkdir(parents=True)
+        anti_file.write_text(
+            "class IssueService {\n"
+            "    void createIssue() { antiFraudOnly(); }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        grc_file.write_text(
+            "class IssueService {\n"
+            "    void createIssue() { grcPortalOnly(); }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        self._build_index_for_entry("AF:All", anti_entry)
+        self._build_index_for_entry("AF:All", grc_entry)
+
+        payload = self.service.query(pm_team="AF", country="All", question="where is createIssue in GRC Portal")
+
+        self.assertEqual(payload["status"], "ok")
+        self.assertTrue(payload["repository_scope"]["active"])
+        self.assertEqual(payload["repository_scope"]["selected_repositories"], ["GRC Portal"])
+        self.assertGreaterEqual(payload["retrieval_runtime"].get("repository_scope_filters", 0), 1)
+        self.assertEqual({match["repo"] for match in payload["matches"]}, {"GRC Portal"})
+        self.assertIn("grcPortalOnly", "\n".join(match["snippet"] for match in payload["matches"]))
+
     def test_question_specific_terms_cover_cbs_credit_review_questions(self):
         terms = self.service._question_specific_retrieval_terms(
             "When will system query CBS report when performing monthly credit review?"
