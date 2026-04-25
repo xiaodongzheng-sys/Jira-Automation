@@ -246,21 +246,6 @@
     });
   };
 
-  const summarizeSessionContext = (session) => {
-    const context = session?.last_context || {};
-    if (!context?.trace_id && !context?.question) {
-      return 'Choose Codex or Vertex, then ask a question. Codex can reuse confirmed files from this session.';
-    }
-    const priorQuestion = context.question ? `Previous: ${String(context.question).slice(0, 140)}` : '';
-    const paths = [
-      ...((context.codex_candidate_paths || []).map((item) => item.path || item.repo).filter(Boolean)),
-      ...((context.matches_snapshot || context.matches || []).map((item) => item.path).filter(Boolean)),
-    ];
-    const uniquePaths = Array.from(new Set(paths)).slice(0, 3);
-    const pathText = uniquePaths.length ? `Confirmed paths: ${uniquePaths.join(', ')}` : '';
-    return [priorQuestion, pathText].filter(Boolean).join(' · ') || 'Session context is ready for follow-up questions.';
-  };
-
   const renderSessionMessages = (session) => {
     if (!sessionMessages) return;
     const messages = session?.messages || [];
@@ -318,7 +303,10 @@
     activeSession = session || null;
     activeSessionId = session?.id || '';
     if (sessionTitle) sessionTitle.textContent = session?.title || 'New Source Code Chat';
-    if (sessionContext) sessionContext.textContent = summarizeSessionContext(session);
+    if (sessionContext) {
+      sessionContext.hidden = true;
+      sessionContext.textContent = '';
+    }
     if (sessionProvider) sessionProvider.textContent = providerLabel(session?.llm_provider || selectedLlmProvider());
     if (sessionScope) sessionScope.textContent = [session?.pm_team || pmTeam.value, session?.country || currentCountry()].filter(Boolean).join(' · ');
     if (session?.last_context && typeof session.last_context === 'object') {
