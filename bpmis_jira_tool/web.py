@@ -722,6 +722,17 @@ def create_app() -> Flask:
         if access_gate is not None:
             return access_gate
         payload = request.get_json(silent=True) or {}
+        if payload.get("async"):
+            job_store: JobStore = current_app.config["JOB_STORE"]
+            job = job_store.create("source-code-qa-query", title="Source Code Q&A Query")
+            app_obj = current_app._get_current_object()
+            thread = threading.Thread(
+                target=_run_source_code_qa_query_job,
+                args=(app_obj, job.job_id, dict(payload)),
+                daemon=True,
+            )
+            thread.start()
+            return jsonify({"status": "queued", "job_id": job.job_id})
         try:
             service = _build_source_code_qa_service()
             auto_sync = service.ensure_synced_today(
@@ -2214,6 +2225,58 @@ def _run_source_code_qa_sync_job(
             job_store.fail(job_id, str(error))
         except Exception as error:  # pragma: no cover - defensive guard for background worker failures.
             app.logger.exception("Source code QA sync job failed unexpectedly.")
+            job_store.fail(job_id, f"Unexpected error: {error}")
+
+
+def _run_source_code_qa_query_job(app: Flask, job_id: str, payload: dict[str, Any]) -> None:
+    with app.app_context():
+        job_store: JobStore = app.config["JOB_STORE"]
+
+        def progress_callback(stage: str, message: str, current: int, total: int) -> None:
+            job_store.update(
+                job_id,
+                state="running",
+                stage=stage,
+                message=message,
+                current=current,
+                total=total,
+            )
+
+        try:
+            service = _build_source_code_qa_service()
+            pm_team = str(payload.get("pm_team") or "")
+            country = str(payload.get("country") or "")
+            progress_callback("auto_sync_check", "Checking whether repositories were refreshed today.", 0, 1)
+            auto_sync = service.ensure_synced_today(pm_team=pm_team, country=country)
+            if auto_sync.get("attempted"):
+                progress_callback("auto_sync_completed", "Repository auto-sync completed; starting code search.", 1, 1)
+            else:
+                progress_callback("auto_sync_completed", "Repository indexes are fresh; starting code search.", 1, 1)
+            result = service.query(
+                pm_team=pm_team,
+                country=country,
+                question=str(payload.get("question") or ""),
+                answer_mode=str(payload.get("answer_mode") or "retrieval_only"),
+                llm_budget_mode="auto",
+                conversation_context=payload.get("conversation_context") if isinstance(payload.get("conversation_context"), dict) else None,
+                progress_callback=progress_callback,
+            )
+            result["auto_sync"] = auto_sync
+            status = str(result.get("status") or "ok")
+            job_store.complete(
+                job_id,
+                results=[result],
+                notice={
+                    "title": "Source Code Q&A",
+                    "tone": "success" if status == "ok" else "warning",
+                    "summary": result.get("summary") or "Source Code Q&A completed.",
+                    "details": [f"Status: {status}", f"Trace: {result.get('trace_id') or 'n/a'}"],
+                },
+            )
+        except ToolError as error:
+            job_store.fail(job_id, str(error))
+        except Exception as error:  # pragma: no cover - defensive guard for background worker failures.
+            app.logger.exception("Source code QA query job failed unexpectedly.")
             job_store.fail(job_id, f"Unexpected error: {error}")
 
 

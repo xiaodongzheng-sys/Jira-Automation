@@ -268,6 +268,49 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertEqual(snapshot.get("state"), "completed")
         self.assertEqual(snapshot["results"][0]["repo_status"][0]["state"], "synced")
 
+    def test_query_api_async_reports_real_backend_progress(self):
+        captured = {}
+
+        def fake_query(**kwargs):
+            captured.update(kwargs)
+            kwargs["progress_callback"]("direct_search", "Searching direct matches in Repo One.", 1, 2)
+            return {"status": "ok", "answer_mode": "retrieval_only", "summary": "done", "matches": []}
+
+        with patch(
+            "bpmis_jira_tool.source_code_qa.SourceCodeQAService.ensure_synced_today",
+            return_value={"attempted": False, "status": "fresh"},
+        ) as ensure_synced, patch(
+            "bpmis_jira_tool.source_code_qa.SourceCodeQAService.query",
+            side_effect=fake_query,
+        ):
+            with self.app.test_client() as client:
+                self._login(client, "teammate@npt.sg")
+                response = client.post(
+                    "/api/source-code-qa/query",
+                    json={
+                        "pm_team": "AF",
+                        "country": "All",
+                        "question": "where is createIssue",
+                        "answer_mode": "auto",
+                        "async": True,
+                    },
+                )
+                self.assertEqual(response.status_code, 200)
+                payload = response.get_json()
+                self.assertEqual(payload["status"], "queued")
+                snapshot = {}
+                for _ in range(20):
+                    job_response = client.get(f"/api/jobs/{payload['job_id']}")
+                    snapshot = job_response.get_json()
+                    if snapshot.get("state") == "completed":
+                        break
+                    time.sleep(0.05)
+
+        self.assertEqual(snapshot.get("state"), "completed")
+        self.assertEqual(snapshot["results"][0]["summary"], "done")
+        self.assertIn("progress_callback", captured)
+        ensure_synced.assert_called_once_with(pm_team="AF", country="All")
+
     def test_job_store_persists_background_job_snapshots(self):
         path = Path(self.temp_dir.name) / "run" / "jobs.json"
         first_store = JobStore(path)

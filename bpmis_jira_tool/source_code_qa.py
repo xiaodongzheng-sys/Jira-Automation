@@ -1750,11 +1750,22 @@ class SourceCodeQAService:
         answer_mode: str = ANSWER_MODE,
         llm_budget_mode: str = "cheap",
         conversation_context: dict[str, Any] | None = None,
+        progress_callback: Any | None = None,
     ) -> dict[str, Any]:
         key = self.mapping_key(pm_team, country)
         question = str(question or "").strip()
         started_at = time.time()
         trace_id = uuid.uuid4().hex
+
+        def report(stage: str, message: str, current: int = 0, total: int = 0) -> None:
+            if not progress_callback:
+                return
+            try:
+                progress_callback(stage, message, current, total)
+            except Exception:
+                return
+
+        report("validating", "Validating question and repository scope.", 0, 0)
         if not question:
             raise ToolError("Please enter a source-code question.")
         original_question = question
@@ -1803,10 +1814,31 @@ class SourceCodeQAService:
         index_freshness = self._index_freshness_payload(repo_status)
         exact_lookup_terms = self._extract_exact_lookup_terms(question)
         exact_matches: list[dict[str, Any]] = []
-        for entry in entries:
-            repo_path = self._repo_path(key, entry)
-            if not (repo_path / ".git").exists():
-                continue
+        synced_entries = [(entry, self._repo_path(key, entry)) for entry in entries if (self._repo_path(key, entry) / ".git").exists()]
+        intent = query_plan.get("intent") if isinstance(query_plan.get("intent"), dict) else {}
+        simple_quality_trace = (
+            any(intent.get(intent_key) for intent_key in ("rule_logic", "api", "config"))
+            and not any(
+                intent.get(intent_key)
+                for intent_key in (
+                    "data_source",
+                    "module_dependency",
+                    "message_flow",
+                    "static_qa",
+                    "impact_analysis",
+                    "test_coverage",
+                    "operational_boundary",
+                )
+            )
+        )
+        if exact_lookup_terms:
+            report(
+                "exact_lookup",
+                f"Checking exact table/path references for {len(exact_lookup_terms)} term{'s' if len(exact_lookup_terms) != 1 else ''}.",
+                0,
+                len(synced_entries),
+            )
+        for index, (entry, repo_path) in enumerate(synced_entries, start=1):
             if exact_lookup_terms:
                 exact_matches.extend(
                     self._exact_table_path_lookup_repo(
@@ -1817,6 +1849,7 @@ class SourceCodeQAService:
                         request_cache=request_cache,
                     )
                 )
+                report("exact_lookup", f"Checked exact references in {entry.display_name}.", index, len(synced_entries))
         exact_lookup_matched_terms = sorted(
             {
                 str((match.get("exact_lookup") or {}).get("term") or "").lower()
@@ -1828,11 +1861,25 @@ class SourceCodeQAService:
         if exact_matches:
             matches.extend(exact_matches)
         if not exact_lookup_sufficient:
-            for entry in entries:
-                repo_path = self._repo_path(key, entry)
-                if not (repo_path / ".git").exists():
-                    continue
+            report("direct_search", f"Searching direct matches across {len(synced_entries)} repos.", 0, len(synced_entries))
+            for index, (entry, repo_path) in enumerate(synced_entries, start=1):
                 matches.extend(self._search_repo(entry, repo_path, tokens, question=question, request_cache=request_cache))
+                report("direct_search", f"Searching direct matches in {entry.display_name}.", index, len(synced_entries))
+            skip_broad_query_decomposition = False
+            if matches and simple_quality_trace:
+                direct_ranked = self._rank_matches(question, matches, request_cache=request_cache)
+                direct_top = self._select_result_matches(direct_ranked, max(1, min(int(limit or 12), 30)), question=question)
+                direct_evidence_summary = self._compress_evidence_cached(question, direct_top, request_cache=request_cache)
+                direct_quality_gate = self._quality_gate_cached(question, direct_evidence_summary, request_cache=request_cache)
+                if direct_quality_gate.get("status") == "sufficient" and direct_quality_gate.get("confidence") in {"medium", "high"}:
+                    skip_broad_query_decomposition = True
+                    self._increment_retrieval_stat(request_cache, "direct_quality_short_circuits")
+                    report("quality_gate", "Direct matches are sufficient; skipping broader evidence expansion.", len(synced_entries), len(synced_entries))
+            if not skip_broad_query_decomposition:
+                report("query_decomposition", "Expanding query terms from domain and intent profile.", 0, len(synced_entries))
+            for index, (entry, repo_path) in enumerate(synced_entries, start=1):
+                if skip_broad_query_decomposition:
+                    continue
                 for component in query_plan.get("components") or []:
                     component_terms = [str(term) for term in component.get("terms") or [] if str(term).strip()]
                     expanded_tokens: list[str] = []
@@ -1852,6 +1899,7 @@ class SourceCodeQAService:
                             request_cache=request_cache,
                         )
                     )
+                report("query_decomposition", f"Expanded query terms in {entry.display_name}.", index, len(synced_entries))
                 if query_plan.get("intent", {}).get("static_qa"):
                     matches.extend(
                         self._tool_find_static_findings(
@@ -1885,6 +1933,7 @@ class SourceCodeQAService:
                             request_cache=request_cache,
                         )
                     )
+        report("ranking", "Ranking matched files and snippets.", 0, 0)
         matches = self._rank_matches(question, matches, request_cache=request_cache)
         result_limit = max(1, min(int(limit or 12), 30))
         top_matches = (
@@ -1893,29 +1942,15 @@ class SourceCodeQAService:
             else matches[:result_limit]
         )
         should_expand_matches = not exact_lookup_sufficient
-        intent = query_plan.get("intent") if isinstance(query_plan.get("intent"), dict) else {}
-        simple_quality_trace = (
-            any(intent.get(key) for key in ("rule_logic", "api", "config"))
-            and not any(
-                intent.get(key)
-                for key in (
-                    "data_source",
-                    "module_dependency",
-                    "message_flow",
-                    "static_qa",
-                    "impact_analysis",
-                    "test_coverage",
-                    "operational_boundary",
-                )
-            )
-        )
         if top_matches and should_expand_matches and simple_quality_trace:
             early_evidence_summary = self._compress_evidence_cached(question, top_matches, request_cache=request_cache)
             early_quality_gate = self._quality_gate_cached(question, early_evidence_summary, request_cache=request_cache)
             if early_quality_gate.get("status") == "sufficient" and early_quality_gate.get("confidence") in {"medium", "high"}:
                 should_expand_matches = False
                 self._increment_retrieval_stat(request_cache, "early_quality_short_circuits")
+                report("quality_gate", "Ranked evidence is sufficient; skipping deeper local expansion.", 0, 0)
         if top_matches and should_expand_matches and self._is_dependency_question(question):
+            report("dependency_expansion", "Expanding dependency evidence from top matches.", 0, 0)
             dependency_matches = self._expand_dependency_matches(
                 entries=entries,
                 key=key,
@@ -1936,6 +1971,7 @@ class SourceCodeQAService:
                 top_matches = self._rank_matches(question, top_matches, request_cache=request_cache)
                 top_matches = self._select_result_matches(top_matches, max(1, min(int(limit or 12), 30)), question=question)
         if top_matches and should_expand_matches:
+            report("two_hop_expansion", "Expanding two-hop evidence from top matches.", 0, 0)
             trace_matches = self._expand_two_hop_matches(
                 entries=entries,
                 key=key,
@@ -1956,6 +1992,7 @@ class SourceCodeQAService:
                 top_matches = self._rank_matches(question, top_matches, request_cache=request_cache)
                 top_matches = self._select_result_matches(top_matches, max(1, min(int(limit or 12), 30)), question=question)
         if top_matches and should_expand_matches:
+            report("agent_trace", "Tracing related entities from top matches.", 0, 0)
             agent_matches = self._expand_agent_trace_matches(
                 entries=entries,
                 key=key,
@@ -1976,6 +2013,7 @@ class SourceCodeQAService:
                 top_matches = self._rank_matches(question, top_matches, request_cache=request_cache)
                 top_matches = self._select_result_matches(top_matches, max(1, min(int(limit or 12), 30)), question=question)
         if top_matches and should_expand_matches:
+            report("tool_loop", "Running targeted local investigation tools.", 0, 0)
             tool_loop_matches = self._run_planner_tool_loop(
                 entries=entries,
                 key=key,
@@ -1997,10 +2035,12 @@ class SourceCodeQAService:
                 top_matches = self._rank_matches(question, top_matches, request_cache=request_cache)
                 top_matches = self._select_result_matches(top_matches, max(1, min(int(limit or 12), 30)), question=question)
         if top_matches and should_expand_matches:
+            report("quality_gate", "Checking evidence sufficiency before deeper expansion.", 0, 0)
             evidence_summary = self._compress_evidence_cached(question, top_matches, request_cache=request_cache)
             quality_gate = self._quality_gate_cached(question, evidence_summary, request_cache=request_cache)
             agent_plan = self._build_agent_plan(question, evidence_summary, quality_gate)
             if quality_gate.get("status") != "sufficient" and agent_plan.get("steps"):
+                report("agent_plan", "Running additional local plan because evidence is incomplete.", 0, 0)
                 top_matches = self._run_agent_plan(
                     entries=entries,
                     key=key,
@@ -2018,6 +2058,7 @@ class SourceCodeQAService:
             quality_gate = self._quality_gate_cached(question, evidence_summary, request_cache=request_cache)
             agent_plan = self._build_agent_plan(question, evidence_summary, quality_gate)
             if quality_gate.get("status") != "sufficient" and agent_plan.get("steps"):
+                report("agent_plan", "Running final local plan to fill missing evidence.", 0, 0)
                 top_matches = self._run_agent_plan(
                     entries=entries,
                     key=key,
@@ -2031,6 +2072,7 @@ class SourceCodeQAService:
                     request_cache=request_cache,
                 )
         if top_matches and should_expand_matches and query_plan.get("intent", {}).get("impact_analysis"):
+            report("impact_analysis", "Expanding impact analysis evidence.", 0, 0)
             impact_matches = self._expand_impact_matches(
                 entries=entries,
                 key=key,
@@ -2071,6 +2113,7 @@ class SourceCodeQAService:
                 started_at=started_at,
             )
             return payload
+        report("evidence_pack", "Building evidence pack and answer context.", 0, 0)
         evidence_summary = self._compress_evidence_cached(question, top_matches, request_cache=request_cache)
         quality_gate = self._quality_gate_cached(question, evidence_summary, request_cache=request_cache)
         trace_paths = [] if exact_lookup_sufficient or not should_expand_matches else self._build_trace_paths(entries=entries, key=key, matches=top_matches, question=question, request_cache=request_cache)
@@ -2138,6 +2181,7 @@ class SourceCodeQAService:
                 )
                 return payload
             try:
+                report("llm_generation", "Calling LLM with retrieved evidence.", 0, 0)
                 llm_payload = self._build_llm_answer(
                     entries=entries,
                     key=key,
@@ -2152,6 +2196,7 @@ class SourceCodeQAService:
                 payload.update(llm_payload)
                 payload["evidence_outline"] = self._build_evidence_outline(payload.get("evidence_pack") or evidence_pack, top_matches)
                 payload["answer_mode"] = normalized_answer_mode
+                report("completed", "LLM answer generated.", 0, 0)
             except ToolError as error:
                 if self._is_retryable_llm_rate_limit(error):
                     retry_after = self._llm_retry_after_seconds(error)
@@ -2175,6 +2220,8 @@ class SourceCodeQAService:
                         "message": f"{error} Showing code-search results instead.",
                         "fallback_mode": ANSWER_MODE,
                     }
+        if not (normalized_answer_mode in {ANSWER_MODE_GEMINI, ANSWER_MODE_AUTO} and payload.get("llm_answer")):
+            report("completed", "Code evidence retrieval completed.", 0, 0)
         self._record_query_telemetry(
             key=key,
             question=question,
@@ -5467,6 +5514,21 @@ class SourceCodeQAService:
         normalized_focus_terms = [term.lower() for term in (focus_terms or []) if term]
         query_terms = list(dict.fromkeys([*tokens, *normalized_focus_terms]))
         intent = self._question_retrieval_features(question, request_cache=request_cache).get("intent") or {}
+        simple_intent = (
+            any((intent or {}).get(key) for key in ("rule_logic", "api", "config"))
+            and not any(
+                (intent or {}).get(key)
+                for key in (
+                    "data_source",
+                    "module_dependency",
+                    "message_flow",
+                    "static_qa",
+                    "impact_analysis",
+                    "test_coverage",
+                    "operational_boundary",
+                )
+            )
+        )
         file_hits: dict[str, dict[str, Any]] = {}
         with sqlite3.connect(index_path) as connection:
             connection.row_factory = sqlite3.Row
@@ -5668,6 +5730,15 @@ class SourceCodeQAService:
                     intent=intent,
                 )
             )
+            if simple_intent and trace_stage == "direct" and len(file_hits) > 60:
+                file_hits = dict(
+                    sorted(
+                        file_hits.items(),
+                        key=lambda item: int(item[1].get("best_score") or 0),
+                        reverse=True,
+                    )[:60]
+                )
+                self._increment_retrieval_stat(request_cache, "simple_file_hit_prunes")
             for relative_path, hit in file_hits.items():
                 if not hit.get("best_score"):
                     continue
@@ -5801,6 +5872,24 @@ class SourceCodeQAService:
             for term in list(dict.fromkeys([*(str(token).lower() for token in tokens), *(str(term).lower() for term in focus_terms)]))
             if len(term) >= 3 and term not in STOPWORDS
         ][:24]
+        simple_intent = (
+            any((intent or {}).get(key) for key in ("rule_logic", "api", "config"))
+            and not any(
+                (intent or {}).get(key)
+                for key in (
+                    "data_source",
+                    "module_dependency",
+                    "message_flow",
+                    "static_qa",
+                    "impact_analysis",
+                    "test_coverage",
+                    "operational_boundary",
+                )
+            )
+        )
+        max_target_files = 48 if simple_intent else MAX_TARGETED_INDEX_FILES
+        max_target_lines = 160 if simple_intent else MAX_TARGETED_INDEX_LINES
+        max_target_semantic_chunks = 64 if simple_intent else MAX_TARGETED_SEMANTIC_CHUNKS
         intent_key = ",".join(sorted(key for key, enabled in (intent or {}).items() if enabled))
         cache_key = f"{self._index_fingerprint(index_path)}:targeted:{'|'.join(query_terms)}:{intent_key}"
         if request_cache is not None:
@@ -5816,13 +5905,13 @@ class SourceCodeQAService:
 
         def add_file_rows(rows: list[sqlite3.Row]) -> None:
             for row in rows:
-                if len(file_rows_by_path) >= MAX_TARGETED_INDEX_FILES:
+                if len(file_rows_by_path) >= max_target_files:
                     break
                 file_rows_by_path.setdefault(str(row["path"]), row)
 
         def add_line_rows(rows: list[sqlite3.Row]) -> None:
             for row in rows:
-                if len(line_rows_by_key) >= MAX_TARGETED_INDEX_LINES:
+                if len(line_rows_by_key) >= max_target_lines:
                     break
                 line_rows_by_key.setdefault((str(row["file_path"]), int(row["line_no"])), row)
 
@@ -5858,7 +5947,7 @@ class SourceCodeQAService:
                         order by count(*) desc, files.path
                         limit ?
                         """,
-                        (*query_terms, MAX_TARGETED_INDEX_FILES),
+                        (*query_terms, max_target_files),
                     ).fetchall()
                 )
             except sqlite3.Error:
@@ -5869,7 +5958,7 @@ class SourceCodeQAService:
                         add_file_rows(
                             connection.execute(
                                 "select * from files where lower_path like ? order by path limit ?",
-                                (f"%{term}%", MAX_TARGETED_INDEX_FILES),
+                                (f"%{term}%", max_target_files),
                             ).fetchall()
                         )
                     except sqlite3.Error:
@@ -5906,7 +5995,7 @@ class SourceCodeQAService:
                         order by count(*) desc, lines.file_path, lines.line_no
                         limit ?
                         """,
-                        (*query_terms[:12], MAX_TARGETED_INDEX_LINES),
+                        (*query_terms[:12], max_target_lines),
                     ).fetchall()
                 )
             except sqlite3.Error:
@@ -5917,7 +6006,7 @@ class SourceCodeQAService:
                         add_line_rows(
                             connection.execute(
                                 "select * from lines where lower_text like ? order by file_path, line_no limit ?",
-                                (f"%{term}%", MAX_TARGETED_INDEX_LINES),
+                                (f"%{term}%", max_target_lines),
                             ).fetchall()
                         )
                     except sqlite3.Error:
@@ -5964,20 +6053,21 @@ class SourceCodeQAService:
                             add_line_rows([line_row])
                     except sqlite3.Error:
                         continue
-        if file_rows_by_path and len(line_rows_by_key) < MAX_TARGETED_INDEX_LINES:
-            paths = list(file_rows_by_path)[:80]
+        if file_rows_by_path and len(line_rows_by_key) < max_target_lines:
+            paths = list(file_rows_by_path)[: (10 if simple_intent else 80)]
+            line_fill_limit = min(max_target_lines - len(line_rows_by_key), 80 if simple_intent else max_target_lines)
             try:
                 add_line_rows(
                     connection.execute(
                         f"select * from lines where file_path in ({placeholders(paths)}) order by file_path, line_no limit ?",
-                        (*paths, MAX_TARGETED_INDEX_LINES - len(line_rows_by_key)),
+                        (*paths, line_fill_limit),
                     ).fetchall()
                 )
             except sqlite3.Error:
                 pass
         if not file_rows_by_path:
             try:
-                add_file_rows(connection.execute("select * from files order by path limit ?", (min(MAX_TARGETED_INDEX_FILES, 80),)).fetchall())
+                add_file_rows(connection.execute("select * from files order by path limit ?", (min(max_target_files, 80),)).fetchall())
             except sqlite3.Error:
                 pass
         if self.semantic_index_enabled:
@@ -5995,7 +6085,7 @@ class SourceCodeQAService:
                     chunk_row = None
                 if chunk_row is not None:
                     semantic_rows_by_id.setdefault(chunk_id, chunk_row)
-                if len(semantic_rows_by_id) >= MAX_TARGETED_SEMANTIC_CHUNKS:
+                if len(semantic_rows_by_id) >= max_target_semantic_chunks:
                     break
             if not semantic_rows_by_id and query_terms:
                 token_lookup_supported = True
@@ -6010,7 +6100,7 @@ class SourceCodeQAService:
                         order by count(*) desc, semantic_chunks.file_path, semantic_chunks.start_line
                         limit ?
                         """,
-                        (*query_terms[:12], MAX_TARGETED_SEMANTIC_CHUNKS),
+                        (*query_terms[:12], max_target_semantic_chunks),
                     ).fetchall()
                 except sqlite3.Error:
                     token_lookup_supported = False
@@ -6021,22 +6111,23 @@ class SourceCodeQAService:
                             rows.extend(
                                 connection.execute(
                                     "select * from semantic_chunks where lower_text like ? order by file_path, start_line limit ?",
-                                    (f"%{term}%", MAX_TARGETED_SEMANTIC_CHUNKS),
+                                    (f"%{term}%", max_target_semantic_chunks),
                                 ).fetchall()
                             )
                         except sqlite3.Error:
                             continue
                 for row in rows:
-                    if len(semantic_rows_by_id) >= MAX_TARGETED_SEMANTIC_CHUNKS:
+                    if len(semantic_rows_by_id) >= max_target_semantic_chunks:
                         break
                     chunk_id = str(row["chunk_id"] if "chunk_id" in row.keys() else f"{row['file_path']}:{row['start_line']}")
                     semantic_rows_by_id.setdefault(chunk_id, row)
-            if file_rows_by_path and len(semantic_rows_by_id) < MAX_TARGETED_SEMANTIC_CHUNKS:
-                paths = list(file_rows_by_path)[:80]
+            if file_rows_by_path and len(semantic_rows_by_id) < max_target_semantic_chunks:
+                paths = list(file_rows_by_path)[: (10 if simple_intent else 80)]
+                semantic_fill_limit = min(max_target_semantic_chunks - len(semantic_rows_by_id), 32 if simple_intent else max_target_semantic_chunks)
                 try:
                     rows = connection.execute(
                         f"select * from semantic_chunks where file_path in ({placeholders(paths)}) order by file_path, start_line limit ?",
-                        (*paths, MAX_TARGETED_SEMANTIC_CHUNKS - len(semantic_rows_by_id)),
+                        (*paths, semantic_fill_limit),
                     ).fetchall()
                 except sqlite3.Error:
                     rows = []
@@ -6080,9 +6171,9 @@ class SourceCodeQAService:
             },
             "semantic_chunks": semantic_chunks,
             "bounded": {
-                "max_files": MAX_TARGETED_INDEX_FILES,
-                "max_lines": MAX_TARGETED_INDEX_LINES,
-                "max_semantic_chunks": MAX_TARGETED_SEMANTIC_CHUNKS,
+                "max_files": max_target_files,
+                "max_lines": max_target_lines,
+                "max_semantic_chunks": max_target_semantic_chunks,
                 "targeted": True,
             },
         }
@@ -6719,6 +6810,9 @@ class SourceCodeQAService:
                 "exact_lookup_repos": 0,
                 "exact_lookup_hits": 0,
                 "exact_lookup_misses": 0,
+                "direct_quality_short_circuits": 0,
+                "early_quality_short_circuits": 0,
+                "simple_file_hit_prunes": 0,
             },
         }
 

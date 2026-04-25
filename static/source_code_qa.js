@@ -76,25 +76,6 @@
   const currentCountry = () => (pmTeam.value === 'CRMS' ? country.value : 'All');
   const currentKey = () => `${pmTeam.value}:${currentCountry()}`;
   const currentRepoCount = () => (config.mappings?.[currentKey()] || []).length;
-  const exactLookupTerms = (value) => {
-    const text = String(value || '');
-    const matches = text.match(/[A-Za-z_][A-Za-z0-9_]*(?:[./:$-][A-Za-z0-9_][A-Za-z0-9_.:$-]*)+/g) || [];
-    const terms = [];
-    matches.forEach((match) => {
-      const term = match.replace(/^[`'",.;()[\]{}<>]+|[`'",.;()[\]{}<>]+$/g, '').toLowerCase();
-      if (term.length >= 8 && !term.startsWith('http://') && !term.startsWith('https://') && !terms.includes(term)) {
-        terms.push(term);
-      }
-    });
-    (text.match(/[A-Za-z_][A-Za-z0-9_]{2,}/g) || []).forEach((match) => {
-      const term = match.replace(/^[`'",.;()[\]{}<>]+|[`'",.;()[\]{}<>]+$/g, '').toLowerCase();
-      if (term.length >= 24 && (term.match(/_/g) || []).length >= 3 && !terms.some((existing) => existing.endsWith(`.${term}`)) && !terms.includes(term)) {
-        terms.push(term);
-      }
-    });
-    return terms.slice(0, 8);
-  };
-
   const formatElapsed = (startedAt) => {
     const seconds = Math.max(0, (performance.now() - startedAt) / 1000);
     return seconds < 10 ? `${seconds.toFixed(1)}s` : `${Math.round(seconds)}s`;
@@ -107,35 +88,24 @@
     }
   };
 
-  const startQueryProgress = ({ effectiveAnswerMode, exactTerms }) => {
+  const startQueryProgress = (message = 'Submitting query to server...') => {
     stopQueryProgress();
     const startedAt = performance.now();
-    const repoCount = currentRepoCount();
-    const hasExactTerms = exactTerms.length > 0;
-    const stageForElapsed = () => {
-      const elapsedMs = performance.now() - startedAt;
-      if (hasExactTerms && elapsedMs < 3500) {
-        return `Checking exact table/path references for ${exactTerms.length} term${exactTerms.length === 1 ? '' : 's'}...`;
+    let currentMessage = message;
+    const setMessage = (nextMessage) => {
+      currentMessage = nextMessage || currentMessage;
+      if (queryStatus) {
+        queryStatus.textContent = `${currentMessage} elapsed ${formatElapsed(startedAt)}`;
       }
-      if (elapsedMs < 9000) {
-        return repoCount ? `Scanning ${repoCount} ${pmTeam.value} repos...` : 'Scanning local code index...';
-      }
-      if (elapsedMs < 18000) {
-        return 'Ranking matching files and snippets...';
-      }
-      if (effectiveAnswerMode !== 'retrieval_only' && elapsedMs >= 26000) {
-        return 'Asking LLM with the retrieved evidence...';
-      }
-      return 'Expanding trace evidence from top matches...';
     };
     const update = () => {
       if (queryStatus) {
-        queryStatus.textContent = `${stageForElapsed()} elapsed ${formatElapsed(startedAt)}`;
+        queryStatus.textContent = `${currentMessage} elapsed ${formatElapsed(startedAt)}`;
       }
     };
     update();
     activeQueryProgress = window.setInterval(update, 500);
-    return startedAt;
+    return { startedAt, setMessage };
   };
 
   const buildFeedbackReplayContext = (payload) => ({
@@ -826,15 +796,33 @@
     }
   };
 
+  const pollQueryJob = async (jobId, progress) => {
+    while (jobId) {
+      const response = await fetch(`/api/jobs/${encodeURIComponent(jobId)}`, { method: 'GET' });
+      const payload = await readJson(response);
+      const progressText = payload.total
+        ? `${payload.message || 'Processing source-code question.'} (${payload.current || 0}/${payload.total})`
+        : (payload.message || 'Processing source-code question.');
+      progress.setMessage(progressText);
+      if (payload.state === 'completed') {
+        return (payload.results || [])[0] || {};
+      }
+      if (payload.state === 'failed') {
+        throw new Error(payload.error || payload.message || 'Source Code Q&A failed.');
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 700));
+    }
+    return {};
+  };
+
   const queryCode = async () => {
     const selectedAnswerMode = answerMode?.value || 'auto';
     const effectiveAnswerMode = selectedAnswerMode !== 'retrieval_only' && !llmReady ? 'retrieval_only' : selectedAnswerMode;
     if (activeMode) activeMode.textContent = effectiveAnswerMode;
-    const exactTerms = exactLookupTerms(questionInput.value);
-    const startedAt = startQueryProgress({ effectiveAnswerMode, exactTerms });
+    const progress = startQueryProgress('Submitting query to server...');
     if (queryButton) queryButton.disabled = true;
     try {
-      const payload = await fetch(queryUrl, {
+      const initialPayload = await fetch(queryUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -844,18 +832,22 @@
           answer_mode: effectiveAnswerMode,
           llm_budget_mode: 'auto',
           conversation_context: conversationContext,
+          async: true,
         }),
       }).then(readJson);
+      const payload = initialPayload.status === 'queued' && initialPayload.job_id
+        ? await pollQueryJob(initialPayload.job_id, progress)
+        : initialPayload;
       lastPayload = payload;
       conversationContext = buildConversationContext(payload);
       rememberLastQueryConfig(effectiveAnswerMode);
       summary.textContent = payload.summary || 'Search completed.';
       if (payload.llm_retryable_error?.retryable) {
-        queryStatus.textContent = `LLM quota/rate limit hit; retry is still enabled. Code search completed in ${formatElapsed(startedAt)}.`;
+        queryStatus.textContent = `LLM quota/rate limit hit; retry is still enabled. Code search completed in ${formatElapsed(progress.startedAt)}.`;
       } else {
         queryStatus.textContent = payload.status === 'ok'
-          ? `Search completed in ${formatElapsed(startedAt)}.`
-          : `${payload.status} after ${formatElapsed(startedAt)}.`;
+          ? `Search completed in ${formatElapsed(progress.startedAt)}.`
+          : `${payload.status} after ${formatElapsed(progress.startedAt)}.`;
       }
       if (activeMode) activeMode.textContent = payload.answer_mode || effectiveAnswerMode;
       renderUsageBadges(payload);
@@ -881,7 +873,7 @@
         feedbackStatus.textContent = '';
       }
     } catch (error) {
-      queryStatus.textContent = `${error.message || 'Search failed.'} elapsed ${formatElapsed(startedAt)}`;
+      queryStatus.textContent = `${error.message || 'Search failed.'} elapsed ${formatElapsed(progress.startedAt)}`;
       renderUsageBadges({});
       renderFallbackNotice({});
       renderLlmAnswer({});
