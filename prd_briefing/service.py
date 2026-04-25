@@ -1501,6 +1501,10 @@ BRIEFING_CATEGORY_META = {
 }
 
 
+MAX_BRIEFING_BLOCK_SECTIONS = 4
+MAX_BRIEFING_BLOCK_HTML_CHARS = 180_000
+
+
 def build_pm_briefing_blocks(sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
     candidates: list[tuple[int, dict[str, Any], str, int]] = []
     for index, section in enumerate(sections):
@@ -1532,32 +1536,63 @@ def build_pm_briefing_blocks(sections: list[dict[str, Any]]) -> list[dict[str, A
     for category in category_order:
         entries = sorted(grouped[category], key=lambda item: item[0])
         meta = BRIEFING_CATEGORY_META.get(category, BRIEFING_CATEGORY_META["feature"])
-        section_indexes = [index for index, _section, _score in entries]
-        block_sections = [section for _index, section, _score in entries]
-        source_refs = [
-            {
-                "section_index": index,
-                "section_path": str(section.get("section_path", "")).strip(),
-                "content_excerpt": truncate_for_prompt(str(section.get("content", "")), 700),
-            }
-            for index, section, _score in entries
-        ]
-        developer_focus = [localize_detail_point_zh(item) for item in extract_detail_points(block_sections, category="developer")]
-        merged_summary = build_block_summary(meta["title"], block_sections)
-        blocks.append(
-            {
-                "block_id": f"block-{len(blocks) + 1}-{category}",
-                "title": meta["title"],
-                "briefing_goal": meta["goal"],
-                "merged_summary": merged_summary,
-                "section_indexes": section_indexes,
-                "source_refs": source_refs,
-                "developer_focus": developer_focus,
-                "walkthrough_cached": False,
-                "walkthrough_audio_cached": False,
-            }
-        )
+        entry_groups = split_briefing_entries(entries)
+        for group_index, group_entries in enumerate(entry_groups, start=1):
+            title = meta["title"]
+            if len(entry_groups) > 1:
+                title = f"{title} {group_index}"
+            section_indexes = [index for index, _section, _score in group_entries]
+            block_sections = [section for _index, section, _score in group_entries]
+            source_refs = [
+                {
+                    "section_index": index,
+                    "section_path": str(section.get("section_path", "")).strip(),
+                    "content_excerpt": truncate_for_prompt(str(section.get("content", "")), 700),
+                }
+                for index, section, _score in group_entries
+            ]
+            developer_focus = [localize_detail_point_zh(item) for item in extract_detail_points(block_sections, category="developer")]
+            merged_summary = build_block_summary(title, block_sections)
+            blocks.append(
+                {
+                    "block_id": (
+                        f"block-{len(blocks) + 1}-{category}-{group_index}"
+                        if len(entry_groups) > 1
+                        else f"block-{len(blocks) + 1}-{category}"
+                    ),
+                    "title": title,
+                    "briefing_goal": meta["goal"],
+                    "merged_summary": merged_summary,
+                    "section_indexes": section_indexes,
+                    "source_refs": source_refs,
+                    "developer_focus": developer_focus,
+                    "walkthrough_cached": False,
+                    "walkthrough_audio_cached": False,
+                }
+            )
     return blocks
+
+
+def split_briefing_entries(entries: list[tuple[int, dict[str, Any], int]]) -> list[list[tuple[int, dict[str, Any], int]]]:
+    groups: list[list[tuple[int, dict[str, Any], int]]] = []
+    current: list[tuple[int, dict[str, Any], int]] = []
+    current_size = 0
+
+    for entry in entries:
+        _index, section, _score = entry
+        section_size = len(str(section.get("html_content", ""))) + len(str(section.get("content", "")))
+        would_overflow_count = len(current) >= MAX_BRIEFING_BLOCK_SECTIONS
+        would_overflow_size = current and current_size + section_size > MAX_BRIEFING_BLOCK_HTML_CHARS
+        if current and (would_overflow_count or would_overflow_size):
+            groups.append(current)
+            current = []
+            current_size = 0
+        current.append(entry)
+        current_size += section_size
+
+    if current:
+        groups.append(current)
+    return groups
 
 
 def classify_briefing_category(section_path: str, content: str) -> str:

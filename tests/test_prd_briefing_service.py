@@ -223,6 +223,26 @@ class PRDBriefingServiceTests(unittest.TestCase):
         self.assertEqual(state_block["section_indexes"], [3, 4])
         self.assertTrue(ui_block["source_refs"])
 
+    def test_pm_briefing_blocks_split_large_related_groups(self):
+        sections = [
+            {
+                "section_path": f"3.8.{index} Report Download",
+                "content": "User can download report history and audit export.",
+                "html_content": "<table>" + ("<tr><td>Report history</td></tr>" * 20) + "</table>",
+            }
+            for index in range(1, 7)
+        ]
+
+        blocks = build_pm_briefing_blocks(sections)
+        reporting_blocks = [block for block in blocks if block["title"].startswith("报表、下载和历史记录")]
+
+        self.assertGreaterEqual(len(reporting_blocks), 2)
+        self.assertTrue(all(len(block["section_indexes"]) <= 4 for block in reporting_blocks))
+        self.assertEqual(
+            [index for block in reporting_blocks for index in block["section_indexes"]],
+            list(range(6)),
+        )
+
     def test_narrate_briefing_block_uses_block_payload_cache(self):
         self.openai_client.is_configured = lambda: True
         page = IngestedConfluencePage(
