@@ -1223,9 +1223,8 @@ class SourceCodeQAService:
             "countries": list(CRMS_COUNTRIES),
             "all_country": ALL_COUNTRY,
             "answer_modes": [
-                {"value": ANSWER_MODE_AUTO, "label": "Auto"},
-                {"value": ANSWER_MODE, "label": "Code Search"},
-                {"value": ANSWER_MODE_GEMINI, "label": "LLM"},
+                {"value": ANSWER_MODE_AUTO, "label": "Smart Answer"},
+                {"value": ANSWER_MODE, "label": "Code Search Only"},
             ],
         }
 

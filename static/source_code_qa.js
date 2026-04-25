@@ -264,9 +264,9 @@
         const provider = llmPolicy.provider?.provider || 'LLM';
         queryStatus.textContent = `${provider} is unavailable; code search will still run.`;
       } else if (llmSelected) {
-        queryStatus.textContent = 'Ready to ask LLM.';
+        queryStatus.textContent = 'Ready. Smart Answer will search first and call LLM only when useful.';
       } else if (!llmSelected) {
-        queryStatus.textContent = 'Ready.';
+        queryStatus.textContent = 'Ready. Code search only.';
       }
     }
   };
@@ -841,7 +841,10 @@
   const renderUsageBadges = (payload) => {
     const llmAnswered = ['gemini_flash', 'auto'].includes(payload?.answer_mode) && Boolean(payload?.llm_answer);
     if (activeCache) {
-      if (llmAnswered) {
+      if (payload?.llm_cost_skip?.skipped) {
+        activeCache.hidden = false;
+        activeCache.textContent = 'LLM skipped';
+      } else if (llmAnswered) {
         activeCache.hidden = false;
         activeCache.textContent = payload?.llm_cached ? 'cache hit' : 'live LLM';
       } else {
