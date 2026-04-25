@@ -686,9 +686,11 @@
       }, { attempts: 5, delayMs: 700 });
       if (payload.status === 'queued' && payload.job_id) {
         await pollSyncJob(payload.job_id);
+        await loadConfig();
         return;
       }
       renderStatus(payload.repo_status || payload.results || []);
+      await loadConfig();
       adminStatus.textContent = payload.status === 'ok'
         ? 'Sync completed.'
         : (payload.message || 'Sync completed with issues. Check status cards.');
