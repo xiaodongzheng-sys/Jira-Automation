@@ -576,6 +576,20 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertEqual(snapshot["state"], "completed")
         self.assertEqual(snapshot["results"][0]["status"], "ok")
 
+    def test_job_store_marks_loaded_running_jobs_interrupted(self):
+        path = Path(self.temp_dir.name) / "run" / "jobs.json"
+        first_store = JobStore(path)
+        job = first_store.create("source-code-qa-query", "Answer Source Code Question")
+        first_store.update(job.job_id, state="running", stage="codex_stream", message="Calling Codex.")
+
+        second_store = JobStore(path)
+        snapshot = second_store.snapshot(job.job_id)
+
+        self.assertIsNotNone(snapshot)
+        self.assertEqual(snapshot["state"], "failed")
+        self.assertEqual(snapshot["stage"], "failed")
+        self.assertIn("interrupted by a server restart", snapshot["error"])
+
     def test_feedback_api_saves_user_signal(self):
         with self.app.test_client() as client:
             self._login(client, "teammate@npt.sg")

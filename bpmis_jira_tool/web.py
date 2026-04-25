@@ -95,8 +95,12 @@ class JobState:
 class JobStore:
     def __init__(self, storage_path: Path | None = None) -> None:
         self.storage_path = storage_path
+        self._loaded_jobs_interrupted = False
         self._jobs: dict[str, JobState] = self._load()
         self._lock = threading.Lock()
+        if self._loaded_jobs_interrupted:
+            with self._lock:
+                self._persist_locked()
 
     def _load(self) -> dict[str, JobState]:
         if self.storage_path is None or not self.storage_path.exists():
@@ -110,9 +114,17 @@ class JobStore:
             if not isinstance(raw_job, dict):
                 continue
             try:
-                jobs[str(job_id)] = JobState(**raw_job)
+                job = JobState(**raw_job)
             except TypeError:
                 continue
+            if job.state in {"queued", "running"}:
+                job.state = "failed"
+                job.stage = "failed"
+                job.message = "This job was interrupted by a server restart. Please start it again."
+                job.error = job.message
+                job.updated_at = time.time()
+                self._loaded_jobs_interrupted = True
+            jobs[str(job_id)] = job
         return jobs
 
     def _persist_locked(self) -> None:

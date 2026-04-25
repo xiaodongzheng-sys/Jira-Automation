@@ -6,6 +6,7 @@
   const saveUrl = root.dataset.saveUrl;
   const syncUrl = root.dataset.syncUrl;
   const queryUrl = root.dataset.queryUrl;
+  const jobsUrlTemplate = root.dataset.jobsUrl || '/api/jobs/__JOB_ID__';
   const feedbackUrl = root.dataset.feedbackUrl;
   const sessionsUrl = root.dataset.sessionsUrl;
   const modelAvailabilityUrl = root.dataset.modelAvailabilityUrl;
@@ -88,6 +89,30 @@
       throw new Error(payload.message || 'Request failed.');
     }
     return payload;
+  };
+  const sleep = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms));
+  const jobStatusUrl = (jobId) => jobsUrlTemplate.replace('__JOB_ID__', encodeURIComponent(jobId));
+  const isTransientJobStatusError = (error) => {
+    const message = String(error?.message || '');
+    return message.includes('HTML error/timeout page') || message.includes('non-JSON response');
+  };
+  const readJobStatus = async (jobId) => {
+    let lastError = null;
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      try {
+        return await fetch(jobStatusUrl(jobId), {
+          method: 'GET',
+          headers: { Accept: 'application/json' },
+        }).then(readJson);
+      } catch (error) {
+        lastError = error;
+        if (!isTransientJobStatusError(error)) {
+          throw error;
+        }
+        await sleep(450 + (attempt * 350));
+      }
+    }
+    throw lastError || new Error('Could not read job status.');
   };
 
   const currentCountry = () => (pmTeam.value === 'CRMS' ? country.value : 'All');
@@ -602,11 +627,7 @@
 
   const pollSyncJob = async (jobId) => {
     while (jobId) {
-      const response = await fetch(`/api/jobs/${encodeURIComponent(jobId)}`, { method: 'GET' });
-      const payload = await response.json();
-      if (!response.ok) {
-        throw new Error(payload.message || 'Could not read sync job status.');
-      }
+      const payload = await readJobStatus(jobId);
       adminStatus.textContent = payload.message || 'Syncing repositories...';
       if (payload.state === 'completed') {
         const result = (payload.results || [])[0] || {};
@@ -619,7 +640,7 @@
       if (payload.state === 'failed') {
         throw new Error(payload.error || payload.message || 'Sync failed.');
       }
-      await new Promise((resolve) => window.setTimeout(resolve, 900));
+      await sleep(900);
     }
     return {};
   };
@@ -1138,8 +1159,7 @@
 
   const pollQueryJob = async (jobId, progress) => {
     while (jobId) {
-      const response = await fetch(`/api/jobs/${encodeURIComponent(jobId)}`, { method: 'GET' });
-      const payload = await readJson(response);
+      const payload = await readJobStatus(jobId);
       const progressText = payload.total
         ? `${payload.message || 'Processing source-code question.'} (${payload.current || 0}/${payload.total})`
         : (payload.message || 'Processing source-code question.');
@@ -1153,7 +1173,7 @@
       if (payload.state === 'failed') {
         throw new Error(payload.error || payload.message || 'Source Code Q&A failed.');
       }
-      await new Promise((resolve) => window.setTimeout(resolve, 700));
+      await sleep(700);
     }
     return {};
   };
