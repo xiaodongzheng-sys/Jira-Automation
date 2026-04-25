@@ -4972,6 +4972,56 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertIn("Showing code-search results instead", payload["fallback_notice"]["message"])
         self.assertTrue(payload["matches"])
 
+    def test_gemini_429_resource_exhausted_keeps_llm_retry_enabled(self):
+        service = SourceCodeQAService(
+            data_root=Path(self.temp_dir.name),
+            team_profiles=TEAM_PROFILE_DEFAULTS,
+            gemini_api_key="gemini-key",
+            llm_max_retries=0,
+            gitlab_token="secret-token",
+            git_timeout_seconds=5,
+            max_file_bytes=200_000,
+        )
+        service.save_mapping(
+            pm_team="AF",
+            country="All",
+            repositories=[{"display_name": "Portal Repo", "url": "https://git.example.com/team/portal.git"}],
+        )
+        entry = service.load_config()["mappings"]["AF:All"][0]
+        repo_path = service._repo_path("AF:All", type("Entry", (), entry)())
+        (repo_path / ".git").mkdir(parents=True)
+        source_file = repo_path / "bpmis" / "jira_client.py"
+        source_file.parent.mkdir(parents=True)
+        source_file.write_text(
+            "class BPMISClient:\n"
+            "    def batchCreateJiraIssue(self):\n"
+            "        return self.post('/api/v1/issues/batchCreateJiraIssue')\n",
+            encoding="utf-8",
+        )
+
+        class RateLimitedResponse:
+            ok = False
+            status_code = 429
+            text = '{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","message":"quota exceeded"}}'
+            headers = {"Retry-After": "3"}
+
+        with patch("bpmis_jira_tool.source_code_qa.requests.post", return_value=RateLimitedResponse()):
+            self._build_all_indexes(service)
+            payload = service.query(
+                pm_team="AF",
+                country="All",
+                question="where is batchCreateJiraIssue",
+                answer_mode="gemini_flash",
+                llm_budget_mode="balanced",
+            )
+
+        self.assertEqual(payload["answer_mode"], "gemini_flash")
+        self.assertTrue(payload["llm_retryable_error"]["retryable"])
+        self.assertEqual(payload["llm_retryable_error"]["code"], "rate_limited")
+        self.assertEqual(payload["fallback_notice"]["fallback_mode"], "gemini_flash")
+        self.assertIn("retry", payload["fallback_notice"]["message"].lower())
+        self.assertTrue(payload["matches"])
+
     def test_gemini_503_retries_and_falls_back_to_lite_model(self):
         service = SourceCodeQAService(
             data_root=Path(self.temp_dir.name),

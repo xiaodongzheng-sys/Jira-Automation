@@ -518,6 +518,23 @@ class LLMGenerateResult:
     attempt_log: tuple[dict[str, Any], ...] = ()
 
 
+class SourceCodeQALLMError(ToolError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        provider_status: str = "",
+        retryable: bool = False,
+        retry_after_seconds: float | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.provider_status = provider_status
+        self.retryable = retryable
+        self.retry_after_seconds = retry_after_seconds
+
+
 class SourceCodeQAEmbeddingProvider:
     name = "local_token_hybrid"
 
@@ -653,6 +670,9 @@ class GeminiSourceCodeQALLMProvider(SourceCodeQALLMProvider):
             models.append(fallback_model)
         retryable_statuses = {429, 500, 502, 503, 504}
         last_error: str | None = None
+        last_status_code: int | None = None
+        last_provider_status = ""
+        last_retry_after: float | None = None
         attempts = 0
         attempt_log: list[dict[str, Any]] = []
         started_at = time.time()
@@ -726,6 +746,8 @@ class GeminiSourceCodeQALLMProvider(SourceCodeQALLMProvider):
                 status = int(getattr(response, "status_code", 500) or 500)
                 detail = self._sanitize_error_detail(response.text)
                 last_error = detail
+                last_status_code = status
+                last_provider_status = self._provider_error_status(detail)
                 retryable = status in retryable_statuses
                 attempt_log.append(
                     {
@@ -741,8 +763,15 @@ class GeminiSourceCodeQALLMProvider(SourceCodeQALLMProvider):
                 if attempt_index + 1 < len(model_delays):
                     retry_after = self._retry_after_seconds(response)
                     if retry_after is not None:
+                        last_retry_after = retry_after
                         model_delays[attempt_index + 1] = retry_after
-        raise ToolError(f"Gemini answer generation failed. {str(last_error or 'Model unavailable.')[:500]}")
+        raise SourceCodeQALLMError(
+            f"Gemini answer generation failed. {str(last_error or 'Model unavailable.')[:500]}",
+            status_code=last_status_code,
+            provider_status=last_provider_status,
+            retryable=bool(last_status_code in retryable_statuses),
+            retry_after_seconds=last_retry_after,
+        )
 
     def extract_text(self, payload: dict[str, Any]) -> str:
         candidates = payload.get("candidates") or []
@@ -795,6 +824,17 @@ class GeminiSourceCodeQALLMProvider(SourceCodeQALLMProvider):
             return None
         return max(0.0, min(self.max_backoff_seconds, delay))
 
+    @staticmethod
+    def _provider_error_status(detail: str) -> str:
+        try:
+            payload = json.loads(str(detail or ""))
+        except json.JSONDecodeError:
+            return ""
+        error = payload.get("error") if isinstance(payload, dict) else {}
+        if isinstance(error, dict):
+            return str(error.get("status") or "").strip()
+        return ""
+
 
 class OpenAICompatibleSourceCodeQALLMProvider(SourceCodeQALLMProvider):
     name = LLM_PROVIDER_OPENAI_COMPATIBLE
@@ -835,6 +875,9 @@ class OpenAICompatibleSourceCodeQALLMProvider(SourceCodeQALLMProvider):
             models.append(fallback_model)
         retryable_statuses = {429, 500, 502, 503, 504}
         last_error: str | None = None
+        last_status_code: int | None = None
+        last_provider_status = ""
+        last_retry_after: float | None = None
         attempts = 0
         attempt_log: list[dict[str, Any]] = []
         started_at = time.time()
@@ -910,6 +953,8 @@ class OpenAICompatibleSourceCodeQALLMProvider(SourceCodeQALLMProvider):
                 detail = self._sanitize_error_detail(response.text)
                 last_error = detail
                 status = int(getattr(response, "status_code", 500) or 500)
+                last_status_code = status
+                last_provider_status = GeminiSourceCodeQALLMProvider._provider_error_status(detail)
                 retryable = status in retryable_statuses
                 attempt_log.append(
                     {
@@ -925,8 +970,15 @@ class OpenAICompatibleSourceCodeQALLMProvider(SourceCodeQALLMProvider):
                 if attempt_index + 1 < len(model_delays):
                     retry_after = self._retry_after_seconds(response)
                     if retry_after is not None:
+                        last_retry_after = retry_after
                         model_delays[attempt_index + 1] = retry_after
-        raise ToolError(f"OpenAI-compatible answer generation failed. {str(last_error or 'Model unavailable.')[:500]}")
+        raise SourceCodeQALLMError(
+            f"OpenAI-compatible answer generation failed. {str(last_error or 'Model unavailable.')[:500]}",
+            status_code=last_status_code,
+            provider_status=last_provider_status,
+            retryable=bool(last_status_code in retryable_statuses),
+            retry_after_seconds=last_retry_after,
+        )
 
     def extract_text(self, payload: dict[str, Any]) -> str:
         choices = payload.get("choices") or []
@@ -2059,11 +2111,28 @@ class SourceCodeQAService:
                 payload["evidence_outline"] = self._build_evidence_outline(payload.get("evidence_pack") or evidence_pack, top_matches)
                 payload["answer_mode"] = normalized_answer_mode
             except ToolError as error:
-                payload["fallback_notice"] = {
-                    "title": "LLM unavailable",
-                    "message": f"{error} Showing code-search results instead.",
-                    "fallback_mode": ANSWER_MODE,
-                }
+                if self._is_retryable_llm_rate_limit(error):
+                    retry_after = self._llm_retry_after_seconds(error)
+                    retry_hint = f" Provider suggested retry after {retry_after:g}s." if retry_after is not None else ""
+                    payload["answer_mode"] = normalized_answer_mode
+                    payload["llm_retryable_error"] = {
+                        "retryable": True,
+                        "code": "rate_limited",
+                        "status_code": getattr(error, "status_code", None),
+                        "provider_status": str(getattr(error, "provider_status", "") or "RESOURCE_EXHAUSTED"),
+                        "retry_after_seconds": retry_after,
+                    }
+                    payload["fallback_notice"] = {
+                        "title": "LLM rate limit, retry allowed",
+                        "message": f"{error} LLM mode remains enabled; you can retry this question when quota is available.{retry_hint} Showing code-search results for this attempt.",
+                        "fallback_mode": normalized_answer_mode,
+                    }
+                else:
+                    payload["fallback_notice"] = {
+                        "title": "LLM unavailable",
+                        "message": f"{error} Showing code-search results instead.",
+                        "fallback_mode": ANSWER_MODE,
+                    }
         self._record_query_telemetry(
             key=key,
             question=question,
@@ -2289,6 +2358,23 @@ class SourceCodeQAService:
                 for item in list(value)[:list_limit]
             ]
         return str(value)[:text_limit]
+
+    @staticmethod
+    def _is_retryable_llm_rate_limit(error: ToolError) -> bool:
+        status_code = getattr(error, "status_code", None)
+        provider_status = str(getattr(error, "provider_status", "") or "").upper()
+        text = str(error).upper()
+        return status_code == 429 or provider_status == "RESOURCE_EXHAUSTED" or "RESOURCE_EXHAUSTED" in text
+
+    @staticmethod
+    def _llm_retry_after_seconds(error: ToolError) -> float | None:
+        value = getattr(error, "retry_after_seconds", None)
+        if value is None:
+            return None
+        try:
+            return max(0.0, float(value))
+        except (TypeError, ValueError):
+            return None
 
     def _load_entries_for_key(self, key: str) -> list[RepositoryEntry]:
         raw_entries = self.load_config().get("mappings", {}).get(key, [])

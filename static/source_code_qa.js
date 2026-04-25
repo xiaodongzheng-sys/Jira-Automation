@@ -844,9 +844,13 @@
       conversationContext = buildConversationContext(payload);
       rememberLastQueryConfig(effectiveAnswerMode);
       summary.textContent = payload.summary || 'Search completed.';
-      queryStatus.textContent = payload.status === 'ok'
-        ? `Search completed in ${formatElapsed(startedAt)}.`
-        : `${payload.status} after ${formatElapsed(startedAt)}.`;
+      if (payload.llm_retryable_error?.retryable) {
+        queryStatus.textContent = `LLM quota/rate limit hit; retry is still enabled. Code search completed in ${formatElapsed(startedAt)}.`;
+      } else {
+        queryStatus.textContent = payload.status === 'ok'
+          ? `Search completed in ${formatElapsed(startedAt)}.`
+          : `${payload.status} after ${formatElapsed(startedAt)}.`;
+      }
       if (activeMode) activeMode.textContent = payload.answer_mode || effectiveAnswerMode;
       renderUsageBadges(payload);
       renderFallbackNotice(payload);
