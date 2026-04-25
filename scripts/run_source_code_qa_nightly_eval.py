@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 from typing import Any
@@ -49,6 +50,7 @@ def run_nightly_eval(*, output_dir: Path, cases: list[str], fixture: bool, inclu
         eval_args.extend(["--cases", case_path])
     eval_payload, eval_stdout, eval_stderr, eval_returncode = _run_json_command(eval_args)
     llm_smoke_data_root = output_dir / "llm_smoke_data"
+    shutil.rmtree(llm_smoke_data_root, ignore_errors=True)
     llm_smoke_args = [
         sys.executable,
         "scripts/run_source_code_qa_evals.py",

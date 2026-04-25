@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 from bpmis_jira_tool.source_code_qa import LLMGenerateResult, RepositoryEntry, SourceCodeQAService
 from bpmis_jira_tool.user_config import TEAM_PROFILE_DEFAULTS
-from bpmis_jira_tool.web import create_app
+from bpmis_jira_tool.web import JobStore, create_app
 from scripts.promote_source_code_qa_eval_candidates import promote_candidates
 from scripts.run_source_code_qa_evals import _build_fixture_repositories, _evaluate_case
 from scripts.source_code_qa_feedback_to_eval import build_eval_candidates
@@ -186,6 +186,10 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertEqual(payload["llm_policy"]["planner_tools"]["version"], 1)
         self.assertEqual(payload["llm_policy"]["semantic_retrieval"]["model"], "local-token-hybrid-v1")
         self.assertEqual(payload["llm_policy"]["semantic_retrieval"]["embedding_provider"]["provider"], "local_token_hybrid")
+        self.assertEqual(payload["index_health"]["status"], "not_configured")
+        self.assertEqual(payload["release_gate"]["status"], "missing")
+        self.assertEqual(payload["domain_knowledge"]["domains"]["CRMS"]["label"], "Credit Risk")
+        self.assertIn("GRC", payload["domain_knowledge"]["domains"])
         self.assertEqual(payload["options"]["answer_modes"][0]["value"], "auto")
         self.assertNotIn("llm_budget_modes", payload["options"])
 
@@ -214,6 +218,20 @@ class SourceCodeQARouteTests(unittest.TestCase):
 
         self.assertEqual(snapshot.get("state"), "completed")
         self.assertEqual(snapshot["results"][0]["repo_status"][0]["state"], "synced")
+
+    def test_job_store_persists_background_job_snapshots(self):
+        path = Path(self.temp_dir.name) / "run" / "jobs.json"
+        first_store = JobStore(path)
+        job = first_store.create("source-code-qa-sync", "Sync Source Code Repositories")
+        first_store.update(job.job_id, state="running", message="Indexing.")
+        first_store.complete(job.job_id, results=[{"status": "ok"}], notice={"summary": "done"})
+
+        second_store = JobStore(path)
+        snapshot = second_store.snapshot(job.job_id)
+
+        self.assertIsNotNone(snapshot)
+        self.assertEqual(snapshot["state"], "completed")
+        self.assertEqual(snapshot["results"][0]["status"], "ok")
 
     def test_feedback_api_saves_user_signal(self):
         with self.app.test_client() as client:
@@ -1106,6 +1124,56 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertIn("feedback_window=1", summary)
         self.assertIn("review_queue=0", summary)
         self.assertIn("latest_eval_state=passed", summary)
+
+    def test_domain_profiles_include_domain_knowledge_pack_terms(self):
+        crms_profile = self.service._domain_profile("CRMS", "SG")
+        af_profile = self.service._domain_profile("AF", "All")
+        grc_profile = self.service._domain_profile("GRC", "All")
+        knowledge = self.service.domain_knowledge_payload()
+
+        self.assertIn("TermLoanPreCheckEngine", crms_profile["source_terms"])
+        self.assertIn("Term Loan PreCheck", crms_profile["knowledge_terms"])
+        self.assertIn("BlackWhiteList", af_profile["data_carriers"])
+        self.assertIn("CaseReviewController", af_profile["api_terms"])
+        self.assertIn("mysql-isolate.globallock", grc_profile["config_terms"])
+        self.assertIn("ApprovalController", grc_profile["api_terms"])
+        self.assertEqual(knowledge["domains"]["CRMS"]["label"], "Credit Risk")
+        self.assertGreaterEqual(knowledge["domains"]["AF"]["module_count"], 5)
+        self.assertGreaterEqual(knowledge["domains"]["GRC"]["question_count"], 4)
+
+    def test_index_health_payload_summarizes_ready_indexes(self):
+        entry = RepositoryEntry(display_name="Portal Repo", url="https://git.example.com/team/portal.git")
+        self.service.save_mapping(pm_team="AF", country="All", repositories=[{"display_name": entry.display_name, "url": entry.url}])
+        repo_path = self.service._repo_path("AF:All", entry)
+        (repo_path / ".git").mkdir(parents=True)
+        (repo_path / "IssueService.java").write_text(
+            "class IssueService { void createIssue() { repository.save(); } }\n",
+            encoding="utf-8",
+        )
+        self.service._build_repo_index("AF:All", entry, repo_path)
+
+        health = self.service.index_health_payload()
+
+        self.assertEqual(health["status"], "ready")
+        self.assertEqual(health["totals"]["repos"], 1)
+        self.assertEqual(health["totals"]["ready"], 1)
+        self.assertIn("AF:All", health["keys"])
+
+    def test_release_gate_evaluator_enforces_case_floor(self):
+        from scripts.run_source_code_qa_release_gate import evaluate_release_gate
+
+        gate = evaluate_release_gate(
+            {
+                "status": "pass",
+                "eval": {"status": "pass", "total": 4, "failed": 0},
+                "llm_smoke": {"status": "pass", "failed": 0},
+                "review_queue": {"returncode": 0},
+            },
+            thresholds={"min_eval_cases": 10},
+        )
+
+        self.assertEqual(gate["status"], "fail")
+        self.assertIn("min_eval_cases", gate["failed_checks"])
 
     def test_review_queue_collects_feedback_and_telemetry_risks(self):
         from scripts.source_code_qa_review_queue import build_review_queue

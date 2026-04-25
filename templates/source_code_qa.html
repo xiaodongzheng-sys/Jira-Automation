@@ -86,6 +86,7 @@
           <button class="button" type="button" data-source-query>Search Code</button>
           <span class="microcopy" data-source-query-status>Ready.</span>
         </div>
+        <div class="source-qa-history" data-source-question-history hidden></div>
       </article>
     </section>
 
@@ -151,6 +152,24 @@
           </div>
           <div class="source-qa-repo-list" data-source-repo-status>
             No repository status loaded yet.
+          </div>
+        </article>
+
+        <article class="panel panel-wide">
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow">Readiness</p>
+              <h2>Index Health &amp; Release Gate</h2>
+              <p class="card-help">Local index freshness and latest Source Code Q&amp;A quality gate signal.</p>
+            </div>
+          </div>
+          <div class="source-qa-health-grid">
+            <div class="source-qa-health-card" data-source-index-health>
+              Index health has not loaded yet.
+            </div>
+            <div class="source-qa-health-card" data-source-release-gate>
+              Release gate has not loaded yet.
+            </div>
           </div>
         </article>
       </section>

@@ -54,6 +54,14 @@ PYTHONPATH=. ./.venv/bin/python scripts/run_source_code_qa_nightly_eval.py --inc
 
 The job writes timestamped reports under `TEAM_PORTAL_DATA_DIR/source_code_qa/eval_runs/` plus `latest.json`. It runs the deterministic fixture evals, runs a deterministic mock-LLM answer smoke eval, regenerates feedback candidates, and writes a local review queue, so it can be launched manually or scheduled by the host without adding a new portal workflow.
 
+Before publishing Source Code Q&A retrieval, prompt, or index changes, run the release gate:
+
+```bash
+PYTHONPATH=. ./.venv/bin/python scripts/run_source_code_qa_release_gate.py --include-useful-feedback
+```
+
+The release gate wraps the nightly eval, enforces minimum coverage and zero-failure thresholds, and writes `TEAM_PORTAL_DATA_DIR/run/source_code_qa_release_gate.json` plus the shared eval status file consumed by the portal readiness panel.
+
 Build the review queue directly when triaging misses:
 
 ```bash

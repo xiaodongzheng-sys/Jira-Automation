@@ -4,6 +4,7 @@ import json
 import math
 import re
 import threading
+import asyncio
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -79,6 +80,10 @@ class VoiceService:
         *,
         store: BriefingStore,
         openai_client: OpenAIClient,
+        tts_provider: str,
+        edge_mandarin_voice: str,
+        edge_english_voice: str,
+        edge_rate: str,
         openai_mandarin_voice: str,
         openai_voice_speed: float,
         openai_custom_voice_enabled: bool,
@@ -89,6 +94,10 @@ class VoiceService:
     ) -> None:
         self.store = store
         self.openai_client = openai_client
+        self.tts_provider = str(tts_provider or "edge").strip().lower() or "edge"
+        self.edge_mandarin_voice = str(edge_mandarin_voice or "zh-CN-XiaoxiaoNeural").strip() or "zh-CN-XiaoxiaoNeural"
+        self.edge_english_voice = str(edge_english_voice or "en-US-JennyNeural").strip() or "en-US-JennyNeural"
+        self.edge_rate = str(edge_rate or "-8%").strip() or "-8%"
         self.openai_mandarin_voice = openai_mandarin_voice
         self.openai_voice_speed = openai_voice_speed
         self.openai_custom_voice_enabled = openai_custom_voice_enabled
@@ -107,7 +116,26 @@ class VoiceService:
 
         elevenlabs_voice_id = self.elevenlabs_mandarin_voice_id
 
-        if self.elevenlabs_api_key and elevenlabs_voice_id:
+        if self.tts_provider == "edge":
+            voice_id = self._edge_voice_for_language(language_code)
+            provider = "edge"
+            model_id = f"edge-tts:{self.edge_rate}"
+            cached = self.store.get_cached_audio(
+                owner_key=owner_key,
+                provider=provider,
+                voice_id=voice_id,
+                language_code=language_code,
+                model_id=model_id,
+                text=normalized_text,
+            )
+            if cached:
+                return cached
+            try:
+                audio_bytes = self._synthesize_with_edge_tts(text=normalized_text, voice_id=voice_id)
+            except Exception:  # noqa: BLE001
+                audio_bytes = None
+            suffix = "mp3"
+        elif self.tts_provider == "elevenlabs" and self.elevenlabs_api_key and elevenlabs_voice_id:
             provider = "elevenlabs"
             model_id = self.elevenlabs_mandarin_model_id
             cached = self.store.get_cached_audio(
@@ -127,7 +155,7 @@ class VoiceService:
                 model_id=model_id,
             )
             suffix = "mp3"
-        elif self.openai_tts_fallback_enabled and self.openai_client.is_configured():
+        elif self.tts_provider == "openai" and self.openai_tts_fallback_enabled and self.openai_client.is_configured():
             voice_id = self.openai_mandarin_voice
             provider = "openai"
             model_id = str(self.openai_client.tts_model)
@@ -168,7 +196,7 @@ class VoiceService:
 
     def get_cached_audio_for_text(self, *, owner_key: str, text: str, language_code: str) -> str | None:
         normalized_text = optimize_tts_text(text, language_code=language_code)
-        cache_target = self._resolve_cache_target()
+        cache_target = self._resolve_cache_target(language_code=language_code)
         if not cache_target:
             return None
         return self.store.get_cached_audio(
@@ -180,15 +208,21 @@ class VoiceService:
             text=normalized_text,
         )
 
-    def _resolve_cache_target(self) -> dict[str, str] | None:
+    def _resolve_cache_target(self, *, language_code: str) -> dict[str, str] | None:
         elevenlabs_voice_id = self.elevenlabs_mandarin_voice_id
-        if self.elevenlabs_api_key and elevenlabs_voice_id:
+        if self.tts_provider == "edge":
+            return {
+                "provider": "edge",
+                "voice_id": self._edge_voice_for_language(language_code),
+                "model_id": f"edge-tts:{self.edge_rate}",
+            }
+        if self.tts_provider == "elevenlabs" and self.elevenlabs_api_key and elevenlabs_voice_id:
             return {
                 "provider": "elevenlabs",
                 "voice_id": elevenlabs_voice_id,
                 "model_id": self.elevenlabs_mandarin_model_id,
             }
-        if self.openai_tts_fallback_enabled and self.openai_client.is_configured():
+        if self.tts_provider == "openai" and self.openai_tts_fallback_enabled and self.openai_client.is_configured():
             return {
                 "provider": "openai",
                 "voice_id": self.openai_mandarin_voice,
@@ -204,6 +238,45 @@ class VoiceService:
             "Emphasize what the flow is, what needs to be built, and what developers need to pay attention to. "
             "Do not sound robotic, theatrical, overly polished, or like you are reading bullet points word for word."
         )
+
+    def _edge_voice_for_language(self, language_code: str) -> str:
+        return self.edge_mandarin_voice if str(language_code or "").lower().startswith("zh") else self.edge_english_voice
+
+    def _synthesize_with_edge_tts(self, *, text: str, voice_id: str) -> bytes:
+        return self._run_edge_tts_async(self._edge_tts_bytes(text=text, voice_id=voice_id))
+
+    async def _edge_tts_bytes(self, *, text: str, voice_id: str) -> bytes:
+        import edge_tts
+
+        communicate = edge_tts.Communicate(text, voice=voice_id, rate=self.edge_rate)
+        chunks: list[bytes] = []
+        async for chunk in communicate.stream():
+            if chunk.get("type") == "audio":
+                data = chunk.get("data") or b""
+                if data:
+                    chunks.append(bytes(data))
+        return b"".join(chunks)
+
+    @staticmethod
+    def _run_edge_tts_async(coro):
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(coro)
+        result: dict[str, Any] = {}
+
+        def run_in_thread() -> None:
+            try:
+                result["value"] = asyncio.run(coro)
+            except Exception as error:  # noqa: BLE001
+                result["error"] = error
+
+        worker = threading.Thread(target=run_in_thread, daemon=True)
+        worker.start()
+        worker.join()
+        if "error" in result:
+            raise result["error"]
+        return result.get("value", b"")
 
     def _synthesize_with_elevenlabs(self, *, text: str, voice_id: str, language_code: str, model_id: str) -> bytes:
         response = requests.post(

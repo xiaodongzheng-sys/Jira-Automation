@@ -105,6 +105,10 @@ class Settings:
     prd_briefing_embedding_model: str = "text-embedding-3-large"
     prd_briefing_transcription_model: str = "gpt-4o-mini-transcribe"
     prd_briefing_tts_model: str = "gpt-4o-mini-tts"
+    prd_briefing_tts_provider: str = "edge"
+    prd_briefing_edge_mandarin_voice: str = "zh-CN-XiaoxiaoNeural"
+    prd_briefing_edge_english_voice: str = "en-US-JennyNeural"
+    prd_briefing_edge_rate: str = "-8%"
     prd_briefing_openai_mandarin_voice: str = "sage"
     prd_briefing_openai_voice_speed: float = 0.96
     prd_briefing_openai_custom_voice_enabled: bool = False
@@ -191,6 +195,10 @@ class Settings:
             prd_briefing_embedding_model=_env_str("PRD_BRIEFING_EMBEDDING_MODEL", "text-embedding-3-large"),
             prd_briefing_transcription_model=_env_str("PRD_BRIEFING_TRANSCRIPTION_MODEL", "gpt-4o-mini-transcribe"),
             prd_briefing_tts_model=_env_str("PRD_BRIEFING_TTS_MODEL", "gpt-4o-mini-tts"),
+            prd_briefing_tts_provider=_env_str("PRD_BRIEFING_TTS_PROVIDER", "edge"),
+            prd_briefing_edge_mandarin_voice=_env_str("PRD_BRIEFING_EDGE_MANDARIN_VOICE", "zh-CN-XiaoxiaoNeural"),
+            prd_briefing_edge_english_voice=_env_str("PRD_BRIEFING_EDGE_ENGLISH_VOICE", "en-US-JennyNeural"),
+            prd_briefing_edge_rate=_env_str("PRD_BRIEFING_EDGE_RATE", "-8%"),
             prd_briefing_openai_mandarin_voice=_env_str("PRD_BRIEFING_OPENAI_MANDARIN_VOICE", "sage"),
             prd_briefing_openai_voice_speed=float(_env_str("PRD_BRIEFING_OPENAI_VOICE_SPEED", "0.96")),
             prd_briefing_openai_custom_voice_enabled=_env_bool("PRD_BRIEFING_OPENAI_CUSTOM_VOICE_ENABLED", False),

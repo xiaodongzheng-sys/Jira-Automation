@@ -34,13 +34,19 @@
   const feedbackStatus = document.querySelector('[data-source-feedback-status]');
   const evidenceSummary = document.querySelector('[data-source-evidence-summary]');
   const debugTrace = document.querySelector('[data-source-debug-trace]');
+  const questionHistory = document.querySelector('[data-source-question-history]');
+  const indexHealth = document.querySelector('[data-source-index-health]');
+  const releaseGate = document.querySelector('[data-source-release-gate]');
   let config = { mappings: {} };
   let gitAuthReady = false;
   let llmReady = false;
   let llmPolicy = {};
+  let indexHealthPayload = {};
+  let releaseGatePayload = {};
   let lastPayload = null;
   let conversationContext = null;
   const preferenceKey = 'source-code-qa:last-query-config:v1';
+  const historyKey = 'source-code-qa:question-history:v1';
 
   const escapeHtml = (value) => String(value ?? '')
     .replaceAll('&', '&amp;')
@@ -130,6 +136,73 @@
     }
   };
 
+  const loadQuestionHistory = () => {
+    try {
+      const rows = JSON.parse(window.localStorage.getItem(historyKey) || '[]');
+      return Array.isArray(rows) ? rows : [];
+    } catch (_error) {
+      return [];
+    }
+  };
+
+  const saveQuestionHistory = (row) => {
+    const question = String(row?.question || '').trim();
+    if (!question) return;
+    try {
+      const rows = loadQuestionHistory()
+        .filter((item) => String(item.question || '').trim() !== question);
+      rows.unshift({
+        question,
+        pm_team: row.pm_team,
+        country: row.country,
+        answer_mode: row.answer_mode,
+        status: row.status,
+        trace_id: row.trace_id || '',
+        summary: String(row.summary || '').slice(0, 160),
+        asked_at: new Date().toISOString(),
+      });
+      window.localStorage.setItem(historyKey, JSON.stringify(rows.slice(0, 12)));
+      renderQuestionHistory();
+    } catch (_error) {
+      // Local history is a convenience only.
+    }
+  };
+
+  const renderQuestionHistory = () => {
+    if (!questionHistory) return;
+    const rows = loadQuestionHistory();
+    if (!rows.length) {
+      questionHistory.hidden = true;
+      questionHistory.innerHTML = '';
+      return;
+    }
+    questionHistory.hidden = false;
+    questionHistory.innerHTML = `
+      <div class="source-qa-history-head">
+        <strong>Recent Questions</strong>
+        <button class="button button-secondary source-qa-clear-history" type="button" data-source-clear-history>Clear</button>
+      </div>
+      <div class="source-qa-history-list">
+        ${rows.slice(0, 6).map((row) => `
+          <button class="source-qa-history-item" type="button" data-source-history-question="${escapeHtml(row.question)}">
+            <span>${escapeHtml(row.question)}</span>
+            <small>${escapeHtml(row.pm_team || '')} · ${escapeHtml(row.country || 'All')} · ${escapeHtml(row.status || '')}</small>
+          </button>
+        `).join('')}
+      </div>
+    `;
+    questionHistory.querySelectorAll('[data-source-history-question]').forEach((button) => {
+      button.addEventListener('click', () => {
+        questionInput.value = button.dataset.sourceHistoryQuestion || '';
+        questionInput.focus();
+      });
+    });
+    questionHistory.querySelector('[data-source-clear-history]')?.addEventListener('click', () => {
+      window.localStorage.removeItem(historyKey);
+      renderQuestionHistory();
+    });
+  };
+
   const updateCountryVisibility = () => {
     const isCreditRisk = pmTeam.value === 'CRMS';
     country.disabled = !isCreditRisk;
@@ -175,6 +248,54 @@
     `).join('');
   };
 
+  const compactNumber = (value) => {
+    const number = Number(value || 0);
+    return Number.isFinite(number) ? number.toLocaleString() : '0';
+  };
+
+  const renderIndexHealth = (health = {}) => {
+    if (!indexHealth) return;
+    const totals = health.totals || {};
+    const keyHealth = health.keys?.[currentKey()] || {};
+    const staleRepos = (keyHealth.freshness?.stale_repos || []).slice(0, 4);
+    const state = health.status || 'unknown';
+    indexHealth.innerHTML = `
+      <div class="source-qa-health-head">
+        <strong>Index ${escapeHtml(state)}</strong>
+        <span>${compactNumber(totals.ready)} / ${compactNumber(totals.repos)} repos ready</span>
+      </div>
+      <div class="source-qa-health-metrics">
+        <span>${compactNumber(totals.files)} files</span>
+        <span>${compactNumber(totals.lines)} lines</span>
+        <span>${compactNumber(totals.definitions)} definitions</span>
+        <span>${compactNumber(totals.semantic_chunks)} chunks</span>
+      </div>
+      <p>${escapeHtml(keyHealth.freshness?.warning || (health.newest_indexed_at ? `Newest index: ${health.newest_indexed_at}` : 'No synced index yet.'))}</p>
+      ${staleRepos.length ? `<ul>${staleRepos.map((repo) => `<li>${escapeHtml(repo)}</li>`).join('')}</ul>` : ''}
+    `;
+  };
+
+  const renderReleaseGate = (gate = {}) => {
+    if (!releaseGate) return;
+    const latestEval = gate.latest_eval || {};
+    const evalSummary = latestEval.eval || {};
+    const llmSmoke = latestEval.llm_smoke || {};
+    const status = gate.status || 'missing';
+    releaseGate.innerHTML = `
+      <div class="source-qa-health-head">
+        <strong>Gate ${escapeHtml(status)}</strong>
+        <span>${escapeHtml(gate.updated_at || 'not run')}</span>
+      </div>
+      <div class="source-qa-health-metrics">
+        <span>eval ${escapeHtml(evalSummary.status || 'n/a')}</span>
+        <span>${compactNumber(evalSummary.total)} cases</span>
+        <span>${compactNumber(evalSummary.failed)} failed</span>
+        <span>smoke ${escapeHtml(llmSmoke.status || 'n/a')}</span>
+      </div>
+      <p>${escapeHtml(gate.summary || 'Run the Source Code Q&A release gate before publishing retrieval or prompt changes.')}</p>
+    `;
+  };
+
   const renderSelectedConfig = () => {
     const entries = config.mappings?.[currentKey()] || [];
     const count = entries.length;
@@ -190,6 +311,8 @@
       message: 'Configured. Sync status will update after refresh.',
       path: entry.url,
     })));
+    renderIndexHealth(indexHealthPayload);
+    renderReleaseGate(releaseGatePayload);
   };
 
   const parseRepoLines = () => {
@@ -213,6 +336,8 @@
       gitAuthReady = Boolean(payload.git_auth_ready);
       llmReady = Boolean(payload.llm_ready);
       llmPolicy = payload.llm_policy || {};
+      indexHealthPayload = payload.index_health || {};
+      releaseGatePayload = payload.release_gate || {};
       if (!gitAuthReady && adminStatus) {
         adminStatus.textContent = 'Set SOURCE_CODE_QA_GITLAB_TOKEN on the server before running Sync / Refresh.';
       } else if (adminStatus && llmPolicy.provider) {
@@ -222,6 +347,8 @@
       }
       updateAnswerModeState();
       renderSelectedConfig();
+      renderIndexHealth(indexHealthPayload);
+      renderReleaseGate(releaseGatePayload);
     } catch (error) {
       configStatus.textContent = error.message || 'Repository config could not be loaded.';
     }
@@ -513,6 +640,44 @@
     `;
   };
 
+  const renderInlineCitationList = (citations = []) => {
+    const values = (citations || []).filter(Boolean).slice(0, 6);
+    if (!values.length) return '';
+    return `<span class="source-qa-citations">${values.map((item) => escapeHtml(item)).join(' ')}</span>`;
+  };
+
+  const renderReadableAnswerBody = (payload, answer) => {
+    const structured = payload?.structured_answer || {};
+    const claims = Array.isArray(structured.claims) ? structured.claims : [];
+    const missing = Array.isArray(structured.missing_evidence) ? structured.missing_evidence : [];
+    if (structured.direct_answer || claims.length || missing.length) {
+      return `
+        <section class="source-qa-answer-section source-qa-answer-direct">
+          <strong>Answer</strong>
+          <p>${escapeHtml(structured.direct_answer || answer)}</p>
+        </section>
+        ${claims.length ? `
+          <section class="source-qa-answer-section">
+            <strong>Evidence-backed Claims</strong>
+            <ul>
+              ${claims.slice(0, 8).map((claim) => `
+                <li>${escapeHtml(claim.text || claim)} ${renderInlineCitationList(claim.citations || [])}</li>
+              `).join('')}
+            </ul>
+          </section>
+        ` : ''}
+        ${missing.length ? `
+          <section class="source-qa-answer-section source-qa-answer-missing">
+            <strong>Missing Evidence</strong>
+            <ul>${missing.slice(0, 6).map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</ul>
+          </section>
+        ` : ''}
+      `;
+    }
+    const paragraphs = answer.split(/\n{2,}/).map((part) => part.trim()).filter(Boolean);
+    return paragraphs.map((part) => `<p>${escapeHtml(part)}</p>`).join('');
+  };
+
   const renderLlmAnswer = (payload) => {
     if (!llmAnswer) return;
     const answer = String(payload?.llm_answer || '').trim();
@@ -533,14 +698,20 @@
       usage?.candidatesTokenCount || usage?.completion_tokens ? `output: ${usage.candidatesTokenCount || usage.completion_tokens}` : '',
       usage?.totalTokenCount || usage?.total_tokens ? `total: ${usage.totalTokenCount || usage.total_tokens}` : '',
     ].filter(Boolean).join(' · ');
+    const confidence = payload?.structured_answer?.confidence || payload?.answer_contract?.confidence || payload?.answer_quality?.confidence;
     llmAnswer.hidden = false;
     llmAnswer.innerHTML = `
       <div class="source-qa-llm-card">
         <div class="source-qa-llm-head">
-          <strong>LLM Answer</strong>
+          <div>
+            <strong>Answer</strong>
+            ${confidence ? `<em>${escapeHtml(confidence)} confidence</em>` : ''}
+          </div>
           <span>${escapeHtml(meta)}</span>
         </div>
-        <pre><code>${escapeHtml(answer)}</code></pre>
+        <div class="source-qa-answer-body">
+          ${renderReadableAnswerBody(payload, answer)}
+        </div>
       </div>
     `;
   };
@@ -623,6 +794,15 @@
       renderEvidenceSummary(payload);
       renderDebugTrace(payload);
       renderMatches(payload.matches || [], { compact: Boolean(payload.llm_answer), open: shouldOpenEvidence(payload) });
+      saveQuestionHistory({
+        question: questionInput.value,
+        pm_team: pmTeam.value,
+        country: currentCountry(),
+        answer_mode: payload.answer_mode || selectedAnswerMode,
+        status: payload.status,
+        trace_id: payload.trace_id,
+        summary: payload.summary,
+      });
       if (feedback) {
         feedback.hidden = payload.status !== 'ok';
       }
@@ -680,6 +860,7 @@
   });
 
   restoreLastQueryConfig();
+  renderQuestionHistory();
   updateAnswerModeState();
   loadConfig();
 })();

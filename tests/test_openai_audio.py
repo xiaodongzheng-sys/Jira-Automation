@@ -48,6 +48,10 @@ class OpenAIAudioTests(unittest.TestCase):
             service = VoiceService(
                 store=store,
                 openai_client=client,
+                tts_provider="openai",
+                edge_mandarin_voice="zh-CN-XiaoxiaoNeural",
+                edge_english_voice="en-US-JennyNeural",
+                edge_rate="-8%",
                 openai_mandarin_voice="sage",
                 openai_voice_speed=0.96,
                 openai_custom_voice_enabled=False,
@@ -76,6 +80,10 @@ class OpenAIAudioTests(unittest.TestCase):
             service = VoiceService(
                 store=store,
                 openai_client=client,
+                tts_provider="openai",
+                edge_mandarin_voice="zh-CN-XiaoxiaoNeural",
+                edge_english_voice="en-US-JennyNeural",
+                edge_rate="-8%",
                 openai_mandarin_voice="sage",
                 openai_voice_speed=0.96,
                 openai_custom_voice_enabled=False,
@@ -94,6 +102,48 @@ class OpenAIAudioTests(unittest.TestCase):
 
             self.assertIsNone(audio_path)
             client.synthesize_speech.assert_not_called()
+        finally:
+            temp_dir.cleanup()
+
+    def test_voice_service_defaults_to_edge_tts(self):
+        temp_dir = tempfile.TemporaryDirectory()
+        try:
+            store = BriefingStore(Path(temp_dir.name))
+            client = Mock()
+            client.is_configured.return_value = True
+
+            service = VoiceService(
+                store=store,
+                openai_client=client,
+                tts_provider="edge",
+                edge_mandarin_voice="zh-CN-XiaoxiaoNeural",
+                edge_english_voice="en-US-JennyNeural",
+                edge_rate="-8%",
+                openai_mandarin_voice="sage",
+                openai_voice_speed=0.96,
+                openai_custom_voice_enabled=False,
+                openai_tts_fallback_enabled=True,
+                elevenlabs_api_key="test-eleven-key",
+                elevenlabs_mandarin_model_id="eleven_multilingual_v2",
+                elevenlabs_mandarin_voice_id="JBFqnCBsd6RMkjVDRZzb",
+            )
+
+            with patch.object(service, "_synthesize_with_edge_tts", return_value=b"edge-audio") as edge_tts:
+                audio_path = service.synthesize(
+                    session_id="s3",
+                    text="中文讲解",
+                    language_code="zh",
+                    owner_key="anon:test",
+                )
+
+            self.assertIsNotNone(audio_path)
+            edge_tts.assert_called_once()
+            self.assertEqual(edge_tts.call_args.kwargs["voice_id"], "zh-CN-XiaoxiaoNeural")
+            client.synthesize_speech.assert_not_called()
+            self.assertEqual(
+                service.get_cached_audio_for_text(owner_key="anon:test", text="中文讲解", language_code="zh"),
+                audio_path,
+            )
         finally:
             temp_dir.cleanup()
 

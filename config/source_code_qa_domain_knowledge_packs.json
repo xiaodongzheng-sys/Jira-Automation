@@ -1,0 +1,279 @@
+{
+  "version": 1,
+  "updated_at": "2026-04-25",
+  "purpose": "Domain knowledge packs for Source Code Q&A. These packs provide local business context, aliases, module maps, and evidence rules without adding online sources or changing LLM models.",
+  "domains": {
+    "CRMS": {
+      "label": "Credit Risk",
+      "summary": "Credit Risk questions usually need tracing from underwriting or pre-check entry points through DTO/context carriers into providers, repositories, mappers, clients, tables, or feature/config flags.",
+      "module_map": [
+        {
+          "name": "Underwriting Initiation",
+          "aliases": ["underwriting initiation", "进件", "授信进件", "initiation"],
+          "repo_hints": ["credit-risk", "crms", "loan-credit-risk"],
+          "code_hints": ["UnderwritingInitiationDTO", "UnderwritingInitiationProvider", "UnderwritingContext", "UnderwritingBasicInfo"],
+          "business_flows": ["request entry", "context assembly", "basic info population"]
+        },
+        {
+          "name": "Term Loan PreCheck",
+          "aliases": ["term loan precheck", "pre-check", "贷前检查", "pre check"],
+          "repo_hints": ["credit-risk", "crms"],
+          "code_hints": ["TermLoanPreCheckEngine", "Layer4TermLoanPreCheckEngineStrategy", "PreCheckStrategy", "DataSourceResult"],
+          "business_flows": ["eligibility check", "rule evaluation", "data source backtrace"]
+        },
+        {
+          "name": "Customer / Loan / Credit Info",
+          "aliases": ["customer info", "loan info", "credit risk info", "客户信息", "贷款信息"],
+          "repo_hints": ["credit-risk", "crms"],
+          "code_hints": ["CustomerInfo", "LoanInfo", "CreditRiskInfo", "CustomerInfoDAO", "LoanInfoMapper", "CreditRiskInfoMapper"],
+          "business_flows": ["carrier DTO", "mapper lookup", "repository lookup"]
+        },
+        {
+          "name": "Feature Data",
+          "aliases": ["feature", "feature data", "风控特征", "变量"],
+          "repo_hints": ["credit-risk", "feature"],
+          "code_hints": ["FeatureData", "FeatureProvider", "FeatureDataProvider", "FeatureConfig"],
+          "business_flows": ["feature fetch", "feature config", "rule input"]
+        }
+      ],
+      "terminology": [
+        {
+          "term": "DataSourceResult",
+          "aliases": ["data source result", "数据源结果", "取数结果"],
+          "code_terms": ["DataSourceResult", "dataSourceResult", "setDataSourceResult"]
+        },
+        {
+          "term": "UnderwritingBasicInfo",
+          "aliases": ["basic info", "基础信息", "授信基础信息"],
+          "code_terms": ["UnderwritingBasicInfo", "setUnderwritingBasicInfo", "UnderwritingBasicInfoMapper"]
+        },
+        {
+          "term": "PreCheck",
+          "aliases": ["pre check", "pre-check", "贷前检查", "准入检查"],
+          "code_terms": ["PreCheck", "TermLoanPreCheck", "PreCheckEngine", "PreCheckStrategy"]
+        }
+      ],
+      "key_artifacts": {
+        "tables": [
+          {"name": "cr_data_source_result", "purpose": "expected concrete source when data-source trace reaches persistence"},
+          {"name": "customer_info", "purpose": "customer information persistence hint"},
+          {"name": "loan_info", "purpose": "loan information persistence hint"}
+        ],
+        "apis": [
+          {"name": "underwriting initiation API", "path": "/underwriting", "purpose": "entry point hint"},
+          {"name": "precheck API", "path": "/precheck", "purpose": "pre-check entry point hint"}
+        ],
+        "configs": [
+          {"name": "feature flags", "purpose": "feature or rule toggle hints"},
+          {"name": "risk strategy config", "purpose": "strategy selection and rule behavior hints"}
+        ]
+      },
+      "retrieval_terms": {
+        "data_carriers": ["DataSourceResult", "UnderwritingContext", "UnderwritingInitiationDTO", "UnderwritingBasicInfo", "CustomerInfo", "LoanInfo", "CreditRiskInfo", "FeatureData"],
+        "source_terms": ["TermLoanPreCheckEngine", "Layer4TermLoanPreCheckEngineStrategy", "DataSourceResultRepository", "CustomerInfoDAO", "CustomerInfoMapper", "LoanInfoDAO", "LoanInfoMapper", "CreditRiskInfoDAO", "CreditRiskInfoMapper", "FeatureProvider"],
+        "api_terms": ["UnderwritingController", "PreCheckController", "TermLoanPreCheckController", "RequestMapping", "PostMapping"],
+        "config_terms": ["feature", "strategy", "precheck", "risk-config", "rule-config", "yaml", "properties"],
+        "logic_terms": ["precheck", "eligibility", "approval", "underwriting", "rule", "condition", "risk", "strategy"],
+        "field_population_terms": ["setDataSourceResult", "setCustomerInfo", "setLoanInfo", "setCreditRiskInfo", "setUnderwritingBasicInfo"]
+      },
+      "evidence_rules": [
+        "For data-source questions, DTO/Input/Info evidence is only a carrier; prefer repository, mapper XML, SQL, client, API, or table evidence.",
+        "For rule questions, identify the entry strategy/engine and then the condition or config that controls the branch.",
+        "For impact questions, separate upstream controller/engine callers from downstream mapper/client/config dependencies."
+      ],
+      "question_seeds": [
+        {"question": "Term Loan PreCheck 的 DataSourceResult 数据从哪里来？", "expected_terms": ["TermLoanPreCheck", "DataSourceResult", "Repository", "Mapper"]},
+        {"question": "UnderwritingBasicInfo 是在哪里组装和填充的？", "expected_terms": ["UnderwritingBasicInfo", "Provider", "setUnderwritingBasicInfo"]},
+        {"question": "某个 precheck rule 改了会影响哪些下游数据源？", "expected_terms": ["PreCheck", "rule", "impact", "Mapper", "Client"]},
+        {"question": "CreditRiskInfo 字段来自哪张表或哪个 client？", "expected_terms": ["CreditRiskInfo", "DAO", "Mapper", "table", "client"]}
+      ]
+    },
+    "AF": {
+      "label": "Anti-Fraud",
+      "summary": "Anti-Fraud questions usually revolve around blacklist/whitelist, risk rules, case review, flow report, CRC records, screening decisions, and risk configuration.",
+      "module_map": [
+        {
+          "name": "Black / White List",
+          "aliases": ["blacklist", "whitelist", "black white list", "黑名单", "白名单", "BlackWhiteList"],
+          "repo_hints": ["anti-fraud-fe", "anti-fraud-admin", "risk-config"],
+          "code_hints": ["BlackWhiteList", "BlacklistController", "BlackWhiteListMapper", "BlackWhiteListRepository"],
+          "business_flows": ["list management", "hit screening", "risk decision override"]
+        },
+        {
+          "name": "Case Review",
+          "aliases": ["case review", "案件审核", "人工审核", "review case"],
+          "repo_hints": ["anti-fraud-admin", "anti-fraud"],
+          "code_hints": ["CaseReview", "CaseReviewController", "ReviewService", "ReviewRecord"],
+          "business_flows": ["case creation", "review status transition", "manual decision"]
+        },
+        {
+          "name": "Flow Report",
+          "aliases": ["flow report", "流程报表", "flow-report", "report"],
+          "repo_hints": ["anti-fraud-fe", "anti-fraud-admin"],
+          "code_hints": ["FlowReport", "FlowReportController", "FlowReportMapper", "FlowReportService"],
+          "business_flows": ["report query", "metric aggregation", "dashboard export"]
+        },
+        {
+          "name": "CRC Record",
+          "aliases": ["CRC", "crc record", "crc case", "CRC记录"],
+          "repo_hints": ["anti-fraud-admin", "anti-fraud"],
+          "code_hints": ["CrcRecord", "CrcController", "CrcRecordMapper", "CrcService"],
+          "business_flows": ["record lifecycle", "case linkage", "review evidence"]
+        },
+        {
+          "name": "Risk Config / Strategy",
+          "aliases": ["risk config", "strategy", "规则配置", "策略配置"],
+          "repo_hints": ["risk-config", "anti-fraud-admin"],
+          "code_hints": ["RiskConfig", "RiskRule", "StrategyService", "DecisionService", "RiskEngineClient"],
+          "business_flows": ["strategy selection", "rule evaluation", "decision output"]
+        }
+      ],
+      "terminology": [
+        {
+          "term": "BlackWhiteList",
+          "aliases": ["BWL", "blacklist", "whitelist", "黑白名单", "黑名单", "白名单"],
+          "code_terms": ["BlackWhiteList", "BlackWhiteListController", "BlackWhiteListMapper"]
+        },
+        {
+          "term": "CaseReview",
+          "aliases": ["case review", "manual review", "人工审核", "案件审核"],
+          "code_terms": ["CaseReview", "ReviewService", "ReviewRecord", "reviewStatus"]
+        },
+        {
+          "term": "CRC",
+          "aliases": ["crc", "CRC record", "CRC记录", "case record"],
+          "code_terms": ["CrcRecord", "CrcController", "CrcRecordMapper"]
+        }
+      ],
+      "key_artifacts": {
+        "tables": [
+          {"name": "black_white_list", "purpose": "black/white list persistence hint"},
+          {"name": "case_review", "purpose": "case review persistence hint"},
+          {"name": "flow_report", "purpose": "flow report aggregation hint"},
+          {"name": "crc_record", "purpose": "CRC lifecycle hint"},
+          {"name": "risk_rule", "purpose": "risk strategy/rule config hint"}
+        ],
+        "apis": [
+          {"name": "blacklist management API", "path": "/blacklist", "purpose": "list management entry point"},
+          {"name": "black white list API", "path": "/black-white-list", "purpose": "list management entry point"},
+          {"name": "case review API", "path": "/case-review", "purpose": "review workflow entry point"},
+          {"name": "flow report API", "path": "/flow-report", "purpose": "report query entry point"},
+          {"name": "crc API", "path": "/crc", "purpose": "CRC record entry point"}
+        ],
+        "configs": [
+          {"name": "risk-config", "purpose": "strategy and rule config repo/key hint"},
+          {"name": "blacklist switch", "purpose": "screening enablement hint"},
+          {"name": "review status mapping", "purpose": "case review transition hint"}
+        ]
+      },
+      "retrieval_terms": {
+        "data_carriers": ["BlackWhiteList", "Blacklist", "Whitelist", "RiskRule", "RiskResult", "CaseReview", "FlowReport", "CrcRecord", "ScreeningResult", "FraudDecision"],
+        "source_terms": ["BlackWhiteListMapper", "BlackWhiteListRepository", "CaseReviewMapper", "FlowReportMapper", "CrcRecordMapper", "RiskRuleMapper", "RiskEngineClient", "ScreeningClient"],
+        "api_terms": ["BlacklistController", "BlackWhiteListController", "CaseReviewController", "FlowReportController", "CrcController", "RiskConfigController", "axios", "fetch"],
+        "config_terms": ["risk-config", "blacklist", "whitelist", "flow-report", "case-review", "crc", "strategy", "threshold", "switch"],
+        "logic_terms": ["blacklist", "whitelist", "screening", "hit", "review", "approve", "reject", "risk", "fraud", "rule", "strategy"],
+        "field_population_terms": ["setRiskResult", "setFraudDecision", "setReviewStatus", "setHitRecord", "setCrcRecord"]
+      },
+      "evidence_rules": [
+        "For blacklist questions, prefer controller/page entry, service rule, mapper/repository, and table evidence over display labels.",
+        "For case review and CRC, state transitions need service/handler logic evidence, not only status enum names.",
+        "For flow report, separate query parameters, aggregation logic, table/source evidence, and export/rendering code."
+      ],
+      "question_seeds": [
+        {"question": "黑名单新增后在哪里生效？", "expected_terms": ["BlackWhiteList", "blacklist", "screening", "Mapper", "Service"]},
+        {"question": "Flow Report 数据从哪张表或哪个接口来？", "expected_terms": ["FlowReport", "Mapper", "select", "from"]},
+        {"question": "CRC record 和 case review 是怎么关联的？", "expected_terms": ["CrcRecord", "CaseReview", "ReviewService"]},
+        {"question": "某个 risk rule 改了会影响哪些 case review 或 screening 流程？", "expected_terms": ["RiskRule", "StrategyService", "CaseReview", "ScreeningClient"]}
+      ]
+    },
+    "GRC": {
+      "label": "Ops Risk",
+      "summary": "GRC questions usually need tracing parameter management, authorization, approval visibility, function-unit filtering, global lock config, and operational risk control boundaries.",
+      "module_map": [
+        {
+          "name": "Parameter Management",
+          "aliases": ["parameter", "parameter edit", "参数管理", "参数编辑"],
+          "repo_hints": ["dbp-grc-service", "grc-portal-fe"],
+          "code_hints": ["ParameterController", "ParameterEdit", "ParameterMapper", "parameterEditFunctionUnit"],
+          "business_flows": ["parameter create/update", "function unit filtering", "approval submission"]
+        },
+        {
+          "name": "Authorization Management",
+          "aliases": ["authorization", "auth management", "权限管理", "授权管理"],
+          "repo_hints": ["dbp-grc-service", "grc-portal-fe"],
+          "code_hints": ["AuthorizationController", "Permission", "Role", "UserGroup", "ExtTicketMapper"],
+          "business_flows": ["permission query", "approval visibility", "role/function unit mapping"]
+        },
+        {
+          "name": "Approval Flow",
+          "aliases": ["approval", "审批", "approval list", "审批列表"],
+          "repo_hints": ["dbp-grc-service", "grc-portal-fe"],
+          "code_hints": ["ApprovalController", "ApprovalMapper", "ApprovalRecord", "approvalStatus"],
+          "business_flows": ["approval creation", "approval list filtering", "visibility decision"]
+        },
+        {
+          "name": "Global Lock",
+          "aliases": ["globallock", "global lock", "全局锁", "bcf_global_lock"],
+          "repo_hints": ["dbp-grc-service"],
+          "code_hints": ["BcfGlobalLockDO", "GlobalLockMapper", "mysql-isolate.globallock", "bcf_global_lock"],
+          "business_flows": ["lock config", "lock persistence", "operation boundary"]
+        }
+      ],
+      "terminology": [
+        {
+          "term": "parameterEditFunctionUnit",
+          "aliases": ["mkt-env.parameter.edit.functionUnit", "function unit", "参数编辑功能单元", "functionUnit"],
+          "code_terms": ["parameterEditFunctionUnit", "mkt-env.parameter.edit.functionUnit", "FunctionUnit"]
+        },
+        {
+          "term": "GlobalLock",
+          "aliases": ["globallock", "global lock", "全局锁", "bcf_global_lock"],
+          "code_terms": ["BcfGlobalLockDO", "GlobalLockMapper", "mysql-isolate.globallock", "bcf_global_lock"]
+        },
+        {
+          "term": "Approval Visibility",
+          "aliases": ["approval list visibility", "审批可见性", "为什么看不到审批单"],
+          "code_terms": ["ApprovalController", "ApprovalMapper", "ExtTicketMapper", "functionUnit"]
+        }
+      ],
+      "key_artifacts": {
+        "tables": [
+          {"name": "bcf_global_lock", "purpose": "global lock persistence"},
+          {"name": "approval_record", "purpose": "approval list and status persistence hint"},
+          {"name": "parameter_edit", "purpose": "parameter edit approval hint"},
+          {"name": "authorization", "purpose": "permission/authorization persistence hint"}
+        ],
+        "apis": [
+          {"name": "parameter API", "path": "/parameter", "purpose": "parameter management entry point"},
+          {"name": "authorization API", "path": "/authorization", "purpose": "permission management entry point"},
+          {"name": "approval API", "path": "/approval", "purpose": "approval list/detail entry point"},
+          {"name": "global lock API", "path": "/globallock", "purpose": "lock management entry point"}
+        ],
+        "configs": [
+          {"name": "mysql-isolate.globallock", "purpose": "global lock storage/config key"},
+          {"name": "mkt-env.parameter.edit.functionUnit", "purpose": "parameter edit function-unit visibility gate"},
+          {"name": "parameterEditFunctionUnit", "purpose": "function-unit filter constant/key"}
+        ]
+      },
+      "retrieval_terms": {
+        "data_carriers": ["Parameter", "ParameterConfig", "ParameterEdit", "Approval", "ApprovalRecord", "Authorization", "GlobalLock", "BcfGlobalLock", "FunctionUnit"],
+        "source_terms": ["ParameterMapper", "ParameterRepository", "ParameterEditMapper", "ApprovalMapper", "AuthorizationMapper", "GlobalLockMapper", "BcfGlobalLockDO", "ExtTicketMapper"],
+        "api_terms": ["ParameterController", "AuthorizationController", "ApprovalController", "GlobalLockController", "RequestMapping", "PostMapping", "GetMapping"],
+        "config_terms": ["globallock", "global-lock", "mysql-isolate.globallock", "bcf_global_lock", "mkt-env.parameter.edit.functionUnit", "parameterEditFunctionUnit"],
+        "logic_terms": ["approval", "authorization", "permission", "role", "functionUnit", "global lock", "globallock", "parameter", "visibility", "filter"],
+        "field_population_terms": ["setParameter", "setApproval", "setPermission", "setFunctionUnit", "setGlobalLock"]
+      },
+      "evidence_rules": [
+        "For approval visibility, prefer controller/service/mapper filters and function-unit config evidence over page labels.",
+        "For globallock, cite config key, DO/entity, mapper/table, and calling service when available.",
+        "For authorization questions, separate role/permission data, user/group mapping, and approval-list filtering."
+      ],
+      "question_seeds": [
+        {"question": "GRC globallock 配置在哪里？", "expected_terms": ["mysql-isolate.globallock", "BcfGlobalLockDO", "bcf_global_lock"]},
+        {"question": "参数审批列表为什么某些人看不到？", "expected_terms": ["Approval", "functionUnit", "parameterEditFunctionUnit", "ExtTicketMapper"]},
+        {"question": "parameter edit functionUnit 是在哪里控制的？", "expected_terms": ["mkt-env.parameter.edit.functionUnit", "parameterEditFunctionUnit"]},
+        {"question": "Authorization Management 的审批可见性有哪些过滤条件？", "expected_terms": ["Authorization", "Approval", "Permission", "filter"]}
+      ]
+    }
+  }
+}

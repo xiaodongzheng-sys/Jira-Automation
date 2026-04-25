@@ -93,9 +93,42 @@ class JobState:
 
 
 class JobStore:
-    def __init__(self) -> None:
-        self._jobs: dict[str, JobState] = {}
+    def __init__(self, storage_path: Path | None = None) -> None:
+        self.storage_path = storage_path
+        self._jobs: dict[str, JobState] = self._load()
         self._lock = threading.Lock()
+
+    def _load(self) -> dict[str, JobState]:
+        if self.storage_path is None or not self.storage_path.exists():
+            return {}
+        try:
+            payload = json.loads(self.storage_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        jobs: dict[str, JobState] = {}
+        for job_id, raw_job in (payload.get("jobs") or {}).items():
+            if not isinstance(raw_job, dict):
+                continue
+            try:
+                jobs[str(job_id)] = JobState(**raw_job)
+            except TypeError:
+                continue
+        return jobs
+
+    def _persist_locked(self) -> None:
+        if self.storage_path is None:
+            return
+        try:
+            self.storage_path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "updated_at": time.time(),
+                "jobs": {job_id: asdict(job) for job_id, job in self._jobs.items()},
+            }
+            temp_path = self.storage_path.with_name(f".{self.storage_path.name}.{os.getpid()}.tmp")
+            temp_path.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True), encoding="utf-8")
+            os.replace(temp_path, self.storage_path)
+        except OSError:
+            return
 
     def create(self, action: str, title: str) -> JobState:
         with self._lock:
@@ -106,6 +139,7 @@ class JobStore:
                 message="Queued and waiting to start.",
             )
             self._jobs[job.job_id] = job
+            self._persist_locked()
             return job
 
     def update(
@@ -131,6 +165,7 @@ class JobStore:
             if total is not None:
                 job.total = total
             job.updated_at = time.time()
+            self._persist_locked()
 
     def complete(self, job_id: str, *, results: list[dict[str, Any]], notice: dict[str, Any]) -> None:
         with self._lock:
@@ -141,6 +176,7 @@ class JobStore:
             job.results = results
             job.notice = notice
             job.updated_at = time.time()
+            self._persist_locked()
 
     def fail(self, job_id: str, error: str) -> None:
         with self._lock:
@@ -150,6 +186,7 @@ class JobStore:
             job.message = error
             job.error = error
             job.updated_at = time.time()
+            self._persist_locked()
 
     def get(self, job_id: str) -> JobState | None:
         with self._lock:
@@ -345,7 +382,7 @@ def create_app() -> Flask:
     app.config["SECRET_KEY"] = settings.flask_secret_key
     app.config["SETTINGS"] = settings
     app.config["CONFIG_STORE"] = config_store
-    app.config["JOB_STORE"] = JobStore()
+    app.config["JOB_STORE"] = JobStore(data_root / "run" / "jobs.json")
     app.config["PRD_BRIEFING_STORE"] = BriefingStore(data_root / "prd_briefing")
     app.config["SOURCE_CODE_QA_SERVICE"] = SourceCodeQAService(
         data_root=data_root,
@@ -619,6 +656,9 @@ def create_app() -> Flask:
                     "llm_deep_model": service.llm_budgets["deep"]["model"],
                     "llm_fallback_model": service._llm_fallback_model(),
                     "llm_policy": service.llm_policy_payload(),
+                    "index_health": service.index_health_payload(),
+                    "release_gate": _source_code_qa_release_gate_payload(settings),
+                    "domain_knowledge": service.domain_knowledge_payload(),
                     "options": service.options_payload(),
                     "config": service.load_config(),
                 }
@@ -1808,6 +1848,38 @@ def _can_manage_source_code_qa(settings: Settings) -> bool:
 
 def _build_source_code_qa_service() -> SourceCodeQAService:
     return current_app.config["SOURCE_CODE_QA_SERVICE"]
+
+
+def _read_json_file(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _source_code_qa_release_gate_payload(settings: Settings) -> dict[str, Any]:
+    data_root = settings.team_portal_data_dir
+    if not data_root.is_absolute():
+        data_root = (PROJECT_ROOT / data_root).resolve()
+    gate = _read_json_file(data_root / "run" / "source_code_qa_release_gate.json")
+    eval_status = _read_json_file(data_root / "run" / "source_code_qa_eval_status.json")
+    latest_eval = _read_json_file(data_root / "source_code_qa" / "eval_runs" / "latest.json")
+    status = str(gate.get("status") or eval_status.get("state") or latest_eval.get("status") or "missing")
+    updated_at = gate.get("timestamp") or latest_eval.get("timestamp") or eval_status.get("updated_at")
+    return {
+        "status": status,
+        "updated_at": updated_at,
+        "summary": gate.get("summary") or eval_status.get("message") or "",
+        "thresholds": gate.get("thresholds") or {},
+        "checks": gate.get("checks") or {},
+        "latest_eval": {
+            "status": latest_eval.get("status"),
+            "eval": latest_eval.get("eval") or {},
+            "llm_smoke": latest_eval.get("llm_smoke") or {},
+            "report_path": latest_eval.get("report_path"),
+        },
+    }
 
 
 def _google_credentials_have_scopes(*required_scopes: str) -> bool:

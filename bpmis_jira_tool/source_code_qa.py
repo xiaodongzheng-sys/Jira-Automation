@@ -43,6 +43,7 @@ GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 OPENAI_COMPATIBLE_API_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_SEMANTIC_INDEX_MODEL = "local-token-hybrid-v1"
 DEFAULT_DOMAIN_PROFILE_PATH = Path(__file__).resolve().parent.parent / "config" / "source_code_qa_domain_profiles.json"
+DEFAULT_DOMAIN_KNOWLEDGE_PACK_PATH = Path(__file__).resolve().parent.parent / "config" / "source_code_qa_domain_knowledge_packs.json"
 DEFAULT_LLM_TIMEOUT_SECONDS = 90
 DEFAULT_LLM_MAX_RETRIES = 2
 DEFAULT_LLM_BACKOFF_SECONDS = 1.0
@@ -1051,6 +1052,7 @@ class SourceCodeQAService:
         self.sync_jobs_path = self.data_root / "sync_jobs.json"
         self.lock_root = self.data_root / "locks"
         self.domain_profile_path = Path(os.getenv("SOURCE_CODE_QA_DOMAIN_PROFILES", str(DEFAULT_DOMAIN_PROFILE_PATH)))
+        self.domain_knowledge_pack_path = Path(os.getenv("SOURCE_CODE_QA_DOMAIN_KNOWLEDGE_PACKS", str(DEFAULT_DOMAIN_KNOWLEDGE_PACK_PATH)))
         self.team_profiles = team_profiles
         self.gitlab_token = str(gitlab_token or "").strip()
         self.gitlab_username = str(gitlab_username or "oauth2").strip() or "oauth2"
@@ -1399,6 +1401,37 @@ class SourceCodeQAService:
             return {"default": {}}
         return payload if isinstance(payload, dict) else {"default": {}}
 
+    def load_domain_knowledge_packs(self) -> dict[str, Any]:
+        if not self.domain_knowledge_pack_path.exists():
+            return {"version": 1, "domains": {}}
+        try:
+            payload = json.loads(self.domain_knowledge_pack_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {"version": 1, "domains": {}}
+        if not isinstance(payload, dict):
+            return {"version": 1, "domains": {}}
+        domains = payload.get("domains") if isinstance(payload.get("domains"), dict) else {}
+        return {**payload, "domains": domains}
+
+    def domain_knowledge_payload(self) -> dict[str, Any]:
+        payload = self.load_domain_knowledge_packs()
+        domains = payload.get("domains") or {}
+        return {
+            "version": payload.get("version") or 1,
+            "updated_at": payload.get("updated_at"),
+            "domains": {
+                key: {
+                    "label": value.get("label"),
+                    "summary": value.get("summary"),
+                    "module_count": len(value.get("module_map") or []),
+                    "question_count": len(value.get("question_seeds") or []),
+                    "evidence_rules": value.get("evidence_rules") or [],
+                }
+                for key, value in domains.items()
+                if isinstance(value, dict)
+            },
+        }
+
     def _domain_profile(self, pm_team: str, country: str) -> dict[str, Any]:
         del country
         profiles = self.load_domain_profiles()
@@ -1411,7 +1444,63 @@ class SourceCodeQAService:
                 merged[key] = list(dict.fromkeys([*merged[key], *value]))
             else:
                 merged[key] = value
+        pack = self._domain_knowledge_pack(team)
+        retrieval_terms = pack.get("retrieval_terms") if isinstance(pack.get("retrieval_terms"), dict) else {}
+        for key, value in retrieval_terms.items():
+            if isinstance(value, list):
+                merged[key] = list(dict.fromkeys([*(merged.get(key) if isinstance(merged.get(key), list) else []), *[str(item) for item in value if str(item).strip()]]))
+        knowledge_terms = self._domain_knowledge_terms(pack)
+        if knowledge_terms:
+            merged["knowledge_terms"] = list(dict.fromkeys([*(merged.get("knowledge_terms") if isinstance(merged.get("knowledge_terms"), list) else []), *knowledge_terms]))
         return merged
+
+    def _domain_knowledge_pack(self, team: str) -> dict[str, Any]:
+        domains = self.load_domain_knowledge_packs().get("domains") or {}
+        pack = domains.get(str(team or "").strip().upper())
+        return pack if isinstance(pack, dict) else {}
+
+    @classmethod
+    def _domain_knowledge_terms(cls, pack: dict[str, Any]) -> list[str]:
+        terms: list[str] = []
+
+        def add(value: Any) -> None:
+            text = str(value or "").strip()
+            if text:
+                terms.append(text)
+
+        for module in pack.get("module_map") or []:
+            if not isinstance(module, dict):
+                continue
+            add(module.get("name"))
+            for key in ("aliases", "code_hints", "repo_hints", "business_flows"):
+                for item in module.get(key) or []:
+                    add(item)
+        for item in pack.get("terminology") or []:
+            if not isinstance(item, dict):
+                continue
+            add(item.get("term"))
+            for alias in item.get("aliases") or []:
+                add(alias)
+            for code_term in item.get("code_terms") or []:
+                add(code_term)
+        artifacts = pack.get("key_artifacts") if isinstance(pack.get("key_artifacts"), dict) else {}
+        for values in artifacts.values():
+            if isinstance(values, list):
+                for item in values:
+                    if isinstance(item, dict):
+                        add(item.get("name"))
+                        add(item.get("path"))
+                        add(item.get("purpose"))
+                    else:
+                        add(item)
+        for question in pack.get("question_seeds") or []:
+            if isinstance(question, dict):
+                add(question.get("question"))
+                for item in question.get("expected_terms") or []:
+                    add(item)
+            else:
+                add(question)
+        return list(dict.fromkeys(terms))[:220]
 
     @staticmethod
     def _profile_terms(profile: dict[str, Any], *keys: str) -> list[str]:
@@ -1431,13 +1520,13 @@ class SourceCodeQAService:
         intent = self._question_intent(question)
         profile_terms: list[str] = []
         if intent.get("data_source"):
-            profile_terms.extend(self._profile_terms(profile, "data_carriers", "source_terms", "field_population_terms"))
+            profile_terms.extend(self._profile_terms(profile, "data_carriers", "source_terms", "field_population_terms", "knowledge_terms"))
         if intent.get("api"):
-            profile_terms.extend(self._profile_terms(profile, "api_terms"))
+            profile_terms.extend(self._profile_terms(profile, "api_terms", "knowledge_terms"))
         if intent.get("config"):
-            profile_terms.extend(self._profile_terms(profile, "config_terms"))
+            profile_terms.extend(self._profile_terms(profile, "config_terms", "knowledge_terms"))
         if intent.get("rule_logic") or intent.get("error"):
-            profile_terms.extend(self._profile_terms(profile, "logic_terms"))
+            profile_terms.extend(self._profile_terms(profile, "logic_terms", "knowledge_terms"))
         expanded = list(tokens)
         for term in profile_terms:
             for token in self._question_tokens(term):
@@ -1920,6 +2009,58 @@ class SourceCodeQAService:
                 }
             )
         return statuses
+
+    def index_health_payload(self) -> dict[str, Any]:
+        config = self.load_config()
+        mappings = config.get("mappings") or {}
+        keys: dict[str, Any] = {}
+        totals = {
+            "repos": 0,
+            "ready": 0,
+            "stale_or_missing": 0,
+            "files": 0,
+            "lines": 0,
+            "definitions": 0,
+            "references": 0,
+            "semantic_chunks": 0,
+            "tree_sitter_files": 0,
+            "tree_sitter_errors": 0,
+        }
+        oldest_indexed_at = ""
+        newest_indexed_at = ""
+        for key in sorted(mappings):
+            statuses = self.repo_status(key)
+            freshness = self._index_freshness_payload(statuses)
+            keys[key] = {"freshness": freshness, "repos": statuses}
+            totals["repos"] += len(statuses)
+            for item in statuses:
+                index = item.get("index") or {}
+                if index.get("state") == "ready":
+                    totals["ready"] += 1
+                else:
+                    totals["stale_or_missing"] += 1
+                for field in (
+                    "files",
+                    "lines",
+                    "definitions",
+                    "references",
+                    "semantic_chunks",
+                    "tree_sitter_files",
+                    "tree_sitter_errors",
+                ):
+                    totals[field] += int(index.get(field) or 0)
+                updated_at = str(index.get("updated_at") or "").strip()
+                if updated_at:
+                    oldest_indexed_at = updated_at if not oldest_indexed_at else min(oldest_indexed_at, updated_at)
+                    newest_indexed_at = updated_at if not newest_indexed_at else max(newest_indexed_at, updated_at)
+        health = "ready" if totals["repos"] and not totals["stale_or_missing"] else "needs_sync" if totals["repos"] else "not_configured"
+        return {
+            "status": health,
+            "totals": totals,
+            "oldest_indexed_at": oldest_indexed_at or None,
+            "newest_indexed_at": newest_indexed_at or None,
+            "keys": keys,
+        }
 
     @staticmethod
     def _index_freshness_payload(repo_status: list[dict[str, Any]]) -> dict[str, Any]:
@@ -9636,6 +9777,7 @@ class SourceCodeQAService:
             "api_terms",
             "config_terms",
             "logic_terms",
+            "knowledge_terms",
         )
         if domain_profile:
             for value in domain_profile.values():
