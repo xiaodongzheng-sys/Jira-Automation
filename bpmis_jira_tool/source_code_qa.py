@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import functools
 import hashlib
 import json
 import os
@@ -26,9 +27,25 @@ ANSWER_MODE_AUTO = "auto"
 ANSWER_MODE = "retrieval_only"
 ANSWER_MODE_GEMINI = "gemini_flash"
 CONFIG_VERSION = 1
-CODE_INDEX_VERSION = 7
+CODE_INDEX_VERSION = 27
+LLM_PROVIDER_GEMINI = "gemini"
+LLM_PROVIDER_OPENAI_COMPATIBLE = "openai_compatible"
+LLM_PROMPT_VERSION = 5
+LLM_RESPONSE_SCHEMA_VERSION = 3
+LLM_ROUTER_VERSION = 6
+LLM_CACHE_VERSION = 7
+LLM_RUNTIME_VERSION = 1
+PLANNER_TOOL_DSL_VERSION = 1
+GEMINI_MIN_THINKING_BUDGET = 512
+GEMINI_MAX_THINKING_BUDGET = 24576
 GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
+OPENAI_COMPATIBLE_API_BASE_URL = "https://api.openai.com/v1"
+DEFAULT_SEMANTIC_INDEX_MODEL = "local-token-hybrid-v1"
 DEFAULT_DOMAIN_PROFILE_PATH = Path(__file__).resolve().parent.parent / "config" / "source_code_qa_domain_profiles.json"
+DEFAULT_LLM_TIMEOUT_SECONDS = 90
+DEFAULT_LLM_MAX_RETRIES = 2
+DEFAULT_LLM_BACKOFF_SECONDS = 1.0
+DEFAULT_LLM_MAX_BACKOFF_SECONDS = 8.0
 DEFAULT_LLM_BUDGETS = {
     "cheap": {
         "match_limit": 4,
@@ -42,7 +59,7 @@ DEFAULT_LLM_BUDGETS = {
         "match_limit": 6,
         "snippet_line_budget": 70,
         "snippet_char_budget": 8_000,
-        "thinking_budget": 0,
+        "thinking_budget": 512,
         "max_output_tokens": 700,
         "model": "gemini-2.5-flash",
     },
@@ -50,7 +67,7 @@ DEFAULT_LLM_BUDGETS = {
         "match_limit": 12,
         "snippet_line_budget": 160,
         "snippet_char_budget": 24_000,
-        "thinking_budget": 768,
+        "thinking_budget": 1024,
         "max_output_tokens": 1_400,
         "model": "gemini-2.5-flash",
     },
@@ -101,6 +118,7 @@ TEXT_SUFFIXES = {
     ".java",
     ".js",
     ".json",
+    ".jsonl",
     ".jsx",
     ".kt",
     ".kts",
@@ -152,6 +170,8 @@ STOPWORDS = {
 HTTPS_URL_PATTERN = re.compile(r"^https://[^/\s]+/.+\.git$")
 IDENTIFIER_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]{2,}")
 CLASS_DEF_PATTERN = re.compile(r"\b(class|interface|enum)\s+([A-Za-z_][A-Za-z0-9_]*)\b")
+JAVA_PACKAGE_PATTERN = re.compile(r"^\s*package\s+([A-Za-z_][A-Za-z0-9_.]*)\s*;")
+JAVA_IMPORT_PATTERN = re.compile(r"^\s*import\s+(?:static\s+)?([A-Za-z_][A-Za-z0-9_.*]*)\s*;")
 PY_DEF_PATTERN = re.compile(r"^\s*(class|def)\s+([A-Za-z_][A-Za-z0-9_]*)\b")
 JS_DEF_PATTERN = re.compile(r"^\s*(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_][A-Za-z0-9_]*)\b|^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:async\s*)?\(")
 JAVA_METHOD_DEF_PATTERN = re.compile(
@@ -167,7 +187,62 @@ MYBATIS_NAMESPACE_PATTERN = re.compile(r"<mapper\b[^>]*\bnamespace\s*=\s*[\"']([
 MYBATIS_STATEMENT_PATTERN = re.compile(r"<(select|insert|update|delete)\b[^>]*\bid\s*=\s*[\"']([^\"']+)[\"']", re.IGNORECASE)
 HTTP_LITERAL_PATTERN = re.compile(r"[\"'](https?://[^\"']+|/[A-Za-z0-9_./{}:-]{2,})[\"']")
 SQL_TABLE_PATTERN = re.compile(r"\b(?:from|join|update|into)\s+([A-Za-z_][A-Za-z0-9_.$]*)", re.IGNORECASE)
+SQL_READ_TABLE_PATTERN = re.compile(r"\b(?:from|join)\s+([A-Za-z_][A-Za-z0-9_.$]*)", re.IGNORECASE)
+SQL_WRITE_TABLE_PATTERN = re.compile(r"\b(?:insert\s+into|update|delete\s+from)\s+([A-Za-z_][A-Za-z0-9_.$]*)", re.IGNORECASE)
 PROPERTIES_KEY_PATTERN = re.compile(r"^\s*([A-Za-z0-9_.-]{3,})\s*[:=]")
+CONFIG_ASSIGNMENT_PATTERN = re.compile(r"^\s*([A-Za-z0-9_.-]{3,})\s*[:=]\s*(.+?)\s*$")
+CONFIG_PLACEHOLDER_PATTERN = re.compile(r"\$\{([A-Za-z0-9_.-]+)(?::[^}]*)?\}")
+SPRING_VALUE_PATTERN = re.compile(r"@Value\s*\(\s*[\"']\$\{([^}:]+)(?::[^}]*)?\}[\"']\s*\)")
+SPRING_QUALIFIER_PATTERN = re.compile(r"@(Qualifier|Resource)\s*(?:\(\s*(?:name\s*=\s*)?[\"']([^\"']+)[\"']\s*\))?")
+SPRING_QUALIFIED_VARIABLE_PATTERN = re.compile(
+    r"@(?:Qualifier|Resource)\s*(?:\(\s*(?:name\s*=\s*)?[\"']([^\"']+)[\"']\s*\))\s*"
+    r"(?:@[A-Za-z_][A-Za-z0-9_]*(?:\([^)]*\))?\s*)*"
+    r"(?:final\s+)?[A-Z][A-Za-z0-9_]*(?:<[^;(){}]*>)?(?:\s*\[\])?\s+([a-z][A-Za-z0-9_]*)"
+)
+SPRING_PROFILE_PATTERN = re.compile(r"@Profile\s*\(([^)]*)\)")
+SPRING_CONDITIONAL_ON_PROPERTY_PATTERN = re.compile(r"@ConditionalOnProperty\s*\(([^)]*)\)")
+SPRING_BEAN_NAME_PATTERN = re.compile(r"@(Service|Component|Repository|Controller|RestController|Bean)\s*(?:\(\s*(?:value\s*=\s*|name\s*=\s*)?[\"']([^\"']+)[\"']\s*\))?")
+SPRING_PRIMARY_PATTERN = re.compile(r"@Primary\b")
+SPRING_AOP_PATTERN = re.compile(r"@(Around|Before|After|AfterReturning|AfterThrowing|Pointcut)\s*(?:\(([^)]*)\))?")
+SPRING_SCHEDULED_PATTERN = re.compile(r"@Scheduled\s*(?:\(([^)]*)\))?")
+SPRING_ASPECT_PATTERN = re.compile(r"@Aspect\b")
+SPRING_INTERCEPTOR_PATTERN = re.compile(r"\b(?:implements\s+)?(?:HandlerInterceptor|AsyncHandlerInterceptor)\b")
+MESSAGE_LISTENER_PATTERN = re.compile(r"@(KafkaListener|RabbitListener|JmsListener)\s*\(([^)]*)\)")
+MESSAGE_SEND_PATTERN = re.compile(r"\b(?:kafkaTemplate|rabbitTemplate|jmsTemplate|streamBridge)\.(?:send|convertAndSend|sendMessage)\s*\(([^)]*)\)", re.IGNORECASE)
+EVENT_PUBLISH_PATTERN = re.compile(r"\b(?:publishEvent|eventBus\.post|applicationEventPublisher\.publishEvent)\s*\(([^)]*)\)")
+MAVEN_DEPENDENCY_BLOCK_PATTERN = re.compile(r"<dependency\b[^>]*>(.*?)</dependency>", re.IGNORECASE | re.DOTALL)
+MAVEN_TAG_PATTERN = re.compile(r"<([A-Za-z0-9_.-]+)>\s*([^<]+?)\s*</\1>", re.IGNORECASE)
+GRADLE_COORDINATE_PATTERN = re.compile(
+    r"\b(?:implementation|api|compileOnly|runtimeOnly|testImplementation|classpath)\s*(?:\(|\s)\s*[\"']([A-Za-z0-9_.-]+):([A-Za-z0-9_.-]+)(?::[^\"']+)?[\"']"
+)
+GRADLE_PROJECT_DEPENDENCY_PATTERN = re.compile(r"\b(?:implementation|api|compileOnly|runtimeOnly|testImplementation)\s*(?:\(|\s).*?project\([\"'](:?[^\"')]+)[\"']\)")
+GRADLE_INCLUDE_PATTERN = re.compile(r"\binclude\s+(.+)")
+RUNTIME_TRACE_FILENAMES = {
+    "source-code-qa-runtime-traces.jsonl",
+    "source_code_qa_runtime_traces.jsonl",
+    "runtime-traces.jsonl",
+    "runtime_traces.jsonl",
+}
+TEST_PATH_MARKERS = (
+    "/test/",
+    "/tests/",
+    "__tests__/",
+    ".spec.",
+    ".test.",
+    "_test.",
+    "test_",
+    "spec_",
+)
+TEST_ANNOTATION_PATTERN = re.compile(
+    r"@(?:Test|ParameterizedTest|RepeatedTest|SpringBootTest|WebMvcTest|DataJpaTest|ExtendWith|RunWith)\b"
+)
+TEST_ASSERTION_PATTERN = re.compile(
+    r"\b(?:assert[A-Z][A-Za-z0-9_]*|assertThat|expect|verify|when|given|then|should|self\.assert[A-Z][A-Za-z0-9_]*)\s*\("
+)
+OPERATIONAL_BOUNDARY_PATTERN = re.compile(
+    r"@(Transactional|Cacheable|CacheEvict|CachePut|Async|Retryable|Recover|CircuitBreaker|RateLimiter|Bulkhead|TimeLimiter|SchedulerLock|PreAuthorize|PostAuthorize)\b"
+    r"(?:\(([^)]*)\))?"
+)
 FTS_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_./:-]{2,}")
 DECLARATION_HINT_PATTERN = re.compile(
     r"^\s*(class|def|function|func|interface|type|enum|const|let|var|public|private|protected|static|final)\b",
@@ -175,10 +250,94 @@ DECLARATION_HINT_PATTERN = re.compile(
 )
 PATHISH_PATTERN = re.compile(r"/[A-Za-z0-9_./:-]{3,}")
 CALL_SYMBOL_PATTERN = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(")
+MEMBER_CALL_PATTERN = re.compile(r"\b([a-z][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)\s*\(")
 CLASS_CONSTRUCTION_PATTERN = re.compile(r"\bnew\s+([A-Za-z_][A-Za-z0-9_]*)\b")
 FIELD_OR_PARAM_TYPE_PATTERN = re.compile(
     r"\b(?:private|protected|public|final|static|@Autowired|@Resource)?\s*"
     r"([A-Z][A-Za-z0-9_]*(?:Service|Client|Integration|Repository|Dao|DAO|Mapper|Adapter|Gateway|Provider|Facade))\b"
+)
+FIELD_VAR_TYPE_PATTERN = re.compile(
+    r"\b([A-Z][A-Za-z0-9_]*(?:Service|Client|Integration|Repository|Dao|DAO|Mapper|Adapter|Gateway|Provider|Facade))\s+([a-z][A-Za-z0-9_]*)\b"
+)
+GENERIC_FIELD_VAR_TYPE_PATTERN = re.compile(
+    r"\b(?:private|protected|public|final|static|\s)*"
+    r"[A-Z][A-Za-z0-9_]*(?:<([^;=(){}]+)>)\s+([a-z][A-Za-z0-9_]*)\b"
+)
+SERVICE_LIKE_TYPE_PATTERN = re.compile(
+    r"\b([A-Z][A-Za-z0-9_]*(?:Service|Client|Integration|Repository|Dao|DAO|Mapper|Adapter|Gateway|Provider|Facade))\b"
+)
+STREAM_LAMBDA_PATTERN = re.compile(
+    r"\b([a-z][A-Za-z0-9_]*)\s*(?:\.values\s*\(\s*\))?(?:\.stream\s*\(\s*\))?"
+    r"\.(?:forEach|map|flatMap|filter|anyMatch|allMatch|noneMatch|peek)\s*\(\s*\(?\s*([a-z][A-Za-z0-9_]*)\s*\)?\s*->"
+)
+PROVIDER_CHAIN_CALL_PATTERN = re.compile(
+    r"\b([a-z][A-Za-z0-9_]*)\.(?:getObject|getIfAvailable|getIfUnique|get)\s*\(\s*\)\.([A-Za-z_][A-Za-z0-9_]*)\s*\("
+)
+THIS_FIELD_ASSIGNMENT_PATTERN = re.compile(r"\bthis\.([a-z][A-Za-z0-9_]*)\s*=\s*([a-z][A-Za-z0-9_]*)\s*;")
+STATIC_QA_RULES: tuple[dict[str, Any], ...] = (
+    {
+        "kind": "hardcoded_secret",
+        "severity": "high",
+        "score": 214,
+        "pattern": re.compile(r"\b(password|passwd|secret|token|api[_-]?key|access[_-]?key)\b\s*[:=]\s*[\"'][^\"'${}]{4,}[\"']", re.IGNORECASE),
+        "reason": "hardcoded credential-like value",
+    },
+    {
+        "kind": "sql_string_concatenation",
+        "severity": "high",
+        "score": 208,
+        "pattern": re.compile(r"\b(select|insert|update|delete)\b[^;\n]{0,180}(?:\+|\.format\s*\(|%s|\$\{)", re.IGNORECASE),
+        "reason": "SQL appears to be assembled with string interpolation/concatenation",
+    },
+    {
+        "kind": "command_execution",
+        "severity": "high",
+        "score": 204,
+        "pattern": re.compile(r"\b(Runtime\.getRuntime\(\)\.exec|ProcessBuilder|subprocess\.(?:Popen|call|run)|os\.system)\s*\(", re.IGNORECASE),
+        "reason": "command execution path needs input validation review",
+    },
+    {
+        "kind": "unsafe_eval_exec",
+        "severity": "high",
+        "score": 204,
+        "pattern": re.compile(r"\b(eval|exec)\s*\(", re.IGNORECASE),
+        "reason": "dynamic code execution is risky",
+    },
+    {
+        "kind": "unsafe_deserialization",
+        "severity": "high",
+        "score": 200,
+        "pattern": re.compile(r"\b(ObjectInputStream|pickle\.loads|yaml\.load)\s*\(", re.IGNORECASE),
+        "reason": "unsafe deserialization needs trust-boundary review",
+    },
+    {
+        "kind": "broad_exception",
+        "severity": "medium",
+        "score": 176,
+        "pattern": re.compile(r"\b(?:catch\s*\(\s*(?:Exception|Throwable)\b|except\s+(?:Exception|BaseException)\b)", re.IGNORECASE),
+        "reason": "broad exception handling can hide specific failures",
+    },
+    {
+        "kind": "swallowed_exception",
+        "severity": "medium",
+        "score": 174,
+        "pattern": re.compile(r"\b(?:printStackTrace\s*\(|except\s+[^:]+:\s*pass\b|catch\s*\([^)]*\)\s*\{\s*\})", re.IGNORECASE),
+        "reason": "exception appears logged weakly or swallowed",
+    },
+    {
+        "kind": "debug_output",
+        "severity": "low",
+        "score": 140,
+        "pattern": re.compile(r"\b(System\.out\.print(?:ln)?|console\.log|print)\s*\(", re.IGNORECASE),
+        "reason": "debug output may leak operational details or noisy logs",
+    },
+    {
+        "kind": "todo_fixme",
+        "severity": "low",
+        "score": 132,
+        "pattern": re.compile(r"\b(TODO|FIXME|XXX)\b", re.IGNORECASE),
+        "reason": "unfinished implementation marker",
+    },
 )
 DEPENDENCY_QUESTION_TERMS = {
     "data", "source", "sources", "integration", "integrations", "upstream", "dependency",
@@ -217,8 +376,36 @@ ANSWER_CONCRETE_SOURCE_HINTS = (
 )
 API_HINTS = ("api", "endpoint", "route", "controller", "requestmapping", "getmapping", "postmapping", "http", "url", "path")
 CONFIG_HINTS = ("config", "configuration", "property", "properties", "yaml", "yml", "env", "setting", "feature", "flag")
+MODULE_DEPENDENCY_HINTS = (
+    "dependency", "dependencies", "depend on", "module", "maven", "gradle", "pom",
+    "artifact", "artifactid", "groupid", "package.json", "npm", "yarn", "pnpm",
+)
 ERROR_HINTS = ("error", "exception", "failed", "failure", "stacktrace", "status", "code", "timeout")
 RULE_HINTS = ("rule", "condition", "logic", "validate", "validation", "permission", "access", "approval", "eligible")
+STATIC_QA_HINTS = (
+    "static qa", "static analysis", "code quality", "code smell", "smell", "bug", "bugs",
+    "risk", "risks", "security", "vulnerability", "vulnerabilities", "unsafe",
+    "hardcoded", "secret", "password", "token", "sql injection", "injection",
+    "empty catch", "swallow", "broad exception", "todo", "fixme",
+)
+IMPACT_ANALYSIS_HINTS = (
+    "impact", "impacted", "affect", "affected", "blast radius", "blast-radius",
+    "change impact", "if change", "if changed", "who calls", "callers",
+    "callees", "upstream", "downstream", "usage", "usages", "dependents",
+    "depends on", "what breaks", "regression", "side effect", "side effects",
+)
+TEST_COVERAGE_HINTS = (
+    "test", "tests", "tested", "testing", "coverage", "covered", "unit test",
+    "integration test", "spec", "specs", "junit", "pytest", "jest", "mocha",
+    "assert", "mockito", "mock", "verify",
+)
+OPERATIONAL_BOUNDARY_HINTS = (
+    "transaction", "transactional", "rollback", "commit", "cache", "cached",
+    "cacheable", "cacheevict", "async", "asynchronous", "retry", "retryable",
+    "circuit breaker", "circuitbreaker", "rate limit", "ratelimiter",
+    "bulkhead", "timeout", "timelimiter", "lock", "schedulerlock",
+    "preauthorize", "postauthorize", "authorization", "permission boundary",
+)
 FIELD_POPULATION_HINTS = (
     "set", "get", "build", "populate", "provider", "factory", "converter",
     "assembler", "initiation", "underwritingbasicinfo", "customerinfo",
@@ -230,12 +417,563 @@ DATA_CARRIER_SUFFIXES = (
 )
 QUALITY_GATE_TRACE_STAGE = "quality_gate"
 TOOL_LOOP_TRACE_PREFIX = "tool_loop_"
+ANSWER_POLICY_REGISTRY = {
+    "data_source": {
+        "label": "Data source evidence",
+        "required_any": ["data_sources"],
+        "supporting_any": ["field_population", "data_carriers", "downstream_components"],
+        "missing": "concrete upstream source/table/API/repository evidence beyond DTO fields",
+    },
+    "api": {
+        "label": "API surface evidence",
+        "required_any": ["api_or_config", "entry_points"],
+        "supporting_any": ["downstream_components"],
+        "missing": "endpoint/client/API evidence",
+    },
+    "config": {
+        "label": "Configuration evidence",
+        "required_any": ["api_or_config"],
+        "supporting_any": ["entry_points"],
+        "missing": "config/property evidence",
+    },
+    "logic": {
+        "label": "Rule or error logic evidence",
+        "required_any": ["rule_or_error_logic", "entry_points"],
+        "supporting_any": ["downstream_components"],
+        "missing": "rule/error handling evidence",
+    },
+    "general": {
+        "label": "Specific code evidence",
+        "required_any": ["entry_points", "downstream_components", "data_sources", "api_or_config", "rule_or_error_logic"],
+        "supporting_any": [],
+        "missing": "specific code evidence",
+    },
+    "static_qa": {
+        "label": "Static QA evidence",
+        "required_any": ["static_findings"],
+        "supporting_any": ["entry_points", "rule_or_error_logic"],
+        "missing": "static QA finding evidence such as risky exception handling, hardcoded secret, unsafe SQL, command execution, or TODO/FIXME",
+    },
+    "impact_analysis": {
+        "label": "Impact analysis evidence",
+        "required_any": ["impact_surfaces"],
+        "supporting_any": ["entry_points", "downstream_components", "api_or_config", "data_sources"],
+        "missing": "caller/callee or graph evidence showing upstream and downstream impact surfaces",
+    },
+    "test_coverage": {
+        "label": "Test coverage evidence",
+        "required_any": ["test_coverage"],
+        "supporting_any": ["entry_points", "downstream_components"],
+        "missing": "test file, test case, assertion, mock, or verification evidence covering the target symbol",
+    },
+    "operational_boundary": {
+        "label": "Operational boundary evidence",
+        "required_any": ["operational_boundaries"],
+        "supporting_any": ["entry_points", "api_or_config", "downstream_components"],
+        "missing": "transaction/cache/async/retry/circuit-breaker/security boundary annotation evidence",
+    },
+}
 
 
 @dataclass(frozen=True)
 class RepositoryEntry:
     display_name: str
     url: str
+
+
+@dataclass(frozen=True)
+class LLMGenerateResult:
+    payload: dict[str, Any]
+    usage: dict[str, Any]
+    model: str
+    attempts: int
+    latency_ms: int = 0
+    attempt_log: tuple[dict[str, Any], ...] = ()
+
+
+class SourceCodeQAEmbeddingProvider:
+    name = "local_token_hybrid"
+
+    def ready(self) -> bool:
+        return True
+
+    def embed_texts(self, texts: list[str]) -> list[list[float]]:
+        del texts
+        return []
+
+    def public_config(self) -> dict[str, Any]:
+        return {"provider": self.name, "ready": self.ready()}
+
+
+class OpenAICompatibleEmbeddingProvider(SourceCodeQAEmbeddingProvider):
+    name = "openai_compatible"
+
+    def __init__(self, *, api_key: str, api_base_url: str, model: str) -> None:
+        self.api_key = str(api_key or "").strip()
+        self.api_base_url = str(api_base_url or OPENAI_COMPATIBLE_API_BASE_URL).rstrip("/")
+        self.model = str(model or "").strip()
+
+    def ready(self) -> bool:
+        return bool(self.api_key and self.model and not self.model.startswith("local-"))
+
+    def embed_texts(self, texts: list[str]) -> list[list[float]]:
+        if not texts:
+            return []
+        if not self.ready():
+            raise ToolError("Source Code Q&A embedding provider is not configured.")
+        response = requests.post(
+            f"{self.api_base_url}/embeddings",
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            },
+            json={"model": self.model, "input": texts},
+            timeout=90,
+        )
+        if not response.ok:
+            detail = self._sanitize_error_detail(response.text)
+            raise ToolError(f"Source Code Q&A embedding generation failed. {detail[:500]}")
+        payload = response.json()
+        rows = payload.get("data") or []
+        rows.sort(key=lambda item: int(item.get("index") or 0))
+        return [[float(value) for value in row.get("embedding") or []] for row in rows]
+
+    def public_config(self) -> dict[str, Any]:
+        return {
+            "provider": self.name,
+            "ready": self.ready(),
+            "model": self.model,
+            "api_base_url": self.api_base_url,
+        }
+
+    def _sanitize_error_detail(self, detail: str) -> str:
+        sanitized = str(detail or "")
+        if self.api_key:
+            sanitized = sanitized.replace(self.api_key, "***")
+        return re.sub(r"https://[^:@/\s]+:[^@/\s]+@", "https://***:***@", sanitized)
+
+
+class SourceCodeQALLMProvider:
+    name = "unknown"
+
+    def ready(self) -> bool:
+        return False
+
+    def generate(
+        self,
+        *,
+        payload: dict[str, Any],
+        primary_model: str,
+        fallback_model: str,
+    ) -> LLMGenerateResult:
+        raise ToolError("The configured Source Code Q&A LLM provider is not supported yet.")
+
+    def extract_text(self, payload: dict[str, Any]) -> str:
+        raise ToolError("The configured Source Code Q&A LLM provider returned an unreadable answer.")
+
+    def public_config(self) -> dict[str, Any]:
+        return {"provider": self.name, "ready": self.ready()}
+
+
+class UnsupportedSourceCodeQALLMProvider(SourceCodeQALLMProvider):
+    def __init__(self, name: str) -> None:
+        self.name = str(name or "unknown")
+
+    def generate(
+        self,
+        *,
+        payload: dict[str, Any],
+        primary_model: str,
+        fallback_model: str,
+    ) -> LLMGenerateResult:
+        raise ToolError(f"Source Code Q&A LLM provider {self.name!r} is not supported yet.")
+
+
+class GeminiSourceCodeQALLMProvider(SourceCodeQALLMProvider):
+    name = LLM_PROVIDER_GEMINI
+
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        api_base_url: str = GEMINI_API_BASE_URL,
+        timeout_seconds: int = DEFAULT_LLM_TIMEOUT_SECONDS,
+        max_retries: int = DEFAULT_LLM_MAX_RETRIES,
+        backoff_seconds: float = DEFAULT_LLM_BACKOFF_SECONDS,
+        max_backoff_seconds: float = DEFAULT_LLM_MAX_BACKOFF_SECONDS,
+    ) -> None:
+        self.api_key = str(api_key or "").strip()
+        self.api_base_url = str(api_base_url or GEMINI_API_BASE_URL).rstrip("/")
+        self.timeout_seconds = max(5, int(timeout_seconds or DEFAULT_LLM_TIMEOUT_SECONDS))
+        self.max_retries = max(0, int(max_retries or 0))
+        self.backoff_seconds = max(0.0, float(backoff_seconds or 0.0))
+        self.max_backoff_seconds = max(self.backoff_seconds, float(max_backoff_seconds or self.backoff_seconds or DEFAULT_LLM_MAX_BACKOFF_SECONDS))
+
+    def ready(self) -> bool:
+        return bool(self.api_key)
+
+    def generate(
+        self,
+        *,
+        payload: dict[str, Any],
+        primary_model: str,
+        fallback_model: str,
+    ) -> LLMGenerateResult:
+        if not self.ready():
+            raise ToolError("LLM mode is not configured yet. Set SOURCE_CODE_QA_GEMINI_API_KEY or GEMINI_API_KEY on the server first.")
+        models = [primary_model]
+        if fallback_model and fallback_model not in models:
+            models.append(fallback_model)
+        retryable_statuses = {429, 500, 502, 503, 504}
+        last_error: str | None = None
+        attempts = 0
+        attempt_log: list[dict[str, Any]] = []
+        started_at = time.time()
+        delays = self._retry_delays()
+        for model in models:
+            model_delays = list(delays)
+            for attempt_index, delay in enumerate(model_delays):
+                attempts += 1
+                if delay:
+                    time.sleep(delay)
+                attempt_started = time.time()
+                try:
+                    response = requests.post(
+                        f"{self.api_base_url}/models/{model}:generateContent",
+                        params={"key": self.api_key},
+                        headers={"Content-Type": "application/json"},
+                        json=payload,
+                        timeout=self.timeout_seconds,
+                    )
+                except requests.Timeout as error:
+                    last_error = self._sanitize_error_detail(str(error))
+                    attempt_log.append(
+                        {
+                            "model": model,
+                            "attempt": attempt_index + 1,
+                            "status": "timeout",
+                            "retryable": True,
+                            "latency_ms": int((time.time() - attempt_started) * 1000),
+                        }
+                    )
+                    continue
+                except requests.RequestException as error:
+                    last_error = self._sanitize_error_detail(str(error))
+                    attempt_log.append(
+                        {
+                            "model": model,
+                            "attempt": attempt_index + 1,
+                            "status": "request_error",
+                            "retryable": True,
+                            "latency_ms": int((time.time() - attempt_started) * 1000),
+                        }
+                    )
+                    continue
+                response_ok = getattr(response, "ok", None)
+                if response_ok is None:
+                    try:
+                        response.raise_for_status()
+                        response_ok = True
+                    except requests.HTTPError:
+                        response_ok = False
+                if response_ok:
+                    result = response.json()
+                    usage = result.get("usageMetadata") or {}
+                    attempt_log.append(
+                        {
+                            "model": model,
+                            "attempt": attempt_index + 1,
+                            "status": "ok",
+                            "retryable": False,
+                            "latency_ms": int((time.time() - attempt_started) * 1000),
+                        }
+                    )
+                    return LLMGenerateResult(
+                        payload=result,
+                        usage=usage,
+                        model=model,
+                        attempts=attempts,
+                        latency_ms=int((time.time() - started_at) * 1000),
+                        attempt_log=tuple(attempt_log),
+                    )
+                status = int(getattr(response, "status_code", 500) or 500)
+                detail = self._sanitize_error_detail(response.text)
+                last_error = detail
+                retryable = status in retryable_statuses
+                attempt_log.append(
+                    {
+                        "model": model,
+                        "attempt": attempt_index + 1,
+                        "status": status,
+                        "retryable": retryable,
+                        "latency_ms": int((time.time() - attempt_started) * 1000),
+                    }
+                )
+                if not retryable:
+                    raise ToolError(f"Gemini answer generation failed. {detail[:500]}")
+                if attempt_index + 1 < len(model_delays):
+                    retry_after = self._retry_after_seconds(response)
+                    if retry_after is not None:
+                        model_delays[attempt_index + 1] = retry_after
+        raise ToolError(f"Gemini answer generation failed. {str(last_error or 'Model unavailable.')[:500]}")
+
+    def extract_text(self, payload: dict[str, Any]) -> str:
+        candidates = payload.get("candidates") or []
+        for candidate in candidates:
+            content = candidate.get("content") or {}
+            parts = content.get("parts") or []
+            texts = [str(part.get("text") or "").strip() for part in parts if str(part.get("text") or "").strip()]
+            if texts:
+                return "\n".join(texts).strip()
+        raise ToolError("Gemini returned no readable answer.")
+
+    def public_config(self) -> dict[str, Any]:
+        return {
+            "provider": self.name,
+            "ready": self.ready(),
+            "api_base_url": self.api_base_url,
+            "runtime": self.runtime_config(),
+        }
+
+    def _sanitize_error_detail(self, detail: str) -> str:
+        sanitized = str(detail or "")
+        if self.api_key:
+            sanitized = sanitized.replace(self.api_key, "***")
+        return re.sub(r"https://[^:@/\s]+:[^@/\s]+@", "https://***:***@", sanitized)
+
+    def runtime_config(self) -> dict[str, Any]:
+        return {
+            "timeout_seconds": self.timeout_seconds,
+            "max_retries": self.max_retries,
+            "backoff_seconds": self.backoff_seconds,
+            "max_backoff_seconds": self.max_backoff_seconds,
+            "retryable_statuses": [429, 500, 502, 503, 504],
+        }
+
+    def _retry_delays(self) -> list[float]:
+        delays = [0.0]
+        for index in range(self.max_retries):
+            delay = self.backoff_seconds * (2**index)
+            delays.append(min(self.max_backoff_seconds, delay))
+        return delays
+
+    def _retry_after_seconds(self, response: Any) -> float | None:
+        headers = getattr(response, "headers", {}) or {}
+        raw_value = headers.get("Retry-After") if hasattr(headers, "get") else None
+        if raw_value is None:
+            return None
+        try:
+            delay = float(str(raw_value).strip())
+        except ValueError:
+            return None
+        return max(0.0, min(self.max_backoff_seconds, delay))
+
+
+class OpenAICompatibleSourceCodeQALLMProvider(SourceCodeQALLMProvider):
+    name = LLM_PROVIDER_OPENAI_COMPATIBLE
+
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        api_base_url: str = OPENAI_COMPATIBLE_API_BASE_URL,
+        timeout_seconds: int = DEFAULT_LLM_TIMEOUT_SECONDS,
+        max_retries: int = DEFAULT_LLM_MAX_RETRIES,
+        backoff_seconds: float = DEFAULT_LLM_BACKOFF_SECONDS,
+        max_backoff_seconds: float = DEFAULT_LLM_MAX_BACKOFF_SECONDS,
+    ) -> None:
+        self.api_key = str(api_key or "").strip()
+        self.api_base_url = str(api_base_url or OPENAI_COMPATIBLE_API_BASE_URL).rstrip("/")
+        self.timeout_seconds = max(5, int(timeout_seconds or DEFAULT_LLM_TIMEOUT_SECONDS))
+        self.max_retries = max(0, int(max_retries or 0))
+        self.backoff_seconds = max(0.0, float(backoff_seconds or 0.0))
+        self.max_backoff_seconds = max(self.backoff_seconds, float(max_backoff_seconds or self.backoff_seconds or DEFAULT_LLM_MAX_BACKOFF_SECONDS))
+
+    def ready(self) -> bool:
+        return bool(self.api_key)
+
+    def generate(
+        self,
+        *,
+        payload: dict[str, Any],
+        primary_model: str,
+        fallback_model: str,
+    ) -> LLMGenerateResult:
+        if not self.ready():
+            raise ToolError("LLM mode is not configured yet. Set SOURCE_CODE_QA_OPENAI_API_KEY or OPENAI_API_KEY on the server first.")
+        messages = self._messages_from_gemini_payload(payload)
+        generation_config = payload.get("generationConfig") or {}
+        models = [primary_model]
+        if fallback_model and fallback_model not in models:
+            models.append(fallback_model)
+        retryable_statuses = {429, 500, 502, 503, 504}
+        last_error: str | None = None
+        attempts = 0
+        attempt_log: list[dict[str, Any]] = []
+        started_at = time.time()
+        delays = self._retry_delays()
+        for model in models:
+            model_delays = list(delays)
+            for attempt_index, delay in enumerate(model_delays):
+                attempts += 1
+                if delay:
+                    time.sleep(delay)
+                attempt_started = time.time()
+                request_payload = {
+                    "model": model,
+                    "messages": messages,
+                    "temperature": generation_config.get("temperature", 0.2),
+                    "max_tokens": generation_config.get("maxOutputTokens", 900),
+                    "response_format": {"type": "json_object"},
+                }
+                try:
+                    response = requests.post(
+                        f"{self.api_base_url}/chat/completions",
+                        headers={
+                            "Authorization": f"Bearer {self.api_key}",
+                            "Content-Type": "application/json",
+                        },
+                        json=request_payload,
+                        timeout=self.timeout_seconds,
+                    )
+                except requests.Timeout as error:
+                    last_error = self._sanitize_error_detail(str(error))
+                    attempt_log.append(
+                        {
+                            "model": model,
+                            "attempt": attempt_index + 1,
+                            "status": "timeout",
+                            "retryable": True,
+                            "latency_ms": int((time.time() - attempt_started) * 1000),
+                        }
+                    )
+                    continue
+                except requests.RequestException as error:
+                    last_error = self._sanitize_error_detail(str(error))
+                    attempt_log.append(
+                        {
+                            "model": model,
+                            "attempt": attempt_index + 1,
+                            "status": "request_error",
+                            "retryable": True,
+                            "latency_ms": int((time.time() - attempt_started) * 1000),
+                        }
+                    )
+                    continue
+                if response.ok:
+                    result = response.json()
+                    usage = result.get("usage") or {}
+                    attempt_log.append(
+                        {
+                            "model": model,
+                            "attempt": attempt_index + 1,
+                            "status": "ok",
+                            "retryable": False,
+                            "latency_ms": int((time.time() - attempt_started) * 1000),
+                        }
+                    )
+                    return LLMGenerateResult(
+                        payload=result,
+                        usage=usage,
+                        model=model,
+                        attempts=attempts,
+                        latency_ms=int((time.time() - started_at) * 1000),
+                        attempt_log=tuple(attempt_log),
+                    )
+                detail = self._sanitize_error_detail(response.text)
+                last_error = detail
+                status = int(getattr(response, "status_code", 500) or 500)
+                retryable = status in retryable_statuses
+                attempt_log.append(
+                    {
+                        "model": model,
+                        "attempt": attempt_index + 1,
+                        "status": status,
+                        "retryable": retryable,
+                        "latency_ms": int((time.time() - attempt_started) * 1000),
+                    }
+                )
+                if not retryable:
+                    raise ToolError(f"OpenAI-compatible answer generation failed. {detail[:500]}")
+                if attempt_index + 1 < len(model_delays):
+                    retry_after = self._retry_after_seconds(response)
+                    if retry_after is not None:
+                        model_delays[attempt_index + 1] = retry_after
+        raise ToolError(f"OpenAI-compatible answer generation failed. {str(last_error or 'Model unavailable.')[:500]}")
+
+    def extract_text(self, payload: dict[str, Any]) -> str:
+        choices = payload.get("choices") or []
+        for choice in choices:
+            message = choice.get("message") or {}
+            content = message.get("content")
+            if isinstance(content, list):
+                texts = [str(item.get("text") or "").strip() for item in content if isinstance(item, dict)]
+                text = "\n".join(item for item in texts if item).strip()
+            else:
+                text = str(content or "").strip()
+            if text:
+                return text
+        raise ToolError("OpenAI-compatible provider returned no readable answer.")
+
+    def public_config(self) -> dict[str, Any]:
+        return {
+            "provider": self.name,
+            "ready": self.ready(),
+            "api_base_url": self.api_base_url,
+            "runtime": self.runtime_config(),
+        }
+
+    @staticmethod
+    def _messages_from_gemini_payload(payload: dict[str, Any]) -> list[dict[str, str]]:
+        system_text = "\n".join(
+            str(part.get("text") or "").strip()
+            for part in (payload.get("systemInstruction") or {}).get("parts") or []
+            if str(part.get("text") or "").strip()
+        )
+        user_parts: list[str] = []
+        for content in payload.get("contents") or []:
+            for part in content.get("parts") or []:
+                text = str(part.get("text") or "").strip()
+                if text:
+                    user_parts.append(text)
+        messages = []
+        if system_text:
+            messages.append({"role": "system", "content": system_text})
+        messages.append({"role": "user", "content": "\n\n".join(user_parts)})
+        return messages
+
+    def _sanitize_error_detail(self, detail: str) -> str:
+        sanitized = str(detail or "")
+        if self.api_key:
+            sanitized = sanitized.replace(self.api_key, "***")
+        return re.sub(r"https://[^:@/\s]+:[^@/\s]+@", "https://***:***@", sanitized)
+
+    def runtime_config(self) -> dict[str, Any]:
+        return {
+            "timeout_seconds": self.timeout_seconds,
+            "max_retries": self.max_retries,
+            "backoff_seconds": self.backoff_seconds,
+            "max_backoff_seconds": self.max_backoff_seconds,
+            "retryable_statuses": [429, 500, 502, 503, 504],
+        }
+
+    def _retry_delays(self) -> list[float]:
+        delays = [0.0]
+        for index in range(self.max_retries):
+            delay = self.backoff_seconds * (2**index)
+            delays.append(min(self.max_backoff_seconds, delay))
+        return delays
+
+    def _retry_after_seconds(self, response: Any) -> float | None:
+        headers = getattr(response, "headers", {}) or {}
+        raw_value = headers.get("Retry-After") if hasattr(headers, "get") else None
+        if raw_value is None:
+            return None
+        try:
+            delay = float(str(raw_value).strip())
+        except ValueError:
+            return None
+        return max(0.0, min(self.max_backoff_seconds, delay))
 
 
 class SourceCodeQAService:
@@ -246,12 +984,35 @@ class SourceCodeQAService:
         team_profiles: dict[str, dict[str, Any]],
         gitlab_token: str | None = None,
         gitlab_username: str = "oauth2",
+        llm_provider: str = LLM_PROVIDER_GEMINI,
         gemini_api_key: str | None = None,
+        gemini_api_base_url: str = GEMINI_API_BASE_URL,
+        openai_api_key: str | None = None,
+        openai_api_base_url: str = OPENAI_COMPATIBLE_API_BASE_URL,
+        openai_model: str = "gpt-4.1-mini",
+        openai_fast_model: str = "gpt-4.1-mini",
+        openai_deep_model: str = "gpt-4.1",
+        openai_fallback_model: str = "gpt-4.1-mini",
         gemini_model: str = "gemini-2.5-flash",
         gemini_fast_model: str = "gemini-2.5-flash-lite",
         gemini_deep_model: str = "gemini-2.5-flash",
         gemini_fallback_model: str = "gemini-2.5-flash-lite",
+        query_rewrite_model: str | None = None,
+        planner_model: str | None = None,
+        answer_model: str | None = None,
+        judge_model: str | None = None,
+        repair_model: str | None = None,
+        llm_judge_enabled: bool = False,
+        semantic_index_model: str = DEFAULT_SEMANTIC_INDEX_MODEL,
+        semantic_index_enabled: bool = True,
+        embedding_provider: str = "local_token_hybrid",
+        embedding_api_key: str | None = None,
+        embedding_api_base_url: str = OPENAI_COMPATIBLE_API_BASE_URL,
         llm_cache_ttl_seconds: int = 1800,
+        llm_timeout_seconds: int = DEFAULT_LLM_TIMEOUT_SECONDS,
+        llm_max_retries: int = DEFAULT_LLM_MAX_RETRIES,
+        llm_backoff_seconds: float = DEFAULT_LLM_BACKOFF_SECONDS,
+        llm_max_backoff_seconds: float = DEFAULT_LLM_MAX_BACKOFF_SECONDS,
         git_timeout_seconds: int = 90,
         max_file_bytes: int = 500_000,
     ) -> None:
@@ -268,12 +1029,43 @@ class SourceCodeQAService:
         self.team_profiles = team_profiles
         self.gitlab_token = str(gitlab_token or "").strip()
         self.gitlab_username = str(gitlab_username or "oauth2").strip() or "oauth2"
+        self.llm_provider_name = str(llm_provider or LLM_PROVIDER_GEMINI).strip().lower() or LLM_PROVIDER_GEMINI
         self.gemini_api_key = str(gemini_api_key or "").strip()
+        self.gemini_api_base_url = str(gemini_api_base_url or GEMINI_API_BASE_URL).strip() or GEMINI_API_BASE_URL
+        self.openai_api_key = str(openai_api_key or "").strip()
+        self.openai_api_base_url = str(openai_api_base_url or OPENAI_COMPATIBLE_API_BASE_URL).strip() or OPENAI_COMPATIBLE_API_BASE_URL
+        self.openai_model = str(openai_model or "gpt-4.1-mini").strip() or "gpt-4.1-mini"
+        self.openai_fast_model = str(openai_fast_model or self.openai_model).strip() or self.openai_model
+        self.openai_deep_model = str(openai_deep_model or self.openai_model).strip() or self.openai_model
+        self.openai_fallback_model = str(openai_fallback_model or self.openai_fast_model).strip() or self.openai_fast_model
         self.gemini_model = str(gemini_model or "gemini-2.5-flash").strip() or "gemini-2.5-flash"
         self.gemini_fast_model = str(gemini_fast_model or "gemini-2.5-flash-lite").strip() or "gemini-2.5-flash-lite"
         self.gemini_deep_model = str(gemini_deep_model or self.gemini_model).strip() or self.gemini_model
         self.gemini_fallback_model = str(gemini_fallback_model or "gemini-2.5-flash-lite").strip() or "gemini-2.5-flash-lite"
+        self.query_rewrite_model = str(query_rewrite_model or "").strip()
+        self.planner_model = str(planner_model or "").strip()
+        self.answer_model = str(answer_model or "").strip()
+        self.judge_model = str(judge_model or "").strip()
+        self.repair_model = str(repair_model or "").strip()
+        self.llm_judge_enabled = bool(llm_judge_enabled)
+        self.semantic_index_model = str(semantic_index_model or DEFAULT_SEMANTIC_INDEX_MODEL).strip() or DEFAULT_SEMANTIC_INDEX_MODEL
+        self.semantic_index_enabled = bool(semantic_index_enabled)
+        self.embedding_provider_name = str(embedding_provider or "local_token_hybrid").strip().lower() or "local_token_hybrid"
+        self.embedding_api_key = str(embedding_api_key or "").strip()
+        self.embedding_api_base_url = str(embedding_api_base_url or OPENAI_COMPATIBLE_API_BASE_URL).strip() or OPENAI_COMPATIBLE_API_BASE_URL
+        self.llm_timeout_seconds = max(5, int(llm_timeout_seconds or DEFAULT_LLM_TIMEOUT_SECONDS))
+        self.llm_max_retries = max(0, int(llm_max_retries or 0))
+        self.llm_backoff_seconds = max(0.0, float(llm_backoff_seconds or 0.0))
+        self.llm_max_backoff_seconds = max(
+            self.llm_backoff_seconds,
+            float(llm_max_backoff_seconds or self.llm_backoff_seconds or DEFAULT_LLM_MAX_BACKOFF_SECONDS),
+        )
+        self.llm_provider = self._build_llm_provider()
+        self.embedding_provider = self._build_embedding_provider()
         self.llm_budgets = self._build_llm_budgets()
+        self.model_policy = self._build_model_policy_matrix()
+        self._tree_sitter_parsers: dict[str, Any | None] = {}
+        self._tree_sitter_load_errors: dict[str, str] = {}
         self.llm_cache_ttl_seconds = max(60, int(llm_cache_ttl_seconds or 1800))
         self.git_timeout_seconds = max(5, int(git_timeout_seconds or 90))
         self.max_file_bytes = max(20_000, int(max_file_bytes or 500_000))
@@ -291,20 +1083,267 @@ class SourceCodeQAService:
                 {"value": ANSWER_MODE, "label": "Retrieval Only"},
                 {"value": ANSWER_MODE_GEMINI, "label": "LLM"},
             ],
-            "llm_budget_modes": [
-                {"value": "auto", "label": "Auto"},
-                {"value": "cheap", "label": "Cheap"},
-                {"value": "balanced", "label": "Balanced"},
-                {"value": "deep", "label": "Deep"},
+        }
+
+    def llm_policy_payload(self) -> dict[str, Any]:
+        return {
+            "provider": self.llm_provider.public_config(),
+            "versions": self._llm_versions(),
+            "budgets": self.llm_budgets,
+            "model_policy": self.model_policy,
+            "router": {
+                "version": LLM_ROUTER_VERSION,
+                "auto_rules": [
+                    {"budget": "deep", "reason": "data_source_trace"},
+                    {"budget": "deep", "reason": "root_cause_or_error"},
+                    {"budget": "deep", "reason": "agentic_or_graph_trace"},
+                    {"budget": "balanced", "reason": "api_config_rule_or_5_plus_matches"},
+                    {"budget": "cheap", "reason": "simple_lookup"},
+                ],
+                "gemini_only_policy": {
+                    "cheap": "Flash-Lite for simple lookup and lightweight judge/rewrite work.",
+                    "balanced": "Flash with moderate thinking for API, config, rule, or multi-match questions.",
+                    "deep": "Flash with higher thinking for data-source, cross-repo, root-cause, and repair work.",
+                },
+            },
+            "planner_tools": self._planner_tool_registry(),
+            "cache": {
+                "version": LLM_CACHE_VERSION,
+                "ttl_seconds": self.llm_cache_ttl_seconds,
+                "atomic_writes": True,
+            },
+            "runtime": {
+                "version": LLM_RUNTIME_VERSION,
+                "timeout_seconds": self.llm_timeout_seconds,
+                "max_retries": self.llm_max_retries,
+                "backoff_seconds": self.llm_backoff_seconds,
+                "max_backoff_seconds": self.llm_max_backoff_seconds,
+                "retry_after": "honored",
+                "fallback_model": self._llm_fallback_model(),
+            },
+            "semantic_retrieval": {
+                "enabled": self.semantic_index_enabled,
+                "model": self.semantic_index_model,
+                "index_version": CODE_INDEX_VERSION,
+                "embedding_provider": self.embedding_provider.public_config(),
+            },
+            "judge": {
+                "enabled": self.llm_judge_enabled,
+                "mode": "llm_evidence_judge" if self.llm_judge_enabled else "deterministic_evidence_judge",
+                "cache": "enabled",
+            },
+        }
+
+    @staticmethod
+    def _planner_tool_registry() -> dict[str, Any]:
+        return {
+            "version": PLANNER_TOOL_DSL_VERSION,
+            "tools": [
+                {"name": "find_definition", "source": "definitions", "purpose": "Find symbol/class/method/config definitions."},
+                {"name": "find_references", "source": "references_index", "purpose": "Find references to symbols, routes, tables, calls, or data-flow targets."},
+                {"name": "find_callers", "source": "flow_edges", "purpose": "Find callers or upstream files that point to a target name."},
+                {"name": "find_callees", "source": "flow_edges", "purpose": "Find downstream calls, services, repositories, routes, tables, and clients from seed files."},
+                {"name": "open_file_window", "source": "lines", "purpose": "Open a wider source window around current evidence."},
+                {"name": "find_tables", "source": "references_index", "purpose": "Find SQL table references."},
+                {"name": "find_api_routes", "source": "references_index", "purpose": "Find route, HTTP endpoint, and downstream API references."},
+                {"name": "trace_graph", "source": "graph_edges", "purpose": "Trace symbol graph edges from seed files."},
+                {"name": "trace_flow", "source": "flow_edges", "purpose": "Trace normalized code-flow edges from seed files."},
+                {"name": "trace_entity", "source": "entity_edges", "purpose": "Trace entity-level edges from seed files."},
+                {"name": "find_static_findings", "source": "lines", "purpose": "Find deterministic static QA findings such as hardcoded secrets, unsafe SQL, broad exceptions, command execution, and TODO/FIXME markers."},
+                {"name": "find_test_coverage", "source": "lines/references_index", "purpose": "Find tests, assertions, mocks, and verification evidence covering a target symbol or behavior."},
+                {"name": "find_operational_boundaries", "source": "references_index/entity_edges", "purpose": "Find transaction, cache, async, retry, circuit breaker, lock, and authorization boundary annotations."},
+                {"name": "search_code", "source": "hybrid_index", "purpose": "Fallback keyword and semantic search."},
             ],
         }
 
+    def llm_unavailable_message(self) -> str:
+        if self.llm_provider_name == LLM_PROVIDER_OPENAI_COMPATIBLE:
+            return "LLM mode is not configured yet. Set SOURCE_CODE_QA_OPENAI_API_KEY or OPENAI_API_KEY on the server first."
+        if self.llm_provider_name == LLM_PROVIDER_GEMINI:
+            return "LLM mode is not configured yet. Set SOURCE_CODE_QA_GEMINI_API_KEY or GEMINI_API_KEY on the server first."
+        return f"LLM mode is not configured yet. Provider {self.llm_provider_name!r} is unsupported or missing credentials."
+
+    def _build_llm_provider(self) -> SourceCodeQALLMProvider:
+        if self.llm_provider_name == LLM_PROVIDER_GEMINI:
+            return GeminiSourceCodeQALLMProvider(
+                api_key=self.gemini_api_key,
+                api_base_url=self.gemini_api_base_url,
+                timeout_seconds=self.llm_timeout_seconds,
+                max_retries=self.llm_max_retries,
+                backoff_seconds=self.llm_backoff_seconds,
+                max_backoff_seconds=self.llm_max_backoff_seconds,
+            )
+        if self.llm_provider_name == LLM_PROVIDER_OPENAI_COMPATIBLE:
+            return OpenAICompatibleSourceCodeQALLMProvider(
+                api_key=self.openai_api_key,
+                api_base_url=self.openai_api_base_url,
+                timeout_seconds=self.llm_timeout_seconds,
+                max_retries=self.llm_max_retries,
+                backoff_seconds=self.llm_backoff_seconds,
+                max_backoff_seconds=self.llm_max_backoff_seconds,
+            )
+        return UnsupportedSourceCodeQALLMProvider(self.llm_provider_name)
+
+    def _build_embedding_provider(self) -> SourceCodeQAEmbeddingProvider:
+        if self.embedding_provider_name == "openai_compatible" or not self.semantic_index_model.startswith("local-"):
+            return OpenAICompatibleEmbeddingProvider(
+                api_key=self.embedding_api_key,
+                api_base_url=self.embedding_api_base_url,
+                model=self.semantic_index_model,
+            )
+        return SourceCodeQAEmbeddingProvider()
+
     def _build_llm_budgets(self) -> dict[str, dict[str, Any]]:
         budgets = json.loads(json.dumps(DEFAULT_LLM_BUDGETS))
-        budgets["cheap"]["model"] = self.gemini_fast_model
-        budgets["balanced"]["model"] = self.gemini_model
-        budgets["deep"]["model"] = self.gemini_deep_model
+        if self.llm_provider_name == LLM_PROVIDER_OPENAI_COMPATIBLE:
+            budgets["cheap"]["model"] = self.openai_fast_model
+            budgets["balanced"]["model"] = self.openai_model
+            budgets["deep"]["model"] = self.openai_deep_model
+        else:
+            budgets["cheap"]["model"] = self.gemini_fast_model
+            budgets["balanced"]["model"] = self.gemini_model
+            budgets["deep"]["model"] = self.gemini_deep_model
         return budgets
+
+    def _build_model_policy_matrix(self) -> dict[str, dict[str, Any]]:
+        role_defaults = {
+            "query_rewrite": ("cheap", self.query_rewrite_model, "Normalize follow-up and fuzzy user wording before retrieval."),
+            "planner": ("cheap", self.planner_model, "Choose deterministic retrieval tools and trace expansion steps."),
+            "answer": ("balanced", self.answer_model, "Generate the user-facing evidence-grounded answer."),
+            "judge": ("cheap", self.judge_model, "Check whether answer claims are supported by the evidence pack."),
+            "repair": ("deep", self.repair_model, "Rewrite after a failed claim check or missing-evidence judge finding."),
+        }
+        matrix: dict[str, dict[str, Any]] = {}
+        for role, (budget, override, purpose) in role_defaults.items():
+            budget_model = str((self.llm_budgets.get(budget) or {}).get("model") or self._llm_default_model()).strip()
+            model = str(override or budget_model or self._llm_default_model()).strip()
+            matrix[role] = {
+                "model": model,
+                "budget": budget,
+                "override": bool(override),
+                "budget_routed": role in {"answer", "repair"} and not bool(override),
+                "enabled": role != "judge" or self.llm_judge_enabled,
+                "purpose": purpose,
+            }
+        return matrix
+
+    def _model_for_role(self, role: str, *, fallback: str | None = None) -> str:
+        policy = self.model_policy.get(role) or {}
+        model = str(policy.get("model") or "").strip()
+        if model:
+            return model
+        return str(fallback or self._llm_default_model()).strip() or self._llm_default_model()
+
+    def _model_for_role_or_budget(self, role: str, budget: dict[str, Any]) -> str:
+        policy = self.model_policy.get(role) or {}
+        if policy.get("override"):
+            model = str(policy.get("model") or "").strip()
+            if model:
+                return model
+        return str((budget or {}).get("model") or self._llm_default_model()).strip() or self._llm_default_model()
+
+    def _thinking_budget_for_call(
+        self,
+        *,
+        role: str,
+        budget_mode: str,
+        budget: dict[str, Any],
+        quality_gate: dict[str, Any] | None = None,
+        retry: bool = False,
+    ) -> int:
+        if self.llm_provider_name != LLM_PROVIDER_GEMINI:
+            return int((budget or {}).get("thinking_budget") or 0)
+        role = str(role or "").strip().lower()
+        mode = str(budget_mode or "").strip().lower()
+        base = int((budget or {}).get("thinking_budget") or 0)
+        if role in {"judge", "query_rewrite", "planner"} or mode == "cheap":
+            return 0
+        if retry or role == "repair":
+            return 2048
+        gate_status = str((quality_gate or {}).get("status") or "").strip().lower()
+        if gate_status and gate_status != "sufficient":
+            return max(base, 1024)
+        if mode == "deep":
+            return max(base, 1024)
+        if mode == "balanced":
+            return max(base, 512)
+        return base
+
+    def _normalize_thinking_budget_for_provider(self, budget: int | None) -> int:
+        value = int(budget or 0)
+        if self.llm_provider_name != LLM_PROVIDER_GEMINI:
+            return value
+        if value <= 0:
+            return 0
+        return max(GEMINI_MIN_THINKING_BUDGET, min(value, GEMINI_MAX_THINKING_BUDGET))
+
+    def _thinking_config_for_provider(self, budget: int | None) -> dict[str, int]:
+        return {"thinkingBudget": self._normalize_thinking_budget_for_provider(budget)}
+
+    def _llm_fallback_model(self) -> str:
+        if self.llm_provider_name == LLM_PROVIDER_OPENAI_COMPATIBLE:
+            return self.openai_fallback_model
+        return self.gemini_fallback_model
+
+    def _llm_default_model(self) -> str:
+        if self.llm_provider_name == LLM_PROVIDER_OPENAI_COMPATIBLE:
+            return self.openai_model
+        return self.gemini_model
+
+    @staticmethod
+    def _normalize_llm_usage(usage: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(usage or {})
+        prompt_tokens = normalized.get("prompt_tokens", normalized.get("promptTokenCount"))
+        completion_tokens = normalized.get("completion_tokens", normalized.get("candidatesTokenCount"))
+        total_tokens = normalized.get("total_tokens", normalized.get("totalTokenCount"))
+        if total_tokens is None and prompt_tokens is not None and completion_tokens is not None:
+            try:
+                total_tokens = int(prompt_tokens) + int(completion_tokens)
+            except (TypeError, ValueError):
+                total_tokens = None
+        if prompt_tokens is not None:
+            normalized["prompt_tokens"] = prompt_tokens
+        if completion_tokens is not None:
+            normalized["completion_tokens"] = completion_tokens
+        if total_tokens is not None:
+            normalized["total_tokens"] = total_tokens
+        return normalized
+
+    @staticmethod
+    def _merge_llm_usage(*usage_rows: dict[str, Any]) -> dict[str, Any]:
+        merged: dict[str, Any] = {}
+        token_keys = {
+            "promptTokenCount",
+            "candidatesTokenCount",
+            "totalTokenCount",
+            "prompt_tokens",
+            "completion_tokens",
+            "total_tokens",
+        }
+        for usage in usage_rows:
+            for key, value in (usage or {}).items():
+                if key in token_keys:
+                    try:
+                        merged[key] = int(merged.get(key) or 0) + int(value)
+                    except (TypeError, ValueError):
+                        merged[key] = value
+                elif key not in merged:
+                    merged[key] = value
+        return SourceCodeQAService._normalize_llm_usage(merged)
+
+    @staticmethod
+    def _llm_finish_reason(payload: dict[str, Any]) -> str:
+        candidates = payload.get("candidates") or []
+        for candidate in candidates:
+            reason = str(candidate.get("finishReason") or "").strip()
+            if reason:
+                return reason
+        choices = payload.get("choices") or []
+        for choice in choices:
+            reason = str(choice.get("finish_reason") or "").strip()
+            if reason:
+                return reason
+        return ""
 
     def load_config(self) -> dict[str, Any]:
         if not self.config_path.exists():
@@ -521,13 +1560,16 @@ class SourceCodeQAService:
         domain_profile = self._domain_profile(pm_team, country)
         tokens = self._expand_tokens_with_domain_profile(tokens, question, domain_profile)
         query_plan = self._build_query_decomposition(question, domain_profile)
+        tool_trace: list[dict[str, Any]] = []
         matches: list[dict[str, Any]] = []
+        request_cache = self._new_retrieval_request_cache()
         repo_status = self.repo_status(key)
+        index_freshness = self._index_freshness_payload(repo_status)
         for entry in entries:
             repo_path = self._repo_path(key, entry)
             if not (repo_path / ".git").exists():
                 continue
-            matches.extend(self._search_repo(entry, repo_path, tokens, question=question))
+            matches.extend(self._search_repo(entry, repo_path, tokens, question=question, request_cache=request_cache))
             for component in query_plan.get("components") or []:
                 component_terms = [str(term) for term in component.get("terms") or [] if str(term).strip()]
                 expanded_tokens: list[str] = []
@@ -544,9 +1586,43 @@ class SourceCodeQAService:
                         question=question,
                         focus_terms=component_terms,
                         trace_stage="query_decomposition",
+                        request_cache=request_cache,
                     )
                 )
-        matches = self._rank_matches(question, matches)
+            if query_plan.get("intent", {}).get("static_qa"):
+                matches.extend(
+                    self._tool_find_static_findings(
+                        entry,
+                        repo_path,
+                        tokens,
+                        question,
+                        0,
+                        request_cache=request_cache,
+                    )
+                )
+            if query_plan.get("intent", {}).get("test_coverage"):
+                matches.extend(
+                    self._tool_find_test_coverage(
+                        entry,
+                        repo_path,
+                        tokens,
+                        question,
+                        0,
+                        request_cache=request_cache,
+                    )
+                )
+            if query_plan.get("intent", {}).get("operational_boundary"):
+                matches.extend(
+                    self._tool_find_operational_boundaries(
+                        entry,
+                        repo_path,
+                        tokens,
+                        question,
+                        0,
+                        request_cache=request_cache,
+                    )
+                )
+        matches = self._rank_matches(question, matches, request_cache=request_cache)
         top_matches = matches[: max(1, min(int(limit or 12), 30))]
         if top_matches and self._is_dependency_question(question):
             dependency_matches = self._expand_dependency_matches(
@@ -555,6 +1631,7 @@ class SourceCodeQAService:
                 question=question,
                 base_matches=top_matches,
                 limit=limit,
+                request_cache=request_cache,
             )
             if dependency_matches:
                 existing_keys = {(item["repo"], item["path"], item["line_start"], item["line_end"]) for item in top_matches}
@@ -565,8 +1642,8 @@ class SourceCodeQAService:
                         existing_keys.add(item_key)
                     else:
                         self._annotate_duplicate_tool_match(top_matches, item)
-                top_matches = self._rank_matches(question, top_matches)
-                top_matches = self._select_result_matches(top_matches, max(1, min(int(limit or 12), 30)))
+                top_matches = self._rank_matches(question, top_matches, request_cache=request_cache)
+                top_matches = self._select_result_matches(top_matches, max(1, min(int(limit or 12), 30)), question=question)
         if top_matches:
             trace_matches = self._expand_two_hop_matches(
                 entries=entries,
@@ -574,6 +1651,7 @@ class SourceCodeQAService:
                 question=question,
                 base_matches=top_matches,
                 limit=limit,
+                request_cache=request_cache,
             )
             if trace_matches:
                 existing_keys = {(item["repo"], item["path"], item["line_start"], item["line_end"]) for item in top_matches}
@@ -584,8 +1662,8 @@ class SourceCodeQAService:
                         existing_keys.add(item_key)
                     else:
                         self._annotate_duplicate_tool_match(top_matches, item)
-                top_matches = self._rank_matches(question, top_matches)
-                top_matches = self._select_result_matches(top_matches, max(1, min(int(limit or 12), 30)))
+                top_matches = self._rank_matches(question, top_matches, request_cache=request_cache)
+                top_matches = self._select_result_matches(top_matches, max(1, min(int(limit or 12), 30)), question=question)
         if top_matches:
             agent_matches = self._expand_agent_trace_matches(
                 entries=entries,
@@ -593,6 +1671,7 @@ class SourceCodeQAService:
                 question=question,
                 base_matches=top_matches,
                 limit=limit,
+                request_cache=request_cache,
             )
             if agent_matches:
                 existing_keys = {(item["repo"], item["path"], item["line_start"], item["line_end"]) for item in top_matches}
@@ -603,8 +1682,8 @@ class SourceCodeQAService:
                         existing_keys.add(item_key)
                     else:
                         self._annotate_duplicate_tool_match(top_matches, item)
-                top_matches = self._rank_matches(question, top_matches)
-                top_matches = self._select_result_matches(top_matches, max(1, min(int(limit or 12), 30)))
+                top_matches = self._rank_matches(question, top_matches, request_cache=request_cache)
+                top_matches = self._select_result_matches(top_matches, max(1, min(int(limit or 12), 30)), question=question)
         if top_matches:
             tool_loop_matches = self._run_planner_tool_loop(
                 entries=entries,
@@ -612,6 +1691,8 @@ class SourceCodeQAService:
                 question=question,
                 base_matches=top_matches,
                 limit=limit,
+                tool_trace=tool_trace,
+                request_cache=request_cache,
             )
             if tool_loop_matches:
                 existing_keys = {(item["repo"], item["path"], item["line_start"], item["line_end"]) for item in top_matches}
@@ -622,11 +1703,11 @@ class SourceCodeQAService:
                         existing_keys.add(item_key)
                     else:
                         self._annotate_duplicate_tool_match(top_matches, item)
-                top_matches = self._rank_matches(question, top_matches)
-                top_matches = self._select_result_matches(top_matches, max(1, min(int(limit or 12), 30)))
+                top_matches = self._rank_matches(question, top_matches, request_cache=request_cache)
+                top_matches = self._select_result_matches(top_matches, max(1, min(int(limit or 12), 30)), question=question)
         if top_matches:
-            evidence_summary = self._compress_evidence(question, top_matches)
-            quality_gate = self._quality_gate(question, evidence_summary)
+            evidence_summary = self._compress_evidence_cached(question, top_matches, request_cache=request_cache)
+            quality_gate = self._quality_gate_cached(question, evidence_summary, request_cache=request_cache)
             agent_plan = self._build_agent_plan(question, evidence_summary, quality_gate)
             top_matches = self._run_agent_plan(
                 entries=entries,
@@ -637,10 +1718,12 @@ class SourceCodeQAService:
                 quality_gate=quality_gate,
                 agent_plan=agent_plan,
                 limit=limit,
+                tool_trace=tool_trace,
+                request_cache=request_cache,
             )
         if top_matches:
-            evidence_summary = self._compress_evidence(question, top_matches)
-            quality_gate = self._quality_gate(question, evidence_summary)
+            evidence_summary = self._compress_evidence_cached(question, top_matches, request_cache=request_cache)
+            quality_gate = self._quality_gate_cached(question, evidence_summary, request_cache=request_cache)
             agent_plan = self._build_agent_plan(question, evidence_summary, quality_gate)
             if quality_gate.get("status") != "sufficient" and agent_plan.get("steps"):
                 top_matches = self._run_agent_plan(
@@ -652,11 +1735,37 @@ class SourceCodeQAService:
                     quality_gate=quality_gate,
                     agent_plan=agent_plan,
                     limit=limit,
+                    tool_trace=tool_trace,
+                    request_cache=request_cache,
                 )
+        if top_matches and query_plan.get("intent", {}).get("impact_analysis"):
+            impact_matches = self._expand_impact_matches(
+                entries=entries,
+                key=key,
+                question=question,
+                base_matches=top_matches,
+                limit=limit,
+                request_cache=request_cache,
+            )
+            if impact_matches:
+                existing_keys = {(item["repo"], item["path"], item["line_start"], item["line_end"]) for item in top_matches}
+                for item in impact_matches:
+                    item_key = (item["repo"], item["path"], item["line_start"], item["line_end"])
+                    if item_key not in existing_keys:
+                        top_matches.append(item)
+                        existing_keys.add(item_key)
+                    else:
+                        self._annotate_duplicate_tool_match(top_matches, item)
+                top_matches = self._rank_matches(question, top_matches, request_cache=request_cache)
+                top_matches = self._select_result_matches(top_matches, max(1, min(int(limit or 12), 30)), question=question)
+        if index_freshness.get("status") != "fresh":
+            repo_status = self.repo_status(key)
+            index_freshness = self._index_freshness_payload(repo_status)
         if not top_matches:
             payload = self._empty_query_payload(
                 key,
                 repo_status=repo_status,
+                index_freshness=index_freshness,
                 status="no_match",
                 summary="No confident match. Try exact symbols, route paths, table names, or error codes.",
             )
@@ -669,12 +1778,19 @@ class SourceCodeQAService:
                 started_at=started_at,
             )
             return payload
-        evidence_summary = self._compress_evidence(question, top_matches)
-        quality_gate = self._quality_gate(question, evidence_summary)
-        trace_paths = self._build_trace_paths(entries=entries, key=key, matches=top_matches, question=question)
+        evidence_summary = self._compress_evidence_cached(question, top_matches, request_cache=request_cache)
+        quality_gate = self._quality_gate_cached(question, evidence_summary, request_cache=request_cache)
+        trace_paths = self._build_trace_paths(entries=entries, key=key, matches=top_matches, question=question, request_cache=request_cache)
         if trace_paths:
             evidence_summary["trace_paths"] = trace_paths
-        repo_graph = self._build_repo_dependency_graph(key=key, entries=entries)
+        repo_graph = self._build_repo_dependency_graph(key=key, entries=entries, request_cache=request_cache)
+        evidence_pack = self._build_evidence_pack(
+            question=question,
+            evidence_summary=evidence_summary,
+            matches=top_matches,
+            trace_paths=trace_paths,
+            quality_gate=quality_gate,
+        )
         payload = {
             "status": "ok",
             "answer_mode": ANSWER_MODE,
@@ -683,10 +1799,14 @@ class SourceCodeQAService:
             "citations": self._build_citations(top_matches),
             "trace_paths": trace_paths,
             "repo_graph": repo_graph,
+            "evidence_pack": evidence_pack,
             "repo_status": repo_status,
+            "index_freshness": index_freshness,
             "answer_quality": quality_gate,
             "agent_plan": self._build_agent_plan(question, evidence_summary, quality_gate),
             "query_plan": query_plan,
+            "tool_trace": tool_trace,
+            "retrieval_runtime": self._retrieval_cache_stats(request_cache),
             "followup_context": followup_context,
             "original_question": original_question,
         }
@@ -708,7 +1828,7 @@ class SourceCodeQAService:
                 )
                 return payload
             try:
-                llm_payload = self._build_gemini_answer(
+                llm_payload = self._build_llm_answer(
                     entries=entries,
                     key=key,
                     pm_team=pm_team,
@@ -717,12 +1837,13 @@ class SourceCodeQAService:
                     matches=top_matches,
                     llm_budget_mode=llm_budget_mode,
                     requested_answer_mode=normalized_answer_mode,
+                    request_cache=request_cache,
                 )
                 payload.update(llm_payload)
                 payload["answer_mode"] = normalized_answer_mode
             except ToolError as error:
                 payload["fallback_notice"] = {
-                    "title": "Gemini unavailable",
+                    "title": "LLM unavailable",
                     "message": f"{error} Showing retrieval-only results instead.",
                     "fallback_mode": ANSWER_MODE,
                 }
@@ -760,6 +1881,37 @@ class SourceCodeQAService:
             )
         return statuses
 
+    @staticmethod
+    def _index_freshness_payload(repo_status: list[dict[str, Any]]) -> dict[str, Any]:
+        repo_count = len(repo_status)
+        stale_repos = []
+        revisions = []
+        updated_at_values = []
+        for item in repo_status:
+            index = item.get("index") or {}
+            state = str(index.get("state") or "missing")
+            if state != "ready":
+                stale_repos.append(str(item.get("display_name") or item.get("url") or item.get("path") or "repository"))
+            revision = str(index.get("git_revision") or "").strip()
+            if revision:
+                revisions.append({"repo": item.get("display_name"), "git_revision": revision})
+            updated_at = str(index.get("updated_at") or "").strip()
+            if updated_at:
+                updated_at_values.append(updated_at)
+        return {
+            "status": "fresh" if not stale_repos and repo_count else "stale_or_missing",
+            "repo_count": repo_count,
+            "stale_repos": stale_repos,
+            "git_revisions": revisions,
+            "oldest_indexed_at": min(updated_at_values) if updated_at_values else None,
+            "newest_indexed_at": max(updated_at_values) if updated_at_values else None,
+            "warning": (
+                ""
+                if not stale_repos
+                else "Some repositories have stale or missing indexes. Run Sync / Refresh before trusting code answers."
+            ),
+        }
+
     def save_feedback(self, *, user_email: str, payload: dict[str, Any]) -> dict[str, Any]:
         rating = str(payload.get("rating") or "").strip().lower()
         if rating not in {"useful", "not_useful", "wrong_file", "too_vague", "hallucinated", "missing_repo", "needs_deeper_trace"}:
@@ -787,7 +1939,7 @@ class SourceCodeQAService:
         return [self._normalize_entry(entry) for entry in raw_entries]
 
     def llm_ready(self) -> bool:
-        return bool(self.gemini_api_key)
+        return self.llm_provider.ready()
 
     def mapping_key(self, pm_team: str, country: str) -> str:
         team = str(pm_team or "").strip().upper()
@@ -932,6 +2084,7 @@ class SourceCodeQAService:
         if not index_path.exists():
             return {"state": "missing", "path": str(index_path)}
         fingerprint = self._repo_fingerprint(repo_path)
+        git_revision = self._repo_git_revision(repo_path)
         try:
             with sqlite3.connect(index_path) as connection:
                 metadata = dict(connection.execute("select key, value from metadata").fetchall())
@@ -955,6 +2108,17 @@ class SourceCodeQAService:
             "entity_edges": int(metadata.get("indexed_entity_edges") or 0),
             "edges": int(metadata.get("indexed_edges") or 0),
             "flow_edges": int(metadata.get("indexed_flow_edges") or 0),
+            "semantic_chunks": int(metadata.get("indexed_semantic_chunks") or 0),
+            "parser_backend": metadata.get("parser_backend") or "regex",
+            "parser_languages": [
+                item
+                for item in str(metadata.get("parser_languages") or "").split(",")
+                if item
+            ],
+            "tree_sitter_files": int(metadata.get("tree_sitter_files") or 0),
+            "tree_sitter_errors": int(metadata.get("tree_sitter_errors") or 0),
+            "semantic_index_model": metadata.get("semantic_index_model") or DEFAULT_SEMANTIC_INDEX_MODEL,
+            "git_revision": metadata.get("git_revision") or git_revision,
             "fts_enabled": metadata.get("fts_enabled") == "1",
             "updated_at": metadata.get("updated_at"),
         }
@@ -977,6 +2141,21 @@ class SourceCodeQAService:
             "total_size": total_size,
         }
 
+    def _repo_git_revision(self, repo_path: Path) -> str:
+        try:
+            completed = subprocess.run(
+                ["git", "-C", str(repo_path), "rev-parse", "--short=12", "HEAD"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return ""
+        if completed.returncode != 0:
+            return ""
+        return (completed.stdout or "").strip()
+
     def _build_repo_index(self, key: str, entry: RepositoryEntry, repo_path: Path) -> dict[str, Any]:
         del key, entry
         lock_path = self._acquire_index_lock(repo_path)
@@ -985,12 +2164,17 @@ class SourceCodeQAService:
         tmp_path = index_path.with_suffix(".tmp")
         tmp_path.unlink(missing_ok=True)
         fingerprint = self._repo_fingerprint(repo_path)
+        git_revision = self._repo_git_revision(repo_path)
         indexed_files = 0
         indexed_lines = 0
         indexed_definitions = 0
         indexed_references = 0
         indexed_entities = 0
         indexed_entity_edges = 0
+        indexed_semantic_chunks = 0
+        tree_sitter_files = 0
+        tree_sitter_errors = 0
+        parser_languages: set[str] = set()
         try:
             with sqlite3.connect(tmp_path) as connection:
                 connection.execute("pragma journal_mode=off")
@@ -1095,6 +2279,18 @@ class SourceCodeQAService:
                     create index idx_flow_to_file on flow_edges(to_file);
                     create index idx_flow_to_name on flow_edges(to_name);
                     create index idx_flow_edge_kind on flow_edges(edge_kind);
+                    create table semantic_chunks (
+                        chunk_id text primary key,
+                        file_path text not null,
+                        start_line integer not null,
+                        end_line integer not null,
+                        chunk_text text not null,
+                        lower_text text not null,
+                        tokens text not null,
+                        symbols text not null,
+                        embedding text not null
+                    );
+                    create index idx_semantic_chunks_file_path on semantic_chunks(file_path);
                     """
                 )
                 fts_enabled = self._try_create_fts(connection)
@@ -1144,6 +2340,13 @@ class SourceCodeQAService:
                             [(relative_path, row[1], row[2]) for row in line_rows],
                         )
                     structure = self._extract_structure_rows(relative_path, lines)
+                    if structure.get("tree_sitter_used"):
+                        tree_sitter_files += 1
+                        parser_language = str(structure.get("tree_sitter_language") or "")
+                        if parser_language:
+                            parser_languages.add(parser_language)
+                    if structure.get("tree_sitter_error"):
+                        tree_sitter_errors += 1
                     connection.executemany(
                         """
                         insert into definitions(name, lower_name, kind, file_path, line_no, signature)
@@ -1165,6 +2368,15 @@ class SourceCodeQAService:
                         """,
                         structure["entities"],
                     )
+                    semantic_chunks = self._build_semantic_chunks(relative_path, lines) if self.semantic_index_enabled else []
+                    semantic_chunks = self._attach_semantic_embeddings(semantic_chunks) if semantic_chunks else []
+                    connection.executemany(
+                        """
+                        insert into semantic_chunks(chunk_id, file_path, start_line, end_line, chunk_text, lower_text, tokens, symbols, embedding)
+                        values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        semantic_chunks,
+                    )
                     connection.executemany(
                         """
                         insert into entity_edges(from_entity_id, from_file, from_line, edge_kind, to_name, lower_to_name, to_entity_id, to_file, to_line, evidence)
@@ -1178,9 +2390,14 @@ class SourceCodeQAService:
                     indexed_references += len(structure["references"])
                     indexed_entities += len(structure["entities"])
                     indexed_entity_edges += len(structure["entity_edges"])
+                    indexed_semantic_chunks += len(semantic_chunks)
                 indexed_edges = self._build_graph_edges(connection)
                 resolved_entity_edges = self._resolve_entity_edges(connection)
                 indexed_entity_edges += resolved_entity_edges
+                implementation_edges = self._build_implementation_edges(connection)
+                indexed_entity_edges += implementation_edges
+                aop_edges = self._build_aop_edges(connection)
+                indexed_entity_edges += aop_edges
                 indexed_flow_edges = self._build_flow_edges(connection)
                 metadata = {
                     "version": str(CODE_INDEX_VERSION),
@@ -1195,6 +2412,13 @@ class SourceCodeQAService:
                     "indexed_entity_edges": str(indexed_entity_edges),
                     "indexed_edges": str(indexed_edges),
                     "indexed_flow_edges": str(indexed_flow_edges),
+                    "indexed_semantic_chunks": str(indexed_semantic_chunks),
+                    "parser_backend": "tree_sitter+regex" if tree_sitter_files else "regex",
+                    "parser_languages": ",".join(sorted(parser_languages)),
+                    "tree_sitter_files": str(tree_sitter_files),
+                    "tree_sitter_errors": str(tree_sitter_errors),
+                    "semantic_index_model": self.semantic_index_model,
+                    "git_revision": git_revision,
                     "fts_enabled": "1" if fts_enabled else "0",
                     "updated_at": self._now_iso(),
                 }
@@ -1211,11 +2435,89 @@ class SourceCodeQAService:
                 "entity_edges": indexed_entity_edges,
                 "edges": indexed_edges,
                 "flow_edges": indexed_flow_edges,
+                "semantic_chunks": indexed_semantic_chunks,
+                "parser_backend": metadata["parser_backend"],
+                "parser_languages": sorted(parser_languages),
+                "tree_sitter_files": tree_sitter_files,
+                "tree_sitter_errors": tree_sitter_errors,
+                "semantic_index_model": self.semantic_index_model,
+                "git_revision": git_revision,
                 "fts_enabled": fts_enabled,
                 "updated_at": metadata["updated_at"],
             }
         finally:
             lock_path.unlink(missing_ok=True)
+
+    @staticmethod
+    def _build_semantic_chunks(relative_path: str, lines: list[str]) -> list[tuple[str, str, int, int, str, str, str, str, str]]:
+        chunks: list[tuple[str, str, int, int, str, str, str, str, str]] = []
+        if not lines:
+            return chunks
+        window = 32
+        overlap = 8
+        step = max(1, window - overlap)
+        for start_index in range(0, len(lines), step):
+            window_lines = lines[start_index : start_index + window]
+            if not window_lines:
+                continue
+            chunk_text = "\n".join(window_lines).strip()
+            if not chunk_text:
+                continue
+            lower_text = chunk_text.lower()
+            tokens = SourceCodeQAService._semantic_tokens(f"{relative_path}\n{chunk_text}")
+            symbols = sorted(SourceCodeQAService._line_symbols(lower_text))
+            start_line = start_index + 1
+            end_line = min(len(lines), start_index + len(window_lines))
+            chunk_id = hashlib.sha1(f"{relative_path}:{start_line}:{end_line}:{chunk_text[:120]}".encode("utf-8")).hexdigest()[:16]
+            chunks.append(
+                (
+                    chunk_id,
+                    relative_path,
+                    start_line,
+                    end_line,
+                    chunk_text[:6000],
+                    lower_text[:6000],
+                    json.dumps(tokens[:160], separators=(",", ":")),
+                    json.dumps(symbols[:160], separators=(",", ":")),
+                    "",
+                )
+            )
+            if end_line >= len(lines):
+                break
+        return chunks
+
+    def _attach_semantic_embeddings(
+        self,
+        chunks: list[tuple[str, str, int, int, str, str, str, str, str]],
+    ) -> list[tuple[str, str, int, int, str, str, str, str, str]]:
+        if not self.embedding_provider.ready() or self.embedding_provider.name == "local_token_hybrid":
+            return chunks
+        texts = [chunk[4] for chunk in chunks]
+        try:
+            embeddings = self.embedding_provider.embed_texts(texts)
+        except ToolError:
+            return chunks
+        enriched = []
+        for chunk, embedding in zip(chunks, embeddings):
+            enriched.append((*chunk[:8], json.dumps(embedding[:2048], separators=(",", ":"))))
+        if len(enriched) < len(chunks):
+            enriched.extend(chunks[len(enriched):])
+        return enriched
+
+    @staticmethod
+    def _semantic_tokens(text: str) -> list[str]:
+        raw_tokens = re.findall(r"[A-Za-z0-9_./:-]{2,}", str(text or "").lower())
+        tokens: list[str] = []
+        for token in raw_tokens:
+            token = token.strip("./:-_")
+            if len(token) < 3 or token in STOPWORDS or token in LOW_VALUE_CALL_SYMBOLS:
+                continue
+            for part in re.split(r"[/_.:-]+", token):
+                if len(part) >= 3 and part not in STOPWORDS and part not in tokens:
+                    tokens.append(part)
+            if token not in tokens:
+                tokens.append(token)
+        return tokens[:220]
 
     @staticmethod
     def _try_create_fts(connection: sqlite3.Connection) -> bool:
@@ -1289,6 +2591,473 @@ class SourceCodeQAService:
         return len(updates)
 
     @staticmethod
+    def _build_implementation_edges(connection: sqlite3.Connection) -> int:
+        bean_names_by_class: dict[str, set[str]] = {}
+        for class_name, bean_name in connection.execute(
+            """
+            select c.name, e.to_name
+            from entity_edges e
+            join code_entities c on c.entity_id = e.from_entity_id
+            where e.edge_kind = 'bean_name'
+            """
+        ):
+            for key in SourceCodeQAService._symbol_lookup_keys(str(class_name)):
+                bean_names_by_class.setdefault(key, set()).add(str(bean_name))
+
+        primary_classes: set[str] = set()
+        for class_name in connection.execute(
+            """
+            select c.name
+            from entity_edges e
+            join code_entities c on c.entity_id = e.from_entity_id
+            where e.edge_kind = 'bean_primary'
+            """
+        ):
+            for key in SourceCodeQAService._symbol_lookup_keys(str(class_name[0])):
+                primary_classes.add(key)
+
+        profiles_by_class: dict[str, set[str]] = {}
+        for class_name, profile_name in connection.execute(
+            """
+            select c.name, e.to_name
+            from entity_edges e
+            join code_entities c on c.entity_id = e.from_entity_id
+            where e.edge_kind = 'spring_profile'
+            """
+        ):
+            for key in SourceCodeQAService._symbol_lookup_keys(str(class_name)):
+                profiles_by_class.setdefault(key, set()).add(str(profile_name).strip().lower())
+
+        active_profiles = SourceCodeQAService._active_spring_profiles(connection)
+        config_values = SourceCodeQAService._spring_config_values(connection)
+
+        conditions_by_class: dict[str, set[str]] = {}
+        for class_name, condition in connection.execute(
+            """
+            select c.name, e.to_name
+            from entity_edges e
+            join code_entities c on c.entity_id = e.from_entity_id
+            where e.edge_kind = 'bean_condition'
+            """
+        ):
+            for key in SourceCodeQAService._symbol_lookup_keys(str(class_name)):
+                conditions_by_class.setdefault(key, set()).add(str(condition).strip())
+
+        qualifiers_by_file: dict[str, set[str]] = {}
+        for from_file, qualifier in connection.execute(
+            "select from_file, to_name from entity_edges where edge_kind = 'bean_qualifier'"
+        ):
+            qualifiers_by_file.setdefault(str(from_file), set()).add(str(qualifier))
+        qualifiers_by_variable: dict[tuple[str, str], set[str]] = {}
+        for from_file, target in connection.execute(
+            "select from_file, to_name from entity_edges where edge_kind = 'bean_qualifier_target'"
+        ):
+            variable_name, separator, qualifier = str(target).partition("=")
+            if separator and variable_name and qualifier:
+                qualifiers_by_variable.setdefault((str(from_file), variable_name), set()).add(qualifier)
+
+        implementors: dict[str, list[dict[str, Any]]] = {}
+        for impl_name, from_file, from_line, interface_name in connection.execute(
+            """
+            select c.name, e.from_file, e.from_line, e.to_name
+            from entity_edges e
+            join code_entities c on c.entity_id = e.from_entity_id
+            where e.edge_kind in ('implements', 'extends')
+            """
+        ):
+            for key in SourceCodeQAService._symbol_lookup_keys(str(interface_name)):
+                impl_keys = SourceCodeQAService._symbol_lookup_keys(str(impl_name))
+                bean_names: set[str] = set()
+                for impl_key in impl_keys:
+                    bean_names.update(bean_names_by_class.get(impl_key) or set())
+                profiles: set[str] = set()
+                for impl_key in impl_keys:
+                    profiles.update(profiles_by_class.get(impl_key) or set())
+                conditions: set[str] = set()
+                for impl_key in impl_keys:
+                    conditions.update(conditions_by_class.get(impl_key) or set())
+                implementors.setdefault(key, []).append(
+                    {
+                        "name": str(impl_name),
+                        "file": str(from_file),
+                        "line": int(from_line),
+                        "bean_names": bean_names,
+                        "profiles": profiles,
+                        "conditions": conditions,
+                        "primary": any(impl_key in primary_classes for impl_key in impl_keys),
+                    }
+                )
+
+        definitions: dict[str, list[tuple[str, int]]] = {}
+        for lower_name, file_path, line_no in connection.execute(
+            "select lower_name, file_path, line_no from definitions"
+        ):
+            definitions.setdefault(str(lower_name), []).append((str(file_path), int(line_no)))
+
+        rows: list[tuple[str, str, int, str, str, str, str, str, int, str]] = []
+        for from_entity_id, from_file, from_line, to_name, evidence in connection.execute(
+            """
+            select from_entity_id, from_file, from_line, to_name, evidence
+            from entity_edges
+            where edge_kind = 'call' and instr(to_name, '.') > 0
+            """
+        ):
+            owner, method_name = str(to_name).rsplit(".", 1)
+            call_variable = SourceCodeQAService._member_call_variable(str(evidence or ""), method_name)
+            for owner_key in SourceCodeQAService._symbol_lookup_keys(owner):
+                candidates = implementors.get(owner_key, [])[:8]
+                qualifiers = qualifiers_by_variable.get((str(from_file), call_variable), set()) if call_variable else set()
+                if not qualifiers:
+                    qualifiers = qualifiers_by_file.get(str(from_file)) or set()
+                qualified_candidates = [
+                    item
+                    for item in candidates
+                    if qualifiers and (item.get("bean_names") or set()) & qualifiers
+                ]
+                profile_candidates = [
+                    item
+                    for item in candidates
+                    if active_profiles and (item.get("profiles") or set()) & active_profiles
+                ]
+                condition_candidates = [
+                    item
+                    for item in candidates
+                    if any(
+                        SourceCodeQAService._spring_condition_matches(str(condition), config_values)
+                        for condition in (item.get("conditions") or set())
+                    )
+                ]
+                primary_candidates = [item for item in candidates if item.get("primary")]
+                selected_candidates = qualified_candidates or profile_candidates or condition_candidates or primary_candidates or candidates
+                for item in selected_candidates:
+                    impl_name = str(item.get("name") or "")
+                    impl_call = f"{impl_name}.{method_name}"
+                    targets = definitions.get(impl_call.lower()) or []
+                    if not targets:
+                        continue
+                    to_file, to_line = targets[0]
+                    matched_qualifiers = sorted((item.get("bean_names") or set()) & qualifiers)
+                    qualifier_note = f" qualifier={matched_qualifiers[0]};" if matched_qualifiers else ""
+                    matched_profiles = sorted((item.get("profiles") or set()) & active_profiles)
+                    profile_note = f" profile={matched_profiles[0]};" if matched_profiles else ""
+                    matched_conditions = sorted(
+                        str(condition)
+                        for condition in (item.get("conditions") or set())
+                        if SourceCodeQAService._spring_condition_matches(str(condition), config_values)
+                    )
+                    condition_note = f" condition={matched_conditions[0]};" if matched_conditions else ""
+                    primary_note = " primary=true;" if item.get("primary") else ""
+                    rows.append(
+                        (
+                            str(from_entity_id),
+                            str(from_file),
+                            int(from_line),
+                            "implementation_call",
+                            impl_call,
+                            impl_call.lower(),
+                            "",
+                            str(to_file),
+                            int(to_line),
+                            f"resolved implementation for {to_name}: {impl_call};{qualifier_note}{profile_note}{condition_note}{primary_note} {evidence or ''}"[:500],
+                        )
+                    )
+        rows = list(dict.fromkeys(rows))
+        connection.executemany(
+            """
+            insert into entity_edges(from_entity_id, from_file, from_line, edge_kind, to_name, lower_to_name, to_entity_id, to_file, to_line, evidence)
+            values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            rows,
+        )
+        return len(rows)
+
+    @staticmethod
+    def _symbol_lookup_keys(name: str) -> list[str]:
+        value = str(name or "").strip().lower()
+        if not value:
+            return []
+        keys = [value]
+        short = value.rsplit(".", 1)[-1]
+        if short and short not in keys:
+            keys.append(short)
+        return keys
+
+    @staticmethod
+    def _build_aop_edges(connection: sqlite3.Connection) -> int:
+        definitions: dict[str, list[tuple[str, int, str]]] = {}
+        for name, lower_name, file_path, line_no in connection.execute(
+            "select name, lower_name, file_path, line_no from definitions"
+        ):
+            definitions.setdefault(str(lower_name), []).append((str(file_path), int(line_no), str(name)))
+
+        implementors: dict[str, set[str]] = {}
+        for impl_name, interface_name in connection.execute(
+            """
+            select c.name, e.to_name
+            from entity_edges e
+            join code_entities c on c.entity_id = e.from_entity_id
+            where e.edge_kind in ('implements', 'extends')
+            """
+        ):
+            for key in SourceCodeQAService._symbol_lookup_keys(str(interface_name)):
+                implementors.setdefault(key, set()).add(str(impl_name))
+
+        raw_aop_edges = list(connection.execute(
+            """
+            select c.entity_id, c.name, e.from_file, e.from_line, e.edge_kind, e.to_name, e.evidence
+            from entity_edges e
+            join code_entities c on c.entity_id = e.from_entity_id
+            where e.edge_kind in ('aop_pointcut', 'aop_advice')
+            """
+        ))
+        pointcuts_by_name: dict[str, str] = {}
+        for _entity_id, entity_name, _from_file, _from_line, edge_kind, to_name, _evidence in raw_aop_edges:
+            if str(edge_kind) == "aop_pointcut" and str(entity_name):
+                pointcuts_by_name[str(entity_name).lower()] = SourceCodeQAService._aop_pointcut_expression(str(to_name), {})
+
+        aop_edges: list[tuple[str, str, int, str, str, str]] = []
+        for entity_id, _entity_name, from_file, from_line, _edge_kind, to_name, evidence in raw_aop_edges:
+            pointcut_expression = SourceCodeQAService._aop_pointcut_expression(str(to_name), pointcuts_by_name)
+            aop_edges.append((str(entity_id), str(from_file), int(from_line), str(to_name), pointcut_expression, str(evidence or "")))
+
+        rows: list[tuple[str, str, int, str, str, str, str, str, int, str]] = []
+        for from_entity_id, from_file, from_line, source_name, pointcut_expression, evidence in aop_edges:
+            for target_name in SourceCodeQAService._aop_execution_target_names(pointcut_expression, implementors):
+                for to_file, to_line, definition_name in SourceCodeQAService._definition_matches_for_aop_target(definitions, target_name):
+                    rows.append(
+                        (
+                            from_entity_id,
+                            from_file,
+                            int(from_line),
+                            "aop_applies_to",
+                            definition_name,
+                            definition_name.lower(),
+                            "",
+                            to_file,
+                            int(to_line),
+                            f"resolved AOP pointcut {source_name} -> {definition_name}; {evidence}"[:500],
+                        )
+                    )
+
+        rows = list(dict.fromkeys(rows))
+        connection.executemany(
+            """
+            insert into entity_edges(from_entity_id, from_file, from_line, edge_kind, to_name, lower_to_name, to_entity_id, to_file, to_line, evidence)
+            values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            rows,
+        )
+        return len(rows)
+
+    @staticmethod
+    def _aop_pointcut_expression(to_name: str, pointcuts_by_name: dict[str, str]) -> str:
+        raw = str(to_name or "")
+        _kind, separator, payload = raw.partition(":")
+        value = payload if separator else raw
+        normalized_reference = re.sub(r"\(\s*\)$", "", value.strip()).lower()
+        return pointcuts_by_name.get(normalized_reference, value.strip())
+
+    @staticmethod
+    def _aop_execution_target_names(pointcut_expression: str, implementors: dict[str, set[str]]) -> list[str]:
+        targets: list[str] = []
+        text = str(pointcut_expression or "")
+        for owner_name, method_name in re.findall(
+            r"(?:execution|within|call)\s*\([^)]*?([A-Z][A-Za-z0-9_.$]*|\*)\.([A-Za-z_][A-Za-z0-9_]+)\s*\(",
+            text,
+        ):
+            if owner_name == "*":
+                targets.append(method_name)
+                continue
+            owner = owner_name.rsplit(".", 1)[-1]
+            targets.append(f"{owner}.{method_name}")
+            for owner_key in SourceCodeQAService._symbol_lookup_keys(owner):
+                for impl_name in sorted(implementors.get(owner_key, set())):
+                    targets.append(f"{impl_name}.{method_name}")
+        for owner_name, method_name in re.findall(r"\*\s+\*+\.\.([A-Z][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]+)\s*\(", text):
+            targets.append(f"{owner_name}.{method_name}")
+            for owner_key in SourceCodeQAService._symbol_lookup_keys(owner_name):
+                for impl_name in sorted(implementors.get(owner_key, set())):
+                    targets.append(f"{impl_name}.{method_name}")
+        return list(dict.fromkeys(targets))
+
+    @staticmethod
+    def _definition_matches_for_aop_target(
+        definitions: dict[str, list[tuple[str, int, str]]],
+        target_name: str,
+    ) -> list[tuple[str, int, str]]:
+        normalized = str(target_name or "").strip().lower()
+        if not normalized:
+            return []
+        matches: list[tuple[str, int, str]] = []
+        if "." in normalized:
+            candidates = definitions.get(normalized, [])
+            suffix = f".{normalized}"
+            for lower_name, rows in definitions.items():
+                if lower_name.endswith(suffix):
+                    candidates.extend(rows)
+            matches.extend(candidates)
+        else:
+            matches.extend(definitions.get(normalized, []))
+        return list(dict.fromkeys(matches))[:12]
+
+    @staticmethod
+    def _member_call_variable(context: str, method_name: str) -> str:
+        for variable_name, called_method in MEMBER_CALL_PATTERN.findall(str(context or "")):
+            if called_method == method_name:
+                return variable_name
+        return ""
+
+    @staticmethod
+    def _qualified_variable_targets(line: str) -> dict[str, list[str]]:
+        targets: dict[str, list[str]] = {}
+        for qualifier, variable_name in SPRING_QUALIFIED_VARIABLE_PATTERN.findall(str(line or "")):
+            if qualifier and variable_name:
+                targets.setdefault(variable_name, []).append(qualifier)
+        return {variable: list(dict.fromkeys(qualifiers)) for variable, qualifiers in targets.items()}
+
+    @staticmethod
+    def _service_like_types_from_generic(generic_text: str) -> list[str]:
+        return list(dict.fromkeys(SERVICE_LIKE_TYPE_PATTERN.findall(str(generic_text or ""))))
+
+    @staticmethod
+    def _active_spring_profiles(connection: sqlite3.Connection) -> set[str]:
+        return SourceCodeQAService._active_spring_profiles_from_rows(
+            SourceCodeQAService._spring_config_rows(connection)
+        )
+
+    @staticmethod
+    def _active_spring_profiles_from_rows(rows: list[tuple[str, str, str, str]]) -> set[str]:
+        profiles: set[str] = set()
+        for file_path, key, value, doc_profile in rows:
+            if SourceCodeQAService._spring_profile_from_config_path(file_path) or doc_profile:
+                continue
+            if str(key).lower() in {"spring.profiles.active", "spring.profiles.include"}:
+                for profile in re.split(r"[,;\s]+", str(value or "")):
+                    normalized = profile.strip().lower()
+                    if normalized:
+                        profiles.add(normalized)
+        return profiles
+
+    @staticmethod
+    def _spring_config_values(connection: sqlite3.Connection) -> dict[str, set[str]]:
+        values: dict[str, set[str]] = {}
+        rows = SourceCodeQAService._spring_config_rows(connection)
+        active_profiles = SourceCodeQAService._active_spring_profiles_from_rows(rows)
+        profile_overrides: set[str] = set()
+        for file_path, key, value, doc_profile in rows:
+            normalized_key = str(key or "").strip().lower()
+            normalized_value = str(value or "").strip().strip("\"'").lower()
+            if not normalized_key or not normalized_value:
+                continue
+            file_profile = doc_profile or SourceCodeQAService._spring_profile_from_config_path(file_path)
+            if file_profile and not SourceCodeQAService._spring_profile_matches(file_profile, active_profiles):
+                continue
+            if file_profile:
+                if normalized_key not in profile_overrides:
+                    values[normalized_key] = set()
+                    profile_overrides.add(normalized_key)
+            elif normalized_key in profile_overrides:
+                continue
+            values.setdefault(normalized_key, set()).add(normalized_value)
+        return values
+
+    @staticmethod
+    def _spring_config_rows(connection: sqlite3.Connection) -> list[tuple[str, str, str, str]]:
+        rows_out: list[tuple[str, str, str, str]] = []
+        try:
+            rows = connection.execute(
+                """
+                select file_path, line_text
+                from lines
+                where lower(file_path) glob '*.properties'
+                   or lower(file_path) glob '*.yml'
+                   or lower(file_path) glob '*.yaml'
+                order by file_path, line_no
+                """
+            ).fetchall()
+        except sqlite3.Error:
+            return rows_out
+
+        current_yaml_file = ""
+        yaml_stack: list[tuple[int, str]] = []
+        yaml_doc_rows: list[tuple[str, str]] = []
+        yaml_doc_profile = ""
+
+        def flush_yaml_doc() -> None:
+            nonlocal yaml_doc_rows, yaml_doc_profile
+            if not current_yaml_file:
+                yaml_doc_rows = []
+                yaml_doc_profile = ""
+                return
+            for key, value in yaml_doc_rows:
+                rows_out.append((current_yaml_file, key, value, yaml_doc_profile))
+            yaml_doc_rows = []
+            yaml_doc_profile = ""
+
+        for file_path, line_text in rows:
+            file_path_str = str(file_path)
+            suffix = Path(file_path_str).suffix.lower()
+            if suffix in {".yaml", ".yml"}:
+                stripped = str(line_text or "").strip()
+                if current_yaml_file != file_path_str:
+                    flush_yaml_doc()
+                    current_yaml_file = file_path_str
+                    yaml_stack = []
+                if stripped.startswith("---"):
+                    flush_yaml_doc()
+                    yaml_stack = []
+                    continue
+                pair = SourceCodeQAService._extract_yaml_config_assignment(str(line_text or ""), yaml_stack)
+            else:
+                if current_yaml_file:
+                    flush_yaml_doc()
+                    current_yaml_file = ""
+                    yaml_stack = []
+                pair = SourceCodeQAService._extract_config_assignment(str(line_text or ""))
+            if not pair:
+                continue
+            key, value = pair
+            normalized_key = str(key or "").strip().lower()
+            normalized_value = str(value or "").strip().strip("\"'")
+            if normalized_key and normalized_value:
+                if suffix in {".yaml", ".yml"}:
+                    if normalized_key in {"spring.config.activate.on-profile", "spring.profiles"}:
+                        yaml_doc_profile = normalized_value.strip().lower()
+                    yaml_doc_rows.append((normalized_key, normalized_value))
+                else:
+                    rows_out.append((file_path_str, normalized_key, normalized_value, ""))
+        flush_yaml_doc()
+        return rows_out
+
+    @staticmethod
+    def _spring_profile_from_config_path(file_path: str) -> str:
+        name = Path(str(file_path or "")).name.lower()
+        match = re.match(r"(?:application|bootstrap)-([a-z0-9_.-]+)\.(?:properties|ya?ml)$", name)
+        return match.group(1) if match else ""
+
+    @staticmethod
+    def _spring_profile_matches(profile_spec: str, active_profiles: set[str]) -> bool:
+        spec = str(profile_spec or "").strip().lower()
+        if not spec:
+            return False
+        candidates = [item.strip().lstrip("!") for item in re.split(r"[,;|\s&()]+", spec) if item.strip()]
+        return any(candidate in active_profiles for candidate in candidates)
+
+    @staticmethod
+    def _spring_condition_matches(condition: str, config_values: dict[str, set[str]]) -> bool:
+        if "=" not in str(condition or ""):
+            return False
+        key, expected_value = str(condition).split("=", 1)
+        normalized_key = key.strip().lower()
+        normalized_expected = expected_value.strip().strip("\"'").lower()
+        values = config_values.get(normalized_key) or set()
+        if normalized_expected == "<missing:true>":
+            return not values
+        if normalized_expected == "<present>":
+            return bool(values) and "false" not in values
+        return normalized_expected in values
+
+    @staticmethod
     def _build_flow_edges(connection: sqlite3.Connection) -> int:
         rows: list[tuple[str, int, str, str, str, str, str, int, str]] = []
 
@@ -1296,10 +3065,10 @@ class SourceCodeQAService:
             """
             select target, kind, file_path, line_no, context
             from references_index
-            where kind in ('route', 'sql_table')
+            where kind in ('route', 'sql_table', 'db_read', 'db_write', 'message_publish', 'message_consume', 'event_publish', 'event_consume')
             """
         ):
-            edge_kind = "route" if str(kind) == "route" else "sql_table"
+            edge_kind = str(kind)
             rows.append(
                 (
                     str(file_path),
@@ -1347,7 +3116,13 @@ class SourceCodeQAService:
             where edge_kind in (
                 'route', 'sql_table', 'injects', 'call', 'import', 'symbol_reference',
                 'mapper_statement', 'downstream_api', 'http_endpoint', 'framework_binding',
-                'data_flow'
+                'data_flow', 'mapper_interface', 'implements', 'extends', 'implementation_call', 'route_prefix',
+                'config_value', 'package', 'module_dependency', 'module_artifact', 'gradle_module', 'gradle_project_dependency',
+                'db_read', 'db_write', 'message_publish', 'message_consume',
+                'event_publish', 'event_consume', 'bean_qualifier', 'bean_qualifier_target', 'bean_name',
+                'bean_primary', 'spring_profile', 'bean_condition',
+                'aop_advice', 'aop_pointcut', 'aop_applies_to', 'scheduled_job', 'web_interceptor',
+                'runtime_call', 'runtime_route', 'runtime_sql', 'runtime_message', 'runtime_config'
             )
             """
         ):
@@ -1405,16 +3180,50 @@ class SourceCodeQAService:
         to_role = SourceCodeQAService._flow_role_for_path(to_file)
         if str(reference_kind) == "route":
             return "route"
+        if str(reference_kind) == "runtime_route":
+            return "route"
+        if str(reference_kind) == "runtime_sql":
+            return "db_runtime"
+        if str(reference_kind) == "runtime_message":
+            return "message_runtime"
+        if str(reference_kind) == "runtime_config":
+            return "config"
+        if str(reference_kind) == "runtime_call":
+            return "runtime"
         if str(reference_kind) == "sql_table":
             return "sql_table"
+        if str(reference_kind) in {"db_read", "db_write"}:
+            return str(reference_kind)
+        if str(reference_kind) in {"message_publish", "message_consume", "event_publish", "event_consume"}:
+            return str(reference_kind)
         if str(reference_kind) == "mapper_statement":
             return "mapper"
+        if str(reference_kind) == "mapper_interface":
+            return "mapper"
+        if str(reference_kind) in {"implements", "extends"}:
+            return "type_hierarchy"
+        if str(reference_kind) == "implementation_call":
+            if to_role in {"service", "repository", "mapper", "dao", "controller", "client"}:
+                return to_role
+            return "implementation"
         if str(reference_kind) in {"downstream_api", "http_endpoint"}:
             return "client"
-        if str(reference_kind) == "framework_binding":
+        if str(reference_kind) == "aop_applies_to":
+            if to_role in {"service", "repository", "mapper", "dao", "controller", "client"}:
+                return to_role
+            return "framework"
+        if str(reference_kind) in {"framework_binding", "aop_advice", "aop_pointcut", "scheduled_job", "web_interceptor"}:
             return "framework"
         if str(reference_kind) == "data_flow":
             return "field_population"
+        if str(reference_kind) == "config_value":
+            return "config"
+        if str(reference_kind) == "package":
+            return "type_hierarchy"
+        if str(reference_kind) in {"module_dependency", "module_artifact", "gradle_module", "gradle_project_dependency"}:
+            return "module_dependency"
+        if str(reference_kind) in {"bean_qualifier", "bean_qualifier_target", "bean_name", "bean_primary", "spring_profile", "bean_condition"}:
+            return "framework"
         if to_role in {"repository", "mapper", "dao"}:
             return to_role
         if to_role == "service":
@@ -1431,6 +3240,243 @@ class SourceCodeQAService:
     def _entity_id(file_path: str, kind: str, name: str, line_no: int) -> str:
         raw = f"{file_path}:{kind}:{name}:{line_no}"
         return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:24]
+
+    def _tree_sitter_parser_for_language(self, language: str) -> Any | None:
+        language = str(language or "").strip().lower()
+        if not language:
+            return None
+        if language in self._tree_sitter_parsers:
+            return self._tree_sitter_parsers[language]
+        try:
+            from tree_sitter import Language, Parser
+
+            if language == "java":
+                import tree_sitter_java as grammar
+
+                tree_language = Language(grammar.language())
+            elif language == "python":
+                import tree_sitter_python as grammar
+
+                tree_language = Language(grammar.language())
+            elif language == "javascript":
+                import tree_sitter_javascript as grammar
+
+                tree_language = Language(grammar.language())
+            elif language == "typescript":
+                import tree_sitter_typescript as grammar
+
+                tree_language = Language(grammar.language_typescript())
+            elif language == "tsx":
+                import tree_sitter_typescript as grammar
+
+                tree_language = Language(grammar.language_tsx())
+            else:
+                self._tree_sitter_parsers[language] = None
+                return None
+            parser = Parser(tree_language)
+            self._tree_sitter_parsers[language] = parser
+            return parser
+        except Exception as error:
+            self._tree_sitter_load_errors[language] = str(error)[:240]
+            self._tree_sitter_parsers[language] = None
+            return None
+
+    @staticmethod
+    def _tree_sitter_language_for_suffix(suffix: str) -> str:
+        return {
+            ".java": "java",
+            ".py": "python",
+            ".js": "javascript",
+            ".jsx": "javascript",
+            ".ts": "typescript",
+            ".tsx": "tsx",
+        }.get(str(suffix or "").lower(), "")
+
+    @staticmethod
+    def _node_text(source: bytes, node: Any) -> str:
+        try:
+            return source[int(node.start_byte) : int(node.end_byte)].decode("utf-8", errors="ignore")
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _node_line(lines: list[str], node: Any) -> str:
+        try:
+            line_no = int(node.start_point[0]) + 1
+        except Exception:
+            line_no = 1
+        if 1 <= line_no <= len(lines):
+            return lines[line_no - 1].strip()
+        return ""
+
+    def _extract_tree_sitter_structure(
+        self,
+        *,
+        relative_path: str,
+        lines: list[str],
+        language: str,
+        add_definition,
+        add_reference,
+        add_entity,
+        add_entity_edge,
+        file_entity_id: str,
+    ) -> tuple[bool, str]:
+        parser = self._tree_sitter_parser_for_language(language)
+        if parser is None:
+            return False, self._tree_sitter_load_errors.get(language, "parser unavailable")
+        source = "\n".join(lines).encode("utf-8", errors="ignore")
+        try:
+            tree = parser.parse(source)
+        except Exception as error:
+            return False, str(error)[:240]
+        root = tree.root_node
+        if getattr(root, "has_error", False):
+            return False, "parse error"
+
+        def line_no(node: Any) -> int:
+            try:
+                return int(node.start_point[0]) + 1
+            except Exception:
+                return 1
+
+        def first_named_child_text(node: Any, types: set[str]) -> str:
+            for child in getattr(node, "named_children", []) or []:
+                if str(child.type) in types:
+                    return self._node_text(source, child).strip()
+            return ""
+
+        def name_for_node(node: Any) -> str:
+            name_node = None
+            try:
+                name_node = node.child_by_field_name("name")
+            except Exception:
+                name_node = None
+            if name_node is not None:
+                value = self._node_text(source, name_node).strip()
+                if value:
+                    return value
+            return first_named_child_text(node, {"identifier", "type_identifier", "property_identifier"})
+
+        def call_target(node: Any) -> str:
+            target_node = None
+            for field in ("function", "name"):
+                try:
+                    target_node = node.child_by_field_name(field)
+                except Exception:
+                    target_node = None
+                if target_node is not None:
+                    break
+            target = self._node_text(source, target_node).strip() if target_node is not None else ""
+            if not target:
+                raw = self._node_text(source, node)
+                target = raw.split("(", 1)[0].strip()
+            target = target.replace("this.", "").strip()
+            return target[-180:]
+
+        def type_text_for_node(node: Any) -> str:
+            type_node = None
+            try:
+                type_node = node.child_by_field_name("type")
+            except Exception:
+                type_node = None
+            if type_node is not None:
+                value = self._node_text(source, type_node).strip()
+                if value:
+                    return value
+            return first_named_child_text(node, {"type_identifier", "generic_type"})
+
+        def string_values(node: Any) -> list[str]:
+            values: list[str] = []
+            raw = self._node_text(source, node)
+            for value in re.findall(r"[\"']([^\"']+)[\"']", raw):
+                if value and value not in values:
+                    values.append(value)
+            return values
+
+        def add_route_edges(owner_id: str, node: Any, evidence: str) -> None:
+            for route in re.findall(r"[\"']([^\"']+)[\"']", evidence):
+                if route.startswith("/") or route.startswith("http"):
+                    add_reference(route, "route", line_no(node), evidence)
+                    add_entity_edge(owner_id, "route", route, line_no(node), evidence)
+
+        def visit(node: Any, class_id: str, method_id: str, class_name: str = "") -> None:
+            node_type = str(getattr(node, "type", ""))
+            current_class_id = class_id
+            current_method_id = method_id
+            signature = self._node_line(lines, node) or self._node_text(source, node).splitlines()[0][:500]
+            node_line = line_no(node)
+
+            if node_type in {"class_declaration", "interface_declaration", "enum_declaration"}:
+                name = name_for_node(node)
+                if name:
+                    kind = f"{language}_{node_type.replace('_declaration', '')}"
+                    add_definition(name, kind, node_line, signature)
+                    current_class_id = add_entity(name, kind, node_line, signature, parent=Path(relative_path).name)
+                    current_method_id = current_class_id
+                    class_name = name
+                    raw = self._node_text(source, node)[:500]
+                    for inherited in re.findall(r"\b(?:implements|extends)\s+([A-Z][A-Za-z0-9_]*(?:\s*,\s*[A-Z][A-Za-z0-9_]*)*)", raw):
+                        for inherited_name in re.findall(r"[A-Z][A-Za-z0-9_]*", inherited):
+                            add_reference(inherited_name, "type_hierarchy", node_line, signature)
+                            add_entity_edge(current_class_id, "implements" if "implements" in raw else "extends", inherited_name, node_line, signature)
+            elif node_type in {"method_declaration", "method_definition", "function_declaration", "function_definition"}:
+                name = name_for_node(node)
+                if name:
+                    kind = f"{language}_{'method' if 'method' in node_type else 'function'}"
+                    add_definition(name, kind, node_line, signature)
+                    current_method_id = add_entity(name, kind, node_line, signature, parent=class_name)
+                    if class_name and "method" in kind:
+                        qualified_name = f"{class_name}.{name}"
+                        add_definition(qualified_name, kind, node_line, signature)
+                        add_entity(qualified_name, kind, node_line, signature, parent=class_name)
+            elif node_type in {"field_declaration", "public_field_definition", "variable_declarator"}:
+                raw = self._node_text(source, node)
+                type_name = type_text_for_node(node) or first_named_child_text(node, {"type_identifier", "generic_type", "identifier"})
+                variable_names = [
+                    value
+                    for value in IDENTIFIER_PATTERN.findall(raw)
+                    if value not in {"private", "public", "protected", "static", "final", type_name}
+                ]
+                if variable_names:
+                    add_definition(variable_names[-1], f"{language}_field", node_line, signature)
+                if type_name and type_name not in variable_names and len(type_name) >= 3:
+                    add_reference(type_name, "field_type", node_line, signature)
+                    add_entity_edge(current_class_id or file_entity_id, "injects", type_name, node_line, signature)
+            elif node_type in {"import_statement", "import_from_statement", "import_declaration"}:
+                for value in string_values(node):
+                    add_reference(value, "import", node_line, signature)
+                    add_entity_edge(current_method_id or current_class_id or file_entity_id, "import", value, node_line, signature)
+                for dotted in re.findall(r"(?:import|from)\s+([A-Za-z0-9_.*{} ,/.-]+)", signature):
+                    add_reference(dotted.strip(), "import", node_line, signature)
+                    add_entity_edge(current_method_id or current_class_id or file_entity_id, "import", dotted.strip(), node_line, signature)
+            elif node_type in {"method_invocation", "call", "call_expression"}:
+                target = call_target(node)
+                if target and target.lower() not in LOW_VALUE_CALL_SYMBOLS:
+                    add_reference(target, "call", node_line, signature)
+                    add_entity_edge(current_method_id or current_class_id or file_entity_id, "call", target, node_line, signature)
+
+            if node_type in {"annotation", "marker_annotation", "decorator"} or "@" in signature:
+                if "FeignClient" in signature:
+                    for value in re.findall(r"[\"']([^\"']+)[\"']", signature):
+                        add_reference(value, "downstream_api", node_line, signature)
+                        add_entity_edge(current_class_id or file_entity_id, "downstream_api", value, node_line, signature)
+                if any(marker in signature for marker in ("RestController", "Controller", "Service", "Repository", "Component")):
+                    for marker in re.findall(r"@([A-Za-z0-9_]+)", signature):
+                        add_reference(marker, "framework_binding", node_line, signature)
+                        add_entity_edge(current_class_id or file_entity_id, "framework_binding", marker, node_line, signature)
+                add_route_edges(current_method_id or current_class_id or file_entity_id, node, signature)
+
+            raw_text = self._node_text(source, node)
+            if node_type in {"string", "string_literal"} or any(client in signature.lower() for client in ("fetch", "axios", "resttemplate", "webclient")):
+                for endpoint in HTTP_LITERAL_PATTERN.findall(raw_text or signature):
+                    add_reference(endpoint, "http_endpoint", node_line, signature)
+                    add_entity_edge(current_method_id or current_class_id or file_entity_id, "http_endpoint", endpoint, node_line, signature)
+
+            for child in getattr(node, "named_children", []) or []:
+                visit(child, current_class_id, current_method_id, class_name)
+
+        visit(root, file_entity_id, file_entity_id)
+        return True, ""
 
     def _extract_structure_rows(self, relative_path: str, lines: list[str]) -> dict[str, list[tuple[Any, ...]]]:
         definitions: list[tuple[Any, ...]] = []
@@ -1511,28 +3557,114 @@ class SourceCodeQAService:
                 file_entity_id=file_entity_id,
             )
 
+        self._extract_build_file_structure(
+            relative_path=relative_path,
+            lines=lines,
+            add_definition=add_definition,
+            add_reference=add_reference,
+            add_entity_edge=add_entity_edge,
+            file_entity_id=file_entity_id,
+        )
+        self._extract_runtime_trace_structure(
+            relative_path=relative_path,
+            lines=lines,
+            add_reference=add_reference,
+            add_entity_edge=add_entity_edge,
+            file_entity_id=file_entity_id,
+        )
+
+        tree_sitter_language = self._tree_sitter_language_for_suffix(suffix)
+        tree_sitter_used = False
+        tree_sitter_error = ""
+        if tree_sitter_language:
+            tree_sitter_used, tree_sitter_error = self._extract_tree_sitter_structure(
+                relative_path=relative_path,
+                lines=lines,
+                language=tree_sitter_language,
+                add_definition=add_definition,
+                add_reference=add_reference,
+                add_entity=add_entity,
+                add_entity_edge=add_entity_edge,
+                file_entity_id=file_entity_id,
+            )
+
         current_class = ""
         current_class_id = file_entity_id
         current_method = ""
         current_method_id = file_entity_id
-        pending_routes: list[tuple[str, int, str]] = []
+        class_routes: list[str] = []
+        pending_routes: list[tuple[str, int, str, str]] = []
         mapper_namespace = ""
         mapper_namespace_id = file_entity_id
+        variable_types: dict[str, str] = {}
+        collection_element_types: dict[str, str] = {}
+        java_package = ""
+        java_imports: dict[str, str] = {}
+        pending_bean_names: list[tuple[str, int, str]] = []
+        pending_profiles: list[tuple[str, int, str]] = []
+        pending_primary: list[tuple[int, str]] = []
+        pending_conditions: list[tuple[str, int, str]] = []
+        pending_qualifiers: list[tuple[str, int, str]] = []
+        pending_class_framework_edges: list[tuple[str, str, int, str]] = []
+        pending_method_framework_edges: list[tuple[str, str, int, str]] = []
+        variable_qualifiers: dict[str, set[str]] = {}
+        yaml_config_stack: list[tuple[int, str]] = []
+        is_test_file = self._is_test_file_path(relative_path)
         for line_no, line in enumerate(lines, start=1):
             stripped = line.strip()
             if not stripped:
                 continue
+            if is_test_file or TEST_ANNOTATION_PATTERN.search(stripped):
+                if TEST_ANNOTATION_PATTERN.search(stripped) or re.search(r"\b(?:test|should)[A-Za-z0-9_]*\s*\(", stripped):
+                    add_reference("test_case", "test_case", line_no, stripped)
+                    add_entity_edge(current_method_id or current_class_id or file_entity_id, "test_case", "test_case", line_no, stripped)
+                if TEST_ASSERTION_PATTERN.search(stripped):
+                    add_reference("assertion", "test_assertion", line_no, stripped)
+                    add_entity_edge(current_method_id or current_class_id or file_entity_id, "test_assertion", "assertion", line_no, stripped)
+                for call_name in CALL_SYMBOL_PATTERN.findall(stripped):
+                    if call_name.lower() not in LOW_VALUE_CALL_SYMBOLS and len(call_name) >= 3:
+                        add_reference(call_name, "test_reference", line_no, stripped)
+                        add_entity_edge(current_method_id or current_class_id or file_entity_id, "test_reference", call_name, line_no, stripped)
+                for subject in re.findall(r"\b([A-Z][A-Za-z0-9_]{3,})\b", stripped):
+                    if subject in {"Test", "BeforeEach", "AfterEach", "Autowired", "MockBean", "Mockito", "Assertions", "Assert"}:
+                        continue
+                    if subject.endswith(("Test", "Tests", "Spec")):
+                        continue
+                    add_reference(subject, "test_subject", line_no, stripped)
+                    add_entity_edge(current_method_id or current_class_id or file_entity_id, "test_subject", subject, line_no, stripped)
+            package_match = JAVA_PACKAGE_PATTERN.search(stripped)
+            if package_match:
+                java_package = package_match.group(1)
+                add_definition(java_package, "java_package", line_no, stripped)
+                add_entity_edge(file_entity_id, "package", java_package, line_no, stripped)
+            import_match = JAVA_IMPORT_PATTERN.search(stripped)
+            if import_match:
+                imported_name = import_match.group(1)
+                short_import = imported_name.rsplit(".", 1)[-1]
+                if short_import and short_import != "*":
+                    java_imports[short_import] = imported_name
+                add_reference(imported_name, "import", line_no, stripped)
+                add_entity_edge(file_entity_id, "import", imported_name, line_no, stripped)
             namespace_match = MYBATIS_NAMESPACE_PATTERN.search(line)
             if namespace_match:
                 mapper_namespace = namespace_match.group(1)
                 add_definition(mapper_namespace, "mybatis_mapper_namespace", line_no, stripped)
                 mapper_namespace_id = self._entity_id(relative_path, "mybatis_mapper_namespace", mapper_namespace, line_no)
+                mapper_short_name = mapper_namespace.rsplit(".", 1)[-1]
+                if mapper_short_name:
+                    add_reference(mapper_short_name, "mapper_interface", line_no, stripped)
+                    add_entity_edge(mapper_namespace_id, "mapper_interface", mapper_short_name, line_no, stripped)
             statement_match = MYBATIS_STATEMENT_PATTERN.search(line)
             if statement_match:
                 statement_name = f"{mapper_namespace}.{statement_match.group(2)}" if mapper_namespace else statement_match.group(2)
                 add_definition(statement_name, f"mybatis_{statement_match.group(1).lower()}", line_no, stripped)
                 statement_id = self._entity_id(relative_path, f"mybatis_{statement_match.group(1).lower()}", statement_name, line_no)
                 add_entity_edge(mapper_namespace_id, "mapper_statement", statement_name, line_no, stripped)
+                if mapper_namespace:
+                    mapper_short_name = mapper_namespace.rsplit(".", 1)[-1]
+                    qualified_statement = f"{mapper_short_name}.{statement_match.group(2)}"
+                    add_definition(qualified_statement, f"mybatis_{statement_match.group(1).lower()}", line_no, stripped)
+                    add_entity_edge(mapper_namespace_id, "mapper_statement", qualified_statement, line_no, stripped)
                 current_method = statement_name
                 current_method_id = statement_id
             feign_match = FEIGN_CLIENT_PATTERN.search(line)
@@ -1543,9 +3675,37 @@ class SourceCodeQAService:
             for match in CLASS_DEF_PATTERN.finditer(line):
                 add_definition(match.group(2), match.group(1).lower(), line_no, stripped)
                 current_class = match.group(2)
+                if java_package:
+                    add_definition(f"{java_package}.{current_class}", match.group(1).lower(), line_no, stripped)
                 current_class_id = self._entity_id(relative_path, match.group(1).lower(), current_class, line_no)
+                for bean_name, bean_line, bean_context in pending_bean_names:
+                    add_reference(bean_name, "bean_name", bean_line, bean_context)
+                    add_entity_edge(current_class_id, "bean_name", bean_name, bean_line, bean_context)
+                pending_bean_names = []
+                for profile_name, profile_line, profile_context in pending_profiles:
+                    add_reference(profile_name, "spring_profile", profile_line, profile_context)
+                    add_entity_edge(current_class_id, "spring_profile", profile_name, profile_line, profile_context)
+                pending_profiles = []
+                for primary_line, primary_context in pending_primary:
+                    add_reference(current_class, "bean_primary", primary_line, primary_context)
+                    add_entity_edge(current_class_id, "bean_primary", current_class, primary_line, primary_context)
+                pending_primary = []
+                for condition, condition_line, condition_context in pending_conditions:
+                    add_reference(condition, "bean_condition", condition_line, condition_context)
+                    add_entity_edge(current_class_id, "bean_condition", condition, condition_line, condition_context)
+                pending_conditions = []
+                for edge_kind, target, edge_line, edge_context in pending_class_framework_edges:
+                    add_reference(target, edge_kind, edge_line, edge_context)
+                    add_entity_edge(current_class_id, edge_kind, target, edge_line, edge_context)
+                pending_class_framework_edges = []
                 current_method = ""
                 current_method_id = current_class_id
+                class_routes = [route for route, _, _, annotation_name in pending_routes if annotation_name == "RequestMapping"]
+                for route, route_line, route_context, annotation_name in pending_routes:
+                    if annotation_name == "RequestMapping":
+                        add_reference(route, "route", route_line, route_context)
+                        add_entity_edge(current_class_id, "route", route, route_line, route_context)
+                pending_routes = [item for item in pending_routes if item[3] != "RequestMapping"]
             py_match = PY_DEF_PATTERN.search(line)
             if py_match and suffix != ".py":
                 add_definition(py_match.group(2), "python_" + py_match.group(1).lower(), line_no, stripped)
@@ -1559,33 +3719,270 @@ class SourceCodeQAService:
             if java_method and not stripped.startswith(("if ", "for ", "while ", "switch ", "catch ")):
                 method_name = java_method.group(1)
                 add_definition(method_name, "java_method", line_no, stripped)
+                if current_class:
+                    add_definition(f"{current_class}.{method_name}", "java_method", line_no, stripped)
+                    if java_package:
+                        add_definition(f"{java_package}.{current_class}.{method_name}", "java_method", line_no, stripped)
                 current_method = method_name
                 current_method_id = self._entity_id(relative_path, "java_method", method_name, line_no)
-                for route, route_line, route_context in pending_routes:
+                for edge_kind, target, edge_line, edge_context in pending_method_framework_edges:
+                    add_reference(target, edge_kind, edge_line, edge_context)
+                    add_entity_edge(current_method_id, edge_kind, target, edge_line, edge_context)
+                pending_method_framework_edges = []
+                for route, route_line, route_context, _annotation_name in pending_routes:
                     add_reference(route, "route", route_line, route_context)
                     add_entity_edge(current_method_id, "route", route, route_line, route_context)
+                    for class_route in class_routes:
+                        joined_route = self._join_routes(class_route, route)
+                        if joined_route and joined_route != route:
+                            add_reference(joined_route, "route", route_line, route_context)
+                            add_entity_edge(current_method_id, "route", joined_route, route_line, route_context)
+                            add_entity_edge(current_class_id or file_entity_id, "route_prefix", joined_route, route_line, route_context)
+                if current_class and method_name == current_class:
+                    for parameter_type in re.findall(r"\b([A-Z][A-Za-z0-9_]*(?:Service|Repository|Mapper|Client|Gateway|Adapter|Dao))\s+[a-z][A-Za-z0-9_]*", stripped):
+                        add_reference(parameter_type, "field_type", line_no, stripped)
+                        add_entity_edge(current_class_id or file_entity_id, "injects", parameter_type, line_no, stripped)
                 pending_routes = []
             for annotation in ANNOTATION_ROUTE_PATTERN.finditer(line):
                 add_definition(annotation.group(1), "route_annotation", line_no, stripped)
                 for route in re.findall(r'"([^"]+)"', annotation.group(2) or ""):
                     add_reference(route, "route", line_no, stripped)
                     add_entity_edge(current_method_id or current_class_id, "route", route, line_no, stripped)
-                    pending_routes.append((route, line_no, stripped))
+                    pending_routes.append((route, line_no, stripped, annotation.group(1)))
+            spring_value_match = SPRING_VALUE_PATTERN.search(line)
+            if spring_value_match:
+                config_key = spring_value_match.group(1)
+                add_reference(config_key, "config_key", line_no, stripped)
+                add_entity_edge(current_method_id or current_class_id or file_entity_id, "config", config_key, line_no, stripped)
+            qualifier_match = SPRING_QUALIFIER_PATTERN.search(line)
+            line_qualifiers: list[tuple[str, int, str]] = []
+            for qualifier_match in SPRING_QUALIFIER_PATTERN.finditer(line):
+                qualifier = qualifier_match.group(2) or ""
+                if qualifier:
+                    add_reference(qualifier, "bean_qualifier", line_no, stripped)
+                    add_entity_edge(current_method_id or current_class_id or file_entity_id, "bean_qualifier", qualifier, line_no, stripped)
+                    line_qualifiers.append((qualifier, line_no, stripped))
+                    if stripped.startswith("@") and not FIELD_VAR_TYPE_PATTERN.search(stripped):
+                        pending_qualifiers.append((qualifier, line_no, stripped))
+            bean_match = SPRING_BEAN_NAME_PATTERN.search(line)
+            if bean_match:
+                bean_name = bean_match.group(2) or ""
+                if bean_name:
+                    target_id = current_class_id if current_class and not stripped.startswith("@") else file_entity_id
+                    if target_id == file_entity_id:
+                        pending_bean_names.append((bean_name, line_no, stripped))
+                    else:
+                        add_reference(bean_name, "bean_name", line_no, stripped)
+                        add_entity_edge(target_id, "bean_name", bean_name, line_no, stripped)
+            if SPRING_PRIMARY_PATTERN.search(line):
+                if current_class and not stripped.startswith("@"):
+                    add_reference(current_class, "bean_primary", line_no, stripped)
+                    add_entity_edge(current_class_id, "bean_primary", current_class, line_no, stripped)
+                else:
+                    pending_primary.append((line_no, stripped))
+            if SPRING_ASPECT_PATTERN.search(line):
+                if current_class and not stripped.startswith("@"):
+                    add_reference("Aspect", "framework_binding", line_no, stripped)
+                    add_entity_edge(current_class_id, "framework_binding", "Aspect", line_no, stripped)
+                else:
+                    pending_class_framework_edges.append(("framework_binding", "Aspect", line_no, stripped))
+            if SPRING_INTERCEPTOR_PATTERN.search(line):
+                target = current_class or "HandlerInterceptor"
+                add_reference(target, "web_interceptor", line_no, stripped)
+                add_entity_edge(current_class_id or file_entity_id, "web_interceptor", target, line_no, stripped)
+            for boundary_match in OPERATIONAL_BOUNDARY_PATTERN.finditer(line):
+                boundary_name = boundary_match.group(1)
+                boundary_args = self._annotation_target_text(boundary_match.group(2) or "")
+                boundary_target = f"{boundary_name}:{boundary_args}" if boundary_args else boundary_name
+                add_reference(boundary_target, "operational_boundary", line_no, stripped)
+                if current_method and not stripped.startswith("@"):
+                    add_entity_edge(current_method_id, "operational_boundary", boundary_target, line_no, stripped)
+                else:
+                    pending_method_framework_edges.append(("operational_boundary", boundary_target, line_no, stripped))
+            for aop_match in SPRING_AOP_PATTERN.finditer(line):
+                advice_kind = aop_match.group(1)
+                pointcut_text = self._annotation_target_text(aop_match.group(2) or stripped) or advice_kind
+                pointcut_target = f"{advice_kind}:{pointcut_text}"
+                edge_kind = "aop_pointcut" if advice_kind == "Pointcut" else "aop_advice"
+                add_reference(pointcut_target, edge_kind, line_no, stripped)
+                if current_method and not stripped.startswith("@"):
+                    add_entity_edge(current_method_id, edge_kind, pointcut_target, line_no, stripped)
+                else:
+                    pending_method_framework_edges.append((edge_kind, pointcut_target, line_no, stripped))
+            scheduled_match = SPRING_SCHEDULED_PATTERN.search(line)
+            if scheduled_match:
+                schedule_target = self._scheduled_target_text(scheduled_match.group(1) or "") or "scheduled"
+                add_reference(schedule_target, "scheduled_job", line_no, stripped)
+                if current_method and not stripped.startswith("@"):
+                    add_entity_edge(current_method_id, "scheduled_job", schedule_target, line_no, stripped)
+                else:
+                    pending_method_framework_edges.append(("scheduled_job", schedule_target, line_no, stripped))
+            profile_match = SPRING_PROFILE_PATTERN.search(line)
+            if profile_match:
+                for profile in re.findall(r'"([^"]+)"|\'([^\']+)\'', profile_match.group(1)):
+                    profile_name = next((item for item in profile if item), "")
+                    if profile_name:
+                        if current_class and not stripped.startswith("@"):
+                            add_reference(profile_name, "spring_profile", line_no, stripped)
+                            add_entity_edge(current_class_id, "spring_profile", profile_name, line_no, stripped)
+                        else:
+                            pending_profiles.append((profile_name, line_no, stripped))
+            conditional_match = SPRING_CONDITIONAL_ON_PROPERTY_PATTERN.search(line)
+            if conditional_match:
+                condition_entries = self._spring_conditional_on_property_entries(conditional_match.group(1))
+                for condition in condition_entries:
+                    add_reference(condition, "bean_condition", line_no, stripped)
+                    if current_class and not stripped.startswith("@"):
+                        add_entity_edge(current_class_id, "bean_condition", condition, line_no, stripped)
+                    else:
+                        pending_conditions.append((condition, line_no, stripped))
+                for property_name in (
+                    self._spring_annotation_arg_values(conditional_match.group(1), "name")
+                    or self._spring_annotation_arg_values(conditional_match.group(1), "value")
+                ):
+                    add_reference(property_name, "config_key", line_no, stripped)
+                    add_entity_edge(current_class_id or file_entity_id, "config", property_name, line_no, stripped)
+                for property_name in self._spring_annotation_arg_values(conditional_match.group(1), "prefix"):
+                    add_reference(property_name, "config_key", line_no, stripped)
+                    add_entity_edge(current_class_id or file_entity_id, "config", property_name, line_no, stripped)
+            listener_match = MESSAGE_LISTENER_PATTERN.search(line)
+            if listener_match:
+                for topic in self._extract_message_names(listener_match.group(2)):
+                    add_reference(topic, "message_consume", line_no, stripped)
+                    add_entity_edge(current_method_id or current_class_id or file_entity_id, "message_consume", topic, line_no, stripped)
+            for send_match in MESSAGE_SEND_PATTERN.finditer(line):
+                for topic in self._extract_message_names(send_match.group(1)):
+                    add_reference(topic, "message_publish", line_no, stripped)
+                    add_entity_edge(current_method_id or current_class_id or file_entity_id, "message_publish", topic, line_no, stripped)
+            for event_match in EVENT_PUBLISH_PATTERN.finditer(line):
+                for event_name in self._extract_event_names(event_match.group(1)):
+                    add_reference(event_name, "event_publish", line_no, stripped)
+                    add_entity_edge(current_method_id or current_class_id or file_entity_id, "event_publish", event_name, line_no, stripped)
+            if "@EventListener" in stripped or "@TransactionalEventListener" in stripped:
+                for event_name in re.findall(r"\b([A-Z][A-Za-z0-9_]*(?:Event|Message|Command))\b", stripped):
+                    add_reference(event_name, "event_consume", line_no, stripped)
+                    add_entity_edge(current_method_id or current_class_id or file_entity_id, "event_consume", event_name, line_no, stripped)
             for table in SQL_TABLE_PATTERN.findall(line):
                 add_reference(table, "sql_table", line_no, stripped)
                 add_entity_edge(current_method_id or current_class_id, "sql_table", table, line_no, stripped)
+            for table in SQL_READ_TABLE_PATTERN.findall(line):
+                add_reference(table, "db_read", line_no, stripped)
+                add_entity_edge(current_method_id or current_class_id, "db_read", table, line_no, stripped)
+            for table in SQL_WRITE_TABLE_PATTERN.findall(line):
+                add_reference(table, "db_write", line_no, stripped)
+                add_entity_edge(current_method_id or current_class_id, "db_write", table, line_no, stripped)
             for endpoint in HTTP_LITERAL_PATTERN.findall(line):
                 if endpoint.startswith("http") or any(client in stripped.lower() for client in ("resttemplate", "webclient", "feign", "exchange", "postfor", "getfor", "request")):
                     add_reference(endpoint, "http_endpoint", line_no, stripped)
                     add_entity_edge(current_method_id or current_class_id or file_entity_id, "http_endpoint", endpoint, line_no, stripped)
             if suffix in {".properties", ".yaml", ".yml", ".conf", ".toml"}:
+                config_pair = (
+                    self._extract_yaml_config_assignment(line, yaml_config_stack)
+                    if suffix in {".yaml", ".yml"}
+                    else self._extract_config_assignment(stripped)
+                )
                 key_match = PROPERTIES_KEY_PATTERN.search(line)
-                if key_match:
+                if config_pair:
+                    config_key, config_value = config_pair
+                    add_definition(config_key, "config_key", line_no, stripped)
+                    add_entity_edge(file_entity_id, "config", config_key, line_no, stripped)
+                    if config_value:
+                        add_reference(config_value, "config_value", line_no, stripped)
+                        add_entity_edge(file_entity_id, "config_value", config_value, line_no, stripped)
+                    for endpoint in HTTP_LITERAL_PATTERN.findall(f"'{config_value}'"):
+                        add_reference(endpoint, "http_endpoint", line_no, stripped)
+                        add_entity_edge(file_entity_id, "http_endpoint", endpoint, line_no, stripped)
+                    if re.search(r"\b[a-z0-9-]+-service\b", config_value, re.IGNORECASE):
+                        add_reference(config_value, "downstream_api", line_no, stripped)
+                        add_entity_edge(file_entity_id, "downstream_api", config_value, line_no, stripped)
+                elif key_match:
                     add_definition(key_match.group(1), "config_key", line_no, stripped)
                     add_entity_edge(file_entity_id, "config", key_match.group(1), line_no, stripped)
             field_match = FIELD_OR_PARAM_TYPE_PATTERN.search(line)
             if field_match:
                 add_entity_edge(current_class_id or file_entity_id, "injects", field_match.group(1), line_no, stripped)
+            qualified_variable_targets = self._qualified_variable_targets(stripped)
+            typed_variables = FIELD_VAR_TYPE_PATTERN.findall(stripped)
+            for type_name, variable_name in typed_variables:
+                variable_types[variable_name] = type_name
+                add_reference(type_name, "field_type", line_no, stripped)
+                add_entity_edge(current_class_id or file_entity_id, "injects", type_name, line_no, stripped)
+                targeted_qualifiers = [
+                    (qualifier, line_no, stripped)
+                    for qualifier in qualified_variable_targets.get(variable_name, [])
+                ]
+                fallback_line_qualifiers = line_qualifiers if not targeted_qualifiers and len(typed_variables) == 1 else []
+                for qualifier, qualifier_line, qualifier_context in pending_qualifiers + targeted_qualifiers + fallback_line_qualifiers:
+                    add_reference(f"{variable_name}={qualifier}", "bean_qualifier_target", qualifier_line, qualifier_context)
+                    add_entity_edge(current_class_id or file_entity_id, "bean_qualifier_target", f"{variable_name}={qualifier}", qualifier_line, qualifier_context)
+                    variable_qualifiers.setdefault(variable_name, set()).add(qualifier)
+                if pending_qualifiers:
+                    pending_qualifiers = []
+                imported_type = java_imports.get(type_name)
+                if imported_type:
+                    add_reference(imported_type, "field_type", line_no, stripped)
+                    add_entity_edge(current_class_id or file_entity_id, "injects", imported_type, line_no, stripped)
+            for field_name, source_variable in THIS_FIELD_ASSIGNMENT_PATTERN.findall(stripped):
+                for qualifier in sorted(variable_qualifiers.get(source_variable, set())):
+                    add_reference(f"{field_name}={qualifier}", "bean_qualifier_target", line_no, stripped)
+                    add_entity_edge(current_class_id or file_entity_id, "bean_qualifier_target", f"{field_name}={qualifier}", line_no, stripped)
+                    variable_qualifiers.setdefault(field_name, set()).add(qualifier)
+            simple_variable_names = {variable_name for _type_name, variable_name in typed_variables}
+            for generic_text, variable_name in GENERIC_FIELD_VAR_TYPE_PATTERN.findall(stripped):
+                if variable_name in simple_variable_names:
+                    continue
+                inner_types = self._service_like_types_from_generic(generic_text)
+                if not inner_types:
+                    continue
+                element_type = inner_types[-1]
+                collection_element_types[variable_name] = element_type
+                add_reference(element_type, "field_type", line_no, stripped)
+                add_entity_edge(current_class_id or file_entity_id, "injects", element_type, line_no, stripped)
+                targeted_qualifiers = [
+                    (qualifier, line_no, stripped)
+                    for qualifier in qualified_variable_targets.get(variable_name, [])
+                ]
+                fallback_line_qualifiers = line_qualifiers if not targeted_qualifiers else []
+                for qualifier, qualifier_line, qualifier_context in pending_qualifiers + targeted_qualifiers + fallback_line_qualifiers:
+                    add_reference(f"{variable_name}={qualifier}", "bean_qualifier_target", qualifier_line, qualifier_context)
+                    add_entity_edge(current_class_id or file_entity_id, "bean_qualifier_target", f"{variable_name}={qualifier}", qualifier_line, qualifier_context)
+                    variable_qualifiers.setdefault(variable_name, set()).add(qualifier)
+                if pending_qualifiers:
+                    pending_qualifiers = []
+                imported_type = java_imports.get(element_type)
+                if imported_type:
+                    add_reference(imported_type, "field_type", line_no, stripped)
+                    add_entity_edge(current_class_id or file_entity_id, "injects", imported_type, line_no, stripped)
+            for collection_variable, lambda_variable in STREAM_LAMBDA_PATTERN.findall(stripped):
+                element_type = collection_element_types.get(collection_variable) or variable_types.get(collection_variable)
+                if element_type:
+                    variable_types[lambda_variable] = element_type
+                    for qualifier in sorted(variable_qualifiers.get(collection_variable, set())):
+                        add_reference(f"{lambda_variable}={qualifier}", "bean_qualifier_target", line_no, stripped)
+                        add_entity_edge(current_class_id or file_entity_id, "bean_qualifier_target", f"{lambda_variable}={qualifier}", line_no, stripped)
+                        variable_qualifiers.setdefault(lambda_variable, set()).add(qualifier)
+            for provider_variable, method_name in PROVIDER_CHAIN_CALL_PATTERN.findall(stripped):
+                owner_type = collection_element_types.get(provider_variable) or variable_types.get(provider_variable)
+                if owner_type:
+                    qualified_call = f"{owner_type}.{method_name}"
+                    add_reference(qualified_call, "call", line_no, stripped)
+                    add_entity_edge(current_method_id or current_class_id or file_entity_id, "call", qualified_call, line_no, stripped)
+                    imported_type = java_imports.get(owner_type)
+                    if imported_type:
+                        imported_call = f"{imported_type}.{method_name}"
+                        add_reference(imported_call, "call", line_no, stripped)
+                        add_entity_edge(current_method_id or current_class_id or file_entity_id, "call", imported_call, line_no, stripped)
+            for variable_name, method_name in MEMBER_CALL_PATTERN.findall(stripped):
+                owner_type = variable_types.get(variable_name)
+                if owner_type:
+                    qualified_call = f"{owner_type}.{method_name}"
+                    add_reference(qualified_call, "call", line_no, stripped)
+                    add_entity_edge(current_method_id or current_class_id or file_entity_id, "call", qualified_call, line_no, stripped)
+                    imported_type = java_imports.get(owner_type)
+                    if imported_type:
+                        imported_call = f"{imported_type}.{method_name}"
+                        add_reference(imported_call, "call", line_no, stripped)
+                        add_entity_edge(current_method_id or current_class_id or file_entity_id, "call", imported_call, line_no, stripped)
             for target in self._extract_data_flow_targets(stripped):
                 add_reference(target, "data_flow", line_no, stripped)
                 add_entity_edge(current_method_id or current_class_id or file_entity_id, "data_flow", target, line_no, stripped)
@@ -1603,6 +4000,9 @@ class SourceCodeQAService:
             "references": list(dict.fromkeys(references)),
             "entities": list(dict.fromkeys(entities)),
             "entity_edges": list(dict.fromkeys(entity_edges)),
+            "tree_sitter_used": tree_sitter_used,
+            "tree_sitter_language": tree_sitter_language if tree_sitter_used else "",
+            "tree_sitter_error": tree_sitter_error,
         }
 
     @staticmethod
@@ -1620,6 +4020,369 @@ class SourceCodeQAService:
             ".properties": "properties",
             ".sql": "sql",
         }.get(str(suffix or "").lower(), "text")
+
+    @staticmethod
+    def _extract_config_assignment(line: str) -> tuple[str, str] | None:
+        stripped = str(line or "").strip()
+        if not stripped or stripped.startswith(("#", "//", "- ")):
+            return None
+        match = CONFIG_ASSIGNMENT_PATTERN.search(stripped)
+        if not match:
+            return None
+        key = match.group(1).strip()
+        value = match.group(2).strip().strip("\"'")
+        if not key or not value:
+            return None
+        return key, value
+
+    def _extract_runtime_trace_structure(
+        self,
+        *,
+        relative_path: str,
+        lines: list[str],
+        add_reference: Any,
+        add_entity_edge: Any,
+        file_entity_id: str,
+    ) -> None:
+        if not self._is_runtime_trace_file(relative_path):
+            return
+        for line_no, raw_line in enumerate(lines, start=1):
+            raw_line = raw_line.strip()
+            if not raw_line:
+                continue
+            try:
+                payload = json.loads(raw_line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            edge_kind, target = self._runtime_trace_edge(payload)
+            if not edge_kind or not target:
+                continue
+            evidence = self._runtime_trace_evidence(payload)
+            add_reference(target, edge_kind, line_no, evidence)
+            add_entity_edge(file_entity_id, edge_kind, target, line_no, evidence)
+
+    @staticmethod
+    def _is_runtime_trace_file(relative_path: str) -> bool:
+        path = Path(str(relative_path or ""))
+        if path.suffix.lower() != ".jsonl":
+            return False
+        lowered_name = path.name.lower()
+        lowered_parts = {part.lower() for part in path.parts}
+        runtime_dirs = {"runtime-traces", "runtime_traces", "source-code-qa-traces", "source_code_qa_traces"}
+        return lowered_name in RUNTIME_TRACE_FILENAMES or bool(runtime_dirs & lowered_parts)
+
+    def _runtime_trace_edge(self, payload: dict[str, Any]) -> tuple[str, str]:
+        kind_text = self._runtime_trace_string(payload, ("kind", "type", "event", "span_kind")).lower()
+        if any(token in kind_text for token in ("route", "http", "request", "endpoint")):
+            return "runtime_route", self._runtime_trace_target(
+                payload, ("route", "path", "url", "http_path", "endpoint", "target", "to", "handler")
+            )
+        if any(token in kind_text for token in ("sql", "db", "database", "table")):
+            return "runtime_sql", self._runtime_trace_sql_target(payload)
+        if any(token in kind_text for token in ("message", "kafka", "rabbit", "jms", "topic", "queue", "event")):
+            return "runtime_message", self._runtime_trace_target(
+                payload, ("topic", "queue", "channel", "message", "event_name", "target", "to")
+            )
+        if any(token in kind_text for token in ("config", "feature", "flag", "property")):
+            return "runtime_config", self._runtime_trace_target(
+                payload, ("key", "config", "property", "feature_flag", "flag", "name", "target", "to")
+            )
+        if any(token in kind_text for token in ("call", "method", "function", "span")):
+            return "runtime_call", self._runtime_trace_target(
+                payload, ("to", "target", "callee", "method", "function", "operation", "handler")
+            )
+        if self._runtime_trace_target(payload, ("route", "path", "url", "http_path", "endpoint")):
+            return "runtime_route", self._runtime_trace_target(payload, ("route", "path", "url", "http_path", "endpoint"))
+        if self._runtime_trace_target(payload, ("table", "sql", "statement", "query")):
+            return "runtime_sql", self._runtime_trace_sql_target(payload)
+        if self._runtime_trace_target(payload, ("topic", "queue", "channel")):
+            return "runtime_message", self._runtime_trace_target(payload, ("topic", "queue", "channel"))
+        if self._runtime_trace_target(payload, ("key", "config", "property", "feature_flag", "flag")):
+            return "runtime_config", self._runtime_trace_target(
+                payload, ("key", "config", "property", "feature_flag", "flag")
+            )
+        return "runtime_call", self._runtime_trace_target(payload, ("to", "target", "callee", "operation", "handler"))
+
+    def _runtime_trace_sql_target(self, payload: dict[str, Any]) -> str:
+        table = self._runtime_trace_target(payload, ("table", "db_table", "entity"))
+        if table:
+            return table
+        sql = self._runtime_trace_target(payload, ("sql", "statement", "query"))
+        for pattern in (SQL_READ_TABLE_PATTERN, SQL_WRITE_TABLE_PATTERN, SQL_TABLE_PATTERN):
+            match = pattern.search(sql)
+            if match:
+                return match.group(1)
+        return sql[:160]
+
+    @staticmethod
+    def _runtime_trace_target(payload: dict[str, Any], keys: tuple[str, ...]) -> str:
+        for key in keys:
+            value = SourceCodeQAService._runtime_trace_string(payload, (key,))
+            if value:
+                return value
+        return ""
+
+    @staticmethod
+    def _runtime_trace_string(payload: dict[str, Any], keys: tuple[str, ...]) -> str:
+        for key in keys:
+            if key not in payload:
+                continue
+            value = payload.get(key)
+            if value is None:
+                continue
+            if isinstance(value, (str, int, float, bool)):
+                normalized = str(value).strip()
+            else:
+                normalized = json.dumps(value, ensure_ascii=False, sort_keys=True)
+            if normalized:
+                return normalized
+        return ""
+
+    @staticmethod
+    def _runtime_trace_evidence(payload: dict[str, Any]) -> str:
+        source = SourceCodeQAService._runtime_trace_target(payload, ("from", "source", "caller", "handler", "span"))
+        target = SourceCodeQAService._runtime_trace_target(
+            payload, ("to", "target", "callee", "route", "path", "url", "table", "topic", "queue", "key")
+        )
+        evidence = SourceCodeQAService._runtime_trace_string(payload, ("evidence", "summary", "trace_id", "span_id"))
+        parts = []
+        if source:
+            parts.append(f"from={source}")
+        if target:
+            parts.append(f"to={target}")
+        if evidence:
+            parts.append(evidence)
+        if not parts:
+            parts.append(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+        return " | ".join(parts)[:500]
+
+    @staticmethod
+    def _extract_yaml_config_assignment(line: str, stack: list[tuple[int, str]]) -> tuple[str, str] | None:
+        raw = str(line or "").rstrip()
+        stripped = raw.strip()
+        if not stripped or stripped.startswith(("#", "---", "...", "- ")):
+            return None
+        match = re.match(r"^(\s*)([A-Za-z0-9_.-]{2,})\s*:\s*(.*?)\s*$", raw)
+        if not match:
+            return None
+        indent = len(match.group(1).replace("\t", "    "))
+        key = match.group(2).strip()
+        value = match.group(3).strip()
+        while stack and stack[-1][0] >= indent:
+            stack.pop()
+        full_key = ".".join([item[1] for item in stack] + [key])
+        if not value or value in {"|", ">"}:
+            stack.append((indent, key))
+            return full_key, ""
+        value = re.sub(r"\s+#.*$", "", value).strip().strip("\"'")
+        if not full_key:
+            return None
+        return full_key, value
+
+    @staticmethod
+    def _spring_annotation_arg_values(annotation_args: str, key: str) -> list[str]:
+        values: list[str] = []
+        pattern = re.compile(
+            rf"\b{re.escape(key)}\s*=\s*(\{{[^}}]*\}}|\"[^\"]*\"|'[^']*'|[A-Za-z0-9_.-]+)"
+        )
+        for match in pattern.finditer(str(annotation_args or "")):
+            raw_value = match.group(1).strip()
+            quoted_values = re.findall(r"\"([^\"]+)\"|'([^']+)'", raw_value)
+            if quoted_values:
+                values.extend(next((item for item in group if item), "") for group in quoted_values)
+            else:
+                values.extend(item.strip() for item in raw_value.strip("{}").split(","))
+        return list(dict.fromkeys(value.strip() for value in values if value and value.strip()))
+
+    @staticmethod
+    def _spring_conditional_on_property_entries(annotation_args: str) -> list[str]:
+        prefix_values = SourceCodeQAService._spring_annotation_arg_values(annotation_args, "prefix")
+        prefix = prefix_values[0].strip(".") if prefix_values else ""
+        property_names = (
+            SourceCodeQAService._spring_annotation_arg_values(annotation_args, "name")
+            or SourceCodeQAService._spring_annotation_arg_values(annotation_args, "value")
+        )
+        having_values = SourceCodeQAService._spring_annotation_arg_values(annotation_args, "havingValue")
+        having_value = having_values[0] if having_values else "<present>"
+        match_if_missing = any(
+            value.lower() == "true"
+            for value in SourceCodeQAService._spring_annotation_arg_values(annotation_args, "matchIfMissing")
+        )
+        conditions: list[str] = []
+        for property_name in property_names:
+            normalized_name = property_name.strip(".")
+            if not normalized_name:
+                continue
+            full_key = (
+                normalized_name
+                if not prefix or normalized_name.startswith(f"{prefix}.")
+                else f"{prefix}.{normalized_name}"
+            )
+            conditions.append(f"{full_key}={having_value}")
+            if match_if_missing:
+                conditions.append(f"{full_key}=<missing:true>")
+        return list(dict.fromkeys(conditions))
+
+    @staticmethod
+    def _annotation_target_text(annotation_args: str) -> str:
+        text = str(annotation_args or "").strip()
+        quoted_values = re.findall(r"\"([^\"]+)\"|'([^']+)'", text)
+        values = [next((item for item in group if item), "") for group in quoted_values]
+        values = [value.strip() for value in values if value and value.strip()]
+        if values:
+            return values[0]
+        cleaned = re.sub(r"^\s*(?:value|pointcut)\s*=\s*", "", text).strip()
+        return cleaned[:200]
+
+    @staticmethod
+    def _scheduled_target_text(annotation_args: str) -> str:
+        text = str(annotation_args or "").strip()
+        if not text:
+            return "scheduled"
+        entries: list[str] = []
+        for key in ("cron", "fixedRateString", "fixedDelayString", "initialDelayString"):
+            for value in SourceCodeQAService._spring_annotation_arg_values(text, key):
+                entries.append(f"{key}={value}")
+        for key in ("fixedRate", "fixedDelay", "initialDelay"):
+            match = re.search(rf"\b{re.escape(key)}\s*=\s*([0-9]+)", text)
+            if match:
+                entries.append(f"{key}={match.group(1)}")
+        return ";".join(entries[:4]) or SourceCodeQAService._annotation_target_text(text) or "scheduled"
+
+    @staticmethod
+    def _extract_message_names(argument_text: str) -> list[str]:
+        names: list[str] = []
+        text = str(argument_text or "")
+        for value in re.findall(r"[\"']([^\"']{3,120})[\"']", text):
+            lowered = value.lower()
+            if any(marker in lowered for marker in ("topic", "queue", "exchange", "event", "issue", "command", ".", "-", "_")):
+                names.append(value)
+        for value in re.findall(r"\$\{([^}:]+)(?::[^}]*)?\}", text):
+            names.append(value)
+        return list(dict.fromkeys(name.strip() for name in names if name.strip()))[:8]
+
+    @staticmethod
+    def _extract_event_names(argument_text: str) -> list[str]:
+        text = str(argument_text or "")
+        names = []
+        for value in re.findall(r"\bnew\s+([A-Z][A-Za-z0-9_]*(?:Event|Message|Command))\b", text):
+            names.append(value)
+        for value in re.findall(r"\b([A-Z][A-Za-z0-9_]*(?:Event|Message|Command))\.class\b", text):
+            names.append(value)
+        for value in re.findall(r"[\"']([^\"']*(?:event|message|command)[^\"']*)[\"']", text, re.IGNORECASE):
+            names.append(value)
+        return list(dict.fromkeys(name.strip() for name in names if name.strip()))[:8]
+
+    def _extract_build_file_structure(
+        self,
+        *,
+        relative_path: str,
+        lines: list[str],
+        add_definition: Any,
+        add_reference: Any,
+        add_entity_edge: Any,
+        file_entity_id: str,
+    ) -> None:
+        lowered_path = str(relative_path or "").lower()
+        filename = Path(relative_path).name.lower()
+        if filename == "package.json":
+            try:
+                payload = json.loads("\n".join(lines))
+            except json.JSONDecodeError:
+                payload = {}
+            package_name = str(payload.get("name") or "").strip() if isinstance(payload, dict) else ""
+            if package_name:
+                line_no = self._first_line_number_containing(lines, package_name)
+                add_definition(package_name, "npm_package", line_no, package_name)
+                add_entity_edge(file_entity_id, "module_artifact", package_name, line_no, package_name)
+            for section in ("dependencies", "devDependencies", "peerDependencies", "optionalDependencies"):
+                dependencies = payload.get(section) if isinstance(payload, dict) else {}
+                if not isinstance(dependencies, dict):
+                    continue
+                for dependency_name in dependencies:
+                    dependency = str(dependency_name or "").strip()
+                    if not dependency:
+                        continue
+                    line_no = self._first_line_number_containing(lines, dependency)
+                    add_reference(dependency, "module_dependency", line_no, dependency)
+                    add_entity_edge(file_entity_id, "module_dependency", dependency, line_no, dependency)
+            return
+        if filename == "pom.xml":
+            full_text = "\n".join(lines)
+            project_header = full_text.split("<dependencies>", 1)[0]
+            project_tags = dict(MAVEN_TAG_PATTERN.findall(project_header))
+            project_group = str(project_tags.get("groupId") or "").strip()
+            project_artifact = str(project_tags.get("artifactId") or "").strip()
+            if project_artifact:
+                line_no = self._first_line_number_containing(lines, project_artifact)
+                add_definition(project_artifact, "maven_artifact", line_no, project_artifact)
+                add_entity_edge(file_entity_id, "module_artifact", project_artifact, line_no, project_artifact)
+                if project_group:
+                    coordinate = f"{project_group}:{project_artifact}"
+                    add_definition(coordinate, "maven_coordinate", line_no, coordinate)
+                    add_entity_edge(file_entity_id, "module_artifact", coordinate, line_no, coordinate)
+            for block in MAVEN_DEPENDENCY_BLOCK_PATTERN.findall(full_text):
+                tags = dict(MAVEN_TAG_PATTERN.findall(block))
+                group_id = str(tags.get("groupId") or "").strip()
+                artifact_id = str(tags.get("artifactId") or "").strip()
+                if not artifact_id or "$" in artifact_id:
+                    continue
+                coordinate = f"{group_id}:{artifact_id}" if group_id and "$" not in group_id else artifact_id
+                line_no = self._first_line_number_containing(lines, artifact_id)
+                add_reference(coordinate, "module_dependency", line_no, block)
+                add_entity_edge(file_entity_id, "module_dependency", coordinate, line_no, block)
+                if coordinate != artifact_id:
+                    add_reference(artifact_id, "module_dependency", line_no, block)
+                    add_entity_edge(file_entity_id, "module_dependency", artifact_id, line_no, block)
+            return
+        if filename in {"build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts"} or lowered_path.endswith(".gradle"):
+            for line_no, line in enumerate(lines, start=1):
+                stripped = line.strip()
+                if not stripped or stripped.startswith(("//", "#")):
+                    continue
+                for group_id, artifact_id in GRADLE_COORDINATE_PATTERN.findall(stripped):
+                    coordinate = f"{group_id}:{artifact_id}"
+                    add_reference(coordinate, "module_dependency", line_no, stripped)
+                    add_entity_edge(file_entity_id, "module_dependency", coordinate, line_no, stripped)
+                    add_reference(artifact_id, "module_dependency", line_no, stripped)
+                    add_entity_edge(file_entity_id, "module_dependency", artifact_id, line_no, stripped)
+                for module_name in GRADLE_PROJECT_DEPENDENCY_PATTERN.findall(stripped):
+                    raw_module = module_name.strip()
+                    normalized_module = self._normalize_gradle_module_name(raw_module)
+                    if normalized_module:
+                        add_reference(normalized_module, "module_dependency", line_no, stripped)
+                        add_entity_edge(file_entity_id, "module_dependency", normalized_module, line_no, stripped)
+                        add_reference(normalized_module, "gradle_project_dependency", line_no, stripped)
+                        add_entity_edge(file_entity_id, "gradle_project_dependency", normalized_module, line_no, stripped)
+                        if raw_module and raw_module != normalized_module:
+                            add_reference(raw_module, "gradle_project_dependency", line_no, stripped)
+                            add_entity_edge(file_entity_id, "gradle_project_dependency", raw_module, line_no, stripped)
+                include_match = GRADLE_INCLUDE_PATTERN.search(stripped)
+                if include_match:
+                    for module_name in re.findall(r"[\"']:([^\"']+)[\"']", include_match.group(1)):
+                        raw_module = f":{module_name.strip().strip(':')}"
+                        normalized_module = self._normalize_gradle_module_name(raw_module)
+                        if normalized_module:
+                            add_definition(normalized_module, "gradle_module", line_no, stripped)
+                            add_entity_edge(file_entity_id, "module_artifact", normalized_module, line_no, stripped)
+                            add_entity_edge(file_entity_id, "gradle_module", normalized_module, line_no, stripped)
+                            add_definition(raw_module, "gradle_module", line_no, stripped)
+                            add_entity_edge(file_entity_id, "gradle_module", raw_module, line_no, stripped)
+
+    @staticmethod
+    def _normalize_gradle_module_name(module_name: str) -> str:
+        return str(module_name or "").strip().strip(":").replace(":", "-")
+
+    @staticmethod
+    def _first_line_number_containing(lines: list[str], needle: str) -> int:
+        value = str(needle or "")
+        if value:
+            for index, line in enumerate(lines, start=1):
+                if value in line:
+                    return index
+        return 1
 
     def _extract_python_ast_structure(
         self,
@@ -1753,6 +4516,7 @@ class SourceCodeQAService:
         question: str,
         focus_terms: list[str] | None = None,
         trace_stage: str = "direct",
+        request_cache: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         index_path = self._index_path(repo_path)
         matches: list[dict[str, Any]] = []
@@ -1760,14 +4524,30 @@ class SourceCodeQAService:
         trace_stage_bonus = 90 if trace_stage == "two_hop" or trace_stage == "query_decomposition" or trace_stage.startswith(TOOL_LOOP_TRACE_PREFIX) or trace_stage.startswith("agent_trace") or trace_stage.startswith("agent_plan") or trace_stage == QUALITY_GATE_TRACE_STAGE else 0
         normalized_focus_terms = [term.lower() for term in (focus_terms or []) if term]
         query_terms = list(dict.fromkeys([*tokens, *normalized_focus_terms]))
+        intent = self._question_retrieval_features(question, request_cache=request_cache).get("intent") or {}
         file_hits: dict[str, dict[str, Any]] = {}
         with sqlite3.connect(index_path) as connection:
             connection.row_factory = sqlite3.Row
-            file_rows = connection.execute("select * from files").fetchall()
+            index_rows = self._cached_index_rows(connection, index_path, request_cache=request_cache)
+            file_rows = index_rows["files"]
+            file_rows_by_path = index_rows["files_by_path"]
+            line_rows = index_rows["lines"]
+            lines_by_path = index_rows["lines_by_path"]
+            file_symbols_by_path = index_rows.get("file_symbols_by_path") or {}
+            line_symbols_by_key = index_rows.get("line_symbols_by_key") or {}
             for file_row in file_rows:
                 path_text = str(file_row["lower_path"] or "")
-                file_symbols = set(json.loads(file_row["symbols"] or "[]"))
+                file_symbols = file_symbols_by_path.get(str(file_row["path"]))
+                if file_symbols is None:
+                    file_symbols = set(json.loads(file_row["symbols"] or "[]"))
                 path_score = sum(10 for token in tokens if token in path_text)
+                if intent.get("config") and path_text.endswith((".properties", ".yaml", ".yml", ".conf", ".toml")):
+                    path_score += 70
+                if intent.get("module_dependency") and (
+                    path_text.endswith(("pom.xml", "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts", "package.json"))
+                    or ".gradle" in path_text
+                ):
+                    path_score += 76
                 if normalized_focus_terms and any(hint in path_text for hint in DEPENDENCY_PATH_HINTS):
                     path_score += 18
                 symbol_score = sum(16 for token in tokens if token in file_symbols)
@@ -1785,10 +4565,14 @@ class SourceCodeQAService:
             for term in query_terms:
                 if len(term) < 3:
                     continue
-                like_term = f"%{term}%"
-                for row in connection.execute(
-                    "select * from definitions where lower_name like ? limit 40",
-                    (like_term,),
+                for row in self._cached_structure_like_rows(
+                    connection,
+                    index_path,
+                    table="definitions",
+                    lower_column="lower_name",
+                    term=term,
+                    limit=40,
+                    request_cache=request_cache,
                 ):
                     file_path = str(row["file_path"])
                     hit = file_hits.setdefault(
@@ -1809,9 +4593,14 @@ class SourceCodeQAService:
                         hit["best_line"] = int(row["line_no"])
                         hit["best_score"] = score
                     hit["structure_hits"].append(f"{row['kind']} definition {row['name']}")
-                for row in connection.execute(
-                    "select * from references_index where lower_target like ? limit 60",
-                    (like_term,),
+                for row in self._cached_structure_like_rows(
+                    connection,
+                    index_path,
+                    table="references_index",
+                    lower_column="lower_target",
+                    term=term,
+                    limit=60,
+                    request_cache=request_cache,
                 ):
                     file_path = str(row["file_path"])
                     hit = file_hits.setdefault(
@@ -1829,12 +4618,22 @@ class SourceCodeQAService:
                     boost = 58 if str(row["lower_target"]) == term else 32
                     if str(row["kind"]) in {"sql_table", "route"}:
                         boost += 18
+                    if intent.get("config") and str(row["kind"]) in {"config_value", "http_endpoint", "downstream_api"}:
+                        boost += 34
+                    if intent.get("module_dependency") and str(row["kind"]) == "module_dependency":
+                        boost += 36
                     score = boost + repo_score + trace_stage_bonus
                     if score > hit.get("best_score", 0):
                         hit["best_line"] = int(row["line_no"])
                         hit["best_score"] = score
                     hit["structure_hits"].append(f"{row['kind']} reference {row['target']}")
-            for row in self._fts_search_rows(connection, tokens, normalized_focus_terms):
+            for row in self._fts_search_rows(
+                connection,
+                tokens,
+                normalized_focus_terms,
+                index_path=index_path,
+                request_cache=request_cache,
+            ):
                 file_path = str(row["file_path"])
                 hit = file_hits.setdefault(
                     file_path,
@@ -1853,24 +4652,30 @@ class SourceCodeQAService:
                     hit["best_line"] = int(row["line_no"])
                     hit["best_score"] = score
                 hit["structure_hits"].append("bm25 content match")
-            for row in connection.execute("select * from lines"):
+            for row in line_rows:
                 lower_text = str(row["lower_text"] or "")
-                line_symbols = set(json.loads(row["symbols"] or "[]"))
                 file_path = str(row["file_path"])
                 file_hit = file_hits.get(file_path)
                 if file_hit is None:
-                    file_row = next((item for item in file_rows if item["path"] == file_path), None)
+                    file_row = file_rows_by_path.get(file_path)
                     if file_row is None:
                         continue
+                    file_symbols = file_symbols_by_path.get(file_path)
+                    if file_symbols is None:
+                        file_symbols = set(json.loads(file_row["symbols"] or "[]"))
                     file_hit = {
                         "path_text": str(file_row["lower_path"] or ""),
-                        "file_symbols": set(json.loads(file_row["symbols"] or "[]")),
+                        "file_symbols": file_symbols,
                         "path_score": 0,
                         "symbol_score": 0,
                         "best_line": 1,
                         "best_score": 0,
                         "structure_hits": [],
                     }
+                line_no = int(row["line_no"])
+                line_symbols = line_symbols_by_key.get((file_path, line_no))
+                if line_symbols is None:
+                    line_symbols = set(json.loads(row["symbols"] or "[]"))
                 score = sum(3 + min(lower_text.count(token), 3) for token in tokens if token in lower_text)
                 score += sum(12 for token in tokens if token in line_symbols)
                 score += sum(16 for term in normalized_focus_terms if term in line_symbols)
@@ -1880,33 +4685,45 @@ class SourceCodeQAService:
                     score += sum(10 for term in normalized_focus_terms if term in lower_text or term in line_symbols)
                 if int(row["has_pathish"] or 0):
                     score += sum(6 for token in tokens if token in lower_text)
+                if intent.get("config") and file_path.lower().endswith((".properties", ".yaml", ".yml", ".conf", ".toml")):
+                    score += 45
+                if intent.get("module_dependency") and file_path.lower().endswith(("pom.xml", "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts", "package.json")):
+                    score += 48
                 if score:
                     score += (
                         file_hit["path_score"]
                         + file_hit["symbol_score"]
                         + repo_score
                         + self._keyword_proximity_bonus(lower_text, tokens)
-                        + self._hybrid_query_bonus(question, lower_text, line_symbols)
+                        + self._hybrid_query_bonus(question, lower_text, line_symbols, intent=intent)
                         + trace_stage_bonus
                     )
                     if score > file_hit.get("best_score", 0):
                         file_hit.update(
                             {
-                                "best_line": int(row["line_no"]),
+                                "best_line": line_no,
                                 "best_score": score,
                             }
                         )
                     file_hits[file_path] = file_hit
+            matches.extend(
+                self._semantic_chunk_matches(
+                    connection,
+                    entry=entry,
+                    tokens=tokens,
+                    question=question,
+                    focus_terms=normalized_focus_terms,
+                    trace_stage=trace_stage,
+                    repo_score=repo_score,
+                    trace_stage_bonus=trace_stage_bonus,
+                    rows=index_rows.get("semantic_chunks"),
+                    intent=intent,
+                )
+            )
             for relative_path, hit in file_hits.items():
                 if not hit.get("best_score"):
                     continue
-                lines = [
-                    str(row["line_text"])
-                    for row in connection.execute(
-                        "select line_text from lines where file_path = ? order by line_no",
-                        (relative_path,),
-                    )
-                ]
+                lines = lines_by_path.get(relative_path) or []
                 if not lines:
                     continue
                 start, end = self._best_snippet_window(lines, int(hit["best_line"]))
@@ -1938,12 +4755,83 @@ class SourceCodeQAService:
                 )
         return matches
 
+    def _cached_index_rows(
+        self,
+        connection: sqlite3.Connection,
+        index_path: Path,
+        *,
+        request_cache: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        cache_key = self._index_fingerprint(index_path)
+        if request_cache is not None:
+            rows_cache = request_cache.setdefault("index_rows", {})
+            cached = rows_cache.get(cache_key)
+            if cached is not None:
+                self._increment_retrieval_stat(request_cache, "index_rows_hits")
+                return cached
+        self._increment_retrieval_stat(request_cache, "index_rows_misses")
+        file_rows = connection.execute("select * from files").fetchall()
+        line_rows = connection.execute("select * from lines").fetchall()
+        files_by_path = {str(row["path"]): row for row in file_rows}
+        file_symbols_by_path = {
+            str(row["path"]): set(json.loads(row["symbols"] or "[]"))
+            for row in file_rows
+        }
+        lines_by_path: dict[str, list[tuple[int, str]]] = {}
+        line_symbols_by_key: dict[tuple[str, int], set[str]] = {}
+        for row in line_rows:
+            file_path = str(row["file_path"])
+            line_no = int(row["line_no"])
+            lines_by_path.setdefault(file_path, []).append((line_no, str(row["line_text"])))
+            line_symbols_by_key[(file_path, line_no)] = set(json.loads(row["symbols"] or "[]"))
+        normalized_lines_by_path = {
+            file_path: [line_text for _, line_text in sorted(rows, key=lambda item: item[0])]
+            for file_path, rows in lines_by_path.items()
+        }
+        semantic_rows: list[sqlite3.Row] | None = None
+        semantic_chunks: list[dict[str, Any]] | None = None
+        if self.semantic_index_enabled:
+            try:
+                semantic_rows = connection.execute("select * from semantic_chunks").fetchall()
+                semantic_chunks = [
+                    {
+                        "chunk_id": str(row["chunk_id"] if "chunk_id" in row.keys() else f"{row['file_path']}:{row['start_line']}"),
+                        "file_path": str(row["file_path"] or ""),
+                        "start_line": int(row["start_line"] or 1),
+                        "end_line": int(row["end_line"] or row["start_line"] or 1),
+                        "chunk_text": str(row["chunk_text"] or ""),
+                        "lower_text": str(row["lower_text"] or ""),
+                        "tokens_set": set(json.loads(row["tokens"] or "[]")),
+                        "symbols_set": set(json.loads(row["symbols"] or "[]")),
+                        "embedding_values": self._parse_embedding(row["embedding"] if "embedding" in row.keys() else ""),
+                    }
+                    for row in semantic_rows
+                ]
+            except sqlite3.Error:
+                semantic_rows = []
+                semantic_chunks = []
+        payload = {
+            "files": file_rows,
+            "files_by_path": files_by_path,
+            "file_symbols_by_path": file_symbols_by_path,
+            "lines": line_rows,
+            "line_symbols_by_key": line_symbols_by_key,
+            "lines_by_path": normalized_lines_by_path,
+            "semantic_chunks": semantic_chunks if semantic_chunks is not None else semantic_rows,
+        }
+        if request_cache is not None:
+            rows_cache[cache_key] = payload
+        return payload
+
     def _fts_search_rows(
         self,
         connection: sqlite3.Connection,
         tokens: list[str],
         focus_terms: list[str],
-    ) -> list[sqlite3.Row]:
+        *,
+        index_path: Path | None = None,
+        request_cache: dict[str, Any] | None = None,
+    ) -> list[sqlite3.Row | dict[str, Any]]:
         terms = []
         for term in [*tokens, *focus_terms]:
             normalized = str(term or "").strip().lower()
@@ -1955,8 +4843,17 @@ class SourceCodeQAService:
         if not terms:
             return []
         query = " OR ".join(f'"{term}"' for term in terms)
+        cache_key = ""
+        if request_cache is not None and index_path is not None:
+            cache_key = f"{self._index_fingerprint(index_path)}:{query}"
+            fts_cache = request_cache.setdefault("fts", {})
+            cached = fts_cache.get(cache_key)
+            if cached is not None:
+                self._increment_retrieval_stat(request_cache, "fts_hits")
+                return cached
+            self._increment_retrieval_stat(request_cache, "fts_misses")
         try:
-            return list(
+            rows = list(
                 connection.execute(
                     """
                     select file_path, line_no, bm25(lines_fts) as rank
@@ -1970,6 +4867,326 @@ class SourceCodeQAService:
             )
         except sqlite3.Error:
             return []
+        payload = [dict(row) for row in rows]
+        if request_cache is not None and cache_key:
+            request_cache.setdefault("fts", {})[cache_key] = payload
+        return payload
+
+    def _cached_structure_like_rows(
+        self,
+        connection: sqlite3.Connection,
+        index_path: Path,
+        *,
+        table: str,
+        lower_column: str,
+        term: str,
+        limit: int,
+        request_cache: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        safe_table_columns = {
+            "definitions": {"lower_name"},
+            "references_index": {"lower_target"},
+        }
+        if table not in safe_table_columns or lower_column not in safe_table_columns[table]:
+            return []
+        normalized = str(term or "").strip().lower()
+        if len(normalized) < 3:
+            return []
+        cache_key = f"{self._index_fingerprint(index_path)}:{table}:{lower_column}:{normalized}:{int(limit or 0)}"
+        if request_cache is not None:
+            structure_cache = request_cache.setdefault("structure_like", {})
+            cached = structure_cache.get(cache_key)
+            if cached is not None:
+                self._increment_retrieval_stat(request_cache, "structure_like_hits")
+                return cached
+            self._increment_retrieval_stat(request_cache, "structure_like_misses")
+        try:
+            rows = connection.execute(
+                f"select * from {table} where {lower_column} like ? limit ?",
+                (f"%{normalized}%", int(limit or 40)),
+            ).fetchall()
+        except sqlite3.Error:
+            rows = []
+        payload = [dict(row) for row in rows]
+        if request_cache is not None:
+            request_cache.setdefault("structure_like", {})[cache_key] = payload
+        return payload
+
+    def _semantic_chunk_matches(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        entry: RepositoryEntry,
+        tokens: list[str],
+        question: str,
+        focus_terms: list[str],
+        trace_stage: str,
+        repo_score: int,
+        trace_stage_bonus: int,
+        rows: list[sqlite3.Row] | None = None,
+        intent: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        if not self.semantic_index_enabled:
+            return []
+        intent = intent or self._question_intent(question)
+        query_terms = self._semantic_query_terms(question, tokens, focus_terms, intent=intent)
+        if not query_terms:
+            return []
+        matches: list[dict[str, Any]] = []
+        query_set = set(query_terms)
+        query_embedding = self._query_embedding(question) if self.embedding_provider.ready() and self.embedding_provider.name != "local_token_hybrid" else []
+        if rows is None:
+            try:
+                rows = connection.execute("select * from semantic_chunks").fetchall()
+            except sqlite3.Error:
+                return []
+        for row in rows:
+            if isinstance(row, dict):
+                chunk_tokens = set(row.get("tokens_set") or set())
+                chunk_symbols = set(row.get("symbols_set") or set())
+                lower_text = str(row.get("lower_text") or "")
+                file_path = str(row.get("file_path") or "")
+                chunk_embedding = list(row.get("embedding_values") or [])
+                start_line = int(row.get("start_line") or 1)
+                end_line = int(row.get("end_line") or start_line)
+                chunk_text = str(row.get("chunk_text") or "")
+            else:
+                chunk_tokens = set(json.loads(row["tokens"] or "[]"))
+                chunk_symbols = set(json.loads(row["symbols"] or "[]"))
+                lower_text = str(row["lower_text"] or "")
+                file_path = str(row["file_path"] or "")
+                chunk_embedding = self._parse_embedding(row["embedding"])
+                start_line = int(row["start_line"])
+                end_line = int(row["end_line"])
+                chunk_text = str(row["chunk_text"] or "")
+            overlap = query_set & (chunk_tokens | chunk_symbols)
+            phrase_hits = [term for term in query_terms if len(term) >= 5 and term in lower_text]
+            embedding_score = self._embedding_similarity(query_embedding, chunk_embedding) if query_embedding and chunk_embedding else 0.0
+            if not overlap and not phrase_hits and embedding_score < 0.2:
+                continue
+            score = 35 + repo_score + trace_stage_bonus
+            score += min(len(overlap), 8) * 9
+            score += min(len(phrase_hits), 6) * 12
+            score += int(max(0.0, embedding_score) * 80)
+            if intent.get("data_source") and any(term in lower_text for term in CONCRETE_SOURCE_HINTS):
+                score += 26
+            if intent.get("api") and any(term in lower_text for term in API_HINTS):
+                score += 20
+            if intent.get("config") and any(term in lower_text for term in CONFIG_HINTS):
+                score += 20
+            if intent.get("module_dependency") and any(term in lower_text for term in MODULE_DEPENDENCY_HINTS):
+                score += 22
+            if (intent.get("error") or intent.get("rule_logic")) and any(term in lower_text for term in ERROR_HINTS + RULE_HINTS):
+                score += 18
+            matched_terms = list(dict.fromkeys([*sorted(overlap), *phrase_hits]))[:6]
+            reason = f"semantic chunk matched: {', '.join(matched_terms)}" if matched_terms else f"semantic embedding matched: {embedding_score:.2f}"
+            matches.append(
+                {
+                    "repo": entry.display_name,
+                    "path": file_path,
+                    "line_start": start_line,
+                    "line_end": end_line,
+                    "score": score,
+                    "snippet": chunk_text[:2400],
+                    "reason": reason,
+                    "trace_stage": trace_stage,
+                    "retrieval": "semantic_chunk",
+                }
+            )
+        matches.sort(key=lambda item: item["score"], reverse=True)
+        return matches[:24]
+
+    def _semantic_query_terms(
+        self,
+        question: str,
+        tokens: list[str],
+        focus_terms: list[str],
+        *,
+        intent: dict[str, Any] | None = None,
+    ) -> list[str]:
+        terms = [*tokens, *focus_terms, *self._semantic_tokens(question)]
+        intent = intent or self._question_intent(question)
+        if intent.get("data_source"):
+            terms.extend(["repository", "mapper", "dao", "jdbc", "jdbctemplate", "select", "from", "client", "integration", "provider", "source"])
+        if intent.get("api"):
+            terms.extend(["controller", "requestmapping", "postmapping", "getmapping", "endpoint", "api", "client"])
+        if intent.get("config"):
+            terms.extend(["config", "configuration", "properties", "yaml", "yml", "value"])
+        if intent.get("module_dependency"):
+            terms.extend(["dependency", "dependencies", "maven", "gradle", "pom", "artifactid", "groupid", "implementation", "package.json", "npm"])
+        if intent.get("error") or intent.get("rule_logic"):
+            terms.extend(["validate", "validation", "condition", "exception", "rule", "approval", "permission"])
+        deduped: list[str] = []
+        for term in terms:
+            lowered = str(term or "").strip().lower()
+            if len(lowered) < 3 or lowered in STOPWORDS or lowered in LOW_VALUE_CALL_SYMBOLS:
+                continue
+            if lowered not in deduped:
+                deduped.append(lowered)
+        return deduped[:64]
+
+    def _query_embedding(self, question: str) -> list[float]:
+        try:
+            rows = self.embedding_provider.embed_texts([question[:6000]])
+        except ToolError:
+            return []
+        return rows[0] if rows else []
+
+    @staticmethod
+    def _parse_embedding(raw_value: Any) -> list[float]:
+        if not raw_value:
+            return []
+        try:
+            values = json.loads(str(raw_value))
+        except json.JSONDecodeError:
+            return []
+        if not isinstance(values, list):
+            return []
+        parsed = []
+        for value in values[:2048]:
+            try:
+                parsed.append(float(value))
+            except (TypeError, ValueError):
+                continue
+        return parsed
+
+    @staticmethod
+    def _embedding_similarity(left: list[float], right: list[float]) -> float:
+        if not left or not right:
+            return 0.0
+        size = min(len(left), len(right))
+        if size <= 0:
+            return 0.0
+        dot = sum(left[index] * right[index] for index in range(size))
+        left_norm = sum(left[index] * left[index] for index in range(size)) ** 0.5
+        right_norm = sum(right[index] * right[index] for index in range(size)) ** 0.5
+        if not left_norm or not right_norm:
+            return 0.0
+        return dot / (left_norm * right_norm)
+
+    @staticmethod
+    def _new_retrieval_request_cache() -> dict[str, Any]:
+        return {
+            "started_at": time.perf_counter(),
+            "search": {},
+            "ensured_indexes": set(),
+            "index_rows": {},
+            "structure_like": {},
+            "fts": {},
+            "trace_paths": {},
+            "evidence": {},
+            "quality": {},
+            "rerank": {},
+            "question_features": {},
+            "stats": {
+                "search_hits": 0,
+                "search_misses": 0,
+                "index_ensure_hits": 0,
+                "index_ensure_misses": 0,
+                "index_rows_hits": 0,
+                "index_rows_misses": 0,
+                "structure_like_hits": 0,
+                "structure_like_misses": 0,
+                "fts_hits": 0,
+                "fts_misses": 0,
+                "trace_paths_hits": 0,
+                "trace_paths_misses": 0,
+                "evidence_hits": 0,
+                "evidence_misses": 0,
+                "quality_hits": 0,
+                "quality_misses": 0,
+                "rerank_hits": 0,
+                "rerank_misses": 0,
+                "question_feature_hits": 0,
+                "question_feature_misses": 0,
+            },
+        }
+
+    @staticmethod
+    def _increment_retrieval_stat(request_cache: dict[str, Any] | None, key: str) -> None:
+        if request_cache is None:
+            return
+        stats = request_cache.setdefault("stats", {})
+        stats[key] = int(stats.get(key) or 0) + 1
+
+    @staticmethod
+    def _retrieval_cache_stats(request_cache: dict[str, Any]) -> dict[str, Any]:
+        stats = dict(request_cache.get("stats") or {})
+        started_at = float(request_cache.get("started_at") or 0)
+        elapsed_ms = int((time.perf_counter() - started_at) * 1000) if started_at else 0
+        return {
+            **stats,
+            "elapsed_ms": elapsed_ms,
+            "search_entries": len(request_cache.get("search") or {}),
+            "index_row_entries": len(request_cache.get("index_rows") or {}),
+            "structure_like_entries": len(request_cache.get("structure_like") or {}),
+            "fts_entries": len(request_cache.get("fts") or {}),
+            "trace_path_entries": len(request_cache.get("trace_paths") or {}),
+            "evidence_entries": len(request_cache.get("evidence") or {}),
+            "quality_entries": len(request_cache.get("quality") or {}),
+            "rerank_entries": len(request_cache.get("rerank") or {}),
+            "question_feature_entries": len(request_cache.get("question_features") or {}),
+        }
+
+    @staticmethod
+    def _clone_jsonish(payload: Any) -> Any:
+        try:
+            return json.loads(json.dumps(payload, ensure_ascii=False))
+        except (TypeError, ValueError):
+            if isinstance(payload, list):
+                return [dict(item) if isinstance(item, dict) else item for item in payload]
+            if isinstance(payload, dict):
+                return dict(payload)
+            return payload
+
+    def _index_fingerprint(self, index_path: Path) -> str:
+        try:
+            stat = index_path.stat()
+        except OSError:
+            return f"{index_path}:missing:{CODE_INDEX_VERSION}"
+        return f"{index_path}:{stat.st_mtime_ns}:{stat.st_size}:{CODE_INDEX_VERSION}"
+
+    def _search_cache_key(
+        self,
+        entry: RepositoryEntry,
+        repo_path: Path,
+        tokens: list[str],
+        *,
+        question: str,
+        focus_terms: list[str] | None,
+        trace_stage: str,
+    ) -> str:
+        index_path = self._index_path(repo_path)
+        payload = {
+            "repo": entry.display_name,
+            "url": entry.url,
+            "repo_path": str(repo_path),
+            "index": self._index_fingerprint(index_path),
+            "tokens": list(tokens),
+            "question": question,
+            "focus_terms": list(focus_terms or []),
+            "trace_stage": trace_stage,
+        }
+        return hashlib.sha1(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+
+    def _ensure_repo_index_cached(
+        self,
+        entry: RepositoryEntry,
+        repo_path: Path,
+        *,
+        request_cache: dict[str, Any] | None = None,
+    ) -> None:
+        if request_cache is None:
+            self._ensure_repo_index(key=None, entry=entry, repo_path=repo_path)
+            return
+        ensured_indexes = request_cache.setdefault("ensured_indexes", set())
+        ensured_key = str(repo_path)
+        if ensured_key in ensured_indexes:
+            self._increment_retrieval_stat(request_cache, "index_ensure_hits")
+            return
+        self._increment_retrieval_stat(request_cache, "index_ensure_misses")
+        self._ensure_repo_index(key=None, entry=entry, repo_path=repo_path)
+        ensured_indexes.add(ensured_key)
 
     def _search_repo(
         self,
@@ -1980,10 +5197,11 @@ class SourceCodeQAService:
         question: str,
         focus_terms: list[str] | None = None,
         trace_stage: str = "direct",
+        request_cache: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         try:
-            self._ensure_repo_index(key=None, entry=entry, repo_path=repo_path)
-            return self._search_repo_index(
+            self._ensure_repo_index_cached(entry, repo_path, request_cache=request_cache)
+            cache_key = self._search_cache_key(
                 entry,
                 repo_path,
                 tokens,
@@ -1991,8 +5209,27 @@ class SourceCodeQAService:
                 focus_terms=focus_terms,
                 trace_stage=trace_stage,
             )
+            if request_cache is not None:
+                search_cache = request_cache.setdefault("search", {})
+                cached = search_cache.get(cache_key)
+                if cached is not None:
+                    self._increment_retrieval_stat(request_cache, "search_hits")
+                    return self._clone_jsonish(cached)
+                self._increment_retrieval_stat(request_cache, "search_misses")
+            matches = self._search_repo_index(
+                entry,
+                repo_path,
+                tokens,
+                question=question,
+                focus_terms=focus_terms,
+                trace_stage=trace_stage,
+                request_cache=request_cache,
+            )
+            if request_cache is not None:
+                request_cache.setdefault("search", {})[cache_key] = self._clone_jsonish(matches)
+            return matches
         except (OSError, sqlite3.Error):
-            return self._search_repo_files(
+            cache_key = self._search_cache_key(
                 entry,
                 repo_path,
                 tokens,
@@ -2000,6 +5237,24 @@ class SourceCodeQAService:
                 focus_terms=focus_terms,
                 trace_stage=trace_stage,
             )
+            if request_cache is not None:
+                search_cache = request_cache.setdefault("search", {})
+                cached = search_cache.get(cache_key)
+                if cached is not None:
+                    self._increment_retrieval_stat(request_cache, "search_hits")
+                    return self._clone_jsonish(cached)
+                self._increment_retrieval_stat(request_cache, "search_misses")
+            matches = self._search_repo_files(
+                entry,
+                repo_path,
+                tokens,
+                question=question,
+                focus_terms=focus_terms,
+                trace_stage=trace_stage,
+            )
+            if request_cache is not None:
+                request_cache.setdefault("search", {})[cache_key] = self._clone_jsonish(matches)
+            return matches
 
     def _search_repo_files(
         self,
@@ -2135,6 +5390,11 @@ class SourceCodeQAService:
 
     @staticmethod
     def _question_tokens(question: str) -> list[str]:
+        return list(SourceCodeQAService._question_tokens_cached(str(question or "")))
+
+    @staticmethod
+    @functools.lru_cache(maxsize=4096)
+    def _question_tokens_cached(question: str) -> tuple[str, ...]:
         lowered_question = question.lower()
         raw_tokens = re.findall(r"[a-zA-Z0-9_./:-]{1,}", lowered_question)
         tokens = []
@@ -2161,7 +5421,7 @@ class SourceCodeQAService:
         for variant in phrase_variants:
             if variant not in tokens:
                 tokens.append(variant)
-        return tokens[:28]
+        return tuple(tokens[:28])
 
     @staticmethod
     def _match_reason(
@@ -2211,6 +5471,13 @@ class SourceCodeQAService:
         lowered = question.lower()
         return any(term in lowered for term in DEPENDENCY_QUESTION_TERMS)
 
+    @staticmethod
+    def _is_test_file_path(path: str) -> bool:
+        normalized = str(path or "").replace("\\", "/").lower()
+        return any(marker in normalized for marker in TEST_PATH_MARKERS) or normalized.endswith(
+            ("test.java", "tests.java", "spec.java", "test.py", "spec.py", "test.ts", "spec.ts", "test.js", "spec.js", "test.tsx", "spec.tsx", "test.jsx", "spec.jsx")
+        )
+
     def _expand_dependency_matches(
         self,
         *,
@@ -2219,6 +5486,7 @@ class SourceCodeQAService:
         question: str,
         base_matches: list[dict[str, Any]],
         limit: int,
+        request_cache: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         focus_terms = self._dependency_focus_terms(question, base_matches)
         if not focus_terms:
@@ -2240,6 +5508,7 @@ class SourceCodeQAService:
                     question=question,
                     focus_terms=focus_terms,
                     trace_stage="dependency",
+                    request_cache=request_cache,
                 )
             )
         matches.sort(key=lambda item: item["score"], reverse=True)
@@ -2253,6 +5522,7 @@ class SourceCodeQAService:
         question: str,
         base_matches: list[dict[str, Any]],
         limit: int,
+        request_cache: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         trace_terms = self._two_hop_trace_terms(question, base_matches)
         if not trace_terms:
@@ -2275,6 +5545,7 @@ class SourceCodeQAService:
                     question=question,
                     focus_terms=trace_terms,
                     trace_stage="two_hop",
+                    request_cache=request_cache,
                 )
             )
         matches.sort(key=lambda item: item["score"], reverse=True)
@@ -2288,6 +5559,7 @@ class SourceCodeQAService:
         question: str,
         base_matches: list[dict[str, Any]],
         limit: int,
+        request_cache: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         all_matches: list[dict[str, Any]] = []
         frontier = list(base_matches[:10])
@@ -2316,6 +5588,7 @@ class SourceCodeQAService:
                         question=question,
                         focus_terms=trace_terms,
                         trace_stage=f"agent_trace_{round_index}",
+                        request_cache=request_cache,
                     )
                 )
             round_matches.sort(key=lambda item: item["score"], reverse=True)
@@ -2343,6 +5616,7 @@ class SourceCodeQAService:
         evidence_summary: dict[str, Any],
         quality_gate: dict[str, Any],
         limit: int,
+        request_cache: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         trace_terms = self._quality_gate_trace_terms(question, evidence_summary, quality_gate, base_matches)
         if not trace_terms:
@@ -2365,6 +5639,7 @@ class SourceCodeQAService:
                     question=question,
                     focus_terms=trace_terms,
                     trace_stage=QUALITY_GATE_TRACE_STAGE,
+                    request_cache=request_cache,
                 )
             )
         matches.sort(key=lambda item: item["score"], reverse=True)
@@ -2378,6 +5653,8 @@ class SourceCodeQAService:
         question: str,
         base_matches: list[dict[str, Any]],
         limit: int,
+        tool_trace: list[dict[str, Any]] | None = None,
+        request_cache: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         collected: list[dict[str, Any]] = []
         current_matches = list(base_matches)
@@ -2386,8 +5663,8 @@ class SourceCodeQAService:
         empty_rounds = 0
         max_rounds = 5
         for step_index in range(1, max_rounds + 1):
-            evidence_summary = self._compress_evidence(question, current_matches)
-            quality_gate = self._quality_gate(question, evidence_summary)
+            evidence_summary = self._compress_evidence_cached(question, current_matches, request_cache=request_cache)
+            quality_gate = self._quality_gate_cached(question, evidence_summary, request_cache=request_cache)
             step = self._choose_next_tool_step(
                 question=question,
                 matches=current_matches,
@@ -2396,6 +5673,16 @@ class SourceCodeQAService:
                 executed_steps=executed_steps,
             )
             if not step:
+                if tool_trace is not None:
+                    tool_trace.append(
+                        {
+                            "phase": "tool_loop",
+                            "round": step_index,
+                            "tool": "stop",
+                            "reason": "no_next_tool",
+                            "matches_before": len(current_matches),
+                        }
+                    )
                 break
             step_signature = self._tool_step_signature(step, current_matches)
             executed_steps.add(step_signature)
@@ -2406,6 +5693,7 @@ class SourceCodeQAService:
                 matches=current_matches,
                 step=step,
                 step_index=step_index,
+                request_cache=request_cache,
             )
             step_matches.sort(key=lambda item: item["score"], reverse=True)
             added = 0
@@ -2419,9 +5707,23 @@ class SourceCodeQAService:
                 seen.add(item_key)
                 added += 1
             current_matches.sort(key=lambda item: item["score"], reverse=True)
-            current_matches = self._select_result_matches(current_matches, max(1, min(int(limit or 12), 30)))
+            current_matches = self._select_result_matches(current_matches, max(1, min(int(limit or 12), 30)), question=question)
             empty_rounds = empty_rounds + 1 if added == 0 else 0
-            if self._should_stop_tool_loop(question, current_matches, step_index, empty_rounds):
+            should_stop = self._should_stop_tool_loop(question, current_matches, step_index, empty_rounds, request_cache=request_cache)
+            if tool_trace is not None:
+                tool_trace.append(
+                    {
+                        "phase": "tool_loop",
+                        "round": step_index,
+                        "tool": str(step.get("tool") or "search_code"),
+                        "terms": [str(term) for term in step.get("terms") or []][:10],
+                        "matches_found": len(step_matches),
+                        "matches_added": added,
+                        "matches_after": len(current_matches),
+                        "stop_reason": "quality_sufficient" if should_stop else "",
+                    }
+                )
+            if should_stop:
                 break
         collected.sort(key=lambda item: item["score"], reverse=True)
         return collected[: max(6, min(int(limit or 12) * 2, 24))]
@@ -2450,8 +5752,18 @@ class SourceCodeQAService:
                 for retrieval in (existing_retrieval, duplicate_retrieval):
                     if retrieval and retrieval not in chain:
                         chain.append(retrieval)
-                if duplicate_retrieval in {"flow_graph", "code_graph", "entity_graph"}:
+                if duplicate_retrieval in {
+                    "flow_graph",
+                    "code_graph",
+                    "entity_graph",
+                    "static_qa",
+                    "test_coverage",
+                    "operational_boundary",
+                }:
                     existing["retrieval"] = duplicate_retrieval
+                for payload_key in ("static_qa", "test_coverage", "operational_boundary"):
+                    if duplicate.get(payload_key):
+                        existing[payload_key] = duplicate.get(payload_key)
             duplicate_reason = str(duplicate.get("reason") or "")
             if duplicate_reason and duplicate_reason not in str(existing.get("reason") or ""):
                 existing["reason"] = f"{existing.get('reason')}; corroborated by {duplicate_reason}"
@@ -2479,27 +5791,74 @@ class SourceCodeQAService:
         if intent.get("data_source"):
             candidates.extend(
                 [
+                    {"tool": "find_tables", "terms": [*terms[:10], *quality_terms[:8]]},
                     {"tool": "trace_entity", "terms": terms[:12]},
                     {"tool": "trace_flow", "terms": terms[:12]},
                     {"tool": "trace_graph", "terms": terms[:12]},
+                    {"tool": "find_callees", "terms": terms[:12]},
+                    {"tool": "find_callers", "terms": terms[:12]},
                     {"tool": "search_code", "terms": [*quality_terms, "repository", "mapper", "dao", "select", "from", "client"]},
                 ]
             )
         if intent.get("api"):
             candidates.extend(
                 [
+                    {"tool": "find_api_routes", "terms": [*terms[:10], *quality_terms[:8]]},
                     {"tool": "trace_entity", "terms": terms[:12]},
                     {"tool": "trace_flow", "terms": terms[:12]},
                     {"tool": "find_references", "terms": [*terms[:10], "RequestMapping", "PostMapping", "GetMapping"]},
+                    {"tool": "find_callees", "terms": terms[:12]},
                     {"tool": "search_code", "terms": [*terms[:8], "controller", "endpoint", "client"]},
                 ]
             )
         if intent.get("config"):
             candidates.append({"tool": "search_code", "terms": [*terms[:8], *quality_terms, "properties", "yaml", "configuration"]})
+        if intent.get("module_dependency"):
+            candidates.extend(
+                [
+                    {"tool": "trace_flow", "terms": [*terms[:10], "module_dependency", "maven", "gradle"]},
+                    {"tool": "search_code", "terms": [*terms[:8], *quality_terms, "pom.xml", "build.gradle", "package.json", "artifactId", "dependency"]},
+                ]
+            )
         if intent.get("rule_logic") or intent.get("error"):
             candidates.append({"tool": "search_code", "terms": [*terms[:8], *quality_terms, "validate", "rule", "exception"]})
+        if intent.get("static_qa"):
+            candidates.extend(
+                [
+                    {"tool": "find_static_findings", "terms": [*terms[:10], *quality_terms[:8]]},
+                    {"tool": "search_code", "terms": [*terms[:8], *quality_terms, "TODO", "FIXME", "secret", "catch", "Exception"]},
+                ]
+            )
+        if intent.get("impact_analysis"):
+            candidates.extend(
+                [
+                    {"tool": "find_references", "terms": [*terms[:12], *quality_terms[:6]]},
+                    {"tool": "find_callers", "terms": terms[:12]},
+                    {"tool": "find_callees", "terms": terms[:12]},
+                    {"tool": "trace_flow", "terms": terms[:12]},
+                    {"tool": "trace_entity", "terms": terms[:12]},
+                    {"tool": "search_code", "terms": [*terms[:8], "controller", "service", "repository", "client", "handler"]},
+                ]
+            )
+        if intent.get("test_coverage"):
+            candidates.extend(
+                [
+                    {"tool": "find_test_coverage", "terms": [*terms[:12], *quality_terms[:6]]},
+                    {"tool": "search_code", "terms": [*terms[:8], "test", "assert", "verify", "mock"]},
+                ]
+            )
+        if intent.get("operational_boundary"):
+            candidates.extend(
+                [
+                    {"tool": "find_operational_boundaries", "terms": [*terms[:12], *quality_terms[:8]]},
+                    {"tool": "trace_entity", "terms": [*terms[:12], "operational_boundary"]},
+                    {"tool": "search_code", "terms": [*terms[:8], "Transactional", "Cacheable", "Async", "Retryable", "CircuitBreaker"]},
+                ]
+            )
 
         candidates.extend(self._build_tool_loop_plan(question, matches))
+        if matches:
+            candidates.append({"tool": "open_file_window", "terms": terms[:8]})
         if terms:
             candidates.append({"tool": "trace_flow", "terms": terms[:12]})
 
@@ -2508,9 +5867,24 @@ class SourceCodeQAService:
                 dict.fromkeys(str(term).strip() for term in candidate.get("terms") or [] if str(term).strip())
             )
             tool = str(candidate.get("tool") or "")
-            if tool not in {"find_definition", "find_references", "trace_graph", "trace_flow", "trace_entity", "search_code"}:
+            if tool not in {
+                "find_definition",
+                "find_references",
+                "find_callers",
+                "find_callees",
+                "open_file_window",
+                "find_tables",
+                "find_api_routes",
+                "trace_graph",
+                "trace_flow",
+                "trace_entity",
+                "find_static_findings",
+                "find_test_coverage",
+                "find_operational_boundaries",
+                "search_code",
+            }:
                 continue
-            if tool in {"find_definition", "find_references", "search_code"} and not normalized_terms:
+            if tool in {"find_definition", "find_references", "find_callers", "find_tables", "find_api_routes", "search_code"} and not normalized_terms:
                 continue
             step = {"tool": tool, "terms": normalized_terms[:18]}
             signature = self._tool_step_signature(step, matches)
@@ -2536,6 +5910,7 @@ class SourceCodeQAService:
         matches: list[dict[str, Any]],
         step: dict[str, Any],
         step_index: int,
+        request_cache: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         tool = str(step.get("tool") or "")
         terms = [str(term) for term in (step.get("terms") or []) if str(term)]
@@ -2545,15 +5920,31 @@ class SourceCodeQAService:
             if not (repo_path / ".git").exists():
                 continue
             if tool == "find_definition":
-                step_matches.extend(self._tool_find_definition(entry, repo_path, terms, question, step_index))
+                step_matches.extend(self._tool_find_definition(entry, repo_path, terms, question, step_index, request_cache=request_cache))
             elif tool == "find_references":
-                step_matches.extend(self._tool_find_references(entry, repo_path, terms, question, step_index))
+                step_matches.extend(self._tool_find_references(entry, repo_path, terms, question, step_index, request_cache=request_cache))
+            elif tool == "find_callers":
+                step_matches.extend(self._tool_find_callers(entry, repo_path, matches, terms, question, step_index, request_cache=request_cache))
+            elif tool == "find_callees":
+                step_matches.extend(self._tool_find_callees(entry, repo_path, matches, terms, question, step_index, request_cache=request_cache))
+            elif tool == "open_file_window":
+                step_matches.extend(self._tool_open_file_window(entry, repo_path, matches, question, step_index, request_cache=request_cache))
+            elif tool == "find_tables":
+                step_matches.extend(self._tool_find_tables(entry, repo_path, terms, question, step_index, request_cache=request_cache))
+            elif tool == "find_api_routes":
+                step_matches.extend(self._tool_find_api_routes(entry, repo_path, terms, question, step_index, request_cache=request_cache))
             elif tool == "trace_graph":
-                step_matches.extend(self._tool_trace_graph(entry, repo_path, matches, question, step_index))
+                step_matches.extend(self._tool_trace_graph(entry, repo_path, matches, question, step_index, request_cache=request_cache))
             elif tool == "trace_flow":
-                step_matches.extend(self._tool_trace_flow(entry, repo_path, matches, question, step_index))
+                step_matches.extend(self._tool_trace_flow(entry, repo_path, matches, question, step_index, request_cache=request_cache))
             elif tool == "trace_entity":
-                step_matches.extend(self._tool_trace_entity(entry, repo_path, matches, question, step_index))
+                step_matches.extend(self._tool_trace_entity(entry, repo_path, matches, question, step_index, request_cache=request_cache))
+            elif tool == "find_static_findings":
+                step_matches.extend(self._tool_find_static_findings(entry, repo_path, terms, question, step_index, request_cache=request_cache))
+            elif tool == "find_test_coverage":
+                step_matches.extend(self._tool_find_test_coverage(entry, repo_path, terms, question, step_index, request_cache=request_cache))
+            elif tool == "find_operational_boundaries":
+                step_matches.extend(self._tool_find_operational_boundaries(entry, repo_path, terms, question, step_index, request_cache=request_cache))
             elif tool == "search_code":
                 expanded_tokens: list[str] = []
                 for term in terms:
@@ -2566,6 +5957,7 @@ class SourceCodeQAService:
                         question=question,
                         focus_terms=terms,
                         trace_stage=f"{TOOL_LOOP_TRACE_PREFIX}{step_index}",
+                        request_cache=request_cache,
                     )
                 )
         return step_matches
@@ -2576,11 +5968,12 @@ class SourceCodeQAService:
         matches: list[dict[str, Any]],
         step_index: int,
         empty_rounds: int,
+        request_cache: dict[str, Any] | None = None,
     ) -> bool:
         if empty_rounds >= 2:
             return True
-        evidence_summary = self._compress_evidence(question, matches)
-        quality_gate = self._quality_gate(question, evidence_summary)
+        evidence_summary = self._compress_evidence_cached(question, matches, request_cache=request_cache)
+        quality_gate = self._quality_gate_cached(question, evidence_summary, request_cache=request_cache)
         if quality_gate.get("status") != "sufficient" or step_index < 2:
             return False
         if evidence_summary.get("intent", {}).get("data_source"):
@@ -2595,13 +5988,33 @@ class SourceCodeQAService:
             plan.append({"tool": "find_definition", "terms": terms[:12]})
             plan.append({"tool": "find_references", "terms": terms[:12]})
         if intent.get("data_source") or intent.get("api") or intent.get("rule_logic"):
+            if intent.get("data_source"):
+                plan.append({"tool": "find_tables", "terms": terms[:12]})
+            if intent.get("api"):
+                plan.append({"tool": "find_api_routes", "terms": terms[:12]})
             plan.append({"tool": "trace_entity", "terms": terms[:12]})
             plan.append({"tool": "trace_flow", "terms": terms[:12]})
             plan.append({"tool": "trace_graph", "terms": terms[:12]})
+            plan.append({"tool": "find_callees", "terms": terms[:12]})
         if intent.get("config"):
             plan.append({"tool": "search_code", "terms": [*terms[:8], "properties", "configuration", "yaml", "feature"]})
         if intent.get("data_source"):
             plan.append({"tool": "search_code", "terms": [*terms[:8], "repository", "mapper", "select", "from", "client"]})
+        if intent.get("static_qa"):
+            plan.append({"tool": "find_static_findings", "terms": [*terms[:8], "secret", "catch", "exception", "todo", "sql"]})
+        if intent.get("test_coverage"):
+            plan.append({"tool": "find_test_coverage", "terms": [*terms[:8], "test", "assert", "verify", "mock"]})
+        if intent.get("operational_boundary"):
+            plan.append({"tool": "find_operational_boundaries", "terms": [*terms[:8], "Transactional", "Cacheable", "Async", "Retryable", "CircuitBreaker"]})
+        if intent.get("impact_analysis"):
+            plan.extend(
+                [
+                    {"tool": "find_references", "terms": terms[:12]},
+                    {"tool": "find_callers", "terms": terms[:12]},
+                    {"tool": "find_callees", "terms": terms[:12]},
+                    {"tool": "trace_flow", "terms": terms[:12]},
+                ]
+            )
         return plan[:5]
 
     def _tool_loop_terms(self, question: str, base_matches: list[dict[str, Any]]) -> list[str]:
@@ -2626,6 +6039,7 @@ class SourceCodeQAService:
         terms: list[str],
         question: str,
         step_index: int,
+        request_cache: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         return self._tool_lookup_structure(
             entry,
@@ -2639,6 +6053,7 @@ class SourceCodeQAService:
             kind_column="kind",
             trace_stage=f"tool_loop_{step_index}",
             retrieval="planner_definition",
+            request_cache=request_cache,
         )
 
     def _tool_find_references(
@@ -2648,6 +6063,7 @@ class SourceCodeQAService:
         terms: list[str],
         question: str,
         step_index: int,
+        request_cache: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         return self._tool_lookup_structure(
             entry,
@@ -2661,7 +6077,690 @@ class SourceCodeQAService:
             kind_column="kind",
             trace_stage=f"tool_loop_{step_index}",
             retrieval="planner_reference",
+            request_cache=request_cache,
         )
+
+    def _tool_find_tables(
+        self,
+        entry: RepositoryEntry,
+        repo_path: Path,
+        terms: list[str],
+        question: str,
+        step_index: int,
+        request_cache: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        lookup_terms = list(dict.fromkeys([*terms, "select", "from", "join", "update", "insert"]))
+        return self._tool_lookup_references_by_kind(
+            entry,
+            repo_path,
+            lookup_terms,
+            kinds={"sql_table"},
+            question=question,
+            trace_stage=f"{TOOL_LOOP_TRACE_PREFIX}{step_index}",
+            retrieval="planner_table",
+            score=184,
+            request_cache=request_cache,
+        )
+
+    def _tool_find_api_routes(
+        self,
+        entry: RepositoryEntry,
+        repo_path: Path,
+        terms: list[str],
+        question: str,
+        step_index: int,
+        request_cache: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        lookup_terms = list(dict.fromkeys([*terms, "requestmapping", "postmapping", "getmapping", "endpoint", "api", "http"]))
+        return self._tool_lookup_references_by_kind(
+            entry,
+            repo_path,
+            lookup_terms,
+            kinds={"route", "http_endpoint", "downstream_api"},
+            question=question,
+            trace_stage=f"{TOOL_LOOP_TRACE_PREFIX}{step_index}",
+            retrieval="planner_api_route",
+            score=178,
+            request_cache=request_cache,
+        )
+
+    def _tool_find_static_findings(
+        self,
+        entry: RepositoryEntry,
+        repo_path: Path,
+        terms: list[str],
+        question: str,
+        step_index: int,
+        request_cache: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        matches: list[dict[str, Any]] = []
+        index_path = self._index_path(repo_path)
+        lowered_terms = [str(term).lower() for term in terms if len(str(term).strip()) >= 3]
+        try:
+            self._ensure_repo_index_cached(entry, repo_path, request_cache=request_cache)
+            with sqlite3.connect(index_path) as connection:
+                connection.row_factory = sqlite3.Row
+                index_rows = self._cached_index_rows(connection, index_path, request_cache=request_cache)
+                lines_by_path = index_rows.get("lines_by_path") or {}
+                seen: set[tuple[str, int, str]] = set()
+                for file_path, lines in lines_by_path.items():
+                    path_lower = str(file_path).lower()
+                    if any(part in path_lower for part in ("/node_modules/", "/dist/", "/build/", "/target/", ".min.js")):
+                        continue
+                    for line_index, line_text in enumerate(lines, start=1):
+                        findings = self._static_qa_findings_for_line(str(line_text))
+                        if not findings:
+                            continue
+                        haystack = f"{file_path} {line_text}".lower()
+                        for finding in findings:
+                            key = (str(file_path), line_index, str(finding["kind"]))
+                            if key in seen:
+                                continue
+                            seen.add(key)
+                            term_boost = 18 if lowered_terms and any(term in haystack or term in str(finding["kind"]).lower() for term in lowered_terms) else 0
+                            match = self._match_from_index_location(
+                                entry,
+                                connection,
+                                str(file_path),
+                                line_index,
+                                score=int(finding["score"]) + term_boost,
+                                reason=f"static QA finding: {finding['severity']} {finding['kind']} - {finding['reason']}",
+                                question=question,
+                                trace_stage=f"{TOOL_LOOP_TRACE_PREFIX}{step_index}" if step_index else "static_qa",
+                                retrieval="static_qa",
+                                index_path=index_path,
+                                request_cache=request_cache,
+                            )
+                            if match:
+                                match["static_qa"] = {
+                                    "kind": finding["kind"],
+                                    "severity": finding["severity"],
+                                    "reason": finding["reason"],
+                                }
+                                matches.append(match)
+                matches.sort(key=lambda item: int(item.get("score") or 0), reverse=True)
+        except (OSError, sqlite3.Error):
+            return []
+        return matches[:80]
+
+    def _tool_find_test_coverage(
+        self,
+        entry: RepositoryEntry,
+        repo_path: Path,
+        terms: list[str],
+        question: str,
+        step_index: int,
+        request_cache: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        noise_terms = set(self._question_tokens(" ".join(TEST_COVERAGE_HINTS))) | {"covered", "coverage", "unit", "integration", "junit", "pytest", "jest"}
+        lookup_terms = [
+            term.lower()
+            for term in [*terms, *self._question_tokens(question)]
+            if len(str(term).strip()) >= 3 and term.lower() not in noise_terms and term.lower() not in STOPWORDS
+        ]
+        lookup_terms = list(dict.fromkeys(lookup_terms))[:18]
+        if not lookup_terms:
+            return []
+        matches: list[dict[str, Any]] = []
+        seen: set[tuple[str, int, str]] = set()
+        index_path = self._index_path(repo_path)
+        try:
+            self._ensure_repo_index_cached(entry, repo_path, request_cache=request_cache)
+            with sqlite3.connect(index_path) as connection:
+                connection.row_factory = sqlite3.Row
+                index_rows = self._cached_index_rows(connection, index_path, request_cache=request_cache)
+                lines_by_path = index_rows.get("lines_by_path") or {}
+                for file_path, lines in lines_by_path.items():
+                    if not self._is_test_file_path(str(file_path)):
+                        continue
+                    path_lower = str(file_path).lower()
+                    file_term_hit = any(term in path_lower for term in lookup_terms)
+                    best_line = 1
+                    best_score = 0
+                    best_reasons: list[str] = []
+                    for line_index, line_text in enumerate(lines, start=1):
+                        lowered_line = str(line_text).lower()
+                        term_hits = [term for term in lookup_terms if term in lowered_line]
+                        if not term_hits and not file_term_hit:
+                            continue
+                        score = 172 + (28 if term_hits else 0) + (16 if file_term_hit else 0)
+                        if TEST_ASSERTION_PATTERN.search(str(line_text)):
+                            score += 24
+                            best_reasons.append("assertion/verify present")
+                        if TEST_ANNOTATION_PATTERN.search(str(line_text)) or re.search(r"\b(?:test|should)[A-Za-z0-9_]*\s*\(", str(line_text)):
+                            score += 20
+                            best_reasons.append("test case present")
+                        if term_hits:
+                            best_reasons.append(f"target terms: {', '.join(term_hits[:4])}")
+                        if score > best_score:
+                            best_score = score
+                            best_line = line_index
+                    if best_score:
+                        key = (str(file_path), best_line, "test_coverage")
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        match = self._match_from_index_location(
+                            entry,
+                            connection,
+                            str(file_path),
+                            best_line,
+                            score=best_score,
+                            reason="test coverage evidence: " + "; ".join(list(dict.fromkeys(best_reasons))[:5]),
+                            question=question,
+                            trace_stage=f"{TOOL_LOOP_TRACE_PREFIX}{step_index}" if step_index else "test_coverage",
+                            retrieval="test_coverage",
+                            index_path=index_path,
+                            request_cache=request_cache,
+                        )
+                        if match:
+                            match["test_coverage"] = {
+                                "terms": lookup_terms[:8],
+                                "has_assertion": "assertion/verify present" in best_reasons,
+                                "has_test_case": "test case present" in best_reasons,
+                            }
+                            matches.append(match)
+                for term in lookup_terms[:10]:
+                    like_term = f"%{term}%"
+                    rows = connection.execute(
+                        """
+                        select * from references_index
+                        where kind in ('test_subject', 'test_reference', 'test_assertion', 'test_case', 'call', 'import')
+                          and lower_target like ?
+                        limit 80
+                        """,
+                        (like_term,),
+                    ).fetchall()
+                    for row in rows:
+                        file_path = str(row["file_path"])
+                        if not self._is_test_file_path(file_path):
+                            continue
+                        line_no = int(row["line_no"] or 1)
+                        key = (file_path, line_no, str(row["kind"] or ""))
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        kind = str(row["kind"] or "")
+                        score = 218 if kind in {"test_assertion", "test_subject", "test_reference"} else 196
+                        if str(row["lower_target"] or "") == term:
+                            score += 24
+                        match = self._match_from_index_location(
+                            entry,
+                            connection,
+                            file_path,
+                            line_no,
+                            score=score,
+                            reason=f"test coverage evidence: {kind} {row['target']}",
+                            question=question,
+                            trace_stage=f"{TOOL_LOOP_TRACE_PREFIX}{step_index}" if step_index else "test_coverage",
+                            retrieval="test_coverage",
+                            index_path=index_path,
+                            request_cache=request_cache,
+                        )
+                        if match:
+                            match["test_coverage"] = {"kind": kind, "target": str(row["target"] or term)}
+                            matches.append(match)
+        except (OSError, sqlite3.Error):
+            return []
+        matches.sort(key=lambda item: int(item.get("score") or 0), reverse=True)
+        return matches[:80]
+
+    def _tool_find_operational_boundaries(
+        self,
+        entry: RepositoryEntry,
+        repo_path: Path,
+        terms: list[str],
+        question: str,
+        step_index: int,
+        request_cache: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        boundary_terms = [
+            "transactional",
+            "transaction",
+            "rollback",
+            "cacheable",
+            "cacheevict",
+            "cacheput",
+            "cache",
+            "async",
+            "retryable",
+            "retry",
+            "circuitbreaker",
+            "ratelimiter",
+            "bulkhead",
+            "timelimiter",
+            "schedulerlock",
+            "lock",
+            "preauthorize",
+            "postauthorize",
+        ]
+        lowered_terms = list(
+            dict.fromkeys(
+                term.lower()
+                for term in [*terms, *self._question_tokens(question), *boundary_terms]
+                if len(str(term).strip()) >= 3 and str(term).lower() not in STOPWORDS
+            )
+        )[:32]
+        matches: list[dict[str, Any]] = []
+        seen: set[tuple[str, int, str]] = set()
+        index_path = self._index_path(repo_path)
+        try:
+            self._ensure_repo_index_cached(entry, repo_path, request_cache=request_cache)
+            with sqlite3.connect(index_path) as connection:
+                connection.row_factory = sqlite3.Row
+                rows = connection.execute(
+                    """
+                    select * from references_index
+                    where kind in ('operational_boundary', 'framework_binding', 'scheduled_job', 'web_interceptor', 'bean_condition')
+                    limit 240
+                    """
+                ).fetchall()
+                for row in rows:
+                    target = str(row["target"] or "")
+                    context = str(row["context"] or "")
+                    haystack = f"{target} {context} {row['file_path']}".lower()
+                    if lowered_terms and not any(term in haystack for term in lowered_terms):
+                        continue
+                    line_no = int(row["line_no"] or 1)
+                    key = (str(row["file_path"]), line_no, str(row["kind"] or ""))
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    kind = str(row["kind"] or "")
+                    score = 226 if kind == "operational_boundary" else 186
+                    if any(term in target.lower() for term in ("transactional", "cache", "async", "retry", "circuit", "rate", "lock", "authorize")):
+                        score += 24
+                    match = self._match_from_index_location(
+                        entry,
+                        connection,
+                        str(row["file_path"]),
+                        line_no,
+                        score=score,
+                        reason=f"operational boundary evidence: {kind} {target}",
+                        question=question,
+                        trace_stage=f"{TOOL_LOOP_TRACE_PREFIX}{step_index}" if step_index else "operational_boundary",
+                        retrieval="operational_boundary",
+                        index_path=index_path,
+                        request_cache=request_cache,
+                    )
+                    if match:
+                        match["operational_boundary"] = {"kind": kind, "target": target}
+                        matches.append(match)
+        except (OSError, sqlite3.Error):
+            return []
+        matches.sort(key=lambda item: int(item.get("score") or 0), reverse=True)
+        return matches[:80]
+
+    def _expand_impact_matches(
+        self,
+        *,
+        entries: list[RepositoryEntry],
+        key: str,
+        question: str,
+        base_matches: list[dict[str, Any]],
+        limit: int,
+        request_cache: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        question_tokens = set(self._question_tokens(question))
+        upstream_matches: list[dict[str, Any]] = []
+        downstream_matches: list[dict[str, Any]] = []
+        seen: set[tuple[str, str, int, str, str]] = set()
+        for entry in entries:
+            repo_path = self._repo_path(key, entry)
+            if not (repo_path / ".git").exists():
+                continue
+            repo_seed_matches = [match for match in base_matches if match.get("repo") == entry.display_name and match.get("path")]
+            repo_seed_matches.sort(
+                key=lambda item: (
+                    Path(str(item.get("path") or "")).stem.lower() in question_tokens,
+                    int(item.get("score") or 0),
+                ),
+                reverse=True,
+            )
+            seed_paths = list(dict.fromkeys(str(match.get("path") or "") for match in repo_seed_matches))[:8]
+            if not seed_paths:
+                continue
+            index_path = self._index_path(repo_path)
+            try:
+                self._ensure_repo_index_cached(entry, repo_path, request_cache=request_cache)
+                with sqlite3.connect(index_path) as connection:
+                    connection.row_factory = sqlite3.Row
+                    for seed_path in seed_paths:
+                        seed_exact = Path(seed_path).stem.lower() in question_tokens
+                        rows = connection.execute(
+                            """
+                            select * from flow_edges
+                            where from_file = ? or to_file = ?
+                            order by
+                                case
+                                    when to_file = ? and from_kind in ('controller', 'handler', 'consumer') then 0
+                                    when to_file = ? then 1
+                                    when from_file = ? and edge_kind in ('repository', 'mapper', 'dao', 'sql_table', 'db_read', 'db_write', 'client', 'route') then 2
+                                    when from_file = ? then 3
+                                    else 4
+                                end,
+                                from_line
+                            limit 80
+                            """,
+                            (seed_path, seed_path, seed_path, seed_path, seed_path, seed_path),
+                        ).fetchall()
+                        for row in rows:
+                            upstream = str(row["to_file"] or "") == seed_path and str(row["from_file"] or "") != seed_path
+                            file_path = str(row["from_file"] if upstream else row["to_file"] or row["from_file"])
+                            if not file_path:
+                                continue
+                            line_no = int(row["from_line"] if upstream else row["to_line"] or row["from_line"] or 1)
+                            edge_key = (
+                                entry.display_name,
+                                file_path,
+                                line_no,
+                                str(row["edge_kind"] or ""),
+                                str(row["to_name"] or ""),
+                            )
+                            if edge_key in seen:
+                                continue
+                            seen.add(edge_key)
+                            role = "upstream caller" if upstream else "downstream dependency"
+                            path_lower = file_path.lower()
+                            score = 214 if seed_exact else 190
+                            if upstream and any(marker in path_lower for marker in ("controller", "handler", "consumer", "job")):
+                                score += 20
+                            if not upstream and any(marker in path_lower for marker in ("repository", "mapper", "dao", "client")):
+                                score += 20
+                            match = self._match_from_index_location(
+                                entry,
+                                connection,
+                                file_path,
+                                line_no,
+                                score=score,
+                                reason=f"impact {role}: {row['edge_kind']} {row['from_name']} -> {row['to_name']}",
+                                question=question,
+                                trace_stage="impact_analysis",
+                                retrieval="planner_caller" if upstream else "planner_callee",
+                                index_path=index_path,
+                                request_cache=request_cache,
+                            )
+                            if match:
+                                if upstream:
+                                    upstream_matches.append(match)
+                                else:
+                                    downstream_matches.append(match)
+            except (OSError, sqlite3.Error):
+                continue
+        upstream_matches.sort(key=lambda item: int(item.get("score") or 0), reverse=True)
+        downstream_matches.sort(key=lambda item: int(item.get("score") or 0), reverse=True)
+        max_items = max(6, min(int(limit or 12), 24))
+        balanced: list[dict[str, Any]] = []
+        seen_result: set[tuple[Any, Any, Any, Any]] = set()
+
+        def add_result(match: dict[str, Any]) -> None:
+            if len(balanced) >= max_items:
+                return
+            key_value = (match.get("repo"), match.get("path"), match.get("line_start"), match.get("line_end"))
+            if key_value in seen_result:
+                return
+            balanced.append(match)
+            seen_result.add(key_value)
+
+        for bucket_limit, bucket in ((max_items // 2, upstream_matches), (max_items // 2, downstream_matches)):
+            added = 0
+            for match in bucket:
+                before = len(balanced)
+                add_result(match)
+                if len(balanced) > before:
+                    added += 1
+                if added >= max(1, bucket_limit):
+                    break
+        for match in [*upstream_matches, *downstream_matches]:
+            add_result(match)
+            if len(balanced) >= max_items:
+                break
+        balanced.sort(key=lambda item: int(item.get("score") or 0), reverse=True)
+        return balanced
+
+    def _tool_lookup_references_by_kind(
+        self,
+        entry: RepositoryEntry,
+        repo_path: Path,
+        terms: list[str],
+        *,
+        kinds: set[str],
+        question: str,
+        trace_stage: str,
+        retrieval: str,
+        score: int,
+        request_cache: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        matches: list[dict[str, Any]] = []
+        index_path = self._index_path(repo_path)
+        try:
+            self._ensure_repo_index_cached(entry, repo_path, request_cache=request_cache)
+            with sqlite3.connect(index_path) as connection:
+                connection.row_factory = sqlite3.Row
+                placeholders = ",".join("?" for _ in kinds)
+                kind_values = tuple(sorted(kinds))
+                rows = connection.execute(
+                    f"select * from references_index where kind in ({placeholders}) limit 120",
+                    kind_values,
+                ).fetchall()
+                lowered_terms = [str(term).lower() for term in terms if len(str(term).strip()) >= 3]
+                for row in rows:
+                    haystack = f"{row['target']} {row['context']} {row['file_path']}".lower()
+                    if lowered_terms and not any(term in haystack for term in lowered_terms):
+                        if str(row["kind"]) == "sql_table" and not any(keyword in haystack for keyword in ("select", "from", "join", "update", "insert")):
+                            continue
+                    matches.append(
+                        self._match_from_index_location(
+                            entry,
+                            connection,
+                            str(row["file_path"]),
+                            int(row["line_no"]),
+                            score=score,
+                            reason=f"planner {retrieval}: {row['kind']} {row['target']}",
+                            question=question,
+                            trace_stage=trace_stage,
+                            retrieval=retrieval,
+                            index_path=index_path,
+                            request_cache=request_cache,
+                        )
+                    )
+        except (OSError, sqlite3.Error):
+            return []
+        return [match for match in matches if match]
+
+    def _tool_find_callers(
+        self,
+        entry: RepositoryEntry,
+        repo_path: Path,
+        base_matches: list[dict[str, Any]],
+        terms: list[str],
+        question: str,
+        step_index: int,
+        request_cache: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        seed_paths = [str(match.get("path") or "") for match in base_matches if match.get("repo") == entry.display_name][:12]
+        return self._tool_lookup_flow_edges(
+            entry,
+            repo_path,
+            terms=terms,
+            seed_paths=seed_paths,
+            direction="callers",
+            question=question,
+            step_index=step_index,
+            request_cache=request_cache,
+        )
+
+    def _tool_find_callees(
+        self,
+        entry: RepositoryEntry,
+        repo_path: Path,
+        base_matches: list[dict[str, Any]],
+        terms: list[str],
+        question: str,
+        step_index: int,
+        request_cache: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        seed_paths = [str(match.get("path") or "") for match in base_matches if match.get("repo") == entry.display_name][:12]
+        return self._tool_lookup_flow_edges(
+            entry,
+            repo_path,
+            terms=terms,
+            seed_paths=seed_paths,
+            direction="callees",
+            question=question,
+            step_index=step_index,
+            request_cache=request_cache,
+        )
+
+    def _tool_lookup_flow_edges(
+        self,
+        entry: RepositoryEntry,
+        repo_path: Path,
+        *,
+        terms: list[str],
+        seed_paths: list[str],
+        direction: str,
+        question: str,
+        step_index: int,
+        request_cache: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        matches: list[dict[str, Any]] = []
+        index_path = self._index_path(repo_path)
+        lowered_terms = [str(term).lower() for term in terms if len(str(term).strip()) >= 3]
+        try:
+            self._ensure_repo_index_cached(entry, repo_path, request_cache=request_cache)
+            with sqlite3.connect(index_path) as connection:
+                connection.row_factory = sqlite3.Row
+                rows: list[sqlite3.Row] = []
+                if direction == "callers" and seed_paths:
+                    for path in seed_paths:
+                        rows.extend(
+                            connection.execute(
+                                """
+                                select * from flow_edges
+                                where to_file = ?
+                                order by
+                                    case edge_kind
+                                        when 'route' then 0
+                                        when 'controller' then 1
+                                        when 'service' then 2
+                                        when 'client' then 3
+                                        when 'runtime_call' then 4
+                                        else 5
+                                    end,
+                                    from_line
+                                limit 80
+                                """,
+                                (path,),
+                            ).fetchall()
+                        )
+                if direction == "callees" and seed_paths:
+                    for path in seed_paths:
+                        rows.extend(
+                            connection.execute(
+                                """
+                                select * from flow_edges
+                                where from_file = ?
+                                order by
+                                    case edge_kind
+                                        when 'sql_table' then 0
+                                        when 'repository' then 1
+                                        when 'mapper' then 2
+                                        when 'dao' then 3
+                                        when 'client' then 4
+                                        else 5
+                                    end,
+                                    from_line
+                                limit 60
+                                """,
+                                (path,),
+                            ).fetchall()
+                        )
+                if lowered_terms:
+                    for term in lowered_terms[:16]:
+                        rows.extend(
+                            connection.execute(
+                                """
+                                select * from flow_edges
+                                where lower(to_name) like ? or lower(from_name) like ? or lower(evidence) like ?
+                                limit 40
+                                """,
+                                (f"%{term}%", f"%{term}%", f"%{term}%"),
+                            ).fetchall()
+                        )
+                seen_rows: set[tuple[Any, ...]] = set()
+                for row in rows:
+                    row_key = (row["from_file"], row["from_line"], row["edge_kind"], row["to_name"], row["to_file"], row["to_line"])
+                    if row_key in seen_rows:
+                        continue
+                    seen_rows.add(row_key)
+                    if direction == "callers":
+                        file_path = str(row["from_file"])
+                        line_no = int(row["from_line"] or 1)
+                        retrieval = "planner_caller"
+                        score = 192 if str(row["from_kind"] or "").lower() in {"controller", "handler", "consumer"} else 184 if any(
+                            marker in file_path.lower() for marker in ("controller", "handler", "consumer", "job", "scheduler")
+                        ) else 176
+                    else:
+                        file_path = str(row["to_file"] or row["from_file"])
+                        line_no = int(row["to_line"] or row["from_line"] or 1)
+                        retrieval = "planner_callee"
+                        score = 176 if row["edge_kind"] in {"sql_table", "repository", "mapper", "dao", "client"} else 150
+                    matches.append(
+                        self._match_from_index_location(
+                            entry,
+                            connection,
+                            file_path,
+                            line_no,
+                            score=score,
+                            reason=f"planner {direction}: {row['edge_kind']} {row['from_name']} -> {row['to_name']}",
+                            question=question,
+                            trace_stage=f"{TOOL_LOOP_TRACE_PREFIX}{step_index}",
+                            retrieval=retrieval,
+                            index_path=index_path,
+                            request_cache=request_cache,
+                        )
+                    )
+        except (OSError, sqlite3.Error):
+            return []
+        return [match for match in matches if match]
+
+    def _tool_open_file_window(
+        self,
+        entry: RepositoryEntry,
+        repo_path: Path,
+        base_matches: list[dict[str, Any]],
+        question: str,
+        step_index: int,
+        request_cache: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        matches: list[dict[str, Any]] = []
+        index_path = self._index_path(repo_path)
+        seeds = [match for match in base_matches if match.get("repo") == entry.display_name][:6]
+        try:
+            self._ensure_repo_index_cached(entry, repo_path, request_cache=request_cache)
+            with sqlite3.connect(index_path) as connection:
+                connection.row_factory = sqlite3.Row
+                for seed in seeds:
+                    line_no = int(seed.get("line_start") or 1)
+                    match = self._match_from_index_location(
+                        entry,
+                        connection,
+                        str(seed.get("path") or ""),
+                        line_no,
+                        score=max(120, int(seed.get("score") or 0) - 5),
+                        reason=f"planner open file window: {seed.get('reason') or 'seed evidence'}",
+                        question=question,
+                        trace_stage=f"{TOOL_LOOP_TRACE_PREFIX}{step_index}",
+                        retrieval="open_file_window",
+                        index_path=index_path,
+                        request_cache=request_cache,
+                    )
+                    if match:
+                        matches.append(match)
+        except (OSError, sqlite3.Error):
+            return []
+        return matches
 
     def _tool_lookup_structure(
         self,
@@ -2677,11 +6776,12 @@ class SourceCodeQAService:
         kind_column: str,
         trace_stage: str,
         retrieval: str,
+        request_cache: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         matches: list[dict[str, Any]] = []
         index_path = self._index_path(repo_path)
         try:
-            self._ensure_repo_index(key=None, entry=entry, repo_path=repo_path)
+            self._ensure_repo_index_cached(entry, repo_path, request_cache=request_cache)
             with sqlite3.connect(index_path) as connection:
                 connection.row_factory = sqlite3.Row
                 for term in terms[:16]:
@@ -2703,6 +6803,8 @@ class SourceCodeQAService:
                                 question=question,
                                 trace_stage=trace_stage,
                                 retrieval=retrieval,
+                                index_path=index_path,
+                                request_cache=request_cache,
                             )
                         )
         except (OSError, sqlite3.Error):
@@ -2716,12 +6818,13 @@ class SourceCodeQAService:
         base_matches: list[dict[str, Any]],
         question: str,
         step_index: int,
+        request_cache: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         index_path = self._index_path(repo_path)
         seed_paths = [str(match.get("path") or "") for match in base_matches if match.get("repo") == entry.display_name][:8]
         matches: list[dict[str, Any]] = []
         try:
-            self._ensure_repo_index(key=None, entry=entry, repo_path=repo_path)
+            self._ensure_repo_index_cached(entry, repo_path, request_cache=request_cache)
             with sqlite3.connect(index_path) as connection:
                 connection.row_factory = sqlite3.Row
                 for path in seed_paths:
@@ -2746,6 +6849,8 @@ class SourceCodeQAService:
                                 question=question,
                                 trace_stage=f"tool_loop_{step_index}",
                                 retrieval="code_graph",
+                                index_path=index_path,
+                                request_cache=request_cache,
                             )
                         )
         except (OSError, sqlite3.Error):
@@ -2759,12 +6864,13 @@ class SourceCodeQAService:
         base_matches: list[dict[str, Any]],
         question: str,
         step_index: int,
+        request_cache: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         index_path = self._index_path(repo_path)
         seed_paths = [str(match.get("path") or "") for match in base_matches if match.get("repo") == entry.display_name][:12]
         matches: list[dict[str, Any]] = []
         try:
-            self._ensure_repo_index(key=None, entry=entry, repo_path=repo_path)
+            self._ensure_repo_index_cached(entry, repo_path, request_cache=request_cache)
             with sqlite3.connect(index_path) as connection:
                 connection.row_factory = sqlite3.Row
                 for path in seed_paths:
@@ -2802,6 +6908,8 @@ class SourceCodeQAService:
                                     question=question,
                                     trace_stage=f"{TOOL_LOOP_TRACE_PREFIX}{step_index}",
                                     retrieval="flow_graph",
+                                    index_path=index_path,
+                                    request_cache=request_cache,
                                 )
                             )
                         else:
@@ -2816,6 +6924,8 @@ class SourceCodeQAService:
                                     question=question,
                                     trace_stage=f"{TOOL_LOOP_TRACE_PREFIX}{step_index}",
                                     retrieval="flow_graph",
+                                    index_path=index_path,
+                                    request_cache=request_cache,
                                 )
                             )
         except (OSError, sqlite3.Error):
@@ -2829,12 +6939,13 @@ class SourceCodeQAService:
         base_matches: list[dict[str, Any]],
         question: str,
         step_index: int,
+        request_cache: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         index_path = self._index_path(repo_path)
         seed_paths = [str(match.get("path") or "") for match in base_matches if match.get("repo") == entry.display_name][:12]
         matches: list[dict[str, Any]] = []
         try:
-            self._ensure_repo_index(key=None, entry=entry, repo_path=repo_path)
+            self._ensure_repo_index_cached(entry, repo_path, request_cache=request_cache)
             with sqlite3.connect(index_path) as connection:
                 connection.row_factory = sqlite3.Row
                 for path in seed_paths:
@@ -2870,6 +6981,8 @@ class SourceCodeQAService:
                                     question=question,
                                     trace_stage=f"{TOOL_LOOP_TRACE_PREFIX}{step_index}",
                                     retrieval="entity_graph",
+                                    index_path=index_path,
+                                    request_cache=request_cache,
                                 )
                             )
                         else:
@@ -2884,6 +6997,8 @@ class SourceCodeQAService:
                                     question=question,
                                     trace_stage=f"{TOOL_LOOP_TRACE_PREFIX}{step_index}",
                                     retrieval="entity_graph",
+                                    index_path=index_path,
+                                    request_cache=request_cache,
                                 )
                             )
         except (OSError, sqlite3.Error):
@@ -2902,12 +7017,19 @@ class SourceCodeQAService:
         question: str,
         trace_stage: str,
         retrieval: str,
+        index_path: Path | None = None,
+        request_cache: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
-        rows = connection.execute(
-            "select line_text from lines where file_path = ? order by line_no",
-            (file_path,),
-        ).fetchall()
-        lines = [str(row["line_text"] if isinstance(row, sqlite3.Row) else row[0]) for row in rows]
+        lines: list[str] = []
+        if index_path is not None and request_cache is not None:
+            index_rows = self._cached_index_rows(connection, index_path, request_cache=request_cache)
+            lines = list((index_rows.get("lines_by_path") or {}).get(file_path) or [])
+        if not lines:
+            rows = connection.execute(
+                "select line_text from lines where file_path = ? order by line_no",
+                (file_path,),
+            ).fetchall()
+            lines = [str(row["line_text"] if isinstance(row, sqlite3.Row) else row[0]) for row in rows]
         if not lines:
             return None
         start, end = self._best_snippet_window(lines, max(1, min(line_no, len(lines))))
@@ -2923,6 +7045,34 @@ class SourceCodeQAService:
             "retrieval": retrieval,
         }
 
+    def _trace_paths_cache_key(
+        self,
+        *,
+        entries: list[RepositoryEntry],
+        key: str,
+        matches: list[dict[str, Any]],
+        limit: int,
+    ) -> str:
+        repo_fingerprints = []
+        for entry in entries:
+            repo_path = self._repo_path(key, entry)
+            if not (repo_path / ".git").exists():
+                continue
+            repo_fingerprints.append(
+                {
+                    "name": entry.display_name,
+                    "url": entry.url,
+                    "path": str(repo_path),
+                    "index": self._index_fingerprint(self._index_path(repo_path)),
+                }
+            )
+        payload = {
+            "repos": repo_fingerprints,
+            "matches": self._match_cache_signature(matches),
+            "limit": max(1, int(limit or 6)),
+        }
+        return hashlib.sha1(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+
     def _build_trace_paths(
         self,
         *,
@@ -2931,10 +7081,19 @@ class SourceCodeQAService:
         matches: list[dict[str, Any]],
         question: str,
         limit: int = 6,
+        request_cache: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         del question
         if not matches:
             return []
+        cache_key = self._trace_paths_cache_key(entries=entries, key=key, matches=matches, limit=limit)
+        if request_cache is not None:
+            trace_cache = request_cache.setdefault("trace_paths", {})
+            cached = trace_cache.get(cache_key)
+            if cached is not None:
+                self._increment_retrieval_stat(request_cache, "trace_paths_hits")
+                return self._clone_jsonish(cached)
+            self._increment_retrieval_stat(request_cache, "trace_paths_misses")
         paths: list[dict[str, Any]] = []
         seen_signatures: set[str] = set()
         for entry in entries:
@@ -2945,11 +7104,20 @@ class SourceCodeQAService:
             if not seed_paths:
                 continue
             try:
-                self._ensure_repo_index(key=None, entry=entry, repo_path=repo_path)
+                self._ensure_repo_index_cached(entry, repo_path, request_cache=request_cache)
                 with sqlite3.connect(self._index_path(repo_path)) as connection:
                     connection.row_factory = sqlite3.Row
+                    edge_cache: dict[str, list[dict[str, Any]]] = {}
+
+                    def edges_for(seed_path: str) -> list[dict[str, Any]]:
+                        cached_edges = edge_cache.get(seed_path)
+                        if cached_edges is not None:
+                            return cached_edges
+                        edge_cache[seed_path] = self._trace_path_edges_for_seed(connection, seed_path)
+                        return edge_cache[seed_path]
+
                     for seed in seed_paths:
-                        first_hops = self._trace_path_edges_for_seed(connection, seed)
+                        first_hops = edges_for(seed)
                         for first in first_hops[:10]:
                             path = self._trace_path_from_edges(entry.display_name, seed, [first])
                             signature = json.dumps(path.get("edges") or [], sort_keys=True)
@@ -2959,7 +7127,7 @@ class SourceCodeQAService:
                             next_seed = str(first.get("to_file") or "")
                             if not next_seed:
                                 continue
-                            for second in self._trace_path_edges_for_seed(connection, next_seed)[:6]:
+                            for second in edges_for(next_seed)[:6]:
                                 if second.get("from_file") == first.get("from_file") and second.get("to_file") == first.get("to_file"):
                                     continue
                                 extended = self._trace_path_from_edges(entry.display_name, seed, [first, second])
@@ -2970,45 +7138,674 @@ class SourceCodeQAService:
             except (OSError, sqlite3.Error):
                 continue
         paths.sort(key=lambda item: item.get("confidence", 0), reverse=True)
-        return paths[: max(1, int(limit or 6))]
+        result = paths[: max(1, int(limit or 6))]
+        if request_cache is not None:
+            request_cache.setdefault("trace_paths", {})[cache_key] = self._clone_jsonish(result)
+        return result
 
-    def _build_repo_dependency_graph(self, *, key: str, entries: list[RepositoryEntry]) -> dict[str, Any]:
+    def _build_repo_dependency_graph(
+        self,
+        *,
+        key: str,
+        entries: list[RepositoryEntry],
+        request_cache: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         nodes = [{"name": entry.display_name, "url": entry.url} for entry in entries]
         edge_rows: list[dict[str, Any]] = []
+        route_index = self._repo_route_index(key=key, entries=entries, request_cache=request_cache)
+        config_index = self._repo_config_index(key=key, entries=entries, request_cache=request_cache)
+        message_index = self._repo_message_index(key=key, entries=entries, config_index=config_index, request_cache=request_cache)
+        artifact_index = self._repo_artifact_index(key=key, entries=entries, request_cache=request_cache)
+        table_index = self._repo_table_index(key=key, entries=entries, request_cache=request_cache)
         for source in entries:
             source_path = self._repo_path(key, source)
             if not (source_path / ".git").exists():
                 continue
             try:
-                self._ensure_repo_index(key=None, entry=source, repo_path=source_path)
+                self._ensure_repo_index_cached(source, source_path, request_cache=request_cache)
                 with sqlite3.connect(self._index_path(source_path)) as connection:
                     connection.row_factory = sqlite3.Row
                     rows = connection.execute(
                         """
-                        select edge_kind, to_name, evidence, from_file, from_line
+                        select edge_kind, to_name, evidence, from_file, from_line, to_file, to_line
                         from flow_edges
-                        where edge_kind in ('client', 'route', 'framework')
+                        where edge_kind in (
+                            'client', 'route', 'framework', 'call', 'import', 'module_dependency',
+                            'message_publish', 'event_publish', 'db_write'
+                        )
                         limit 300
                         """
                     ).fetchall()
             except (OSError, sqlite3.Error):
                 continue
             for row in rows:
-                target = self._match_repo_dependency_target(str(row["to_name"] or row["evidence"] or ""), entries, source.display_name)
-                if not target:
+                candidate = self._match_repo_dependency_candidate(
+                    row=dict(row),
+                    entries=entries,
+                    source_name=source.display_name,
+                    route_index=route_index,
+                    message_index=message_index,
+                    artifact_index=artifact_index,
+                    table_index=table_index,
+                    source_config=config_index.get(source.display_name) or {},
+                )
+                if not candidate:
                     continue
                 edge_rows.append(
                     {
                         "from_repo": source.display_name,
-                        "to_repo": target.display_name,
-                        "edge_kind": str(row["edge_kind"] or "dependency"),
+                        "to_repo": candidate["target"].display_name,
+                        "edge_kind": candidate.get("edge_kind") or str(row["edge_kind"] or "dependency"),
+                        "confidence": candidate["confidence"],
+                        "match_reason": candidate["match_reason"],
                         "evidence": str(row["evidence"] or row["to_name"] or "")[:300],
                         "from_file": str(row["from_file"] or ""),
                         "from_line": int(row["from_line"] or 0),
+                        "to_file": str(candidate.get("to_file") or row["to_file"] or ""),
+                        "to_line": int(candidate.get("to_line") or row["to_line"] or 0),
                     }
                 )
-        deduped = list({json.dumps(edge, sort_keys=True): edge for edge in edge_rows}.values())
-        return {"nodes": nodes, "edges": deduped[:80]}
+        by_signature: dict[str, dict[str, Any]] = {}
+        for edge in edge_rows:
+            signature = json.dumps(
+                {
+                    "from_repo": edge.get("from_repo"),
+                    "to_repo": edge.get("to_repo"),
+                    "edge_kind": edge.get("edge_kind"),
+                    "from_file": edge.get("from_file"),
+                    "from_line": edge.get("from_line"),
+                    "to_file": edge.get("to_file"),
+                    "to_line": edge.get("to_line"),
+                },
+                sort_keys=True,
+            )
+            existing = by_signature.get(signature)
+            if existing is None or float(edge.get("confidence") or 0) > float(existing.get("confidence") or 0):
+                by_signature[signature] = edge
+        deduped = sorted(by_signature.values(), key=lambda item: float(item.get("confidence") or 0), reverse=True)
+        return {"version": 2, "nodes": nodes, "edges": deduped[:80]}
+
+    def _repo_message_index(
+        self,
+        *,
+        key: str,
+        entries: list[RepositoryEntry],
+        config_index: dict[str, dict[str, list[str]]] | None = None,
+        request_cache: dict[str, Any] | None = None,
+    ) -> dict[str, list[dict[str, Any]]]:
+        message_index: dict[str, list[dict[str, Any]]] = {}
+        for entry in entries:
+            repo_path = self._repo_path(key, entry)
+            if not (repo_path / ".git").exists():
+                continue
+            messages: list[dict[str, Any]] = []
+            repo_config = (config_index or {}).get(entry.display_name) or {}
+            try:
+                self._ensure_repo_index_cached(entry, repo_path, request_cache=request_cache)
+                with sqlite3.connect(self._index_path(repo_path)) as connection:
+                    connection.row_factory = sqlite3.Row
+                    for row in connection.execute(
+                        """
+                        select edge_kind, to_name, evidence, from_file, from_line
+                        from flow_edges
+                        where edge_kind in ('message_consume', 'event_consume')
+                        limit 300
+                        """
+                    ):
+                        for message_name in self._message_values_from_config(str(row["to_name"] or ""), repo_config):
+                            messages.append(
+                                {
+                                    "message": message_name,
+                                    "edge_kind": str(row["edge_kind"] or ""),
+                                    "file": str(row["from_file"] or ""),
+                                    "line": int(row["from_line"] or 0),
+                                    "evidence": str(row["evidence"] or ""),
+                                }
+                            )
+            except (OSError, sqlite3.Error):
+                messages = []
+            message_index[entry.display_name] = messages
+        return message_index
+
+    def _repo_artifact_index(
+        self,
+        *,
+        key: str,
+        entries: list[RepositoryEntry],
+        request_cache: dict[str, Any] | None = None,
+    ) -> dict[str, list[dict[str, Any]]]:
+        artifact_index: dict[str, list[dict[str, Any]]] = {}
+        for entry in entries:
+            repo_path = self._repo_path(key, entry)
+            if not (repo_path / ".git").exists():
+                continue
+            artifacts: list[dict[str, Any]] = []
+            try:
+                self._ensure_repo_index_cached(entry, repo_path, request_cache=request_cache)
+                with sqlite3.connect(self._index_path(repo_path)) as connection:
+                    connection.row_factory = sqlite3.Row
+                    for row in connection.execute(
+                        """
+                        select edge_kind, to_name, evidence, from_file, from_line
+                        from flow_edges
+                        where edge_kind = 'module_dependency'
+                          and (evidence = to_name or from_file like '%pom.xml' or from_file like '%package.json')
+                        limit 300
+                        """
+                    ):
+                        artifacts.append(
+                            {
+                                "artifact": str(row["to_name"] or ""),
+                                "file": str(row["from_file"] or ""),
+                                "line": int(row["from_line"] or 0),
+                                "evidence": str(row["evidence"] or ""),
+                            }
+                        )
+                    for row in connection.execute(
+                        """
+                        select edge_kind, to_name, evidence, from_file, from_line
+                        from flow_edges
+                        where edge_kind = 'module_dependency'
+                        limit 300
+                        """
+                    ):
+                        if str(row["evidence"] or "") != str(row["to_name"] or ""):
+                            continue
+                        artifacts.append(
+                            {
+                                "artifact": str(row["to_name"] or ""),
+                                "file": str(row["from_file"] or ""),
+                                "line": int(row["from_line"] or 0),
+                                "evidence": str(row["evidence"] or ""),
+                            }
+                        )
+                    for row in connection.execute(
+                        """
+                        select edge_kind, to_name, evidence, from_file, from_line
+                        from flow_edges
+                        where edge_kind = 'module_dependency'
+                           or edge_kind = 'module_artifact'
+                        limit 300
+                        """
+                    ):
+                        artifacts.append(
+                            {
+                                "artifact": str(row["to_name"] or ""),
+                                "file": str(row["from_file"] or ""),
+                                "line": int(row["from_line"] or 0),
+                                "evidence": str(row["evidence"] or ""),
+                            }
+                        )
+            except (OSError, sqlite3.Error):
+                artifacts = []
+            by_key: dict[str, dict[str, Any]] = {}
+            for item in artifacts:
+                normalized = self._normalize_artifact_name(str(item.get("artifact") or ""))
+                if normalized and normalized not in by_key:
+                    by_key[normalized] = item
+            artifact_index[entry.display_name] = list(by_key.values())
+        return artifact_index
+
+    def _repo_table_index(
+        self,
+        *,
+        key: str,
+        entries: list[RepositoryEntry],
+        request_cache: dict[str, Any] | None = None,
+    ) -> dict[str, list[dict[str, Any]]]:
+        table_index: dict[str, list[dict[str, Any]]] = {}
+        for entry in entries:
+            repo_path = self._repo_path(key, entry)
+            if not (repo_path / ".git").exists():
+                continue
+            tables: list[dict[str, Any]] = []
+            try:
+                self._ensure_repo_index_cached(entry, repo_path, request_cache=request_cache)
+                with sqlite3.connect(self._index_path(repo_path)) as connection:
+                    connection.row_factory = sqlite3.Row
+                    for row in connection.execute(
+                        """
+                        select edge_kind, to_name, evidence, from_file, from_line
+                        from flow_edges
+                        where edge_kind in ('db_read', 'db_write')
+                        limit 300
+                        """
+                    ):
+                        tables.append(
+                            {
+                                "table": str(row["to_name"] or ""),
+                                "edge_kind": str(row["edge_kind"] or ""),
+                                "file": str(row["from_file"] or ""),
+                                "line": int(row["from_line"] or 0),
+                                "evidence": str(row["evidence"] or ""),
+                            }
+                        )
+            except (OSError, sqlite3.Error):
+                tables = []
+            table_index[entry.display_name] = tables
+        return table_index
+
+    def _repo_route_index(
+        self,
+        *,
+        key: str,
+        entries: list[RepositoryEntry],
+        request_cache: dict[str, Any] | None = None,
+    ) -> dict[str, list[dict[str, Any]]]:
+        route_index: dict[str, list[dict[str, Any]]] = {}
+        for entry in entries:
+            repo_path = self._repo_path(key, entry)
+            if not (repo_path / ".git").exists():
+                continue
+            routes: list[dict[str, Any]] = []
+            try:
+                self._ensure_repo_index_cached(entry, repo_path, request_cache=request_cache)
+                with sqlite3.connect(self._index_path(repo_path)) as connection:
+                    connection.row_factory = sqlite3.Row
+                    for row in connection.execute(
+                        """
+                        select edge_kind, to_name, evidence, from_file, from_line
+                        from flow_edges
+                        where edge_kind = 'route'
+                        limit 300
+                        """
+                    ):
+                        routes.append(
+                            {
+                                "route": str(row["to_name"] or ""),
+                                "file": str(row["from_file"] or ""),
+                                "line": int(row["from_line"] or 0),
+                                "evidence": str(row["evidence"] or ""),
+                            }
+                        )
+            except (OSError, sqlite3.Error):
+                routes = []
+            route_index[entry.display_name] = self._prefer_specific_routes(routes)
+        return route_index
+
+    def _repo_config_index(
+        self,
+        *,
+        key: str,
+        entries: list[RepositoryEntry],
+        request_cache: dict[str, Any] | None = None,
+    ) -> dict[str, dict[str, list[str]]]:
+        config_index: dict[str, dict[str, list[str]]] = {}
+        for entry in entries:
+            repo_path = self._repo_path(key, entry)
+            if not (repo_path / ".git").exists():
+                continue
+            values: dict[str, list[str]] = {}
+            yaml_stacks: dict[str, list[tuple[int, str]]] = {}
+            try:
+                self._ensure_repo_index_cached(entry, repo_path, request_cache=request_cache)
+                with sqlite3.connect(self._index_path(repo_path)) as connection:
+                    connection.row_factory = sqlite3.Row
+                    for row in connection.execute(
+                        """
+                        select file_path, line_no, line_text
+                        from lines
+                        where lower(file_path) glob '*.properties'
+                           or lower(file_path) glob '*.yml'
+                           or lower(file_path) glob '*.yaml'
+                           or lower(file_path) glob '*.conf'
+                           or lower(file_path) glob '*.toml'
+                        order by file_path, line_no
+                        limit 1000
+                        """
+                    ):
+                        file_path = str(row["file_path"] or "")
+                        suffix = Path(file_path).suffix.lower()
+                        yaml_stack = yaml_stacks.setdefault(file_path, [])
+                        pair = (
+                            self._extract_yaml_config_assignment(str(row["line_text"] or ""), yaml_stack)
+                            if suffix in {".yaml", ".yml"}
+                            else self._extract_config_assignment(str(row["line_text"] or ""))
+                        )
+                        if not pair:
+                            continue
+                        key_name, value = pair
+                        if not value:
+                            continue
+                        values.setdefault(key_name, [])
+                        if value not in values[key_name]:
+                            values[key_name].append(value)
+            except (OSError, sqlite3.Error):
+                values = {}
+            config_index[entry.display_name] = values
+        return config_index
+
+    def _match_repo_dependency_candidate(
+        self,
+        *,
+        row: dict[str, Any],
+        entries: list[RepositoryEntry],
+        source_name: str,
+        route_index: dict[str, list[dict[str, Any]]],
+        message_index: dict[str, list[dict[str, Any]]] | None = None,
+        artifact_index: dict[str, list[dict[str, Any]]] | None = None,
+        table_index: dict[str, list[dict[str, Any]]] | None = None,
+        source_config: dict[str, list[str]] | None = None,
+    ) -> dict[str, Any] | None:
+        value = str(row.get("to_name") or row.get("evidence") or "")
+        evidence = str(row.get("evidence") or "")
+        search_text = f"{value} {evidence}"
+        best: dict[str, Any] | None = None
+        source_role = self._flow_role_for_path(str(row.get("from_file") or ""))
+        row_kind = str(row.get("edge_kind") or "")
+        lowered_search_text = search_text.lower()
+
+        http_client_like = source_role == "client" or any(
+            marker in lowered_search_text for marker in ("feignclient", "fetch", "axios", "resttemplate", "webclient")
+        )
+        resolved_config_values = self._resolve_config_placeholders(search_text, source_config or {})
+        if http_client_like:
+            resolved_config_values.extend(self._candidate_dependency_config_values(source_config or {}))
+            resolved_config_values = list(dict.fromkeys(resolved_config_values))[:20]
+        if resolved_config_values:
+            search_text = " ".join([search_text, *resolved_config_values, *self._join_config_routes(search_text, resolved_config_values)])
+            lowered_search_text = search_text.lower()
+        if http_client_like:
+            for route in self._extract_route_literals(search_text):
+                for entry in entries:
+                    if entry.display_name == source_name:
+                        continue
+                    for target_route in route_index.get(entry.display_name) or []:
+                        score = self._route_overlap_score(route, str(target_route.get("route") or ""))
+                        if score <= 0:
+                            continue
+                        candidate = {
+                            "target": entry,
+                            "edge_kind": "http_path",
+                            "confidence": score,
+                            "match_reason": f"http path overlap: {route} -> {target_route.get('route')}",
+                            "from_route": route,
+                            "target_route": target_route.get("route") or "",
+                            "to_file": target_route.get("file") or "",
+                            "to_line": int(target_route.get("line") or 0),
+                        }
+                        best = self._better_repo_dependency_candidate(best, candidate)
+
+        if row_kind in {"module_dependency"}:
+            source_artifacts = [self._normalize_artifact_name(item) for item in self._artifact_values_from_text(search_text)]
+            source_artifacts = [item for item in dict.fromkeys(source_artifacts) if item]
+            for source_artifact in source_artifacts:
+                for entry in entries:
+                    if entry.display_name == source_name:
+                        continue
+                    for target_artifact in (artifact_index or {}).get(entry.display_name) or []:
+                        target_name = str(target_artifact.get("artifact") or "")
+                        if source_artifact != self._normalize_artifact_name(target_name):
+                            continue
+                        candidate = {
+                            "target": entry,
+                            "edge_kind": "module_dependency",
+                            "confidence": 0.97,
+                            "match_reason": f"exact build artifact match: {source_artifact}",
+                            "to_file": target_artifact.get("file") or "",
+                            "to_line": int(target_artifact.get("line") or 0),
+                        }
+                        best = self._better_repo_dependency_candidate(best, candidate)
+
+        if row_kind in {"db_write"}:
+            source_table = self._normalize_table_name(value)
+            if source_table:
+                for entry in entries:
+                    if entry.display_name == source_name:
+                        continue
+                    for target_table in (table_index or {}).get(entry.display_name) or []:
+                        if str(target_table.get("edge_kind") or "") != "db_read":
+                            continue
+                        target_name = str(target_table.get("table") or "")
+                        if source_table != self._normalize_table_name(target_name):
+                            continue
+                        candidate = {
+                            "target": entry,
+                            "edge_kind": "shared_table",
+                            "confidence": 0.86,
+                            "match_reason": f"db write/read table overlap: {value} -> {target_name}",
+                            "to_file": target_table.get("file") or "",
+                            "to_line": int(target_table.get("line") or 0),
+                        }
+                        best = self._better_repo_dependency_candidate(best, candidate)
+
+        if row_kind in {"message_publish", "event_publish"}:
+            source_messages = self._message_values_from_config(value, source_config or {})
+            for source_message_value in source_messages:
+                source_message = self._normalize_message_name(source_message_value)
+                if not source_message:
+                    continue
+                for entry in entries:
+                    if entry.display_name == source_name:
+                        continue
+                    for target_message in (message_index or {}).get(entry.display_name) or []:
+                        target_name = str(target_message.get("message") or "")
+                        if source_message != self._normalize_message_name(target_name):
+                            continue
+                        candidate = {
+                            "target": entry,
+                            "edge_kind": "message_topic" if row_kind == "message_publish" else "event_flow",
+                            "confidence": 0.93,
+                            "match_reason": f"{row_kind} matches consumer: {source_message_value} -> {target_name}",
+                            "to_file": target_message.get("file") or "",
+                            "to_line": int(target_message.get("line") or 0),
+                        }
+                        best = self._better_repo_dependency_candidate(best, candidate)
+
+        alias_client_like = http_client_like or row_kind in {"import", "module_dependency"}
+        if alias_client_like:
+            for entry in entries:
+                if entry.display_name == source_name:
+                    continue
+                alias_score = self._repo_alias_match_score(search_text, entry)
+                if alias_score <= 0:
+                    continue
+                candidate = {
+                    "target": entry,
+                    "edge_kind": str(row.get("edge_kind") or "dependency"),
+                    "confidence": alias_score,
+                    "match_reason": "build dependency alias match" if row_kind == "module_dependency" else "service/import alias match",
+                    "to_file": "",
+                    "to_line": 0,
+                }
+                best = self._better_repo_dependency_candidate(best, candidate)
+
+        return best
+
+    @staticmethod
+    def _normalize_message_name(value: str) -> str:
+        normalized = str(value or "").strip().lower()
+        normalized = re.sub(r"^\$\{([^}:]+).*$", r"\1", normalized)
+        return re.sub(r"[^a-z0-9_.:-]+", "", normalized)
+
+    @staticmethod
+    def _message_values_from_config(value: str, config_values: dict[str, list[str]]) -> list[str]:
+        raw_value = str(value or "").strip()
+        values: list[str] = []
+        for key in CONFIG_PLACEHOLDER_PATTERN.findall(str(value or "")):
+            values.extend(config_values.get(key, [])[:5])
+        values.extend(config_values.get(raw_value, [])[:5])
+        values.append(raw_value)
+        return list(dict.fromkeys(item for item in values if item))[:8]
+
+    @staticmethod
+    def _artifact_values_from_text(value: str) -> list[str]:
+        text = str(value or "")
+        artifacts: list[str] = []
+        for coordinate in re.findall(r"([A-Za-z0-9_.@/-]+:[A-Za-z0-9_.@/-]+)", text):
+            artifacts.append(coordinate)
+            artifacts.append(coordinate.rsplit(":", 1)[-1])
+        for package_name in re.findall(r"@[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", text):
+            artifacts.append(package_name)
+        for token in re.findall(r"\b[A-Za-z0-9_.-]+(?:-api|-sdk|-client|-service)\b", text):
+            artifacts.append(token)
+        return list(dict.fromkeys(item.strip() for item in artifacts if item.strip()))[:12]
+
+    @staticmethod
+    def _normalize_artifact_name(value: str) -> str:
+        normalized = str(value or "").strip().lower()
+        if ":" in normalized:
+            normalized = normalized.rsplit(":", 1)[-1]
+        if "/" in normalized:
+            normalized = normalized.rsplit("/", 1)[-1]
+        return re.sub(r"[^a-z0-9_.-]+", "", normalized)
+
+    @staticmethod
+    def _normalize_table_name(value: str) -> str:
+        normalized = str(value or "").strip().lower()
+        normalized = normalized.rsplit(".", 1)[-1]
+        return re.sub(r"[^a-z0-9_]+", "", normalized)
+
+    @staticmethod
+    def _better_repo_dependency_candidate(current: dict[str, Any] | None, candidate: dict[str, Any]) -> dict[str, Any]:
+        if current is None:
+            return candidate
+        candidate_confidence = float(candidate.get("confidence") or 0)
+        current_confidence = float(current.get("confidence") or 0)
+        if candidate_confidence > current_confidence:
+            return candidate
+        if candidate_confidence == current_confidence:
+            candidate_specificity = SourceCodeQAService._route_segment_count(str(candidate.get("from_route") or "")) + SourceCodeQAService._route_segment_count(str(candidate.get("target_route") or ""))
+            current_specificity = SourceCodeQAService._route_segment_count(str(current.get("from_route") or "")) + SourceCodeQAService._route_segment_count(str(current.get("target_route") or ""))
+            if candidate_specificity > current_specificity:
+                return candidate
+        return current
+
+    @staticmethod
+    def _extract_route_literals(value: str) -> list[str]:
+        routes = []
+        for route in re.findall(r"https?://[^\s\"'<>),]+", str(value or "")):
+            if route not in routes:
+                routes.append(route)
+        for route in HTTP_LITERAL_PATTERN.findall(str(value or "")):
+            if route not in routes:
+                routes.append(route)
+        for route in re.findall(r"(?<![A-Za-z0-9_])/[A-Za-z0-9_./{}:-]{2,}", str(value or "")):
+            if route not in routes:
+                routes.append(route)
+        return routes[:12]
+
+    @staticmethod
+    def _prefer_specific_routes(routes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        preferred: list[dict[str, Any]] = []
+        route_values = [str(route.get("route") or "") for route in routes]
+        for route in routes:
+            value = str(route.get("route") or "")
+            normalized = "/" + value.strip("/")
+            if SourceCodeQAService._route_segment_count(normalized) <= 1 and any(
+                SourceCodeQAService._route_segment_count(other) > 1
+                and ("/" + str(other).strip("/")).endswith(normalized)
+                for other in route_values
+                if str(other or "") != value
+            ):
+                continue
+            preferred.append(route)
+        return preferred
+
+    @staticmethod
+    def _route_segment_count(route: str) -> int:
+        return len([part for part in SourceCodeQAService._route_path(route).split("/") if part])
+
+    @staticmethod
+    def _join_config_routes(search_text: str, config_values: list[str]) -> list[str]:
+        joined: list[str] = []
+        relative_routes = [
+            route
+            for route in SourceCodeQAService._extract_route_literals(search_text)
+            if route.startswith("/") and SourceCodeQAService._route_segment_count(route) <= 2
+        ]
+        for value in config_values:
+            parsed = urlsplit(str(value or ""))
+            base_path = parsed.path if parsed.scheme else str(value or "")
+            if not base_path:
+                continue
+            for route in relative_routes:
+                combined = SourceCodeQAService._join_routes(base_path, route)
+                if combined and combined not in joined:
+                    joined.append(combined)
+        return joined[:12]
+
+    @staticmethod
+    def _resolve_config_placeholders(value: str, config_values: dict[str, list[str]]) -> list[str]:
+        resolved: list[str] = []
+        for key in CONFIG_PLACEHOLDER_PATTERN.findall(str(value or "")):
+            for candidate in config_values.get(key, [])[:5]:
+                if candidate and candidate not in resolved:
+                    resolved.append(candidate)
+        return resolved[:12]
+
+    @staticmethod
+    def _candidate_dependency_config_values(config_values: dict[str, list[str]]) -> list[str]:
+        values: list[str] = []
+        for key, candidates in config_values.items():
+            lowered_key = str(key or "").lower()
+            if not any(marker in lowered_key for marker in ("url", "uri", "endpoint", "host", "service", "client")):
+                continue
+            for candidate in candidates[:5]:
+                lowered = str(candidate or "").lower()
+                if candidate and ("http" in lowered or "/" in lowered or "-service" in lowered):
+                    values.append(candidate)
+        return values[:20]
+
+    @staticmethod
+    def _route_overlap_score(left: str, right: str) -> float:
+        left_norm = SourceCodeQAService._route_path(left)
+        right_norm = SourceCodeQAService._route_path(right)
+        if len(left_norm) < 3 or len(right_norm) < 3:
+            return 0.0
+        if left_norm == right_norm:
+            return 0.96
+        if left_norm.endswith(right_norm) or right_norm.endswith(left_norm):
+            return 0.88
+        left_parts = {part for part in left_norm.lower().split("/") if part and not part.startswith("{")}
+        right_parts = {part for part in right_norm.lower().split("/") if part and not part.startswith("{")}
+        if not left_parts or not right_parts:
+            return 0.0
+        overlap = left_parts & right_parts
+        if len(overlap) >= 2:
+            return 0.78
+        return 0.0
+
+    @staticmethod
+    def _route_path(route: str) -> str:
+        value = str(route or "").split("?", 1)[0].strip()
+        parsed = urlsplit(value)
+        if parsed.scheme and parsed.path:
+            value = parsed.path
+        return "/" + value.strip("/")
+
+    @staticmethod
+    def _join_routes(prefix: str, suffix: str) -> str:
+        prefix = str(prefix or "").split("?", 1)[0].strip()
+        suffix = str(suffix or "").split("?", 1)[0].strip()
+        if not prefix:
+            return suffix
+        if not suffix:
+            return prefix
+        if prefix.startswith("http") or suffix.startswith("http"):
+            return suffix if suffix.startswith("http") else prefix.rstrip("/") + "/" + suffix.lstrip("/")
+        return "/" + "/".join(part.strip("/") for part in (prefix, suffix) if part.strip("/"))
+
+    @staticmethod
+    def _repo_alias_match_score(value: str, entry: RepositoryEntry) -> float:
+        normalized_value = re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+        if not normalized_value:
+            return 0.0
+        aliases = {
+            re.sub(r"[^a-z0-9]+", "", entry.display_name.lower()),
+            re.sub(r"[^a-z0-9]+", "", SourceCodeQAService._derive_display_name(entry.url).lower()),
+        }
+        ignored_parts = {"service", "repo", "repository", "portal", "client", "api", "team"}
+        for raw_part in re.split(r"[^A-Za-z0-9]+", entry.display_name):
+            normalized_part = raw_part.lower()
+            if len(normalized_part) >= 8 and normalized_part not in ignored_parts:
+                aliases.add(normalized_part)
+        for candidate in aliases:
+            if len(candidate) >= 4 and candidate in normalized_value:
+                return 0.84
+            if len(candidate) >= 6 and normalized_value in candidate:
+                return 0.72
+        return 0.0
 
     @staticmethod
     def _match_repo_dependency_target(value: str, entries: list[RepositoryEntry], source_name: str) -> RepositoryEntry | None:
@@ -3120,6 +7917,7 @@ class SourceCodeQAService:
         quality_gate: dict[str, Any],
     ) -> dict[str, Any]:
         intent = evidence_summary.get("intent") or self._question_intent(question)
+        seed_terms = self._planner_seed_terms(question, evidence_summary)
         steps: list[dict[str, Any]] = []
         if intent.get("data_source"):
             steps.extend(
@@ -3127,34 +7925,88 @@ class SourceCodeQAService:
                     {
                         "name": "trace_data_carriers",
                         "purpose": "Find DTO/context/result objects that carry the requested data.",
-                        "terms": ["DataSourceResult", "UnderwritingContext", "UnderwritingInitiationDTO", "Input", "DTO", "Record", "Result"],
+                        "terms": [*seed_terms, "dto", "input", "context", "record", "result", "request", "response", "profile", "info"],
+                        "tools": ["find_definition", "find_references", "open_file_window"],
                     },
                     {
                         "name": "trace_field_population",
                         "purpose": "Trace DTO fields backward to provider, builder, converter, and setter/getter code.",
                         "terms": [
-                            "UnderwritingInitiationProvider", "UnderwritingInitiationDTO",
-                            "UnderwritingBasicInfo", "CustomerInfo", "LoanInfo", "CreditRiskInfo",
-                            "setCustomerInfo", "setLoanInfo", "setCreditRiskInfo",
-                            "getCustomerInfo", "getLoanInfo", "getCreditRiskInfo",
-                            "populate", "build", "provider", "converter",
+                            *seed_terms,
+                            "set",
+                            "get",
+                            "populate",
+                            "build",
+                            "builder",
+                            "provider",
+                            "factory",
+                            "converter",
+                            "assembler",
+                            "mapper",
                         ],
+                        "tools": ["find_references", "find_callers", "find_callees", "trace_flow"],
                     },
                     {
                         "name": "trace_downstream_sources",
                         "purpose": "Follow services into repository, mapper, integration, client, SQL, or API calls.",
-                        "terms": ["Repository", "Mapper", "Dao", "DAO", "jdbcTemplate", "queryForObject", "select", "Integration", "Client"],
+                        "terms": [*seed_terms, "repository", "mapper", "dao", "jdbcTemplate", "queryForObject", "select", "from", "integration", "client", "gateway"],
+                        "tools": ["find_tables", "find_callees", "trace_flow", "trace_entity"],
                     },
                     {
                         "name": "trace_dao_mapper_methods",
                         "purpose": "Open DAO/Mapper classes and XML/SQL mappings to find concrete table, query, or upstream API source.",
                         "terms": [
-                            "CustomerInfoDAO", "CustomerInfoDao", "CustomerInfoMapper",
-                            "LoanInfoDAO", "LoanInfoDao", "LoanInfoMapper",
-                            "CreditRiskInfoDAO", "CreditRiskInfoDao", "CreditRiskInfoMapper",
-                            "UnderwritingBasicInfoDAO", "UnderwritingBasicInfoMapper",
-                            "select", "from", "resultMap", "namespace", "queryForObject",
+                            *self._planner_suffix_terms(seed_terms, ("Repository", "Mapper", "Dao", "DAO", "Client", "Integration")),
+                            "select",
+                            "from",
+                            "join",
+                            "resultMap",
+                            "namespace",
+                            "queryForObject",
+                            "statement",
                         ],
+                        "tools": ["find_definition", "find_tables", "find_references"],
+                    },
+                ]
+            )
+        if intent.get("module_dependency") or any(term in str(question or "").lower() for term in ("cross-repo", "cross repo", "another repo", "dependency", "module")):
+            steps.extend(
+                [
+                    {
+                        "name": "trace_module_dependencies",
+                        "purpose": "Find Maven, Gradle, npm, package, and module dependency evidence across repositories.",
+                        "terms": [
+                            *seed_terms,
+                            "pom.xml",
+                            "build.gradle",
+                            "settings.gradle",
+                            "package.json",
+                            "artifactId",
+                            "groupId",
+                            "dependency",
+                            "implementation",
+                            "api",
+                            "module_dependency",
+                        ],
+                        "tools": ["find_references", "trace_flow", "trace_entity", "search_code"],
+                    },
+                    {
+                        "name": "trace_cross_repo_contracts",
+                        "purpose": "Find cross-repo contracts through routes, clients, message topics, shared tables, or dependency coordinates.",
+                        "terms": [
+                            *seed_terms,
+                            "FeignClient",
+                            "RestTemplate",
+                            "WebClient",
+                            "KafkaListener",
+                            "RabbitListener",
+                            "JmsListener",
+                            "topic",
+                            "queue",
+                            "shared table",
+                            "requestmapping",
+                        ],
+                        "tools": ["find_api_routes", "find_references", "find_tables", "trace_flow", "search_code"],
                     },
                 ]
             )
@@ -3163,7 +8015,8 @@ class SourceCodeQAService:
                 {
                     "name": "trace_api_flow",
                     "purpose": "Find controllers, API clients, request mappings, and endpoint calls.",
-                    "terms": ["Controller", "RequestMapping", "PostMapping", "GetMapping", "Client", "Endpoint"],
+                    "terms": [*seed_terms, "controller", "requestmapping", "postmapping", "getmapping", "client", "endpoint", "route", "url"],
+                    "tools": ["find_api_routes", "find_definition", "find_callees", "trace_flow"],
                 }
             )
         if intent.get("config"):
@@ -3171,7 +8024,17 @@ class SourceCodeQAService:
                 {
                     "name": "trace_config",
                     "purpose": "Find properties, YAML, feature flags, and configuration classes.",
-                    "terms": ["Configuration", "Properties", "yaml", "feature", "config"],
+                    "terms": [*seed_terms, "configuration", "properties", "yaml", "yml", "feature", "config", "flag"],
+                    "tools": ["find_definition", "find_references", "search_code"],
+                }
+            )
+        if any(term in str(question or "").lower() for term in ("topic", "queue", "kafka", "rabbit", "jms", "message", "consumer", "producer")):
+            steps.append(
+                {
+                    "name": "trace_message_flow",
+                    "purpose": "Find message producers, consumers, topics, queues, and event handoff code.",
+                    "terms": [*seed_terms, "KafkaListener", "RabbitListener", "JmsListener", "topic", "queue", "send", "publishEvent", "consumer", "producer"],
+                    "tools": ["find_references", "find_callers", "find_callees", "trace_flow", "search_code"],
                 }
             )
         if intent.get("rule_logic") or intent.get("error"):
@@ -3179,8 +8042,84 @@ class SourceCodeQAService:
                 {
                     "name": "trace_decision_logic",
                     "purpose": "Find validations, rule branches, error handling, or approval logic.",
-                    "terms": ["validate", "rule", "condition", "exception", "status", "approval"],
+                    "terms": [*seed_terms, "validate", "validation", "rule", "condition", "exception", "status", "approval", "permission"],
+                    "tools": ["find_references", "find_callers", "open_file_window", "search_code"],
                 }
+            )
+        if intent.get("static_qa"):
+            steps.append(
+                {
+                    "name": "scan_static_qa_findings",
+                    "purpose": "Find deterministic static QA risks such as hardcoded secrets, unsafe SQL, swallowed exceptions, command execution, and TODO/FIXME markers.",
+                    "terms": [
+                        *seed_terms,
+                        "password",
+                        "secret",
+                        "token",
+                        "apiKey",
+                        "catch",
+                        "Exception",
+                        "Throwable",
+                        "printStackTrace",
+                        "Runtime",
+                        "ProcessBuilder",
+                        "subprocess",
+                        "eval",
+                        "exec",
+                        "TODO",
+                        "FIXME",
+                    ],
+                    "tools": ["find_static_findings", "open_file_window", "search_code"],
+                }
+            )
+        if intent.get("test_coverage"):
+            steps.append(
+                {
+                    "name": "trace_test_coverage",
+                    "purpose": "Find test files, test cases, assertions, mocks, and verification calls that cover the target symbol or behavior.",
+                    "terms": [*seed_terms, "test", "assert", "assertThat", "verify", "mock", "when", "should", "junit", "pytest", "jest"],
+                    "tools": ["find_test_coverage", "find_references", "open_file_window", "search_code"],
+                }
+            )
+        if intent.get("operational_boundary"):
+            steps.append(
+                {
+                    "name": "trace_operational_boundaries",
+                    "purpose": "Find transaction, cache, async, retry, circuit breaker, lock, rate-limit, and authorization annotations that alter runtime behavior.",
+                    "terms": [
+                        *seed_terms,
+                        "Transactional",
+                        "rollbackFor",
+                        "Cacheable",
+                        "CacheEvict",
+                        "Async",
+                        "Retryable",
+                        "CircuitBreaker",
+                        "RateLimiter",
+                        "Bulkhead",
+                        "TimeLimiter",
+                        "SchedulerLock",
+                        "PreAuthorize",
+                    ],
+                    "tools": ["find_operational_boundaries", "find_references", "trace_entity", "open_file_window", "search_code"],
+                }
+            )
+        if intent.get("impact_analysis"):
+            steps.extend(
+                [
+                    {
+                        "name": "trace_upstream_impact",
+                        "purpose": "Find callers, controllers, handlers, jobs, consumers, and cross-repo clients that can be affected by a change.",
+                        "terms": [*seed_terms, "controller", "handler", "consumer", "scheduler", "job", "client", "route", "caller", "usage"],
+                        "tools": ["find_references", "find_callers", "trace_flow", "trace_entity"],
+                    },
+                    {
+                        "name": "trace_downstream_impact",
+                        "purpose": "Find downstream services, repositories, mappers, clients, APIs, tables, topics, and configs touched by the changed code.",
+                        "terms": [*seed_terms, "service", "repository", "mapper", "dao", "client", "api", "table", "topic", "config", "callee"],
+                        "tools": ["find_callees", "trace_flow", "trace_entity", "find_tables", "find_api_routes"],
+                    },
+                ]
             )
         if quality_gate.get("status") != "sufficient":
             steps.append(
@@ -3188,6 +8127,7 @@ class SourceCodeQAService:
                     "name": "fill_quality_gap",
                     "purpose": "Search for the missing evidence reported by the quality gate.",
                     "terms": self._quality_gate_trace_terms(question, evidence_summary, quality_gate, []),
+                    "tools": ["find_tables", "find_api_routes", "trace_flow", "search_code"],
                 }
             )
         deduped_steps: list[dict[str, Any]] = []
@@ -3199,13 +8139,53 @@ class SourceCodeQAService:
             terms = list(dict.fromkeys(str(term).strip() for term in step.get("terms") or [] if str(term).strip()))
             if not terms:
                 continue
-            deduped_steps.append({**step, "terms": terms[:16]})
+            tools = [
+                str(tool).strip()
+                for tool in step.get("tools") or []
+                if str(tool).strip() in {tool_def["name"] for tool_def in self._planner_tool_registry()["tools"]}
+            ]
+            deduped_steps.append({**step, "terms": terms[:16], "tools": list(dict.fromkeys(tools))[:5]})
             seen.add(name)
         return {
             "mode": "local_agentic_retrieval",
+            "recipe_version": 2,
             "status": "planned" if deduped_steps else "not_needed",
+            "intent": intent,
             "steps": deduped_steps[:5],
         }
+
+    def _planner_seed_terms(self, question: str, evidence_summary: dict[str, Any]) -> list[str]:
+        terms: list[str] = []
+        for bucket in ("entry_points", "data_carriers", "field_population", "downstream_components", "data_sources", "api_or_config", "rule_or_error_logic"):
+            for fact in evidence_summary.get(bucket) or []:
+                terms.extend(IDENTIFIER_PATTERN.findall(str(fact)))
+                terms.extend(part for part in re.split(r"[/_.:-]+", str(fact)) if part)
+        terms.extend(token for token in self._question_tokens(question) if token not in DEPENDENCY_QUESTION_TERMS)
+        deduped: list[str] = []
+        for term in terms:
+            normalized = str(term or "").strip()
+            lowered = normalized.lower()
+            if len(lowered) < 4 or lowered in STOPWORDS or lowered in LOW_VALUE_CALL_SYMBOLS:
+                continue
+            if lowered in LOW_VALUE_FOCUS_TERMS and len(lowered) < 10:
+                continue
+            if lowered not in {item.lower() for item in deduped}:
+                deduped.append(normalized)
+        return deduped[:16]
+
+    @staticmethod
+    def _planner_suffix_terms(seed_terms: list[str], suffixes: tuple[str, ...]) -> list[str]:
+        generated: list[str] = []
+        for term in seed_terms[:8]:
+            base = re.sub(r"[^A-Za-z0-9_]", "", str(term or ""))
+            if len(base) < 4:
+                continue
+            if any(base.lower().endswith(suffix.lower()) for suffix in suffixes):
+                generated.append(base)
+                continue
+            for suffix in suffixes:
+                generated.append(f"{base}{suffix}")
+        return generated[:24]
 
     def _run_agent_plan(
         self,
@@ -3218,6 +8198,8 @@ class SourceCodeQAService:
         quality_gate: dict[str, Any],
         agent_plan: dict[str, Any],
         limit: int,
+        tool_trace: list[dict[str, Any]] | None = None,
+        request_cache: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         collected = list(matches)
         seen_keys = {(item["repo"], item["path"], item["line_start"], item["line_end"]) for item in collected}
@@ -3232,31 +8214,85 @@ class SourceCodeQAService:
                 expanded_tokens.extend(self._question_tokens(term))
             expanded_tokens = list(dict.fromkeys(expanded_tokens))[:30]
             step_matches: list[dict[str, Any]] = []
-            for entry in entries:
-                repo_path = self._repo_path(key, entry)
-                if not (repo_path / ".git").exists():
-                    continue
+            for tool in step.get("tools") or []:
+                tool_step = {"tool": str(tool), "terms": terms[:18]}
+                before_tool_count = len(step_matches)
                 step_matches.extend(
-                    self._search_repo(
-                        entry,
-                        repo_path,
-                        expanded_tokens,
+                    self._execute_tool_loop_step(
+                        entries=entries,
+                        key=key,
                         question=question,
-                        focus_terms=terms,
-                        trace_stage=f"agent_plan_{step_index}",
+                        matches=collected,
+                        step=tool_step,
+                        step_index=step_index,
+                        request_cache=request_cache,
                     )
                 )
+                if tool_trace is not None:
+                    tool_trace.append(
+                        {
+                            "phase": "agent_plan",
+                            "round": step_index,
+                            "step": str(step.get("name") or f"step_{step_index}"),
+                            "tool": str(tool),
+                            "terms": terms[:10],
+                            "matches_found": len(step_matches) - before_tool_count,
+                        }
+                    )
+            before_keyword_count = len(step_matches)
+            ran_explicit_search = any(str(tool) == "search_code" for tool in (step.get("tools") or []))
+            if not ran_explicit_search:
+                for entry in entries:
+                    repo_path = self._repo_path(key, entry)
+                    if not (repo_path / ".git").exists():
+                        continue
+                    step_matches.extend(
+                        self._search_repo(
+                            entry,
+                            repo_path,
+                            expanded_tokens,
+                            question=question,
+                            focus_terms=terms,
+                            trace_stage=f"agent_plan_{step_index}",
+                            request_cache=request_cache,
+                        )
+                    )
+            if tool_trace is not None:
+                tool_trace.append(
+                    {
+                        "phase": "agent_plan",
+                        "round": step_index,
+                        "step": str(step.get("name") or f"step_{step_index}"),
+                        "tool": "search_code" if not ran_explicit_search else "search_code_skipped_duplicate",
+                        "terms": terms[:10],
+                        "matches_found": len(step_matches) - before_keyword_count,
+                    }
+                )
             step_matches.sort(key=lambda item: item["score"], reverse=True)
+            added = 0
             for item in step_matches[: max(6, min(int(limit or 12), 18))]:
                 item_key = (item["repo"], item["path"], item["line_start"], item["line_end"])
                 if item_key in seen_keys:
                     continue
                 collected.append(item)
                 seen_keys.add(item_key)
+                added += 1
+            if tool_trace is not None:
+                tool_trace.append(
+                    {
+                        "phase": "agent_plan",
+                        "round": step_index,
+                        "step": str(step.get("name") or f"step_{step_index}"),
+                        "tool": "dedupe_rank",
+                        "matches_found": len(step_matches),
+                        "matches_added": added,
+                        "matches_after": len(collected),
+                    }
+                )
             collected.sort(key=lambda item: item["score"], reverse=True)
-            collected = self._select_result_matches(collected, max(1, min(int(limit or 12), 30)))
-            current_summary = self._compress_evidence(question, collected)
-            current_gate = self._quality_gate(question, current_summary)
+            collected = self._select_result_matches(collected, max(1, min(int(limit or 12), 30)), question=question)
+            current_summary = self._compress_evidence_cached(question, collected, request_cache=request_cache)
+            current_gate = self._quality_gate_cached(question, current_summary, request_cache=request_cache)
             if self._should_stop_agent_plan(current_summary, current_gate, step_index):
                 break
         return collected
@@ -3310,40 +8346,9 @@ class SourceCodeQAService:
                     terms.append(symbol)
                     if symbol.endswith(("Info", "DTO", "Input", "Result", "Context")):
                         terms.extend([f"set{symbol}", f"get{symbol}", f"build{symbol}", f"populate{symbol}"])
-                    if symbol in {"CustomerInfo", "LoanInfo", "CreditRiskInfo", "UnderwritingBasicInfo"}:
-                        terms.extend([f"set{symbol}", f"get{symbol}"])
-        terms.extend(
-            [
-                "UnderwritingInitiationProvider",
-                "UnderwritingInitiationDTO",
-                "CustomerInfoDAO",
-                "CustomerInfoDao",
-                "CustomerInfoMapper",
-                "LoanInfoDAO",
-                "LoanInfoDao",
-                "LoanInfoMapper",
-                "CreditRiskInfoDAO",
-                "CreditRiskInfoDao",
-                "CreditRiskInfoMapper",
-                "UnderwritingBasicInfoDAO",
-                "UnderwritingBasicInfoMapper",
-                "UnderwritingBasicInfo",
-                "CustomerInfo",
-                "LoanInfo",
-                "CreditRiskInfo",
-                "setCustomerInfo",
-                "setLoanInfo",
-                "setCreditRiskInfo",
-                "getCustomerInfo",
-                "getLoanInfo",
-                "getCreditRiskInfo",
-                "populate",
-                "build",
-                "provider",
-                "converter",
-                "assembler",
-            ]
-        )
+                    if symbol.endswith(("Repository", "Mapper", "Dao", "DAO", "Client", "Integration", "Provider")):
+                        terms.extend([symbol, f"{symbol}Impl"])
+        terms.extend(["populate", "build", "provider", "converter", "assembler", "repository", "mapper", "dao", "client"])
         terms.extend(self._all_profile_terms("data_carriers", "source_terms", "field_population_terms"))
         return terms
 
@@ -3368,15 +8373,17 @@ class SourceCodeQAService:
                 [
                     "datasourceresult",
                     "getdatasourceresult",
-                    "underwritingcontext",
-                    "underwritingrecord",
-                    "customerinfodo",
-                    "customerextrainfodto",
-                    "userinfo",
-                    "featuredata",
+                    "dataresult",
+                    "datacontext",
+                    "datarecord",
+                    "dataprofile",
+                    "datadto",
+                    "datainput",
                     "integration",
                     "repository",
                     "mapper",
+                    "dao",
+                    "client",
                     "provider",
                 ]
             )
@@ -3449,15 +8456,15 @@ class SourceCodeQAService:
             focus_terms.extend(
                 [
                     "datasourceresult",
-                    "underwritingcontext",
-                    "underwritinginitiationdto",
-                    "customerinfodo",
-                    "customerextrainfodto",
-                    "userinfo",
-                    "featuredata",
-                    "dpdunderwriting",
-                    "buildcommon",
-                    "commonenginestrategy",
+                    "datacontext",
+                    "datarecord",
+                    "datadto",
+                    "datainput",
+                    "datarequest",
+                    "dataresponse",
+                    "dataprofile",
+                    "build",
+                    "strategy",
                     "provider",
                 ]
             )
@@ -3486,8 +8493,13 @@ class SourceCodeQAService:
             "data_source": any(term in lowered for term in DATA_SOURCE_HINTS),
             "api": any(term in lowered for term in API_HINTS),
             "config": any(term in lowered for term in CONFIG_HINTS),
+            "module_dependency": any(term in lowered for term in MODULE_DEPENDENCY_HINTS),
             "error": any(term in lowered for term in ERROR_HINTS),
             "rule_logic": any(term in lowered for term in RULE_HINTS),
+            "static_qa": any(term in lowered for term in STATIC_QA_HINTS),
+            "impact_analysis": any(term in lowered for term in IMPACT_ANALYSIS_HINTS),
+            "test_coverage": any(term in lowered for term in TEST_COVERAGE_HINTS),
+            "operational_boundary": any(term in lowered for term in OPERATIONAL_BOUNDARY_HINTS),
         }
 
     def _build_query_decomposition(self, question: str, domain_profile: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -3526,8 +8538,39 @@ class SourceCodeQAService:
             add("carrier_backtrace", ["provider", "builder", "converter", "assembler", *profile_terms[:16], *question_terms])
         if intent.get("config"):
             add("configuration", ["properties", "yaml", "configuration", "feature", "config", *question_terms])
+        if intent.get("module_dependency"):
+            add("module_dependency", ["pom.xml", "build.gradle", "package.json", "maven", "gradle", "npm", "dependency", "artifactId", "groupId", *question_terms])
         if intent.get("rule_logic") or intent.get("error"):
             add("decision_logic", ["validate", "rule", "condition", "exception", "status", "approval", *question_terms])
+        if intent.get("static_qa"):
+            add(
+                "static_qa",
+                [
+                    "TODO", "FIXME", "password", "secret", "token", "apiKey", "catch",
+                    "Exception", "Throwable", "printStackTrace", "Runtime", "ProcessBuilder",
+                    "subprocess", "eval", "exec", "select", "format", *question_terms,
+                ],
+            )
+        if intent.get("impact_analysis"):
+            add(
+                "impact_analysis",
+                [
+                    "controller", "handler", "consumer", "service", "repository", "mapper",
+                    "dao", "client", "route", "endpoint", "table", "topic", "config",
+                    "caller", "callee", "dependency", *question_terms,
+                ],
+            )
+        if intent.get("test_coverage"):
+            add("test_coverage", ["test", "assert", "verify", "mock", "should", "junit", "pytest", "jest", *question_terms])
+        if intent.get("operational_boundary"):
+            add(
+                "operational_boundary",
+                [
+                    "Transactional", "Cacheable", "CacheEvict", "CachePut", "Async",
+                    "Retryable", "CircuitBreaker", "RateLimiter", "Bulkhead",
+                    "TimeLimiter", "SchedulerLock", "PreAuthorize", *question_terms,
+                ],
+            )
 
         return {
             "mode": "query_decomposition",
@@ -3535,24 +8578,103 @@ class SourceCodeQAService:
             "components": components[:5],
         }
 
-    def _rank_matches(self, question: str, matches: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _rank_matches(
+        self,
+        question: str,
+        matches: list[dict[str, Any]],
+        *,
+        request_cache: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
         if not matches:
             return []
         ranked = []
+        question_features = self._question_retrieval_features(question, request_cache=request_cache)
         for match in matches:
             enriched = dict(match)
-            enriched["rerank_score"] = self._rerank_score(question, enriched)
+            enriched["rerank_score"] = self._rerank_score_cached(
+                question,
+                enriched,
+                question_features=question_features,
+                request_cache=request_cache,
+            )
             ranked.append(enriched)
         ranked.sort(key=lambda item: item.get("rerank_score", item.get("score", 0)), reverse=True)
         return ranked
 
-    def _rerank_score(self, question: str, match: dict[str, Any]) -> int:
+    def _question_retrieval_features(
+        self,
+        question: str,
+        *,
+        request_cache: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        if request_cache is not None:
+            features_cache = request_cache.setdefault("question_features", {})
+            cached = features_cache.get(question)
+            if cached is not None:
+                self._increment_retrieval_stat(request_cache, "question_feature_hits")
+                return cached
+            self._increment_retrieval_stat(request_cache, "question_feature_misses")
+        features = {
+            "intent": self._question_intent(question),
+            "tokens": set(self._question_tokens(question)),
+        }
+        if request_cache is not None:
+            request_cache.setdefault("question_features", {})[question] = features
+        return features
+
+    @staticmethod
+    def _rerank_cache_key(question: str, match: dict[str, Any]) -> tuple[Any, ...]:
+        return (
+            question,
+            match.get("path"),
+            match.get("score"),
+            match.get("snippet"),
+            match.get("retrieval"),
+            match.get("trace_stage"),
+            bool(match.get("static_qa")),
+            bool(match.get("test_coverage")),
+            bool(match.get("operational_boundary")),
+        )
+
+    def _rerank_score_cached(
+        self,
+        question: str,
+        match: dict[str, Any],
+        *,
+        question_features: dict[str, Any] | None = None,
+        request_cache: dict[str, Any] | None = None,
+    ) -> int:
+        if request_cache is None:
+            return self._rerank_score(question, match, question_features=question_features)
+        cache_key = self._rerank_cache_key(question, match)
+        rerank_cache = request_cache.setdefault("rerank", {})
+        cached = rerank_cache.get(cache_key)
+        if cached is not None:
+            self._increment_retrieval_stat(request_cache, "rerank_hits")
+            return int(cached)
+        self._increment_retrieval_stat(request_cache, "rerank_misses")
+        score = self._rerank_score(question, match, question_features=question_features)
+        rerank_cache[cache_key] = score
+        return score
+
+    def _rerank_score(
+        self,
+        question: str,
+        match: dict[str, Any],
+        *,
+        question_features: dict[str, Any] | None = None,
+    ) -> int:
         score = int(match.get("score") or 0)
-        intent = self._question_intent(question)
+        question_features = question_features or self._question_retrieval_features(question)
+        intent = question_features.get("intent") or {}
         path = str(match.get("path") or "").lower()
         snippet = str(match.get("snippet") or "").lower()
         retrieval = str(match.get("retrieval") or "")
         trace_stage = str(match.get("trace_stage") or "")
+        question_tokens = set(question_features.get("tokens") or [])
+        path_stem = Path(path).stem.lower()
+        if path_stem and path_stem in question_tokens:
+            score += 80
         if trace_stage == "query_decomposition":
             score += 20
         if retrieval in {"flow_graph", "code_graph"}:
@@ -3577,7 +8699,71 @@ class SourceCodeQAService:
         if intent.get("rule_logic") or intent.get("error"):
             if any(term in snippet for term in ("validate", "condition", "exception", "approval", "permission")):
                 score += 20
+        if intent.get("static_qa"):
+            if retrieval == "static_qa" or match.get("static_qa"):
+                score += 42
+            if any(term in snippet for term in ("password", "secret", "token", "printstacktrace", "runtime", "processbuilder", "todo", "fixme")):
+                score += 20
+        if intent.get("impact_analysis"):
+            if retrieval in {"planner_caller", "planner_callee", "flow_graph", "entity_graph", "code_graph"}:
+                score += 38
+            if any(term in path for term in ("controller", "handler", "consumer", "service", "repository", "mapper", "client")):
+                score += 16
+        if intent.get("test_coverage"):
+            if retrieval == "test_coverage" or match.get("test_coverage"):
+                score += 54
+            if self._is_test_file_path(path):
+                score += 36
+            if any(term in snippet for term in ("assert", "verify", "expect", "@test", "should")):
+                score += 18
+        if intent.get("operational_boundary"):
+            if retrieval == "operational_boundary" or match.get("operational_boundary"):
+                score += 54
+            if any(term in snippet for term in ("@transactional", "@cacheable", "@cacheevict", "@async", "@retryable", "@circuitbreaker", "@ratelimiter", "@schedulerlock", "@preauthorize")):
+                score += 30
         return score
+
+    @staticmethod
+    def _match_cache_signature(matches: list[dict[str, Any]]) -> list[tuple[Any, ...]]:
+        return [
+            (
+                match.get("repo"),
+                match.get("path"),
+                match.get("line_start"),
+                match.get("line_end"),
+                match.get("score"),
+                match.get("trace_stage"),
+                match.get("retrieval"),
+                match.get("reason"),
+            )
+            for match in matches
+        ]
+
+    def _compress_evidence_cached(
+        self,
+        question: str,
+        matches: list[dict[str, Any]],
+        *,
+        request_cache: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        if request_cache is None:
+            return self._compress_evidence(question, matches)
+        cache_key = hashlib.sha1(
+            json.dumps(
+                {"question": question, "matches": self._match_cache_signature(matches)},
+                ensure_ascii=False,
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()
+        evidence_cache = request_cache.setdefault("evidence", {})
+        cached = evidence_cache.get(cache_key)
+        if cached is not None:
+            self._increment_retrieval_stat(request_cache, "evidence_hits")
+            return self._clone_jsonish(cached)
+        self._increment_retrieval_stat(request_cache, "evidence_misses")
+        summary = self._compress_evidence(question, matches)
+        evidence_cache[cache_key] = self._clone_jsonish(summary)
+        return summary
 
     def _compress_evidence(self, question: str, matches: list[dict[str, Any]]) -> dict[str, Any]:
         selected = self._select_llm_matches(matches, 12, question=question)
@@ -3590,6 +8776,10 @@ class SourceCodeQAService:
             "data_sources": [],
             "api_or_config": [],
             "rule_or_error_logic": [],
+            "static_findings": [],
+            "impact_surfaces": [],
+            "test_coverage": [],
+            "operational_boundaries": [],
             "source_count": len(selected),
         }
         adders = {key: self._limited_fact_adder(summary[key], 12) for key in summary if isinstance(summary.get(key), list)}
@@ -3604,6 +8794,22 @@ class SourceCodeQAService:
 
             if match.get("trace_stage") == "direct" or any(hint in path_lower for hint in ("controller", "consumer", "scene", "strategy", "service", "engine")):
                 adders["entry_points"](f"{label}: {self._compact_path(path)}")
+
+            retrieval = str(match.get("retrieval") or "")
+            reason = str(match.get("reason") or "")
+            if retrieval in {"planner_caller", "planner_callee", "flow_graph", "code_graph", "entity_graph"}:
+                impact_role = {
+                    "planner_caller": "upstream caller",
+                    "planner_callee": "downstream callee",
+                    "flow_graph": "flow dependency",
+                    "code_graph": "symbol dependency",
+                    "entity_graph": "entity dependency",
+                }.get(retrieval, "dependency")
+                adders["impact_surfaces"](f"{label}: {impact_role}: {reason or self._compact_path(path)}")
+            if retrieval == "test_coverage" or match.get("test_coverage"):
+                adders["test_coverage"](f"{label}: {reason or 'test coverage evidence'}")
+            if retrieval == "operational_boundary" or match.get("operational_boundary"):
+                adders["operational_boundaries"](f"{label}: {reason or 'operational boundary evidence'}")
 
             for symbol in symbols:
                 lowered = symbol.lower()
@@ -3624,8 +8830,271 @@ class SourceCodeQAService:
                 adders["api_or_config"](f"{label}: {line}")
             for line in self._interesting_lines(snippet, ERROR_HINTS + RULE_HINTS):
                 adders["rule_or_error_logic"](f"{label}: {line}")
+            if match.get("retrieval") == "static_qa" or match.get("static_qa"):
+                finding = match.get("static_qa") or {}
+                finding_label = str(finding.get("kind") or "static_qa")
+                severity = str(finding.get("severity") or "medium")
+                reason = str(finding.get("reason") or match.get("reason") or "static QA finding")
+                adders["static_findings"](f"{label}: {severity} {finding_label}: {reason}")
+            else:
+                for finding in self._static_qa_findings_for_line(snippet):
+                    adders["static_findings"](
+                        f"{label}: {finding['severity']} {finding['kind']}: {finding['reason']}"
+                    )
 
         return summary
+
+    def _build_evidence_pack(
+        self,
+        *,
+        question: str,
+        evidence_summary: dict[str, Any],
+        matches: list[dict[str, Any]],
+        trace_paths: list[dict[str, Any]],
+        quality_gate: dict[str, Any],
+    ) -> dict[str, Any]:
+        pack: dict[str, Any] = {
+            "version": 2,
+            "intent": evidence_summary.get("intent") or self._question_intent(question),
+            "items": [],
+            "entry_points": [],
+            "call_chain": [],
+            "read_write_points": [],
+            "external_dependencies": [],
+            "tables": [],
+            "apis": [],
+            "configs": [],
+            "static_findings": [],
+            "impact_surfaces": [],
+            "test_coverage": [],
+            "operational_boundaries": [],
+            "missing_hops": [],
+            "citation_map": [],
+            "confirmed_facts": [],
+            "inferred_facts": [],
+            "missing_facts": [],
+            "evidence_limits": [],
+        }
+        adders = {
+            key: self._limited_fact_adder(pack[key], 10)
+            for key in pack
+            if isinstance(pack.get(key), list)
+        }
+
+        def add_item(
+            evidence_type: str,
+            claim: str,
+            *,
+            source_id: str = "",
+            match: dict[str, Any] | None = None,
+            confidence: str = "medium",
+            hop: str = "",
+            supports_answer: bool = True,
+        ) -> None:
+            claim_text = re.sub(r"\s+", " ", str(claim or "")).strip()
+            if not claim_text:
+                return
+            item = {
+                "type": evidence_type,
+                "claim": claim_text[:500],
+                "source_id": source_id,
+                "confidence": confidence,
+                "hop": hop,
+                "supports_answer": bool(supports_answer),
+            }
+            if match:
+                item.update(
+                    {
+                        "repo": match.get("repo"),
+                        "path": match.get("path"),
+                        "line_start": match.get("line_start"),
+                        "line_end": match.get("line_end"),
+                        "retrieval": match.get("retrieval") or "file_scan",
+                        "trace_stage": match.get("trace_stage") or "direct",
+                    }
+                )
+            if not any(existing.get("type") == item["type"] and existing.get("claim") == item["claim"] for existing in pack["items"]):
+                pack["items"].append(item)
+
+        for fact in evidence_summary.get("entry_points") or []:
+            adders["entry_points"](str(fact))
+            add_item("entry_point", str(fact), confidence="medium", hop="entry")
+        for fact in evidence_summary.get("data_sources") or []:
+            lowered = str(fact).lower()
+            for table in SQL_TABLE_PATTERN.findall(str(fact)):
+                adders["tables"](f"{table} ({self._fact_source_label(str(fact))})")
+                add_item("table", f"{table} is referenced by {self._fact_source_label(str(fact))}", confidence="high", hop="source")
+            if any(term in lowered for term in ("client", "integration", "gateway", "feign", "resttemplate", "webclient", "endpoint", "http")):
+                adders["external_dependencies"](str(fact))
+                add_item("external_dependency", str(fact), confidence="high", hop="source")
+            adders["read_write_points"](str(fact))
+            add_item("read_write", str(fact), confidence="high", hop="source")
+        for fact in evidence_summary.get("api_or_config") or []:
+            lowered = str(fact).lower()
+            if any(term in lowered for term in API_HINTS):
+                adders["apis"](str(fact))
+                add_item("api", str(fact), confidence="high", hop="api")
+            if any(term in lowered for term in CONFIG_HINTS):
+                adders["configs"](str(fact))
+                add_item("config", str(fact), confidence="high", hop="config")
+        for fact in evidence_summary.get("field_population") or []:
+            adders["read_write_points"](str(fact))
+            add_item("field_population", str(fact), confidence="medium", hop="field_population")
+        for fact in evidence_summary.get("downstream_components") or []:
+            adders["call_chain"](str(fact))
+            add_item("call_chain", str(fact), confidence="medium", hop="downstream")
+        for fact in evidence_summary.get("static_findings") or []:
+            severity = "high" if " high " in f" {str(fact).lower()} " else "medium" if " medium " in f" {str(fact).lower()} " else "low"
+            adders["static_findings"](str(fact))
+            add_item("static_finding", str(fact), confidence=severity, hop="static_qa")
+        for fact in evidence_summary.get("impact_surfaces") or []:
+            lowered = str(fact).lower()
+            hop = "upstream" if "upstream" in lowered or "caller" in lowered else "downstream" if "downstream" in lowered or "callee" in lowered else "graph"
+            adders["impact_surfaces"](str(fact))
+            add_item("impact_surface", str(fact), confidence="medium", hop=hop)
+        for fact in evidence_summary.get("test_coverage") or []:
+            lowered = str(fact).lower()
+            confidence = "high" if any(term in lowered for term in ("assert", "verify", "expect", "test case")) else "medium"
+            adders["test_coverage"](str(fact))
+            add_item("test_coverage", str(fact), confidence=confidence, hop="test")
+        for fact in evidence_summary.get("operational_boundaries") or []:
+            lowered = str(fact).lower()
+            confidence = "high" if any(term in lowered for term in ("transactional", "cache", "async", "retry", "circuit", "rate", "lock", "authorize")) else "medium"
+            adders["operational_boundaries"](str(fact))
+            add_item("operational_boundary", str(fact), confidence=confidence, hop="runtime_boundary")
+
+        for path in trace_paths[:8]:
+            edges = path.get("edges") or []
+            if not edges:
+                continue
+            edge_text = " -> ".join(
+                str(edge.get("to_name") or edge.get("to_file") or edge.get("edge_kind") or "").strip()
+                for edge in edges
+                if str(edge.get("to_name") or edge.get("to_file") or edge.get("edge_kind") or "").strip()
+            )
+            if edge_text:
+                adders["call_chain"](f"{path.get('repo')}: {edge_text}")
+                add_item("call_chain", f"{path.get('repo')}: {edge_text}", confidence=str(path.get("confidence") or "medium"), hop="trace_path")
+
+        for index, match in enumerate(matches[:16], start=1):
+            source_id = f"S{index}"
+            label = self._evidence_label(match)
+            path = str(match.get("path") or "")
+            snippet = str(match.get("snippet") or "")
+            snippet_lower = snippet.lower()
+            adders["citation_map"](
+                f"{source_id}: {label} / {match.get('retrieval') or 'file_scan'} / {match.get('trace_stage') or 'direct'}"
+            )
+            if any(term in path.lower() for term in ("controller", "consumer", "handler", "service", "engine", "strategy")):
+                adders["entry_points"](f"{label}: {self._compact_path(path)}")
+                add_item("entry_point", f"{label}: {self._compact_path(path)}", source_id=source_id, match=match, hop="entry")
+            for table in SQL_TABLE_PATTERN.findall(snippet):
+                adders["tables"](f"{table} ({label})")
+                add_item("table", f"{table} is referenced in {label}", source_id=source_id, match=match, confidence="high", hop="source")
+            for literal in HTTP_LITERAL_PATTERN.findall(snippet):
+                if literal.startswith(("http://", "https://", "/")):
+                    adders["apis"](f"{label}: {literal}")
+                    add_item("api", f"{label}: {literal}", source_id=source_id, match=match, confidence="high", hop="api")
+            for line in self._interesting_lines(snippet, API_HINTS):
+                adders["apis"](f"{label}: {line}")
+                add_item("api", f"{label}: {line}", source_id=source_id, match=match, confidence="medium", hop="api")
+            for line in self._interesting_lines(snippet, CONFIG_HINTS):
+                adders["configs"](f"{label}: {line}")
+                add_item("config", f"{label}: {line}", source_id=source_id, match=match, confidence="medium", hop="config")
+            for line in self._interesting_lines(snippet, FIELD_POPULATION_HINTS):
+                adders["read_write_points"](f"{label}: {line}")
+                add_item("field_population", f"{label}: {line}", source_id=source_id, match=match, confidence="medium", hop="field_population")
+            if any(term in snippet_lower for term in ("feign", "resttemplate", "webclient", "http://", "https://")):
+                for line in self._interesting_lines(snippet, ("feign", "resttemplate", "webclient", "http://", "https://")):
+                    adders["external_dependencies"](f"{label}: {line}")
+                    add_item("external_dependency", f"{label}: {line}", source_id=source_id, match=match, confidence="high", hop="source")
+            for finding in self._static_qa_findings_for_line(snippet):
+                claim = f"{finding['severity']} {finding['kind']}: {finding['reason']} in {label}"
+                adders["static_findings"](claim)
+                add_item("static_finding", claim, source_id=source_id, match=match, confidence=str(finding["severity"]), hop="static_qa")
+            retrieval = str(match.get("retrieval") or "")
+            if retrieval in {"planner_caller", "planner_callee", "flow_graph", "code_graph", "entity_graph"}:
+                reason = str(match.get("reason") or "").strip()
+                role = {
+                    "planner_caller": "upstream caller",
+                    "planner_callee": "downstream callee",
+                    "flow_graph": "flow dependency",
+                    "code_graph": "symbol dependency",
+                    "entity_graph": "entity dependency",
+                }.get(retrieval, "dependency")
+                claim = f"{role}: {reason or label}"
+                adders["impact_surfaces"](claim)
+                add_item("impact_surface", claim, source_id=source_id, match=match, confidence="medium", hop=role.split(" ")[0])
+            if retrieval == "test_coverage" or match.get("test_coverage"):
+                reason = str(match.get("reason") or "").strip()
+                claim = f"test coverage: {reason or label}"
+                adders["test_coverage"](claim)
+                add_item("test_coverage", claim, source_id=source_id, match=match, confidence="high" if "assert" in claim.lower() or "verify" in claim.lower() else "medium", hop="test")
+            if retrieval == "operational_boundary" or match.get("operational_boundary"):
+                reason = str(match.get("reason") or "").strip()
+                claim = f"operational boundary: {reason or label}"
+                adders["operational_boundaries"](claim)
+                add_item("operational_boundary", claim, source_id=source_id, match=match, confidence="high", hop="runtime_boundary")
+
+        for item in quality_gate.get("missing") or []:
+            adders["missing_hops"](str(item))
+            add_item("missing_hop", str(item), confidence="low", hop="missing", supports_answer=False)
+        if pack["intent"].get("data_source") and not pack["tables"] and not pack["external_dependencies"]:
+            adders["missing_hops"]("No confirmed table/API/client source found in indexed evidence.")
+            add_item("missing_hop", "No confirmed table/API/client source found in indexed evidence.", confidence="low", hop="missing", supports_answer=False)
+        pack["items"] = pack["items"][:40]
+        self._classify_evidence_pack_items(pack)
+        return pack
+
+    def _classify_evidence_pack_items(self, pack: dict[str, Any]) -> None:
+        confirmed_types = {"table", "api", "external_dependency", "config", "static_finding", "test_coverage", "operational_boundary"}
+        inferred_types = {"entry_point", "call_chain", "field_population", "read_write", "impact_surface"}
+        confirmed: list[str] = []
+        inferred: list[str] = []
+        missing: list[str] = []
+        limits: list[str] = []
+        for item in pack.get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            item_type = str(item.get("type") or "")
+            claim = re.sub(r"\s+", " ", str(item.get("claim") or "")).strip()
+            if not claim:
+                continue
+            if item.get("supports_answer") is False or item_type == "missing_hop":
+                item["support_level"] = "missing"
+                if claim not in missing:
+                    missing.append(claim[:420])
+                continue
+            confidence = str(item.get("confidence") or "").lower()
+            if item_type in confirmed_types and confidence in {"high", "medium"}:
+                item["support_level"] = "confirmed"
+                if claim not in confirmed:
+                    confirmed.append(claim[:420])
+            elif item_type == "read_write" and confidence == "high":
+                item["support_level"] = "confirmed"
+                if claim not in confirmed:
+                    confirmed.append(claim[:420])
+            elif item_type in inferred_types or confidence in {"low", "medium"}:
+                item["support_level"] = "inferred"
+                if claim not in inferred:
+                    inferred.append(claim[:420])
+            else:
+                item["support_level"] = "confirmed"
+                if claim not in confirmed:
+                    confirmed.append(claim[:420])
+        if pack.get("intent", {}).get("data_source") and not confirmed:
+            limits.append("No confirmed table/API/client/config source evidence was found; carrier and call-chain evidence must not be treated as final source.")
+        if pack.get("missing_hops"):
+            limits.extend(str(item) for item in pack.get("missing_hops") or [])
+        pack["confirmed_facts"] = confirmed[:12]
+        pack["inferred_facts"] = inferred[:12]
+        pack["missing_facts"] = missing[:12]
+        pack["evidence_limits"] = list(dict.fromkeys(limits))[:8]
+
+    @staticmethod
+    def _fact_source_label(fact: str) -> str:
+        match = re.match(r"^([^:]+:[^:]+:\d+-\d+)", str(fact or ""))
+        return match.group(1) if match else "evidence"
 
     @staticmethod
     def _limited_fact_adder(target: list[str], limit: int):
@@ -3663,6 +9132,25 @@ class SourceCodeQAService:
         return lines
 
     @staticmethod
+    def _static_qa_findings_for_line(line: str) -> list[dict[str, Any]]:
+        text = str(line or "").strip()
+        if not text:
+            return []
+        findings: list[dict[str, Any]] = []
+        for rule in STATIC_QA_RULES:
+            pattern = rule.get("pattern")
+            if pattern.search(text):
+                findings.append(
+                    {
+                        "kind": str(rule.get("kind") or "static_qa"),
+                        "severity": str(rule.get("severity") or "medium"),
+                        "score": int(rule.get("score") or 150),
+                        "reason": str(rule.get("reason") or "static QA finding"),
+                    }
+                )
+        return findings
+
+    @staticmethod
     def _is_concrete_source_line(line: str) -> bool:
         lowered = str(line or "").strip().lower()
         if not lowered:
@@ -3673,18 +9161,93 @@ class SourceCodeQAService:
             return False
         return any(hint in f" {lowered} " for hint in CONCRETE_SOURCE_HINTS)
 
+    def _answer_policy_names(self, intent: dict[str, Any]) -> list[str]:
+        names: list[str] = []
+        if intent.get("data_source"):
+            names.append("data_source")
+        if intent.get("api"):
+            names.append("api")
+        if intent.get("config"):
+            names.append("config")
+        if intent.get("error") or intent.get("rule_logic"):
+            names.append("logic")
+        if intent.get("static_qa"):
+            names.append("static_qa")
+        if intent.get("impact_analysis"):
+            names.append("impact_analysis")
+        if intent.get("test_coverage"):
+            names.append("test_coverage")
+        if intent.get("operational_boundary"):
+            names.append("operational_boundary")
+        return names or ["general"]
+
+    def _evaluate_answer_policies(self, evidence_summary: dict[str, Any], intent: dict[str, Any]) -> dict[str, Any]:
+        policy_results: list[dict[str, Any]] = []
+        missing: list[str] = []
+        score = 0
+        for name in self._answer_policy_names(intent):
+            policy = ANSWER_POLICY_REGISTRY[name]
+            required_buckets = list(policy.get("required_any") or [])
+            supporting_buckets = list(policy.get("supporting_any") or [])
+            satisfied_buckets = [bucket for bucket in required_buckets if evidence_summary.get(bucket)]
+            policy_ok = bool(satisfied_buckets)
+            if name == "data_source":
+                policy_ok = policy_ok and self._has_concrete_source_evidence(evidence_summary)
+            if policy_ok:
+                score += 2
+                supporting_hits = [bucket for bucket in supporting_buckets if evidence_summary.get(bucket)]
+                score += min(len(supporting_hits), 2)
+            else:
+                missing.append(str(policy["missing"]))
+                supporting_hits = []
+            policy_results.append(
+                {
+                    "name": name,
+                    "label": policy["label"],
+                    "status": "satisfied" if policy_ok else "missing",
+                    "required_any": required_buckets,
+                    "satisfied_buckets": satisfied_buckets,
+                    "supporting_buckets": supporting_hits,
+                    "missing": [] if policy_ok else [str(policy["missing"])],
+                }
+            )
+        return {"policies": policy_results, "missing": list(dict.fromkeys(missing)), "score": score}
+
+    def _quality_gate_cached(
+        self,
+        question: str,
+        evidence_summary: dict[str, Any],
+        *,
+        request_cache: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        if request_cache is None:
+            return self._quality_gate(question, evidence_summary)
+        cache_key = hashlib.sha1(
+            json.dumps(
+                {"question": question, "evidence_summary": evidence_summary},
+                ensure_ascii=False,
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()
+        quality_cache = request_cache.setdefault("quality", {})
+        cached = quality_cache.get(cache_key)
+        if cached is not None:
+            self._increment_retrieval_stat(request_cache, "quality_hits")
+            return self._clone_jsonish(cached)
+        self._increment_retrieval_stat(request_cache, "quality_misses")
+        quality = self._quality_gate(question, evidence_summary)
+        quality_cache[cache_key] = self._clone_jsonish(quality)
+        return quality
+
     def _quality_gate(self, question: str, evidence_summary: dict[str, Any]) -> dict[str, Any]:
         intent = evidence_summary.get("intent") or self._question_intent(question)
+        policy_evaluation = self._evaluate_answer_policies(evidence_summary, intent)
         missing: list[str] = []
         checks: list[str] = []
-        score = 0
+        score = int(policy_evaluation.get("score") or 0)
 
         if intent.get("data_source"):
             checks.append("data_source")
-            if self._has_concrete_source_evidence(evidence_summary):
-                score += 3
-            else:
-                missing.append("concrete upstream source/table/API/repository evidence beyond DTO fields")
             if evidence_summary.get("data_carriers"):
                 score += 1
             if evidence_summary.get("field_population"):
@@ -3694,31 +9257,28 @@ class SourceCodeQAService:
 
         if intent.get("api"):
             checks.append("api")
-            if evidence_summary.get("api_or_config") or evidence_summary.get("downstream_components"):
-                score += 2
-            else:
-                missing.append("endpoint/client/API evidence")
 
         if intent.get("config"):
             checks.append("config")
-            if evidence_summary.get("api_or_config"):
-                score += 2
-            else:
-                missing.append("config/property evidence")
 
         if intent.get("error") or intent.get("rule_logic"):
             checks.append("logic")
-            if evidence_summary.get("rule_or_error_logic") or evidence_summary.get("entry_points"):
-                score += 2
-            else:
-                missing.append("rule/error handling evidence")
+
+        if intent.get("static_qa"):
+            checks.append("static_qa")
+
+        if intent.get("impact_analysis"):
+            checks.append("impact_analysis")
+
+        if intent.get("test_coverage"):
+            checks.append("test_coverage")
+
+        if intent.get("operational_boundary"):
+            checks.append("operational_boundary")
 
         if not checks:
             checks.append("general")
-            if evidence_summary.get("entry_points") or evidence_summary.get("downstream_components") or evidence_summary.get("data_sources"):
-                score += 2
-            else:
-                missing.append("specific code evidence")
+        missing.extend(policy_evaluation.get("missing") or [])
 
         status = "sufficient" if not missing and score >= 2 else "needs_more_trace"
         confidence = "high" if status == "sufficient" and score >= 4 else "medium" if status == "sufficient" else "low"
@@ -3726,8 +9286,9 @@ class SourceCodeQAService:
             "status": status,
             "confidence": confidence,
             "checks": checks,
-            "missing": missing,
+            "missing": list(dict.fromkeys(missing)),
             "score": score,
+            "policies": policy_evaluation.get("policies") or [],
         }
 
     @staticmethod
@@ -3749,28 +9310,35 @@ class SourceCodeQAService:
                 [
                     "repository", "mapper", "dao", "jdbcTemplate", "queryForObject", "select",
                     "from", "DataSourceResult", "dataSourceResult", "integration", "client",
-                    "provider", "CustomerInfo", "UserInfo", "DataSource",
-                    "UnderwritingInitiationProvider", "UnderwritingInitiationDTO",
-                    "UnderwritingBasicInfo", "LoanInfo", "CreditRiskInfo",
-                    "setCustomerInfo", "setLoanInfo", "setCreditRiskInfo",
-                    "getCustomerInfo", "getLoanInfo", "getCreditRiskInfo",
+                    "provider", "DataSource", "input", "context", "result", "request",
+                    "response", "profile", "info", "set", "get", "populate",
                 ]
             )
         if "api" in (quality_gate.get("checks") or []):
             terms.extend(["controller", "requestmapping", "postmapping", "getmapping", "client", "endpoint"])
         if "config" in (quality_gate.get("checks") or []):
             terms.extend(["properties", "yaml", "configuration", "config", "feature"])
-
-        terms.extend(
-            self._all_profile_terms(
-                "data_carriers",
-                "source_terms",
-                "field_population_terms",
-                "api_terms",
-                "config_terms",
-                "logic_terms",
+        if "static_qa" in (quality_gate.get("checks") or []):
+            terms.extend(
+                [
+                    "TODO", "FIXME", "password", "secret", "token", "apiKey", "catch",
+                    "Exception", "Throwable", "printStackTrace", "Runtime", "ProcessBuilder",
+                    "subprocess", "eval", "exec", "select", "format",
+                ]
             )
-        )
+        if "impact_analysis" in (quality_gate.get("checks") or []):
+            terms.extend(
+                [
+                    "controller", "service", "repository", "mapper", "client", "handler",
+                    "consumer", "producer", "route", "endpoint", "call", "usage",
+                    "dependency", "downstream", "upstream",
+                ]
+            )
+        if "test_coverage" in (quality_gate.get("checks") or []):
+            terms.extend(["test", "tests", "assert", "assertThat", "verify", "mock", "should", "junit", "pytest", "jest"])
+        if "operational_boundary" in (quality_gate.get("checks") or []):
+            terms.extend(["Transactional", "rollback", "Cacheable", "CacheEvict", "Async", "Retryable", "CircuitBreaker", "RateLimiter", "Bulkhead", "TimeLimiter", "SchedulerLock", "PreAuthorize"])
+
         for bucket in ("data_carriers", "field_population", "downstream_components", "entry_points"):
             for fact in evidence_summary.get(bucket) or []:
                 terms.extend(IDENTIFIER_PATTERN.findall(str(fact)))
@@ -3821,8 +9389,15 @@ class SourceCodeQAService:
             return 5
         return 0
 
-    def _hybrid_query_bonus(self, question: str, line: str, line_symbols: set[str]) -> int:
-        intent = self._question_intent(question)
+    def _hybrid_query_bonus(
+        self,
+        question: str,
+        line: str,
+        line_symbols: set[str],
+        *,
+        intent: dict[str, Any] | None = None,
+    ) -> int:
+        intent = intent or self._question_intent(question)
         score = 0
         symbol_text = " ".join(line_symbols)
         combined = f" {line} {symbol_text} "
@@ -3881,6 +9456,15 @@ class SourceCodeQAService:
             label = f"{match['repo']}:{match['path']}"
             if label not in top_files:
                 top_files.append(label)
+        static_count = sum(1 for match in matches if match.get("retrieval") == "static_qa" or match.get("static_qa"))
+        test_count = sum(1 for match in matches if match.get("retrieval") == "test_coverage" or match.get("test_coverage"))
+        boundary_count = sum(1 for match in matches if match.get("retrieval") == "operational_boundary" or match.get("operational_boundary"))
+        if static_count:
+            return f"Found {len(matches)} ranked code references including {static_count} static QA findings. Start with: " + "; ".join(top_files[:3])
+        if test_count:
+            return f"Found {len(matches)} ranked code references including {test_count} test coverage matches. Start with: " + "; ".join(top_files[:3])
+        if boundary_count:
+            return f"Found {len(matches)} ranked code references including {boundary_count} operational boundary matches. Start with: " + "; ".join(top_files[:3])
         return f"Found {len(matches)} ranked code references. Start with: " + "; ".join(top_files[:3])
 
     @staticmethod
@@ -3907,15 +9491,18 @@ class SourceCodeQAService:
             )
         return citations
 
-    @staticmethod
-    def _select_result_matches(matches: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    def _select_result_matches(self, matches: list[dict[str, Any]], limit: int, *, question: str = "") -> list[dict[str, Any]]:
         limit = max(1, int(limit or 1))
+        intent = self._question_intent(question) if question else {}
         buckets = {
             "direct": [match for match in matches if match.get("trace_stage") == "direct"],
             "query_decomposition": [match for match in matches if match.get("trace_stage") == "query_decomposition"],
             "dependency": [match for match in matches if match.get("trace_stage") == "dependency"],
             "two_hop": [match for match in matches if match.get("trace_stage") == "two_hop"],
             "tool_loop": [match for match in matches if str(match.get("trace_stage") or "").startswith(TOOL_LOOP_TRACE_PREFIX)],
+            "impact_analysis": [match for match in matches if match.get("trace_stage") == "impact_analysis"],
+            "test_coverage": [match for match in matches if match.get("trace_stage") == "test_coverage" or match.get("retrieval") == "test_coverage"],
+            "operational_boundary": [match for match in matches if match.get("trace_stage") == "operational_boundary" or match.get("retrieval") == "operational_boundary"],
             "agent_trace": [match for match in matches if str(match.get("trace_stage") or "").startswith("agent_trace")],
             "agent_plan": [match for match in matches if str(match.get("trace_stage") or "").startswith("agent_plan")],
             "quality_gate": [match for match in matches if match.get("trace_stage") == QUALITY_GATE_TRACE_STAGE],
@@ -3934,12 +9521,53 @@ class SourceCodeQAService:
             selected.append(match)
             seen.add(key)
 
+        if intent.get("impact_analysis"):
+            ranked_matches = sorted(matches, key=lambda item: item.get("rerank_score", item.get("score", 0)), reverse=True)
+            for predicate in (
+                lambda item: str(item.get("retrieval") or "") == "planner_caller",
+                lambda item: str(item.get("retrieval") or "") == "planner_callee"
+                and any(marker in str(item.get("path") or "").lower() for marker in ("repository", "mapper", "dao", "client")),
+                lambda item: str(item.get("retrieval") or "") == "planner_callee",
+                lambda item: str(item.get("retrieval") or "") in {"flow_graph", "entity_graph", "code_graph"},
+                lambda item: any(marker in str(item.get("path") or "").lower() for marker in ("controller", "handler", "consumer", "job")),
+                lambda item: any(marker in str(item.get("path") or "").lower() for marker in ("repository", "mapper", "dao", "client")),
+            ):
+                for match in ranked_matches:
+                    if predicate(match):
+                        add(match)
+                        break
+        if intent.get("test_coverage"):
+            ranked_matches = sorted(matches, key=lambda item: item.get("rerank_score", item.get("score", 0)), reverse=True)
+            for predicate in (
+                lambda item: str(item.get("retrieval") or "") == "test_coverage",
+                lambda item: self._is_test_file_path(str(item.get("path") or "")) and any(marker in str(item.get("snippet") or "").lower() for marker in ("assert", "verify", "expect")),
+                lambda item: not self._is_test_file_path(str(item.get("path") or "")),
+            ):
+                for match in ranked_matches:
+                    if predicate(match):
+                        add(match)
+                        break
+        if intent.get("operational_boundary"):
+            ranked_matches = sorted(matches, key=lambda item: item.get("rerank_score", item.get("score", 0)), reverse=True)
+            for predicate in (
+                lambda item: str(item.get("retrieval") or "") == "operational_boundary",
+                lambda item: "@" in str(item.get("snippet") or "") and any(marker in str(item.get("snippet") or "").lower() for marker in ("transactional", "cache", "async", "retry", "circuit", "rate", "lock", "authorize")),
+                lambda item: any(marker in str(item.get("path") or "").lower() for marker in ("service", "controller", "job", "config")),
+            ):
+                for match in ranked_matches:
+                    if predicate(match):
+                        add(match)
+                        break
+
         for stage, stage_limit in (
-            ("direct", 3),
-            ("query_decomposition", 3),
-            ("dependency", 3),
-            ("two_hop", 3),
-            ("tool_loop", 5),
+            ("direct", 2 if intent.get("impact_analysis") else 3),
+            ("query_decomposition", 2 if intent.get("impact_analysis") else 3),
+            ("dependency", 2 if intent.get("impact_analysis") else 3),
+            ("two_hop", 2 if intent.get("impact_analysis") else 3),
+            ("impact_analysis", 6 if intent.get("impact_analysis") else 0),
+            ("test_coverage", 6 if intent.get("test_coverage") else 0),
+            ("operational_boundary", 6 if intent.get("operational_boundary") else 0),
+            ("tool_loop", 7 if intent.get("impact_analysis") else 5),
             ("agent_trace", 8),
             ("agent_plan", 6),
             ("quality_gate", 4),
@@ -3953,7 +9581,7 @@ class SourceCodeQAService:
         selected.sort(key=lambda item: item["score"], reverse=True)
         return selected
 
-    def _build_gemini_answer(
+    def _build_llm_answer(
         self,
         *,
         entries: list[RepositoryEntry],
@@ -3964,25 +9592,47 @@ class SourceCodeQAService:
         matches: list[dict[str, Any]],
         llm_budget_mode: str,
         requested_answer_mode: str = ANSWER_MODE_GEMINI,
+        request_cache: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         if not self.llm_ready():
-            raise ToolError("LLM mode is not configured yet. Set SOURCE_CODE_QA_GEMINI_API_KEY or GEMINI_API_KEY on the server first.")
+            raise ToolError(self.llm_unavailable_message())
         routed_budget_mode, budget, llm_route = self._resolve_llm_budget(llm_budget_mode, question, matches)
-        selected_model = str(budget.get("model") or self.gemini_model).strip() or self.gemini_model
+        selected_model = self._model_for_role_or_budget("answer", budget)
         selected_matches = self._select_llm_matches(matches, int(budget["match_limit"]), question=question)
-        evidence_summary = self._compress_evidence(question, selected_matches)
-        trace_paths = self._build_trace_paths(entries=entries, key=key, matches=selected_matches, question=question)
+        evidence_summary = self._compress_evidence_cached(question, selected_matches, request_cache=request_cache)
+        trace_paths = self._build_trace_paths(entries=entries, key=key, matches=selected_matches, question=question, request_cache=request_cache)
         if trace_paths:
             evidence_summary["trace_paths"] = trace_paths
-        quality_gate = self._quality_gate(question, evidence_summary)
+        quality_gate = self._quality_gate_cached(question, evidence_summary, request_cache=request_cache)
+        evidence_pack = self._build_evidence_pack(
+            question=question,
+            evidence_summary=evidence_summary,
+            matches=selected_matches,
+            trace_paths=trace_paths,
+            quality_gate=quality_gate,
+        )
+        answer_thinking_budget = self._thinking_budget_for_call(
+            role="answer",
+            budget_mode=routed_budget_mode,
+            budget=budget,
+            quality_gate=quality_gate,
+        )
+        answer_thinking_budget = self._normalize_thinking_budget_for_provider(answer_thinking_budget)
+        llm_route = {
+            **llm_route,
+            "answer_model": selected_model,
+            "thinking_budget": answer_thinking_budget,
+        }
         prompt_context = self._build_compressed_llm_context(
             evidence_summary,
             quality_gate,
+            evidence_pack,
             selected_matches,
             snippet_line_budget=budget["snippet_line_budget"],
             snippet_char_budget=budget["snippet_char_budget"],
         )
         cache_key = self._answer_cache_key(
+            provider=self.llm_provider.name,
             model=selected_model,
             question=question,
             answer_mode=requested_answer_mode,
@@ -3994,6 +9644,7 @@ class SourceCodeQAService:
             cached_answer = str(cached["answer"])
             cached_structured = self._parse_structured_answer(cached_answer)
             cached_claim_check = self._verify_answer_claims(cached_answer, evidence_summary, selected_matches)
+            cached_judge = self._run_answer_judge(question, cached_answer, evidence_pack, cached_claim_check)
             cached_final = self._finalize_llm_answer(
                 question=question,
                 answer=cached_answer,
@@ -4008,12 +9659,20 @@ class SourceCodeQAService:
                 "llm_budget_mode": routed_budget_mode,
                 "llm_requested_budget_mode": llm_budget_mode,
                 "llm_route": llm_route,
+                "llm_provider": cached.get("provider") or self.llm_provider.name,
+                "llm_model": cached.get("model") or selected_model,
                 "llm_cached": True,
-                "llm_usage": cached.get("usage") or {},
+                "llm_usage": self._normalize_llm_usage(cached.get("usage") or {}),
+                "llm_thinking_budget": cached.get("thinking_budget", answer_thinking_budget),
+                "llm_latency_ms": 0,
+                "llm_attempt_log": [],
+                "llm_finish_reason": cached.get("finish_reason") or "cache_hit",
                 "answer_quality": cached.get("answer_quality") or quality_gate,
                 "answer_claim_check": cached_claim_check,
+                "answer_judge": cached_judge,
                 "structured_answer": cached_final["structured_answer"],
                 "answer_contract": cached_final["answer_contract"],
+                "evidence_pack": evidence_pack,
             }
         payload = {
             "contents": [
@@ -4052,24 +9711,36 @@ class SourceCodeQAService:
                 "maxOutputTokens": budget["max_output_tokens"],
                 "responseMimeType": "application/json",
                 "responseSchema": self._llm_answer_response_schema(),
-                "thinkingConfig": {
-                    "thinkingBudget": budget["thinking_budget"],
-                },
+                "thinkingConfig": self._thinking_config_for_provider(answer_thinking_budget),
             },
         }
-        result, usage, effective_model, attempts = self._generate_gemini_with_retry(
+        result = self.llm_provider.generate(
             payload=payload,
             primary_model=selected_model,
-            fallback_model=self.gemini_fallback_model,
+            fallback_model=self._llm_fallback_model(),
         )
-        answer = self._extract_gemini_text(result)
+        answer = self.llm_provider.extract_text(result.payload)
         structured_answer = self._parse_structured_answer(answer)
-        usage = usage or result.get("usageMetadata") or {}
+        usage = self._normalize_llm_usage(result.usage or result.payload.get("usageMetadata") or {})
+        effective_model = result.model
+        attempts = result.attempts
+        llm_latency_ms = int(result.latency_ms or 0)
+        llm_attempt_log = [dict(item) for item in result.attempt_log]
+        finish_reason = self._llm_finish_reason(result.payload)
         answer_check = self._answer_self_check(question, answer, evidence_summary, quality_gate)
+        if finish_reason.upper() in {"MAX_TOKENS", "SAFETY", "RECITATION"} or finish_reason.lower() in {"length", "content_filter"}:
+            issues = list(answer_check.get("issues") or [])
+            issues.append(f"model finish reason requires repair: {finish_reason}")
+            answer_check = {"status": "retry", "issues": list(dict.fromkeys(issues))}
         claim_check = self._verify_answer_claims(answer, evidence_summary, selected_matches)
+        answer_judge = self._run_answer_judge(question, answer, evidence_pack, claim_check)
         if claim_check.get("status") != "ok" and answer_check.get("status") == "retry":
             issues = list(answer_check.get("issues") or [])
             issues.extend(claim_check.get("issues") or [])
+            answer_check = {"status": "retry", "issues": list(dict.fromkeys(issues))}
+        if answer_judge.get("status") == "repair":
+            issues = list(answer_check.get("issues") or [])
+            issues.extend(answer_judge.get("issues") or [])
             answer_check = {"status": "retry", "issues": list(dict.fromkeys(issues))}
         if answer_check.get("status") == "retry":
             retry_matches = self._expand_answer_retry_matches(
@@ -4080,28 +9751,49 @@ class SourceCodeQAService:
                 evidence_summary=evidence_summary,
                 quality_gate=quality_gate,
                 limit=int(budget["match_limit"]) + 6,
+                request_cache=request_cache,
             )
             if retry_matches:
                 retry_selected_matches = self._select_llm_matches(retry_matches, int(budget["match_limit"]) + 4, question=question)
-                retry_evidence_summary = self._compress_evidence(question, retry_selected_matches)
-                retry_trace_paths = self._build_trace_paths(entries=entries, key=key, matches=retry_selected_matches, question=question)
+                retry_evidence_summary = self._compress_evidence_cached(question, retry_selected_matches, request_cache=request_cache)
+                retry_trace_paths = self._build_trace_paths(
+                    entries=entries,
+                    key=key,
+                    matches=retry_selected_matches,
+                    question=question,
+                    request_cache=request_cache,
+                )
                 if retry_trace_paths:
                     retry_evidence_summary["trace_paths"] = retry_trace_paths
-                retry_quality_gate = self._quality_gate(question, retry_evidence_summary)
+                retry_quality_gate = self._quality_gate_cached(question, retry_evidence_summary, request_cache=request_cache)
+                retry_evidence_pack = self._build_evidence_pack(
+                    question=question,
+                    evidence_summary=retry_evidence_summary,
+                    matches=retry_selected_matches,
+                    trace_paths=retry_trace_paths,
+                    quality_gate=retry_quality_gate,
+                )
                 retry_context = self._build_compressed_llm_context(
                     retry_evidence_summary,
                     retry_quality_gate,
+                    retry_evidence_pack,
                     retry_selected_matches,
                     snippet_line_budget=min(int(budget["snippet_line_budget"]) + 60, 180),
                     snippet_char_budget=min(int(budget["snippet_char_budget"]) + 8000, 28_000),
                 )
                 retry_payload = dict(payload)
+                retry_thinking_budget = self._thinking_budget_for_call(
+                    role="repair",
+                    budget_mode="deep",
+                    budget=self.llm_budgets.get("deep") or budget,
+                    quality_gate=retry_quality_gate,
+                    retry=True,
+                )
+                retry_thinking_budget = self._normalize_thinking_budget_for_provider(retry_thinking_budget)
                 retry_payload["generationConfig"] = {
                     **payload["generationConfig"],
                     "maxOutputTokens": min(max(int(budget["max_output_tokens"]) + 500, 900), 1_600),
-                    "thinkingConfig": {
-                        "thinkingBudget": min(max(int(budget["thinking_budget"]), 256), 1_024),
-                    },
+                    "thinkingConfig": self._thinking_config_for_provider(retry_thinking_budget),
                 }
                 retry_payload["contents"] = [
                     {
@@ -4118,30 +9810,51 @@ class SourceCodeQAService:
                         ]
                     }
                 ]
-                retry_result, retry_usage, retry_model, retry_attempts = self._generate_gemini_with_retry(
+                retry_result = self.llm_provider.generate(
                     payload=retry_payload,
-                    primary_model=effective_model,
-                    fallback_model=self.gemini_fallback_model,
+                    primary_model=self._model_for_role_or_budget("repair", self.llm_budgets.get("deep") or budget),
+                    fallback_model=self._llm_fallback_model(),
                 )
-                retry_answer = self._extract_gemini_text(retry_result)
+                retry_answer = self.llm_provider.extract_text(retry_result.payload)
                 retry_structured_answer = self._parse_structured_answer(retry_answer)
+                retry_finish_reason = self._llm_finish_reason(retry_result.payload)
                 retry_check = self._answer_self_check(question, retry_answer, retry_evidence_summary, retry_quality_gate)
+                if retry_finish_reason.upper() in {"MAX_TOKENS", "SAFETY", "RECITATION"} or retry_finish_reason.lower() in {"length", "content_filter"}:
+                    issues = list(retry_check.get("issues") or [])
+                    issues.append(f"model finish reason requires caution: {retry_finish_reason}")
+                    retry_check = {"status": "retry", "issues": list(dict.fromkeys(issues))}
                 retry_claim_check = self._verify_answer_claims(retry_answer, retry_evidence_summary, retry_selected_matches)
+                retry_judge = self._run_answer_judge(question, retry_answer, retry_evidence_pack, retry_claim_check)
                 if retry_claim_check.get("status") != "ok":
                     issues = list(retry_check.get("issues") or [])
                     issues.extend(retry_claim_check.get("issues") or [])
                     retry_check = {"status": "retry", "issues": list(dict.fromkeys(issues))}
+                if retry_judge.get("status") == "repair":
+                    issues = list(retry_check.get("issues") or [])
+                    issues.extend(retry_judge.get("issues") or [])
+                    retry_check = {"status": "retry", "issues": list(dict.fromkeys(issues))}
                 answer = retry_answer
                 structured_answer = retry_structured_answer
-                usage = retry_usage or retry_result.get("usageMetadata") or {}
-                effective_model = retry_model
-                attempts += retry_attempts
+                retry_usage = self._normalize_llm_usage(retry_result.usage or retry_result.payload.get("usageMetadata") or {})
+                usage = self._merge_llm_usage(usage, retry_usage)
+                effective_model = retry_result.model
+                attempts += retry_result.attempts
+                llm_latency_ms += int(retry_result.latency_ms or 0)
+                llm_attempt_log.extend(dict(item) for item in retry_result.attempt_log)
+                finish_reason = retry_finish_reason
                 evidence_summary = retry_evidence_summary
                 quality_gate = retry_quality_gate
+                evidence_pack = retry_evidence_pack
                 answer_check = retry_check
                 claim_check = retry_claim_check
+                answer_judge = retry_judge
                 selected_matches = retry_selected_matches
                 prompt_context = retry_context
+                llm_route = {
+                    **llm_route,
+                    "repair_model": effective_model,
+                    "repair_thinking_budget": retry_thinking_budget,
+                }
         final = self._finalize_llm_answer(
             question=question,
             answer=answer,
@@ -4154,71 +9867,38 @@ class SourceCodeQAService:
         answer = final["answer"]
         structured_answer = final["structured_answer"]
         answer_contract = final["answer_contract"]
-        self._store_cached_answer(cache_key, answer=answer, usage=usage, answer_quality=quality_gate)
+        self._store_cached_answer(
+            cache_key,
+            answer=answer,
+            usage=usage,
+            answer_quality=quality_gate,
+            provider=self.llm_provider.name,
+            model=effective_model,
+            thinking_budget=llm_route.get("repair_thinking_budget", answer_thinking_budget),
+            finish_reason=finish_reason,
+        )
         return {
             "llm_answer": answer,
             "llm_budget_mode": routed_budget_mode,
             "llm_requested_budget_mode": llm_budget_mode,
             "llm_route": llm_route,
+            "llm_provider": self.llm_provider.name,
             "llm_cached": False,
             "llm_usage": usage,
             "llm_model": effective_model,
+            "llm_thinking_budget": llm_route.get("repair_thinking_budget", answer_thinking_budget),
             "llm_attempts": attempts,
+            "llm_latency_ms": llm_latency_ms,
+            "llm_attempt_log": llm_attempt_log,
+            "llm_finish_reason": finish_reason,
             "answer_quality": quality_gate,
             "answer_self_check": answer_check,
             "answer_claim_check": claim_check,
+            "answer_judge": answer_judge,
             "structured_answer": structured_answer,
             "answer_contract": answer_contract,
+            "evidence_pack": evidence_pack,
         }
-
-    def _generate_gemini_with_retry(
-        self,
-        *,
-        payload: dict[str, Any],
-        primary_model: str,
-        fallback_model: str,
-    ) -> tuple[dict[str, Any], dict[str, Any], str, int]:
-        models = [primary_model]
-        if fallback_model and fallback_model not in models:
-            models.append(fallback_model)
-        retryable_statuses = {429, 500, 502, 503, 504}
-        last_error: str | None = None
-        attempts = 0
-        for model in models:
-            for _delay in (0.0, 1.0, 2.0):
-                attempts += 1
-                if _delay:
-                    import time
-                    time.sleep(_delay)
-                try:
-                    response = requests.post(
-                        f"{GEMINI_API_BASE_URL}/models/{model}:generateContent",
-                        params={"key": self.gemini_api_key},
-                        headers={"Content-Type": "application/json"},
-                        json=payload,
-                        timeout=90,
-                    )
-                except requests.RequestException as error:
-                    last_error = self._sanitize_error_detail(str(error))
-                    continue
-                response_ok = getattr(response, "ok", None)
-                if response_ok is None:
-                    try:
-                        response.raise_for_status()
-                        response_ok = True
-                    except requests.HTTPError:
-                        response_ok = False
-                if response_ok:
-                    result = response.json()
-                    usage = result.get("usageMetadata") or {}
-                    return result, usage, model, attempts
-                status = int(getattr(response, "status_code", 500) or 500)
-                detail = self._sanitize_error_detail(response.text)
-                last_error = detail
-                if status not in retryable_statuses:
-                    raise ToolError(f"Gemini answer generation failed. {detail[:500]}")
-            # try next fallback model after retries on the current model
-        raise ToolError(f"Gemini answer generation failed. {str(last_error or 'Model unavailable.')[:500]}")
 
     def _resolve_llm_budget(
         self,
@@ -4233,24 +9913,35 @@ class SourceCodeQAService:
         trace_stages = {str(match.get("trace_stage") or "") for match in matches}
         retrievals = {str(match.get("retrieval") or "") for match in matches}
         lowered_question = str(question or "").lower()
+        simple_lookup = self._is_simple_symbol_lookup_question(question)
         deep_reasons: list[str] = []
         if intent.get("data_source"):
             deep_reasons.append("data_source_trace")
         if intent.get("error") or "root cause" in lowered_question or "why" in lowered_question:
             deep_reasons.append("root_cause_or_error")
-        if any(stage.startswith(("agent_trace", "agent_plan", TOOL_LOOP_TRACE_PREFIX)) for stage in trace_stages):
+        if not simple_lookup and any(stage.startswith(("agent_trace", "agent_plan", TOOL_LOOP_TRACE_PREFIX)) for stage in trace_stages):
             deep_reasons.append("agentic_trace_used")
-        if {"flow_graph", "entity_graph", "code_graph"} & retrievals and len(matches) >= 8:
+        if not simple_lookup and {"flow_graph", "entity_graph", "code_graph"} & retrievals and len(matches) >= 8:
             deep_reasons.append("graph_evidence_bundle")
         if deep_reasons:
             mode = "deep"
-        elif any(intent.get(key) for key in ("api", "config", "rule_logic")) or len(matches) >= 5:
+        elif any(intent.get(key) for key in ("api", "config", "rule_logic")) or (
+            len(matches) >= 5 and not simple_lookup
+        ):
             mode = "balanced"
             deep_reasons.append("moderate_code_reasoning")
         else:
             mode = "cheap"
             deep_reasons.append("simple_lookup")
         return mode, self.llm_budgets[mode], {"mode": "auto", "requested": requested, "selected": mode, "reason": ",".join(deep_reasons)}
+
+    def _is_simple_symbol_lookup_question(self, question: str) -> bool:
+        lowered = str(question or "").lower()
+        if any(term in lowered for term in ("why", "root cause", "data source", "upstream", "flow", "chain", "call graph", "cross-repo")):
+            return False
+        if any(intent for intent in (self._question_intent(question).get(key) for key in ("api", "config", "rule_logic", "error"))):
+            return False
+        return any(term in lowered for term in ("where is", "where are", "which file", "find ", "在哪里", "在哪"))
 
     @staticmethod
     def _llm_answer_response_schema() -> dict[str, Any]:
@@ -4276,6 +9967,17 @@ class SourceCodeQAService:
             },
             "required": ["direct_answer", "claims", "missing_evidence", "confidence"],
             "propertyOrdering": ["direct_answer", "claims", "missing_evidence", "confidence"],
+        }
+
+    @staticmethod
+    def _llm_versions() -> dict[str, int]:
+        return {
+            "prompt": LLM_PROMPT_VERSION,
+            "response_schema": LLM_RESPONSE_SCHEMA_VERSION,
+            "router": LLM_ROUTER_VERSION,
+            "cache": LLM_CACHE_VERSION,
+            "runtime": LLM_RUNTIME_VERSION,
+            "index": CODE_INDEX_VERSION,
         }
 
     def _build_llm_context(self, matches: list[dict[str, Any]], *, snippet_line_budget: int, snippet_char_budget: int) -> str:
@@ -4308,6 +10010,7 @@ class SourceCodeQAService:
         self,
         evidence_summary: dict[str, Any],
         quality_gate: dict[str, Any],
+        evidence_pack: dict[str, Any],
         matches: list[dict[str, Any]],
         *,
         snippet_line_budget: int,
@@ -4317,6 +10020,44 @@ class SourceCodeQAService:
             "Compressed evidence facts:",
             f"- Quality gate: {quality_gate.get('status')} / confidence={quality_gate.get('confidence')} / missing={', '.join(quality_gate.get('missing') or []) or 'none'}",
         ]
+        policies = quality_gate.get("policies") or []
+        if policies:
+            sections.append("- Evidence policies:")
+            for policy in policies[:6]:
+                sections.append(
+                    f"  - {policy.get('name')}: {policy.get('status')} / required_any={', '.join(policy.get('required_any') or [])}"
+                )
+        if evidence_pack:
+            sections.append(f"- Evidence pack v{evidence_pack.get('version')}:")
+            typed_items = evidence_pack.get("items") or []
+            if typed_items:
+                sections.append("  - Typed evidence items:")
+                for item in typed_items[:12]:
+                    location = ""
+                    if item.get("source_id"):
+                        location = f" [{item.get('source_id')}]"
+                    sections.append(
+                        f"    - {item.get('type')} / confidence={item.get('confidence')} / hop={item.get('hop')}{location}: {item.get('claim')}"
+                    )
+            for label, key in (
+                ("Entry points", "entry_points"),
+                ("Call chain", "call_chain"),
+                ("Read/write points", "read_write_points"),
+                ("External dependencies", "external_dependencies"),
+                ("Tables", "tables"),
+                ("APIs", "apis"),
+                ("Configs", "configs"),
+                ("Static QA findings", "static_findings"),
+                ("Impact surfaces", "impact_surfaces"),
+                ("Test coverage", "test_coverage"),
+                ("Operational boundaries", "operational_boundaries"),
+                ("Missing hops", "missing_hops"),
+            ):
+                values = evidence_pack.get(key) or []
+                if values:
+                    sections.append(f"  - {label}:")
+                    for value in values[:8]:
+                        sections.append(f"    - {value}")
         for label, key in (
             ("Entry points", "entry_points"),
             ("Data carriers", "data_carriers"),
@@ -4325,6 +10066,10 @@ class SourceCodeQAService:
             ("Concrete data sources", "data_sources"),
             ("API or config evidence", "api_or_config"),
             ("Rule or error logic", "rule_or_error_logic"),
+            ("Static QA findings", "static_findings"),
+            ("Impact surfaces", "impact_surfaces"),
+            ("Test coverage", "test_coverage"),
+            ("Operational boundaries", "operational_boundaries"),
         ):
             values = evidence_summary.get(key) or []
             if values:
@@ -4383,6 +10128,10 @@ class SourceCodeQAService:
             "- For data-source questions, a DTO/Input/Info class is not a final data source. Trace backward to the provider/builder/setter and then to repository/mapper/client/API/table when evidence exists.\n"
             "- A DAO/Mapper import or field declaration is not enough; prefer method bodies, SQL, mapper XML, API client calls, or table names.\n"
             "- If only DTO fields are known, clearly say that these are carriers, not the upstream source.\n"
+            "- For static QA questions, rank concrete findings by severity and explain why each code line is risky without inventing runtime impact.\n"
+            "- For impact-analysis questions, separate upstream callers/users from downstream dependencies/tables/APIs/configs.\n"
+            "- For test-coverage questions, distinguish direct tests/assertions/mocks from nearby production code; call out missing test evidence explicitly.\n"
+            "- For operational-boundary questions, call out transaction, cache, async, retry, circuit breaker, lock, rate-limit, and authorization annotations as runtime behavior constraints.\n"
             "- If a quality gate says evidence is missing, do not pretend certainty. Say the closest known flow and the exact missing link.\n"
             "- Do not use likely/suggests/appears for final data-source claims. Put uncertainty in missing_evidence instead.\n"
             "- Summarize the relevant logic, data sources, APIs, tables, or classes in plain language when applicable.\n"
@@ -4429,6 +10178,7 @@ class SourceCodeQAService:
             "missing_links": missing_links[:8],
             "confidence": "low" if blocked else str(structured_answer.get("confidence") or quality_gate.get("confidence") or "medium").lower(),
             "claim_check": claim_check,
+            "policies": quality_gate.get("policies") or [],
         }
         final_answer = str(answer or "").strip()
         if blocked:
@@ -4587,6 +10337,286 @@ class SourceCodeQAService:
             "issues": list(dict.fromkeys(issues)),
         }
 
+    def _judge_answer(
+        self,
+        question: str,
+        answer: str,
+        evidence_pack: dict[str, Any],
+        claim_check: dict[str, Any],
+    ) -> dict[str, Any]:
+        intent = evidence_pack.get("intent") or self._question_intent(question)
+        answer_text = str(answer or "").strip()
+        lowered_answer = answer_text.lower()
+        issues: list[str] = []
+        repair_targets: list[str] = []
+        typed_items = [item for item in evidence_pack.get("items") or [] if isinstance(item, dict)]
+        supported_items = [item for item in typed_items if item.get("supports_answer") is not False]
+        missing_hops = evidence_pack.get("missing_hops") or []
+        repairable_intent = any(intent.get(key) for key in ("data_source", "api", "config", "rule_logic", "error", "test_coverage", "operational_boundary"))
+
+        if claim_check.get("status") != "ok":
+            issues.extend(str(issue) for issue in claim_check.get("issues") or [])
+            if repairable_intent:
+                repair_targets.append("add citation-backed claims or remove unsupported concrete claims")
+        if len(answer_text) < 80 and len(supported_items) >= 2:
+            issues.append("answer is too thin for the available typed evidence")
+            repair_targets.append("summarize the strongest typed evidence")
+        if intent.get("data_source"):
+            has_source_item = any(item.get("type") in {"table", "api", "external_dependency", "read_write"} for item in supported_items)
+            if has_source_item and not any(
+                str(item.get("claim") or "").split(" ")[0].lower() in lowered_answer
+                for item in supported_items
+                if item.get("type") in {"table", "api", "external_dependency"}
+            ):
+                issues.append("answer omits typed table/API/client source evidence")
+                repair_targets.append("include the confirmed table/API/client source")
+            if missing_hops and any(phrase in lowered_answer for phrase in ("likely", "suggest", "appears", "probably")):
+                issues.append("answer speculates despite missing typed evidence")
+                repair_targets.append("state missing evidence explicitly instead of speculating")
+        if intent.get("api") and evidence_pack.get("apis") and not any(
+            token.lower() in lowered_answer
+            for token in re.findall(r"[A-Za-z0-9_./:-]{4,}", " ".join(evidence_pack.get("apis") or []))[:12]
+        ):
+            issues.append("answer omits API route evidence")
+            repair_targets.append("include the route or API client evidence")
+        if intent.get("static_qa") and evidence_pack.get("static_findings") and not any(
+            token.lower() in lowered_answer
+            for token in re.findall(r"[A-Za-z0-9_./:-]{4,}", " ".join(evidence_pack.get("static_findings") or []))[:16]
+        ):
+            issues.append("answer omits static QA finding evidence")
+            repair_targets.append("include the highest-severity static QA findings")
+        if intent.get("impact_analysis") and evidence_pack.get("impact_surfaces") and not any(
+            token.lower() in lowered_answer
+            for token in re.findall(r"[A-Za-z0-9_./:-]{4,}", " ".join(evidence_pack.get("impact_surfaces") or []))[:16]
+        ):
+            issues.append("answer omits impact surface evidence")
+            repair_targets.append("include upstream callers and downstream dependencies from the impact evidence")
+        if intent.get("test_coverage") and evidence_pack.get("test_coverage") and not any(
+            token.lower() in lowered_answer
+            for token in re.findall(r"[A-Za-z0-9_./:-]{4,}", " ".join(evidence_pack.get("test_coverage") or []))[:16]
+        ):
+            issues.append("answer omits test coverage evidence")
+            repair_targets.append("include tests, assertions, mocks, or verification evidence")
+        if intent.get("operational_boundary") and evidence_pack.get("operational_boundaries") and not any(
+            token.lower() in lowered_answer
+            for token in re.findall(r"[A-Za-z0-9_./:-]{4,}", " ".join(evidence_pack.get("operational_boundaries") or []))[:16]
+        ):
+            issues.append("answer omits operational boundary evidence")
+            repair_targets.append("include transaction/cache/async/retry/circuit/security boundary evidence")
+
+        status = "repair" if issues and (repair_targets or repairable_intent) else "warn" if issues else "ok"
+        return {
+            "status": status,
+            "mode": "deterministic_evidence_judge",
+            "checked_items": len(typed_items),
+            "supporting_items": len(supported_items),
+            "issues": list(dict.fromkeys(issues))[:6],
+            "repair_targets": list(dict.fromkeys(repair_targets))[:6],
+        }
+
+    def _run_answer_judge(
+        self,
+        question: str,
+        answer: str,
+        evidence_pack: dict[str, Any],
+        claim_check: dict[str, Any],
+    ) -> dict[str, Any]:
+        deterministic = self._judge_answer(question, answer, evidence_pack, claim_check)
+        if not self.llm_judge_enabled or not self.llm_ready():
+            return deterministic
+        cache_key = self._judge_cache_key(question, answer, evidence_pack, claim_check)
+        cached = self._load_judge_cache(cache_key)
+        if cached is not None:
+            cached["cached"] = True
+            return cached
+        try:
+            judge = self._llm_judge_answer(question, answer, evidence_pack, claim_check, deterministic)
+            self._store_judge_cache(cache_key, judge)
+            return judge
+        except (OSError, ValueError, requests.RequestException, ToolError) as error:
+            fallback = dict(deterministic)
+            fallback["llm_judge_error"] = self._sanitize_error_detail(str(error))
+            return fallback
+
+    def _judge_cache_key(
+        self,
+        question: str,
+        answer: str,
+        evidence_pack: dict[str, Any],
+        claim_check: dict[str, Any],
+    ) -> str:
+        digest = hashlib.sha1(
+            json.dumps(
+                {
+                    "provider": self.llm_provider.name,
+                    "model": self._model_for_role("judge", fallback=str(self.llm_budgets["cheap"]["model"])),
+                    "question": question,
+                    "answer": answer,
+                    "evidence_pack": evidence_pack,
+                    "claim_check": claim_check,
+                    "versions": self._llm_versions(),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()
+        return digest
+
+    def _load_judge_cache(self, key: str) -> dict[str, Any] | None:
+        cache_path = self.answer_cache_root / "judge" / f"{key}.json"
+        if not cache_path.exists():
+            return None
+        try:
+            payload = json.loads(cache_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        expire_at = float(payload.get("expire_at") or 0)
+        if expire_at < datetime.now(timezone.utc).timestamp():
+            cache_path.unlink(missing_ok=True)
+            return None
+        if payload.get("versions") != self._llm_versions():
+            return None
+        judge = payload.get("judge")
+        return judge if isinstance(judge, dict) else None
+
+    def _store_judge_cache(self, key: str, judge: dict[str, Any]) -> None:
+        cache_dir = self.answer_cache_root / "judge"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "versions": self._llm_versions(),
+            "judge": judge,
+            "expire_at": datetime.now(timezone.utc).timestamp() + self.llm_cache_ttl_seconds,
+        }
+        self._atomic_write_json(cache_dir / f"{key}.json", payload)
+
+    @staticmethod
+    def _llm_judge_response_schema() -> dict[str, Any]:
+        string_array = {"type": "ARRAY", "items": {"type": "STRING"}}
+        return {
+            "type": "OBJECT",
+            "properties": {
+                "status": {"type": "STRING", "enum": ["ok", "warn", "repair", "insufficient_evidence"]},
+                "confidence": {"type": "STRING", "enum": ["high", "medium", "low"]},
+                "issues": string_array,
+                "repair_targets": string_array,
+            },
+            "required": ["status", "confidence", "issues", "repair_targets"],
+            "propertyOrdering": ["status", "confidence", "issues", "repair_targets"],
+        }
+
+    def _llm_judge_answer(
+        self,
+        question: str,
+        answer: str,
+        evidence_pack: dict[str, Any],
+        claim_check: dict[str, Any],
+        deterministic: dict[str, Any],
+    ) -> dict[str, Any]:
+        typed_items = [
+            {
+                "type": item.get("type"),
+                "claim": item.get("claim"),
+                "source_id": item.get("source_id"),
+                "confidence": item.get("confidence"),
+                "supports_answer": item.get("supports_answer"),
+            }
+            for item in evidence_pack.get("items") or []
+            if isinstance(item, dict)
+        ][:18]
+        judge_context = {
+            "question": question,
+            "answer": answer,
+            "claim_check": claim_check,
+            "deterministic_judge": deterministic,
+            "evidence": {
+                "version": evidence_pack.get("version"),
+                "intent": evidence_pack.get("intent"),
+                "items": typed_items,
+                "tables": evidence_pack.get("tables") or [],
+                "apis": evidence_pack.get("apis") or [],
+                "missing_hops": evidence_pack.get("missing_hops") or [],
+            },
+        }
+        payload = {
+            "contents": [
+                {
+                    "parts": [
+                        {
+                            "text": (
+                                "Judge whether the answer is fully supported by the evidence. "
+                                "Return JSON only. Use repair when the answer invents, overstates, or misses stronger typed evidence. "
+                                "Use insufficient_evidence when evidence itself cannot answer the question.\n\n"
+                                f"{json.dumps(judge_context, ensure_ascii=False)}"
+                            )
+                        }
+                    ]
+                }
+            ],
+            "systemInstruction": {
+                "parts": [
+                    {
+                        "text": (
+                            "You are an evidence judge for source-code QA. "
+                            "Do not answer the user's question. Judge only support, missing evidence, and repair targets."
+                        )
+                    }
+                ]
+            },
+            "generationConfig": {
+                "temperature": 0,
+                "maxOutputTokens": 500,
+                "responseMimeType": "application/json",
+                "responseSchema": self._llm_judge_response_schema(),
+                "thinkingConfig": {"thinkingBudget": 0},
+            },
+        }
+        result = self.llm_provider.generate(
+            payload=payload,
+            primary_model=self._model_for_role("judge", fallback=str(self.llm_budgets["cheap"]["model"])),
+            fallback_model=self._llm_fallback_model(),
+        )
+        parsed = self._parse_judge_payload(self.llm_provider.extract_text(result.payload))
+        status = str(parsed.get("status") or deterministic.get("status") or "warn").strip().lower()
+        if status == "insufficient_evidence":
+            status = "repair"
+        if status not in {"ok", "warn", "repair"}:
+            status = deterministic.get("status") or "warn"
+        issues = [str(item).strip() for item in parsed.get("issues") or [] if str(item).strip()]
+        repair_targets = [str(item).strip() for item in parsed.get("repair_targets") or [] if str(item).strip()]
+        if deterministic.get("status") == "repair" and status == "ok":
+            status = "warn"
+            issues.extend(deterministic.get("issues") or [])
+        return {
+            "status": status,
+            "mode": "llm_evidence_judge",
+            "model": result.model,
+            "attempts": result.attempts,
+            "usage": self._normalize_llm_usage(result.usage or result.payload.get("usageMetadata") or {}),
+            "deterministic_status": deterministic.get("status"),
+            "checked_items": deterministic.get("checked_items", len(typed_items)),
+            "supporting_items": deterministic.get("supporting_items"),
+            "confidence": str(parsed.get("confidence") or "medium"),
+            "issues": list(dict.fromkeys(issues))[:6],
+            "repair_targets": list(dict.fromkeys(repair_targets))[:6],
+        }
+
+    @staticmethod
+    def _parse_judge_payload(text: str) -> dict[str, Any]:
+        raw = str(text or "").strip()
+        if not raw:
+            return {}
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            match = re.search(r"\{.*\}", raw, flags=re.DOTALL)
+            if not match:
+                return {"status": "warn", "issues": ["judge returned non-json output"], "repair_targets": []}
+            try:
+                payload = json.loads(match.group(0))
+            except json.JSONDecodeError:
+                return {"status": "warn", "issues": ["judge returned invalid json"], "repair_targets": []}
+        return payload if isinstance(payload, dict) else {}
+
     @staticmethod
     def _split_answer_claims(answer: str) -> list[str]:
         claims: list[str] = []
@@ -4623,6 +10653,22 @@ class SourceCodeQAService:
             api_markers = self._answer_expected_terms(evidence_summary, "api_or_config")
             if api_markers and not any(marker in lowered_answer for marker in api_markers):
                 issues.append("answer omits concrete API/config terms found in evidence")
+        if intent.get("static_qa"):
+            static_markers = self._answer_expected_terms(evidence_summary, "static_findings")
+            if static_markers and not any(marker in lowered_answer for marker in static_markers):
+                issues.append("answer omits static QA finding terms found in evidence")
+        if intent.get("impact_analysis"):
+            impact_markers = self._answer_expected_terms(evidence_summary, "impact_surfaces")
+            if impact_markers and not any(marker in lowered_answer for marker in impact_markers):
+                issues.append("answer omits impact surface terms found in evidence")
+        if intent.get("test_coverage"):
+            test_markers = self._answer_expected_terms(evidence_summary, "test_coverage")
+            if test_markers and not any(marker in lowered_answer for marker in test_markers):
+                issues.append("answer omits test coverage terms found in evidence")
+        if intent.get("operational_boundary"):
+            boundary_markers = self._answer_expected_terms(evidence_summary, "operational_boundaries")
+            if boundary_markers and not any(marker in lowered_answer for marker in boundary_markers):
+                issues.append("answer omits operational boundary terms found in evidence")
         if len(str(answer or "").strip()) < 80 and evidence_summary.get("source_count", 0) >= 2:
             issues.append("answer is too thin for available evidence")
         retryable = bool(issues) and quality_gate.get("status") != "needs_more_trace" or bool(issues and evidence_summary.get("source_count", 0))
@@ -4663,6 +10709,7 @@ class SourceCodeQAService:
         evidence_summary: dict[str, Any],
         quality_gate: dict[str, Any],
         limit: int,
+        request_cache: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         agent_plan = self._build_agent_plan(question, evidence_summary, quality_gate)
         if not agent_plan.get("steps"):
@@ -4684,27 +10731,19 @@ class SourceCodeQAService:
             quality_gate=quality_gate,
             agent_plan=agent_plan,
             limit=max(int(limit or 12), 12),
+            request_cache=request_cache,
         )
 
-    @staticmethod
-    def _extract_gemini_text(payload: dict[str, Any]) -> str:
-        candidates = payload.get("candidates") or []
-        for candidate in candidates:
-            content = candidate.get("content") or {}
-            parts = content.get("parts") or []
-            texts = [str(part.get("text") or "").strip() for part in parts if str(part.get("text") or "").strip()]
-            if texts:
-                return "\n".join(texts).strip()
-        raise ToolError("Gemini returned no readable answer.")
-
-    def _answer_cache_key(self, *, model: str, question: str, answer_mode: str, llm_budget_mode: str, context: str) -> str:
+    def _answer_cache_key(self, *, provider: str, model: str, question: str, answer_mode: str, llm_budget_mode: str, context: str) -> str:
         digest = hashlib.sha1(
             json.dumps(
                 {
+                    "provider": provider,
                     "model": model,
                     "question": question,
                     "answer_mode": answer_mode,
                     "llm_budget_mode": llm_budget_mode,
+                    "versions": self._llm_versions(),
                     "context": context,
                 },
                 ensure_ascii=False,
@@ -4725,17 +10764,42 @@ class SourceCodeQAService:
         if expire_at < datetime.now(timezone.utc).timestamp():
             cache_path.unlink(missing_ok=True)
             return None
+        if payload.get("versions") != self._llm_versions():
+            return None
         return payload
 
-    def _store_cached_answer(self, key: str, *, answer: str, usage: dict[str, Any], answer_quality: dict[str, Any] | None = None) -> None:
+    def _store_cached_answer(
+        self,
+        key: str,
+        *,
+        answer: str,
+        usage: dict[str, Any],
+        answer_quality: dict[str, Any] | None = None,
+        provider: str,
+        model: str,
+        thinking_budget: int | None = None,
+        finish_reason: str | None = None,
+    ) -> None:
         self.answer_cache_root.mkdir(parents=True, exist_ok=True)
         payload = {
+            "versions": self._llm_versions(),
+            "provider": provider,
+            "model": model,
+            "thinking_budget": int(thinking_budget or 0),
+            "finish_reason": str(finish_reason or ""),
             "answer": answer,
             "usage": usage,
             "answer_quality": answer_quality or {},
             "expire_at": datetime.now(timezone.utc).timestamp() + self.llm_cache_ttl_seconds,
         }
-        (self.answer_cache_root / f"{key}.json").write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        self._atomic_write_json(self.answer_cache_root / f"{key}.json", payload)
+
+    @staticmethod
+    def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        temp_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        os.replace(temp_path, path)
 
     def _record_query_telemetry(
         self,
@@ -4749,6 +10813,10 @@ class SourceCodeQAService:
     ) -> None:
         try:
             matches = payload.get("matches") or []
+            answer_contract = payload.get("answer_contract") or {}
+            evidence_pack = payload.get("evidence_pack") or {}
+            tool_trace = payload.get("tool_trace") or []
+            policies = answer_contract.get("policies") or (payload.get("answer_quality") or {}).get("policies") or []
             stage_counts: dict[str, int] = {}
             retrieval_counts: dict[str, int] = {}
             for match in matches:
@@ -4763,16 +10831,60 @@ class SourceCodeQAService:
                 "question_preview": question[:180],
                 "requested_answer_mode": answer_mode,
                 "answer_mode": payload.get("answer_mode"),
-                "llm_budget_mode": llm_budget_mode,
+                "requested_llm_budget_mode": llm_budget_mode,
+                "llm_budget_mode": payload.get("llm_budget_mode") or llm_budget_mode,
+                "llm_requested_budget_mode": payload.get("llm_requested_budget_mode") or llm_budget_mode,
+                "llm_route": payload.get("llm_route") or {},
+                "llm_provider": payload.get("llm_provider") or self.llm_provider.name,
+                "llm_model": payload.get("llm_model"),
+                "llm_thinking_budget": payload.get("llm_thinking_budget"),
+                "llm_cached": bool(payload.get("llm_cached")),
+                "llm_attempts": payload.get("llm_attempts"),
+                "llm_latency_ms": payload.get("llm_latency_ms"),
+                "llm_finish_reason": payload.get("llm_finish_reason"),
+                "llm_attempt_log": payload.get("llm_attempt_log") or [],
                 "status": payload.get("status"),
                 "latency_ms": int((time.time() - started_at) * 1000),
                 "match_count": len(matches),
                 "top_paths": [str(match.get("path") or "") for match in matches[:5]],
+                "index_freshness": payload.get("index_freshness") or {},
                 "trace_stage_counts": stage_counts,
                 "retrieval_counts": retrieval_counts,
+                "retrieval_runtime": payload.get("retrieval_runtime") or {},
                 "answer_quality": payload.get("answer_quality") or {},
+                "answer_claim_check": payload.get("answer_claim_check") or {},
+                "answer_judge": payload.get("answer_judge") or {},
+                "tool_trace_summary": {
+                    "steps": len(tool_trace),
+                    "phases": sorted({str(step.get("phase") or "unknown") for step in tool_trace if isinstance(step, dict)}),
+                    "tools": sorted({str(step.get("tool") or "unknown") for step in tool_trace if isinstance(step, dict)})[:20],
+                    "matches_added": sum(int(step.get("matches_added") or 0) for step in tool_trace if isinstance(step, dict)),
+                },
+                "answer_contract": answer_contract,
+                "evidence_pack_summary": {
+                    "version": evidence_pack.get("version"),
+                    "items": len(evidence_pack.get("items") or []),
+                    "entry_points": len(evidence_pack.get("entry_points") or []),
+                    "call_chain": len(evidence_pack.get("call_chain") or []),
+                    "read_write_points": len(evidence_pack.get("read_write_points") or []),
+                    "external_dependencies": len(evidence_pack.get("external_dependencies") or []),
+                    "tables": len(evidence_pack.get("tables") or []),
+                    "apis": len(evidence_pack.get("apis") or []),
+                    "static_findings": len(evidence_pack.get("static_findings") or []),
+                    "impact_surfaces": len(evidence_pack.get("impact_surfaces") or []),
+                    "test_coverage": len(evidence_pack.get("test_coverage") or []),
+                    "operational_boundaries": len(evidence_pack.get("operational_boundaries") or []),
+                    "missing_hops": len(evidence_pack.get("missing_hops") or []),
+                },
+                "answer_policy_statuses": {
+                    str(policy.get("name") or "unknown"): str(policy.get("status") or "unknown")
+                    for policy in policies
+                    if isinstance(policy, dict)
+                },
+                "structured_answer_confidence": (payload.get("structured_answer") or {}).get("confidence"),
                 "llm_usage": payload.get("llm_usage") or {},
                 "fallback": bool(payload.get("fallback_notice")),
+                "versions": self._llm_versions(),
             }
             self.telemetry_path.parent.mkdir(parents=True, exist_ok=True)
             with self.telemetry_path.open("a", encoding="utf-8") as handle:
@@ -4791,6 +10903,9 @@ class SourceCodeQAService:
             "dependency": [match for match in matches if match.get("trace_stage") == "dependency"],
             "two_hop": [match for match in matches if match.get("trace_stage") == "two_hop"],
             "tool_loop": [match for match in matches if str(match.get("trace_stage") or "").startswith(TOOL_LOOP_TRACE_PREFIX)],
+            "impact_analysis": [match for match in matches if match.get("trace_stage") == "impact_analysis"],
+            "test_coverage": [match for match in matches if match.get("trace_stage") == "test_coverage" or match.get("retrieval") == "test_coverage"],
+            "operational_boundary": [match for match in matches if match.get("trace_stage") == "operational_boundary" or match.get("retrieval") == "operational_boundary"],
             "agent_trace": [match for match in matches if str(match.get("trace_stage") or "").startswith("agent_trace")],
             "agent_plan": [match for match in matches if str(match.get("trace_stage") or "").startswith("agent_plan")],
             "quality_gate": [match for match in matches if match.get("trace_stage") == QUALITY_GATE_TRACE_STAGE],
@@ -4811,6 +10926,12 @@ class SourceCodeQAService:
         # and downstream/common builders. This improves answer accuracy more than
         # sending only the highest raw scores.
         stage_order = ("direct", "query_decomposition", "dependency", "two_hop", "tool_loop", "agent_trace", "agent_plan", "quality_gate")
+        if intent.get("impact_analysis"):
+            stage_order = ("direct", "impact_analysis", "tool_loop", "query_decomposition", "dependency", "two_hop", "agent_trace", "agent_plan", "quality_gate")
+        if intent.get("test_coverage"):
+            stage_order = ("direct", "test_coverage", "query_decomposition", "tool_loop", "dependency", "two_hop", "agent_trace", "agent_plan", "quality_gate")
+        if intent.get("operational_boundary"):
+            stage_order = ("direct", "operational_boundary", "query_decomposition", "tool_loop", "dependency", "two_hop", "agent_trace", "agent_plan", "quality_gate")
         for stage in stage_order:
             stage_take = 1 if intent.get("data_source") else 2
             for match in buckets[stage][:stage_take]:
@@ -4838,6 +10959,30 @@ class SourceCodeQAService:
                     if predicate(match):
                         add(match)
                         break
+        if intent.get("static_qa"):
+            for match in matches:
+                if match.get("retrieval") == "static_qa" or match.get("static_qa"):
+                    add(match)
+                if len(selected) >= limit:
+                    break
+        if intent.get("impact_analysis"):
+            for match in matches:
+                if str(match.get("retrieval") or "") in {"planner_caller", "planner_callee", "flow_graph", "entity_graph", "code_graph"}:
+                    add(match)
+                if len(selected) >= limit:
+                    break
+        if intent.get("test_coverage"):
+            for match in matches:
+                if str(match.get("retrieval") or "") == "test_coverage" or match.get("test_coverage"):
+                    add(match)
+                if len(selected) >= limit:
+                    break
+        if intent.get("operational_boundary"):
+            for match in matches:
+                if str(match.get("retrieval") or "") == "operational_boundary" or match.get("operational_boundary"):
+                    add(match)
+                if len(selected) >= limit:
+                    break
         for stage in stage_order:
             for match in buckets[stage][:2]:
                 add(match)
@@ -4867,6 +11012,7 @@ class SourceCodeQAService:
         status: str,
         summary: str,
         repo_status: list[dict[str, Any]] | None = None,
+        index_freshness: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         return {
             "status": status,
@@ -4874,6 +11020,7 @@ class SourceCodeQAService:
             "summary": summary,
             "matches": [],
             "repo_status": repo_status or [],
+            "index_freshness": index_freshness or {},
             "key": key,
         }
 

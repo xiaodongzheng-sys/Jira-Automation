@@ -13,7 +13,6 @@
   const pmTeam = document.querySelector('[data-source-pm-team]');
   const country = document.querySelector('[data-source-country]');
   const answerMode = document.querySelector('[data-source-answer-mode]');
-  const llmBudget = document.querySelector('[data-source-llm-budget]');
   const countryWrap = document.querySelector('[data-source-country-wrap]');
   const configStatus = document.querySelector('[data-source-config-status]');
   const adminStatus = document.querySelector('[data-source-admin-status]');
@@ -28,7 +27,6 @@
   const results = document.querySelector('[data-source-results]');
   const llmAnswer = document.querySelector('[data-source-llm-answer]');
   const activeMode = document.querySelector('[data-source-active-mode]');
-  const activeBudget = document.querySelector('[data-source-active-budget]');
   const activeCache = document.querySelector('[data-source-active-cache]');
   const activeUsage = document.querySelector('[data-source-active-usage]');
   const fallbackNotice = document.querySelector('[data-source-fallback-notice]');
@@ -38,6 +36,7 @@
   let config = { mappings: {} };
   let gitAuthReady = false;
   let llmReady = false;
+  let llmPolicy = {};
   let lastPayload = null;
   let conversationContext = null;
   const preferenceKey = 'source-code-qa:last-query-config:v1';
@@ -90,18 +89,14 @@
     if (selectHasValue(answerMode, saved.answer_mode)) {
       answerMode.value = saved.answer_mode;
     }
-    if (selectHasValue(llmBudget, saved.llm_budget_mode)) {
-      llmBudget.value = saved.llm_budget_mode;
-    }
   };
 
-  const rememberLastQueryConfig = (selectedAnswerMode, selectedBudget) => {
+  const rememberLastQueryConfig = (selectedAnswerMode) => {
     try {
       window.localStorage.setItem(preferenceKey, JSON.stringify({
         pm_team: pmTeam.value,
         country: currentCountry(),
         answer_mode: selectedAnswerMode,
-        llm_budget_mode: selectedBudget,
       }));
     } catch (_error) {
       // Local storage can be blocked in private/browser-managed contexts.
@@ -124,9 +119,6 @@
   const updateAnswerModeState = () => {
     const answerModeValue = answerMode?.value || 'auto';
     const llmSelected = answerModeValue !== 'retrieval_only';
-    if (llmBudget) {
-      llmBudget.disabled = !llmSelected;
-    }
     if (queryButton) {
       queryButton.textContent = llmSelected ? 'Search + Generate Answer' : 'Search Code';
     }
@@ -193,8 +185,13 @@
       config = payload.config || { mappings: {} };
       gitAuthReady = Boolean(payload.git_auth_ready);
       llmReady = Boolean(payload.llm_ready);
+      llmPolicy = payload.llm_policy || {};
       if (!gitAuthReady && adminStatus) {
         adminStatus.textContent = 'Set SOURCE_CODE_QA_GITLAB_TOKEN on the server before running Sync / Refresh.';
+      } else if (adminStatus && llmPolicy.provider) {
+        const provider = llmPolicy.provider.provider || payload.llm_provider || 'llm';
+        const routerVersion = llmPolicy.router?.version ? ` · router v${llmPolicy.router.version}` : '';
+        adminStatus.textContent = `LLM provider: ${provider}${routerVersion}.`;
       }
       updateAnswerModeState();
       renderSelectedConfig();
@@ -344,7 +341,11 @@
       .join('');
     const repoEdges = (payload.repo_graph?.edges || [])
       .slice(0, 8)
-      .map((edge) => `<li>${escapeHtml(edge.from_repo)} -> ${escapeHtml(edge.to_repo)} · ${escapeHtml(edge.edge_kind)} · ${escapeHtml(edge.evidence)}</li>`)
+      .map((edge) => {
+        const confidence = Number.isFinite(Number(edge.confidence)) ? ` · ${(Number(edge.confidence) * 100).toFixed(0)}%` : '';
+        const reason = edge.match_reason ? ` · ${edge.match_reason}` : '';
+        return `<li>${escapeHtml(edge.from_repo)} -> ${escapeHtml(edge.to_repo)} · ${escapeHtml(edge.edge_kind)}${escapeHtml(confidence)}${escapeHtml(reason)} · ${escapeHtml(edge.evidence)}</li>`;
+      })
       .join('');
     const contract = payload.answer_contract || {};
     const confirmedSources = (contract.confirmed_sources || [])
@@ -354,6 +355,27 @@
     const missingLinks = (contract.missing_links || [])
       .slice(0, 6)
       .map((item) => `<li>${escapeHtml(item)}</li>`)
+      .join('');
+    const judge = payload.answer_judge || {};
+    const judgeIssues = (judge.issues || [])
+      .slice(0, 5)
+      .map((item) => `<li>${escapeHtml(item)}</li>`)
+      .join('');
+    const toolTrace = (payload.tool_trace || [])
+      .slice(0, 8)
+      .map((step) => {
+        const label = [
+          step.phase || 'trace',
+          step.tool || 'tool',
+          step.step || '',
+        ].filter(Boolean).join(' · ');
+        const counts = [
+          Number.isFinite(Number(step.matches_found)) ? `found ${step.matches_found}` : '',
+          Number.isFinite(Number(step.matches_added)) ? `added ${step.matches_added}` : '',
+        ].filter(Boolean).join(', ');
+        const terms = (step.terms || []).slice(0, 5).join(', ');
+        return `<li>${escapeHtml(label)}${counts ? ` (${escapeHtml(counts)})` : ''}${terms ? `: ${escapeHtml(terms)}` : ''}</li>`;
+      })
       .join('');
     debugTrace.hidden = false;
     debugTrace.innerHTML = `
@@ -384,6 +406,15 @@
             <strong>Missing links</strong>
             <ul>${missingLinks || '<li>No missing link reported.</li>'}</ul>
           </section>
+          <section>
+            <strong>Answer judge</strong>
+            <p>${escapeHtml(judge.mode || 'deterministic_evidence_judge')} · ${escapeHtml(judge.status || 'unknown')} · checked: ${escapeHtml(String(judge.checked_items ?? 'n/a'))}</p>
+            <ul>${judgeIssues || '<li>No judge issue reported.</li>'}</ul>
+          </section>
+          <section>
+            <strong>Investigation tools</strong>
+            <ul>${toolTrace || '<li>No planner tool step recorded.</li>'}</ul>
+          </section>
         </div>
       </details>
     `;
@@ -400,16 +431,20 @@
     const usage = payload?.llm_usage || {};
     const meta = [
       payload?.llm_budget_mode ? `budget: ${payload.llm_budget_mode}` : '',
+      payload?.llm_provider ? `provider: ${payload.llm_provider}` : '',
+      payload?.llm_model ? `model: ${payload.llm_model}` : '',
+      payload?.llm_thinking_budget !== undefined ? `thinking: ${payload.llm_thinking_budget}` : '',
       payload?.llm_route?.mode === 'auto' ? `route: ${payload.llm_route.reason}` : '',
       payload?.llm_cached ? 'cache hit' : 'live call',
-      usage?.promptTokenCount ? `prompt: ${usage.promptTokenCount}` : '',
-      usage?.candidatesTokenCount ? `output: ${usage.candidatesTokenCount}` : '',
+      usage?.promptTokenCount || usage?.prompt_tokens ? `prompt: ${usage.promptTokenCount || usage.prompt_tokens}` : '',
+      usage?.candidatesTokenCount || usage?.completion_tokens ? `output: ${usage.candidatesTokenCount || usage.completion_tokens}` : '',
+      usage?.totalTokenCount || usage?.total_tokens ? `total: ${usage.totalTokenCount || usage.total_tokens}` : '',
     ].filter(Boolean).join(' · ');
     llmAnswer.hidden = false;
     llmAnswer.innerHTML = `
       <div class="source-qa-llm-card">
         <div class="source-qa-llm-head">
-          <strong>Gemini Answer</strong>
+          <strong>LLM Answer</strong>
           <span>${escapeHtml(meta)}</span>
         </div>
         <pre><code>${escapeHtml(answer)}</code></pre>
@@ -420,7 +455,13 @@
   const renderFallbackNotice = (payload) => {
     if (!fallbackNotice) return;
     const notice = payload?.fallback_notice;
+    const freshnessWarning = payload?.index_freshness?.warning;
     if (!notice?.message) {
+      if (freshnessWarning) {
+        fallbackNotice.hidden = false;
+        fallbackNotice.textContent = `Index freshness: ${freshnessWarning}`;
+        return;
+      }
       fallbackNotice.hidden = true;
       fallbackNotice.textContent = '';
       return;
@@ -429,10 +470,7 @@
     fallbackNotice.textContent = `${notice.title || 'Fallback'}: ${notice.message}`;
   };
 
-  const renderUsageBadges = (payload, selectedBudget) => {
-    if (activeBudget) {
-      activeBudget.textContent = payload?.llm_budget_mode || selectedBudget || 'auto';
-    }
+  const renderUsageBadges = (payload) => {
     const llmAnswered = ['gemini_flash', 'auto'].includes(payload?.answer_mode) && Boolean(payload?.llm_answer);
     if (activeCache) {
       if (llmAnswered) {
@@ -445,7 +483,7 @@
     }
     if (activeUsage) {
       const usage = payload?.llm_usage || {};
-      const total = usage?.totalTokenCount;
+      const total = usage?.totalTokenCount || usage?.total_tokens;
       if (llmAnswered && total) {
         activeUsage.hidden = false;
         activeUsage.textContent = `${total} tokens`;
@@ -458,14 +496,13 @@
 
   const queryCode = async () => {
     const selectedAnswerMode = answerMode?.value || 'auto';
-    const selectedBudget = llmBudget?.value || 'auto';
     if (selectedAnswerMode === 'gemini_flash' && !llmReady) {
       queryStatus.textContent = 'LLM mode is not configured on the server yet.';
       return;
     }
     activeMode.textContent = selectedAnswerMode;
     queryStatus.textContent = selectedAnswerMode !== 'retrieval_only'
-      ? 'Searching local code and asking Gemini...'
+      ? 'Searching local code and asking LLM...'
       : 'Searching local code index...';
     try {
       const payload = await fetch(queryUrl, {
@@ -476,17 +513,17 @@
           country: currentCountry(),
           question: questionInput.value,
           answer_mode: selectedAnswerMode,
-          llm_budget_mode: selectedBudget,
+          llm_budget_mode: 'auto',
           conversation_context: conversationContext,
         }),
       }).then(readJson);
       lastPayload = payload;
       conversationContext = buildConversationContext(payload);
-      rememberLastQueryConfig(selectedAnswerMode, selectedBudget);
+      rememberLastQueryConfig(selectedAnswerMode);
       summary.textContent = payload.summary || 'Search completed.';
       queryStatus.textContent = payload.status === 'ok' ? 'Search completed.' : payload.status;
       activeMode.textContent = payload.answer_mode || selectedAnswerMode;
-      renderUsageBadges(payload, selectedBudget);
+      renderUsageBadges(payload);
       renderFallbackNotice(payload);
       renderStatus(payload.repo_status || []);
       renderLlmAnswer(payload);
@@ -500,7 +537,7 @@
       }
     } catch (error) {
       queryStatus.textContent = error.message || 'Search failed.';
-      renderUsageBadges({}, selectedBudget);
+      renderUsageBadges({});
       renderFallbackNotice({});
       renderLlmAnswer({});
       renderDebugTrace(null);
