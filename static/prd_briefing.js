@@ -105,6 +105,48 @@
     }
   };
 
+  const captureReadingAnchor = () => {
+    if (!sectionDetailNode) return null;
+    const viewportAnchorY = Math.min(160, Math.max(80, window.innerHeight * 0.18));
+    const sections = Array.from(sectionDetailNode.querySelectorAll('[data-source-section-index]'));
+    if (!sections.length) return null;
+    let best = null;
+    sections.forEach((node) => {
+      const rect = node.getBoundingClientRect();
+      const containsAnchor = rect.top <= viewportAnchorY && rect.bottom >= viewportAnchorY;
+      const distance = containsAnchor ? 0 : Math.min(Math.abs(rect.top - viewportAnchorY), Math.abs(rect.bottom - viewportAnchorY));
+      if (!best || distance < best.distance) {
+        best = {
+          index: node.dataset.sourceSectionIndex,
+          top: rect.top,
+          distance,
+        };
+      }
+    });
+    return best;
+  };
+
+  const restoreReadingAnchor = (anchor) => {
+    if (!anchor || !sectionDetailNode) return;
+    const node = Array.from(sectionDetailNode.querySelectorAll('[data-source-section-index]'))
+      .find((item) => String(item.dataset.sourceSectionIndex) === String(anchor.index));
+    if (!node) return;
+    const rect = node.getBoundingClientRect();
+    window.scrollBy({
+      top: rect.top - anchor.top,
+      left: 0,
+      behavior: 'auto',
+    });
+  };
+
+  const restoreReadingAnchorAfterLayout = (anchor) => {
+    if (!anchor) return;
+    window.requestAnimationFrame(() => {
+      restoreReadingAnchor(anchor);
+      window.setTimeout(() => restoreReadingAnchor(anchor), 120);
+    });
+  };
+
   const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
 
   const applyNoImageTogglePosition = (position) => {
@@ -756,11 +798,13 @@
         event.preventDefault();
         return;
       }
+      const readingAnchor = captureReadingAnchor();
       state.noImageMode = !state.noImageMode;
       try {
         window.localStorage.setItem(NO_IMAGE_MODE_STORAGE_KEY, state.noImageMode ? '1' : '0');
       } catch {}
       renderNoImageMode();
+      restoreReadingAnchorAfterLayout(readingAnchor);
     });
   }
 
