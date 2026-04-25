@@ -459,6 +459,18 @@ ANSWER_POLICY_REGISTRY = {
         "supporting_any": ["entry_points"],
         "missing": "config/property evidence",
     },
+    "module_dependency": {
+        "label": "Module dependency evidence",
+        "required_any": ["module_dependencies", "api_or_config"],
+        "supporting_any": ["external_dependencies", "downstream_components", "entry_points"],
+        "missing": "build-file dependency evidence such as Maven, Gradle, npm, or module artifact coordinates",
+    },
+    "message_flow": {
+        "label": "Message flow evidence",
+        "required_any": ["message_flows"],
+        "supporting_any": ["api_or_config", "entry_points", "downstream_components"],
+        "missing": "message producer/consumer evidence such as Kafka topic, queue, publisher, or listener",
+    },
     "logic": {
         "label": "Rule or error logic evidence",
         "required_any": ["rule_or_error_logic", "entry_points"],
@@ -10134,6 +10146,7 @@ class SourceCodeQAService:
             "api": any(term in lowered for term in API_HINTS),
             "config": any(term in lowered for term in CONFIG_HINTS),
             "module_dependency": any(term in lowered for term in MODULE_DEPENDENCY_HINTS),
+            "message_flow": self._question_message_flow_intent(question),
             "error": any(term in lowered for term in ERROR_HINTS),
             "rule_logic": any(term in lowered for term in RULE_HINTS),
             "static_qa": self._question_static_qa_intent(question),
@@ -10228,6 +10241,33 @@ class SourceCodeQAService:
         # Avoid treating table/config names like bcf_global_lock or globallock as a
         # boundary ask. Standalone "lock" questions still need boundary evidence.
         return bool(re.search(r"\b(?:lock|locks|locking)\b", lowered) or any(term in lowered for term in (" 锁 ", " 加锁 ", " 解锁 ")))
+
+    @staticmethod
+    def _question_message_flow_intent(question: str) -> bool:
+        lowered = f" {str(question or '').lower()} "
+        return any(
+            term in lowered
+            for term in (
+                "topic",
+                "queue",
+                "kafka",
+                "rabbit",
+                "jms",
+                "message",
+                "event",
+                "consumer",
+                "consume",
+                "producer",
+                "publish",
+                "listener",
+                "消息",
+                "事件",
+                "主题",
+                "队列",
+                "消费",
+                "发布",
+            )
+        )
 
     def _build_query_decomposition(self, question: str, domain_profile: dict[str, Any] | None = None) -> dict[str, Any]:
         intent = self._question_intent(question)
@@ -10399,6 +10439,7 @@ class SourceCodeQAService:
         snippet = str(match.get("snippet") or "").lower()
         retrieval = str(match.get("retrieval") or "")
         trace_stage = str(match.get("trace_stage") or "")
+        lowered_question = str(question or "").lower()
         question_tokens = set(question_features.get("tokens") or [])
         path_stem = Path(path).stem.lower()
         exact_lookup = match.get("exact_lookup") or {}
@@ -10435,6 +10476,25 @@ class SourceCodeQAService:
         if intent.get("config"):
             if path.endswith((".properties", ".yaml", ".yml", ".toml", ".conf")):
                 score += 30
+        if intent.get("module_dependency"):
+            if path.endswith(("pom.xml", "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts", "package.json")):
+                score += 64
+            if ("npm" in lowered_question or "package" in lowered_question or "node" in lowered_question) and path.endswith("package.json"):
+                score += 90
+            if ("gradle" in lowered_question or "multi-module" in lowered_question) and (
+                path.endswith(("build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts"))
+                or ".gradle" in path
+            ):
+                score += 90
+            if ("maven" in lowered_question or "pom" in lowered_question) and path.endswith("pom.xml"):
+                score += 90
+            if any(term in snippet for term in ("artifactid", "groupid", "implementation project", "dependencies", "module_dependency")):
+                score += 28
+        if intent.get("message_flow"):
+            if any(term in path for term in ("event", "message", "consumer", "producer", "listener")):
+                score += 48
+            if any(term in snippet for term in ("kafkalistener", "rabbitlistener", "jmslistener", "kafkatemplate", ".send(", "topic", "queue")):
+                score += 32
         if intent.get("rule_logic") or intent.get("error"):
             if any(term in snippet for term in ("validate", "condition", "exception", "approval", "permission")):
                 score += 20
@@ -10514,6 +10574,8 @@ class SourceCodeQAService:
             "downstream_components": [],
             "data_sources": [],
             "api_or_config": [],
+            "module_dependencies": [],
+            "message_flows": [],
             "rule_or_error_logic": [],
             "static_findings": [],
             "impact_surfaces": [],
@@ -10522,6 +10584,7 @@ class SourceCodeQAService:
             "source_count": len(selected),
         }
         adders = {key: self._limited_fact_adder(summary[key], 12) for key in summary if isinstance(summary.get(key), list)}
+        intent = summary["intent"]
 
         for match in selected:
             label = self._evidence_label(match)
@@ -10549,6 +10612,19 @@ class SourceCodeQAService:
                 adders["test_coverage"](f"{label}: {reason or 'test coverage evidence'}")
             if retrieval == "operational_boundary" or match.get("operational_boundary"):
                 adders["operational_boundaries"](f"{label}: {reason or 'operational boundary evidence'}")
+            if intent.get("module_dependency") and (
+                any(path_lower.endswith(suffix) for suffix in ("pom.xml", "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts", "package.json"))
+                or "module_dependency" in reason
+                or "artifactid" in snippet_lower
+                or "implementation project" in snippet_lower
+            ):
+                adders["module_dependencies"](f"{label}: {reason or self._compact_path(path)}")
+            if intent.get("message_flow") and (
+                any(term in path_lower for term in ("event", "message", "consumer", "producer", "listener"))
+                or any(term in snippet_lower for term in ("kafkalistener", "rabbitlistener", "jmslistener", "kafkatemplate", ".send(", "topic", "queue"))
+                or any(term in reason.lower() for term in ("message_publish", "message_consume", "event_publish", "event_consume", "message_topic"))
+            ):
+                adders["message_flows"](f"{label}: {reason or self._compact_path(path)}")
 
             for symbol in symbols:
                 lowered = symbol.lower()
@@ -10600,6 +10676,8 @@ class SourceCodeQAService:
             "call_chain": [],
             "read_write_points": [],
             "external_dependencies": [],
+            "module_dependencies": [],
+            "message_flows": [],
             "tables": [],
             "apis": [],
             "configs": [],
@@ -10676,6 +10754,14 @@ class SourceCodeQAService:
             if any(term in lowered for term in CONFIG_HINTS):
                 adders["configs"](str(fact))
                 add_item("config", str(fact), confidence="high", hop="config")
+        for fact in evidence_summary.get("module_dependencies") or []:
+            adders["module_dependencies"](str(fact))
+            adders["external_dependencies"](str(fact))
+            add_item("module_dependency", str(fact), confidence="high", hop="dependency")
+        for fact in evidence_summary.get("message_flows") or []:
+            adders["message_flows"](str(fact))
+            adders["external_dependencies"](str(fact))
+            add_item("message_flow", str(fact), confidence="high", hop="message")
         for fact in evidence_summary.get("field_population") or []:
             adders["read_write_points"](str(fact))
             add_item("field_population", str(fact), confidence="medium", hop="field_population")
@@ -10760,6 +10846,25 @@ class SourceCodeQAService:
             for line in self._interesting_lines(snippet, CONFIG_HINTS):
                 adders["configs"](f"{label}: {line}")
                 add_item("config", f"{label}: {line}", source_id=source_id, match=match, confidence="medium", hop="config")
+            if pack["intent"].get("module_dependency") and (
+                path.lower().endswith(("pom.xml", "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts", "package.json"))
+                or "module_dependency" in str(match.get("reason") or "").lower()
+                or "artifactid" in snippet_lower
+                or "implementation project" in snippet_lower
+            ):
+                claim = f"{label}: {str(match.get('reason') or self._compact_path(path))}"
+                adders["module_dependencies"](claim)
+                adders["external_dependencies"](claim)
+                add_item("module_dependency", claim, source_id=source_id, match=match, confidence="high", hop="dependency")
+            if pack["intent"].get("message_flow") and (
+                any(term in path.lower() for term in ("event", "message", "consumer", "producer", "listener"))
+                or any(term in snippet_lower for term in ("kafkalistener", "rabbitlistener", "jmslistener", "kafkatemplate", ".send(", "topic", "queue"))
+                or any(term in str(match.get("reason") or "").lower() for term in ("message_publish", "message_consume", "event_publish", "event_consume", "message_topic"))
+            ):
+                claim = f"{label}: {str(match.get('reason') or self._compact_path(path))}"
+                adders["message_flows"](claim)
+                adders["external_dependencies"](claim)
+                add_item("message_flow", claim, source_id=source_id, match=match, confidence="high", hop="message")
             for line in self._interesting_lines(snippet, FIELD_POPULATION_HINTS):
                 adders["read_write_points"](f"{label}: {line}")
                 add_item("field_population", f"{label}: {line}", source_id=source_id, match=match, confidence="medium", hop="field_population")
@@ -10928,6 +11033,10 @@ class SourceCodeQAService:
             names.append("api")
         if intent.get("config"):
             names.append("config")
+        if intent.get("module_dependency"):
+            names.append("module_dependency")
+        if intent.get("message_flow"):
+            names.append("message_flow")
         if intent.get("error") or intent.get("rule_logic"):
             names.append("logic")
         if intent.get("static_qa"):
@@ -11019,6 +11128,12 @@ class SourceCodeQAService:
 
         if intent.get("config"):
             checks.append("config")
+
+        if intent.get("module_dependency"):
+            checks.append("module_dependency")
+
+        if intent.get("message_flow"):
+            checks.append("message_flow")
 
         if intent.get("error") or intent.get("rule_logic"):
             checks.append("logic")
@@ -11397,6 +11512,7 @@ class SourceCodeQAService:
             trace_stage = str(item.get("trace_stage") or "")
             path = str(item.get("path") or "").lower()
             snippet = str(item.get("snippet") or "").lower()
+            lowered_question = str(question or "").lower()
             priority = 0
             if trace_stage == "exact_lookup" or retrieval == "exact_table_path_lookup":
                 priority = max(priority, 70)
@@ -11406,6 +11522,27 @@ class SourceCodeQAService:
                 priority = max(priority, 60)
             if intent.get("operational_boundary") and (retrieval == "operational_boundary" or item.get("operational_boundary")):
                 priority = max(priority, 60)
+            if intent.get("module_dependency") and (
+                path.endswith(("pom.xml", "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts", "package.json"))
+                or "module_dependency" in str(item.get("reason") or "").lower()
+            ):
+                priority = max(priority, 58)
+            if intent.get("module_dependency"):
+                if ("npm" in lowered_question or "package" in lowered_question or "node" in lowered_question) and path.endswith("package.json"):
+                    priority = max(priority, 72)
+                if ("gradle" in lowered_question or "multi-module" in lowered_question) and (
+                    path.endswith(("build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts"))
+                    or ".gradle" in path
+                ):
+                    priority = max(priority, 72)
+                if ("maven" in lowered_question or "pom" in lowered_question) and path.endswith("pom.xml"):
+                    priority = max(priority, 72)
+            if intent.get("message_flow") and (
+                any(term in path for term in ("event", "message", "consumer", "producer", "listener"))
+                or any(term in snippet for term in ("kafkalistener", "rabbitlistener", "jmslistener", "kafkatemplate", ".send(", "topic", "queue"))
+                or any(term in str(item.get("reason") or "").lower() for term in ("message_publish", "message_consume", "event_publish", "event_consume", "message_topic"))
+            ):
+                priority = max(priority, 58)
             if intent.get("impact_analysis") and retrieval in {"planner_caller", "planner_callee", "flow_graph", "entity_graph", "code_graph"}:
                 priority = max(priority, 45)
             if intent.get("api") and (any(term in path for term in ("controller", "client", "api", "routes")) or any(term in snippet for term in ("requestmapping", "postmapping", "getmapping", "route("))):
@@ -11414,7 +11551,7 @@ class SourceCodeQAService:
                 priority = max(priority, 35)
             return (priority, int(item.get("rerank_score", item.get("score", 0)) or 0), int(item.get("score") or 0))
 
-        if any(intent.get(key) for key in ("static_qa", "test_coverage", "operational_boundary")) and not intent.get("impact_analysis"):
+        if any(intent.get(key) for key in ("static_qa", "test_coverage", "operational_boundary", "module_dependency", "message_flow")) and not intent.get("impact_analysis"):
             selected.sort(key=result_sort_key, reverse=True)
         else:
             selected.sort(key=lambda item: item["score"], reverse=True)

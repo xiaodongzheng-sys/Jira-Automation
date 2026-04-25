@@ -3390,6 +3390,9 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self._build_all_indexes()
 
         payload = self.service.query(pm_team="AF", country="All", question="which repo does portal-web depend on")
+        policy_statuses = {policy["name"]: policy["status"] for policy in payload["answer_quality"]["policies"]}
+        self.assertEqual(policy_statuses["module_dependency"], "satisfied")
+        self.assertIn(payload["matches"][0]["path"], {"pom.xml", "package.json", "settings.gradle", "build.gradle"})
         edge = next(
             edge
             for edge in payload["repo_graph"]["edges"]
@@ -3548,6 +3551,12 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
+        (portal_path / "pom.xml").write_text(
+            "<project><artifactId>portal-web</artifactId><dependencies>"
+            "<dependency><groupId>com.example</groupId><artifactId>unrelated-service-api</artifactId></dependency>"
+            "</dependencies></project>\n",
+            encoding="utf-8",
+        )
         (sdk_path / "package.json").write_text(
             json.dumps({"name": "@example/issue-sdk"}, indent=2),
             encoding="utf-8",
@@ -3555,6 +3564,9 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self._build_all_indexes()
 
         payload = self.service.query(pm_team="AF", country="All", question="which npm package does portal-web depend on")
+        policy_statuses = {policy["name"]: policy["status"] for policy in payload["answer_quality"]["policies"]}
+        self.assertEqual(policy_statuses["module_dependency"], "satisfied")
+        self.assertEqual(payload["matches"][0]["path"], "package.json")
         edge = next(
             edge
             for edge in payload["repo_graph"]["edges"]
@@ -3606,6 +3618,9 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self._build_all_indexes()
 
         payload = self.service.query(pm_team="AF", country="All", question="which service consumes issue created event")
+        policy_statuses = {policy["name"]: policy["status"] for policy in payload["answer_quality"]["policies"]}
+        self.assertEqual(policy_statuses["message_flow"], "satisfied")
+        self.assertIn(payload["matches"][0]["path"], {"events/IssueEventPublisher.java", "events/IssueEventListener.java"})
         edge = next(
             edge
             for edge in payload["repo_graph"]["edges"]
@@ -3662,6 +3677,9 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self._build_all_indexes()
 
         payload = self.service.query(pm_team="AF", country="All", question="which service consumes configured issue topic")
+        policy_statuses = {policy["name"]: policy["status"] for policy in payload["answer_quality"]["policies"]}
+        self.assertEqual(policy_statuses["message_flow"], "satisfied")
+        self.assertIn(payload["matches"][0]["path"], {"events/IssueEventPublisher.java", "events/IssueEventListener.java", "application.properties"})
         edge = next(
             edge
             for edge in payload["repo_graph"]["edges"]
