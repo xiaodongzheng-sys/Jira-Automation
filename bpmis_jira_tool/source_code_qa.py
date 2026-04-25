@@ -2283,6 +2283,26 @@ class SourceCodeQAService:
                 len(query_entries),
                 len(entries),
             )
+        if not synced_entries:
+            payload = self._empty_query_payload(
+                key,
+                repo_status=repo_status,
+                index_freshness=index_freshness,
+                status="not_synced",
+                summary="No synced repositories are available in the selected scope. Run Sync / Refresh before asking code questions.",
+                trace_id=trace_id,
+            )
+            payload["repository_scope"] = repository_scope
+            payload["retrieval_runtime"] = self._retrieval_cache_stats(request_cache)
+            self._record_query_telemetry(
+                key=key,
+                question=question,
+                answer_mode=answer_mode,
+                llm_budget_mode=llm_budget_mode,
+                payload=payload,
+                started_at=started_at,
+            )
+            return payload
         intent = query_plan.get("intent") if isinstance(query_plan.get("intent"), dict) else {}
         simple_quality_trace = (
             any(intent.get(intent_key) for intent_key in ("rule_logic", "api", "config"))

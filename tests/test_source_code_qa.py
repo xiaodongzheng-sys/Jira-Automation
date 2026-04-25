@@ -1231,6 +1231,46 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertFalse(self.service._index_path(repo_path).exists())
         self.assertEqual(payload["index_freshness"]["status"], "stale_or_missing")
 
+    def test_query_reports_not_synced_when_no_local_clone_is_available(self):
+        self.service.save_mapping(
+            pm_team="AF",
+            country="All",
+            repositories=[{"display_name": "Portal Repo", "url": "https://git.example.com/team/portal.git"}],
+        )
+
+        payload = self.service.query(pm_team="AF", country="All", question="where is BPMISClient")
+
+        self.assertEqual(payload["status"], "not_synced")
+        self.assertEqual(payload["matches"], [])
+        self.assertEqual(payload["index_freshness"]["status"], "stale_or_missing")
+        self.assertIn("Sync / Refresh", payload["summary"])
+
+    def test_query_reports_not_synced_for_unsynced_explicit_repository_scope(self):
+        self.service.save_mapping(
+            pm_team="AF",
+            country="All",
+            repositories=[
+                {"display_name": "Anti Fraud API", "url": "https://git.example.com/team/anti-fraud-api.git"},
+                {"display_name": "GRC Portal", "url": "https://git.example.com/team/grc-portal.git"},
+            ],
+        )
+        entries = self.service.load_config()["mappings"]["AF:All"]
+        anti_entry = entries[0]
+        anti_path = self.service._repo_path("AF:All", type("Entry", (), anti_entry)())
+        (anti_path / ".git").mkdir(parents=True)
+        source_file = anti_path / "service" / "IssueService.java"
+        source_file.parent.mkdir(parents=True)
+        source_file.write_text("class IssueService { void createIssue() {} }\n", encoding="utf-8")
+        self._build_index_for_entry("AF:All", anti_entry)
+
+        payload = self.service.query(pm_team="AF", country="All", question="where is createIssue in GRC Portal")
+
+        self.assertEqual(payload["status"], "not_synced")
+        self.assertTrue(payload["repository_scope"]["active"])
+        self.assertEqual(payload["repository_scope"]["selected_repositories"], ["GRC Portal"])
+        self.assertEqual(payload["matches"], [])
+        self.assertGreaterEqual(payload["retrieval_runtime"].get("repository_scope_filters", 0), 1)
+
     def test_query_can_use_stale_but_schema_compatible_index(self):
         self.service.save_mapping(
             pm_team="AF",
