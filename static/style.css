@@ -78,7 +78,7 @@
 
 .bpmis-task-panel {
   display: grid;
-  gap: 10px;
+  gap: 8px;
   margin: 0 0 8px 28px;
   padding: 12px;
   border: 1px solid rgba(106, 119, 149, 0.16);
@@ -88,55 +88,99 @@
 
 .bpmis-task-card {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 12px;
-  align-items: start;
-  padding: 12px;
+  gap: 8px;
+  padding: 14px 14px 12px;
   border: 1px solid rgba(106, 119, 149, 0.14);
   border-radius: 8px;
   background: #ffffff;
+  box-shadow: 0 8px 20px rgba(15, 23, 42, 0.04);
 }
 
-.bpmis-task-main {
+.bpmis-task-card-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 14px;
+  align-items: center;
+  min-width: 0;
+}
+
+.bpmis-task-identity {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 10px;
+  align-items: center;
   min-width: 0;
 }
 
 .bpmis-task-id {
   display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
   align-items: center;
   font-size: 0.82rem;
   font-weight: 700;
 }
 
-.bpmis-task-id span,
+.bpmis-task-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.bpmis-task-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: #f2f4f7;
+  color: #475467;
+  font-size: 0.76rem;
+  font-weight: 700;
+}
+
 .bpmis-task-meta span {
   color: var(--muted);
 }
 
 .bpmis-task-title {
-  margin-top: 4px;
   color: var(--ink);
   font-weight: 650;
   overflow-wrap: anywhere;
 }
 
+.bpmis-task-actions,
 .bpmis-task-meta {
   display: flex;
   flex-wrap: wrap;
-  justify-content: flex-end;
   gap: 8px;
-  min-width: 180px;
+  align-items: center;
+}
+
+.bpmis-task-actions {
+  justify-content: flex-end;
+}
+
+.bpmis-task-meta {
   font-size: 0.82rem;
 }
 
+.bpmis-task-meta strong {
+  color: #475467;
+  font-weight: 800;
+}
+
 .bpmis-task-status {
-  padding: 3px 8px;
+  padding: 8px 10px;
   border-radius: 999px;
   background: #edf4ff;
   color: #155eef;
   font-weight: 700;
+  line-height: 1;
+}
+
+.bpmis-task-status.is-created {
+  background: #eef4ff;
+  color: #175cd3;
 }
 
 .bpmis-task-status.is-done {
@@ -158,7 +202,6 @@
 }
 
 .bpmis-task-warning {
-  grid-column: 1 / -1;
   color: #b54708;
 }
 
@@ -166,6 +209,20 @@
   min-height: 32px;
   padding: 6px 10px;
   font-size: 0.78rem;
+}
+
+@media (max-width: 760px) {
+  .bpmis-task-panel {
+    margin-left: 0;
+  }
+
+  .bpmis-task-card-head {
+    grid-template-columns: 1fr;
+  }
+
+  .bpmis-task-actions {
+    justify-content: flex-start;
+  }
 }
 
 .jira-wizard-modal {

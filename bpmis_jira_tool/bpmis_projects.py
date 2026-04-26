@@ -500,7 +500,7 @@ class PortalJiraCreationService:
                 results.append({"status": "error", "component": component, "market": market, "message": str(error)})
         return results
 
-    def list_tickets(self, *, user_key: str, bpmis_id: str) -> list[dict[str, Any]]:
+    def list_tickets(self, *, user_key: str, bpmis_id: str, include_live: bool = False) -> list[dict[str, Any]]:
         project = self.store.get_project(user_key=user_key, bpmis_id=bpmis_id)
         if project is None:
             raise ToolError("BPMIS project was not found.")
@@ -508,6 +508,8 @@ class PortalJiraCreationService:
         tickets = project.get("jira_tickets") if isinstance(project, dict) else []
         if not isinstance(tickets, list):
             return []
+        if not include_live:
+            return [dict(ticket) for ticket in tickets]
         return [self._ticket_with_live_jira_fields(ticket) for ticket in tickets]
 
     def delete_ticket(self, *, user_key: str, bpmis_id: str, ticket_id: str | int) -> bool:

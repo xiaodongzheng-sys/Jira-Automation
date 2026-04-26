@@ -2390,7 +2390,12 @@ def create_app() -> Flask:
         try:
             user_identity = _get_user_identity(settings)
             service = _build_portal_jira_creation_service(settings)
-            tickets = service.list_tickets(user_key=user_identity["config_key"], bpmis_id=bpmis_id)
+            include_live = str(request.args.get("live") or "").strip().lower() in {"1", "true", "yes"}
+            tickets = service.list_tickets(
+                user_key=user_identity["config_key"],
+                bpmis_id=bpmis_id,
+                include_live=include_live,
+            )
             return jsonify({"status": "ok", "tickets": tickets})
         except ToolError as error:
             return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST

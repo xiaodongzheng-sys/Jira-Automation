@@ -32,6 +32,9 @@ from bpmis_jira_tool.web import (
 
 
 class _PortalFakeBPMISClient:
+    def __init__(self):
+        self.detail_calls = []
+
     def list_biz_projects_for_pm_email(self, _email):
         return [{"issue_id": "225159", "project_name": "Fraud Rule Upgrade", "market": "SG"}]
 
@@ -43,6 +46,7 @@ class _PortalFakeBPMISClient:
         return CreatedTicket(ticket_key="AF-1", ticket_link="https://jira/browse/AF-1", raw={"ok": True})
 
     def get_jira_ticket_detail(self, ticket_key):
+        self.detail_calls.append(ticket_key)
         return {
             "jiraKey": ticket_key,
             "summary": "Live Fraud Task",
@@ -1429,6 +1433,16 @@ class WebPortalFeatureTests(unittest.TestCase):
                 with client.session_transaction() as session:
                     session["anonymous_user_key"] = "create-user"
                 tickets_response = client.get("/api/bpmis-projects/225159/jira-tickets")
+
+            self.assertEqual(tickets_response.status_code, 200)
+            tickets_payload = tickets_response.get_json()
+            self.assertNotIn("live_jira_title", tickets_payload["tickets"][0])
+            self.assertEqual(fake_client.detail_calls, [])
+
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["anonymous_user_key"] = "create-user"
+                tickets_response = client.get("/api/bpmis-projects/225159/jira-tickets?live=1")
 
             self.assertEqual(tickets_response.status_code, 200)
             tickets_payload = tickets_response.get_json()
