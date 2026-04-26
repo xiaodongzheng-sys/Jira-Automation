@@ -916,6 +916,10 @@ input {
   display: grid;
 }
 
+.confirm-modal-backdrop[data-jira-modal-backdrop].is-visible {
+  display: grid;
+}
+
 .confirm-modal {
   position: relative;
   width: min(620px, 100%);
