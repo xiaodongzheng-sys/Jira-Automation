@@ -88,7 +88,7 @@
   const taskStatusClass = (value) => {
     const normalized = String(value || '').trim().toLowerCase();
     if (!normalized) return '';
-    if (normalized.includes('created')) return ' is-created';
+    if (normalized.includes('waiting')) return ' is-waiting';
     if (normalized.includes('done') || normalized.includes('closed') || normalized.includes('resolved')) return ' is-done';
     if (normalized.includes('progress') || normalized.includes('doing')) return ' is-progress';
     return '';
@@ -96,8 +96,7 @@
 
   const displayTaskStatus = (value) => {
     const text = String(value || '').trim();
-    if (!text) return 'Created';
-    if (text.toLowerCase() === 'created') return 'Created';
+    if (!text || text.toLowerCase() === 'created') return 'Waiting';
     return text;
   };
 
@@ -124,18 +123,22 @@
       const liveError = ticket.live_error ? `<p class="bpmis-task-warning">${escapeHtml(ticket.live_error)}</p>` : '';
       return `
         <article class="bpmis-task-card" data-task-card="${escapeHtml(ticket.id || '')}">
-          <div class="bpmis-task-card-head">
-            <div class="bpmis-task-identity">
+          <div class="bpmis-task-identity">
+            <div class="bpmis-task-id-line">
               <div class="bpmis-task-id">${link}</div>
               <div class="bpmis-task-chips">${metaMarkup}</div>
             </div>
-            <div class="bpmis-task-actions">
-              <span class="bpmis-task-status${taskStatusClass(rawStatus)}">${statusText}</span>
-              <button class="button button-secondary danger-button bpmis-task-delink" type="button" data-delink-task="${escapeHtml(ticket.id || '')}" data-delink-project="${escapeHtml(ticket.bpmis_id || '')}">Delink</button>
+            <div class="bpmis-task-meta">
+              <span><strong>Version</strong> ${version}</span>
+              ${prdMarkup}
             </div>
           </div>
-          <div class="bpmis-task-title">${title}</div>
-          <div class="bpmis-task-meta">
+          <div class="bpmis-task-title" title="${title}">${title}</div>
+          <div class="bpmis-task-actions">
+            <span class="bpmis-task-status${taskStatusClass(rawStatus)}">${statusText}</span>
+            <button class="button button-secondary danger-button bpmis-task-delink" type="button" data-delink-task="${escapeHtml(ticket.id || '')}" data-delink-project="${escapeHtml(ticket.bpmis_id || '')}">Delink</button>
+          </div>
+          <div class="bpmis-task-meta bpmis-task-meta-mobile">
             <span><strong>Version</strong> ${version}</span>
             ${prdMarkup}
           </div>
