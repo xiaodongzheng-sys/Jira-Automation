@@ -194,7 +194,7 @@
         });
       }
     });
-    const rows = Array.from(rowsById.values()).sort((left, right) => (right.count - left.count) || left.id.localeCompare(right.id));
+    const rows = Array.from(rowsById.values());
     if (!rows.length) {
       body.innerHTML = `
         <article class="seatalk-insight-item">
