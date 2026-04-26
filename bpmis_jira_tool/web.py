@@ -267,6 +267,33 @@ class SeaTalkTodoStore:
             completed = owner_payload.get("completed") if isinstance(owner_payload.get("completed"), dict) else {}
             return {str(todo_id) for todo_id in completed if str(todo_id).strip()}
 
+    def open_todos(self, *, owner_email: str) -> list[dict[str, Any]]:
+        owner = str(owner_email or "").strip().lower()
+        with self._lock:
+            owners = self._payload.get("owners") if isinstance(self._payload.get("owners"), dict) else {}
+            owner_payload = owners.get(owner) if isinstance(owners.get(owner), dict) else {}
+            open_items = owner_payload.get("open") if isinstance(owner_payload.get("open"), dict) else {}
+            return [dict(todo) for todo in open_items.values() if isinstance(todo, dict)]
+
+    def merge_open_todos(self, *, owner_email: str, todos: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        owner = str(owner_email or "").strip().lower()
+        if not owner:
+            return []
+        with self._lock:
+            owners = self._payload.setdefault("owners", {})
+            owner_payload = owners.setdefault(owner, {})
+            open_items = owner_payload.setdefault("open", {})
+            completed = owner_payload.get("completed") if isinstance(owner_payload.get("completed"), dict) else {}
+            for todo in todos:
+                if not isinstance(todo, dict):
+                    continue
+                todo_id = self.todo_id(todo)
+                if not todo_id or todo_id in completed:
+                    continue
+                open_items[todo_id] = {**todo, "id": todo_id, "last_seen_at": self._now()}
+            self._persist_locked()
+            return [dict(todo) for todo in open_items.values() if isinstance(todo, dict)]
+
     def mark_completed(self, *, owner_email: str, todo: dict[str, Any]) -> dict[str, Any]:
         owner = str(owner_email or "").strip().lower()
         todo_id = self.todo_id(todo)
@@ -283,6 +310,8 @@ class SeaTalkTodoStore:
                 "due": str(todo.get("due") or "").strip(),
                 "completed_at": self._now(),
             }
+            open_items = owner_payload.get("open") if isinstance(owner_payload.get("open"), dict) else {}
+            open_items.pop(todo_id, None)
             self._persist_locked()
             return {"status": "ok", "todo_id": todo_id, "completed_at": completed[todo_id]["completed_at"]}
 
@@ -1756,8 +1785,12 @@ def create_app() -> Flask:
             todo_store: SeaTalkTodoStore = current_app.config["SEATALK_TODO_STORE"]
             completed_ids = todo_store.completed_ids(owner_email=owner_email)
             payload = dict(payload)
+            open_todos = todo_store.merge_open_todos(
+                owner_email=owner_email,
+                todos=[todo for todo in (payload.get("my_todos") or []) if isinstance(todo, dict)],
+            )
             payload["my_todos"] = [
-                todo for todo in (payload.get("my_todos") or [])
+                todo for todo in SeaTalkDashboardService._sort_todos(open_todos)
                 if SeaTalkTodoStore.todo_id(todo) not in completed_ids
             ]
             payload["team_todos"] = []

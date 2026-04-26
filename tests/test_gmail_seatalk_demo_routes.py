@@ -408,6 +408,47 @@ class GmailSeaTalkDemoRouteTests(unittest.TestCase):
         payload = response.get_json()
         self.assertEqual([item["task"] for item in payload["my_todos"]], ["Review GRC lock"])
 
+    def test_uncompleted_seatalk_todos_survive_later_insight_refreshes(self):
+        first_todo = {"task": "Follow up rollout", "domain": "Anti-fraud", "priority": "high", "due": "2026-04-30", "evidence": "Apr 21"}
+        second_todo = {"task": "Review GRC lock", "domain": "GRC", "priority": "medium", "due": "unknown", "evidence": "Apr 22"}
+        payloads = [
+            {
+                "project_updates": [],
+                "my_todos": [first_todo],
+                "team_todos": [],
+                "generated_at": "2026-04-21T21:00:00+08:00",
+                "model_id": "codex:gpt-5.5",
+                "cache": {"hit": False, "expires_at": "2026-04-22T00:00:00+08:00"},
+                "codex": {"latency_ms": 1200, "session_mode": "ephemeral"},
+            },
+            {
+                "project_updates": [],
+                "my_todos": [second_todo],
+                "team_todos": [],
+                "generated_at": "2026-04-22T21:00:00+08:00",
+                "model_id": "codex:gpt-5.5",
+                "cache": {"hit": False, "expires_at": "2026-04-23T00:00:00+08:00"},
+                "codex": {"latency_ms": 1200, "session_mode": "ephemeral"},
+            },
+        ]
+
+        class FakeSeaTalkService:
+            def build_insights(self):
+                return payloads.pop(0)
+
+        with patch("bpmis_jira_tool.web._build_seatalk_dashboard_service", return_value=FakeSeaTalkService()):
+            with self.app.test_client() as client:
+                self._login_owner(client, scopes=[GMAIL_READONLY_SCOPE])
+                first = client.get("/api/gmail-sea-talk-demo/seatalk/insights")
+                second = client.get("/api/gmail-sea-talk-demo/seatalk/insights")
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(
+            [item["task"] for item in second.get_json()["my_todos"]],
+            ["Follow up rollout", "Review GRC lock"],
+        )
+
     def test_owner_can_load_and_save_seatalk_name_mappings(self):
         class FakeSeaTalkService:
             def build_name_mappings(self):
