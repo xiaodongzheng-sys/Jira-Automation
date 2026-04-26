@@ -4649,11 +4649,30 @@ select:focus {
 }
 
 .source-qa-chat-composer {
+  position: relative;
   margin-top: 6px;
 }
 
 .source-qa-chat-composer textarea {
+  min-height: 132px;
+  padding-right: 112px;
+  padding-bottom: 72px;
   resize: none;
+}
+
+.source-qa-send-button {
+  position: absolute;
+  right: 14px;
+  bottom: 14px;
+  min-width: 76px;
+  min-height: 42px;
+  padding: 10px 16px;
+  box-shadow: 0 12px 26px rgba(22, 119, 255, 0.22);
+}
+
+.source-qa-send-button.is-stopping {
+  background: #101828;
+  box-shadow: 0 12px 26px rgba(16, 24, 40, 0.22);
 }
 
 .source-qa-model-availability {

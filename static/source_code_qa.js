@@ -68,6 +68,7 @@
   let sessionHistoryExpanded = false;
   let liveAssistantMessage = null;
   let pendingUserMessage = null;
+  let activeQueryControl = null;
   const preferenceKey = 'source-code-qa:last-query-config:v1';
 
   const escapeHtml = (value) => String(value ?? '')
@@ -371,6 +372,7 @@
         text: liveAssistantMessage.text,
         created_at: liveAssistantMessage.created_at || '',
         live: true,
+        stopped: Boolean(liveAssistantMessage.stopped),
         payload: {
           llm_provider: selectedLlmProvider(),
           llm_model: liveAssistantMessage.meta || 'streaming CLI output',
@@ -397,11 +399,11 @@
         <article class="source-qa-message source-qa-message-${escapeHtml(message.role || 'assistant')}${message.live ? ' is-live' : ''}">
           <div class="source-qa-message-head">
             <strong>
-              ${message.live ? 'Codex Live <em>Running - not final answer</em>' : (message.role === 'user' ? 'You' : 'Assistant')}
+              ${message.live ? `Codex Live <em>${message.stopped ? 'Stopped' : 'Running - not final answer'}</em>` : (message.role === 'user' ? 'You' : 'Assistant')}
             </strong>
             <span>${escapeHtml(meta)}</span>
           </div>
-          <div class="source-qa-message-body">${message.live ? `<p class="source-qa-live-note">Codex is still investigating. The final answer will appear as an Assistant message when complete.</p><pre>${escapeHtml(text)}</pre>` : (message.role === 'assistant' ? renderReadableAnswerBody(payload, text) : `<p>${escapeHtml(text)}</p>`)}</div>
+          <div class="source-qa-message-body">${message.live ? `<p class="source-qa-live-note">${message.stopped ? 'This run was stopped in the UI and will no longer update this chat.' : 'Codex is still investigating. The final answer will appear as an Assistant message when complete.'}</p><pre>${escapeHtml(text)}</pre>` : (message.role === 'assistant' ? renderReadableAnswerBody(payload, text) : `<p>${escapeHtml(text)}</p>`)}</div>
           ${citations.length ? `<div class="source-qa-message-citations">${citations.map((item) => `<span>${escapeHtml(item)}</span>`).join('')}</div>` : ''}
         </article>
       `;
@@ -536,14 +538,28 @@
     }
   };
 
+  const updateQueryButtonState = (running = Boolean(activeQueryControl && !activeQueryControl.stopped)) => {
+    if (!queryButton) return;
+    queryButton.textContent = running ? 'Stop' : 'Send';
+    queryButton.classList.toggle('is-stopping', running);
+    queryButton.setAttribute('aria-label', running ? 'Stop current Codex run' : 'Send question');
+  };
+
+  const stopActiveQuery = () => {
+    if (!activeQueryControl || activeQueryControl.stopped) return;
+    activeQueryControl.stopped = true;
+    stopQueryProgress();
+    renderLiveAnswer('Stopped by user. This run is no longer updating in the chat.', { title: 'Codex Live', meta: 'stopped', stopped: true });
+    updateQueryButtonState(false);
+    if (queryStatus) queryStatus.textContent = 'Stopped.';
+  };
+
   const updateAnswerModeState = () => {
     const answerModeValue = answerMode?.value || 'auto';
     const providerReady = selectedProviderReady();
     const providerLabel = llmProvider?.selectedOptions?.[0]?.textContent || llmPolicy.provider?.provider || 'LLM';
     const llmSelected = answerModeValue !== 'retrieval_only' && providerReady;
-    if (queryButton) {
-      queryButton.textContent = llmSelected ? 'Search + Generate Answer' : 'Search Code';
-    }
+    updateQueryButtonState();
     if (queryStatus) {
       if (answerModeValue !== 'retrieval_only' && !providerReady) {
         queryStatus.textContent = `${providerLabel} is unavailable; code search will still run.`;
@@ -1228,6 +1244,7 @@
       title: options.title || 'Codex Live',
       meta: options.meta || 'read-only investigation',
       created_at: new Date().toISOString(),
+      stopped: Boolean(options.stopped),
     };
     if (liveAnswer) {
       liveAnswer.hidden = true;
@@ -1281,9 +1298,19 @@
     }
   };
 
-  const pollQueryJob = async (jobId, progress) => {
+  const pollQueryJob = async (jobId, progress, control) => {
     while (jobId) {
+      if (control?.stopped) {
+        const error = new Error('Stopped by user.');
+        error.stoppedByUser = true;
+        throw error;
+      }
       const payload = await readJobStatus(jobId);
+      if (control?.stopped) {
+        const error = new Error('Stopped by user.');
+        error.stoppedByUser = true;
+        throw error;
+      }
       const progressText = payload.total
         ? `${payload.message || 'Processing source-code question.'} (${payload.current || 0}/${payload.total})`
         : (payload.message || 'Processing source-code question.');
@@ -1303,17 +1330,29 @@
   };
 
   const queryCode = async () => {
+    if (activeQueryControl && !activeQueryControl.stopped) {
+      stopActiveQuery();
+      return;
+    }
     const selectedAnswerMode = answerMode?.value || 'auto';
     const selectedProvider = selectedLlmProvider();
     const effectiveAnswerMode = selectedAnswerMode !== 'retrieval_only' && !selectedProviderReady() ? 'retrieval_only' : selectedAnswerMode;
     if (activeMode) activeMode.textContent = effectiveAnswerMode;
     const progress = startQueryProgress('Submitting query to server...');
-    if (queryButton) queryButton.disabled = true;
-    const submittedQuestion = questionInput.value;
+    const submittedQuestion = String(questionInput?.value || '').trim();
+    if (!submittedQuestion) {
+      stopQueryProgress();
+      if (queryStatus) queryStatus.textContent = 'Question is empty.';
+      return;
+    }
+    const queryControl = { stopped: false };
+    activeQueryControl = queryControl;
+    updateQueryButtonState(true);
     if (questionInput) questionInput.value = '';
     renderPendingQuery(submittedQuestion, effectiveAnswerMode);
     try {
       const session = await ensureActiveSession();
+      if (queryControl.stopped) return;
       renderOptimisticUserMessage(submittedQuestion);
       const initialPayload = await apiFetchJson(queryUrl, {
         method: 'POST',
@@ -1330,9 +1369,11 @@
           async: true,
         }),
       }, { attempts: 3 });
+      if (queryControl.stopped) return;
       const payload = initialPayload.status === 'queued' && initialPayload.job_id
-        ? await pollQueryJob(initialPayload.job_id, progress)
+        ? await pollQueryJob(initialPayload.job_id, progress, queryControl)
         : initialPayload;
+      if (queryControl.stopped) return;
       lastPayload = payload;
       conversationContext = buildConversationContext(payload, submittedQuestion);
       if (payload.session) {
@@ -1377,7 +1418,11 @@
         feedbackStatus.textContent = '';
       }
     } catch (error) {
-      queryStatus.textContent = `${error.message || 'Search failed.'} elapsed ${formatElapsed(progress.startedAt)}`;
+      if (error?.stoppedByUser) {
+        if (queryStatus) queryStatus.textContent = `Stopped after ${formatElapsed(progress.startedAt)}.`;
+        return;
+      }
+      if (queryStatus) queryStatus.textContent = `${error.message || 'Search failed.'} elapsed ${formatElapsed(progress.startedAt)}`;
       renderUsageBadges({});
       renderFallbackNotice({});
       renderLiveAnswer('');
@@ -1387,7 +1432,10 @@
       if (feedback) feedback.hidden = true;
     } finally {
       stopQueryProgress();
-      if (queryButton) queryButton.disabled = false;
+      if (activeQueryControl === queryControl) {
+        activeQueryControl = null;
+        updateQueryButtonState(false);
+      }
     }
   };
 
