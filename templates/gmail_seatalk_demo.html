@@ -7,6 +7,31 @@
       gap: 1.5rem;
     }
 
+    .seatalk-summary-card {
+      padding: 1rem 1.25rem 1.25rem;
+    }
+
+    .seatalk-summary-card > .panel-head {
+      align-items: center;
+      gap: 1rem;
+      margin-bottom: 0.65rem;
+    }
+
+    .seatalk-summary-card .eyebrow {
+      margin-bottom: 0.25rem;
+      font-size: 0.68rem;
+    }
+
+    .seatalk-summary-card h2 {
+      margin-bottom: 0.15rem;
+      font-size: 1.45rem;
+    }
+
+    .seatalk-summary-card .help-text {
+      margin: 0;
+      font-size: 0.92rem;
+    }
+
     .mail-demo-copy .showcase-lede,
     .mail-demo-copy .step-copy,
     .mail-demo-copy .help-text,
@@ -253,7 +278,7 @@
       display: inline-flex;
       gap: 0.25rem;
       padding: 0.25rem;
-      margin: 1rem 0;
+      margin: 0.4rem 0 0.8rem;
       border: 1px solid rgba(110, 139, 194, 0.18);
       border-radius: 999px;
       background: rgba(248, 251, 255, 0.9);
@@ -272,6 +297,32 @@
     }
 
     .seatalk-tab[aria-selected="true"] {
+      background: #ffffff;
+      color: #1f4e9d;
+      box-shadow: 0 8px 18px rgba(48, 84, 151, 0.12);
+    }
+
+    .seatalk-project-tabs {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.4rem;
+      margin: 0.85rem 0 0.75rem;
+    }
+
+    .seatalk-project-tab {
+      border: 1px solid rgba(110, 139, 194, 0.2);
+      border-radius: 999px;
+      padding: 0.45rem 0.75rem;
+      background: rgba(248, 251, 255, 0.9);
+      color: #526380;
+      font: inherit;
+      font-size: 0.82rem;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    .seatalk-project-tab[aria-selected="true"] {
+      border-color: rgba(44, 109, 230, 0.3);
       background: #ffffff;
       color: #1f4e9d;
       box-shadow: 0 8px 18px rgba(48, 84, 151, 0.12);
@@ -445,7 +496,7 @@
     data-seatalk-name-mappings-url="{{ seatalk_name_mappings_url }}"
     data-seatalk-configured="{{ 'true' if seatalk_configured else 'false' }}"
   >
-      <section class="panel panel-wide glass-panel mail-demo-card">
+      <section class="panel panel-wide glass-panel mail-demo-card seatalk-summary-card">
         <div class="panel-head">
           <div>
             <p class="eyebrow">SeaTalk</p>
@@ -487,7 +538,14 @@
                 <div class="mail-demo-pill">Project updates</div>
                 <h3>Project Updates</h3>
                 <p>Major updates from the last 7 days across your SeaTalk conversations.</p>
-                <div class="seatalk-insight-list" data-seatalk-project-updates hidden></div>
+                <div data-seatalk-project-updates hidden>
+                  <div class="seatalk-project-tabs" role="tablist" aria-label="Project update product lines">
+                    <button class="seatalk-project-tab" type="button" role="tab" aria-selected="true">Anti-fraud</button>
+                    <button class="seatalk-project-tab" type="button" role="tab" aria-selected="false">Credit Risk</button>
+                    <button class="seatalk-project-tab" type="button" role="tab" aria-selected="false">Ops Risk</button>
+                    <button class="seatalk-project-tab" type="button" role="tab" aria-selected="false">General</button>
+                  </div>
+                </div>
               </article>
             </section>
           </section>

@@ -24,7 +24,7 @@ SEATALK_DASHBOARD_DEFAULT_DAYS = 7
 SEATALK_DASHBOARD_CACHE_TTL_SECONDS = 300
 SEATALK_DEFAULT_APP_PATH = "/Applications/SeaTalk.app"
 SEATALK_DEFAULT_DATA_DIR = "~/Library/Application Support/SeaTalk"
-SEATALK_INSIGHTS_PROMPT_MODE = "seatalk_7_day_insights_v1"
+SEATALK_INSIGHTS_PROMPT_MODE = "seatalk_7_day_insights_v2"
 SEATALK_INSIGHTS_TIMEZONE = ZoneInfo("Asia/Singapore")
 SEATALK_INSIGHTS_HISTORY_MAX_CHARS = 620_000
 SEATALK_INSIGHTS_SIGNAL_MAX_CHARS = 360_000
@@ -383,11 +383,20 @@ class SeaTalkDashboardService:
         if self.daily_cache_dir is None:
             return None
         safe_kind = re.sub(r"[^a-z0-9_]+", "_", kind.lower()).strip("_")
+        if safe_kind == "insights":
+            safe_mode = re.sub(r"[^a-z0-9_]+", "_", SEATALK_INSIGHTS_PROMPT_MODE.lower()).strip("_")
+            safe_kind = f"{safe_kind}_{safe_mode}"
         cache_date = now.astimezone(SEATALK_INSIGHTS_TIMEZONE).date().isoformat()
         return self.daily_cache_dir / f"{safe_kind}_last_{int(days)}_days_{cache_date}.json"
 
     def _insights_cache_key(self, days: int) -> tuple[str, str, int, str, str]:
-        return (str(self.seatalk_app_path), str(self.seatalk_data_dir), int(days), self.codex_model, self._name_overrides_cache_token())
+        return (
+            str(self.seatalk_app_path),
+            str(self.seatalk_data_dir),
+            int(days),
+            self.codex_model,
+            f"{SEATALK_INSIGHTS_PROMPT_MODE}:{self._name_overrides_cache_token()}",
+        )
 
     def _name_overrides_cache_token(self) -> str:
         if self.name_overrides_path is None:
@@ -423,7 +432,10 @@ class SeaTalkDashboardService:
             "You must not modify files or run commands. Produce only valid JSON. "
             "Analyze the last 7 days of SeaTalk messages and write concise English work summaries. "
             "Prioritize Anti-fraud, Credit Risk / Collection, and Ops Risk / GRC topics, but first consider all messages. "
+            "Classify project update domains as exactly one of Anti-fraud, Credit Risk, Ops Risk, General. "
+            "Use General for non-owned product lines, cross-product banking updates, leadership or boss updates, AI sharing, planning, slides, reporting, and Key Project table work. "
             "Classify action items into my_todos when Xiaodong, Zheng Xiaodong, xiaodong.zheng@npt.sg, or direct second-person requests indicate Xiaodong should act. "
+            "Include Xiaodong-owned General tasks such as AI sharing, Key Project table updates, slide updates, reporting, meeting prep, and leadership follow-ups. "
             "Do not include action items owned by other people."
         )
 
@@ -432,8 +444,12 @@ class SeaTalkDashboardService:
         return (
             "Return a JSON object with exactly these top-level keys: project_updates, my_todos, team_todos.\n"
             "project_updates must be an array of objects with keys: domain, title, summary, status, evidence.\n"
+            "For every project_updates item, domain must be exactly one of: Anti-fraud, Credit Risk, Ops Risk, General.\n"
+            "Use General for other banking product lines and for cross-product, leadership, AI sharing, Key Project, slide, reporting, and planning updates.\n"
             "my_todos must contain only Xiaodong's own action items. team_todos must always be an empty array.\n"
             "my_todos objects must have keys: task, domain, priority, due, evidence.\n"
+            "For every my_todos item, domain must be exactly one of: Anti-fraud, Credit Risk, Ops Risk, General.\n"
+            "Do include Xiaodong-owned General tasks such as AI sharing, updating the Key Project table, updating slides, preparing reports, meeting prep, and boss or leadership follow-ups.\n"
             "Allowed status values: done, in_progress, blocked, unknown. Allowed priority values: high, medium, low, unknown.\n"
             "For due, extract an explicit deadline if present; otherwise use unknown.\n"
             "Keep each evidence value short: include date/time or conversation if visible, plus a brief snippet. Do not include long raw chat content.\n"
@@ -482,6 +498,13 @@ class SeaTalkDashboardService:
             "prd",
             "release",
             "rollout",
+            "ai sharing",
+            "key project",
+            "slides",
+            "slide",
+            "reporting",
+            "leadership",
+            "boss",
         )
         signal_lines: list[str] = []
         signal_chars = 0
@@ -629,7 +652,7 @@ class SeaTalkDashboardService:
                 continue
             normalized.append(
                 {
-                    "domain": cls._clean_text(row.get("domain"), "Unknown"),
+                    "domain": cls._normalize_insight_domain(row.get("domain")),
                     "title": cls._clean_text(row.get("title"), "Untitled update"),
                     "summary": cls._clean_text(row.get("summary"), ""),
                     "status": cls._clean_choice(row.get("status"), {"done", "in_progress", "blocked", "unknown"}, "unknown"),
@@ -649,7 +672,7 @@ class SeaTalkDashboardService:
                 cls._todo_with_id(
                     {
                         "task": cls._clean_text(row.get("task"), "Untitled task"),
-                        "domain": cls._clean_text(row.get("domain"), "Unknown"),
+                        "domain": cls._normalize_insight_domain(row.get("domain")),
                         "priority": cls._clean_choice(row.get("priority"), {"high", "medium", "low", "unknown"}, "unknown"),
                         "due": cls._clean_text(row.get("due"), "unknown"),
                         "evidence": cls._clean_text(row.get("evidence"), ""),
@@ -672,6 +695,21 @@ class SeaTalkDashboardService:
     @staticmethod
     def _fingerprint_text(value: Any) -> str:
         return re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
+
+    @classmethod
+    def _normalize_insight_domain(cls, value: Any) -> str:
+        text = cls._fingerprint_text(value)
+        if any(term in text for term in ("anti fraud", "antifraud")) or text == "af" or text.startswith("af "):
+            return "Anti-fraud"
+        if (
+            any(term in text for term in ("credit risk", "collection", "collections", "consumer lending", "crms"))
+            or text == "cr"
+            or text.startswith("cr ")
+        ):
+            return "Credit Risk"
+        if any(term in text for term in ("ops risk", "operational risk", "grc", "governance risk compliance")):
+            return "Ops Risk"
+        return "General"
 
     @classmethod
     def _sort_todos(cls, todos: list[dict[str, str]]) -> list[dict[str, str]]:

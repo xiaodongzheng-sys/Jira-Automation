@@ -419,6 +419,45 @@ class SeaTalkDashboardServiceTests(unittest.TestCase):
         self.assertIn("@Xiaodong please follow up the CRMS rollout", prompts[0])
         self.assertIn("System-generated alarm/reminder messages removed: 2.", prompts[0])
 
+    def test_insights_prompt_includes_project_tabs_and_general_todo_guidance(self):
+        prompt = SeaTalkDashboardService._insights_user_prompt(
+            history_text="SeaTalk Chat History Export\nhello",
+            days=7,
+            now=datetime(2026, 4, 21, 21, 0).astimezone(),
+        )
+        system_prompt = SeaTalkDashboardService._insights_system_prompt()
+
+        self.assertIn("Anti-fraud, Credit Risk, Ops Risk, General", prompt)
+        self.assertIn("AI sharing", prompt)
+        self.assertIn("Key Project table", prompt)
+        self.assertIn("slide", prompt.lower())
+        self.assertIn("leadership", system_prompt)
+
+    def test_insights_normalizes_update_and_todo_domains(self):
+        parsed = SeaTalkDashboardService._parse_insights_response(
+            json.dumps(
+                {
+                    "project_updates": [
+                        {"domain": "AF", "title": "AF", "summary": "", "status": "done", "evidence": ""},
+                        {"domain": "Collection", "title": "CR", "summary": "", "status": "done", "evidence": ""},
+                        {"domain": "GRC", "title": "GRC", "summary": "", "status": "done", "evidence": ""},
+                        {"domain": "Deposit", "title": "Deposit", "summary": "", "status": "done", "evidence": ""},
+                    ],
+                    "my_todos": [
+                        {"task": "Prepare AI sharing", "domain": "Leadership", "priority": "medium", "due": "unknown", "evidence": "boss"},
+                    ],
+                    "team_todos": [],
+                }
+            )
+        )
+
+        self.assertEqual(
+            [item["domain"] for item in parsed["project_updates"]],
+            ["Anti-fraud", "Credit Risk", "Ops Risk", "General"],
+        )
+        self.assertEqual(parsed["my_todos"][0]["domain"], "General")
+        self.assertEqual(parsed["my_todos"][0]["task"], "Prepare AI sharing")
+
     def test_build_insights_sorts_my_todos_by_priority(self):
         def local_runner(command: list[str]):
             return subprocess.CompletedProcess(args=command, returncode=0, stdout="SeaTalk Chat History Export\nhello", stderr="")

@@ -75,18 +75,26 @@
     `;
   };
 
-  const renderProjectUpdates = (container, updates) => {
-    if (!container) return;
-    const rows = Array.isArray(updates) ? updates : [];
+  const projectUpdateDomains = ['Anti-fraud', 'Credit Risk', 'Ops Risk', 'General'];
+
+  const normalizeProjectDomain = (value) => {
+    const text = String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+    if (text.includes('anti fraud') || text.includes('antifraud') || text === 'af' || text.startsWith('af ')) return 'Anti-fraud';
+    if (text.includes('credit risk') || text.includes('collection') || text.includes('crms') || text === 'cr' || text.startsWith('cr ')) return 'Credit Risk';
+    if (text.includes('ops risk') || text.includes('operational risk') || text.includes('grc')) return 'Ops Risk';
+    return 'General';
+  };
+
+  const renderProjectUpdateItems = (container, rows) => {
     if (!rows.length) {
-      renderEmptyInsights(container, 'No confident project updates were found in the last 7 days.');
+      renderEmptyInsights(container, 'No confident updates found for this product line.');
       container.hidden = false;
       return;
     }
     container.innerHTML = rows.map((item) => `
       <article class="seatalk-insight-item">
         <div class="seatalk-insight-meta">
-          <span>${escapeHtml(item.domain || 'Unknown')}</span>
+          <span>${escapeHtml(normalizeProjectDomain(item.domain))}</span>
           <span>${escapeHtml(String(item.status || 'unknown').replaceAll('_', ' '))}</span>
         </div>
         <h4>${escapeHtml(item.title || 'Untitled update')}</h4>
@@ -94,6 +102,46 @@
         ${item.evidence ? `<div class="seatalk-insight-evidence">${escapeHtml(item.evidence)}</div>` : ''}
       </article>
     `).join('');
+    container.hidden = false;
+  };
+
+  const renderProjectUpdates = (container, updates) => {
+    if (!container) return;
+    const rows = Array.isArray(updates) ? updates : [];
+    const grouped = projectUpdateDomains.reduce((acc, domain) => ({ ...acc, [domain]: [] }), {});
+    rows.forEach((item) => {
+      grouped[normalizeProjectDomain(item?.domain)].push(item);
+    });
+    const activeDomain = projectUpdateDomains.includes(container.dataset.seatalkProjectDomain)
+      ? container.dataset.seatalkProjectDomain
+      : projectUpdateDomains[0];
+    container.dataset.seatalkProjectDomain = activeDomain;
+    container.innerHTML = `
+      <div class="seatalk-project-tabs" role="tablist" aria-label="Project update product lines">
+        ${projectUpdateDomains.map((domain) => `
+          <button
+            class="seatalk-project-tab"
+            type="button"
+            role="tab"
+            aria-selected="${domain === activeDomain ? 'true' : 'false'}"
+            data-seatalk-project-tab="${escapeHtml(domain)}"
+          >${escapeHtml(domain)}</button>
+        `).join('')}
+      </div>
+      <div class="seatalk-insight-list" data-seatalk-project-update-list></div>
+    `;
+    const list = container.querySelector('[data-seatalk-project-update-list]');
+    renderProjectUpdateItems(list, grouped[activeDomain] || []);
+    container.querySelectorAll('[data-seatalk-project-tab]').forEach((tab) => {
+      tab.addEventListener('click', () => {
+        const domain = tab.dataset.seatalkProjectTab || projectUpdateDomains[0];
+        container.dataset.seatalkProjectDomain = domain;
+        container.querySelectorAll('[data-seatalk-project-tab]').forEach((button) => {
+          button.setAttribute('aria-selected', button === tab ? 'true' : 'false');
+        });
+        renderProjectUpdateItems(list, grouped[domain] || []);
+      });
+    });
     container.hidden = false;
   };
 
