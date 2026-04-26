@@ -126,23 +126,25 @@
     empty.hidden = true;
     body.innerHTML = projects.map((project) => {
       const countValue = ticketCount(project);
-      const taskButton = `<button class="button button-secondary" type="button" data-toggle-tasks="${escapeHtml(project.bpmis_id)}" aria-expanded="false">${escapeHtml(ticketLabel(countValue))}</button>`;
+      const taskButtonLabel = countValue ? `Expand ${countValue} Jira task${countValue === 1 ? '' : 's'}` : 'Expand Jira tasks';
       return `
       <tr class="bpmis-project-row" data-project-row="${escapeHtml(project.bpmis_id)}">
+        <td>
+          <button class="bpmis-task-toggle" type="button" data-toggle-tasks="${escapeHtml(project.bpmis_id)}" aria-expanded="false" aria-label="${escapeHtml(taskButtonLabel)}">+</button>
+        </td>
         <td>${escapeHtml(project.bpmis_id || '-')}</td>
         <td>${escapeHtml(project.project_name || '-')}</td>
         <td>${brdMarkup(project.brd_link)}</td>
         <td>${escapeHtml(project.market || '-')}</td>
         <td>
           <div class="button-row bpmis-project-actions">
-            ${taskButton}
             <button class="button button-secondary" type="button" data-create-jira="${escapeHtml(project.bpmis_id)}">Create Jira</button>
             <button class="button button-secondary danger-button" type="button" data-delete-project="${escapeHtml(project.bpmis_id)}">Delete</button>
           </div>
         </td>
       </tr>
       <tr class="bpmis-task-row" data-task-row="${escapeHtml(project.bpmis_id)}" hidden>
-        <td colspan="5">
+        <td colspan="6">
           <div class="bpmis-task-panel" data-task-panel="${escapeHtml(project.bpmis_id)}">
             <div class="bpmis-task-loading">Loading Jira tasks...</div>
           </div>
@@ -178,6 +180,7 @@
     const willOpen = row.hidden;
     row.hidden = !willOpen;
     button.setAttribute('aria-expanded', willOpen ? 'true' : 'false');
+    button.textContent = willOpen ? '-' : '+';
     expandedProjectId = willOpen ? bpmisId : '';
     if (willOpen) {
       await loadTasks(bpmisId);
@@ -197,6 +200,7 @@
         if (row && button) {
           row.hidden = false;
           button.setAttribute('aria-expanded', 'true');
+          button.textContent = '-';
           await loadTasks(expandedProjectId, { force: true });
         }
       }
