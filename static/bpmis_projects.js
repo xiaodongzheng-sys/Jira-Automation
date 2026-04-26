@@ -401,7 +401,10 @@
   const submitJira = async () => {
     if (!activeProject) return;
     submitButton.disabled = true;
-    setWizardStatus('Creating Jira tickets...');
+    backButton.disabled = true;
+    cancelButton.disabled = true;
+    submitButton.textContent = 'Creating...';
+    setWizardStatus('Creating Jira tickets... Please wait.', 'info');
     try {
       const response = await fetch(`${projectsUrl}/${encodeURIComponent(activeProject.bpmis_id)}/jira-tickets`, {
         method: 'POST',
@@ -416,18 +419,21 @@
       const created = (payload.results || []).filter((item) => item.status === 'created').length;
       const errors = (payload.results || []).filter((item) => item.status === 'error');
       if (errors.length) {
-        setWizardStatus(`${created} created, ${errors.length} failed: ${errors[0].message || 'validation failed'}`, created ? 'success' : 'error');
+        setWizardStatus(`${created} created, ${errors.length} failed: ${errors[0].message || 'validation failed'}`, created ? 'warning' : 'error');
       } else {
-        setWizardStatus(`${created} Jira ticket${created === 1 ? '' : 's'} created.`, 'success');
+        setWizardStatus(`${created} Jira ticket${created === 1 ? '' : 's'} created successfully.`, 'success');
       }
       await loadProjects();
       if (created) {
-        window.setTimeout(closeModal, 900);
+        window.setTimeout(closeModal, 1800);
       }
     } catch (error) {
       setWizardStatus(error.message || 'Could not create Jira tickets.', 'error');
     } finally {
       submitButton.disabled = false;
+      backButton.disabled = false;
+      cancelButton.disabled = false;
+      submitButton.textContent = 'Create Jira';
     }
   };
 

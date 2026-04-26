@@ -311,7 +311,7 @@
           <p class="confirm-modal-message">Review each Jira title and optional fields before creating.</p>
           <div class="jira-ticket-form-list" data-jira-ticket-form-list></div>
         </form>
-        <p class="productization-inline-status" data-jira-wizard-status></p>
+        <p class="productization-inline-status" data-jira-wizard-status aria-live="polite"></p>
         <div class="confirm-modal-actions">
           <button class="button button-secondary" type="button" data-jira-wizard-cancel>Cancel</button>
           <button class="button button-secondary" type="button" data-jira-wizard-back hidden>Back</button>
@@ -459,7 +459,7 @@
 {% endblock %}
 
 {% block extra_scripts %}
-  <script src="{{ url_for('static', filename='bpmis_projects.js') }}?v=20260426-modal7"></script>
+  <script src="{{ url_for('static', filename='bpmis_projects.js') }}?v=20260426-modal8"></script>
   <script src="{{ url_for('static', filename='productization_upgrade_summary.js') }}"></script>
   <script id="team-profile-data" type="application/json">{{ team_profiles | tojson }}</script>
   <script>

@@ -577,7 +577,9 @@ class BPMISDirectApiClient(BPMISClient):
         return self._extract_issue_key(str(self._find_first_value(row, "jiraLink") or ""))
 
     def _row_matches_jira_key(self, row: dict[str, Any], ticket_key: str) -> bool:
-        return self._extract_issue_key_from_row(row).lower() == str(ticket_key or "").strip().lower()
+        row_key = self._extract_issue_key_from_row(row)
+        normalized_ticket_key = str(ticket_key or "").strip()
+        return bool(row_key and normalized_ticket_key and row_key.lower() == normalized_ticket_key.lower())
 
     def _jira_ticket_search_payloads(self, ticket_key: str) -> list[dict[str, Any]]:
         base = {"page": 1, "pageSize": 10, "mapping": True}

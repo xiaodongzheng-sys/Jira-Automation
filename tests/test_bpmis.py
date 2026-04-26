@@ -724,6 +724,31 @@ class BPMISClientTests(unittest.TestCase):
             self.assertEqual(detail["summary"], "Live AF task")
             self.assertEqual(detail["fixVersionId"][0]["fullName"], "Planning_26Q2")
 
+    def test_row_matches_jira_key_ignores_rows_without_key(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings = Settings(
+                flask_secret_key="secret",
+                google_oauth_client_secret_file=Path(temp_dir) / "client.json",
+                google_oauth_redirect_uri=None,
+                team_portal_host="127.0.0.1",
+                team_portal_port=5000,
+                team_portal_base_url=None,
+                team_allowed_emails=(),
+                team_allowed_email_domains=(),
+                team_portal_data_dir=Path(temp_dir),
+                spreadsheet_id="sheet",
+                common_tab_name="Common",
+                input_tab_name="Input",
+                bpmis_base_url="https://example.com",
+                bpmis_api_access_token="token",
+            )
+
+            client = BPMISDirectApiClient(settings)
+
+            self.assertFalse(client._row_matches_jira_key({"summary": "No Jira key"}, "AF-101"))
+            self.assertFalse(client._row_matches_jira_key({"jiraKey": ""}, "AF-101"))
+            self.assertTrue(client._row_matches_jira_key({"jiraKey": "AF-101"}, "af-101"))
+
 
 if __name__ == "__main__":
     unittest.main()
