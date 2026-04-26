@@ -184,6 +184,12 @@
   padding-right: 4px;
 }
 
+.jira-ticket-form-list {
+  max-height: none;
+  overflow: visible;
+  padding-right: 0;
+}
+
 .jira-component-option {
   align-items: center;
   background: rgba(255, 255, 255, 0.84);

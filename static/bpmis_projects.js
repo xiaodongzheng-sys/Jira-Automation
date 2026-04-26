@@ -350,8 +350,9 @@
       const menu = formNode.querySelector('[data-version-menu]');
       if (input && menu) bindVersionSearch(input, menu);
     });
-    setWizardStatus('');
+    setWizardStatus(`${selections.length} selected Component${selections.length === 1 ? '' : 's'} ready for Jira creation.`, 'neutral');
     showStep(2);
+    modal.scrollTop = 0;
     return true;
   };
 
