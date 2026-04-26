@@ -461,7 +461,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertEqual(payload["llm_provider"], "codex_cli_bridge")
         self.assertEqual(payload["llm_policy"]["provider"]["provider"], "codex_cli_bridge")
         self.assertEqual(payload["llm_policy"]["router"]["version"], 7)
-        self.assertEqual(payload["llm_policy"]["versions"]["cache"], 11)
+        self.assertEqual(payload["llm_policy"]["versions"]["cache"], 12)
         self.assertEqual(payload["llm_policy"]["versions"]["runtime"], 2)
         self.assertEqual(payload["llm_policy"]["runtime"]["max_retries"], 2)
         self.assertEqual(payload["llm_policy"]["model_policy"]["answer"]["model"], os.getenv("SOURCE_CODE_QA_CODEX_MODEL", "codex-cli"))
@@ -5757,7 +5757,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertEqual(telemetry["llm_model"], "gemini-2.5-flash")
         self.assertIn(telemetry["llm_thinking_budget"], {512, 2048})
         self.assertEqual(telemetry["llm_route"]["mode"], "manual")
-        self.assertEqual(telemetry["versions"]["cache"], 11)
+        self.assertEqual(telemetry["versions"]["cache"], 12)
         self.assertIn("llm_latency_ms", telemetry)
         self.assertIn("llm_attempt_log", telemetry)
         self.assertIn("answer_contract", telemetry)
@@ -6082,7 +6082,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         )
         cached = service._load_cached_answer(cache_key)
         self.assertIsNotNone(cached)
-        self.assertEqual(cached["versions"]["cache"], 11)
+        self.assertEqual(cached["versions"]["cache"], 12)
         cache_path = service.answer_cache_root / f"{cache_key}.json"
         stale_payload = json.loads(cache_path.read_text(encoding="utf-8"))
         stale_payload["versions"]["router"] = -1
@@ -6821,7 +6821,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertEqual(validation["status"], "ok")
         self.assertEqual(validation["cited_path_count"], 1)
 
-    def test_codex_answer_repairs_invalid_citations_once(self):
+    def test_codex_answer_passthrough_skips_citation_repair(self):
         service = SourceCodeQAService(
             data_root=Path(self.temp_dir.name),
             team_profiles=TEAM_PROFILE_DEFAULTS,
@@ -6890,10 +6890,12 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             )
 
         exec_calls = [item for item in calls if "exec" in item[0]]
-        self.assertEqual(len(exec_calls), 2)
+        self.assertEqual(len(exec_calls), 1)
         self.assertEqual(payload["llm_route"]["prompt_mode"], "codex_investigation_brief_v1")
-        self.assertTrue(payload["llm_route"]["codex_repair_attempted"])
-        self.assertEqual(payload["answer_claim_check"]["codex_citation_validation"]["status"], "ok")
+        self.assertFalse(payload["llm_route"]["codex_repair_attempted"])
+        self.assertEqual(payload["answer_claim_check"]["status"], "skipped")
+        self.assertEqual(payload["codex_cli_summary"]["citation_validation_status"], "skipped")
+        self.assertEqual(payload["answer_contract"]["status"], "model_answer")
         self.assertIn("IssueRepository reads issue_table", payload["llm_answer"])
 
     def test_codex_cli_bridge_requires_chatgpt_login(self):

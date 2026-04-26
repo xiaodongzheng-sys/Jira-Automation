@@ -42,7 +42,7 @@ LLM_PROVIDER_ALLOWED_QUERY_CHOICES = {LLM_PROVIDER_GEMINI, LLM_PROVIDER_CODEX_CL
 LLM_PROMPT_VERSION = 7
 LLM_RESPONSE_SCHEMA_VERSION = 3
 LLM_ROUTER_VERSION = 7
-LLM_CACHE_VERSION = 11
+LLM_CACHE_VERSION = 12
 LLM_RUNTIME_VERSION = 2
 PLANNER_TOOL_DSL_VERSION = 1
 GEMINI_MIN_THINKING_BUDGET = 512
@@ -14082,19 +14082,34 @@ class SourceCodeQAService:
         if cached is not None:
             cached_answer = str(cached["answer"])
             cached_structured = self._parse_structured_answer(cached_answer)
-            cached_claim_check = self._verify_answer_claims(cached_answer, evidence_summary, selected_matches)
-            cached_judge = self._run_answer_judge(question, cached_answer, evidence_pack, cached_claim_check)
-            cached_final = self._finalize_llm_answer(
-                question=question,
-                answer=cached_answer,
-                structured_answer=cached_structured,
-                evidence_summary=evidence_summary,
-                quality_gate=cached.get("answer_quality") or quality_gate,
-                claim_check=cached_claim_check,
-                answer_judge=cached_judge,
-                finish_reason=cached.get("finish_reason") or "cache_hit",
-                selected_matches=selected_matches,
-            )
+            if self._trust_provider_final_answer():
+                cached_claim_check = self._trusted_provider_check()
+                cached_judge = self._trusted_provider_judge()
+                cached_final = self._finalize_trusted_model_answer(
+                    question=question,
+                    answer=cached_answer,
+                    structured_answer=cached_structured,
+                    evidence_summary=evidence_summary,
+                    quality_gate=cached.get("answer_quality") or quality_gate,
+                    claim_check=cached_claim_check,
+                    answer_judge=cached_judge,
+                    finish_reason=cached.get("finish_reason") or "cache_hit",
+                    selected_matches=selected_matches,
+                )
+            else:
+                cached_claim_check = self._verify_answer_claims(cached_answer, evidence_summary, selected_matches)
+                cached_judge = self._run_answer_judge(question, cached_answer, evidence_pack, cached_claim_check)
+                cached_final = self._finalize_llm_answer(
+                    question=question,
+                    answer=cached_answer,
+                    structured_answer=cached_structured,
+                    evidence_summary=evidence_summary,
+                    quality_gate=cached.get("answer_quality") or quality_gate,
+                    claim_check=cached_claim_check,
+                    answer_judge=cached_judge,
+                    finish_reason=cached.get("finish_reason") or "cache_hit",
+                    selected_matches=selected_matches,
+                )
             return {
                 "llm_answer": cached_final["answer"],
                 "llm_budget_mode": routed_budget_mode,
@@ -14284,6 +14299,55 @@ class SourceCodeQAService:
         finish_reason = self._llm_finish_reason(result.payload)
         answer_check = self._answer_self_check(question, answer, evidence_summary, quality_gate)
         token_limited_generation = self._finish_reason_is_token_limited(finish_reason)
+        if self._trust_provider_final_answer():
+            claim_check = self._trusted_provider_check()
+            answer_judge = self._trusted_provider_judge()
+            final = self._finalize_trusted_model_answer(
+                question=question,
+                answer=answer,
+                structured_answer=structured_answer,
+                evidence_summary=evidence_summary,
+                quality_gate=quality_gate,
+                claim_check=claim_check,
+                answer_judge=answer_judge,
+                finish_reason=finish_reason,
+                selected_matches=selected_matches,
+            )
+            answer = final["answer"]
+            structured_answer = final["structured_answer"]
+            answer_contract = final["answer_contract"]
+            self._store_cached_answer(
+                cache_key,
+                answer=answer,
+                usage=usage,
+                answer_quality=quality_gate,
+                provider=self.llm_provider.name,
+                model=effective_model,
+                thinking_budget=llm_route.get("repair_thinking_budget", answer_thinking_budget),
+                finish_reason=finish_reason,
+            )
+            return {
+                "llm_answer": answer,
+                "llm_budget_mode": routed_budget_mode,
+                "llm_requested_budget_mode": llm_budget_mode,
+                "llm_route": llm_route,
+                "llm_provider": self.llm_provider.name,
+                "llm_cached": False,
+                "llm_usage": usage,
+                "llm_model": effective_model,
+                "llm_thinking_budget": llm_route.get("repair_thinking_budget", answer_thinking_budget),
+                "llm_attempts": attempts,
+                "llm_latency_ms": llm_latency_ms,
+                "llm_attempt_log": llm_attempt_log,
+                "llm_finish_reason": finish_reason,
+                "answer_quality": quality_gate,
+                "answer_self_check": answer_check,
+                "answer_claim_check": claim_check,
+                "answer_judge": answer_judge,
+                "structured_answer": structured_answer,
+                "answer_contract": answer_contract,
+                "evidence_pack": evidence_pack,
+            }
         if self._finish_reason_needs_generation_repair(finish_reason):
             issues = list(answer_check.get("issues") or [])
             issues.append(f"model finish reason requires repair: {finish_reason}")
@@ -14551,11 +14615,11 @@ class SourceCodeQAService:
         if cached is not None:
             cached_answer = str(cached["answer"])
             cached_structured = self._parse_structured_answer(cached_answer)
-            cached_claim_check = self._verify_answer_claims(cached_answer, evidence_summary, candidate_matches)
-            cached_validation = self._validate_codex_citations(cached_answer, candidate_paths, candidate_matches)
-            cached_claim_check = self._merge_codex_validation(cached_claim_check, cached_validation)
-            cached_judge = self._run_answer_judge(question, cached_answer, evidence_pack, cached_claim_check)
-            cached_final = self._finalize_llm_answer(
+            cached_claim_check = self._trusted_provider_check()
+            cached_validation = self._skipped_codex_validation()
+            cached_claim_check = {**cached_claim_check, "codex_citation_validation": cached_validation}
+            cached_judge = self._trusted_provider_judge()
+            cached_final = self._finalize_trusted_model_answer(
                 question=question,
                 answer=cached_answer,
                 structured_answer=cached_structured,
@@ -14567,13 +14631,11 @@ class SourceCodeQAService:
                 selected_matches=candidate_matches,
             )
             answer_contract = cached_final["answer_contract"]
-            if cached_validation.get("status") != "ok":
-                answer_contract = self._mark_codex_answer_unreliable(answer_contract, cached_validation)
             cached_summary = {
                 "prompt_mode": llm_route.get("prompt_mode"),
                 "candidate_repo_count": llm_route.get("candidate_repo_count"),
                 "candidate_path_count": llm_route.get("candidate_path_count"),
-                "cited_path_count": cached_validation.get("cited_path_count", 0),
+                "cited_path_count": 0,
                 "citation_validation_status": cached_validation.get("status"),
                 "repair_attempted": False,
                 "cli_latency_ms": 0,
@@ -14616,54 +14678,12 @@ class SourceCodeQAService:
         llm_latency_ms = int(result.latency_ms or 0)
         llm_attempt_log = [dict(item) for item in result.attempt_log]
         finish_reason = self._llm_finish_reason(result.payload)
-        claim_check = self._verify_answer_claims(answer, evidence_summary, candidate_matches)
-        codex_validation = self._validate_codex_citations(answer, candidate_paths, candidate_matches)
-        claim_check = self._merge_codex_validation(claim_check, codex_validation)
-        answer_judge = self._run_answer_judge(question, answer, evidence_pack, claim_check)
+        claim_check = self._trusted_provider_check()
+        codex_validation = self._skipped_codex_validation()
+        claim_check = {**claim_check, "codex_citation_validation": codex_validation}
+        answer_judge = self._trusted_provider_judge()
         repair_attempted = False
-        if self.codex_repair_enabled and codex_validation.get("status") != "ok":
-            repair_attempted = True
-            repair_payload = self._codex_payload(
-                self._codex_investigation_brief(
-                    pm_team=pm_team,
-                    country=country,
-                    question=question,
-                    candidate_paths=candidate_paths,
-                    evidence_pack=evidence_pack,
-                    quality_gate=quality_gate,
-                    followup_context=followup_context,
-                    repair_issues=codex_validation.get("issues") or [],
-                ),
-                progress_callback=progress_callback,
-            )
-            repair_result = self.llm_provider.generate(
-                payload=repair_payload,
-                primary_model=selected_model,
-                fallback_model=self._llm_fallback_model(),
-            )
-            repair_answer = self.llm_provider.extract_text(repair_result.payload)
-            repair_structured = self._parse_structured_answer(repair_answer)
-            repair_validation = self._validate_codex_citations(repair_answer, candidate_paths, candidate_matches)
-            repair_claim_check = self._merge_codex_validation(
-                self._verify_answer_claims(repair_answer, evidence_summary, candidate_matches),
-                repair_validation,
-            )
-            repair_judge = self._run_answer_judge(question, repair_answer, evidence_pack, repair_claim_check)
-            answer = repair_answer
-            structured_answer = repair_structured
-            codex_validation = repair_validation
-            claim_check = repair_claim_check
-            answer_judge = repair_judge
-            usage = self._merge_llm_usage(
-                usage,
-                self._normalize_llm_usage(repair_result.usage or repair_result.payload.get("usageMetadata") or {}),
-            )
-            effective_model = repair_result.model
-            attempts += repair_result.attempts
-            llm_latency_ms += int(repair_result.latency_ms or 0)
-            llm_attempt_log.extend(dict(item) for item in repair_result.attempt_log)
-            finish_reason = self._llm_finish_reason(repair_result.payload)
-        final = self._finalize_llm_answer(
+        final = self._finalize_trusted_model_answer(
             question=question,
             answer=answer,
             structured_answer=structured_answer,
@@ -14675,25 +14695,22 @@ class SourceCodeQAService:
             selected_matches=candidate_matches,
         )
         answer_contract = final["answer_contract"]
-        if codex_validation.get("status") != "ok":
-            answer_contract = self._mark_codex_answer_unreliable(answer_contract, codex_validation)
         llm_route = {
             **llm_route,
             "codex_citation_validation_status": codex_validation.get("status"),
             "codex_repair_attempted": repair_attempted,
             "codex_cited_path_count": codex_validation.get("cited_path_count", 0),
         }
-        if codex_validation.get("status") == "ok":
-            self._store_cached_answer(
-                cache_key,
-                answer=final["answer"],
-                usage=usage,
-                answer_quality=quality_gate,
-                provider=self.llm_provider.name,
-                model=effective_model,
-                thinking_budget=0,
-                finish_reason=finish_reason,
-            )
+        self._store_cached_answer(
+            cache_key,
+            answer=final["answer"],
+            usage=usage,
+            answer_quality=quality_gate,
+            provider=self.llm_provider.name,
+            model=effective_model,
+            thinking_budget=0,
+            finish_reason=finish_reason,
+        )
         codex_cli_summary = {
             "prompt_mode": llm_route.get("prompt_mode"),
             "candidate_repo_count": llm_route.get("candidate_repo_count"),
@@ -15568,6 +15585,87 @@ class SourceCodeQAService:
         return {
             "answer": final_answer,
             "structured_answer": final_structured,
+            "answer_contract": contract,
+        }
+
+    def _trust_provider_final_answer(self) -> bool:
+        return self.llm_provider_name in {LLM_PROVIDER_CODEX_CLI_BRIDGE, LLM_PROVIDER_VERTEX_AI}
+
+    @staticmethod
+    def _trusted_provider_check() -> dict[str, Any]:
+        return {
+            "status": "skipped",
+            "reason": "trusted_provider_passthrough",
+            "issues": [],
+            "unsupported_claims": [],
+        }
+
+    @staticmethod
+    def _trusted_provider_judge() -> dict[str, Any]:
+        return {
+            "status": "skipped",
+            "mode": "trusted_provider_passthrough",
+            "issues": [],
+            "repair_targets": [],
+        }
+
+    @staticmethod
+    def _skipped_codex_validation() -> dict[str, Any]:
+        return {
+            "status": "skipped",
+            "reason": "trusted_provider_passthrough",
+            "checked_claims": 0,
+            "cited_path_count": 0,
+            "direct_file_refs": [],
+            "issues": [],
+            "unsupported_claims": [],
+        }
+
+    def _finalize_trusted_model_answer(
+        self,
+        *,
+        question: str,
+        answer: str,
+        structured_answer: dict[str, Any],
+        evidence_summary: dict[str, Any],
+        quality_gate: dict[str, Any],
+        claim_check: dict[str, Any],
+        selected_matches: list[dict[str, Any]],
+        answer_judge: dict[str, Any] | None = None,
+        finish_reason: str | None = None,
+    ) -> dict[str, Any]:
+        intent = evidence_summary.get("intent") or self._question_intent(question)
+        missing_links = list(structured_answer.get("missing_evidence") or [])
+        contract = {
+            "intent": intent,
+            "status": "model_answer",
+            "confirmed_sources": [
+                self._append_fact_citation(fact, selected_matches)
+                for fact in evidence_summary.get("data_sources") or []
+                if self._is_concrete_source_line(str(fact))
+            ][:8],
+            "data_carriers": [
+                self._append_fact_citation(fact, selected_matches)
+                for fact in evidence_summary.get("data_carriers") or []
+            ][:8],
+            "field_population": [
+                self._append_fact_citation(fact, selected_matches)
+                for fact in evidence_summary.get("field_population") or []
+            ][:8],
+            "missing_links": missing_links[:8],
+            "confidence": str(structured_answer.get("confidence") or quality_gate.get("confidence") or "medium").lower(),
+            "claim_check": claim_check,
+            "answer_judge": answer_judge or {},
+            "finish_reason": finish_reason,
+            "policies": quality_gate.get("policies") or [],
+            "passthrough": True,
+        }
+        final_answer = str(answer or "").strip()
+        if structured_answer.get("format") == "json" and structured_answer.get("direct_answer"):
+            final_answer = self._render_structured_answer(structured_answer, contract)
+        return {
+            "answer": final_answer,
+            "structured_answer": structured_answer,
             "answer_contract": contract,
         }
 
