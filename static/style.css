@@ -847,15 +847,20 @@ input {
   inset: 0;
   background: rgba(21, 20, 16, 0.34);
   backdrop-filter: blur(8px);
-  display: grid;
-  place-items: center;
+  display: block;
   padding: 24px;
   z-index: 1000;
+  overflow: auto;
 }
 
 .notice-card {
-  position: relative;
+  position: fixed;
+  top: 48px;
+  left: 50%;
   width: min(560px, 100%);
+  max-height: calc(100dvh - 96px);
+  overflow: auto;
+  transform: translateX(-50%);
   background: linear-gradient(160deg, rgba(255, 251, 242, 0.98), rgba(248, 242, 226, 0.98));
   border: 1px solid rgba(255, 255, 255, 0.7);
   border-radius: 28px;
