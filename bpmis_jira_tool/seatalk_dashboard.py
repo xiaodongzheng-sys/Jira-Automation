@@ -26,6 +26,9 @@ SEATALK_DEFAULT_APP_PATH = "/Applications/SeaTalk.app"
 SEATALK_DEFAULT_DATA_DIR = "~/Library/Application Support/SeaTalk"
 SEATALK_INSIGHTS_PROMPT_MODE = "seatalk_7_day_insights_v1"
 SEATALK_INSIGHTS_TIMEZONE = ZoneInfo("Asia/Singapore")
+SEATALK_INSIGHTS_HISTORY_MAX_CHARS = 620_000
+SEATALK_INSIGHTS_SIGNAL_MAX_CHARS = 360_000
+SEATALK_INSIGHTS_RECENT_MAX_CHARS = 240_000
 UNAVAILABLE_REASON = "Not available from local SeaTalk desktop data for this scope."
 
 
@@ -126,6 +129,7 @@ class SeaTalkDashboardService:
             payload = self._empty_insights_payload(days=days, now=now, cache_hit=False)
             self._store_cached_insights(days=days, now=now, payload=payload)
             return payload
+        history_text = self._compact_history_for_insights(history_text)
         provider = CodexCliBridgeSourceCodeQALLMProvider(
             workspace_root=self.codex_workspace_root,
             timeout_seconds=self.codex_timeout_seconds,
@@ -315,10 +319,86 @@ class SeaTalkDashboardService:
             "For due, extract an explicit deadline if present; otherwise use unknown.\n"
             "Keep each evidence value short: include date/time or conversation if visible, plus a brief snippet. Do not include long raw chat content.\n"
             "If there are no confident items for a section, return an empty array.\n"
+            "The chat export may be compacted to fit the Codex CLI input limit; treat it as the available source of truth.\n"
             f"Window: last {days} days. Generated at: {now.isoformat()}.\n\n"
             "SeaTalk chat history export:\n"
             f"{history_text}"
         )
+
+    @classmethod
+    def _compact_history_for_insights(cls, history_text: str) -> str:
+        text = str(history_text or "")
+        if len(text) <= SEATALK_INSIGHTS_HISTORY_MAX_CHARS:
+            return text
+        lines = text.splitlines()
+        header = "\n".join(lines[:8]).strip()
+        signal_terms = (
+            "@xiaodong",
+            "xiaodong",
+            "zheng xiaodong",
+            "please",
+            "pls",
+            "todo",
+            "to-do",
+            "follow up",
+            "follow-up",
+            "action item",
+            "need",
+            "deadline",
+            "by ",
+            "eta",
+            "block",
+            "issue",
+            "risk",
+            "af",
+            "anti-fraud",
+            "anti fraud",
+            "credit risk",
+            "crms",
+            "collection",
+            "grc",
+            "ops risk",
+            "incident",
+            "approval",
+            "prd",
+            "release",
+            "rollout",
+        )
+        signal_lines: list[str] = []
+        signal_chars = 0
+        for line in lines:
+            lowered = line.lower()
+            if not any(term in lowered for term in signal_terms):
+                continue
+            signal_lines.append(line)
+            signal_chars += len(line) + 1
+            if signal_chars >= SEATALK_INSIGHTS_SIGNAL_MAX_CHARS:
+                break
+
+        recent_lines: list[str] = []
+        recent_chars = 0
+        for line in reversed(lines):
+            recent_lines.append(line)
+            recent_chars += len(line) + 1
+            if recent_chars >= SEATALK_INSIGHTS_RECENT_MAX_CHARS:
+                break
+        recent_lines.reverse()
+
+        compacted = "\n".join(
+            part for part in (
+                header,
+                "",
+                "[Compacted high-signal lines]",
+                "\n".join(signal_lines),
+                "",
+                "[Most recent lines]",
+                "\n".join(recent_lines),
+            )
+            if part is not None
+        ).strip()
+        if len(compacted) > SEATALK_INSIGHTS_HISTORY_MAX_CHARS:
+            compacted = compacted[-SEATALK_INSIGHTS_HISTORY_MAX_CHARS:]
+        return compacted
 
     @classmethod
     def _parse_insights_response(cls, text: str) -> dict[str, list[dict[str, str]]]:

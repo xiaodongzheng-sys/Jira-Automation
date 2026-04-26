@@ -235,6 +235,48 @@ class SeaTalkDashboardServiceTests(unittest.TestCase):
         self.assertIn("--json", exec_command)
         self.assertIn("--output-last-message", exec_command)
 
+    def test_build_insights_compacts_large_history_before_codex(self):
+        huge_history = "\n".join(
+            [
+                "SeaTalk Chat History Export",
+                *[f"[2026-04-21 09:{index % 60:02d}:00] Noise: routine chat line {index} " + ("x" * 900) for index in range(900)],
+                "[2026-04-21 18:00:00] Alice: @Xiaodong please follow up Credit Risk approval by Friday.",
+                *[f"[2026-04-21 19:{index % 60:02d}:00] Recent: latest discussion {index}" for index in range(200)],
+            ]
+        )
+
+        def local_runner(command: list[str]):
+            return subprocess.CompletedProcess(args=command, returncode=0, stdout=huge_history, stderr="")
+
+        prompts: list[str] = []
+
+        def fake_codex_run(command, **kwargs):
+            if "login" in command and "status" in command:
+                return SimpleNamespace(returncode=0, stdout="Logged in using ChatGPT\n", stderr="")
+            prompts.append(str(kwargs.get("input") or ""))
+            output_path = command[command.index("--output-last-message") + 1]
+            Path(output_path).write_text('{"project_updates":[],"my_todos":[],"team_todos":[]}', encoding="utf-8")
+            return SimpleNamespace(returncode=0, stdout='{"type":"done"}\n', stderr="")
+
+        service = SeaTalkDashboardService(
+            owner_email="xiaodong.zheng@npt.sg",
+            seatalk_app_path=str(self.app_dir),
+            seatalk_data_dir=str(self.data_dir),
+            codex_workspace_root=str(self.temp_dir.name),
+            command_runner=local_runner,
+        )
+
+        with patch("bpmis_jira_tool.source_code_qa.shutil.which", return_value="/usr/local/bin/codex"), patch(
+            "bpmis_jira_tool.source_code_qa.subprocess.run",
+            side_effect=fake_codex_run,
+        ):
+            service.build_insights(now=datetime(2026, 4, 21, 21, 0).astimezone())
+
+        self.assertTrue(prompts)
+        self.assertLess(len(prompts[0]), 700_000)
+        self.assertIn("@Xiaodong please follow up Credit Risk approval", prompts[0])
+        self.assertIn("[Most recent lines]", prompts[0])
+
     def test_build_insights_sorts_my_todos_by_priority(self):
         def local_runner(command: list[str]):
             return subprocess.CompletedProcess(args=command, returncode=0, stdout="SeaTalk Chat History Export\nhello", stderr="")
