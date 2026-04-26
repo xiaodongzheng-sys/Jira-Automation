@@ -41,46 +41,54 @@ class GmailSeaTalkDemoRouteTests(unittest.TestCase):
             session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
             session["google_credentials"] = {"token": "x", "scopes": [GMAIL_READONLY_SCOPE]}
 
-    def test_owner_sees_gmail_demo_tab_on_index(self):
+    def test_owner_sees_seatalk_summary_tab_on_index(self):
         with self.app.test_client() as client:
             self._login_owner(client, scopes=[GMAIL_READONLY_SCOPE])
             response = client.get("/")
 
         self.assertEqual(response.status_code, 200)
-        self.assertIn(b"Gmail &amp; SeaTalk Demo", response.data)
+        html = response.get_data(as_text=True)
+        self.assertIn("SeaTalk Summary", html)
         self.assertIn(b"/gmail-sea-talk-demo", response.data)
+        self.assertLess(html.index("Source Code Q&amp;A"), html.index("SeaTalk Summary"))
+        self.assertLess(html.index("SeaTalk Summary"), html.index("PRD Briefing Tool"))
+        self.assertNotIn("Gmail &amp; SeaTalk Demo", html)
 
-    def test_non_owner_does_not_see_gmail_demo_tab(self):
+    def test_non_owner_does_not_see_seatalk_summary_tab(self):
         with self.app.test_client() as client:
             self._login_teammate(client)
             response = client.get("/")
 
         self.assertEqual(response.status_code, 200)
-        self.assertNotIn(b"Gmail &amp; SeaTalk Demo", response.data)
+        self.assertNotIn(b"SeaTalk Summary", response.data)
 
-    def test_owner_can_open_demo_page(self):
+    def test_owner_can_open_seatalk_summary_page(self):
         with self.app.test_client() as client:
             self._login_owner(client, scopes=[GMAIL_READONLY_SCOPE])
             response = client.get("/gmail-sea-talk-demo")
 
         self.assertEqual(response.status_code, 200)
-        self.assertIn(b"Gmail &amp; SeaTalk Demo", response.data)
-        self.assertIn(b"Mailbox Overview", response.data)
+        self.assertIn(b"SeaTalk Summary", response.data)
+        self.assertNotIn(b"Gmail", response.data)
+        self.assertNotIn(b"Mailbox Overview", response.data)
         self.assertIn(b"Daily Received Volume", response.data)
         self.assertIn(b"last 7 days", response.data)
-        self.assertIn(b"Preparing Gmail download batches", response.data)
-        self.assertIn(b"data-gmail-export-manifest-url", response.data)
+        self.assertNotIn(b"Preparing Gmail download batches", response.data)
+        self.assertNotIn(b"data-gmail-demo-root", response.data)
+        self.assertNotIn(b"data-gmail-export-manifest-url", response.data)
         self.assertNotIn(b"Top 10 Senders", response.data)
         self.assertIn(b"SeaTalk Overview", response.data)
         self.assertIn(b"Desktop data unavailable", response.data)
 
-    def test_owner_page_shows_reconnect_when_scope_missing(self):
-        with self.app.test_client() as client:
-            self._login_owner(client, scopes=[])
-            response = client.get("/gmail-sea-talk-demo")
+    def test_owner_page_does_not_require_gmail_scope(self):
+        with patch("bpmis_jira_tool.web._google_credentials_have_scopes") as scope_check:
+            with self.app.test_client() as client:
+                self._login_owner(client, scopes=[])
+                response = client.get("/gmail-sea-talk-demo")
 
         self.assertEqual(response.status_code, 200)
-        self.assertIn(b"Reconnect Google to grant Gmail access", response.data)
+        scope_check.assert_not_called()
+        self.assertNotIn(b"Reconnect Google to grant Gmail access", response.data)
         self.assertNotIn(b"Download 7-Day Gmail History", response.data)
 
     def test_non_owner_page_is_denied(self):

@@ -762,22 +762,23 @@ def create_app() -> Flask:
                     "active": request.path.startswith("/source-code-qa"),
                 }
             )
+        prd_tab = None
         if _can_access_prd_briefing(settings):
-            site_tabs.append(
-                {
-                    "label": "PRD Briefing Tool",
-                    "href": url_for("prd_briefing.portal"),
-                    "active": current_endpoint.startswith("prd_briefing"),
-                }
-            )
+            prd_tab = {
+                "label": "PRD Briefing Tool",
+                "href": url_for("prd_briefing.portal"),
+                "active": current_endpoint.startswith("prd_briefing"),
+            }
         if _can_access_gmail_seatalk_demo(settings):
             site_tabs.append(
                 {
-                    "label": "Gmail & SeaTalk Demo",
+                    "label": "SeaTalk Summary",
                     "href": url_for("gmail_seatalk_demo"),
                     "active": request.path.startswith("/gmail-sea-talk-demo"),
                 }
             )
+        if prd_tab:
+            site_tabs.append(prd_tab)
         return {
             "site_tabs": site_tabs,
             "site_requires_google_login": _site_requires_google_login(settings),
@@ -1231,10 +1232,9 @@ def create_app() -> Flask:
         user_identity = _get_user_identity(settings)
         return render_template(
             "gmail_seatalk_demo.html",
-            page_title="Gmail & SeaTalk Demo",
+            page_title="SeaTalk Summary",
             user_identity=user_identity,
             google_connected="google_credentials" in session,
-            gmail_scope_ready=_google_credentials_have_scopes(GMAIL_READONLY_SCOPE),
             seatalk_configured=_seatalk_dashboard_is_configured(settings),
             asset_revision=_current_release_revision(),
         )
@@ -2472,7 +2472,7 @@ def _require_gmail_seatalk_demo_access(settings: Settings, *, api: bool = False)
     login_gate = _require_google_login(settings, api=api)
     if login_gate is not None:
         return login_gate
-    message = f"Gmail & SeaTalk Demo is restricted to {settings.gmail_seatalk_demo_owner_email.strip().lower()}."
+    message = f"SeaTalk Summary is restricted to {settings.gmail_seatalk_demo_owner_email.strip().lower()}."
     if not _can_access_gmail_seatalk_demo(settings):
         if api:
             return jsonify({"status": "error", "message": message}), HTTPStatus.FORBIDDEN

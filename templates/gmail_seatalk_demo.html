@@ -207,28 +207,27 @@
     <div class="showcase-backdrop"></div>
     <div class="showcase-grid">
       <div class="showcase-copy mail-demo-copy">
-        <p class="showcase-kicker">Mailbox Intelligence Demo</p>
-        <h1>Gmail &amp; SeaTalk Demo</h1>
+        <p class="showcase-kicker">SeaTalk Activity Summary</p>
+        <h1>SeaTalk Summary</h1>
         <p class="showcase-lede">
-          Review Gmail and SeaTalk activity in a clean admin dashboard with 7-day trend visibility and owner-scoped operational metrics.
+          Review local SeaTalk activity in a clean admin dashboard with 7-day trend visibility and owner-scoped operational metrics.
         </p>
         <div class="showcase-badges">
-          <span>Gmail Readonly</span>
           <span>7-Day Trends</span>
           <span>SeaTalk Desktop Data</span>
         </div>
         <div class="showcase-metrics">
           <article class="metric-card">
-            <strong>Fast mailbox pulse</strong>
-            <span>Track incoming volume, unread pressure, and read rate without opening Gmail directly.</span>
+            <strong>Fast SeaTalk pulse</strong>
+            <span>Track incoming volume, unread pressure, and read rate from local SeaTalk desktop data.</span>
           </article>
           <article class="metric-card">
             <strong>Trend visibility</strong>
-            <span>Spot volume changes across the last 7 days for both inbound and outbound mail.</span>
+            <span>Spot volume changes across the last 7 days for inbound and outbound SeaTalk messages.</span>
           </article>
           <article class="metric-card">
-            <strong>Dual-channel visibility</strong>
-            <span>Track Gmail and local SeaTalk desktop activity separately without leaving the portal.</span>
+            <strong>Local account scope</strong>
+            <span>Summarize the SeaTalk desktop account visible on this Mac without external mailbox calls.</span>
           </article>
         </div>
       </div>
@@ -237,7 +236,7 @@
         <div class="executive-card-head">
           <div>
             <p class="executive-eyebrow">Access</p>
-            <h2>Mailbox Session</h2>
+            <h2>SeaTalk Session</h2>
           </div>
           <span class="executive-pill">Owner only</span>
         </div>
@@ -251,73 +250,25 @@
             <strong>{{ "Connected" if google_connected else "Not connected" }}</strong>
           </li>
           <li>
-            <span>Gmail Scope</span>
-            <strong>{{ "Ready" if gmail_scope_ready else "Reconnect required" }}</strong>
-          </li>
-          <li>
             <span>SeaTalk</span>
             <strong>{{ "Available on this Mac" if seatalk_configured else "Desktop data unavailable" }}</strong>
           </li>
         </ul>
         <div class="executive-note">
-          <p>Gmail data is read-only in this version. SeaTalk metrics load from the local SeaTalk desktop data stored on this Mac.</p>
+          <p>SeaTalk metrics load from the local SeaTalk desktop data stored on this Mac.</p>
         </div>
       </aside>
     </div>
   </section>
 
-  <section class="workspace-shell mail-demo-shell" data-gmail-demo-root data-dashboard-url="{{ url_for('gmail_seatalk_demo_dashboard_api') }}" data-gmail-export-url="{{ url_for('gmail_seatalk_demo_gmail_export') }}" data-gmail-export-manifest-url="{{ url_for('gmail_seatalk_demo_gmail_export_manifest') }}" data-gmail-export-prewarm-url="{{ url_for('gmail_seatalk_demo_gmail_export_prewarm') }}" data-gmail-scope-ready="{{ 'true' if gmail_scope_ready else 'false' }}">
-    <section class="panel panel-wide glass-panel">
-      <div class="panel-head">
-        <div>
-          <p class="eyebrow">Dashboard</p>
-          <h2>Mailbox Overview</h2>
-          <p class="step-copy">This dashboard uses real Gmail mailbox metadata. Trend charts cover the last 7 days.</p>
-        </div>
-        <div class="button-row">
-          {% if gmail_scope_ready %}
-            <div class="button-row" data-gmail-export-buttons>
-              <span class="help-text">Preparing Gmail download batches…</span>
-            </div>
-          {% else %}
-            <a class="button" href="{{ url_for('google_login') }}">Reconnect Google to grant Gmail access</a>
-          {% endif %}
-        </div>
-      </div>
-      <div class="empty-state mail-demo-status" data-mail-demo-status data-tone="neutral">
-        {% if gmail_scope_ready %}
-          <p>Loading Gmail dashboard data…</p>
-        {% else %}
-          <p>Gmail access has not been granted to this Google session yet. Reconnect Google to continue.</p>
-        {% endif %}
-      </div>
-    </section>
-
-    <div class="mail-demo-grid" data-mail-demo-content {% if not gmail_scope_ready %}hidden{% endif %}>
-      <section class="mail-demo-scorecards" data-mail-demo-scorecards></section>
-
-      <section class="mail-demo-chart-grid">
-        <article class="panel glass-panel mail-demo-card">
-          <div class="mail-demo-pill">Inbound trend</div>
-          <h3>Daily Received Volume</h3>
-          <p>Inbound Gmail volume over the last 7 days.</p>
-          <div data-mail-demo-chart="received"></div>
-        </article>
-        <article class="panel glass-panel mail-demo-card">
-          <div class="mail-demo-pill">Outbound trend</div>
-          <h3>Daily Sent Volume</h3>
-          <p>Outbound Gmail volume over the last 7 days.</p>
-          <div data-mail-demo-chart="sent"></div>
-        </article>
-      </section>
-
-      <section
-        class="panel panel-wide glass-panel mail-demo-card"
-        data-seatalk-demo-root
-        data-seatalk-url="{{ url_for('gmail_seatalk_demo_seatalk_api') }}"
-        data-seatalk-export-url="{{ url_for('gmail_seatalk_demo_seatalk_export') }}"
-        data-seatalk-configured="{{ 'true' if seatalk_configured else 'false' }}"
-      >
+  <section
+    class="workspace-shell mail-demo-shell"
+    data-seatalk-demo-root
+    data-seatalk-url="{{ url_for('gmail_seatalk_demo_seatalk_api') }}"
+    data-seatalk-export-url="{{ url_for('gmail_seatalk_demo_seatalk_export') }}"
+    data-seatalk-configured="{{ 'true' if seatalk_configured else 'false' }}"
+  >
+      <section class="panel panel-wide glass-panel mail-demo-card">
         <div class="panel-head">
           <div>
             <p class="eyebrow">SeaTalk</p>
@@ -368,7 +319,6 @@
           </section>
         </div>
       </section>
-    </div>
   </section>
 {% endblock %}
 
