@@ -1,73 +1,22 @@
 {% extends "base.html" %}
 
 {% block body %}
-  <section class="showcase-shell">
-    <div class="showcase-backdrop"></div>
-    <div class="showcase-grid">
-      <div class="showcase-copy">
-        <p class="showcase-kicker">BPMIS Setup Wizard</p>
-        <h1>BPMIS Automation Tool</h1>
-        <p class="showcase-lede">
-          Set up your BPMIS token, choose a PM team, sync BPMIS projects into the portal, and create Jira tickets project by project.
-          The setup flow stays simple for first-time users while advanced routing and owner defaults remain available when needed.
-        </p>
-        <div class="showcase-badges">
-          <span>BPMIS API</span>
-          <span>Portal records</span>
-          <span>Per-user config</span>
-        </div>
-        <div class="showcase-metrics">
-          <article class="metric-card">
-            <strong>Step-by-step setup</strong>
-            <span>Guide teammates through token, PM team, routing, and default values in one setup path.</span>
-          </article>
-          <article class="metric-card">
-            <strong>Hidden complexity</strong>
-            <span>Advanced routing and owner defaults stay available without crowding the main setup flow.</span>
-          </article>
-          <article class="metric-card">
-            <strong>Controlled execution</strong>
-            <span>After setup, use Run to sync BPMIS projects and create Jira tickets safely.</span>
-          </article>
-        </div>
-      </div>
-
-      <aside class="executive-card">
-        <div class="executive-card-head">
-          <div>
-            <p class="executive-eyebrow">Current Session</p>
-            <h2>Setup Snapshot</h2>
-          </div>
-          <span class="executive-pill">{{ "Team mode" if shared_portal_enabled else "Local mode" }}</span>
-        </div>
-        <ul class="executive-list">
-          <li>
-            <span>Portal User</span>
-            <strong>{{ user_identity.display_name }}</strong>
-          </li>
-          <li>
-            <span>Project Store</span>
-            <strong>Portal SQLite</strong>
-          </li>
-          <li>
-            <span>PM Team</span>
-            <strong>
-              {% if mapping_config.pm_team and mapping_config.pm_team in team_profiles %}
-                {{ team_profiles[mapping_config.pm_team].label }}
-              {% else %}
-                {{ mapping_config.pm_team or "Not selected" }}
-              {% endif %}
-            </strong>
-          </li>
-          <li>
-            <span>Sync Email</span>
-            <strong>{{ mapping_config.sync_pm_email or "-" }}</strong>
-          </li>
-        </ul>
-        <div class="executive-note">
-          <p>Finish Setup once, then switch to Run for daily sync and ticket creation.</p>
-        </div>
-      </aside>
+  <section class="portal-compact-hero" aria-label="BPMIS workspace status">
+    <div class="portal-compact-title">
+      <p class="showcase-kicker">BPMIS Automation Tool</p>
+      <h1>Setup and Run</h1>
+    </div>
+    <div class="portal-compact-meta">
+      <span>{{ "Team mode" if shared_portal_enabled else "Local mode" }}</span>
+      <span>{{ user_identity.display_name }}</span>
+      <span>
+        {% if mapping_config.pm_team and mapping_config.pm_team in team_profiles %}
+          {{ team_profiles[mapping_config.pm_team].label }}
+        {% else %}
+          {{ mapping_config.pm_team or "PM team not selected" }}
+        {% endif %}
+      </span>
+      <span>{{ mapping_config.sync_pm_email or "Sync email not set" }}</span>
     </div>
   </section>
 
