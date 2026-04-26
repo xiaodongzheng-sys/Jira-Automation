@@ -94,7 +94,7 @@
 .bpmis-task-list-head,
 .bpmis-task-card {
   display: grid;
-  grid-template-columns: 136px minmax(360px, 1fr) 76px 116px 150px 170px;
+  grid-template-columns: 136px minmax(360px, 560px) 76px 116px 150px 170px;
   column-gap: 16px;
   align-items: center;
 }
