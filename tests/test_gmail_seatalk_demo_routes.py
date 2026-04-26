@@ -456,6 +456,62 @@ class GmailSeaTalkDemoRouteTests(unittest.TestCase):
             ["Follow up rollout", "Review GRC lock"],
         )
 
+    def test_similar_uncompleted_seatalk_todos_are_not_duplicated(self):
+        first_todo = {
+            "task": "Prepare PM AI sharing session",
+            "domain": "General",
+            "priority": "medium",
+            "due": "unknown",
+            "evidence": "Apr 22",
+        }
+        second_todo = {
+            "task": "Prepare follow-up PM AI tool sharing session",
+            "domain": "General",
+            "priority": "high",
+            "due": "2026-05-06",
+            "evidence": "Apr 23",
+        }
+        payloads = [
+            {
+                "project_updates": [],
+                "my_todos": [first_todo],
+                "team_todos": [],
+                "generated_at": "2026-04-21T21:00:00+08:00",
+                "model_id": "codex:gpt-5.5",
+                "cache": {"hit": False, "expires_at": "2026-04-22T00:00:00+08:00"},
+                "codex": {"latency_ms": 1200, "session_mode": "ephemeral"},
+            },
+            {
+                "project_updates": [],
+                "my_todos": [second_todo],
+                "team_todos": [],
+                "generated_at": "2026-04-22T21:00:00+08:00",
+                "model_id": "codex:gpt-5.5",
+                "cache": {"hit": False, "expires_at": "2026-04-23T00:00:00+08:00"},
+                "codex": {"latency_ms": 1200, "session_mode": "ephemeral"},
+            },
+        ]
+
+        class FakeSeaTalkService:
+            def build_insights(self):
+                return payloads.pop(0)
+
+        with patch("bpmis_jira_tool.web._build_seatalk_dashboard_service", return_value=FakeSeaTalkService()):
+            with self.app.test_client() as client:
+                self._login_owner(client, scopes=[GMAIL_READONLY_SCOPE])
+                first = client.get("/api/gmail-sea-talk-demo/seatalk/insights")
+                second = client.get("/api/gmail-sea-talk-demo/seatalk/insights")
+
+        first_items = first.get_json()["my_todos"]
+        second_items = second.get_json()["my_todos"]
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(len(second_items), 1)
+        self.assertEqual(second_items[0]["id"], first_items[0]["id"])
+        self.assertEqual(second_items[0]["task"], "Prepare PM AI sharing session")
+        self.assertEqual(second_items[0]["priority"], "high")
+        self.assertEqual(second_items[0]["due"], "2026-05-06")
+
     def test_owner_can_load_and_save_seatalk_name_mappings(self):
         class FakeSeaTalkService:
             def build_name_mappings(self):

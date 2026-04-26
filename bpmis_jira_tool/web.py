@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+import difflib
 from functools import lru_cache
 import hashlib
 import html
@@ -290,9 +291,65 @@ class SeaTalkTodoStore:
                 todo_id = self.todo_id(todo)
                 if not todo_id or todo_id in completed:
                     continue
+                similar_id = self._find_similar_open_todo_id(open_items=open_items, todo=todo)
+                if similar_id:
+                    existing = open_items.get(similar_id) if isinstance(open_items.get(similar_id), dict) else {}
+                    open_items[similar_id] = self._merge_similar_open_todo(existing=existing, incoming=todo, todo_id=similar_id)
+                    continue
                 open_items[todo_id] = {**todo, "id": todo_id, "last_seen_at": self._now()}
             self._persist_locked()
             return [dict(todo) for todo in open_items.values() if isinstance(todo, dict)]
+
+    @classmethod
+    def _find_similar_open_todo_id(cls, *, open_items: dict[str, Any], todo: dict[str, Any]) -> str | None:
+        for existing_id, existing in open_items.items():
+            if not isinstance(existing, dict):
+                continue
+            if cls._todos_are_similar(existing, todo):
+                return str(existing.get("id") or existing_id)
+        return None
+
+    @classmethod
+    def _todos_are_similar(cls, left: dict[str, Any], right: dict[str, Any]) -> bool:
+        left_task = cls._similarity_text(left.get("task"))
+        right_task = cls._similarity_text(right.get("task"))
+        if not left_task or not right_task:
+            return False
+        left_domain = SeaTalkDashboardService._normalize_insight_domain(left.get("domain"))
+        right_domain = SeaTalkDashboardService._normalize_insight_domain(right.get("domain"))
+        same_domain = left_domain == right_domain
+        sequence_score = difflib.SequenceMatcher(None, left_task, right_task).ratio()
+        token_score = cls._token_overlap_score(left_task, right_task)
+        score = max(sequence_score, token_score)
+        return score >= (0.78 if same_domain else 0.9)
+
+    @staticmethod
+    def _similarity_text(value: Any) -> str:
+        return re.sub(r"[^\w\u4e00-\u9fff]+", " ", str(value or "").lower()).strip()
+
+    @staticmethod
+    def _token_overlap_score(left: str, right: str) -> float:
+        left_tokens = {token for token in left.split() if len(token) > 1}
+        right_tokens = {token for token in right.split() if len(token) > 1}
+        if not left_tokens or not right_tokens:
+            return 0.0
+        return len(left_tokens & right_tokens) / len(left_tokens | right_tokens)
+
+    @classmethod
+    def _merge_similar_open_todo(cls, *, existing: dict[str, Any], incoming: dict[str, Any], todo_id: str) -> dict[str, Any]:
+        merged = {**existing, "id": todo_id, "last_seen_at": cls._now()}
+        priority_rank = {"high": 0, "medium": 1, "low": 2, "unknown": 3}
+        incoming_priority = str(incoming.get("priority") or "unknown").strip().lower()
+        existing_priority = str(existing.get("priority") or "unknown").strip().lower()
+        if priority_rank.get(incoming_priority, 3) < priority_rank.get(existing_priority, 3):
+            merged["priority"] = incoming_priority
+        existing_due = str(existing.get("due") or "").strip()
+        incoming_due = str(incoming.get("due") or "").strip()
+        if (not existing_due or existing_due.lower() == "unknown") and incoming_due:
+            merged["due"] = incoming_due
+        if not str(existing.get("evidence") or "").strip() and str(incoming.get("evidence") or "").strip():
+            merged["evidence"] = str(incoming.get("evidence") or "").strip()
+        return merged
 
     def mark_completed(self, *, owner_email: str, todo: dict[str, Any]) -> dict[str, Any]:
         owner = str(owner_email or "").strip().lower()
