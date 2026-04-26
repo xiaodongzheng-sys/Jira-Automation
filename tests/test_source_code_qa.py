@@ -6718,6 +6718,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
 
         self.assertIn("Prompt mode: codex_investigation_brief_v1", brief)
         self.assertIn(str(repo_path), brief)
+        self.assertIn("relative_root=AF-All", brief)
         self.assertIn("path=repository/IssueRepository.java", brief)
         self.assertIn("file_exists=True", brief)
         self.assertIn("path_status=exact", brief)
@@ -6754,6 +6755,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
 
         self.assertEqual(candidate_paths[0]["path"], "src/main/java/IssueRepository.java")
         self.assertEqual(candidate_paths[0]["original_path"], "repository/IssueRepository.java")
+        self.assertTrue(candidate_paths[0]["repo_relative_root"].startswith("AF-All/"))
         self.assertTrue(candidate_paths[0]["file_exists"])
         self.assertEqual(candidate_paths[0]["path_status"], "resolved_by_filename")
 

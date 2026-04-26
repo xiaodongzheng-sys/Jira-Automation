@@ -14740,6 +14740,7 @@ class SourceCodeQAService:
                     "id": f"S{len(rows) + 1}",
                     "repo": repo or (entry.display_name if entry else ""),
                     "repo_root": str(repo_root),
+                    "repo_relative_root": self._repo_relative_root(repo_root),
                     "path": resolved_path,
                     "original_path": path if resolved_path != path else "",
                     "absolute_path": str((repo_root / resolved_path).resolve()),
@@ -14838,6 +14839,7 @@ class SourceCodeQAService:
                     "id": f"S{len(merged) + 1}",
                     "repo": repo,
                     "repo_root": root,
+                    "repo_relative_root": self._repo_relative_root(Path(root)) if root else "",
                     "path": path,
                     "absolute_path": str((Path(root) / path).resolve()) if root else str(prior.get("absolute_path") or ""),
                     "line_start": prior.get("line_start"),
@@ -14849,6 +14851,12 @@ class SourceCodeQAService:
             )
             seen.add(key)
         return merged
+
+    def _repo_relative_root(self, repo_root: Path) -> str:
+        try:
+            return str(Path(repo_root).resolve().relative_to(self.repo_root.resolve()))
+        except ValueError:
+            return ""
 
     def _codex_investigation_brief(
         self,
@@ -14873,7 +14881,10 @@ class SourceCodeQAService:
             "- Local retrieval has only narrowed the candidate repo/path range; verify by opening files yourself.",
             "- Do not write files, run formatters, install packages, commit, push, deploy, or mutate runtime state.",
             "- Prefer `rg` when available; if it is unavailable, use `grep -R`, `find`, `sed -n`, `nl -ba`, and direct file reads.",
-            "- Candidate `root` values are absolute synced repo roots. Candidate `path` values are relative to that root; inspect files as root/path.",
+            f"- Codex starts in the synced repos parent directory: {self.repo_root}.",
+            "- Candidate `root` values are absolute synced repo roots. Candidate `relative_root` values are relative to the current repos parent.",
+            "- Use either `cd relative_root` from the repos parent or use the absolute `root`; do not use only the final directory basename.",
+            "- Candidate `path` values are relative to that repo root; inspect files as root/path.",
             "",
             "Candidate repository workspaces and top paths:",
         ]
@@ -14886,6 +14897,7 @@ class SourceCodeQAService:
                 [
                     (
                         f"- {item.get('id')} repo={item.get('repo')} root={item.get('repo_root')} "
+                        f"relative_root={item.get('repo_relative_root')} "
                         f"path={item.get('path')}{path_note} file_exists={item.get('file_exists')} "
                         f"path_status={item.get('path_status')}{alternative_note} "
                         f"lines={item.get('line_start')}-{item.get('line_end')}"
