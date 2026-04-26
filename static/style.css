@@ -184,6 +184,11 @@
   line-height: 1;
 }
 
+.bpmis-task-status.is-loading {
+  background: #f2f4f7;
+  color: #667085;
+}
+
 .bpmis-task-status.is-waiting {
   background: #eef4ff;
   color: #175cd3;

@@ -73,7 +73,7 @@
     wizardStatus.dataset.tone = tone;
   };
 
-  const ticketCount = (project) => Array.isArray(project.jira_tickets) ? project.jira_tickets.length : 0;
+  const ticketCount = (project) => Array.isArray(project?.jira_tickets) ? project.jira_tickets.length : 0;
 
   const ticketLabel = (countValue) => {
     if (!countValue) return 'Tasks';
@@ -88,6 +88,7 @@
   const taskStatusClass = (value) => {
     const normalized = String(value || '').trim().toLowerCase();
     if (!normalized) return '';
+    if (normalized.includes('loading')) return ' is-loading';
     if (normalized.includes('waiting')) return ' is-waiting';
     if (normalized.includes('done') || normalized.includes('closed') || normalized.includes('resolved')) return ' is-done';
     if (normalized.includes('progress') || normalized.includes('doing')) return ' is-progress';
@@ -96,7 +97,7 @@
 
   const displayTaskStatus = (value) => {
     const text = String(value || '').trim();
-    if (!text || text.toLowerCase() === 'created') return 'Waiting';
+    if (!text || text.toLowerCase() === 'created') return 'Loading status';
     return text;
   };
 
@@ -199,10 +200,40 @@
   const loadTasks = async (bpmisId, { force = false } = {}) => {
     const panel = body.querySelector(`[data-task-panel="${cssEscape(bpmisId)}"]`);
     if (!panel) return;
-    if (panel.dataset.loaded === 'true' && !force) return;
     const project = projectById(bpmisId);
+    if (panel.dataset.loaded === 'true' && !force) {
+      if (ticketCount(project) > 0 && panel.dataset.liveLoaded !== 'true') {
+        void refreshLiveTasks(bpmisId, panel);
+      }
+      return;
+    }
     panel.innerHTML = taskMarkup(Array.isArray(project?.jira_tickets) ? project.jira_tickets : []);
     panel.dataset.loaded = 'true';
+    if (ticketCount(project) > 0) {
+      void refreshLiveTasks(bpmisId, panel);
+    }
+  };
+
+  const refreshLiveTasks = async (bpmisId, panel) => {
+    if (panel.dataset.liveLoading === 'true') return;
+    panel.dataset.liveLoading = 'true';
+    try {
+      const response = await fetch(`${projectsUrl}/${encodeURIComponent(bpmisId)}/jira-tickets?live=1`, {
+        headers: { Accept: 'application/json' },
+        credentials: 'same-origin',
+      });
+      const payload = await readJson(response, 'Could not load live Jira status.');
+      const liveTickets = Array.isArray(payload.tickets) ? payload.tickets : [];
+      panel.innerHTML = taskMarkup(liveTickets);
+      panel.dataset.liveLoaded = 'true';
+    } catch (error) {
+      const warning = document.createElement('p');
+      warning.className = 'bpmis-task-warning';
+      warning.textContent = error.message || 'Could not load live Jira status.';
+      panel.appendChild(warning);
+    } finally {
+      panel.dataset.liveLoading = 'false';
+    }
   };
 
   const toggleTasks = async (button) => {
