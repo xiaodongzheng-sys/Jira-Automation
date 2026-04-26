@@ -277,6 +277,53 @@ class SeaTalkDashboardServiceTests(unittest.TestCase):
         self.assertIn("@Xiaodong please follow up Credit Risk approval", prompts[0])
         self.assertIn("[Most recent lines]", prompts[0])
 
+    def test_build_insights_filters_system_generated_group_messages(self):
+        history = "\n".join(
+            [
+                "SeaTalk Chat History Export",
+                "Window: last 7 days",
+                "=== Risk Group (group-1) ===",
+                "[2026-04-21 10:00:00] System Account: Automated reminder: submit weekly report.",
+                "[2026-04-21 10:01:00] Alert Bot: Alarm notification: service latency high.",
+                "[2026-04-21 10:01:30] Bob: reminder that I will send the PRD later.",
+                "[2026-04-21 10:02:00] Alice: @Xiaodong please follow up the CRMS rollout.",
+            ]
+        )
+
+        def local_runner(command: list[str]):
+            return subprocess.CompletedProcess(args=command, returncode=0, stdout=history, stderr="")
+
+        prompts: list[str] = []
+
+        def fake_codex_run(command, **kwargs):
+            if "login" in command and "status" in command:
+                return SimpleNamespace(returncode=0, stdout="Logged in using ChatGPT\n", stderr="")
+            prompts.append(str(kwargs.get("input") or ""))
+            output_path = command[command.index("--output-last-message") + 1]
+            Path(output_path).write_text('{"project_updates":[],"my_todos":[],"team_todos":[]}', encoding="utf-8")
+            return SimpleNamespace(returncode=0, stdout='{"type":"done"}\n', stderr="")
+
+        service = SeaTalkDashboardService(
+            owner_email="xiaodong.zheng@npt.sg",
+            seatalk_app_path=str(self.app_dir),
+            seatalk_data_dir=str(self.data_dir),
+            codex_workspace_root=str(self.temp_dir.name),
+            command_runner=local_runner,
+        )
+
+        with patch("bpmis_jira_tool.source_code_qa.shutil.which", return_value="/usr/local/bin/codex"), patch(
+            "bpmis_jira_tool.source_code_qa.subprocess.run",
+            side_effect=fake_codex_run,
+        ):
+            service.build_insights(now=datetime(2026, 4, 21, 21, 0).astimezone())
+
+        self.assertTrue(prompts)
+        self.assertNotIn("Automated reminder: submit weekly report", prompts[0])
+        self.assertNotIn("Alarm notification: service latency high", prompts[0])
+        self.assertIn("Bob: reminder that I will send the PRD later", prompts[0])
+        self.assertIn("@Xiaodong please follow up the CRMS rollout", prompts[0])
+        self.assertIn("System-generated alarm/reminder messages removed: 2.", prompts[0])
+
     def test_build_insights_sorts_my_todos_by_priority(self):
         def local_runner(command: list[str]):
             return subprocess.CompletedProcess(args=command, returncode=0, stdout="SeaTalk Chat History Export\nhello", stderr="")

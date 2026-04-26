@@ -129,6 +129,7 @@ class SeaTalkDashboardService:
             payload = self._empty_insights_payload(days=days, now=now, cache_hit=False)
             self._store_cached_insights(days=days, now=now, payload=payload)
             return payload
+        history_text = self._filter_system_generated_history(history_text)
         history_text = self._compact_history_for_insights(history_text)
         provider = CodexCliBridgeSourceCodeQALLMProvider(
             workspace_root=self.codex_workspace_root,
@@ -399,6 +400,77 @@ class SeaTalkDashboardService:
         if len(compacted) > SEATALK_INSIGHTS_HISTORY_MAX_CHARS:
             compacted = compacted[-SEATALK_INSIGHTS_HISTORY_MAX_CHARS:]
         return compacted
+
+    @classmethod
+    def _filter_system_generated_history(cls, history_text: str) -> str:
+        kept_lines: list[str] = []
+        skipped_count = 0
+        for line in str(history_text or "").splitlines():
+            if cls._is_system_generated_history_line(line):
+                skipped_count += 1
+                continue
+            kept_lines.append(line)
+        if skipped_count:
+            insert_at = min(len(kept_lines), 5)
+            kept_lines.insert(insert_at, f"System-generated alarm/reminder messages removed: {skipped_count}.")
+        return "\n".join(kept_lines) + ("\n" if kept_lines else "")
+
+    @staticmethod
+    def _is_system_generated_history_line(line: str) -> bool:
+        text = str(line or "").strip()
+        if not text.startswith("[") or "] " not in text or ": " not in text:
+            return False
+        try:
+            sender_and_message = text.split("] ", 1)[1]
+            sender, message = sender_and_message.split(": ", 1)
+        except ValueError:
+            return False
+        sender_l = sender.strip().lower()
+        message_l = message.strip().lower()
+        sender_system_markers = (
+            "system",
+            "system account",
+            "bot",
+            "robot",
+            "monitor",
+            "notification",
+            "noreply",
+            "no-reply",
+            "workflow",
+            "scheduler",
+            "jira",
+            "gitlab",
+            "jenkins",
+            "grafana",
+            "prometheus",
+            "系统",
+            "机器人",
+        )
+        sender_alert_markers = ("reminder", "alert", "alarm", "提醒", "告警", "报警")
+        message_auto_markers = (
+            "automated reminder",
+            "auto reminder",
+            "scheduled reminder",
+            "system reminder",
+            "this is an automated",
+            "do not reply",
+            "no-reply",
+            "alarm notification",
+            "alert notification",
+            "monitor alert",
+            "service alert",
+            "incident alert",
+            "告警通知",
+            "报警通知",
+            "自动提醒",
+            "系统提醒",
+            "系统通知",
+        )
+        if any(marker in sender_l for marker in sender_system_markers):
+            return True
+        if any(marker in sender_l for marker in sender_alert_markers):
+            return any(marker in message_l for marker in message_auto_markers)
+        return any(marker in message_l for marker in message_auto_markers)
 
     @classmethod
     def _parse_insights_response(cls, text: str) -> dict[str, list[dict[str, str]]]:
