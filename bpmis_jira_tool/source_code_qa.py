@@ -2899,8 +2899,34 @@ class SourceCodeQAService:
             or any(re.search(rf"\b{re.escape(marker)}\b", lowered) for marker in english_followup_phrases)
             or any(marker in lowered for marker in chinese_followup_markers)
         )
-        is_followup = has_followup_marker
-        if not is_followup:
+        english_clarification_phrases = (
+            "i mean",
+            "what i mean",
+            "actually",
+            "not asking",
+            "don't need",
+            "do not need",
+            "instead",
+            "clarify",
+        )
+        chinese_clarification_markers = (
+            "我问的是",
+            "不是",
+            "不需要",
+            "不用",
+            "要的话",
+            "是否",
+            "刚才",
+            "上一",
+            "前面",
+        )
+        has_clarification_marker = (
+            any(phrase in lowered for phrase in english_clarification_phrases)
+            or any(marker in question for marker in chinese_clarification_markers)
+        )
+        has_same_scope_context = bool(current_key and (context_key == current_key or not context_key))
+        should_augment_question = has_followup_marker or has_clarification_marker
+        if not should_augment_question and not has_same_scope_context:
             return question, {"used": False}
         terms: list[str] = []
         for match in conversation_context.get("matches") or []:
@@ -2939,15 +2965,31 @@ class SourceCodeQAService:
             if lowered_term not in deduped:
                 deduped.append(lowered_term)
         context_terms = deduped[:16]
-        if not context_terms:
+        if not context_terms and not has_same_scope_context:
             return question, {"used": False}
-        augmented = f"{question}\n\nPrevious Source Code Q&A context terms: {' '.join(context_terms)}"
-        return augmented, self._conversation_followup_payload(conversation_context, context_terms)
+        augmented = question
+        if should_augment_question and context_terms:
+            augmented = f"{question}\n\nPrevious Source Code Q&A context terms: {' '.join(context_terms)}"
+        followup_payload = self._conversation_followup_payload(
+            conversation_context,
+            context_terms,
+            implicit=not should_augment_question,
+            reason="same_scope_session" if not should_augment_question else "followup_marker",
+        )
+        return augmented, followup_payload
 
     @staticmethod
-    def _conversation_followup_payload(conversation_context: dict[str, Any], context_terms: list[str]) -> dict[str, Any]:
+    def _conversation_followup_payload(
+        conversation_context: dict[str, Any],
+        context_terms: list[str],
+        *,
+        implicit: bool = False,
+        reason: str = "followup_marker",
+    ) -> dict[str, Any]:
         return {
             "used": True,
+            "implicit": implicit,
+            "reason": reason,
             "terms": context_terms,
             "previous_question": str(conversation_context.get("question") or "")[:180],
             "question": str(conversation_context.get("question") or "")[:500],

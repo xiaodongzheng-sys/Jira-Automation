@@ -1296,7 +1296,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertIn("Previous answer", followup["answer"])
         self.assertEqual(followup["codex_candidate_paths"][0]["path"], "repository/IssueRepository.java")
 
-    def test_codex_followup_terms_do_not_affect_non_codex_provider(self):
+    def test_codex_followup_terms_do_not_augment_non_codex_provider(self):
         augmented, followup = self.service._apply_conversation_context(
             "continue with this",
             {
@@ -1322,7 +1322,8 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             current_key="AF:All",
         )
 
-        self.assertFalse(followup["used"])
+        self.assertTrue(followup["used"])
+        self.assertEqual(followup["terms"], [])
         self.assertEqual(augmented, "continue with this")
 
     def test_codex_followup_terms_are_used_for_codex_provider(self):
@@ -1413,6 +1414,56 @@ class SourceCodeQAServiceTests(unittest.TestCase):
 
         self.assertFalse(followup["used"])
         self.assertEqual(augmented, "When will system query CBS report when performing monthly credit review?")
+
+    def test_followup_context_same_scope_session_is_carried_without_query_pollution(self):
+        augmented, followup = self.service._apply_conversation_context(
+            "Which table stores payslip extracted fields?",
+            {
+                "key": "CRMS:PH",
+                "question": "When is payslip parsed?",
+                "answer": "Previous answer mentioned ExtractRecord.",
+                "matches": [{"path": "repository/ExtractRecordDAO.xml", "snippet": "response_body"}],
+                "trace_paths": [],
+                "structured_answer": {"claims": [{"text": "ExtractRecord stores response_body."}]},
+                "answer_contract": {"confirmed_sources": ["extract_record_tab.response_body"]},
+                "evidence_pack": {"confirmed_facts": ["raw response is stored in extract_record_tab"]},
+            },
+            current_key="CRMS:PH",
+        )
+
+        self.assertTrue(followup["used"])
+        self.assertTrue(followup["implicit"])
+        self.assertEqual(followup["reason"], "same_scope_session")
+        self.assertEqual(augmented, "Which table stores payslip extracted fields?")
+        self.assertIn("Previous answer", followup["answer"])
+
+    def test_followup_context_chinese_clarification_uses_previous_terms(self):
+        augmented, followup = self.service._apply_conversation_context(
+            "我问的是是否要approve，要的话哪些role需要approve？不需要名字",
+            {
+                "key": "GRC:All",
+                "question": "When can an incident be withdrawn?",
+                "answer": "Previous answer mentioned AuthorizationContent.",
+                "matches": [
+                    {
+                        "path": "src/pages/AuthorizationManagement/Components/DetailPage/AuthorizationContent.tsx",
+                        "snippet": "IncidentApprove IncidentReview pendingWithdraw Approver Reviewer",
+                    }
+                ],
+                "trace_paths": [],
+                "structured_answer": {"claims": [{"text": "pendingWithdraw is mapped to IncidentApprove."}]},
+                "answer_contract": {"confirmed_sources": ["AuthorizationContent.tsx:241-262"]},
+                "evidence_pack": {"confirmed_facts": ["Approver handles IncidentApprove"]},
+            },
+            current_key="GRC:All",
+        )
+
+        self.assertTrue(followup["used"])
+        self.assertFalse(followup["implicit"])
+        self.assertEqual(followup["reason"], "followup_marker")
+        self.assertIn("Previous Source Code Q&A context terms", augmented)
+        self.assertIn("authorizationcontent", augmented)
+        self.assertIn("incidentapprove", augmented)
 
     def test_followup_context_does_not_pollute_specific_short_lookup(self):
         augmented, followup = self.service._apply_conversation_context(
