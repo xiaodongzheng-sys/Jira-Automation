@@ -31,13 +31,26 @@ class BPMISProjectStore:
     ) -> str:
         owner = self._require_user_key(user_key)
         issue_id = self._require_bpmis_id(bpmis_id)
+        normalized_project_name = str(project_name or "").strip()
+        normalized_brd_link = str(brd_link or "").strip()
+        normalized_market = str(market or "").strip()
         with sqlite3.connect(self.db_path) as connection:
             row = connection.execute(
-                "SELECT deleted_at FROM bpmis_projects WHERE user_key = ? AND bpmis_id = ?",
+                """
+                SELECT project_name, brd_link, market, deleted_at
+                FROM bpmis_projects
+                WHERE user_key = ? AND bpmis_id = ?
+                """,
                 (owner, issue_id),
             ).fetchone()
-            if row and row[0]:
+            if row and row[3]:
                 return "deleted"
+            if row and (
+                str(row[0] or "") == normalized_project_name
+                and str(row[1] or "") == normalized_brd_link
+                and str(row[2] or "") == normalized_market
+            ):
+                return "skipped"
             connection.execute(
                 """
                 INSERT INTO bpmis_projects (
@@ -55,9 +68,9 @@ class BPMISProjectStore:
                 (
                     owner,
                     issue_id,
-                    str(project_name or "").strip(),
-                    str(brd_link or "").strip(),
-                    str(market or "").strip(),
+                    normalized_project_name,
+                    normalized_brd_link,
+                    normalized_market,
                 ),
             )
             connection.commit()
@@ -315,6 +328,18 @@ class PortalProjectSyncService:
                         issue_id=issue_id,
                         status="skipped",
                         message="Skipped because this BPMIS project was deleted in the portal.",
+                        project_label=project_name or issue_id,
+                        matched_project_id=market or None,
+                    )
+                )
+                continue
+            if status == "skipped":
+                results.append(
+                    RunResult(
+                        row_number=0,
+                        issue_id=issue_id,
+                        status="skipped",
+                        message="Skipped because this BPMIS project is already up to date.",
                         project_label=project_name or issue_id,
                         matched_project_id=market or None,
                     )

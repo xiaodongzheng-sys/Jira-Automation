@@ -120,6 +120,40 @@ class BPMISProjectStoreTests(unittest.TestCase):
             self.assertEqual([project["bpmis_id"] for project in projects], ["225159"])
             self.assertEqual(projects[0]["brd_link"], "https://docs/brd-1")
 
+    def test_portal_sync_skips_unchanged_existing_projects(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = BPMISProjectStore(Path(temp_dir) / "team_portal.db")
+            store.upsert_project(
+                user_key="google:pm@npt.sg",
+                bpmis_id="225159",
+                project_name="Fraud Rule Upgrade",
+                brd_link="https://docs/brd-1",
+                market="SG",
+            )
+            service = PortalProjectSyncService(store, FakeBPMISClient())
+
+            results = service.sync_projects(user_key="google:pm@npt.sg", pm_email="pm@npt.sg")
+
+            self.assertEqual(["skipped", "created"], [result.status for result in results])
+            self.assertEqual("Skipped because this BPMIS project is already up to date.", results[0].message)
+
+    def test_portal_sync_updates_when_existing_project_fields_change(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = BPMISProjectStore(Path(temp_dir) / "team_portal.db")
+            store.upsert_project(
+                user_key="google:pm@npt.sg",
+                bpmis_id="225159",
+                project_name="Old Fraud Rule",
+                brd_link="https://docs/brd-1",
+                market="SG",
+            )
+            service = PortalProjectSyncService(store, FakeBPMISClient())
+
+            results = service.sync_projects(user_key="google:pm@npt.sg", pm_email="pm@npt.sg")
+
+            self.assertEqual(["updated", "created"], [result.status for result in results])
+            self.assertEqual("Fraud Rule Upgrade", store.get_project(user_key="google:pm@npt.sg", bpmis_id="225159")["project_name"])
+
     def test_portal_jira_creation_uses_preformatted_title_and_allows_append(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             db_path = Path(temp_dir) / "team_portal.db"
