@@ -1308,6 +1308,7 @@
     const progress = startQueryProgress('Submitting query to server...');
     if (queryButton) queryButton.disabled = true;
     const submittedQuestion = questionInput.value;
+    if (questionInput) questionInput.value = '';
     renderPendingQuery(submittedQuestion, effectiveAnswerMode);
     try {
       const session = await ensureActiveSession();
