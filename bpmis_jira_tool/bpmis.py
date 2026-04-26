@@ -26,7 +26,13 @@ class BPMISClient(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def create_jira_ticket(self, project: ProjectMatch, fields: dict[str, str]) -> CreatedTicket:
+    def create_jira_ticket(
+        self,
+        project: ProjectMatch,
+        fields: dict[str, str],
+        *,
+        preformatted_summary: bool = False,
+    ) -> CreatedTicket:
         raise NotImplementedError
 
     @abstractmethod
@@ -97,8 +103,14 @@ class BPMISDirectApiClient(BPMISClient):
             },
         )
 
-    def create_jira_ticket(self, project: ProjectMatch, fields: dict[str, str]) -> CreatedTicket:
-        payload = self._build_create_payload(project, fields)
+    def create_jira_ticket(
+        self,
+        project: ProjectMatch,
+        fields: dict[str, str],
+        *,
+        preformatted_summary: bool = False,
+    ) -> CreatedTicket:
+        payload = self._build_create_payload(project, fields, preformatted_summary=preformatted_summary)
         response = self._api_request(
             "/api/v1/issues/batchCreateJiraIssue",
             method="POST",
@@ -387,17 +399,20 @@ class BPMISDirectApiClient(BPMISClient):
         self,
         project: ProjectMatch,
         fields: dict[str, str],
+        *,
+        preformatted_summary: bool = False,
     ) -> dict[str, Any]:
         field_defs = self._get_issue_fields()
         market_value = self._required_field(fields, "Market")
         market_id = self._resolve_option_value(field_defs["marketId"], market_value)
         task_type_label = fields.get("Task Type", "Feature").strip() or "Feature"
         task_type = self._resolve_option_value(field_defs["taskType"], task_type_label)
-        summary = self._prefix_summary(
+        raw_summary = self._required_field(fields, "Summary")
+        summary = raw_summary.strip() if preformatted_summary else self._prefix_summary(
             task_type_label,
             market_value,
             fields.get("System", ""),
-            self._required_field(fields, "Summary"),
+            raw_summary,
         )
 
         payload: dict[str, Any] = {

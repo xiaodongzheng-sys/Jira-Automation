@@ -1,6 +1,7 @@
 import io
 import os
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -9,6 +10,7 @@ from openpyxl import load_workbook
 
 from bpmis_jira_tool.config import Settings
 from bpmis_jira_tool.errors import ToolError
+from bpmis_jira_tool.models import CreatedTicket
 from bpmis_jira_tool.web import (
     _build_team_profiles_for_display,
     _classify_portal_error,
@@ -27,6 +29,18 @@ from bpmis_jira_tool.web import (
     _translate_productization_text_to_english,
     create_app,
 )
+
+
+class _PortalFakeBPMISClient:
+    def list_biz_projects_for_pm_email(self, _email):
+        return [{"issue_id": "225159", "project_name": "Fraud Rule Upgrade", "market": "SG"}]
+
+    def get_brd_doc_links_for_projects(self, issue_ids):
+        return {issue_id: ["https://docs/brd"] for issue_id in issue_ids}
+
+    def create_jira_ticket(self, project, fields, *, preformatted_summary=False):
+        self.last_create = (project, fields, preformatted_summary)
+        return CreatedTicket(ticket_key="AF-1", ticket_link="https://jira/browse/AF-1", raw={"ok": True})
 
 
 class WebPortalFeatureTests(unittest.TestCase):
@@ -212,7 +226,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertEqual("Detailed Jira description goes here.", worksheet["H2"].value)
         self.assertIsNone(worksheet["A1"].fill.fill_type)
 
-    def test_index_shows_create_google_sheet_template_button(self):
+    def test_index_hides_sheet_template_setup(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
@@ -235,8 +249,9 @@ class WebPortalFeatureTests(unittest.TestCase):
                 response = client.get("/")
 
         self.assertEqual(response.status_code, 200)
-        self.assertIn(b"Create a new Google Sheet from template", response.data)
-        self.assertIn(b"data-create-template-sheet-button", response.data)
+        self.assertNotIn(b"Step 2 \xc2\xb7 Sheet Template", response.data)
+        self.assertNotIn(b"Create a new Google Sheet from template", response.data)
+        self.assertNotIn(b"data-create-template-sheet-button", response.data)
         self.assertNotIn(b"Download the default sheet template", response.data)
 
     def test_create_template_spreadsheet_endpoint_returns_new_sheet_link(self):
@@ -388,10 +403,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertNotIn(b"Google Sheets request failed", response.data)
         self.assertIn(b'id="spreadsheet_link" name="spreadsheet_link" value=""', response.data)
         self.assertIn(b'id="input_tab_name" name="input_tab_name" value="Sheet1"', response.data)
-        self.assertIn(
-            b'id="summary_header" name="summary_header" list="input-header-options" value="Jira Title"',
-            response.data,
-        )
+        self.assertIn(b'name="summary_header" value="Jira Title"', response.data)
         read_snapshot.assert_not_called()
 
     def test_shared_mode_index_skips_google_sheet_read_with_partial_google_credentials(self):
@@ -1158,6 +1170,218 @@ class WebPortalFeatureTests(unittest.TestCase):
             self.assertEqual(saved["product_manager_value"], "teammate@npt.sg")
             self.assertEqual(saved["reporter_value"], "teammate@npt.sg")
             self.assertEqual(saved["biz_pic_value"], "teammate@npt.sg")
+
+    def test_save_mapping_config_forces_sync_email_for_non_allowlisted_google_user(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
+            },
+            clear=False,
+        ):
+            app = create_app()
+            app.testing = True
+
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
+                    session["google_credentials"] = {"token": "x"}
+
+                response = client.post(
+                    "/config/save",
+                    data={
+                        "bpmis_api_access_token": "",
+                        "pm_team": "AF",
+                        "sync_pm_email": "someone-else@npt.sg",
+                        "component_route_rules_text": "AF | SG | DBP-Anti-fraud",
+                        "component_default_rules_text": "DBP-Anti-fraud | owner@npt.sg | dev@npt.sg | qa@npt.sg | Planning_26Q2",
+                        "market_header": "Market",
+                        "system_header": "System",
+                    },
+                    follow_redirects=False,
+                )
+
+            self.assertEqual(response.status_code, 302)
+            saved = app.config["CONFIG_STORE"].load("google:teammate@npt.sg")
+            self.assertEqual(saved["sync_pm_email"], "teammate@npt.sg")
+
+    def test_save_mapping_config_allows_sync_email_for_allowlisted_user(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
+            },
+            clear=False,
+        ):
+            app = create_app()
+            app.testing = True
+
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Owner"}
+                    session["google_credentials"] = {"token": "x"}
+
+                response = client.post(
+                    "/config/save",
+                    data={
+                        "bpmis_api_access_token": "",
+                        "pm_team": "AF",
+                        "sync_pm_email": "other-pm@npt.sg",
+                        "component_route_rules_text": "AF | SG | DBP-Anti-fraud",
+                        "component_default_rules_text": "DBP-Anti-fraud | owner@npt.sg | dev@npt.sg | qa@npt.sg | Planning_26Q2",
+                        "market_header": "Market",
+                        "system_header": "System",
+                    },
+                    follow_redirects=False,
+                )
+
+            self.assertEqual(response.status_code, 302)
+            saved = app.config["CONFIG_STORE"].load("google:xiaodong.zheng@npt.sg")
+            self.assertEqual(saved["sync_pm_email"], "other-pm@npt.sg")
+
+    def test_sync_bpmis_projects_job_does_not_require_google_credentials(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
+                "BPMIS_API_ACCESS_TOKEN": "token",
+            },
+            clear=False,
+        ), patch("bpmis_jira_tool.web.build_bpmis_client", return_value=_PortalFakeBPMISClient()):
+            app = create_app()
+            app.testing = True
+
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["anonymous_user_key"] = "sync-user"
+                app.config["CONFIG_STORE"].save(
+                    {
+                        "pm_team": "AF",
+                        "sync_pm_email": "pm@npt.sg",
+                        "component_route_rules_text": "AF | SG | DBP-Anti-fraud",
+                        "component_default_rules_text": "DBP-Anti-fraud | owner@npt.sg | dev@npt.sg | qa@npt.sg | Planning_26Q2",
+                    },
+                    "anon:sync-user",
+                )
+
+                response = client.post("/api/jobs/sync-bpmis-projects")
+
+                self.assertEqual(response.status_code, 200)
+                payload = response.get_json()
+                self.assertEqual(payload["status"], "queued")
+                deadline = time.time() + 2
+                while time.time() < deadline:
+                    job_payload = client.get(f"/api/jobs/{payload['job_id']}").get_json()
+                    if job_payload["state"] == "completed":
+                        break
+                    time.sleep(0.01)
+
+    def test_bpmis_projects_api_delete_is_user_scoped(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
+            },
+            clear=False,
+        ):
+            app = create_app()
+            app.testing = True
+            store = app.config["BPMIS_PROJECT_STORE"]
+            store.upsert_project(user_key="anon:first", bpmis_id="225159", project_name="First", brd_link="", market="SG")
+            store.upsert_project(user_key="anon:second", bpmis_id="225159", project_name="Second", brd_link="", market="SG")
+
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["anonymous_user_key"] = "first"
+
+                delete_response = client.delete("/api/bpmis-projects/225159")
+                list_response = client.get("/api/bpmis-projects")
+
+            self.assertEqual(delete_response.status_code, 200)
+            self.assertEqual(list_response.get_json()["projects"], [])
+            self.assertEqual(len(store.list_projects(user_key="anon:second")), 1)
+
+    def test_create_jira_api_returns_partial_results_and_saves_links(self):
+        fake_client = _PortalFakeBPMISClient()
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
+                "BPMIS_API_ACCESS_TOKEN": "token",
+            },
+            clear=False,
+        ), patch("bpmis_jira_tool.web.build_bpmis_client", return_value=fake_client):
+            app = create_app()
+            app.testing = True
+            app.config["CONFIG_STORE"].save(
+                {
+                    "pm_team": "AF",
+                    "sync_pm_email": "pm@npt.sg",
+                    "component_route_rules_text": "AF | SG | DBP-Anti-fraud",
+                    "component_default_rules_text": "DBP-Anti-fraud | owner@npt.sg | dev@npt.sg | qa@npt.sg | Planning_26Q2",
+                    "priority_value": "P1",
+                    "product_manager_value": "pm@npt.sg",
+                    "reporter_value": "pm@npt.sg",
+                    "biz_pic_value": "pm@npt.sg",
+                },
+                "anon:create-user",
+            )
+            app.config["BPMIS_PROJECT_STORE"].upsert_project(
+                user_key="anon:create-user",
+                bpmis_id="225159",
+                project_name="Fraud Rule Upgrade",
+                brd_link="",
+                market="SG",
+            )
+
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["anonymous_user_key"] = "create-user"
+
+                response = client.post(
+                    "/api/bpmis-projects/225159/jira-tickets",
+                    json={
+                        "items": [
+                            {
+                                "component": "DBP-Anti-fraud",
+                                "market": "SG",
+                                "jira_title": "[Feature][AF]Fraud Rule Upgrade",
+                                "fix_version": "Planning_26Q2",
+                                "prd_link": "",
+                                "description": "",
+                            }
+                        ]
+                    },
+                )
+
+            self.assertEqual(response.status_code, 200)
+            payload = response.get_json()
+            self.assertEqual(payload["results"][0]["status"], "created")
+            self.assertTrue(fake_client.last_create[2])
+            self.assertEqual(
+                app.config["BPMIS_PROJECT_STORE"].list_projects(user_key="anon:create-user")[0]["jira_tickets"][0]["ticket_link"],
+                "https://jira/browse/AF-1",
+            )
 
     def test_team_defaults_allow_saving_setup_without_manual_advanced_mapping(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(

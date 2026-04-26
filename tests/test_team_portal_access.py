@@ -1,9 +1,18 @@
 import os
+import time
 import tempfile
 import unittest
 from unittest.mock import patch
 
 from bpmis_jira_tool.web import _current_release_revision, create_app
+
+
+class _FakeSyncBPMISClient:
+    def list_biz_projects_for_pm_email(self, _email):
+        return []
+
+    def get_brd_doc_links_for_projects(self, _issue_ids):
+        return {}
 
 
 class TeamPortalAccessTests(unittest.TestCase):
@@ -224,7 +233,7 @@ class TeamPortalAccessTests(unittest.TestCase):
                 payload = response.get_json()
                 self.assertIn("connect Google", payload["message"])
 
-    def test_sync_job_requires_google_connection(self):
+    def test_sync_job_does_not_require_google_connection(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
@@ -233,17 +242,27 @@ class TeamPortalAccessTests(unittest.TestCase):
                 "TEAM_PORTAL_BASE_URL": "",
                 "TEAM_ALLOWED_EMAIL_DOMAINS": "",
                 "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
+                "BPMIS_API_ACCESS_TOKEN": "token",
             },
             clear=False,
-        ):
+        ), patch("bpmis_jira_tool.web.build_bpmis_client", return_value=_FakeSyncBPMISClient()):
             app = create_app()
             app.testing = True
 
             with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["anonymous_user_key"] = "sync-user"
+                app.config["CONFIG_STORE"].save({"sync_pm_email": "pm@npt.sg"}, "anon:sync-user")
                 response = client.post("/api/jobs/sync-bpmis-projects")
-                self.assertEqual(response.status_code, 400)
+                self.assertEqual(response.status_code, 200)
                 payload = response.get_json()
-                self.assertIn("connect Google", payload["message"])
+                self.assertEqual(payload["status"], "queued")
+                deadline = time.time() + 2
+                while time.time() < deadline:
+                    job_payload = client.get(f"/api/jobs/{payload['job_id']}").get_json()
+                    if job_payload["state"] == "completed":
+                        break
+                    time.sleep(0.01)
 
     def test_default_sheet_template_download_returns_csv(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(

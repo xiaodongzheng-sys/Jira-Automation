@@ -12,6 +12,112 @@
   --shadow: 0 24px 60px rgba(42, 37, 25, 0.12);
 }
 
+.bpmis-projects-section {
+  margin-top: 28px;
+}
+
+.bpmis-project-table th:nth-child(1),
+.bpmis-project-table td:nth-child(1) {
+  width: 110px;
+}
+
+.bpmis-project-table th:nth-child(5),
+.bpmis-project-table td:nth-child(5) {
+  min-width: 180px;
+}
+
+.bpmis-project-actions {
+  gap: 8px;
+  flex-wrap: nowrap;
+}
+
+.danger-button {
+  border-color: rgba(214, 69, 69, 0.35);
+  color: #b42318;
+}
+
+.bpmis-jira-link {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 8px;
+}
+
+.bpmis-jira-link:last-child {
+  margin-bottom: 0;
+}
+
+.bpmis-jira-link span {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.jira-wizard-modal {
+  max-width: 820px;
+}
+
+.jira-component-list,
+.jira-ticket-form-list {
+  display: grid;
+  gap: 12px;
+  margin-top: 16px;
+  max-height: min(62vh, 620px);
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.jira-component-option {
+  align-items: center;
+  background: rgba(255, 255, 255, 0.84);
+  border: 1px solid rgba(106, 119, 149, 0.16);
+  border-radius: 8px;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: auto 1fr;
+  padding: 12px;
+}
+
+.jira-component-option > span {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.jira-component-option select {
+  max-width: 220px;
+}
+
+.jira-ticket-form {
+  background: rgba(255, 255, 255, 0.86);
+  border: 1px solid rgba(106, 119, 149, 0.16);
+  border-radius: 8px;
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+}
+
+.jira-ticket-form h4 {
+  font-size: 1rem;
+  margin: 0;
+}
+
+.jira-version-typeahead button {
+  background: transparent;
+  border: 0;
+  color: inherit;
+  cursor: pointer;
+  display: block;
+  font: inherit;
+  padding: 10px 12px;
+  text-align: left;
+  width: 100%;
+}
+
+.jira-version-typeahead button:hover {
+  background: rgba(72, 95, 199, 0.08);
+}
+
 * {
   box-sizing: border-box;
 }

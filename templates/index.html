@@ -8,26 +8,26 @@
         <p class="showcase-kicker">BPMIS Setup Wizard</p>
         <h1>BPMIS Automation Tool</h1>
         <p class="showcase-lede">
-          Set up your BPMIS token, prepare the sheet template, choose a PM team, and then move into sync, preview, and run.
-          The setup flow stays simple for first-time users while advanced sheet and mapping controls remain available when needed.
+          Set up your BPMIS token, choose a PM team, sync BPMIS projects into the portal, and create Jira tickets project by project.
+          The setup flow stays simple for first-time users while advanced routing and owner defaults remain available when needed.
         </p>
         <div class="showcase-badges">
           <span>BPMIS API</span>
-          <span>Google Sheets</span>
+          <span>Portal records</span>
           <span>Per-user config</span>
         </div>
         <div class="showcase-metrics">
           <article class="metric-card">
             <strong>Step-by-step setup</strong>
-            <span>Guide teammates through token, template, PM team, and default values in one setup path.</span>
+            <span>Guide teammates through token, PM team, routing, and default values in one setup path.</span>
           </article>
           <article class="metric-card">
             <strong>Hidden complexity</strong>
-            <span>Advanced sheet columns and mapping overrides stay available without crowding the main setup flow.</span>
+            <span>Advanced routing and owner defaults stay available without crowding the main setup flow.</span>
           </article>
           <article class="metric-card">
             <strong>Controlled execution</strong>
-            <span>After setup, use Run to sync BPMIS projects, preview rows, and create Jira tickets safely.</span>
+            <span>After setup, use Run to sync BPMIS projects and create Jira tickets safely.</span>
           </article>
         </div>
       </div>
@@ -46,8 +46,8 @@
             <strong>{{ user_identity.display_name }}</strong>
           </li>
           <li>
-            <span>Google Sheets</span>
-            <strong>{{ "Connected" if google_connected else "Not connected" }}</strong>
+            <span>Project Store</span>
+            <strong>Portal SQLite</strong>
           </li>
           <li>
             <span>PM Team</span>
@@ -60,12 +60,12 @@
             </strong>
           </li>
           <li>
-            <span>Source Sheet</span>
-            <strong>{{ mapping_config.spreadsheet_link or settings.spreadsheet_id }}</strong>
+            <span>Sync Email</span>
+            <strong>{{ mapping_config.sync_pm_email or "-" }}</strong>
           </li>
         </ul>
         <div class="executive-note">
-          <p>Finish Setup once, then switch to Run for daily sync, preview, and ticket creation.</p>
+          <p>Finish Setup once, then switch to Run for daily sync and ticket creation.</p>
         </div>
       </aside>
     </div>
@@ -76,7 +76,7 @@
       <div>
         <p class="eyebrow">Workspace</p>
         <h2>Setup and Run</h2>
-        <p class="step-copy">Use Setup to save your BPMIS configuration. Use Run to execute the BPMIS-to-Jira flow.</p>
+        <p class="step-copy">Use Setup to save your BPMIS configuration. Use Run to sync projects and create Jira tickets.</p>
       </div>
       <div class="workspace-rail">
         <span>Guided for first-time teammates</span>
@@ -125,111 +125,21 @@
               </div>
             </div>
 
-            <div class="config-card config-card-wide">
-              <h3>Step 2 · Sheet Template</h3>
-              <p class="card-help">
-                Create a fresh Google Sheet with the template header row, or paste an existing sheet link here.
-              </p>
-              <div class="button-row">
-                <button class="button button-secondary" type="button" data-create-template-sheet-button>Create a new Google Sheet from template</button>
-              </div>
-              <div class="mapping-inline-status" data-create-template-sheet-status hidden></div>
-              <div class="field-stack">
-                <div class="field-group">
-                  <div class="field-label-row">
-                    <label for="spreadsheet_link">Spreadsheet Link or ID</label>
-                    <span class="field-badge field-badge-required">Required</span>
-                  </div>
-                  <p class="field-help">Paste the full Google Sheets link or just the spreadsheet ID for your working sheet.</p>
-                  <input id="spreadsheet_link" name="spreadsheet_link" value="{{ mapping_config.spreadsheet_link }}" placeholder="https://docs.google.com/spreadsheets/d/..." required>
-                </div>
-
-                <details class="config-details">
-                  <summary>Advanced sheet settings</summary>
-                  <div class="field-stack">
-                    <div class="field-group">
-                      <label for="input_tab_name">Input Tab Name</label>
-                      <p class="field-help">Default is <code>Sheet1</code>. Change this only if your worksheet tab uses a different name.</p>
-                      <input id="input_tab_name" name="input_tab_name" value="{{ mapping_config.input_tab_name }}" placeholder="Sheet1">
-                    </div>
-
-                    <details class="config-details config-details-nested">
-                      <summary>Column name overrides</summary>
-                      <div class="field-stack">
-                        <p class="field-help">Only open this if your real Google Sheet uses different column names from the default template.</p>
-                        <div class="sheet-mock">
-                          <div class="sheet-mock-toolbar">
-                            <span class="sheet-chip sheet-chip-required">Required</span>
-                            <span class="sheet-chip">Sync</span>
-                            <span class="sheet-chip">Create Jira</span>
-                            <span class="sheet-chip">Write Back</span>
-                          </div>
-                          <div class="sheet-mock-grid">
-                            <div class="sheet-mock-col">
-                              <label for="issue_id_header">BPMIS Issue ID</label>
-                              <input id="issue_id_header" name="issue_id_header" list="input-header-options" value="{{ mapping_config.issue_id_header }}" placeholder="BPMIS ID">
-                              <p>Example: <code>225159</code></p>
-                              <span>Primary sync key and parent reference.</span>
-                            </div>
-                            <div class="sheet-mock-col">
-                              <label for="sync_project_name_header">BPMIS - Summary</label>
-                              <input id="sync_project_name_header" name="sync_project_name_header" list="input-header-options" value="{{ mapping_config.sync_project_name_header }}" placeholder="Project Name">
-                              <p>Example: <code>Standalone Cash Loan</code></p>
-                              <span>Filled by BPMIS sync.</span>
-                            </div>
-                            <div class="sheet-mock-col">
-                              <label for="sync_market_header">Market</label>
-                              <input id="sync_market_header" name="sync_market_header" list="input-header-options" value="{{ mapping_config.sync_market_header }}" placeholder="Market">
-                              <p>Example: <code>SG</code></p>
-                              <span>Used for sync and global Need UAT mapping.</span>
-                            </div>
-                            <div class="sheet-mock-col">
-                              <label for="sync_brd_link_header">BRD Link</label>
-                              <input id="sync_brd_link_header" name="sync_brd_link_header" list="input-header-options" value="{{ mapping_config.sync_brd_link_header }}" placeholder="BRD Link">
-                              <p>Example: <code>https://docs.google.com/...</code></p>
-                              <span>Filled by sync when exactly one BRD exists.</span>
-                            </div>
-                            <div class="sheet-mock-col">
-                              <label for="system_header">System</label>
-                              <input id="system_header" name="system_header" list="input-header-options" value="{{ mapping_config.system_header }}" placeholder="System">
-                              <p>Example: <code>AF</code></p>
-                              <span>Used with Market to decide Component.</span>
-                            </div>
-                            <div class="sheet-mock-col">
-                              <label for="summary_header">Jira Title</label>
-                              <input id="summary_header" name="summary_header" list="input-header-options" value="{{ mapping_config.summary_header }}" placeholder="Jira Title">
-                              <p>Example: <code>Fraud rule improvement</code></p>
-                              <span>Used to build the Jira title.</span>
-                            </div>
-                            <div class="sheet-mock-col">
-                              <label for="prd_links_header">PRD Link/s</label>
-                              <input id="prd_links_header" name="prd_links_header" list="input-header-options" value="{{ mapping_config.prd_links_header }}" placeholder="PRD Link">
-                              <p>Example: <code>https://confluence/...</code></p>
-                              <span>Optional Jira payload field.</span>
-                            </div>
-                            <div class="sheet-mock-col">
-                              <label for="description_header">Description</label>
-                              <input id="description_header" name="description_header" list="input-header-options" value="{{ mapping_config.description_header }}" placeholder="Description">
-                              <p>Example: <code>Detailed Jira description goes here.</code></p>
-                              <span>Passed into Jira as the description body.</span>
-                            </div>
-                            <div class="sheet-mock-col">
-                              <label for="jira_ticket_link_header">Jira Ticket Link</label>
-                              <input id="jira_ticket_link_header" name="jira_ticket_link_header" list="input-header-options" value="{{ mapping_config.jira_ticket_link_header }}" placeholder="Jira Ticket Link">
-                              <p>Example: <code>https://jira.shopee.io/browse/ABC-123</code></p>
-                              <span>Written back after ticket creation.</span>
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                    </details>
-                  </div>
-                </details>
-              </div>
-            </div>
+            <input type="hidden" id="spreadsheet_link" name="spreadsheet_link" value="{{ mapping_config.spreadsheet_link }}">
+            <input type="hidden" id="input_tab_name" name="input_tab_name" value="{{ mapping_config.input_tab_name }}">
+            <input type="hidden" name="issue_id_header" value="{{ mapping_config.issue_id_header }}">
+            <input type="hidden" name="jira_ticket_link_header" value="{{ mapping_config.jira_ticket_link_header }}">
+            <input type="hidden" name="sync_project_name_header" value="{{ mapping_config.sync_project_name_header }}">
+            <input type="hidden" name="sync_market_header" value="{{ mapping_config.sync_market_header }}">
+            <input type="hidden" name="sync_brd_link_header" value="{{ mapping_config.sync_brd_link_header }}">
+            <input type="hidden" id="market_header" name="market_header" value="{{ mapping_config.market_header or 'Market' }}">
+            <input type="hidden" id="system_header" name="system_header" value="{{ mapping_config.system_header or 'System' }}">
+            <input type="hidden" name="summary_header" value="{{ mapping_config.summary_header }}">
+            <input type="hidden" name="prd_links_header" value="{{ mapping_config.prd_links_header }}">
+            <input type="hidden" name="description_header" value="{{ mapping_config.description_header }}">
 
             <div class="config-card config-card-wide">
-              <h3>Step 3 · PM Team</h3>
+              <h3>Step 2 · PM Team</h3>
               <p class="card-help">
                 Choose your PM team. The system will load the default System + Market routing and Component owner mapping for this team when they are available.
               </p>
@@ -321,7 +231,7 @@
             </div>
 
             <div class="config-card config-card-wide">
-              <h3>Step 4 · Defaults</h3>
+              <h3>Step 3 · Defaults</h3>
               <p class="card-help">
                 These defaults are prefilled for the current signed-in user and usually do not need changes.
               </p>
@@ -332,7 +242,10 @@
                     <div class="field-group">
                       <label for="sync_pm_email">Sync Email</label>
                       <p class="field-help">Used by BPMIS sync to find Biz Projects where PM PIC or All Involved PM includes this email.</p>
-                      <input id="sync_pm_email" name="sync_pm_email" value="{{ mapping_config.sync_pm_email }}" placeholder="pm@example.com">
+                      <input id="sync_pm_email" name="sync_pm_email" value="{{ mapping_config.sync_pm_email }}" placeholder="pm@example.com" {% if not sync_email_editable %}disabled{% endif %}>
+                      {% if not sync_email_editable %}
+                        <input type="hidden" name="sync_pm_email" value="{{ mapping_config.sync_pm_email }}">
+                      {% endif %}
                     </div>
                     <div class="field-group">
                       <label for="task_type_value">Task Type</label>
@@ -398,30 +311,28 @@
     </section>
 
     <section class="workspace-panel" data-tab-panel="run">
-      <section class="panel panel-wide glass-panel" id="results" data-results-panel>
+      <section class="panel panel-wide glass-panel bpmis-projects-panel" id="results" data-results-panel data-bpmis-projects
+        data-projects-url="{{ url_for('bpmis_projects') }}"
+        data-sync-job-url="{{ url_for('create_sync_bpmis_projects_job') }}"
+        data-version-url="{{ url_for('productization_upgrade_summary_versions') }}"
+      >
         <div class="panel-head">
           <div>
             <h2>Run</h2>
-            <p class="step-copy">Use this page after Setup is saved. Sync first, preview second, run last.</p>
+            <p class="step-copy">Sync BPMIS projects into the portal, then create Jira tickets from each project row.</p>
             <p class="help-text">
-              Sync adds missing BPMIS projects. Preview shows what is eligible. Run creates Jira tickets and writes the final ticket URL back to the sheet.
+              Jira links are saved under the BPMIS ID in the portal. A project can have multiple Jira tickets.
             </p>
             <div class="result-tips">
-              <span>Sync adds missing BPMIS projects without touching existing rows.</span>
+              <span>Sync updates portal records without using Google Sheets.</span>
               <span>Only BPMIS Biz projects that are not done will be synced.</span>
-              <span>Preview never creates Jira.</span>
-              <span>Run only touches rows whose Jira link cell is blank.</span>
+              <span>Deleted project records stay hidden on later syncs.</span>
+              <span>Create Jira appends a new ticket link.</span>
             </div>
           </div>
           <div class="button-row">
             <form method="post" action="#" data-job-form data-job-url="{{ url_for('create_sync_bpmis_projects_job') }}" data-job-label="Sync BPMIS Projects">
               <button class="button button-secondary" type="submit">Sync BPMIS Projects</button>
-            </form>
-            <form method="post" action="{{ url_for('preview') }}" data-job-form data-job-url="{{ url_for('create_preview_job') }}" data-job-label="Preview Eligible Rows">
-              <button class="button button-secondary" type="submit">Preview Eligible Rows</button>
-            </form>
-            <form method="post" action="{{ url_for('run') }}" class="run-form" data-job-form data-job-url="{{ url_for('create_run_job') }}" data-job-label="Run Ticket Creation">
-              <button class="button" type="submit">Run Ticket Creation</button>
             </form>
           </div>
         </div>
@@ -474,10 +385,61 @@
           </div>
         </div>
         <div class="empty-state" data-results-empty {% if results %}hidden{% endif %}>
-          <p>No preview or run results yet.</p>
+          <p>No sync results yet.</p>
         </div>
+
+        <section class="bpmis-projects-section">
+          <div class="productization-section-head">
+            <div>
+              <h3>BPMIS Projects</h3>
+              <span data-bpmis-project-count>Loading projects…</span>
+            </div>
+          </div>
+          <div class="table-wrap premium-table-wrap" data-bpmis-project-table-wrap hidden>
+            <table class="bpmis-project-table">
+              <thead>
+                <tr>
+                  <th>BPMIS ID</th>
+                  <th>Project Name</th>
+                  <th>BRD Link</th>
+                  <th>Market</th>
+                  <th>Jira Links</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody data-bpmis-project-body></tbody>
+            </table>
+          </div>
+          <div class="empty-state" data-bpmis-project-empty>
+            <p>No BPMIS projects synced yet.</p>
+          </div>
+          <p class="productization-inline-status" data-bpmis-project-status></p>
+        </section>
       </section>
     </section>
+
+    <div class="confirm-modal-backdrop" data-jira-modal-backdrop hidden>
+      <div class="confirm-modal jira-wizard-modal" role="dialog" aria-modal="true" aria-labelledby="jira-wizard-title">
+        <div class="confirm-modal-accent"></div>
+        <p class="confirm-modal-kicker" data-jira-wizard-kicker>Create Jira</p>
+        <h3 id="jira-wizard-title" data-jira-wizard-title>Select Components</h3>
+        <div data-jira-wizard-step-one>
+          <p class="confirm-modal-message">Choose the configured Components that need Jira tickets.</p>
+          <div class="jira-component-list" data-jira-component-list></div>
+        </div>
+        <form data-jira-wizard-step-two hidden>
+          <p class="confirm-modal-message">Review each Jira title and optional fields before creating.</p>
+          <div class="jira-ticket-form-list" data-jira-ticket-form-list></div>
+        </form>
+        <p class="productization-inline-status" data-jira-wizard-status></p>
+        <div class="confirm-modal-actions">
+          <button class="button button-secondary" type="button" data-jira-wizard-cancel>Cancel</button>
+          <button class="button button-secondary" type="button" data-jira-wizard-back hidden>Back</button>
+          <button class="button" type="button" data-jira-wizard-next>Next</button>
+          <button class="button" type="button" data-jira-wizard-submit hidden>Create Jira</button>
+        </div>
+      </div>
+    </div>
 
     <section class="workspace-panel" data-tab-panel="productization-upgrade-summary">
       <section class="panel panel-wide glass-panel productization-panel" data-productization-upgrade-summary>
@@ -617,6 +579,7 @@
 {% endblock %}
 
 {% block extra_scripts %}
+  <script src="{{ url_for('static', filename='bpmis_projects.js') }}"></script>
   <script src="{{ url_for('static', filename='productization_upgrade_summary.js') }}"></script>
   <script id="team-profile-data" type="application/json">{{ team_profiles | tojson }}</script>
   <script>
@@ -629,10 +592,6 @@
       const profiles = JSON.parse(scriptNode.textContent || '{}');
       const routeRules = document.getElementById('component_route_rules_text');
       const defaultRules = document.getElementById('component_default_rules_text');
-      const spreadsheetLinkInput = document.getElementById('spreadsheet_link');
-      const inputTabNameInput = document.getElementById('input_tab_name');
-      const createTemplateSheetButton = document.querySelector('[data-create-template-sheet-button]');
-      const createTemplateSheetStatus = document.querySelector('[data-create-template-sheet-status]');
       const ownerEditorState = document.querySelector('[data-component-owner-state]');
       const ownerEditorBody = document.querySelector('[data-component-owner-editor-body]');
       const routeSaveButton = document.querySelector('[data-route-save-button]');
@@ -780,13 +739,6 @@
         routeSaveStatus.hidden = !message;
         routeSaveStatus.textContent = message || '';
         routeSaveStatus.dataset.tone = tone;
-      };
-
-      const setCreateTemplateSheetStatus = (message, tone = 'info') => {
-        if (!createTemplateSheetStatus) return;
-        createTemplateSheetStatus.hidden = !message;
-        createTemplateSheetStatus.textContent = message || '';
-        createTemplateSheetStatus.dataset.tone = tone;
       };
 
       const syncSelectedTeamBaseline = () => {
@@ -985,33 +937,6 @@
 
       routeSaveButton?.addEventListener('click', async () => {
         await saveCurrentRoute();
-      });
-      createTemplateSheetButton?.addEventListener('click', async () => {
-        createTemplateSheetButton.disabled = true;
-        setCreateTemplateSheetStatus('Creating a new Google Sheet...', 'info');
-        try {
-          const response = await fetch('{{ url_for("create_template_spreadsheet") }}', {
-            method: 'POST',
-            headers: {
-              'Accept': 'application/json',
-            },
-            credentials: 'same-origin',
-          });
-          const payload = await response.json().catch(() => ({}));
-          if (!response.ok || payload.status !== 'ok') {
-            throw new Error(payload.message || 'Could not create a new Google Sheet.');
-          }
-          if (spreadsheetLinkInput) spreadsheetLinkInput.value = payload.spreadsheet_url || payload.spreadsheet_id || '';
-          if (inputTabNameInput) inputTabNameInput.value = payload.input_tab_name || 'Sheet1';
-          if (payload.spreadsheet_url) {
-            window.open(payload.spreadsheet_url, '_blank', 'noopener,noreferrer');
-          }
-          setCreateTemplateSheetStatus(payload.message || 'A new Google Sheet was created.', 'success');
-        } catch (error) {
-          setCreateTemplateSheetStatus(error.message || 'Could not create a new Google Sheet.', 'error');
-        } finally {
-          createTemplateSheetButton.disabled = false;
-        }
       });
       refreshMappingPreviews();
     })();

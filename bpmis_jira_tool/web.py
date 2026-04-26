@@ -35,6 +35,7 @@ from bpmis_jira_tool.google_auth import (
 from bpmis_jira_tool.gmail_dashboard import GMAIL_READONLY_SCOPE, GmailDashboardService
 from bpmis_jira_tool.seatalk_dashboard import SeaTalkDashboardService
 from bpmis_jira_tool.google_sheets import GoogleSheetsService
+from bpmis_jira_tool.bpmis_projects import BPMISProjectStore, PortalJiraCreationService, PortalProjectSyncService
 from bpmis_jira_tool.project_sync import BPMISProjectSyncService
 from bpmis_jira_tool.service import JiraCreationService, build_bpmis_client
 from bpmis_jira_tool.source_code_qa import CRMS_COUNTRIES, ALL_COUNTRY, SourceCodeQAService
@@ -55,6 +56,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(PROJECT_ROOT / ".env")
 MARKET_KEYS = ["ID", "SG", "PH", "Regional"]
 TEAM_PROFILE_ADMIN_EMAIL = "xiaodong.zheng@npt.sg"
+SYNC_EMAIL_EDIT_ALLOWLIST = {"xiaodong.zheng@npt.sg", "xiaodong.zheng1991@gmail.com"}
 _gmail_export_active_users: set[str] = set()
 _gmail_export_active_users_lock = threading.Lock()
 _source_code_qa_codex_session_locks: dict[str, threading.Lock] = {}
@@ -979,6 +981,7 @@ def create_app() -> Flask:
     app.config["SECRET_KEY"] = settings.flask_secret_key
     app.config["SETTINGS"] = settings
     app.config["CONFIG_STORE"] = config_store
+    app.config["BPMIS_PROJECT_STORE"] = BPMISProjectStore(config_store.db_path)
     app.config["JOB_STORE"] = JobStore(data_root / "run" / "jobs.json")
     app.config["SEATALK_TODO_STORE"] = SeaTalkTodoStore(data_root / "seatalk" / "completed_todos.json")
     app.config["SEATALK_NAME_MAPPING_STORE"] = SeaTalkNameMappingStore(data_root / "seatalk" / "name_overrides.json")
@@ -1176,6 +1179,7 @@ def create_app() -> Flask:
         effective_team_profiles = _load_effective_team_profiles(config_store)
         config_data = raw_config_data or config_store._normalize({})
         config_data = _hydrate_setup_defaults(config_data, user_identity, team_profiles=effective_team_profiles)
+        _apply_sync_email_policy(config_data, user_identity)
         input_headers: list[str] = []
         has_saved_config = bool(config_key and raw_config_data)
 
@@ -1213,6 +1217,7 @@ def create_app() -> Flask:
             shared_portal_enabled=_shared_portal_enabled(settings),
             google_connected="google_credentials" in session,
             user_identity=user_identity,
+            sync_email_editable=_can_edit_sync_email(user_identity),
             results=results,
             run_notice=run_notice,
             mapping_fields=CONFIGURED_FIELDS,
@@ -2026,6 +2031,7 @@ def create_app() -> Flask:
                     for market in MARKET_KEYS
                 },
             }
+            _apply_sync_email_policy(config, user_identity)
             config = config_store._normalize(
                 _hydrate_setup_defaults(
                     config,
@@ -2345,6 +2351,55 @@ def create_app() -> Flask:
     def create_sync_bpmis_projects_job():
         return _start_job("sync-bpmis-projects", dry_run=False)
 
+    @app.get("/api/bpmis-projects")
+    def bpmis_projects():
+        login_gate = _require_google_login(settings, api=True)
+        if login_gate is not None:
+            return login_gate
+        user_identity = _get_user_identity(settings)
+        store = _get_bpmis_project_store()
+        return jsonify({"status": "ok", "projects": store.list_projects(user_key=user_identity["config_key"])})
+
+    @app.delete("/api/bpmis-projects/<bpmis_id>")
+    def delete_bpmis_project(bpmis_id: str):
+        login_gate = _require_google_login(settings, api=True)
+        if login_gate is not None:
+            return login_gate
+        user_identity = _get_user_identity(settings)
+        deleted = _get_bpmis_project_store().soft_delete_project(user_key=user_identity["config_key"], bpmis_id=bpmis_id)
+        return jsonify({"status": "ok", "deleted": deleted})
+
+    @app.get("/api/bpmis-projects/<bpmis_id>/jira-options")
+    def bpmis_project_jira_options(bpmis_id: str):
+        login_gate = _require_google_login(settings, api=True)
+        if login_gate is not None:
+            return login_gate
+        try:
+            user_identity = _get_user_identity(settings)
+            service = _build_portal_jira_creation_service(settings)
+            options = service.jira_options(user_key=user_identity["config_key"], bpmis_id=bpmis_id)
+            return jsonify({"status": "ok", **options})
+        except ToolError as error:
+            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
+
+    @app.post("/api/bpmis-projects/<bpmis_id>/jira-tickets")
+    def create_bpmis_project_jira_tickets(bpmis_id: str):
+        login_gate = _require_google_login(settings, api=True)
+        if login_gate is not None:
+            return login_gate
+        payload = request.get_json(silent=True) or {}
+        items = payload.get("items") if isinstance(payload, dict) else []
+        if not isinstance(items, list):
+            return jsonify({"status": "error", "message": "items must be a list."}), HTTPStatus.BAD_REQUEST
+        try:
+            user_identity = _get_user_identity(settings)
+            service = _build_portal_jira_creation_service(settings)
+            results = service.create_tickets(user_key=user_identity["config_key"], bpmis_id=bpmis_id, items=items)
+            status_code = HTTPStatus.OK if any(result.get("status") == "created" for result in results) else HTTPStatus.BAD_REQUEST
+            return jsonify({"status": "ok" if status_code == HTTPStatus.OK else "error", "results": results}), status_code
+        except ToolError as error:
+            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
+
     @app.get("/api/productization-upgrade-summary/versions")
     def productization_upgrade_summary_versions():
         login_gate = _require_google_login(settings, api=True)
@@ -2520,11 +2575,14 @@ def create_app() -> Flask:
         login_gate = _require_google_login(settings, api=True)
         if login_gate is not None:
             return login_gate
-        if "google_credentials" not in session:
+        if action != "sync-bpmis-projects" and "google_credentials" not in session:
             return jsonify({"status": "error", "message": "Please connect Google Sheets first."}), 400
 
         user_identity = _get_user_identity(settings)
         config_data = config_store.load(user_identity["config_key"]) or config_store._normalize({})
+        config_data = _hydrate_setup_defaults(config_data, user_identity)
+        _apply_sync_email_policy(config_data, user_identity)
+        config_data["_user_key"] = user_identity["config_key"]
         job_store: JobStore = current_app.config["JOB_STORE"]
         title = {
             "preview": "Preview Eligible Rows",
@@ -2578,7 +2636,9 @@ def _load_current_user_config(settings: Settings) -> dict[str, Any]:
     user_identity = _get_user_identity(settings)
     config_store = _get_config_store()
     config_data = config_store.load(user_identity["config_key"]) or config_store._normalize({})
-    return _hydrate_setup_defaults(config_data, user_identity)
+    hydrated = _hydrate_setup_defaults(config_data, user_identity)
+    _apply_sync_email_policy(hydrated, user_identity)
+    return hydrated
 
 
 def _build_service_from_config(
@@ -2607,6 +2667,21 @@ def _build_project_sync_service_from_config(
     sheets = _build_sheets_service_with_credentials(settings, config_data, credentials)
     bpmis_client = build_bpmis_client(settings, access_token=_resolve_bpmis_access_token(config_data, settings))
     return BPMISProjectSyncService(sheets, bpmis_client)
+
+
+def _build_portal_project_sync_service(settings: Settings, config_data: dict[str, Any]) -> PortalProjectSyncService:
+    bpmis_client = build_bpmis_client(settings, access_token=_resolve_bpmis_access_token(config_data, settings))
+    return PortalProjectSyncService(_get_bpmis_project_store(), bpmis_client)
+
+
+def _build_portal_jira_creation_service(settings: Settings) -> PortalJiraCreationService:
+    config_data = _load_current_user_config(settings)
+    return PortalJiraCreationService(
+        store=_get_bpmis_project_store(),
+        bpmis_client=build_bpmis_client(settings, access_token=_resolve_bpmis_access_token(config_data, settings)),
+        config_store=_get_config_store(),
+        config_data=config_data,
+    )
 
 
 def _build_sheets_service(settings: Settings, config_data: dict[str, object] | None = None) -> GoogleSheetsService:
@@ -2670,6 +2745,10 @@ def _build_sheets_service_with_credentials(
 
 def _get_config_store() -> WebConfigStore:
     return current_app.config["CONFIG_STORE"]
+
+
+def _get_bpmis_project_store() -> BPMISProjectStore:
+    return current_app.config["BPMIS_PROJECT_STORE"]
 
 
 def _current_google_profile() -> dict[str, Any]:
@@ -3020,6 +3099,16 @@ def _is_team_profile_admin(user_identity: dict[str, str | None]) -> bool:
     return str(user_identity.get("email") or "").strip().lower() == TEAM_PROFILE_ADMIN_EMAIL
 
 
+def _can_edit_sync_email(user_identity: dict[str, str | None]) -> bool:
+    return str(user_identity.get("email") or "").strip().lower() in SYNC_EMAIL_EDIT_ALLOWLIST
+
+
+def _apply_sync_email_policy(config_data: dict[str, Any], user_identity: dict[str, str | None]) -> None:
+    email = str(user_identity.get("email") or "").strip().lower()
+    if email and not _can_edit_sync_email(user_identity):
+        config_data["sync_pm_email"] = email
+
+
 def _hydrate_setup_defaults(
     config_data: dict[str, Any],
     user_identity: dict[str, str | None],
@@ -3149,12 +3238,15 @@ def _build_run_notice(results: list[object], dry_run: bool) -> dict[str, object]
 
 def _build_sync_notice(results: list[object]) -> dict[str, object]:
     created = [result for result in results if getattr(result, "status", "") == "created"]
+    updated = [result for result in results if getattr(result, "status", "") == "updated"]
     errors = [result for result in results if getattr(result, "status", "") == "error"]
     skipped = [result for result in results if getattr(result, "status", "") == "skipped"]
 
     details: list[str] = []
     for result in created[:3]:
-        details.append(f"Added BPMIS Issue ID {result.issue_id} to row {result.row_number}.")
+        details.append(f"Added BPMIS Issue ID {result.issue_id}.")
+    for result in updated[:3]:
+        details.append(f"Updated BPMIS Issue ID {result.issue_id}.")
     for result in errors[:3]:
         details.append(f"{result.issue_id or 'Unknown Issue'}: {result.message}")
     if not details:
@@ -3164,7 +3256,7 @@ def _build_sync_notice(results: list[object]) -> dict[str, object]:
     return {
         "title": "BPMIS Sync Completed" if not errors else "BPMIS Sync Completed With Issues",
         "tone": "success" if not errors else "warning",
-        "summary": f"{len(created)} added, {len(skipped)} skipped, {len(errors)} error.",
+        "summary": f"{len(created)} added, {len(updated)} updated, {len(skipped)} skipped, {len(errors)} error.",
         "details": details,
     }
 
@@ -3346,13 +3438,10 @@ def _run_background_job(
 
         try:
             if action == "sync-bpmis-projects":
-                service = _build_project_sync_service_from_config(settings, config_data, credentials_payload)
+                service = _build_portal_project_sync_service(settings, config_data)
                 results = service.sync_projects(
+                    user_key=str(config_data.get("_user_key", "")).strip(),
                     pm_email=str(config_data.get("sync_pm_email", "")).strip(),
-                    issue_id_header=str(config_data.get("issue_id_header", "")).strip() or "Issue ID",
-                    project_name_header=str(config_data.get("sync_project_name_header", "")).strip() or "Project Name",
-                    market_header=str(config_data.get("sync_market_header", "")).strip() or "Market",
-                    brd_link_header=str(config_data.get("sync_brd_link_header", "")).strip(),
                     progress_callback=progress_callback,
                 )
                 notice = _build_sync_notice(results)
