@@ -1213,7 +1213,7 @@ def create_app() -> Flask:
             return jsonify(
                 {
                     "status": "ok",
-                    "answer_mode": "retrieval_only",
+                    "answer_mode": "auto",
                     "can_manage": _can_manage_source_code_qa(settings),
                     "git_auth_ready": bool(settings.source_code_qa_gitlab_token),
                     "llm_ready": service.llm_ready(),
@@ -1393,7 +1393,7 @@ def create_app() -> Flask:
                     pm_team=str(payload.get("pm_team") or ""),
                     country=str(payload.get("country") or ""),
                     question=str(payload.get("question") or ""),
-                    answer_mode=str(payload.get("answer_mode") or "retrieval_only"),
+                    answer_mode=_source_code_qa_public_answer_mode(payload.get("answer_mode")),
                     llm_budget_mode="auto",
                     conversation_context=conversation_context,
                 )
@@ -2715,6 +2715,11 @@ def _source_code_qa_provider_available(llm_provider: str | None) -> bool:
     return bool(_source_code_qa_model_availability().get(provider, False))
 
 
+def _source_code_qa_public_answer_mode(answer_mode: str | None) -> str:
+    mode = str(answer_mode or "auto").strip()
+    return mode if mode in {"auto", "gemini_flash"} else "auto"
+
+
 def _compact_source_code_qa_session_payload(result: dict[str, Any]) -> dict[str, Any]:
     structured = result.get("structured_answer") if isinstance(result.get("structured_answer"), dict) else {}
     answer_claim_check = result.get("answer_claim_check") if isinstance(result.get("answer_claim_check"), dict) else {}
@@ -3197,7 +3202,7 @@ def _run_source_code_qa_query_job(app: Flask, job_id: str, payload: dict[str, An
                     pm_team=pm_team,
                     country=country,
                     question=str(payload.get("question") or ""),
-                    answer_mode=str(payload.get("answer_mode") or "retrieval_only"),
+                    answer_mode=_source_code_qa_public_answer_mode(payload.get("answer_mode")),
                     llm_budget_mode="auto",
                     conversation_context=conversation_context,
                     progress_callback=progress_callback,

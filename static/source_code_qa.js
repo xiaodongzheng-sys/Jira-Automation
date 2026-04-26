@@ -558,16 +558,11 @@
     const answerModeValue = answerMode?.value || 'auto';
     const providerReady = selectedProviderReady();
     const providerLabel = llmProvider?.selectedOptions?.[0]?.textContent || llmPolicy.provider?.provider || 'LLM';
-    const llmSelected = answerModeValue !== 'retrieval_only' && providerReady;
     updateQueryButtonState();
     if (queryStatus) {
-      if (answerModeValue !== 'retrieval_only' && !providerReady) {
-        queryStatus.textContent = `${providerLabel} is unavailable; code search will still run.`;
-      } else if (llmSelected) {
-        queryStatus.textContent = `Ready. Smart Answer will search first and call ${providerLabel} only when useful.`;
-      } else if (!llmSelected) {
-        queryStatus.textContent = 'Ready. Code search only.';
-      }
+      queryStatus.textContent = providerReady
+        ? `Ready. Smart Answer will search first and call ${providerLabel}.`
+        : `${providerLabel} is unavailable.`;
     }
   };
 
@@ -1179,7 +1174,7 @@
       payload?.llm_model ? `model: ${payload.llm_model}` : '',
       payload?.llm_thinking_budget !== undefined ? `thinking: ${payload.llm_thinking_budget}` : '',
       payload?.llm_route?.mode === 'auto' ? `route: ${payload.llm_route.reason}` : '',
-      payload?.llm_cost_skip?.skipped ? 'LLM skipped' : (payload?.llm_cached ? 'cache hit' : 'live call'),
+      payload?.llm_cached ? 'cache hit' : 'live call',
       usage?.promptTokenCount || usage?.prompt_tokens ? `prompt: ${usage.promptTokenCount || usage.prompt_tokens}` : '',
       usage?.candidatesTokenCount || usage?.completion_tokens ? `output: ${usage.candidatesTokenCount || usage.completion_tokens}` : '',
       usage?.totalTokenCount || usage?.total_tokens ? `total: ${usage.totalTokenCount || usage.total_tokens}` : '',
@@ -1274,10 +1269,7 @@
   const renderUsageBadges = (payload) => {
     const llmAnswered = ['gemini_flash', 'auto'].includes(payload?.answer_mode) && Boolean(payload?.llm_answer);
     if (activeCache) {
-      if (payload?.llm_cost_skip?.skipped) {
-        activeCache.hidden = false;
-        activeCache.textContent = 'LLM skipped';
-      } else if (llmAnswered) {
+      if (llmAnswered) {
         activeCache.hidden = false;
         activeCache.textContent = payload?.llm_cached ? 'cache hit' : 'live LLM';
       } else {
@@ -1336,7 +1328,7 @@
     }
     const selectedAnswerMode = answerMode?.value || 'auto';
     const selectedProvider = selectedLlmProvider();
-    const effectiveAnswerMode = selectedAnswerMode !== 'retrieval_only' && !selectedProviderReady() ? 'retrieval_only' : selectedAnswerMode;
+    const effectiveAnswerMode = selectedAnswerMode;
     if (activeMode) activeMode.textContent = effectiveAnswerMode;
     const progress = startQueryProgress('Submitting query to server...');
     const submittedQuestion = String(questionInput?.value || '').trim();

@@ -14,6 +14,7 @@ from bpmis_jira_tool.source_code_qa import (
     CodexCliBridgeSourceCodeQALLMProvider,
     LLMGenerateResult,
     RepositoryEntry,
+    SourceCodeQALLMError,
     SourceCodeQAService,
     VertexAIEmbeddingProvider,
     VertexAISourceCodeQALLMProvider,
@@ -295,7 +296,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         payload = response.get_json()
         self.assertEqual(payload["status"], "empty_config")
-        self.assertEqual(payload["answer_mode"], "retrieval_only")
+        self.assertEqual(payload["answer_mode"], "auto")
 
     def test_query_api_defaults_llm_budget_to_auto(self):
         captured = {}
@@ -319,6 +320,28 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertEqual(captured["llm_budget_mode"], "auto")
         ensure_synced.assert_called_once()
         self.assertEqual(response.get_json()["auto_sync"]["status"], "fresh")
+
+    def test_query_api_coerces_legacy_retrieval_only_to_auto(self):
+        captured = {}
+
+        def fake_query(**kwargs):
+            captured.update(kwargs)
+            return {"status": "ok", "answer_mode": kwargs["answer_mode"], "matches": []}
+
+        with patch("bpmis_jira_tool.source_code_qa.SourceCodeQAService.query", side_effect=fake_query), patch(
+            "bpmis_jira_tool.source_code_qa.SourceCodeQAService.ensure_synced_today",
+            return_value={"attempted": False, "status": "fresh"},
+        ):
+            with self.app.test_client() as client:
+                self._login(client, "teammate@npt.sg")
+                response = client.post(
+                    "/api/source-code-qa/query",
+                    json={"pm_team": "AF", "country": "All", "question": "where is createIssue", "answer_mode": "retrieval_only"},
+                )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(captured["answer_mode"], "auto")
+        self.assertEqual(response.get_json()["answer_mode"], "auto")
 
     def test_query_api_uses_requested_llm_provider(self):
         selected = []
@@ -5933,7 +5956,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertNotEqual(payload["answer_contract"]["status"], "unreliable_llm_answer")
         self.assertEqual(payload["llm_thinking_budget"], 0)
 
-    def test_simple_function_usage_no_hit_skips_llm_call(self):
+    def test_simple_function_usage_no_hit_still_calls_llm(self):
         service = SourceCodeQAService(
             data_root=Path(self.temp_dir.name),
             team_profiles=TEAM_PROFILE_DEFAULTS,
@@ -5961,7 +5984,30 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         spec_file.write_text("fdMaturityDate is exposed as a rule form field.\n", encoding="utf-8")
         self._build_all_indexes(service)
 
-        with patch("bpmis_jira_tool.source_code_qa.requests.post", side_effect=AssertionError("LLM should not be called")):
+        fake_response = SimpleNamespace(
+            raise_for_status=lambda: None,
+            json=lambda: {
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [
+                                {
+                                    "text": (
+                                        '{"direct_answer":"fdMaturityDate only appears in config/spec candidates.",'
+                                        '"claims":[{"text":"fdMaturityDate appears in config/spec evidence","citations":["S1"]}],'
+                                        '"missing_evidence":[],"confidence":"medium"}'
+                                    )
+                                }
+                            ]
+                        }
+                    }
+                ],
+                "usageMetadata": {"promptTokenCount": 123, "candidatesTokenCount": 45},
+            },
+            text='{"ok":true}',
+        )
+
+        with patch("bpmis_jira_tool.source_code_qa.requests.post", return_value=fake_response) as mocked_post:
             payload = service.query(
                 pm_team="AF",
                 country="All",
@@ -5970,12 +6016,10 @@ class SourceCodeQAServiceTests(unittest.TestCase):
                 llm_budget_mode="balanced",
             )
 
-        self.assertEqual(payload["answer_mode"], "retrieval_only")
-        self.assertTrue(payload["llm_cost_skip"]["skipped"])
-        self.assertEqual(payload["llm_provider"], "local")
-        self.assertEqual(payload["llm_usage"], {})
-        self.assertIn("not in a function or method usage context", payload["llm_answer"])
-        self.assertEqual(payload["answer_contract"]["status"], "local_no_function_usage_hit")
+        self.assertEqual(payload["answer_mode"], "gemini_flash")
+        self.assertEqual(payload["llm_provider"], "gemini")
+        self.assertIn("fdMaturityDate only appears", payload["llm_answer"])
+        self.assertEqual(mocked_post.call_count, 1)
 
     def test_simple_function_usage_with_method_body_still_calls_llm(self):
         service = SourceCodeQAService(
@@ -7316,7 +7360,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertIn("domain guidance and answer blueprint", system_text)
         self.assertIn(payload["llm_thinking_budget"], {1024, 2048})
 
-    def test_gemini_failure_falls_back_to_retrieval_only(self):
+    def test_gemini_failure_does_not_fallback_to_retrieval_only(self):
         service = SourceCodeQAService(
             data_root=Path(self.temp_dir.name),
             team_profiles=TEAM_PROFILE_DEFAULTS,
@@ -7351,17 +7395,14 @@ class SourceCodeQAServiceTests(unittest.TestCase):
 
         with patch("bpmis_jira_tool.source_code_qa.requests.post", return_value=FakeErrorResponse()):
             self._build_all_indexes(service)
-            payload = service.query(
-                pm_team="AF",
-                country="All",
-                question="where is batchCreateJiraIssue",
-                answer_mode="gemini_flash",
-                llm_budget_mode="balanced",
-            )
-
-        self.assertEqual(payload["answer_mode"], "retrieval_only")
-        self.assertIn("Showing code-search results instead", payload["fallback_notice"]["message"])
-        self.assertTrue(payload["matches"])
+            with self.assertRaises(SourceCodeQALLMError):
+                service.query(
+                    pm_team="AF",
+                    country="All",
+                    question="where is batchCreateJiraIssue",
+                    answer_mode="gemini_flash",
+                    llm_budget_mode="balanced",
+                )
 
     def test_gemini_429_resource_exhausted_keeps_llm_retry_enabled(self):
         service = SourceCodeQAService(
@@ -7398,20 +7439,14 @@ class SourceCodeQAServiceTests(unittest.TestCase):
 
         with patch("bpmis_jira_tool.source_code_qa.requests.post", return_value=RateLimitedResponse()):
             self._build_all_indexes(service)
-            payload = service.query(
-                pm_team="AF",
-                country="All",
-                question="where is batchCreateJiraIssue",
-                answer_mode="gemini_flash",
-                llm_budget_mode="balanced",
-            )
-
-        self.assertEqual(payload["answer_mode"], "gemini_flash")
-        self.assertTrue(payload["llm_retryable_error"]["retryable"])
-        self.assertEqual(payload["llm_retryable_error"]["code"], "rate_limited")
-        self.assertEqual(payload["fallback_notice"]["fallback_mode"], "gemini_flash")
-        self.assertIn("retry", payload["fallback_notice"]["message"].lower())
-        self.assertTrue(payload["matches"])
+            with self.assertRaises(SourceCodeQALLMError):
+                service.query(
+                    pm_team="AF",
+                    country="All",
+                    question="where is batchCreateJiraIssue",
+                    answer_mode="gemini_flash",
+                    llm_budget_mode="balanced",
+                )
 
     def test_gemini_503_retries_and_falls_back_to_lite_model(self):
         service = SourceCodeQAService(

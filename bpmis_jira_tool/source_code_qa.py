@@ -2223,7 +2223,6 @@ class SourceCodeQAService:
             "all_country": ALL_COUNTRY,
             "answer_modes": [
                 {"value": ANSWER_MODE_AUTO, "label": "Smart Answer"},
-                {"value": ANSWER_MODE, "label": "Code Search Only"},
             ],
             "llm_providers": [
                 {"value": LLM_PROVIDER_CODEX_CLI_BRIDGE, "label": "Codex"},
@@ -4046,7 +4045,10 @@ class SourceCodeQAService:
                 started_at=started_at,
             )
             return payload
-        codex_fast_path = self._codex_fast_path_active(answer_mode)
+        normalized_answer_mode = str(answer_mode or ANSWER_MODE).strip() or ANSWER_MODE
+        if normalized_answer_mode not in {ANSWER_MODE, ANSWER_MODE_GEMINI, ANSWER_MODE_AUTO}:
+            normalized_answer_mode = ANSWER_MODE_AUTO
+        codex_fast_path = self._codex_fast_path_active(normalized_answer_mode)
         report(
             "evidence_pack",
             "Preparing Codex navigation hints." if codex_fast_path else "Building evidence pack and answer context.",
@@ -4085,7 +4087,7 @@ class SourceCodeQAService:
         )
         payload = {
             "status": "ok",
-            "answer_mode": ANSWER_MODE,
+            "answer_mode": normalized_answer_mode,
             "summary": self._build_summary(top_matches),
             "matches": top_matches,
             "citations": self._build_citations(top_matches),
@@ -4111,83 +4113,26 @@ class SourceCodeQAService:
             "original_question": original_question,
             "trace_id": trace_id,
         }
-        normalized_answer_mode = str(answer_mode or ANSWER_MODE).strip() or ANSWER_MODE
         if normalized_answer_mode in {ANSWER_MODE_GEMINI, ANSWER_MODE_AUTO}:
             payload["llm_provider"] = self.llm_provider.name
-            local_no_hit_answer = self._llm_cost_skip_for_local_no_hit(
+            report("llm_generation", "Calling LLM with retrieved evidence.", 0, 0)
+            llm_payload = self._build_llm_answer(
+                entries=query_entries,
+                key=key,
+                pm_team=pm_team,
+                country=country,
                 question=question,
                 matches=top_matches,
-                evidence_summary=evidence_summary,
-                evidence_pack=evidence_pack,
-                quality_gate=quality_gate,
+                llm_budget_mode=llm_budget_mode,
+                followup_context=followup_context,
+                requested_answer_mode=normalized_answer_mode,
+                request_cache=request_cache,
+                progress_callback=progress_callback,
             )
-            if local_no_hit_answer:
-                payload.update(local_no_hit_answer)
-                payload["answer_mode"] = ANSWER_MODE
-                payload["fallback_notice"] = {
-                    "title": "LLM skipped by local retrieval gate",
-                    "message": "The local index found no function/method usage evidence for this simple symbol lookup, so the portal returned a deterministic answer without calling the LLM.",
-                    "fallback_mode": ANSWER_MODE,
-                }
-                report("completed", "LLM skipped: local no-hit gate answered from retrieval.", 0, 0)
-            elif normalized_answer_mode == ANSWER_MODE_AUTO and not self.llm_ready():
-                payload["fallback_notice"] = {
-                    "title": "Auto LLM unavailable",
-                    "message": "Auto mode is using code-search results because Source Code Q&A LLM credentials are not configured.",
-                    "fallback_mode": ANSWER_MODE,
-                }
-                self._record_query_telemetry(
-                    key=key,
-                    question=question,
-                    answer_mode=answer_mode,
-                    llm_budget_mode=llm_budget_mode,
-                    payload=payload,
-                    started_at=started_at,
-                )
-                return payload
-            else:
-                try:
-                    report("llm_generation", "Calling LLM with retrieved evidence.", 0, 0)
-                    llm_payload = self._build_llm_answer(
-                        entries=query_entries,
-                        key=key,
-                        pm_team=pm_team,
-                        country=country,
-                        question=question,
-                        matches=top_matches,
-                        llm_budget_mode=llm_budget_mode,
-                        followup_context=followup_context,
-                        requested_answer_mode=normalized_answer_mode,
-                        request_cache=request_cache,
-                        progress_callback=progress_callback,
-                    )
-                    payload.update(llm_payload)
-                    payload["evidence_outline"] = self._build_evidence_outline(payload.get("evidence_pack") or evidence_pack, top_matches)
-                    payload["answer_mode"] = normalized_answer_mode
-                    report("completed", "LLM answer generated.", 0, 0)
-                except ToolError as error:
-                    if self._is_retryable_llm_rate_limit(error):
-                        retry_after = self._llm_retry_after_seconds(error)
-                        retry_hint = f" Provider suggested retry after {retry_after:g}s." if retry_after is not None else ""
-                        payload["answer_mode"] = normalized_answer_mode
-                        payload["llm_retryable_error"] = {
-                            "retryable": True,
-                            "code": "rate_limited",
-                            "status_code": getattr(error, "status_code", None),
-                            "provider_status": str(getattr(error, "provider_status", "") or "RESOURCE_EXHAUSTED"),
-                            "retry_after_seconds": retry_after,
-                        }
-                        payload["fallback_notice"] = {
-                            "title": "LLM rate limit, retry allowed",
-                            "message": f"{error} LLM mode remains enabled; you can retry this question when quota is available.{retry_hint} Showing code-search results for this attempt.",
-                            "fallback_mode": normalized_answer_mode,
-                        }
-                    else:
-                        payload["fallback_notice"] = {
-                            "title": "LLM unavailable",
-                            "message": f"{error} Showing code-search results instead.",
-                            "fallback_mode": ANSWER_MODE,
-                        }
+            payload.update(llm_payload)
+            payload["evidence_outline"] = self._build_evidence_outline(payload.get("evidence_pack") or evidence_pack, top_matches)
+            payload["answer_mode"] = normalized_answer_mode
+            report("completed", "LLM answer generated.", 0, 0)
         if not (normalized_answer_mode in {ANSWER_MODE_GEMINI, ANSWER_MODE_AUTO} and payload.get("llm_answer")):
             report("completed", "Code evidence retrieval completed.", 0, 0)
         self._record_query_telemetry(
@@ -17128,7 +17073,7 @@ class SourceCodeQAService:
     ) -> dict[str, Any]:
         return {
             "status": status,
-            "answer_mode": ANSWER_MODE,
+            "answer_mode": ANSWER_MODE_AUTO,
             "summary": summary,
             "matches": [],
             "repo_status": repo_status or [],
