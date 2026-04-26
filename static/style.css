@@ -94,8 +94,8 @@
 .bpmis-task-list-head,
 .bpmis-task-card {
   display: grid;
-  grid-template-columns: minmax(120px, 0.8fr) minmax(280px, 1.8fr) minmax(68px, 0.45fr) minmax(108px, 0.65fr) minmax(140px, 0.8fr) minmax(140px, 0.8fr) auto;
-  gap: 12px;
+  grid-template-columns: 136px minmax(360px, 1fr) 76px 116px 150px 170px;
+  column-gap: 16px;
   align-items: center;
 }
 
@@ -109,7 +109,8 @@
 }
 
 .bpmis-task-card {
-  padding: 12px;
+  position: relative;
+  padding: 12px 116px 12px 12px;
   border: 1px solid rgba(106, 119, 149, 0.14);
   border-radius: 8px;
   background: #ffffff;
@@ -136,6 +137,10 @@
 }
 
 .bpmis-task-actions {
+  position: absolute;
+  top: 50%;
+  right: 12px;
+  transform: translateY(-50%);
   display: flex;
   justify-content: flex-end;
 }
@@ -221,8 +226,10 @@
   }
 
   .bpmis-task-card {
+    position: static;
     grid-template-columns: 1fr;
     gap: 10px;
+    padding: 12px;
   }
 
   .bpmis-task-cell {
@@ -238,6 +245,8 @@
   }
 
   .bpmis-task-actions {
+    position: static;
+    transform: none;
     justify-content: flex-start;
     display: flex;
   }

@@ -166,7 +166,6 @@
           <span>Status</span>
           <span>Version</span>
           <span>Component</span>
-          <span></span>
         </div>
         ${rows}
       </div>
