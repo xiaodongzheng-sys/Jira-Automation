@@ -1,7 +1,9 @@
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from bpmis_jira_tool.bpmis import BPMISDirectApiClient
 from bpmis_jira_tool.config import Settings
@@ -10,6 +12,17 @@ from bpmis_jira_tool.models import ProjectMatch
 
 
 class BPMISClientTests(unittest.TestCase):
+    class _FakeResponse:
+        def __init__(self, status_code, payload=None, text=""):
+            self.status_code = status_code
+            self._payload = payload
+            self.text = text or (json.dumps(payload) if payload is not None else "")
+
+        def json(self):
+            if self._payload is None:
+                raise ValueError("no json")
+            return self._payload
+
     def test_build_create_payload_supports_multiple_components_from_comma_separated_value(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             settings = Settings(
@@ -801,6 +814,108 @@ class BPMISClientTests(unittest.TestCase):
             self.assertEqual(update_call[1], "POST")
             self.assertEqual(update_call[3], {"jiraKey": "AF-101", "statusId": 44})
             self.assertEqual(detail["status"]["label"], "Testing")
+
+    def test_get_jira_ticket_detail_uses_direct_jira_api_when_token_configured(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings = Settings(
+                flask_secret_key="secret",
+                google_oauth_client_secret_file=Path(temp_dir) / "client.json",
+                google_oauth_redirect_uri=None,
+                team_portal_host="127.0.0.1",
+                team_portal_port=5000,
+                team_portal_base_url=None,
+                team_allowed_emails=(),
+                team_allowed_email_domains=(),
+                team_portal_data_dir=Path(temp_dir),
+                spreadsheet_id="sheet",
+                common_tab_name="Common",
+                input_tab_name="Input",
+                bpmis_base_url="https://example.com",
+                bpmis_api_access_token="token",
+            )
+            client = BPMISDirectApiClient(settings)
+            calls = []
+
+            def fake_request(**kwargs):
+                calls.append(kwargs)
+                return self._FakeResponse(
+                    200,
+                    {
+                        "id": "10001",
+                        "key": "AF-101",
+                        "fields": {
+                            "summary": "Live AF task",
+                            "status": {"name": "Waiting"},
+                            "fixVersions": [{"name": "Planning_26Q2"}],
+                            "components": [{"name": "Anti-fraud"}],
+                        },
+                    },
+                )
+
+            env = {
+                "JIRA_API_TOKEN": "dXNlcjp0b2tlbg==",
+                "JIRA_AUTH_SCHEME": "basic",
+                "JIRA_BASE_URL": "https://jira.example.test",
+                "JIRA_USERNAME": "",
+                "JIRA_EMAIL": "",
+            }
+            with patch.dict(os.environ, env), patch("bpmis_jira_tool.bpmis.requests.request", side_effect=fake_request):
+                detail = client.get_jira_ticket_detail("AF-101")
+
+            self.assertEqual(detail["summary"], "Live AF task")
+            self.assertEqual(detail["status"]["label"], "Waiting")
+            self.assertEqual(detail["fixVersions"], ["Planning_26Q2"])
+            self.assertEqual(detail["components"], ["Anti-fraud"])
+            self.assertEqual(calls[0]["headers"]["Authorization"], "Basic dXNlcjp0b2tlbg==")
+
+    def test_update_jira_ticket_status_uses_direct_jira_transition(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings = Settings(
+                flask_secret_key="secret",
+                google_oauth_client_secret_file=Path(temp_dir) / "client.json",
+                google_oauth_redirect_uri=None,
+                team_portal_host="127.0.0.1",
+                team_portal_port=5000,
+                team_portal_base_url=None,
+                team_allowed_emails=(),
+                team_allowed_email_domains=(),
+                team_portal_data_dir=Path(temp_dir),
+                spreadsheet_id="sheet",
+                common_tab_name="Common",
+                input_tab_name="Input",
+                bpmis_base_url="https://example.com",
+                bpmis_api_access_token="token",
+            )
+            client = BPMISDirectApiClient(settings)
+            calls = []
+
+            def fake_request(**kwargs):
+                calls.append(kwargs)
+                if kwargs["method"] == "GET" and kwargs["url"].endswith("/transitions"):
+                    return self._FakeResponse(
+                        200,
+                        {"transitions": [{"id": "31", "name": "Close", "to": {"name": "Closed"}}]},
+                    )
+                if kwargs["method"] == "POST" and kwargs["url"].endswith("/transitions"):
+                    return self._FakeResponse(204, None)
+                return self._FakeResponse(
+                    200,
+                    {"id": "10001", "key": "AF-101", "fields": {"summary": "Live AF task", "status": {"name": "Closed"}}},
+                )
+
+            env = {
+                "JIRA_API_TOKEN": "dXNlcjp0b2tlbg==",
+                "JIRA_AUTH_SCHEME": "basic",
+                "JIRA_BASE_URL": "https://jira.example.test",
+                "JIRA_USERNAME": "",
+                "JIRA_EMAIL": "",
+            }
+            with patch.dict(os.environ, env), patch("bpmis_jira_tool.bpmis.requests.request", side_effect=fake_request):
+                detail = client.update_jira_ticket_status("AF-101", "Closed")
+
+            transition_call = next(call for call in calls if call["method"] == "POST")
+            self.assertEqual(transition_call["json"], {"transition": {"id": "31"}})
+            self.assertEqual(detail["status"]["label"], "Closed")
 
     def test_update_jira_ticket_status_rejects_unchanged_live_status(self):
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
@@ -421,6 +422,10 @@ class BPMISDirectApiClient(BPMISClient):
         if not normalized_ticket_key:
             return {}
 
+        jira_detail = self._get_jira_ticket_detail_via_jira(normalized_ticket_key)
+        if jira_detail is not None:
+            return jira_detail
+
         detail_attempts = [
             ("GET", "/api/v1/issues/detail", {"jiraKey": normalized_ticket_key}, None),
             ("GET", "/api/v1/issues/detail", {"jiraIssueKey": normalized_ticket_key}, None),
@@ -682,39 +687,45 @@ class BPMISDirectApiClient(BPMISClient):
         allowed = {value.lower(): value for value in self.JIRA_STATUS_OPTIONS}
         return allowed.get(normalized.lower(), "")
 
-    def _update_jira_ticket_status_via_jira(self, ticket_key: str, status: str) -> dict[str, Any] | None:
-        jira_token = (
-            os.getenv("JIRA_API_TOKEN")
-            or os.getenv("JIRA_PAT")
-            or os.getenv("JIRA_PERSONAL_ACCESS_TOKEN")
-            or ""
-        ).strip()
-        if not jira_token:
+    def _get_jira_ticket_detail_via_jira(self, ticket_key: str) -> dict[str, Any] | None:
+        payload = self._jira_api_request(
+            "GET",
+            f"/rest/api/2/issue/{ticket_key}",
+            params={"fields": "summary,status,fixVersions,components"},
+        )
+        if payload is None:
             return None
 
-        jira_base_url = (os.getenv("JIRA_BASE_URL") or self.JIRA_BROWSE_BASE_URL).strip().rstrip("/")
-        if jira_base_url.endswith("/browse"):
-            jira_base_url = jira_base_url[: -len("/browse")]
-        username = (os.getenv("JIRA_USERNAME") or os.getenv("JIRA_EMAIL") or "").strip()
-        headers = {"Accept": "application/json", "Content-Type": "application/json"}
-        auth = None
-        if username:
-            auth = (username, jira_token)
-        else:
-            headers["Authorization"] = f"Bearer {jira_token}"
+        fields = payload.get("fields") if isinstance(payload.get("fields"), dict) else {}
+        status = fields.get("status") if isinstance(fields.get("status"), dict) else {}
+        fix_versions = fields.get("fixVersions") if isinstance(fields.get("fixVersions"), list) else []
+        components = fields.get("components") if isinstance(fields.get("components"), list) else []
+        return {
+            "id": str(payload.get("id") or "").strip(),
+            "jiraKey": str(payload.get("key") or ticket_key).strip(),
+            "key": str(payload.get("key") or ticket_key).strip(),
+            "summary": str(fields.get("summary") or "").strip(),
+            "status": {"label": str(status.get("name") or "").strip()},
+            "fixVersions": [
+                str(item.get("name") or "").strip()
+                for item in fix_versions
+                if isinstance(item, dict) and str(item.get("name") or "").strip()
+            ],
+            "components": [
+                str(item.get("name") or "").strip()
+                for item in components
+                if isinstance(item, dict) and str(item.get("name") or "").strip()
+            ],
+            "raw_jira": payload,
+        }
 
-        transitions_url = f"{jira_base_url}/rest/api/2/issue/{ticket_key}/transitions"
-        try:
-            transitions_response = requests.get(transitions_url, headers=headers, auth=auth, timeout=30)
-            if transitions_response.status_code >= 400:
-                raise BPMISError(
-                    f"Jira transition lookup failed for '{ticket_key}' with status {transitions_response.status_code}."
-                )
-            transitions_payload = transitions_response.json()
-        except requests.RequestException as error:
-            raise BPMISError(f"Jira transition lookup failed for '{ticket_key}'.") from error
-        except ValueError as error:
-            raise BPMISError(f"Jira transition lookup returned non-JSON data for '{ticket_key}'.") from error
+    def _update_jira_ticket_status_via_jira(self, ticket_key: str, status: str) -> dict[str, Any] | None:
+        transitions_payload = self._jira_api_request(
+            "GET",
+            f"/rest/api/2/issue/{ticket_key}/transitions",
+        )
+        if transitions_payload is None:
+            return None
 
         transitions = transitions_payload.get("transitions") or []
         transition = next(
@@ -737,34 +748,114 @@ class BPMISDirectApiClient(BPMISClient):
             )
 
         transition_id = str(transition.get("id") or "").strip()
-        try:
-            transition_response = requests.post(
-                transitions_url,
-                headers=headers,
-                auth=auth,
-                json={"transition": {"id": transition_id}},
-                timeout=30,
-            )
-            if transition_response.status_code >= 400:
-                raise BPMISError(
-                    f"Jira transition failed for '{ticket_key}' with status {transition_response.status_code}: "
-                    f"{transition_response.text[:240]}"
-                )
-        except requests.RequestException as error:
-            raise BPMISError(f"Jira transition failed for '{ticket_key}'.") from error
+        self._jira_api_request(
+            "POST",
+            f"/rest/api/2/issue/{ticket_key}/transitions",
+            body={"transition": {"id": transition_id}},
+            expected_statuses={200, 204},
+            allow_empty=True,
+        )
 
-        issue_url = f"{jira_base_url}/rest/api/2/issue/{ticket_key}"
-        try:
-            issue_response = requests.get(issue_url, headers=headers, auth=auth, params={"fields": "status"}, timeout=30)
-            issue_response.raise_for_status()
-            issue_payload = issue_response.json()
-        except (requests.RequestException, ValueError):
+        detail = self._get_jira_ticket_detail_via_jira(ticket_key)
+        if detail is None:
             return {"jiraKey": ticket_key, "status": {"label": status}}
+        updated_status = self._extract_jira_status_label(detail)
+        if updated_status and not self._status_labels_match(updated_status, status):
+            raise BPMISError(f"Jira transition request completed, but Jira is still '{updated_status}'.")
+        return detail
 
-        return {
-            "jiraKey": ticket_key,
-            "status": {"label": ((issue_payload.get("fields") or {}).get("status") or {}).get("name") or status},
-        }
+    def _jira_api_request(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        body: Any | None = None,
+        expected_statuses: set[int] | None = None,
+        allow_empty: bool = False,
+    ) -> dict[str, Any] | None:
+        token = self._jira_token()
+        if not token:
+            return None
+
+        expected = expected_statuses or {200}
+        jira_base_url = self._jira_base_url()
+        url = f"{jira_base_url}/{path.lstrip('/')}"
+        candidates = self._jira_auth_candidates(token)
+        last_status = 0
+        last_text = ""
+        for headers, auth in candidates:
+            try:
+                response = requests.request(
+                    method=method,
+                    url=url,
+                    params=params,
+                    json=body if body is not None else None,
+                    headers=headers,
+                    auth=auth,
+                    timeout=30,
+                )
+            except requests.RequestException as error:
+                raise BPMISError(f"Jira API request failed for '{path}'.") from error
+
+            last_status = int(response.status_code)
+            last_text = response.text[:240]
+            if response.status_code in {401, 403} and len(candidates) > 1:
+                continue
+            if response.status_code not in expected:
+                raise BPMISError(f"Jira API request failed for '{path}' with status {response.status_code}.")
+            if response.status_code == 204 or not response.text.strip():
+                return {} if allow_empty else {}
+            try:
+                payload = response.json()
+            except ValueError as error:
+                if allow_empty:
+                    return {}
+                raise BPMISError(f"Jira API returned non-JSON data for '{path}'.") from error
+            return payload if isinstance(payload, dict) else {}
+
+        raise BPMISError(f"Jira API request failed for '{path}' with status {last_status}: {last_text}")
+
+    @staticmethod
+    def _jira_token() -> str:
+        return (
+            os.getenv("JIRA_API_TOKEN")
+            or os.getenv("JIRA_PAT")
+            or os.getenv("JIRA_PERSONAL_ACCESS_TOKEN")
+            or ""
+        ).strip()
+
+    def _jira_base_url(self) -> str:
+        jira_base_url = (os.getenv("JIRA_BASE_URL") or self.JIRA_BROWSE_BASE_URL).strip().rstrip("/")
+        if jira_base_url.endswith("/browse"):
+            jira_base_url = jira_base_url[: -len("/browse")]
+        return jira_base_url
+
+    def _jira_auth_candidates(self, token: str) -> list[tuple[dict[str, str], tuple[str, str] | None]]:
+        base_headers = {"Accept": "application/json", "Content-Type": "application/json"}
+        username = (os.getenv("JIRA_USERNAME") or os.getenv("JIRA_EMAIL") or "").strip()
+        if username:
+            return [(base_headers, (username, token))]
+
+        requested_scheme = str(os.getenv("JIRA_AUTH_SCHEME") or "").strip().lower()
+        bearer = ({**base_headers, "Authorization": f"Bearer {token}"}, None)
+        basic = ({**base_headers, "Authorization": f"Basic {token}"}, None)
+        if requested_scheme == "bearer":
+            return [bearer]
+        if requested_scheme == "basic":
+            return [basic]
+        return [basic, bearer] if self._looks_like_basic_auth_blob(token) else [bearer, basic]
+
+    @staticmethod
+    def _looks_like_basic_auth_blob(token: str) -> bool:
+        if not token:
+            return False
+        try:
+            padded = token + "=" * (-len(token) % 4)
+            decoded = base64.b64decode(padded, validate=True)
+        except Exception:
+            return False
+        return b":" in decoded[:128]
 
     def _extract_jira_status_label(self, detail: dict[str, Any]) -> str:
         for key in ("status", "statusId", "jiraStatus", "jiraStatusId"):
