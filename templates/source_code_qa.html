@@ -70,18 +70,7 @@
     </div>
   </section>
 
-  <div class="workspace-tabs source-qa-tabs" role="tablist" aria-label="Source Code Q&A sections" data-default-tab="ask-search">
-    <button class="workspace-tab is-active" type="button" role="tab" aria-selected="true" data-tab-trigger="ask-search">
-      Ask &amp; Search
-    </button>
-    {% if can_manage_source_code_qa %}
-      <button class="workspace-tab" type="button" role="tab" aria-selected="false" data-tab-trigger="repo-admin">
-        Repo Admin
-      </button>
-    {% endif %}
-  </div>
-
-  <section class="workspace-panel source-qa-panel is-active" data-tab-panel="ask-search">
+  <section class="workspace-panel source-qa-panel is-active">
     <section class="source-qa-chat-shell">
       <aside class="source-qa-session-sidebar" aria-label="Source Code Q&A chat history">
         <div class="source-qa-session-sidebar-head">
@@ -155,7 +144,7 @@
   </section>
 
   {% if can_manage_source_code_qa %}
-    <section class="workspace-panel source-qa-panel" data-tab-panel="repo-admin" hidden>
+    <section class="workspace-panel source-qa-panel">
       <section class="grid source-qa-workspace">
         <section class="panel panel-wide source-qa-admin">
           <div class="panel-head">
