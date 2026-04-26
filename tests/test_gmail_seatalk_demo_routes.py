@@ -440,7 +440,7 @@ class GmailSeaTalkDemoRouteTests(unittest.TestCase):
         payload = loaded.get_json()
         self.assertEqual(payload["mappings"]["group-123"], "Risk Project Group")
         self.assertEqual(payload["mappings"]["buddy-456"], "Important DM")
-        self.assertEqual(payload["unknown_ids"][0]["id"], "group-123")
+        self.assertEqual(payload["unknown_ids"], [])
 
     def test_owner_seatalk_name_mappings_api_reports_export_error(self):
         class FakeSeaTalkService:

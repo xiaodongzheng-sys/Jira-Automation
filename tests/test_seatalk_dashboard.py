@@ -212,6 +212,41 @@ class SeaTalkDashboardServiceTests(unittest.TestCase):
         self.assertEqual(result["unknown_ids"][1]["id"], "UID 888")
         self.assertTrue(any("--unknown-ids-json" in command for command in calls))
 
+    def test_build_name_mappings_reuses_daily_disk_cache(self):
+        calls: list[list[str]] = []
+
+        def runner(command: list[str]):
+            calls.append(command)
+            return subprocess.CompletedProcess(
+                args=command,
+                returncode=0,
+                stdout=json.dumps(
+                    {
+                        "unknown_ids": [{"id": "group-123", "type": "group", "count": 9, "example": "2026-04-21: Please review"}],
+                        "generated_at": "2026-04-21T21:00:00+08:00",
+                        "period_days": 7,
+                    }
+                ),
+                stderr="",
+            )
+
+        service = SeaTalkDashboardService(
+            owner_email="xiaodong.zheng@npt.sg",
+            seatalk_app_path=str(self.app_dir),
+            seatalk_data_dir=str(self.data_dir),
+            daily_cache_dir=Path(self.temp_dir.name) / "cache",
+            command_runner=runner,
+        )
+        now = datetime(2026, 4, 21, 21, 0).astimezone()
+
+        first = service.build_name_mappings(now=now)
+        second = service.build_name_mappings(now=now)
+
+        self.assertEqual(len(calls), 1)
+        self.assertFalse(first["cache"]["hit"])
+        self.assertTrue(second["cache"]["hit"])
+        self.assertEqual(second["unknown_ids"][0]["id"], "group-123")
+
     def test_build_insights_uses_codex_read_only_ephemeral_command(self):
         def local_runner(command: list[str]):
             return subprocess.CompletedProcess(
@@ -415,7 +450,11 @@ class SeaTalkDashboardServiceTests(unittest.TestCase):
         self.assertEqual(result["team_todos"], [])
 
     def test_build_insights_reuses_daily_cache(self):
+        local_call_count = 0
+
         def local_runner(command: list[str]):
+            nonlocal local_call_count
+            local_call_count += 1
             return subprocess.CompletedProcess(args=command, returncode=0, stdout="SeaTalk Chat History Export\nhello", stderr="")
 
         codex_exec_count = 0
@@ -434,6 +473,7 @@ class SeaTalkDashboardServiceTests(unittest.TestCase):
             seatalk_app_path=str(self.app_dir),
             seatalk_data_dir=str(self.data_dir),
             codex_workspace_root=str(self.temp_dir.name),
+            daily_cache_dir=Path(self.temp_dir.name) / "cache",
             command_runner=local_runner,
         )
         now = datetime(2026, 4, 21, 21, 0).astimezone()
@@ -446,8 +486,25 @@ class SeaTalkDashboardServiceTests(unittest.TestCase):
             second = service.build_insights(now=now)
 
         self.assertEqual(codex_exec_count, 1)
+        self.assertEqual(local_call_count, 1)
         self.assertFalse(first["cache"]["hit"])
         self.assertTrue(second["cache"]["hit"])
+
+        SeaTalkDashboardService.clear_cache()
+        service_after_restart = SeaTalkDashboardService(
+            owner_email="xiaodong.zheng@npt.sg",
+            seatalk_app_path=str(self.app_dir),
+            seatalk_data_dir=str(self.data_dir),
+            codex_workspace_root=str(self.temp_dir.name),
+            daily_cache_dir=Path(self.temp_dir.name) / "cache",
+            command_runner=local_runner,
+        )
+
+        third = service_after_restart.build_insights(now=now)
+
+        self.assertEqual(codex_exec_count, 1)
+        self.assertEqual(local_call_count, 1)
+        self.assertTrue(third["cache"]["hit"])
 
     def test_build_insights_invalid_codex_json_raises_tool_error(self):
         def local_runner(command: list[str]):

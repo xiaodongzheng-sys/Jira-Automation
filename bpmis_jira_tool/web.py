@@ -879,6 +879,7 @@ def create_app() -> Flask:
     app.config["JOB_STORE"] = JobStore(data_root / "run" / "jobs.json")
     app.config["SEATALK_TODO_STORE"] = SeaTalkTodoStore(data_root / "seatalk" / "completed_todos.json")
     app.config["SEATALK_NAME_MAPPING_STORE"] = SeaTalkNameMappingStore(data_root / "seatalk" / "name_overrides.json")
+    app.config["SEATALK_DAILY_CACHE_DIR"] = data_root / "seatalk" / "cache"
     app.config["SOURCE_CODE_QA_SESSION_STORE"] = SourceCodeQASessionStore(data_root / "source_code_qa" / "sessions.json")
     app.config["SOURCE_CODE_QA_MODEL_AVAILABILITY_STORE"] = SourceCodeQAModelAvailabilityStore(
         data_root / "source_code_qa" / "model_availability.json"
@@ -1798,7 +1799,13 @@ def create_app() -> Flask:
             return jsonify({"status": "ok", "mappings": mappings})
         try:
             candidates = _build_seatalk_dashboard_service(settings).build_name_mappings()
-            return jsonify({"status": "ok", "mappings": mapping_store.mappings(), **candidates})
+            mappings = mapping_store.mappings()
+            candidates = dict(candidates)
+            candidates["unknown_ids"] = [
+                row for row in (candidates.get("unknown_ids") or [])
+                if isinstance(row, dict) and str(row.get("id") or "") not in mappings
+            ]
+            return jsonify({"status": "ok", "mappings": mappings, **candidates})
         except ToolError as error:
             error_details = _classify_portal_error(error)
             _log_portal_event(
@@ -2507,6 +2514,7 @@ def _build_gmail_dashboard_service() -> GmailDashboardService:
 def _build_seatalk_dashboard_service(settings: Settings) -> SeaTalkDashboardService:
     name_mapping_store = current_app.config.get("SEATALK_NAME_MAPPING_STORE") if current_app else None
     name_overrides_path = getattr(name_mapping_store, "storage_path", None)
+    daily_cache_dir = current_app.config.get("SEATALK_DAILY_CACHE_DIR") if current_app else None
     return SeaTalkDashboardService(
         owner_email=settings.seatalk_owner_email,
         seatalk_app_path=settings.seatalk_local_app_path,
@@ -2516,6 +2524,7 @@ def _build_seatalk_dashboard_service(settings: Settings) -> SeaTalkDashboardServ
         codex_timeout_seconds=settings.source_code_qa_codex_timeout_seconds,
         codex_concurrency=settings.source_code_qa_codex_concurrency,
         name_overrides_path=name_overrides_path,
+        daily_cache_dir=daily_cache_dir,
     )
 
 

@@ -73,6 +73,7 @@ class SeaTalkDashboardService:
         codex_concurrency: int = 1,
         codex_binary: str | None = None,
         name_overrides_path: str | Path | None = None,
+        daily_cache_dir: str | Path | None = None,
         command_runner: Callable[[list[str]], subprocess.CompletedProcess[str]] | None = None,
     ) -> None:
         self.owner_email = str(owner_email or "").strip().lower()
@@ -84,6 +85,7 @@ class SeaTalkDashboardService:
         self.codex_concurrency = max(1, min(int(codex_concurrency or 1), 4))
         self.codex_binary = str(codex_binary or os.getenv("SOURCE_CODE_QA_CODEX_BINARY") or "codex").strip() or "codex"
         self.name_overrides_path = Path(name_overrides_path).expanduser() if name_overrides_path else None
+        self.daily_cache_dir = Path(daily_cache_dir).expanduser() if daily_cache_dir else None
         self._command_runner = command_runner
         if not self.owner_email:
             raise ConfigError("SeaTalk owner email is missing. Set SEATALK_OWNER_EMAIL first.")
@@ -125,11 +127,16 @@ class SeaTalkDashboardService:
         cached = self._get_cached_insights(days=days, now=now)
         if cached is not None:
             return cached
+        daily_cached = self._load_daily_cache(kind="insights", days=days, now=now)
+        if daily_cached is not None:
+            self._store_cached_insights(days=days, now=now, payload=daily_cached)
+            return self._mark_cache_hit(daily_cached, expires_at=self._insights_cache_expiry(now))
         self._validate_local_environment()
         history_text = self._load_local_history_export(days=days, now=now)
         if not history_text.strip():
             payload = self._empty_insights_payload(days=days, now=now, cache_hit=False)
             self._store_cached_insights(days=days, now=now, payload=payload)
+            self._store_daily_cache(kind="insights", days=days, now=now, payload=payload)
             return payload
         history_text = self._filter_system_generated_history(history_text)
         history_text = self._compact_history_for_insights(history_text)
@@ -170,6 +177,7 @@ class SeaTalkDashboardService:
             },
         }
         self._store_cached_insights(days=days, now=now, payload=payload)
+        self._store_daily_cache(kind="insights", days=days, now=now, payload=payload)
         return payload
 
     def build_name_mappings(
@@ -179,6 +187,11 @@ class SeaTalkDashboardService:
         now: datetime | None = None,
     ) -> dict[str, Any]:
         now = now or datetime.now().astimezone()
+        daily_cached = self._load_daily_cache(kind="name_mappings", days=days, now=now)
+        if daily_cached is not None:
+            payload = json.loads(json.dumps(daily_cached))
+            payload["cache"] = {"hit": True, "expires_at": self._insights_cache_expiry(now).isoformat()}
+            return payload
         self._validate_local_environment()
         result = self._run_local_helper(
             "seatalk_local_export.js",
@@ -199,11 +212,14 @@ class SeaTalkDashboardService:
         if not isinstance(payload, dict):
             raise ToolError("SeaTalk name mapping candidates returned an invalid payload.")
         unknown_ids = payload.get("unknown_ids") if isinstance(payload.get("unknown_ids"), list) else []
-        return {
+        payload = {
             "unknown_ids": [self._normalize_unknown_id(row) for row in unknown_ids if isinstance(row, dict)],
             "generated_at": self._clean_text(payload.get("generated_at"), now.isoformat()),
             "period_days": int(payload.get("period_days") or days),
+            "cache": {"hit": False, "expires_at": self._insights_cache_expiry(now).isoformat()},
         }
+        self._store_daily_cache(kind="name_mappings", days=days, now=now, payload=payload)
+        return payload
 
     def _validate_local_environment(self) -> None:
         if not self.seatalk_app_path.exists():
@@ -316,6 +332,59 @@ class SeaTalkDashboardService:
                 payload=json.loads(json.dumps(payload)),
                 expires_at=self._insights_cache_expiry(now),
             )
+
+    @staticmethod
+    def _mark_cache_hit(payload: dict[str, Any], *, expires_at: datetime) -> dict[str, Any]:
+        cached_payload = json.loads(json.dumps(payload))
+        cached_payload["cache"] = dict(cached_payload.get("cache") or {})
+        cached_payload["cache"]["hit"] = True
+        cached_payload["cache"]["expires_at"] = expires_at.isoformat()
+        return cached_payload
+
+    def _load_daily_cache(self, *, kind: str, days: int, now: datetime) -> dict[str, Any] | None:
+        cache_path = self._daily_cache_path(kind=kind, days=days, now=now)
+        if cache_path is None or not cache_path.exists():
+            return None
+        try:
+            payload = json.loads(cache_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        expires_at_raw = str(payload.get("expires_at") or "")
+        try:
+            expires_at = datetime.fromisoformat(expires_at_raw)
+        except ValueError:
+            return None
+        if expires_at <= now.astimezone(SEATALK_INSIGHTS_TIMEZONE):
+            return None
+        data = payload.get("payload")
+        return data if isinstance(data, dict) else None
+
+    def _store_daily_cache(self, *, kind: str, days: int, now: datetime, payload: dict[str, Any]) -> None:
+        cache_path = self._daily_cache_path(kind=kind, days=days, now=now)
+        if cache_path is None:
+            return
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            wrapper = {
+                "kind": kind,
+                "cache_date": now.astimezone(SEATALK_INSIGHTS_TIMEZONE).date().isoformat(),
+                "expires_at": self._insights_cache_expiry(now).isoformat(),
+                "payload": payload,
+            }
+            temp_path = cache_path.with_name(f".{cache_path.name}.{os.getpid()}.tmp")
+            temp_path.write_text(json.dumps(wrapper, ensure_ascii=False, sort_keys=True), encoding="utf-8")
+            os.replace(temp_path, cache_path)
+        except OSError:
+            return
+
+    def _daily_cache_path(self, *, kind: str, days: int, now: datetime) -> Path | None:
+        if self.daily_cache_dir is None:
+            return None
+        safe_kind = re.sub(r"[^a-z0-9_]+", "_", kind.lower()).strip("_")
+        cache_date = now.astimezone(SEATALK_INSIGHTS_TIMEZONE).date().isoformat()
+        return self.daily_cache_dir / f"{safe_kind}_last_{int(days)}_days_{cache_date}.json"
 
     def _insights_cache_key(self, days: int) -> tuple[str, str, int, str, str]:
         return (str(self.seatalk_app_path), str(self.seatalk_data_dir), int(days), self.codex_model, self._name_overrides_cache_token())
