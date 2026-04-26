@@ -176,7 +176,7 @@
 
     .seatalk-insights-grid {
       display: grid;
-      grid-template-columns: minmax(0, 1.15fr) minmax(0, 0.85fr);
+      grid-template-columns: minmax(0, 1fr);
       gap: 1rem;
       align-items: start;
     }
@@ -340,8 +340,6 @@
   <section
     class="workspace-shell mail-demo-shell"
     data-seatalk-demo-root
-    data-seatalk-url="{{ url_for('gmail_seatalk_demo_seatalk_api') }}"
-    data-seatalk-export-url="{{ url_for('gmail_seatalk_demo_seatalk_export') }}"
     data-seatalk-insights-url="{{ seatalk_insights_url }}"
     data-seatalk-todo-complete-url="{{ seatalk_todo_complete_url }}"
     data-seatalk-configured="{{ 'true' if seatalk_configured else 'false' }}"
@@ -350,68 +348,35 @@
         <div class="panel-head">
           <div>
             <p class="eyebrow">SeaTalk</p>
-            <h2>SeaTalk Overview</h2>
-            <p class="help-text">SeaTalk metrics cover the last 7 days for the local SeaTalk desktop account on this Mac.</p>
-          </div>
-          <div class="button-row">
-            <a class="button button-secondary" data-seatalk-export-button href="{{ url_for('gmail_seatalk_demo_seatalk_export') }}">
-              Download 7-Day Chat History
-            </a>
+            <h2>SeaTalk Summary</h2>
+            <p class="help-text">Project updates and my to-do items from recent SeaTalk conversations.</p>
           </div>
         </div>
         <div class="empty-state mail-demo-status" data-seatalk-status data-tone="neutral">
           {% if seatalk_configured %}
-            <p>Loading SeaTalk dashboard data…</p>
+            <p>Loading SeaTalk summary…</p>
           {% else %}
-            <p>SeaTalk desktop data is not available yet. Open the SeaTalk Mac app on this machine to enable these metrics.</p>
+            <p>SeaTalk desktop data is not available yet. Open the SeaTalk Mac app on this machine to enable the summary.</p>
           {% endif %}
         </div>
         <div class="mail-demo-grid" data-seatalk-content {% if not seatalk_configured %}hidden{% endif %}>
-          <section class="mail-demo-scorecards" data-seatalk-scorecards></section>
-          <section class="mail-demo-chart-grid">
-            <article class="panel glass-panel mail-demo-card">
-              <div class="mail-demo-pill">Inbound trend</div>
-              <h3>Daily Received Volume</h3>
-              <p>Inbound SeaTalk messages over the last 7 days.</p>
-              <div data-seatalk-chart="received"></div>
-            </article>
-            <article class="panel glass-panel mail-demo-card">
-              <div class="mail-demo-pill">Outbound trend</div>
-              <h3>Daily Sent Volume</h3>
-              <p>Outbound SeaTalk messages over the last 7 days.</p>
-              <div data-seatalk-chart="sent"></div>
-            </article>
-          </section>
-          <section class="mail-demo-note-grid">
-            <article class="mail-demo-note-card" data-seatalk-note>
-              <strong>Local Status</strong>
-              <p>SeaTalk status note will appear here after the dashboard loads.</p>
-            </article>
-            <article class="mail-demo-note-card">
-              <strong>Data Scope</strong>
-              <p data-seatalk-scope>The portal will summarize the local SeaTalk desktop account visible on this Mac.</p>
-              <div class="mail-demo-source-strip" data-seatalk-meta>
-                <span class="mail-demo-source-tag">7-day window</span>
-              </div>
-            </article>
-          </section>
           <section class="seatalk-insights-grid" data-seatalk-insights-content>
-            <article class="mail-demo-card">
-              <div class="mail-demo-pill">Codex insights</div>
-              <h3>Project Updates</h3>
-              <p>Major updates from the last 7 days across your SeaTalk conversations.</p>
-              <div class="empty-state mail-demo-status" data-seatalk-insights-status data-tone="neutral">
-                <p>Loading Codex insights…</p>
-              </div>
-              <div class="seatalk-insight-list" data-seatalk-project-updates hidden></div>
-            </article>
             <article class="mail-demo-card">
               <div class="mail-demo-pill">Action items</div>
               <h3>To-do Items</h3>
               <p>My to-dos inferred from recent SeaTalk messages, sorted by priority.</p>
+              <div class="empty-state mail-demo-status" data-seatalk-insights-status data-tone="neutral">
+                <p>Loading SeaTalk summary…</p>
+              </div>
               <div class="seatalk-todo-columns" data-seatalk-todos hidden>
                 <div class="seatalk-insight-list" data-seatalk-my-todos></div>
               </div>
+            </article>
+            <article class="mail-demo-card">
+              <div class="mail-demo-pill">Project updates</div>
+              <h3>Project Updates</h3>
+              <p>Major updates from the last 7 days across your SeaTalk conversations.</p>
+              <div class="seatalk-insight-list" data-seatalk-project-updates hidden></div>
             </article>
           </section>
         </div>

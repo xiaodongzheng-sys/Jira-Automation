@@ -319,93 +319,28 @@
   const renderSeaTalk = async () => {
     if (!seatalkRoot) return;
     const seatalkConfigured = seatalkRoot.dataset.seatalkConfigured === 'true';
-    const seatalkUrl = seatalkRoot.dataset.seatalkUrl || '';
-    const exportUrl = seatalkRoot.dataset.seatalkExportUrl || '';
     const insightsUrl = seatalkRoot.dataset.seatalkInsightsUrl || '';
     const todoCompleteUrl = seatalkRoot.dataset.seatalkTodoCompleteUrl || '';
     const contentNode = seatalkRoot.querySelector('[data-seatalk-content]');
-    const scorecardsNode = seatalkRoot.querySelector('[data-seatalk-scorecards]');
-    const receivedChartNode = seatalkRoot.querySelector('[data-seatalk-chart="received"]');
-    const sentChartNode = seatalkRoot.querySelector('[data-seatalk-chart="sent"]');
-    const noteNode = seatalkRoot.querySelector('[data-seatalk-note]');
-    const scopeNode = seatalkRoot.querySelector('[data-seatalk-scope]');
-    const metaNode = seatalkRoot.querySelector('[data-seatalk-meta]');
-    const exportButton = seatalkRoot.querySelector('[data-seatalk-export-button]');
     const insightsStatusNode = seatalkRoot.querySelector('[data-seatalk-insights-status]');
     const projectUpdatesNode = seatalkRoot.querySelector('[data-seatalk-project-updates]');
     const todosNode = seatalkRoot.querySelector('[data-seatalk-todos]');
     const myTodosNode = seatalkRoot.querySelector('[data-seatalk-my-todos]');
     if (!seatalkConfigured) return;
-    if (exportButton && exportUrl) {
-      exportButton.href = exportUrl;
-    }
-    setScopedStatus(seatalkRoot, '[data-seatalk-status]', 'Loading SeaTalk dashboard data…', 'neutral');
+    if (contentNode) contentNode.hidden = false;
+    hideScopedStatus(seatalkRoot, '[data-seatalk-status]');
+    if (!insightsUrl || !insightsStatusNode) return;
+    setScopedStatus(seatalkRoot, '[data-seatalk-insights-status]', 'Loading SeaTalk summary…', 'neutral');
     try {
-      const response = await fetch(seatalkUrl, { method: 'GET' });
-      const payload = await parseDashboardResponse(response);
-      if (!response.ok) throw new Error(payload.message || 'Could not load SeaTalk dashboard data.');
-      const availability = payload.metric_availability || {};
-      const unreadAvailability = availability.current_unread || {};
-      const readRateAvailability = availability.read_rate_percent || {};
-      renderCards(scorecardsNode, [
-        {
-          label: 'Received Today',
-          value: buildMetricValue(payload.summary?.received_today),
-          detail: `${formatNumber(payload.summary?.received_period_total)} inbound SeaTalk messages in the last 7 days`,
-        },
-        {
-          label: 'Current Unread',
-          value: buildMetricValue(payload.summary?.current_unread),
-          detail: unreadAvailability.available ? 'Current unread SeaTalk conversations' : (unreadAvailability.reason || 'Not available'),
-        },
-        {
-          label: 'Read Rate',
-          value: payload.summary?.read_rate_percent === null || payload.summary?.read_rate_percent === undefined
-            ? 'N/A'
-            : `${buildMetricValue(payload.summary?.read_rate_percent)}%`,
-          detail: readRateAvailability.available
-            ? 'Estimated as (Received Today - Current Unread) / Received Today'
-            : (readRateAvailability.reason || 'Not available'),
-        },
-      ]);
-      renderChart(receivedChartNode, payload.trends?.received || []);
-      renderChart(sentChartNode, payload.trends?.sent || []);
-      if (noteNode) {
-        noteNode.innerHTML = `
-          <strong>Local Status</strong>
-          <p>${escapeHtml(payload.data_quality?.status_note || 'SeaTalk metrics loaded.')}</p>
-        `;
-      }
-      if (scopeNode) {
-        scopeNode.textContent = payload.data_quality?.source_scope || 'SeaTalk metrics are loaded from local desktop chat data on this Mac.';
-      }
-      renderSourceTags(metaNode, [
-        `${formatNumber(payload.period_days || 7)}-day window`,
-        payload.data_quality?.current_account_uid ? `UID ${payload.data_quality.current_account_uid}` : '',
-        `Updated ${formatDateTime(payload.generated_at)}`,
-      ]);
-      if (contentNode) contentNode.hidden = false;
-      hideScopedStatus(seatalkRoot, '[data-seatalk-status]');
-      if (insightsUrl && insightsStatusNode) {
-        setScopedStatus(seatalkRoot, '[data-seatalk-insights-status]', 'Loading Codex insights…', 'neutral');
-        fetch(insightsUrl, { method: 'GET' })
-          .then(async (insightsResponse) => {
-            const insightsPayload = await parseDashboardResponse(insightsResponse);
-            if (!insightsResponse.ok) throw new Error(insightsPayload.message || 'Could not load Codex insights.');
-            renderProjectUpdates(projectUpdatesNode, insightsPayload.project_updates || []);
-            renderTodos(myTodosNode, insightsPayload.my_todos || [], todoCompleteUrl);
-            if (todosNode) todosNode.hidden = false;
-            const cacheText = insightsPayload.cache?.hit ? 'cached' : 'fresh';
-            const modelText = insightsPayload.model_id || 'codex';
-            setScopedStatus(seatalkRoot, '[data-seatalk-insights-status]', `Codex insights loaded (${cacheText}, ${modelText}).`, 'success');
-          })
-          .catch((error) => {
-            setScopedStatus(seatalkRoot, '[data-seatalk-insights-status]', error.message || 'Could not load Codex insights.', 'error');
-          });
-      }
+      const insightsResponse = await fetch(insightsUrl, { method: 'GET' });
+      const insightsPayload = await parseDashboardResponse(insightsResponse);
+      if (!insightsResponse.ok) throw new Error(insightsPayload.message || 'Could not load SeaTalk summary.');
+      renderTodos(myTodosNode, insightsPayload.my_todos || [], todoCompleteUrl);
+      renderProjectUpdates(projectUpdatesNode, insightsPayload.project_updates || []);
+      if (todosNode) todosNode.hidden = false;
+      hideScopedStatus(seatalkRoot, '[data-seatalk-insights-status]');
     } catch (error) {
-      if (contentNode) contentNode.hidden = true;
-      setScopedStatus(seatalkRoot, '[data-seatalk-status]', error.message || 'Could not load SeaTalk dashboard data.', 'error');
+      setScopedStatus(seatalkRoot, '[data-seatalk-insights-status]', error.message || 'Could not load SeaTalk summary.', 'error');
     }
   };
 
