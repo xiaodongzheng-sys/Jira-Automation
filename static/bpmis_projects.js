@@ -204,7 +204,7 @@
           await loadTasks(expandedProjectId, { force: true });
         }
       }
-      setStatus(projects.length ? 'Projects are up to date.' : 'Sync BPMIS Projects to begin.', projects.length ? 'success' : 'neutral');
+      setStatus('');
     } catch (error) {
       setStatus(error.message || 'Could not load BPMIS projects.', 'error');
     }
