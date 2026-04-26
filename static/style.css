@@ -924,10 +924,11 @@ input {
 
 .confirm-modal-backdrop[data-jira-modal-backdrop].is-visible .jira-wizard-modal {
   position: fixed;
-  top: 50%;
+  top: 48px;
   left: 50%;
   width: min(820px, calc(100vw - 48px));
-  transform: translate(-50%, -50%);
+  max-height: calc(100dvh - 96px);
+  transform: translateX(-50%);
 }
 
 .confirm-modal {
