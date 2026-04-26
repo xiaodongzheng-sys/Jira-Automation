@@ -877,18 +877,31 @@ class SourceCodeQALLMProvider:
 
 class CodexCliBridgeSourceCodeQALLMProvider(SourceCodeQALLMProvider):
     name = LLM_PROVIDER_CODEX_CLI_BRIDGE
-    _run_lock = threading.Lock()
+    _semaphore_lock = threading.Lock()
+    _run_semaphore = threading.BoundedSemaphore(1)
+    _semaphore_limit = 1
 
     def __init__(
         self,
         *,
         workspace_root: Path,
         timeout_seconds: int = DEFAULT_LLM_TIMEOUT_SECONDS,
+        concurrency_limit: int = 1,
         codex_binary: str | None = None,
     ) -> None:
         self.workspace_root = Path(workspace_root)
         self.timeout_seconds = max(10, int(timeout_seconds or DEFAULT_LLM_TIMEOUT_SECONDS))
+        self.concurrency_limit = max(1, min(int(concurrency_limit or 1), 4))
         self.codex_binary = str(codex_binary or os.getenv("SOURCE_CODE_QA_CODEX_BINARY") or "codex").strip() or "codex"
+
+    @classmethod
+    def _semaphore_for_limit(cls, limit: int) -> threading.BoundedSemaphore:
+        normalized_limit = max(1, min(int(limit or 1), 4))
+        with cls._semaphore_lock:
+            if cls._semaphore_limit != normalized_limit:
+                cls._run_semaphore = threading.BoundedSemaphore(normalized_limit)
+                cls._semaphore_limit = normalized_limit
+            return cls._run_semaphore
 
     def ready(self) -> bool:
         if not shutil.which(self.codex_binary):
@@ -942,8 +955,27 @@ class CodexCliBridgeSourceCodeQALLMProvider(SourceCodeQALLMProvider):
             ]
             if model not in {"codex-cli", "codex"}:
                 command[2:2] = ["--model", model]
+            queue_started = time.time()
+            queue_wait_ms = 0
             try:
-                with self._run_lock:
+                semaphore = self._semaphore_for_limit(self.concurrency_limit)
+                if progress_callback:
+                    progress_callback(
+                        "codex_queue",
+                        f"Waiting for Codex slot ({self.concurrency_limit} max concurrent).",
+                        0,
+                        1,
+                    )
+                semaphore.acquire()
+                queue_wait_ms = int((time.time() - queue_started) * 1000)
+                try:
+                    if progress_callback and queue_wait_ms > 250:
+                        progress_callback(
+                            "codex_queue",
+                            f"Codex slot acquired after {queue_wait_ms / 1000:.1f}s.",
+                            1,
+                            1,
+                        )
                     if progress_callback:
                         result = self._run_codex_streaming(
                             command=command,
@@ -961,6 +993,8 @@ class CodexCliBridgeSourceCodeQALLMProvider(SourceCodeQALLMProvider):
                             timeout=self.timeout_seconds,
                             check=False,
                         )
+                finally:
+                    semaphore.release()
             except subprocess.TimeoutExpired as error:
                 raise ToolError(f"Codex unavailable; used code search fallback. Codex CLI timed out after {self.timeout_seconds}s.") from error
             except OSError as error:
@@ -993,6 +1027,8 @@ class CodexCliBridgeSourceCodeQALLMProvider(SourceCodeQALLMProvider):
                     "timeout": False,
                     "workspace_root": str(self.workspace_root),
                     "prompt_mode": prompt_mode,
+                    "concurrency_limit": self.concurrency_limit,
+                    "queue_wait_ms": queue_wait_ms,
                     "command": self._command_summary(command),
                 },
             ),
@@ -1896,6 +1932,7 @@ class SourceCodeQAService:
         llm_cache_ttl_seconds: int = 1800,
         llm_timeout_seconds: int = DEFAULT_LLM_TIMEOUT_SECONDS,
         codex_timeout_seconds: int | None = None,
+        codex_concurrency: int = 1,
         codex_top_path_limit: int = DEFAULT_CODEX_TOP_PATH_LIMIT,
         codex_repair_enabled: bool = True,
         llm_max_retries: int = DEFAULT_LLM_MAX_RETRIES,
@@ -1957,6 +1994,7 @@ class SourceCodeQAService:
             10,
             int(codex_timeout_seconds if codex_timeout_seconds is not None else DEFAULT_CODEX_TIMEOUT_SECONDS),
         )
+        self.codex_concurrency = max(1, min(int(codex_concurrency or 1), 4))
         self.codex_top_path_limit = max(5, min(int(codex_top_path_limit or DEFAULT_CODEX_TOP_PATH_LIMIT), 80))
         self.codex_repair_enabled = bool(codex_repair_enabled)
         self.llm_max_retries = max(0, int(llm_max_retries or 0))
@@ -2018,6 +2056,7 @@ class SourceCodeQAService:
             llm_cache_ttl_seconds=self.llm_cache_ttl_seconds,
             llm_timeout_seconds=self.llm_timeout_seconds,
             codex_timeout_seconds=self.codex_timeout_seconds,
+            codex_concurrency=self.codex_concurrency,
             codex_top_path_limit=self.codex_top_path_limit,
             codex_repair_enabled=self.codex_repair_enabled,
             llm_max_retries=self.llm_max_retries,
@@ -2173,6 +2212,7 @@ class SourceCodeQAService:
             return CodexCliBridgeSourceCodeQALLMProvider(
                 workspace_root=self.repo_root,
                 timeout_seconds=self.codex_timeout_seconds,
+                concurrency_limit=self.codex_concurrency,
             )
         if self.llm_provider_name == LLM_PROVIDER_VERTEX_AI:
             return VertexAISourceCodeQALLMProvider(

@@ -662,6 +662,7 @@ def create_app() -> Flask:
         llm_cache_ttl_seconds=settings.source_code_qa_llm_cache_ttl_seconds,
         llm_timeout_seconds=settings.source_code_qa_llm_timeout_seconds,
         codex_timeout_seconds=settings.source_code_qa_codex_timeout_seconds,
+        codex_concurrency=settings.source_code_qa_codex_concurrency,
         codex_top_path_limit=settings.source_code_qa_codex_top_path_limit,
         codex_repair_enabled=settings.source_code_qa_codex_repair_enabled,
         llm_max_retries=settings.source_code_qa_llm_max_retries,

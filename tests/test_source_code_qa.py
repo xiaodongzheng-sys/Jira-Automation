@@ -6531,6 +6531,8 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertEqual(result.model, "codex-cli")
         self.assertEqual(result.attempt_log[0]["exit_code"], 0)
         self.assertEqual(result.attempt_log[0]["workspace_root"], self.temp_dir.name)
+        self.assertEqual(result.attempt_log[0]["concurrency_limit"], 1)
+        self.assertIn("queue_wait_ms", result.attempt_log[0])
         self.assertIn("--sandbox", result.attempt_log[0]["command"])
 
     def test_codex_cli_bridge_adds_rg_directory_to_exec_path(self):
@@ -6664,12 +6666,14 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             llm_provider="codex_cli_bridge",
             llm_timeout_seconds=90,
             codex_timeout_seconds=260,
+            codex_concurrency=2,
             gitlab_token="secret-token",
             git_timeout_seconds=5,
             max_file_bytes=200_000,
         )
 
         self.assertEqual(service.llm_provider.timeout_seconds, 260)
+        self.assertEqual(service.llm_provider.concurrency_limit, 2)
 
     def test_codex_investigation_brief_uses_paths_not_long_snippet_context(self):
         entry = RepositoryEntry("Portal Repo", "https://git.example.com/team/portal.git")
