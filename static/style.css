@@ -86,97 +86,66 @@
   background: rgba(248, 251, 255, 0.92);
 }
 
+.bpmis-task-list {
+  display: grid;
+  gap: 8px;
+}
+
+.bpmis-task-list-head,
 .bpmis-task-card {
   display: grid;
-  grid-template-columns: minmax(240px, 0.9fr) minmax(260px, 1.4fr) auto;
-  gap: 16px;
+  grid-template-columns: minmax(120px, 0.8fr) minmax(280px, 1.8fr) minmax(68px, 0.45fr) minmax(108px, 0.65fr) minmax(140px, 0.8fr) minmax(140px, 0.8fr) auto;
+  gap: 12px;
   align-items: center;
-  padding: 14px 14px 12px;
+}
+
+.bpmis-task-list-head {
+  padding: 0 12px;
+  color: #667085;
+  font-size: 0.74rem;
+  font-weight: 800;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.bpmis-task-card {
+  padding: 12px;
   border: 1px solid rgba(106, 119, 149, 0.14);
   border-radius: 8px;
   background: #ffffff;
   box-shadow: 0 8px 20px rgba(15, 23, 42, 0.04);
 }
 
-.bpmis-task-identity {
-  display: grid;
-  gap: 8px;
+.bpmis-task-cell {
   min-width: 0;
-}
-
-.bpmis-task-id-line {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px 10px;
-  align-items: center;
-}
-
-.bpmis-task-id {
-  display: flex;
-  align-items: center;
+  color: #475467;
   font-size: 0.82rem;
   font-weight: 700;
+  line-height: 1.35;
 }
 
-.bpmis-task-chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  min-width: 0;
-}
-
-.bpmis-task-chip {
-  display: inline-flex;
-  align-items: center;
-  min-height: 24px;
-  padding: 3px 8px;
-  border-radius: 999px;
-  background: #f2f4f7;
-  color: #475467;
-  font-size: 0.76rem;
-  font-weight: 700;
-}
-
-.bpmis-task-meta span {
-  color: var(--muted);
+.bpmis-task-ticket {
+  color: #155eef;
 }
 
 .bpmis-task-title {
-  color: var(--ink);
+  color: #1f2937;
   font-weight: 650;
   text-align: left;
   overflow-wrap: anywhere;
 }
 
-.bpmis-task-actions,
-.bpmis-task-meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  align-items: center;
-}
-
 .bpmis-task-actions {
+  display: flex;
   justify-content: flex-end;
-  flex-wrap: nowrap;
-  min-width: 150px;
-}
-
-.bpmis-task-meta {
-  font-size: 0.82rem;
-}
-
-.bpmis-task-meta-mobile {
-  display: none;
-}
-
-.bpmis-task-meta strong {
-  color: #475467;
-  font-weight: 800;
 }
 
 .bpmis-task-status {
-  padding: 8px 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 30px;
+  padding: 6px 10px;
   border-radius: 999px;
   background: #edf4ff;
   color: #155eef;
@@ -228,21 +197,34 @@
     margin-left: 0;
   }
 
+  .bpmis-task-list-head {
+    display: none;
+  }
+
   .bpmis-task-card {
     grid-template-columns: 1fr;
     gap: 10px;
   }
 
+  .bpmis-task-cell {
+    display: grid;
+    grid-template-columns: 92px minmax(0, 1fr);
+    gap: 10px;
+  }
+
+  .bpmis-task-cell::before {
+    content: attr(data-label);
+    color: #667085;
+    font-weight: 800;
+  }
+
   .bpmis-task-actions {
     justify-content: flex-start;
-  }
-
-  .bpmis-task-identity > .bpmis-task-meta {
-    display: none;
-  }
-
-  .bpmis-task-meta-mobile {
     display: flex;
+  }
+
+  .bpmis-task-actions::before {
+    display: none;
   }
 }
 

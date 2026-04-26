@@ -105,48 +105,49 @@
     if (!Array.isArray(tickets) || !tickets.length) {
       return '<div class="bpmis-task-empty">No Jira tasks created for this project yet.</div>';
     }
-    return tickets.map((ticket) => {
+    const rows = tickets.map((ticket) => {
       const key = escapeHtml(ticket.ticket_key || ticket.ticket_link || 'Jira');
       const title = escapeHtml(ticket.live_jira_title || ticket.jira_title || '-');
       const rawStatus = displayTaskStatus(ticket.live_jira_status || ticket.status);
       const statusText = escapeHtml(rawStatus);
       const version = escapeHtml(ticket.live_fix_version || ticket.fix_version_name || '-');
-      const prdLink = String(ticket.prd_link || '').trim();
+      const market = escapeHtml(ticket.market || '-');
+      const component = escapeHtml(ticket.component || '-');
       const link = ticket.ticket_link
         ? `<a href="${escapeHtml(ticket.ticket_link)}" target="_blank" rel="noreferrer">${key}</a>`
         : `<span>${key}</span>`;
-      const metaMarkup = [ticket.component, ticket.market].filter(Boolean)
-        .map((item) => `<span class="bpmis-task-chip">${escapeHtml(item)}</span>`)
-        .join('');
-      const prdMarkup = prdLink
-        ? `<span><strong>PRD</strong> <a href="${escapeHtml(prdLink)}" target="_blank" rel="noreferrer">Open</a></span>`
-        : '';
       const liveError = ticket.live_error ? `<p class="bpmis-task-warning">${escapeHtml(ticket.live_error)}</p>` : '';
       return `
         <article class="bpmis-task-card" data-task-card="${escapeHtml(ticket.id || '')}">
-          <div class="bpmis-task-identity">
-            <div class="bpmis-task-id-line">
-              <div class="bpmis-task-id">${link}</div>
-              <div class="bpmis-task-chips">${metaMarkup}</div>
-            </div>
-            <div class="bpmis-task-meta">
-              <span><strong>Version</strong> ${version}</span>
-              ${prdMarkup}
-            </div>
-          </div>
-          <div class="bpmis-task-title" title="${title}">${title}</div>
-          <div class="bpmis-task-actions">
+          <div class="bpmis-task-cell bpmis-task-ticket" data-label="Ticket">${link}</div>
+          <div class="bpmis-task-cell bpmis-task-title" data-label="Title" title="${title}">${title}</div>
+          <div class="bpmis-task-cell" data-label="Market">${market}</div>
+          <div class="bpmis-task-cell" data-label="Status">
             <span class="bpmis-task-status${taskStatusClass(rawStatus)}">${statusText}</span>
-            <button class="button button-secondary danger-button bpmis-task-delink" type="button" data-delink-task="${escapeHtml(ticket.id || '')}" data-delink-project="${escapeHtml(ticket.bpmis_id || '')}">Delink</button>
           </div>
-          <div class="bpmis-task-meta bpmis-task-meta-mobile">
-            <span><strong>Version</strong> ${version}</span>
-            ${prdMarkup}
+          <div class="bpmis-task-cell" data-label="Version">${version}</div>
+          <div class="bpmis-task-cell" data-label="Component">${component}</div>
+          <div class="bpmis-task-cell bpmis-task-actions">
+            <button class="button button-secondary danger-button bpmis-task-delink" type="button" data-delink-task="${escapeHtml(ticket.id || '')}" data-delink-project="${escapeHtml(ticket.bpmis_id || '')}">Delink</button>
           </div>
           ${liveError}
         </article>
       `;
     }).join('');
+    return `
+      <div class="bpmis-task-list">
+        <div class="bpmis-task-list-head" aria-hidden="true">
+          <span>Ticket</span>
+          <span>Title</span>
+          <span>Market</span>
+          <span>Status</span>
+          <span>Version</span>
+          <span>Component</span>
+          <span></span>
+        </div>
+        ${rows}
+      </div>
+    `;
   };
 
   const projectById = (bpmisId) => projects.find((project) => String(project.bpmis_id || '') === String(bpmisId || ''));
