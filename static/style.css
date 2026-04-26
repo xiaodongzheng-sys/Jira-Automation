@@ -4405,6 +4405,8 @@ select:focus {
   gap: 8px;
   max-height: 520px;
   overflow: auto;
+  padding-right: 4px;
+  scrollbar-gutter: stable;
 }
 
 .source-qa-session-row {
@@ -4505,13 +4507,18 @@ select:focus {
 
 .source-qa-session-list {
   scrollbar-width: thin;
-  scrollbar-color: rgba(102, 112, 133, 0.28) transparent;
+  scrollbar-color: rgba(102, 112, 133, 0.2) transparent;
 }
 
 .source-qa-session-messages::-webkit-scrollbar,
 .source-qa-session-list::-webkit-scrollbar {
   width: 6px;
   height: 6px;
+}
+
+.source-qa-session-list::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
 }
 
 .source-qa-session-messages::-webkit-scrollbar-track,
@@ -4525,9 +4532,17 @@ select:focus {
   background: rgba(102, 112, 133, 0.34);
 }
 
+.source-qa-session-list::-webkit-scrollbar-thumb {
+  background: rgba(102, 112, 133, 0.22);
+}
+
 .source-qa-session-messages::-webkit-scrollbar-thumb:hover,
 .source-qa-session-list::-webkit-scrollbar-thumb:hover {
   background: rgba(102, 112, 133, 0.5);
+}
+
+.source-qa-session-list::-webkit-scrollbar-thumb:hover {
+  background: rgba(102, 112, 133, 0.38);
 }
 
 .source-qa-message {
