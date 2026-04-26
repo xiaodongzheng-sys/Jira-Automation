@@ -24,7 +24,7 @@ SEATALK_DASHBOARD_DEFAULT_DAYS = 7
 SEATALK_DASHBOARD_CACHE_TTL_SECONDS = 300
 SEATALK_DEFAULT_APP_PATH = "/Applications/SeaTalk.app"
 SEATALK_DEFAULT_DATA_DIR = "~/Library/Application Support/SeaTalk"
-SEATALK_INSIGHTS_PROMPT_MODE = "seatalk_7_day_insights_v3"
+SEATALK_INSIGHTS_PROMPT_MODE = "seatalk_7_day_insights_v4"
 SEATALK_INSIGHTS_TIMEZONE = ZoneInfo("Asia/Singapore")
 SEATALK_INSIGHTS_HISTORY_MAX_CHARS = 620_000
 SEATALK_INSIGHTS_SIGNAL_MAX_CHARS = 360_000
@@ -435,6 +435,7 @@ class SeaTalkDashboardService:
             "Classify project update domains as exactly one of Anti-fraud, Credit Risk, Ops Risk, General. "
             "Use General as a broad awareness radar: include any noteworthy update Xiaodong should know from the whole chat history that does not fit the three owned product lines. "
             "General includes non-owned product lines, cross-product banking updates, leadership or boss updates, AI sharing, planning, slides, reporting, Key Project table work, org/process changes, incidents, launches, dependencies, and important discussions even when Xiaodong has no action item. "
+            "Run a separate General-awareness pass before finalizing project_updates; if the chat history contains any General signals, include 3 to 6 General project_updates and put them before owned-product updates. "
             "Classify action items into my_todos when Xiaodong, Zheng Xiaodong, xiaodong.zheng@npt.sg, or direct second-person requests indicate Xiaodong should act. "
             "Include Xiaodong-owned General tasks such as AI sharing, Key Project table updates, slide updates, reporting, meeting prep, and leadership follow-ups. "
             "Do not include action items owned by other people."
@@ -447,7 +448,7 @@ class SeaTalkDashboardService:
             "project_updates must be an array of objects with keys: domain, title, summary, status, evidence.\n"
             "For every project_updates item, domain must be exactly one of: Anti-fraud, Credit Risk, Ops Risk, General.\n"
             "For General project_updates, scan the entire chat history for anything worth Xiaodong's awareness, not only traditional product projects. Include other banking product lines, cross-product updates, leadership or boss updates, AI sharing, Key Project, slide, reporting, planning, org/process changes, incidents, launches, dependencies, and important discussions. It is OK for a General update to have no Xiaodong-owned todo.\n"
-            "Do not leave General empty merely because the item is not Xiaodong's owned product line or is not an action item.\n"
+            "Do a separate General pass and put 3 to 6 General project_updates first whenever the history has any such signal. Do not leave General empty merely because the item is not Xiaodong's owned product line or is not an action item.\n"
             "my_todos must contain only Xiaodong's own action items. team_todos must always be an empty array.\n"
             "my_todos objects must have keys: task, domain, priority, due, evidence.\n"
             "For every my_todos item, domain must be exactly one of: Anti-fraud, Credit Risk, Ops Risk, General.\n"
@@ -649,7 +650,7 @@ class SeaTalkDashboardService:
     def _normalize_project_updates(cls, value: Any) -> list[dict[str, str]]:
         rows = value if isinstance(value, list) else []
         normalized: list[dict[str, str]] = []
-        for row in rows[:12]:
+        for row in rows[:20]:
             if not isinstance(row, dict):
                 continue
             normalized.append(

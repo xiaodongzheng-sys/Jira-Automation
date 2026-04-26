@@ -435,6 +435,8 @@ class SeaTalkDashboardServiceTests(unittest.TestCase):
         self.assertIn("broad awareness radar", system_prompt)
         self.assertIn("anything worth Xiaodong's awareness", prompt)
         self.assertIn("It is OK for a General update to have no Xiaodong-owned todo", prompt)
+        self.assertIn("separate General-awareness pass", system_prompt)
+        self.assertIn("put 3 to 6 General project_updates first", prompt)
 
     def test_insights_normalizes_update_and_todo_domains(self):
         parsed = SeaTalkDashboardService._parse_insights_response(
@@ -460,6 +462,21 @@ class SeaTalkDashboardServiceTests(unittest.TestCase):
         )
         self.assertEqual(parsed["my_todos"][0]["domain"], "General")
         self.assertEqual(parsed["my_todos"][0]["task"], "Prepare AI sharing")
+
+    def test_insights_keeps_more_than_twelve_project_updates(self):
+        project_updates = [
+            {"domain": "Anti-fraud", "title": f"AF {index}", "summary": "", "status": "done", "evidence": ""}
+            for index in range(12)
+        ]
+        project_updates.append({"domain": "Leadership", "title": "General awareness", "summary": "", "status": "done", "evidence": ""})
+
+        parsed = SeaTalkDashboardService._parse_insights_response(
+            json.dumps({"project_updates": project_updates, "my_todos": [], "team_todos": []})
+        )
+
+        self.assertEqual(len(parsed["project_updates"]), 13)
+        self.assertEqual(parsed["project_updates"][-1]["domain"], "General")
+        self.assertEqual(parsed["project_updates"][-1]["title"], "General awareness")
 
     def test_build_insights_sorts_my_todos_by_priority(self):
         def local_runner(command: list[str]):
