@@ -1,0 +1,12 @@
+.git
+.gitignore
+.gcloudignore
+.env
+.env.*
+.venv/
+.team-portal/
+__pycache__/
+*.pyc
+.DS_Store
+tmp/
+node_modules/

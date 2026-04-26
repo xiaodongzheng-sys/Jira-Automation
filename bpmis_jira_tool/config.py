@@ -132,6 +132,14 @@ class Settings:
     elevenlabs_api_key: str | None = None
     elevenlabs_mandarin_model_id: str = "eleven_multilingual_v2"
     elevenlabs_mandarin_voice_id: str = "JBFqnCBsd6RMkjVDRZzb"
+    local_agent_base_url: str | None = None
+    local_agent_hmac_secret: str | None = None
+    local_agent_timeout_seconds: int = 300
+    local_agent_mode: str = "disabled"
+    local_agent_source_code_qa_enabled: bool = False
+    local_agent_seatalk_enabled: bool = False
+    local_agent_bpmis_enabled: bool = False
+    bpmis_call_mode: str = "direct"
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -237,4 +245,12 @@ class Settings:
             elevenlabs_api_key=_env_str("ELEVENLABS_API_KEY"),
             elevenlabs_mandarin_model_id=_env_str("ELEVENLABS_MANDARIN_MODEL_ID", "eleven_multilingual_v2"),
             elevenlabs_mandarin_voice_id=_env_str("ELEVENLABS_MANDARIN_VOICE_ID", "JBFqnCBsd6RMkjVDRZzb"),
+            local_agent_base_url=_env_str("LOCAL_AGENT_BASE_URL"),
+            local_agent_hmac_secret=_env_str("LOCAL_AGENT_HMAC_SECRET"),
+            local_agent_timeout_seconds=int(_env_str("LOCAL_AGENT_TIMEOUT_SECONDS", "300")),
+            local_agent_mode=_env_str("LOCAL_AGENT_MODE", "disabled"),
+            local_agent_source_code_qa_enabled=_env_bool("LOCAL_AGENT_SOURCE_CODE_QA_ENABLED", False),
+            local_agent_seatalk_enabled=_env_bool("LOCAL_AGENT_SEATALK_ENABLED", False),
+            local_agent_bpmis_enabled=_env_bool("LOCAL_AGENT_BPMIS_ENABLED", False),
+            bpmis_call_mode=_env_str("BPMIS_CALL_MODE", "direct"),
         )

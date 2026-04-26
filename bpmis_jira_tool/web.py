@@ -32,6 +32,7 @@ from bpmis_jira_tool.google_auth import (
     finish_google_oauth,
     get_google_credentials,
 )
+from bpmis_jira_tool.local_agent_client import LocalAgentClient, RemoteSeaTalkDashboardService, RemoteSourceCodeQAService
 from bpmis_jira_tool.gmail_dashboard import GMAIL_READONLY_SCOPE, GmailDashboardService
 from bpmis_jira_tool.seatalk_dashboard import SeaTalkDashboardService
 from bpmis_jira_tool.google_sheets import GoogleSheetsService
@@ -2752,6 +2753,12 @@ def _build_gmail_dashboard_service() -> GmailDashboardService:
 
 
 def _build_seatalk_dashboard_service(settings: Settings) -> SeaTalkDashboardService:
+    if _local_agent_seatalk_enabled(settings):
+        name_mapping_store = current_app.config.get("SEATALK_NAME_MAPPING_STORE") if current_app else None
+        return RemoteSeaTalkDashboardService(
+            _build_local_agent_client(settings),
+            name_mappings_provider=lambda: name_mapping_store.mappings() if name_mapping_store else {},
+        )
     name_mapping_store = current_app.config.get("SEATALK_NAME_MAPPING_STORE") if current_app else None
     name_overrides_path = getattr(name_mapping_store, "storage_path", None)
     daily_cache_dir = current_app.config.get("SEATALK_DAILY_CACHE_DIR") if current_app else None
@@ -2769,6 +2776,12 @@ def _build_seatalk_dashboard_service(settings: Settings) -> SeaTalkDashboardServ
 
 
 def _seatalk_dashboard_is_configured(settings: Settings) -> bool:
+    if _local_agent_seatalk_enabled(settings):
+        try:
+            capabilities = _build_local_agent_client(settings).get_health().get("capabilities") or {}
+            return bool(capabilities.get("seatalk_configured"))
+        except ToolError:
+            return False
     app_path = Path(str(settings.seatalk_local_app_path or "")).expanduser()
     data_dir = Path(str(settings.seatalk_local_data_dir or "")).expanduser()
     return bool(app_path.exists() and data_dir.exists() and (data_dir / "config.json").exists())
@@ -2876,9 +2889,41 @@ def _can_manage_source_code_qa(settings: Settings) -> bool:
 
 def _build_source_code_qa_service(llm_provider: str | None = None) -> SourceCodeQAService:
     service: SourceCodeQAService = current_app.config["SOURCE_CODE_QA_SERVICE"]
-    if llm_provider is None:
-        return service
-    return service.with_llm_provider(str(llm_provider or ""))
+    resolved = service if llm_provider is None else service.with_llm_provider(str(llm_provider or ""))
+    if _local_agent_source_code_qa_enabled(current_app.config["SETTINGS"]):
+        return RemoteSourceCodeQAService(_build_local_agent_client(current_app.config["SETTINGS"]), service, llm_provider=llm_provider or resolved.llm_provider_name)
+    return resolved
+
+
+def _build_local_agent_client(settings: Settings) -> LocalAgentClient:
+    return LocalAgentClient(
+        base_url=settings.local_agent_base_url or "",
+        hmac_secret=settings.local_agent_hmac_secret or "",
+        timeout_seconds=settings.local_agent_timeout_seconds,
+    )
+
+
+def _local_agent_mode_enabled(settings: Settings) -> bool:
+    mode = (settings.local_agent_mode or "").strip().lower()
+    return mode in {"sync", "remote", "cloud_run", "enabled"}
+
+
+def _local_agent_source_code_qa_enabled(settings: Settings) -> bool:
+    return bool(
+        _local_agent_mode_enabled(settings)
+        and settings.local_agent_base_url
+        and settings.local_agent_hmac_secret
+        and settings.local_agent_source_code_qa_enabled
+    )
+
+
+def _local_agent_seatalk_enabled(settings: Settings) -> bool:
+    return bool(
+        _local_agent_mode_enabled(settings)
+        and settings.local_agent_base_url
+        and settings.local_agent_hmac_secret
+        and settings.local_agent_seatalk_enabled
+    )
 
 
 def _source_code_qa_model_availability() -> dict[str, bool]:
