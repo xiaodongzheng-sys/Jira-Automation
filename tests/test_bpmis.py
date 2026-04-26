@@ -802,6 +802,52 @@ class BPMISClientTests(unittest.TestCase):
             self.assertEqual(update_call[3], {"jiraKey": "AF-101", "statusId": 44})
             self.assertEqual(detail["status"]["label"], "Testing")
 
+    def test_update_jira_ticket_status_rejects_unchanged_live_status(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings = Settings(
+                flask_secret_key="secret",
+                google_oauth_client_secret_file=Path(temp_dir) / "client.json",
+                google_oauth_redirect_uri=None,
+                team_portal_host="127.0.0.1",
+                team_portal_port=5000,
+                team_portal_base_url=None,
+                team_allowed_emails=(),
+                team_allowed_email_domains=(),
+                team_portal_data_dir=Path(temp_dir),
+                spreadsheet_id="sheet",
+                common_tab_name="Common",
+                input_tab_name="Input",
+                bpmis_base_url="https://example.com",
+                bpmis_api_access_token="token",
+            )
+
+            client = BPMISDirectApiClient(settings)
+
+            def fake_api_request(path, method="GET", params=None, body=None):
+                if path == "/api/v1/issues/detail":
+                    return {
+                        "data": {
+                            "row": {
+                                "id": 9001,
+                                "jiraKey": "AF-101",
+                                "summary": "Live AF task",
+                                "status": {"label": "Waiting"},
+                            }
+                        }
+                    }
+                if path == "/api/v1/issueField/list":
+                    return {"data": {"statusId": {"key": "statusId", "optionGroup": "jiraStatus"}}}
+                if path == "/api/v1/options/getGroupOptions":
+                    return {"data": {"jiraStatus": [{"label": "Testing", "value": 44}]}}
+                if path == "/api/v1/issues/updateStatus":
+                    return {"data": {"ok": True}}
+                raise BPMISError("not found")
+
+            client._api_request = fake_api_request  # type: ignore[method-assign]
+
+            with self.assertRaisesRegex(BPMISError, "Jira is still 'Waiting'"):
+                client.update_jira_ticket_status("AF-101", "Testing")
+
     def test_update_jira_ticket_status_rejects_unknown_status(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             settings = Settings(

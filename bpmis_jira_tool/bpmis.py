@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -458,6 +459,10 @@ class BPMISDirectApiClient(BPMISClient):
         if not normalized_status:
             raise BPMISError("Jira status is required.")
 
+        direct_jira_detail = self._update_jira_ticket_status_via_jira(normalized_ticket_key, normalized_status)
+        if direct_jira_detail is not None:
+            return direct_jira_detail
+
         detail = self.get_jira_ticket_detail(normalized_ticket_key)
         issue_id = self._extract_issue_identifier(detail)
         status_id = self._resolve_jira_status_id(normalized_status)
@@ -478,16 +483,35 @@ class BPMISDirectApiClient(BPMISClient):
             ("POST", "/api/v1/issue/status/update"),
         ]
         last_error: BPMISError | None = None
+        accepted_statuses: list[str] = []
         for body in bodies:
             for method, path in attempts:
                 try:
                     self._api_request(path, method=method, body=body)
-                    return self.get_jira_ticket_detail(normalized_ticket_key)
+                    updated_detail = self.get_jira_ticket_detail(normalized_ticket_key)
+                    updated_status = self._extract_jira_status_label(updated_detail)
+                    if self._status_labels_match(updated_status, normalized_status):
+                        return updated_detail
+                    if updated_status:
+                        accepted_statuses.append(updated_status)
                 except BPMISError as error:
                     last_error = error
+        if accepted_statuses:
+            current_status = accepted_statuses[-1]
+            raise BPMISError(
+                f"BPMIS accepted the status update request, but Jira is still '{current_status}'. "
+                "The current BPMIS API token does not appear to expose a working Jira workflow transition endpoint."
+            )
         if last_error is not None:
-            raise BPMISError(f"Could not update Jira status through BPMIS: {last_error}") from last_error
-        raise BPMISError("Could not update Jira status through BPMIS.")
+            raise BPMISError(
+                "Could not update Jira status through BPMIS. "
+                "The current BPMIS API token does not expose a working Jira workflow transition endpoint. "
+                f"Last error: {last_error}"
+            ) from last_error
+        raise BPMISError(
+            "Could not update Jira status through BPMIS. "
+            "The current BPMIS API token does not expose a working Jira workflow transition endpoint."
+        )
 
     def _build_create_payload(
         self,
@@ -657,6 +681,101 @@ class BPMISDirectApiClient(BPMISClient):
         normalized = str(status or "").strip()
         allowed = {value.lower(): value for value in self.JIRA_STATUS_OPTIONS}
         return allowed.get(normalized.lower(), "")
+
+    def _update_jira_ticket_status_via_jira(self, ticket_key: str, status: str) -> dict[str, Any] | None:
+        jira_token = (
+            os.getenv("JIRA_API_TOKEN")
+            or os.getenv("JIRA_PAT")
+            or os.getenv("JIRA_PERSONAL_ACCESS_TOKEN")
+            or ""
+        ).strip()
+        if not jira_token:
+            return None
+
+        jira_base_url = (os.getenv("JIRA_BASE_URL") or self.JIRA_BROWSE_BASE_URL).strip().rstrip("/")
+        if jira_base_url.endswith("/browse"):
+            jira_base_url = jira_base_url[: -len("/browse")]
+        username = (os.getenv("JIRA_USERNAME") or os.getenv("JIRA_EMAIL") or "").strip()
+        headers = {"Accept": "application/json", "Content-Type": "application/json"}
+        auth = None
+        if username:
+            auth = (username, jira_token)
+        else:
+            headers["Authorization"] = f"Bearer {jira_token}"
+
+        transitions_url = f"{jira_base_url}/rest/api/2/issue/{ticket_key}/transitions"
+        try:
+            transitions_response = requests.get(transitions_url, headers=headers, auth=auth, timeout=30)
+            if transitions_response.status_code >= 400:
+                raise BPMISError(
+                    f"Jira transition lookup failed for '{ticket_key}' with status {transitions_response.status_code}."
+                )
+            transitions_payload = transitions_response.json()
+        except requests.RequestException as error:
+            raise BPMISError(f"Jira transition lookup failed for '{ticket_key}'.") from error
+        except ValueError as error:
+            raise BPMISError(f"Jira transition lookup returned non-JSON data for '{ticket_key}'.") from error
+
+        transitions = transitions_payload.get("transitions") or []
+        transition = next(
+            (
+                item
+                for item in transitions
+                if self._status_labels_match(str(((item.get("to") or {}).get("name")) or item.get("name") or ""), status)
+            ),
+            None,
+        )
+        if not transition:
+            available = ", ".join(
+                str(((item.get("to") or {}).get("name")) or item.get("name") or "").strip()
+                for item in transitions
+                if str(((item.get("to") or {}).get("name")) or item.get("name") or "").strip()
+            )
+            raise BPMISError(
+                f"Jira does not expose a transition from the current status to '{status}'."
+                + (f" Available transitions: {available}." if available else "")
+            )
+
+        transition_id = str(transition.get("id") or "").strip()
+        try:
+            transition_response = requests.post(
+                transitions_url,
+                headers=headers,
+                auth=auth,
+                json={"transition": {"id": transition_id}},
+                timeout=30,
+            )
+            if transition_response.status_code >= 400:
+                raise BPMISError(
+                    f"Jira transition failed for '{ticket_key}' with status {transition_response.status_code}: "
+                    f"{transition_response.text[:240]}"
+                )
+        except requests.RequestException as error:
+            raise BPMISError(f"Jira transition failed for '{ticket_key}'.") from error
+
+        issue_url = f"{jira_base_url}/rest/api/2/issue/{ticket_key}"
+        try:
+            issue_response = requests.get(issue_url, headers=headers, auth=auth, params={"fields": "status"}, timeout=30)
+            issue_response.raise_for_status()
+            issue_payload = issue_response.json()
+        except (requests.RequestException, ValueError):
+            return {"jiraKey": ticket_key, "status": {"label": status}}
+
+        return {
+            "jiraKey": ticket_key,
+            "status": {"label": ((issue_payload.get("fields") or {}).get("status") or {}).get("name") or status},
+        }
+
+    def _extract_jira_status_label(self, detail: dict[str, Any]) -> str:
+        for key in ("status", "statusId", "jiraStatus", "jiraStatusId"):
+            text = self._stringify_value(self._find_first_value(detail, key))
+            if text:
+                return text
+        return ""
+
+    @staticmethod
+    def _status_labels_match(left: str, right: str) -> bool:
+        return str(left or "").strip().casefold() == str(right or "").strip().casefold()
 
     def _resolve_jira_status_id(self, status: str) -> int | None:
         field_defs = self._get_issue_fields()

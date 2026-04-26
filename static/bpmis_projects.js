@@ -290,6 +290,10 @@
     if (!bpmisId || !ticketId || !nextStatus || !panel) return;
     select.dataset.saving = 'true';
     select.disabled = true;
+    const cell = select.closest('.bpmis-task-cell');
+    if (cell) {
+      cell.innerHTML = '<span class="bpmis-task-status is-loading">Updating...</span>';
+    }
     setStatus(`Updating Jira status to ${nextStatus}...`, 'neutral');
     try {
       const response = await fetch(`${projectsUrl}/${encodeURIComponent(bpmisId)}/jira-tickets/${encodeURIComponent(ticketId)}/status`, {
