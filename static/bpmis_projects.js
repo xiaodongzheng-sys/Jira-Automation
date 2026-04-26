@@ -72,6 +72,11 @@
     return `Tasks (${countValue})`;
   };
 
+  const displayVersionName = (item) => {
+    const rawName = item?.version_name || item?.fullName || item?.name || item?.versionName || item?.label || '';
+    return String(rawName || '').replace(/\s+·\s+\d+\s*$/, '').trim();
+  };
+
   const taskStatusClass = (value) => {
     const normalized = String(value || '').trim().toLowerCase();
     if (!normalized) return '';
@@ -292,7 +297,10 @@
           const items = Array.isArray(payload.items) ? payload.items : [];
           menu.hidden = false;
           menu.innerHTML = items.length
-            ? items.slice(0, 8).map((item) => `<button type="button" data-version-name="${escapeHtml(item.name || item.label || '')}">${escapeHtml(item.name || item.label || '')}</button>`).join('')
+            ? items.slice(0, 8).map((item) => {
+              const versionName = displayVersionName(item);
+              return `<button type="button" data-version-name="${escapeHtml(versionName)}">${escapeHtml(versionName)}</button>`;
+            }).join('')
             : '<div class="productization-typeahead-empty">No matching versions.</div>';
         } catch (error) {
           if (error.name !== 'AbortError') {
