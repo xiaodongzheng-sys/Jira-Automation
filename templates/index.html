@@ -4,7 +4,7 @@
   <section class="portal-compact-hero" aria-label="BPMIS workspace status">
     <div class="portal-compact-title">
       <p class="showcase-kicker">BPMIS Automation Tool</p>
-      <h1>Setup and Run</h1>
+      <h1>Setup and My Projects</h1>
     </div>
     <div class="portal-compact-meta">
       <span>{{ "Team mode" if shared_portal_enabled else "Local mode" }}</span>
@@ -24,8 +24,8 @@
     <div class="workspace-head">
       <div>
         <p class="eyebrow">Workspace</p>
-        <h2>Setup and Run</h2>
-        <p class="step-copy">Use Setup to save your BPMIS configuration. Use Run to sync projects and create Jira tickets.</p>
+        <h2>Setup and My Projects</h2>
+        <p class="step-copy">Use Setup to save your BPMIS configuration. Use My Projects to sync projects and create Jira tickets.</p>
       </div>
       <div class="workspace-rail">
         <span>Guided for first-time teammates</span>
@@ -35,7 +35,7 @@
 
     <div class="workspace-tabs" role="tablist" aria-label="Workspace sections" data-default-tab="{{ default_workspace_tab }}">
       <button class="workspace-tab is-active" type="button" role="tab" aria-selected="true" data-tab-trigger="setup">Setup</button>
-      <button class="workspace-tab" type="button" role="tab" aria-selected="false" data-tab-trigger="run">Run</button>
+      <button class="workspace-tab" type="button" role="tab" aria-selected="false" data-tab-trigger="run">My Projects</button>
       <button class="workspace-tab" type="button" role="tab" aria-selected="false" data-tab-trigger="productization-upgrade-summary">Productization Upgrade Summary</button>
       {% if team_profile_admin_enabled %}
         <button class="workspace-tab" type="button" role="tab" aria-selected="false" data-tab-trigger="team-default-admin">Team Default Admin</button>
@@ -47,7 +47,7 @@
         <div class="panel-head">
           <div>
             <h2>Setup Wizard</h2>
-            <p class="step-copy">Follow these steps in order. Save once, then come back to Run for daily execution.</p>
+            <p class="step-copy">Follow these steps in order. Save once, then come back to My Projects for daily execution.</p>
           </div>
         </div>
 
@@ -267,7 +267,7 @@
       >
         <div class="panel-head">
           <div>
-            <h2>Run</h2>
+            <h2>My Projects</h2>
             <p class="step-copy">Sync BPMIS projects into the portal, then create Jira tickets from each project row.</p>
             <p class="help-text">
               Jira links are saved under the BPMIS ID in the portal. A project can have multiple Jira tickets.

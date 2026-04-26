@@ -268,7 +268,6 @@
 
         const tabTriggers = [...document.querySelectorAll('[data-tab-trigger]')];
         const tabPanels = [...document.querySelectorAll('[data-tab-panel]')];
-        const tabStorageKey = 'jira-automation-active-tab';
 
         const activateTab = (tabName) => {
           tabTriggers.forEach((trigger) => {
@@ -282,25 +281,11 @@
             panel.classList.toggle('is-active', active);
             panel.hidden = !active;
           });
-
-          try {
-            window.localStorage.setItem(tabStorageKey, tabName);
-          } catch (error) {
-            // Ignore storage failures in restricted browser contexts.
-          }
         };
 
         if (tabTriggers.length && tabPanels.length) {
           const tabContainer = document.querySelector('[data-default-tab]');
           let initialTab = tabContainer?.dataset.defaultTab || tabTriggers.find((trigger) => trigger.classList.contains('is-active'))?.dataset.tabTrigger;
-          try {
-            const storedTab = window.localStorage.getItem(tabStorageKey);
-            if (storedTab && tabTriggers.some((trigger) => trigger.dataset.tabTrigger === storedTab)) {
-              initialTab = storedTab;
-            }
-          } catch (error) {
-            // Ignore storage failures in restricted browser contexts.
-          }
 
           activateTab(initialTab || tabTriggers[0].dataset.tabTrigger);
 

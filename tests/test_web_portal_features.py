@@ -570,7 +570,8 @@ class WebPortalFeatureTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertIn(b">Setup<", response.data)
-        self.assertIn(b">Run<", response.data)
+        self.assertIn(b">My Projects<", response.data)
+        self.assertNotIn(b">Run<", response.data)
         self.assertIn(b">Productization Upgrade Summary<", response.data)
         self.assertNotIn(b">Overview<", response.data)
         self.assertNotIn(b">Support<", response.data)
@@ -593,6 +594,39 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertIn(b"classList.remove('pm-confirm-visible')", response.data)
         self.assertIn(b"data-initial-team=", response.data)
         self.assertIn(b"productization_upgrade_summary.js", response.data)
+
+    def test_new_user_defaults_to_setup_then_configured_user_defaults_to_my_projects(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_ALLOWED_EMAILS": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
+            },
+            clear=True,
+        ):
+            app = create_app()
+            app.testing = True
+
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["anonymous_user_key"] = "new-user"
+                first_response = client.get("/")
+
+            app.config["CONFIG_STORE"].save({"pm_team": "AF", "sync_pm_email": "owner@npt.sg"}, user_key="anon:configured-user")
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["anonymous_user_key"] = "configured-user"
+                second_response = client.get("/")
+
+        self.assertEqual(first_response.status_code, 200)
+        self.assertIn(b'data-default-tab="setup"', first_response.data)
+        self.assertEqual(second_response.status_code, 200)
+        self.assertIn(b'data-default-tab="run"', second_response.data)
+        self.assertIn(b">My Projects<", second_response.data)
 
     def test_index_shows_team_default_admin_tab_only_for_admin_user(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
