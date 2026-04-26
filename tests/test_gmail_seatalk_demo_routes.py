@@ -101,7 +101,7 @@ class GmailSeaTalkDemoRouteTests(unittest.TestCase):
         self.assertIn(b"data-seatalk-insights-url", response.data)
         self.assertIn(b"data-seatalk-todo-complete-url", response.data)
         self.assertNotIn(b"Team / Follow-up To-dos", response.data)
-        self.assertIn(b"Desktop data unavailable", response.data)
+        self.assertIn(b"SeaTalk unavailable", response.data)
 
     def test_owner_page_does_not_require_gmail_scope(self):
         with patch("bpmis_jira_tool.web._google_credentials_have_scopes") as scope_check:

@@ -7,6 +7,54 @@
       gap: 1.5rem;
     }
 
+    .seatalk-compact-session {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.75rem;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0.85rem 1.1rem;
+      margin-bottom: 1rem;
+      border: 1px solid rgba(110, 139, 194, 0.18);
+      border-radius: 18px;
+      background: rgba(255, 255, 255, 0.9);
+      box-shadow: 0 12px 28px rgba(37, 72, 135, 0.08);
+    }
+
+    .seatalk-compact-title {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.55rem;
+      align-items: center;
+      color: #5d6b8a;
+      font-size: 0.88rem;
+      font-weight: 700;
+    }
+
+    .seatalk-compact-title strong {
+      color: #10203d;
+      font-size: 1.05rem;
+    }
+
+    .seatalk-compact-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      align-items: center;
+    }
+
+    .seatalk-compact-meta span {
+      display: inline-flex;
+      align-items: center;
+      min-height: 1.8rem;
+      padding: 0.28rem 0.7rem;
+      border-radius: 999px;
+      background: rgba(24, 58, 118, 0.08);
+      color: #355180;
+      font-size: 0.78rem;
+      font-weight: 800;
+    }
+
     .seatalk-summary-card {
       padding: 1rem 1.25rem 1.25rem;
     }
@@ -430,72 +478,26 @@
 {% endblock %}
 
 {% block body %}
-  <section class="showcase-shell">
-    <div class="showcase-backdrop"></div>
-    <div class="showcase-grid">
-      <div class="showcase-copy mail-demo-copy">
-        <p class="showcase-kicker">SeaTalk Activity Summary</p>
-        <h1>SeaTalk Summary</h1>
-        <p class="showcase-lede">
-          Review local SeaTalk activity in a clean admin dashboard with 7-day trend visibility and owner-scoped operational metrics.
-        </p>
-        <div class="showcase-badges">
-          <span>7-Day Trends</span>
-          <span>SeaTalk Desktop Data</span>
-        </div>
-        <div class="showcase-metrics">
-          <article class="metric-card">
-            <strong>Fast SeaTalk pulse</strong>
-            <span>Track incoming volume, unread pressure, and read rate from local SeaTalk desktop data.</span>
-          </article>
-          <article class="metric-card">
-            <strong>Trend visibility</strong>
-            <span>Spot volume changes across the last 7 days for inbound and outbound SeaTalk messages.</span>
-          </article>
-          <article class="metric-card">
-            <strong>Local account scope</strong>
-            <span>Summarize the SeaTalk desktop account visible on this Mac without external mailbox calls.</span>
-          </article>
-        </div>
+  <section class="workspace-shell mail-demo-shell">
+    <div class="seatalk-compact-session">
+      <div class="seatalk-compact-title">
+        <strong>SeaTalk Summary</strong>
+        <span>{{ user_identity.display_name }}</span>
       </div>
-
-      <aside class="executive-card">
-        <div class="executive-card-head">
-          <div>
-            <p class="executive-eyebrow">Access</p>
-            <h2>SeaTalk Session</h2>
-          </div>
-          <span class="executive-pill">Owner only</span>
-        </div>
-        <ul class="executive-list">
-          <li>
-            <span>Portal User</span>
-            <strong>{{ user_identity.display_name }}</strong>
-          </li>
-          <li>
-            <span>Google Login</span>
-            <strong>{{ "Connected" if google_connected else "Not connected" }}</strong>
-          </li>
-          <li>
-            <span>SeaTalk</span>
-            <strong>{{ "Available on this Mac" if seatalk_configured else "Desktop data unavailable" }}</strong>
-          </li>
-        </ul>
-        <div class="executive-note">
-          <p>SeaTalk metrics load from the local SeaTalk desktop data stored on this Mac.</p>
-        </div>
-      </aside>
+      <div class="seatalk-compact-meta" aria-label="SeaTalk session status">
+        <span>Owner only</span>
+        <span>{{ "SeaTalk available" if seatalk_configured else "SeaTalk unavailable" }}</span>
+        <span>{{ "Google connected" if google_connected else "Google not connected" }}</span>
+      </div>
     </div>
-  </section>
 
-  <section
-    class="workspace-shell mail-demo-shell"
-    data-seatalk-demo-root
-    data-seatalk-insights-url="{{ seatalk_insights_url }}"
-    data-seatalk-todo-complete-url="{{ seatalk_todo_complete_url }}"
-    data-seatalk-name-mappings-url="{{ seatalk_name_mappings_url }}"
-    data-seatalk-configured="{{ 'true' if seatalk_configured else 'false' }}"
-  >
+    <section
+      data-seatalk-demo-root
+      data-seatalk-insights-url="{{ seatalk_insights_url }}"
+      data-seatalk-todo-complete-url="{{ seatalk_todo_complete_url }}"
+      data-seatalk-name-mappings-url="{{ seatalk_name_mappings_url }}"
+      data-seatalk-configured="{{ 'true' if seatalk_configured else 'false' }}"
+    >
       <section class="panel panel-wide glass-panel mail-demo-card seatalk-summary-card">
         <div class="panel-head">
           <div>
@@ -566,6 +568,7 @@
           </section>
         </div>
       </section>
+    </section>
   </section>
 {% endblock %}
 
