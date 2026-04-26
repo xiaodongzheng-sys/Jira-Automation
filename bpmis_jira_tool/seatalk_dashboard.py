@@ -646,6 +646,7 @@ class SeaTalkDashboardService:
             "count": count_value,
             "example": cls._clean_text(row.get("example"), ""),
             "first_seen": cls._clean_text(row.get("first_seen"), ""),
+            "priority_reason": cls._clean_text(row.get("priority_reason"), "Frequent unknown ID"),
         }
 
     @classmethod

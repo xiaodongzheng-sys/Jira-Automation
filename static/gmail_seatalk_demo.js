@@ -165,11 +165,18 @@
         type: row.type || 'uid',
         count: Number(row.count || 0),
         example: row.example || '',
+        priorityReason: row.priority_reason || 'Frequent unknown ID',
       });
     });
     Object.keys(mappings).sort().forEach((id) => {
       if (!rowsById.has(id)) {
-        rowsById.set(id, { id, type: id.startsWith('group-') ? 'group' : id.startsWith('buddy-') ? 'buddy' : 'uid', count: 0, example: '' });
+        rowsById.set(id, {
+          id,
+          type: id.startsWith('group-') ? 'group' : id.startsWith('buddy-') ? 'buddy' : 'uid',
+          count: 0,
+          example: '',
+          priorityReason: 'Saved mapping',
+        });
       }
     });
     const rows = Array.from(rowsById.values()).sort((left, right) => (right.count - left.count) || left.id.localeCompare(right.id));
@@ -187,7 +194,7 @@
       <div class="seatalk-mapping-row" data-seatalk-mapping-row data-seatalk-mapping-id="${escapeHtml(row.id)}">
         <div class="seatalk-mapping-id">
           <strong>${escapeHtml(row.id)}</strong>
-          <span>${escapeHtml(row.type || 'uid')}</span>
+          <span>${escapeHtml(row.priorityReason || row.type || 'Frequent unknown ID')}</span>
         </div>
         <div class="seatalk-mapping-count">
           <strong>${formatNumber(row.count || 0)}</strong>

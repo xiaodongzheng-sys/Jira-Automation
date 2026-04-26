@@ -420,17 +420,26 @@ class GmailSeaTalkDemoRouteTests(unittest.TestCase):
         with patch("bpmis_jira_tool.web._build_seatalk_dashboard_service", return_value=FakeSeaTalkService()):
             with self.app.test_client() as client:
                 self._login_owner(client, scopes=[GMAIL_READONLY_SCOPE])
+                first_save = client.post(
+                    "/api/gmail-sea-talk-demo/seatalk/name-mappings",
+                    json={"mappings": {"buddy-456": "Important DM"}},
+                )
                 saved = client.post(
                     "/api/gmail-sea-talk-demo/seatalk/name-mappings",
                     json={"mappings": {"group-123": "Risk Project Group", "UID 888": "Alice", "bad": "ignored"}},
                 )
                 loaded = client.get("/api/gmail-sea-talk-demo/seatalk/name-mappings")
 
+        self.assertEqual(first_save.status_code, 200)
         self.assertEqual(saved.status_code, 200)
-        self.assertEqual(saved.get_json()["mappings"], {"UID 888": "Alice", "group-123": "Risk Project Group"})
+        self.assertEqual(
+            saved.get_json()["mappings"],
+            {"UID 888": "Alice", "buddy-456": "Important DM", "group-123": "Risk Project Group"},
+        )
         self.assertEqual(loaded.status_code, 200)
         payload = loaded.get_json()
         self.assertEqual(payload["mappings"]["group-123"], "Risk Project Group")
+        self.assertEqual(payload["mappings"]["buddy-456"], "Important DM")
         self.assertEqual(payload["unknown_ids"][0]["id"], "group-123")
 
     def test_owner_seatalk_name_mappings_api_reports_export_error(self):

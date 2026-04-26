@@ -298,6 +298,19 @@ function conversationIdentity(row, sidNames, overrides) {
   return resolveName(row.sid, sidNames.get(row.sid), overrides);
 }
 
+function mentionsSelf(text, selfUid) {
+  const value = String(text || '').toLowerCase();
+  const compact = value.replace(/\s+/g, ' ');
+  return [
+    '@xiaodong',
+    'xiaodong',
+    'zheng xiaodong',
+    'xiaodong.zheng@npt.sg',
+    `@${selfUid}`,
+    `uid ${selfUid}`,
+  ].some((term) => compact.includes(String(term).toLowerCase()));
+}
+
 function formatTimestamp(epochSeconds) {
   const date = new Date(Number(epochSeconds) * 1000);
   const year = date.getFullYear();
@@ -340,15 +353,34 @@ function collectUnknownIds(rows, selfUid, db, overrides) {
   const { uidNames, sidNames } = buildNameMaps(rows, db);
   const filteredRows = rows.filter((row) => !isBotConversationRow(row, sidNames));
   const unknowns = new Map();
-  const remember = (id, type, row, text) => {
+  const priorityRank = {
+    direct_chat: 0,
+    mentioned_me: 1,
+    group_i_spoke_in: 2,
+    frequent: 3,
+  };
+  const priorityLabel = {
+    direct_chat: 'Private chat',
+    mentioned_me: '@mentioned me',
+    group_i_spoke_in: 'I spoke in this group',
+    frequent: 'Frequent unknown ID',
+  };
+  const remember = (id, type, row, text, reason) => {
     const current = unknowns.get(id) || {
       id,
       type,
       count: 0,
       example: '',
       first_seen: row.ts ? formatTimestamp(row.ts) : '',
+      priority_reason: priorityLabel.frequent,
+      priority_rank: priorityRank.frequent,
     };
     current.count += 1;
+    const rank = priorityRank[reason] ?? priorityRank.frequent;
+    if (rank < current.priority_rank) {
+      current.priority_rank = rank;
+      current.priority_reason = priorityLabel[reason] || priorityLabel.frequent;
+    }
     if (!current.example) {
       const snippet = String(text || '').replace(/\s+/g, ' ').trim().slice(0, 180);
       current.example = snippet ? `${formatTimestamp(row.ts)}: ${snippet}` : formatTimestamp(row.ts);
@@ -359,18 +391,28 @@ function collectUnknownIds(rows, selfUid, db, overrides) {
   for (const row of filteredRows) {
     const parsed = safeParseJson(row.c);
     const text = extractText(row, parsed);
+    const selfMentioned = mentionsSelf(text, selfUid);
+    const isSelfSender = String(row.u) === String(selfUid);
     const conversation = conversationIdentity(row, sidNames, overrides);
     if (!conversation.resolved) {
-      remember(row.sid, row.sid.startsWith('group-') ? 'group' : 'buddy', row, text);
+      let reason = 'frequent';
+      if (row.sid.startsWith('buddy-')) reason = 'direct_chat';
+      if (row.sid.startsWith('group-') && selfMentioned) reason = 'mentioned_me';
+      if (row.sid.startsWith('group-') && isSelfSender) reason = 'group_i_spoke_in';
+      remember(row.sid, row.sid.startsWith('group-') ? 'group' : 'buddy', row, text, reason);
     }
     const sender = senderIdentity(row, selfUid, uidNames, overrides);
-    if (!sender.resolved && String(row.u) !== String(selfUid)) {
-      remember(`UID ${row.u}`, 'uid', row, text);
+    if (!sender.resolved && !isSelfSender) {
+      remember(`UID ${row.u}`, 'uid', row, text, selfMentioned ? 'mentioned_me' : 'frequent');
     }
   }
 
   return Array.from(unknowns.values())
-    .sort((left, right) => (right.count - left.count) || left.id.localeCompare(right.id))
+    .sort((left, right) => (
+      (left.priority_rank - right.priority_rank)
+      || (right.count - left.count)
+      || left.id.localeCompare(right.id)
+    ))
     .slice(0, 80);
 }
 

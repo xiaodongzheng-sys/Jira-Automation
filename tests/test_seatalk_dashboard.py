@@ -181,7 +181,13 @@ class SeaTalkDashboardServiceTests(unittest.TestCase):
                 stdout=json.dumps(
                     {
                         "unknown_ids": [
-                            {"id": "group-123", "type": "group", "count": 9, "example": "2026-04-21: Please review"},
+                            {
+                                "id": "group-123",
+                                "type": "group",
+                                "count": 9,
+                                "example": "2026-04-21: Please review",
+                                "priority_reason": "@mentioned me",
+                            },
                             {"id": "UID 888", "type": "uid", "count": "4", "example": "2026-04-21: hello"},
                         ],
                         "generated_at": "2026-04-21T21:00:00+08:00",
@@ -202,6 +208,7 @@ class SeaTalkDashboardServiceTests(unittest.TestCase):
 
         self.assertEqual(result["unknown_ids"][0]["id"], "group-123")
         self.assertEqual(result["unknown_ids"][0]["count"], 9)
+        self.assertEqual(result["unknown_ids"][0]["priority_reason"], "@mentioned me")
         self.assertEqual(result["unknown_ids"][1]["id"], "UID 888")
         self.assertTrue(any("--unknown-ids-json" in command for command in calls))
 

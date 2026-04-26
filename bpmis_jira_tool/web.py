@@ -350,6 +350,15 @@ class SeaTalkNameMappingStore:
             self._persist_locked()
             return dict(normalized)
 
+    def merge_mappings(self, mappings: dict[str, str]) -> dict[str, str]:
+        normalized = self.normalize_mappings(mappings)
+        with self._lock:
+            current = dict(self._payload.get("mappings") or {})
+            current.update(normalized)
+            self._payload["mappings"] = current
+            self._persist_locked()
+            return dict(current)
+
 
 class SourceCodeQASessionStore:
     def __init__(self, storage_path: Path | None = None) -> None:
@@ -1784,7 +1793,7 @@ def create_app() -> Flask:
         mapping_store: SeaTalkNameMappingStore = current_app.config["SEATALK_NAME_MAPPING_STORE"]
         if request.method == "POST":
             payload = request.get_json(silent=True) or {}
-            mappings = mapping_store.replace_mappings(payload.get("mappings") if isinstance(payload, dict) else {})
+            mappings = mapping_store.merge_mappings(payload.get("mappings") if isinstance(payload, dict) else {})
             SeaTalkDashboardService.clear_cache()
             return jsonify({"status": "ok", "mappings": mappings})
         try:
