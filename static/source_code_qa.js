@@ -67,6 +67,7 @@
   let activeQueryProgress = null;
   let sessionHistoryExpanded = false;
   let liveAssistantMessage = null;
+  let pendingUserMessage = null;
   const preferenceKey = 'source-code-qa:last-query-config:v1';
 
   const escapeHtml = (value) => String(value ?? '')
@@ -351,6 +352,19 @@
   const renderSessionMessages = (session) => {
     if (!sessionMessages) return;
     const messages = [...(session?.messages || [])];
+    if (pendingUserMessage?.text) {
+      const alreadyPersisted = messages.some((message) =>
+        message.role === 'user' && String(message.text || '').trim() === pendingUserMessage.text
+      );
+      if (!alreadyPersisted) {
+        messages.push({
+          role: 'user',
+          text: pendingUserMessage.text,
+          created_at: pendingUserMessage.created_at || '',
+          pending: true,
+        });
+      }
+    }
     if (liveAssistantMessage?.text) {
       messages.push({
         role: 'assistant',
@@ -397,20 +411,11 @@
     if (!sessionMessages) return;
     const text = String(question || '').trim();
     if (!text) return;
-    const empty = sessionMessages.querySelector('.source-qa-empty');
-    if (empty) {
-      sessionMessages.innerHTML = '';
-    }
-    sessionMessages.insertAdjacentHTML('beforeend', `
-      <article class="source-qa-message source-qa-message-user">
-        <div class="source-qa-message-head">
-          <strong>You</strong>
-          <span>now</span>
-        </div>
-        <p>${escapeHtml(text)}</p>
-      </article>
-    `);
-    sessionMessages.scrollTop = sessionMessages.scrollHeight;
+    pendingUserMessage = {
+      text,
+      created_at: new Date().toISOString(),
+    };
+    renderSessionMessages(activeSession);
   };
 
   const applyActiveSession = (session) => {
@@ -456,6 +461,7 @@
     try {
       const payload = await fetch(`${sessionsUrl}/${encodeURIComponent(sessionId)}`).then(readJson);
       liveAssistantMessage = null;
+      pendingUserMessage = null;
       applyActiveSession(payload.session || null);
       return payload.session || null;
     } catch (error) {
@@ -471,6 +477,7 @@
       sourceSessions = sourceSessions.filter((item) => item.id !== sessionId);
       if (activeSessionId === sessionId) {
         liveAssistantMessage = null;
+        pendingUserMessage = null;
         activeSessionId = '';
         activeSession = null;
         conversationContext = null;
@@ -503,6 +510,7 @@
       sourceSessions = [session, ...sourceSessions.filter((item) => item.id !== session.id)].slice(0, 30);
       conversationContext = null;
       liveAssistantMessage = null;
+      pendingUserMessage = null;
       applyActiveSession(session);
     }
     return session;
@@ -1328,8 +1336,10 @@
         activeSession = payload.session;
         activeSessionId = payload.session.id || activeSessionId;
         sourceSessions = [payload.session, ...sourceSessions.filter((item) => item.id !== payload.session.id)].slice(0, 30);
+        pendingUserMessage = null;
         applyActiveSession(payload.session);
       } else if (activeSessionId) {
+        pendingUserMessage = null;
         await loadSession(activeSessionId);
       }
       rememberLastQueryConfig(effectiveAnswerMode, selectedProvider);
