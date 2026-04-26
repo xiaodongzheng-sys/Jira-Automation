@@ -41,6 +41,14 @@
     ? window.CSS.escape(String(value ?? ''))
     : String(value ?? '').replace(/["\\]/g, '\\$&');
 
+  const externalHref = (value) => {
+    const text = String(value || '').trim();
+    if (!text) return '';
+    if (/^(https?:|mailto:|tel:)/i.test(text)) return text;
+    if (text.startsWith('//')) return `https:${text}`;
+    return `https://${text}`;
+  };
+
   const readJson = async (response, fallbackMessage) => {
     const payload = await response.json().catch(() => ({}));
     if (!response.ok || payload.status === 'error') {
@@ -142,7 +150,7 @@
   const brdMarkup = (value) => {
     const links = String(value || '').split(/\n+/).map((item) => item.trim()).filter(Boolean);
     if (!links.length) return '-';
-    return links.map((link, index) => `<a href="${escapeHtml(link)}" target="_blank" rel="noreferrer">BRD ${index + 1}</a>`).join('<br>');
+    return links.map((link, index) => `<a href="${escapeHtml(externalHref(link))}" target="_blank" rel="noreferrer">BRD ${index + 1}</a>`).join('<br>');
   };
 
   const renderProjects = () => {
