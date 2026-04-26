@@ -1436,6 +1436,17 @@ class WebPortalFeatureTests(unittest.TestCase):
             self.assertEqual(tickets_payload["tickets"][0]["live_jira_status"], "In Progress")
             self.assertEqual(tickets_payload["tickets"][0]["live_fix_version"], "Planning_26Q2")
 
+            ticket_id = tickets_payload["tickets"][0]["id"]
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["anonymous_user_key"] = "create-user"
+                delete_ticket_response = client.delete(f"/api/bpmis-projects/225159/jira-tickets/{ticket_id}")
+                tickets_after_delete_response = client.get("/api/bpmis-projects/225159/jira-tickets")
+
+            self.assertEqual(delete_ticket_response.status_code, 200)
+            self.assertTrue(delete_ticket_response.get_json()["deleted"])
+            self.assertEqual(tickets_after_delete_response.get_json()["tickets"], [])
+
     def test_team_defaults_allow_saving_setup_without_manual_advanced_mapping(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,

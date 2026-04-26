@@ -49,6 +49,7 @@
   let activeProject = null;
   let activeOptions = null;
   let versionController = null;
+  let expandedProjectId = '';
 
   const setStatus = (message, tone = 'neutral') => {
     status.textContent = message || '';
@@ -91,7 +92,7 @@
       const metaMarkup = meta ? `<span>${escapeHtml(meta)}</span>` : '';
       const liveError = ticket.live_error ? `<p class="bpmis-task-warning">${escapeHtml(ticket.live_error)}</p>` : '';
       return `
-        <article class="bpmis-task-card">
+        <article class="bpmis-task-card" data-task-card="${escapeHtml(ticket.id || '')}">
           <div class="bpmis-task-main">
             <div class="bpmis-task-id">${link}${metaMarkup}</div>
             <div class="bpmis-task-title">${title}</div>
@@ -99,6 +100,7 @@
           <div class="bpmis-task-meta">
             <span class="bpmis-task-status${taskStatusClass(statusText)}">${statusText}</span>
             <span>Version: ${version}</span>
+            <button class="button button-secondary danger-button bpmis-task-delink" type="button" data-delink-task="${escapeHtml(ticket.id || '')}" data-delink-project="${escapeHtml(ticket.bpmis_id || '')}">Delink</button>
           </div>
           ${liveError}
         </article>
@@ -176,6 +178,7 @@
     const willOpen = row.hidden;
     row.hidden = !willOpen;
     button.setAttribute('aria-expanded', willOpen ? 'true' : 'false');
+    expandedProjectId = willOpen ? bpmisId : '';
     if (willOpen) {
       await loadTasks(bpmisId);
     }
@@ -188,6 +191,15 @@
       const payload = await readJson(response, 'Could not load BPMIS projects.');
       projects = Array.isArray(payload.projects) ? payload.projects : [];
       renderProjects();
+      if (expandedProjectId) {
+        const row = body.querySelector(`[data-task-row="${cssEscape(expandedProjectId)}"]`);
+        const button = body.querySelector(`[data-toggle-tasks="${cssEscape(expandedProjectId)}"]`);
+        if (row && button) {
+          row.hidden = false;
+          button.setAttribute('aria-expanded', 'true');
+          await loadTasks(expandedProjectId, { force: true });
+        }
+      }
       setStatus(projects.length ? 'Projects are up to date.' : 'Sync BPMIS Projects to begin.', projects.length ? 'success' : 'neutral');
     } catch (error) {
       setStatus(error.message || 'Could not load BPMIS projects.', 'error');
@@ -402,6 +414,29 @@
     }
   };
 
+  const delinkTask = async (button) => {
+    const bpmisId = button.dataset.delinkProject || '';
+    const ticketId = button.dataset.delinkTask || '';
+    if (!bpmisId || !ticketId) return;
+    if (!window.confirm('Delink this Jira from the BPMIS project?')) return;
+    button.disabled = true;
+    try {
+      const response = await fetch(`${projectsUrl}/${encodeURIComponent(bpmisId)}/jira-tickets/${encodeURIComponent(ticketId)}`, {
+        method: 'DELETE',
+        headers: { Accept: 'application/json' },
+        credentials: 'same-origin',
+      });
+      await readJson(response, 'Could not delink Jira task.');
+      expandedProjectId = bpmisId;
+      await loadProjects();
+      setStatus('Jira task delinked from BPMIS project.', 'success');
+    } catch (error) {
+      setStatus(error.message || 'Could not delink Jira task.', 'error');
+    } finally {
+      button.disabled = false;
+    }
+  };
+
   body.addEventListener('click', async (event) => {
     const createButton = event.target.closest('[data-create-jira]');
     if (createButton) {
@@ -411,6 +446,11 @@
     const taskButton = event.target.closest('[data-toggle-tasks]');
     if (taskButton) {
       await toggleTasks(taskButton);
+      return;
+    }
+    const delinkButton = event.target.closest('[data-delink-task]');
+    if (delinkButton) {
+      await delinkTask(delinkButton);
       return;
     }
     const deleteButton = event.target.closest('[data-delete-project]');

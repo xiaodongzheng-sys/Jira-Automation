@@ -189,6 +189,23 @@ class BPMISProjectStore:
         ticket["raw_response"] = self._loads_json(ticket.pop("raw_response_json", ""))
         return ticket
 
+    def delete_jira_ticket(self, *, user_key: str, bpmis_id: str, ticket_id: str | int) -> bool:
+        owner = self._require_user_key(user_key)
+        issue_id = self._require_bpmis_id(bpmis_id)
+        normalized_ticket_id = str(ticket_id or "").strip()
+        if not normalized_ticket_id:
+            raise ToolError("Jira task ID is required.")
+        with sqlite3.connect(self.db_path) as connection:
+            cursor = connection.execute(
+                """
+                DELETE FROM bpmis_project_jira_tickets
+                WHERE id = ? AND user_key = ? AND bpmis_id = ?
+                """,
+                (normalized_ticket_id, owner, issue_id),
+            )
+            connection.commit()
+        return cursor.rowcount > 0
+
     def _ensure_db(self) -> None:
         with sqlite3.connect(self.db_path) as connection:
             connection.execute(
@@ -467,6 +484,12 @@ class PortalJiraCreationService:
         if not isinstance(tickets, list):
             return []
         return [self._ticket_with_live_jira_fields(ticket) for ticket in tickets]
+
+    def delete_ticket(self, *, user_key: str, bpmis_id: str, ticket_id: str | int) -> bool:
+        project = self.store.get_project(user_key=user_key, bpmis_id=bpmis_id)
+        if project is None:
+            raise ToolError("BPMIS project was not found.")
+        return self.store.delete_jira_ticket(user_key=user_key, bpmis_id=bpmis_id, ticket_id=ticket_id)
 
     def _ticket_with_live_jira_fields(self, ticket: dict[str, Any]) -> dict[str, Any]:
         item = dict(ticket)

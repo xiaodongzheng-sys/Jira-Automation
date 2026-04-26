@@ -2395,6 +2395,23 @@ def create_app() -> Flask:
         except ToolError as error:
             return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
 
+    @app.delete("/api/bpmis-projects/<bpmis_id>/jira-tickets/<ticket_id>")
+    def delete_bpmis_project_jira_ticket(bpmis_id: str, ticket_id: str):
+        login_gate = _require_google_login(settings, api=True)
+        if login_gate is not None:
+            return login_gate
+        try:
+            user_identity = _get_user_identity(settings)
+            service = _build_portal_jira_creation_service(settings)
+            deleted = service.delete_ticket(
+                user_key=user_identity["config_key"],
+                bpmis_id=bpmis_id,
+                ticket_id=ticket_id,
+            )
+            return jsonify({"status": "ok", "deleted": deleted})
+        except ToolError as error:
+            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
+
     @app.post("/api/bpmis-projects/<bpmis_id>/jira-tickets")
     def create_bpmis_project_jira_tickets(bpmis_id: str):
         login_gate = _require_google_login(settings, api=True)

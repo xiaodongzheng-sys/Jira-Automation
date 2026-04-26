@@ -136,6 +136,12 @@
   color: #b54708;
 }
 
+.bpmis-task-delink {
+  min-height: 32px;
+  padding: 6px 10px;
+  font-size: 0.78rem;
+}
+
 .jira-wizard-modal {
   max-width: 820px;
 }

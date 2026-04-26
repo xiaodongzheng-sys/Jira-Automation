@@ -184,6 +184,8 @@ class BPMISProjectStoreTests(unittest.TestCase):
             self.assertEqual(tickets[0]["live_jira_title"], "Live Jira title")
             self.assertEqual(tickets[0]["live_jira_status"], "In Progress")
             self.assertEqual(tickets[0]["live_fix_version"], "Live_26Q2")
+            self.assertTrue(service.delete_ticket(user_key="google:pm@npt.sg", bpmis_id="225159", ticket_id=tickets[0]["id"]))
+            self.assertEqual(len(service.list_tickets(user_key="google:pm@npt.sg", bpmis_id="225159")), 1)
 
 
 if __name__ == "__main__":
