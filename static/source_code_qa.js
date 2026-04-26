@@ -295,6 +295,36 @@
     });
   };
 
+  const citationPattern = /\[((?:S\d+|[\w./-]+\.(?:java|xml|kt|groovy|md|sql|yml|yaml|properties|json|ts|tsx|js):\d+(?:-\d+)?)(?:\]\s*\[)?(?:[^\]]*)?)\]/g;
+  const renderAnswerText = (text) => {
+    const paragraphs = String(text || '')
+      .split(/\n{2,}/)
+      .map((paragraph) => paragraph.trim())
+      .filter(Boolean);
+    if (!paragraphs.length) return '<p>Answer completed.</p>';
+    return paragraphs.map((paragraph) => {
+      const lines = paragraph.split('\n').map((line) => line.trim()).filter(Boolean);
+      if (lines.length && lines.every((line) => line.startsWith('- '))) {
+        return `<ul class="source-qa-answer-list">${lines.map((line) => renderAnswerLine(line.slice(2), 'li')).join('')}</ul>`;
+      }
+      return renderAnswerLine(paragraph, 'p');
+    }).join('');
+  };
+  const renderAnswerLine = (text, tagName) => {
+    const citations = [];
+    const cleanText = String(text || '').replace(citationPattern, (_match, citationText) => {
+      citationText.split('] [').forEach((item) => {
+        const value = item.trim();
+        if (value) citations.push(value);
+      });
+      return '';
+    }).replace(/\s{2,}/g, ' ').trim();
+    const citationHtml = citations.length
+      ? `<span class="source-qa-inline-citations">${citations.map((item) => `<span>${escapeHtml(item)}</span>`).join('')}</span>`
+      : '';
+    return `<${tagName}>${escapeHtml(cleanText)}${citationHtml}</${tagName}>`;
+  };
+
   const renderSessionMessages = (session) => {
     if (!sessionMessages) return;
     const messages = session?.messages || [];
@@ -320,7 +350,7 @@
             <strong>${message.role === 'user' ? 'You' : 'Assistant'}</strong>
             <span>${escapeHtml(meta)}</span>
           </div>
-          <p>${escapeHtml(text)}</p>
+          <div class="source-qa-message-body">${message.role === 'assistant' ? renderAnswerText(text) : `<p>${escapeHtml(text)}</p>`}</div>
           ${citations.length ? `<div class="source-qa-message-citations">${citations.map((item) => `<span>${escapeHtml(item)}</span>`).join('')}</div>` : ''}
         </article>
       `;

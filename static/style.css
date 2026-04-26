@@ -4496,13 +4496,49 @@ select:focus {
   overflow-wrap: anywhere;
 }
 
-.source-qa-message p {
+.source-qa-message-body {
+  display: grid;
+  gap: 10px;
+}
+
+.source-qa-message-body p,
+.source-qa-answer-list {
   margin: 0;
   color: #344054;
   line-height: 1.58;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   word-break: break-word;
+}
+
+.source-qa-answer-list {
+  display: grid;
+  gap: 10px;
+  padding-left: 20px;
+}
+
+.source-qa-answer-list li {
+  padding-left: 2px;
+}
+
+.source-qa-inline-citations {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-left: 6px;
+  vertical-align: baseline;
+}
+
+.source-qa-inline-citations span {
+  max-width: 100%;
+  padding: 2px 6px;
+  border-radius: 6px;
+  background: #f2f4f7;
+  color: #98a2b3;
+  font-size: 0.78rem;
+  font-weight: 600;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
 }
 
 .source-qa-message-citations {
