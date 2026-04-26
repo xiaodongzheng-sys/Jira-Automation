@@ -459,7 +459,7 @@
 {% endblock %}
 
 {% block extra_scripts %}
-  <script src="{{ url_for('static', filename='bpmis_projects.js') }}"></script>
+  <script src="{{ url_for('static', filename='bpmis_projects.js') }}?v=20260426-modal3"></script>
   <script src="{{ url_for('static', filename='productization_upgrade_summary.js') }}"></script>
   <script id="team-profile-data" type="application/json">{{ team_profiles | tojson }}</script>
   <script>
