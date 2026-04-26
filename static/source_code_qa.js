@@ -396,10 +396,12 @@
       return `
         <article class="source-qa-message source-qa-message-${escapeHtml(message.role || 'assistant')}${message.live ? ' is-live' : ''}">
           <div class="source-qa-message-head">
-            <strong>${message.live ? 'Codex Live' : (message.role === 'user' ? 'You' : 'Assistant')}</strong>
+            <strong>
+              ${message.live ? 'Codex Live <em>Running - not final answer</em>' : (message.role === 'user' ? 'You' : 'Assistant')}
+            </strong>
             <span>${escapeHtml(meta)}</span>
           </div>
-          <div class="source-qa-message-body">${message.live ? `<pre>${escapeHtml(text)}</pre>` : (message.role === 'assistant' ? renderReadableAnswerBody(payload, text) : `<p>${escapeHtml(text)}</p>`)}</div>
+          <div class="source-qa-message-body">${message.live ? `<p class="source-qa-live-note">Codex is still investigating. The final answer will appear as an Assistant message when complete.</p><pre>${escapeHtml(text)}</pre>` : (message.role === 'assistant' ? renderReadableAnswerBody(payload, text) : `<p>${escapeHtml(text)}</p>`)}</div>
           ${citations.length ? `<div class="source-qa-message-citations">${citations.map((item) => `<span>${escapeHtml(item)}</span>`).join('')}</div>` : ''}
         </article>
       `;

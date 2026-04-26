@@ -4524,8 +4524,10 @@ select:focus {
 }
 
 .source-qa-message-assistant.is-live {
-  border-color: #bfdbfe;
-  background: #f6faff;
+  border-color: #2563eb;
+  border-width: 2px;
+  background: #eff6ff;
+  box-shadow: 0 12px 28px rgba(37, 99, 235, 0.12);
 }
 
 .source-qa-message-head {
@@ -4541,6 +4543,28 @@ select:focus {
   font-size: 0.86rem;
   text-align: right;
   overflow-wrap: anywhere;
+}
+
+.source-qa-message-head strong {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.source-qa-message-head strong em {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 2px 9px;
+  border-radius: 999px;
+  background: #dbeafe;
+  color: #1d4ed8;
+  font-size: 0.76rem;
+  font-style: normal;
+  font-weight: 800;
+  letter-spacing: 0;
+  text-transform: uppercase;
 }
 
 .source-qa-message-body {
@@ -4561,6 +4585,15 @@ select:focus {
 
 .source-qa-message-body pre {
   font-family: inherit;
+}
+
+.source-qa-live-note {
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: #dbeafe;
+  color: #1d4ed8 !important;
+  font-size: 0.9rem;
+  font-weight: 700;
 }
 
 .source-qa-answer-list {
