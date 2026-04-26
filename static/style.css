@@ -146,11 +146,30 @@
   justify-content: center;
   min-height: 30px;
   padding: 6px 10px;
+  border: 0;
   border-radius: 999px;
   background: #edf4ff;
   color: #155eef;
+  cursor: pointer;
   font-weight: 700;
   line-height: 1;
+}
+
+.bpmis-task-status:hover {
+  box-shadow: 0 0 0 3px rgba(21, 94, 239, 0.12);
+}
+
+.bpmis-task-status-select {
+  width: 100%;
+  min-height: 36px;
+  border: 1px solid #bfd7ff;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #1f2937;
+  font: inherit;
+  font-size: 0.82rem;
+  font-weight: 700;
+  padding: 6px 8px;
 }
 
 .bpmis-task-status.is-loading {

@@ -34,6 +34,7 @@ from bpmis_jira_tool.web import (
 class _PortalFakeBPMISClient:
     def __init__(self):
         self.detail_calls = []
+        self.status_calls = []
 
     def list_biz_projects_for_pm_email(self, _email):
         return [{"issue_id": "225159", "project_name": "Fraud Rule Upgrade", "market": "SG"}]
@@ -53,6 +54,10 @@ class _PortalFakeBPMISClient:
             "status": {"label": "In Progress"},
             "fixVersionId": [{"fullName": "Planning_26Q2"}],
         }
+
+    def update_jira_ticket_status(self, ticket_key, status):
+        self.status_calls.append((ticket_key, status))
+        return {"jiraKey": ticket_key, "status": {"label": status}}
 
 
 class WebPortalFeatureTests(unittest.TestCase):
@@ -1451,6 +1456,18 @@ class WebPortalFeatureTests(unittest.TestCase):
             self.assertEqual(tickets_payload["tickets"][0]["live_fix_version"], "Planning_26Q2")
 
             ticket_id = tickets_payload["tickets"][0]["id"]
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["anonymous_user_key"] = "create-user"
+                status_response = client.patch(
+                    f"/api/bpmis-projects/225159/jira-tickets/{ticket_id}/status",
+                    json={"status": "Testing"},
+                )
+
+            self.assertEqual(status_response.status_code, 200)
+            self.assertEqual(fake_client.status_calls, [("AF-1", "Testing")])
+            self.assertEqual(status_response.get_json()["ticket"]["live_jira_status"], "In Progress")
+
             with app.test_client() as client:
                 with client.session_transaction() as session:
                     session["anonymous_user_key"] = "create-user"

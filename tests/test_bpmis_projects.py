@@ -12,6 +12,7 @@ class FakeBPMISClient:
     def __init__(self):
         self.create_calls = []
         self.detail_calls = []
+        self.status_calls = []
 
     def list_biz_projects_for_pm_email(self, _email):
         return [
@@ -42,6 +43,10 @@ class FakeBPMISClient:
             "status": {"label": "In Progress"},
             "fixVersionId": [{"fullName": "Live_26Q2"}],
         }
+
+    def update_jira_ticket_status(self, ticket_key, status):
+        self.status_calls.append((ticket_key, status))
+        return {"jiraKey": ticket_key, "status": {"label": status}}
 
 
 class BPMISProjectStoreTests(unittest.TestCase):
@@ -225,6 +230,14 @@ class BPMISProjectStoreTests(unittest.TestCase):
             self.assertEqual(tickets[0]["live_jira_status"], "In Progress")
             self.assertEqual(tickets[0]["live_fix_version"], "Live_26Q2")
             self.assertEqual(bpmis_client.detail_calls, ["AF-1", "AF-1"])
+            updated = service.update_ticket_status(
+                user_key="google:pm@npt.sg",
+                bpmis_id="225159",
+                ticket_id=tickets[0]["id"],
+                status="Testing",
+            )
+            self.assertEqual(bpmis_client.status_calls, [("AF-1", "Testing")])
+            self.assertEqual(updated["live_jira_status"], "In Progress")
             self.assertTrue(service.delete_ticket(user_key="google:pm@npt.sg", bpmis_id="225159", ticket_id=tickets[0]["id"]))
             self.assertEqual(len(service.list_tickets(user_key="google:pm@npt.sg", bpmis_id="225159")), 1)
 

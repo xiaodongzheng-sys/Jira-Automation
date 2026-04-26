@@ -2417,6 +2417,28 @@ def create_app() -> Flask:
         except ToolError as error:
             return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
 
+    @app.patch("/api/bpmis-projects/<bpmis_id>/jira-tickets/<ticket_id>/status")
+    def update_bpmis_project_jira_ticket_status(bpmis_id: str, ticket_id: str):
+        login_gate = _require_google_login(settings, api=True)
+        if login_gate is not None:
+            return login_gate
+        payload = request.get_json(silent=True) or {}
+        status_value = str(payload.get("status") or "").strip() if isinstance(payload, dict) else ""
+        if not status_value:
+            return jsonify({"status": "error", "message": "Jira status is required."}), HTTPStatus.BAD_REQUEST
+        try:
+            user_identity = _get_user_identity(settings)
+            service = _build_portal_jira_creation_service(settings)
+            ticket = service.update_ticket_status(
+                user_key=user_identity["config_key"],
+                bpmis_id=bpmis_id,
+                ticket_id=ticket_id,
+                status=status_value,
+            )
+            return jsonify({"status": "ok", "ticket": ticket})
+        except ToolError as error:
+            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
+
     @app.post("/api/bpmis-projects/<bpmis_id>/jira-tickets")
     def create_bpmis_project_jira_tickets(bpmis_id: str):
         login_gate = _require_google_login(settings, api=True)

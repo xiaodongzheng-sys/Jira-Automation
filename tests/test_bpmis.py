@@ -5,6 +5,7 @@ from pathlib import Path
 
 from bpmis_jira_tool.bpmis import BPMISDirectApiClient
 from bpmis_jira_tool.config import Settings
+from bpmis_jira_tool.errors import BPMISError
 from bpmis_jira_tool.models import ProjectMatch
 
 
@@ -748,6 +749,82 @@ class BPMISClientTests(unittest.TestCase):
             self.assertFalse(client._row_matches_jira_key({"summary": "No Jira key"}, "AF-101"))
             self.assertFalse(client._row_matches_jira_key({"jiraKey": ""}, "AF-101"))
             self.assertTrue(client._row_matches_jira_key({"jiraKey": "AF-101"}, "af-101"))
+
+    def test_update_jira_ticket_status_posts_resolved_workflow_status(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings = Settings(
+                flask_secret_key="secret",
+                google_oauth_client_secret_file=Path(temp_dir) / "client.json",
+                google_oauth_redirect_uri=None,
+                team_portal_host="127.0.0.1",
+                team_portal_port=5000,
+                team_portal_base_url=None,
+                team_allowed_emails=(),
+                team_allowed_email_domains=(),
+                team_portal_data_dir=Path(temp_dir),
+                spreadsheet_id="sheet",
+                common_tab_name="Common",
+                input_tab_name="Input",
+                bpmis_base_url="https://example.com",
+                bpmis_api_access_token="token",
+            )
+
+            client = BPMISDirectApiClient(settings)
+            calls: list[tuple[str, str, dict | None, dict | None]] = []
+
+            def fake_api_request(path, method="GET", params=None, body=None):
+                calls.append((path, method, params, body))
+                if path == "/api/v1/issues/detail":
+                    return {
+                        "data": {
+                            "row": {
+                                "id": 9001,
+                                "jiraKey": "AF-101",
+                                "summary": "Live AF task",
+                                "status": {"label": "Testing"},
+                            }
+                        }
+                    }
+                if path == "/api/v1/issueField/list":
+                    return {"data": {"statusId": {"key": "statusId", "optionGroup": "jiraStatus"}}}
+                if path == "/api/v1/options/getGroupOptions":
+                    return {"data": {"jiraStatus": [{"label": "Testing", "value": 44}]}}
+                if path == "/api/v1/issues/updateStatus":
+                    return {"data": {"ok": True}}
+                raise AssertionError(path)
+
+            client._api_request = fake_api_request  # type: ignore[method-assign]
+
+            detail = client.update_jira_ticket_status("https://jira.shopee.io/browse/AF-101", "Testing")
+
+            update_call = next(call for call in calls if call[0] == "/api/v1/issues/updateStatus")
+            self.assertEqual(update_call[1], "POST")
+            self.assertEqual(update_call[3], {"jiraKey": "AF-101", "statusId": 44})
+            self.assertEqual(detail["status"]["label"], "Testing")
+
+    def test_update_jira_ticket_status_rejects_unknown_status(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings = Settings(
+                flask_secret_key="secret",
+                google_oauth_client_secret_file=Path(temp_dir) / "client.json",
+                google_oauth_redirect_uri=None,
+                team_portal_host="127.0.0.1",
+                team_portal_port=5000,
+                team_portal_base_url=None,
+                team_allowed_emails=(),
+                team_allowed_email_domains=(),
+                team_portal_data_dir=Path(temp_dir),
+                spreadsheet_id="sheet",
+                common_tab_name="Common",
+                input_tab_name="Input",
+                bpmis_base_url="https://example.com",
+                bpmis_api_access_token="token",
+            )
+
+            client = BPMISDirectApiClient(settings)
+
+            with self.assertRaises(BPMISError):
+                client.update_jira_ticket_status("AF-101", "Not a workflow status")
 
 
 if __name__ == "__main__":

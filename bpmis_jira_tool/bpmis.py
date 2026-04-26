@@ -67,6 +67,10 @@ class BPMISClient(ABC):
     def get_jira_ticket_detail(self, ticket_key: str) -> dict[str, Any]:
         raise NotImplementedError
 
+    @abstractmethod
+    def update_jira_ticket_status(self, ticket_key: str, status: str) -> dict[str, Any]:
+        raise NotImplementedError
+
 
 class BPMISDirectApiClient(BPMISClient):
     BIZ_PROJECT_TYPE_ID = 1
@@ -80,6 +84,18 @@ class BPMISDirectApiClient(BPMISClient):
         "tech": "[Tech]",
         "support": "[Support]",
     }
+    JIRA_STATUS_OPTIONS = [
+        "Waiting",
+        "PRD in Progress",
+        "PRD Reviewed",
+        "Developing",
+        "Testing",
+        "UAT",
+        "Regression",
+        "Done",
+        "Closed",
+        "IceBox",
+    ]
 
     def __init__(self, settings: Settings, access_token: str | None = None):
         self.settings = settings
@@ -434,6 +450,45 @@ class BPMISDirectApiClient(BPMISClient):
                 return match
         return {}
 
+    def update_jira_ticket_status(self, ticket_key: str, status: str) -> dict[str, Any]:
+        normalized_ticket_key = self._extract_issue_key(str(ticket_key or "")) or str(ticket_key or "").strip()
+        normalized_status = self._normalize_jira_status(status)
+        if not normalized_ticket_key:
+            raise BPMISError("Jira ticket key is required.")
+        if not normalized_status:
+            raise BPMISError("Jira status is required.")
+
+        detail = self.get_jira_ticket_detail(normalized_ticket_key)
+        issue_id = self._extract_issue_identifier(detail)
+        status_id = self._resolve_jira_status_id(normalized_status)
+        bodies = self._jira_status_update_bodies(
+            ticket_key=normalized_ticket_key,
+            issue_id=issue_id,
+            status=normalized_status,
+            status_id=status_id,
+        )
+        attempts = [
+            ("POST", "/api/v1/issues/updateStatus"),
+            ("POST", "/api/v1/issues/status/update"),
+            ("POST", "/api/v1/issues/transition"),
+            ("POST", "/api/v1/issues/workflow"),
+            ("POST", "/api/v1/issues/update"),
+            ("PUT", "/api/v1/issues/update"),
+            ("POST", "/api/v1/issue/updateStatus"),
+            ("POST", "/api/v1/issue/status/update"),
+        ]
+        last_error: BPMISError | None = None
+        for body in bodies:
+            for method, path in attempts:
+                try:
+                    self._api_request(path, method=method, body=body)
+                    return self.get_jira_ticket_detail(normalized_ticket_key)
+                except BPMISError as error:
+                    last_error = error
+        if last_error is not None:
+            raise BPMISError(f"Could not update Jira status through BPMIS: {last_error}") from last_error
+        raise BPMISError("Could not update Jira status through BPMIS.")
+
     def _build_create_payload(
         self,
         project: ProjectMatch,
@@ -597,6 +652,48 @@ class BPMISDirectApiClient(BPMISClient):
                 ],
             },
         ]
+
+    def _normalize_jira_status(self, status: str) -> str:
+        normalized = str(status or "").strip()
+        allowed = {value.lower(): value for value in self.JIRA_STATUS_OPTIONS}
+        return allowed.get(normalized.lower(), "")
+
+    def _resolve_jira_status_id(self, status: str) -> int | None:
+        field_defs = self._get_issue_fields()
+        status_field = field_defs.get("statusId") or field_defs.get("jiraStatusId") or field_defs.get("status") or {}
+        if not isinstance(status_field, dict):
+            return None
+        try:
+            return int(self._resolve_option_value(status_field, status))
+        except (BPMISError, TypeError, ValueError):
+            return None
+
+    def _jira_status_update_bodies(
+        self,
+        *,
+        ticket_key: str,
+        issue_id: str,
+        status: str,
+        status_id: int | None,
+    ) -> list[dict[str, Any]]:
+        identifiers: list[dict[str, Any]] = [{"jiraKey": ticket_key}, {"jiraIssueKey": ticket_key}, {"key": ticket_key}]
+        if issue_id:
+            identifiers.extend([{"id": issue_id}, {"issueId": issue_id}])
+        status_values: list[dict[str, Any]] = []
+        if status_id is not None:
+            status_values.extend([{"statusId": status_id}, {"jiraStatusId": status_id}])
+        status_values.extend([{"status": status}, {"jiraStatus": status}, {"statusName": status}])
+
+        bodies: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for identifier in identifiers:
+            for status_value in status_values:
+                body = {**identifier, **status_value}
+                key = json.dumps(body, sort_keys=True)
+                if key not in seen:
+                    bodies.append(body)
+                    seen.add(key)
+        return bodies
 
     def _extract_issue_description(self, row: dict[str, Any]) -> str:
         for key in ("desc", "description", "jiraDescription"):

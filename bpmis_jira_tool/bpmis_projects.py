@@ -518,6 +518,32 @@ class PortalJiraCreationService:
             raise ToolError("BPMIS project was not found.")
         return self.store.delete_jira_ticket(user_key=user_key, bpmis_id=bpmis_id, ticket_id=ticket_id)
 
+    def update_ticket_status(
+        self,
+        *,
+        user_key: str,
+        bpmis_id: str,
+        ticket_id: str | int,
+        status: str,
+    ) -> dict[str, Any]:
+        project = self.store.get_project(user_key=user_key, bpmis_id=bpmis_id)
+        if project is None:
+            raise ToolError("BPMIS project was not found.")
+        tickets = project.get("jira_tickets") if isinstance(project, dict) else []
+        ticket = next((item for item in tickets if str(item.get("id") or "") == str(ticket_id or "")), None)
+        if not isinstance(ticket, dict):
+            raise ToolError("Jira task was not found.")
+        ticket_key = str(ticket.get("ticket_key") or ticket.get("ticket_link") or "").strip()
+        if not ticket_key:
+            raise ToolError("Jira task does not have a Jira key.")
+        if not hasattr(self.bpmis_client, "update_jira_ticket_status"):
+            raise ToolError("BPMIS client does not support updating Jira status.")
+        try:
+            self.bpmis_client.update_jira_ticket_status(ticket_key, status)
+        except BPMISError as error:
+            raise ToolError(str(error)) from error
+        return self._ticket_with_live_jira_fields(ticket)
+
     def _ticket_with_live_jira_fields(self, ticket: dict[str, Any]) -> dict[str, Any]:
         item = dict(ticket)
         ticket_key = str(item.get("ticket_key") or item.get("ticket_link") or "").strip()

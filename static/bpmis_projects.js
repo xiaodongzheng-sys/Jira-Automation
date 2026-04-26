@@ -21,6 +21,18 @@
   const backButton = document.querySelector('[data-jira-wizard-back]');
   const nextButton = document.querySelector('[data-jira-wizard-next]');
   const submitButton = document.querySelector('[data-jira-wizard-submit]');
+  const JIRA_STATUS_OPTIONS = [
+    'Waiting',
+    'PRD in Progress',
+    'PRD Reviewed',
+    'Developing',
+    'Testing',
+    'UAT',
+    'Regression',
+    'Done',
+    'Closed',
+    'IceBox',
+  ];
 
   if (!body || !tableWrap || !empty || !count || !status || !modal || !modalTitle || !modalKicker || !stepOne || !stepTwo || !componentList || !formList || !wizardStatus || !cancelButton || !backButton || !nextButton || !submitButton) {
     return;
@@ -101,6 +113,17 @@
     return text;
   };
 
+  const statusButtonMarkup = (ticket, rawStatus, statusText) => `
+    <button
+      class="bpmis-task-status${taskStatusClass(rawStatus)}"
+      type="button"
+      data-update-status
+      data-status-task="${escapeHtml(ticket.id || '')}"
+      data-status-project="${escapeHtml(ticket.bpmis_id || '')}"
+      data-current-status="${escapeHtml(rawStatus)}"
+    >${statusText}</button>
+  `;
+
   const taskMarkup = (tickets) => {
     if (!Array.isArray(tickets) || !tickets.length) {
       return '<div class="bpmis-task-empty">No Jira tasks created for this project yet.</div>';
@@ -123,7 +146,7 @@
           <div class="bpmis-task-cell bpmis-task-title" data-label="Title" title="${title}">${title}</div>
           <div class="bpmis-task-cell" data-label="Market">${market}</div>
           <div class="bpmis-task-cell" data-label="Status">
-            <span class="bpmis-task-status${taskStatusClass(rawStatus)}">${statusText}</span>
+            ${statusButtonMarkup(ticket, rawStatus, statusText)}
           </div>
           <div class="bpmis-task-cell" data-label="Version">${version}</div>
           <div class="bpmis-task-cell" data-label="Component">${component}</div>
@@ -234,6 +257,57 @@
       panel.appendChild(warning);
     } finally {
       panel.dataset.liveLoading = 'false';
+    }
+  };
+
+  const openStatusSelect = (button) => {
+    const cell = button.closest('.bpmis-task-cell');
+    if (!cell) return;
+    const currentStatus = button.dataset.currentStatus || button.textContent || '';
+    const originalMarkup = button.outerHTML;
+    const select = document.createElement('select');
+    select.className = 'bpmis-task-status-select';
+    select.dataset.statusTask = button.dataset.statusTask || '';
+    select.dataset.statusProject = button.dataset.statusProject || '';
+    select.setAttribute('aria-label', 'Update Jira status');
+    select.innerHTML = JIRA_STATUS_OPTIONS
+      .map((option) => `<option value="${escapeHtml(option)}"${option.toLowerCase() === currentStatus.trim().toLowerCase() ? ' selected' : ''}>${escapeHtml(option)}</option>`)
+      .join('');
+    cell.innerHTML = '';
+    cell.appendChild(select);
+    select.focus();
+    select.addEventListener('change', () => updateTaskStatus(select));
+    select.addEventListener('blur', () => {
+      if (select.dataset.saving === 'true') return;
+      cell.innerHTML = originalMarkup;
+    }, { once: true });
+  };
+
+  const updateTaskStatus = async (select) => {
+    const bpmisId = select.dataset.statusProject || '';
+    const ticketId = select.dataset.statusTask || '';
+    const nextStatus = select.value || '';
+    const panel = body.querySelector(`[data-task-panel="${cssEscape(bpmisId)}"]`);
+    if (!bpmisId || !ticketId || !nextStatus || !panel) return;
+    select.dataset.saving = 'true';
+    select.disabled = true;
+    setStatus(`Updating Jira status to ${nextStatus}...`, 'neutral');
+    try {
+      const response = await fetch(`${projectsUrl}/${encodeURIComponent(bpmisId)}/jira-tickets/${encodeURIComponent(ticketId)}/status`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ status: nextStatus }),
+      });
+      await readJson(response, 'Could not update Jira status.');
+      panel.dataset.loaded = 'false';
+      panel.dataset.liveLoaded = 'false';
+      await loadTasks(bpmisId, { force: true });
+      setStatus(`Jira status updated to ${nextStatus}.`, 'success');
+    } catch (error) {
+      setStatus(error.message || 'Could not update Jira status.', 'error');
+      panel.dataset.liveLoaded = 'false';
+      await loadTasks(bpmisId, { force: true });
     }
   };
 
@@ -529,6 +603,11 @@
     const delinkButton = event.target.closest('[data-delink-task]');
     if (delinkButton) {
       await delinkTask(delinkButton);
+      return;
+    }
+    const statusButton = event.target.closest('[data-update-status]');
+    if (statusButton) {
+      openStatusSelect(statusButton);
       return;
     }
     const deleteButton = event.target.closest('[data-delete-project]');
