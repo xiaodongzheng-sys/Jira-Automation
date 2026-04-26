@@ -287,6 +287,70 @@ class SeaTalkTodoStore:
             return {"status": "ok", "todo_id": todo_id, "completed_at": completed[todo_id]["completed_at"]}
 
 
+class SeaTalkNameMappingStore:
+    def __init__(self, storage_path: Path | None = None) -> None:
+        self.storage_path = storage_path
+        self._payload = self._load()
+        self._lock = threading.Lock()
+
+    @staticmethod
+    def normalize_key(value: Any) -> str:
+        key = str(value or "").strip()
+        if key.startswith("group-") or key.startswith("buddy-"):
+            return key
+        uid_match = re.match(r"^UID\s+(.+)$", key, re.IGNORECASE)
+        if uid_match and uid_match.group(1).strip():
+            return f"UID {uid_match.group(1).strip()}"
+        return ""
+
+    @classmethod
+    def normalize_mappings(cls, value: Any) -> dict[str, str]:
+        if not isinstance(value, dict):
+            return {}
+        mappings: dict[str, str] = {}
+        for raw_key, raw_name in value.items():
+            key = cls.normalize_key(raw_key)
+            name = " ".join(str(raw_name or "").split())
+            if key and name:
+                mappings[key] = name[:180]
+        return mappings
+
+    def _load(self) -> dict[str, Any]:
+        if self.storage_path is None or not self.storage_path.exists():
+            return {"mappings": {}}
+        try:
+            payload = json.loads(self.storage_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {"mappings": {}}
+        if not isinstance(payload, dict):
+            return {"mappings": {}}
+        payload["mappings"] = self.normalize_mappings(payload.get("mappings") if "mappings" in payload else payload)
+        return payload
+
+    def _persist_locked(self) -> None:
+        if self.storage_path is None:
+            return
+        try:
+            self.storage_path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {**self._payload, "updated_at": time.time()}
+            temp_path = self.storage_path.with_name(f".{self.storage_path.name}.{os.getpid()}.tmp")
+            temp_path.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True), encoding="utf-8")
+            os.replace(temp_path, self.storage_path)
+        except OSError:
+            return
+
+    def mappings(self) -> dict[str, str]:
+        with self._lock:
+            return dict(self._payload.get("mappings") or {})
+
+    def replace_mappings(self, mappings: dict[str, str]) -> dict[str, str]:
+        normalized = self.normalize_mappings(mappings)
+        with self._lock:
+            self._payload["mappings"] = normalized
+            self._persist_locked()
+            return dict(normalized)
+
+
 class SourceCodeQASessionStore:
     def __init__(self, storage_path: Path | None = None) -> None:
         self.storage_path = storage_path
@@ -805,6 +869,7 @@ def create_app() -> Flask:
     app.config["CONFIG_STORE"] = config_store
     app.config["JOB_STORE"] = JobStore(data_root / "run" / "jobs.json")
     app.config["SEATALK_TODO_STORE"] = SeaTalkTodoStore(data_root / "seatalk" / "completed_todos.json")
+    app.config["SEATALK_NAME_MAPPING_STORE"] = SeaTalkNameMappingStore(data_root / "seatalk" / "name_overrides.json")
     app.config["SOURCE_CODE_QA_SESSION_STORE"] = SourceCodeQASessionStore(data_root / "source_code_qa" / "sessions.json")
     app.config["SOURCE_CODE_QA_MODEL_AVAILABILITY_STORE"] = SourceCodeQAModelAvailabilityStore(
         data_root / "source_code_qa" / "model_availability.json"
@@ -1388,6 +1453,7 @@ def create_app() -> Flask:
             seatalk_configured=_seatalk_dashboard_is_configured(settings),
             seatalk_insights_url=url_for("gmail_seatalk_demo_seatalk_insights_api"),
             seatalk_todo_complete_url=url_for("gmail_seatalk_demo_seatalk_todo_complete"),
+            seatalk_name_mappings_url=url_for("gmail_seatalk_demo_seatalk_name_mappings"),
             asset_revision=_current_release_revision(),
         )
 
@@ -1709,6 +1775,44 @@ def create_app() -> Flask:
             return jsonify(result)
         except ToolError as error:
             return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
+
+    @app.route("/api/gmail-sea-talk-demo/seatalk/name-mappings", methods=["GET", "POST"])
+    def gmail_seatalk_demo_seatalk_name_mappings():
+        access_gate = _require_gmail_seatalk_demo_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        mapping_store: SeaTalkNameMappingStore = current_app.config["SEATALK_NAME_MAPPING_STORE"]
+        if request.method == "POST":
+            payload = request.get_json(silent=True) or {}
+            mappings = mapping_store.replace_mappings(payload.get("mappings") if isinstance(payload, dict) else {})
+            SeaTalkDashboardService.clear_cache()
+            return jsonify({"status": "ok", "mappings": mappings})
+        try:
+            candidates = _build_seatalk_dashboard_service(settings).build_name_mappings()
+            return jsonify({"status": "ok", "mappings": mapping_store.mappings(), **candidates})
+        except ToolError as error:
+            error_details = _classify_portal_error(error)
+            _log_portal_event(
+                "gmail_seatalk_seatalk_name_mappings_tool_error",
+                level=logging.WARNING,
+                **_build_request_log_context(
+                    settings,
+                    user_identity=_get_user_identity(settings),
+                    extra=error_details,
+                ),
+            )
+            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
+        except Exception:
+            _log_portal_event(
+                "gmail_seatalk_seatalk_name_mappings_unexpected_error",
+                level=logging.ERROR,
+                **_build_request_log_context(settings, user_identity=_get_user_identity(settings)),
+            )
+            current_app.logger.exception("SeaTalk name mapping load failed.")
+            return (
+                jsonify({"status": "error", "message": "SeaTalk name mappings could not be loaded right now. Please try again shortly."}),
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
 
     @app.get("/api/gmail-sea-talk-demo/seatalk/export")
     def gmail_seatalk_demo_seatalk_export():
@@ -2392,6 +2496,8 @@ def _build_gmail_dashboard_service() -> GmailDashboardService:
 
 
 def _build_seatalk_dashboard_service(settings: Settings) -> SeaTalkDashboardService:
+    name_mapping_store = current_app.config.get("SEATALK_NAME_MAPPING_STORE") if current_app else None
+    name_overrides_path = getattr(name_mapping_store, "storage_path", None)
     return SeaTalkDashboardService(
         owner_email=settings.seatalk_owner_email,
         seatalk_app_path=settings.seatalk_local_app_path,
@@ -2400,6 +2506,7 @@ def _build_seatalk_dashboard_service(settings: Settings) -> SeaTalkDashboardServ
         codex_model=os.getenv("SOURCE_CODE_QA_CODEX_MODEL", "codex-cli"),
         codex_timeout_seconds=settings.source_code_qa_codex_timeout_seconds,
         codex_concurrency=settings.source_code_qa_codex_concurrency,
+        name_overrides_path=name_overrides_path,
     )
 
 

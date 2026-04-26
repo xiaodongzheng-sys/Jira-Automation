@@ -58,7 +58,7 @@ def _run_subprocess(command: list[str], *, env: dict[str, str], timeout: int) ->
 class SeaTalkDashboardService:
     _dashboard_cache: dict[tuple[str, str, int], _SeaTalkDashboardCacheEntry] = {}
     _dashboard_cache_lock = Lock()
-    _insights_cache: dict[tuple[str, str, int, str], _SeaTalkInsightsCacheEntry] = {}
+    _insights_cache: dict[tuple[str, str, int, str, str], _SeaTalkInsightsCacheEntry] = {}
     _insights_cache_lock = Lock()
 
     def __init__(
@@ -72,6 +72,7 @@ class SeaTalkDashboardService:
         codex_timeout_seconds: int = DEFAULT_CODEX_TIMEOUT_SECONDS,
         codex_concurrency: int = 1,
         codex_binary: str | None = None,
+        name_overrides_path: str | Path | None = None,
         command_runner: Callable[[list[str]], subprocess.CompletedProcess[str]] | None = None,
     ) -> None:
         self.owner_email = str(owner_email or "").strip().lower()
@@ -82,6 +83,7 @@ class SeaTalkDashboardService:
         self.codex_timeout_seconds = max(10, int(codex_timeout_seconds or DEFAULT_CODEX_TIMEOUT_SECONDS))
         self.codex_concurrency = max(1, min(int(codex_concurrency or 1), 4))
         self.codex_binary = str(codex_binary or os.getenv("SOURCE_CODE_QA_CODEX_BINARY") or "codex").strip() or "codex"
+        self.name_overrides_path = Path(name_overrides_path).expanduser() if name_overrides_path else None
         self._command_runner = command_runner
         if not self.owner_email:
             raise ConfigError("SeaTalk owner email is missing. Set SEATALK_OWNER_EMAIL first.")
@@ -170,6 +172,39 @@ class SeaTalkDashboardService:
         self._store_cached_insights(days=days, now=now, payload=payload)
         return payload
 
+    def build_name_mappings(
+        self,
+        *,
+        days: int = SEATALK_DASHBOARD_DEFAULT_DAYS,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        now = now or datetime.now().astimezone()
+        self._validate_local_environment()
+        result = self._run_local_helper(
+            "seatalk_local_export.js",
+            days=days,
+            now=now,
+            timeout=45,
+            extra_args=["--unknown-ids-json"],
+        )
+        if result.returncode != 0:
+            message = (result.stderr or result.stdout or "").strip()
+            if not message:
+                message = "SeaTalk name mapping candidates could not be loaded right now."
+            raise ToolError(message)
+        try:
+            payload = json.loads(result.stdout or "{}")
+        except json.JSONDecodeError as error:
+            raise ToolError("SeaTalk name mapping candidates returned an invalid response.") from error
+        if not isinstance(payload, dict):
+            raise ToolError("SeaTalk name mapping candidates returned an invalid payload.")
+        unknown_ids = payload.get("unknown_ids") if isinstance(payload.get("unknown_ids"), list) else []
+        return {
+            "unknown_ids": [self._normalize_unknown_id(row) for row in unknown_ids if isinstance(row, dict)],
+            "generated_at": self._clean_text(payload.get("generated_at"), now.isoformat()),
+            "period_days": int(payload.get("period_days") or days),
+        }
+
     def _validate_local_environment(self) -> None:
         if not self.seatalk_app_path.exists():
             raise ConfigError(
@@ -216,6 +251,7 @@ class SeaTalkDashboardService:
         days: int,
         now: datetime,
         timeout: int = 25,
+        extra_args: list[str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
         helper_path = Path(__file__).with_name(helper_name)
         command = [
@@ -228,6 +264,10 @@ class SeaTalkDashboardService:
             "--now",
             now.isoformat(),
         ]
+        if helper_name == "seatalk_local_export.js" and self.name_overrides_path is not None:
+            command.extend(["--name-overrides", str(self.name_overrides_path)])
+        if extra_args:
+            command.extend(extra_args)
         env = os.environ.copy()
         env["ELECTRON_RUN_AS_NODE"] = "1"
         runner = self._command_runner or (lambda args: _run_subprocess(args, env=env, timeout=timeout))
@@ -277,8 +317,17 @@ class SeaTalkDashboardService:
                 expires_at=self._insights_cache_expiry(now),
             )
 
-    def _insights_cache_key(self, days: int) -> tuple[str, str, int, str]:
-        return (str(self.seatalk_app_path), str(self.seatalk_data_dir), int(days), self.codex_model)
+    def _insights_cache_key(self, days: int) -> tuple[str, str, int, str, str]:
+        return (str(self.seatalk_app_path), str(self.seatalk_data_dir), int(days), self.codex_model, self._name_overrides_cache_token())
+
+    def _name_overrides_cache_token(self) -> str:
+        if self.name_overrides_path is None:
+            return ""
+        try:
+            stat = self.name_overrides_path.stat()
+        except OSError:
+            return str(self.name_overrides_path)
+        return f"{self.name_overrides_path}:{stat.st_mtime_ns}:{stat.st_size}"
 
     @staticmethod
     def _insights_cache_expiry(now: datetime) -> datetime:
@@ -583,6 +632,21 @@ class SeaTalkDashboardService:
     def _clean_text(value: Any, fallback: str) -> str:
         text = " ".join(str(value or "").split())
         return (text or fallback)[:900]
+
+    @classmethod
+    def _normalize_unknown_id(cls, row: dict[str, Any]) -> dict[str, Any]:
+        count = row.get("count")
+        try:
+            count_value = max(0, int(count))
+        except (TypeError, ValueError):
+            count_value = 0
+        return {
+            "id": cls._clean_text(row.get("id"), ""),
+            "type": cls._clean_choice(row.get("type"), {"group", "buddy", "uid"}, "uid"),
+            "count": count_value,
+            "example": cls._clean_text(row.get("example"), ""),
+            "first_seen": cls._clean_text(row.get("first_seen"), ""),
+        }
 
     @classmethod
     def clear_cache(cls) -> None:

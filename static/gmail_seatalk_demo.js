@@ -151,6 +151,109 @@
     });
   };
 
+  const renderNameMappings = (root, payload) => {
+    const body = root.querySelector('[data-seatalk-name-mapping-body]');
+    const actions = root.querySelector('[data-seatalk-name-mapping-actions]');
+    if (!body) return;
+    const mappings = payload?.mappings && typeof payload.mappings === 'object' ? payload.mappings : {};
+    const unknownRows = Array.isArray(payload?.unknown_ids) ? payload.unknown_ids : [];
+    const rowsById = new Map();
+    unknownRows.forEach((row) => {
+      if (!row?.id) return;
+      rowsById.set(String(row.id), {
+        id: String(row.id),
+        type: row.type || 'uid',
+        count: Number(row.count || 0),
+        example: row.example || '',
+      });
+    });
+    Object.keys(mappings).sort().forEach((id) => {
+      if (!rowsById.has(id)) {
+        rowsById.set(id, { id, type: id.startsWith('group-') ? 'group' : id.startsWith('buddy-') ? 'buddy' : 'uid', count: 0, example: '' });
+      }
+    });
+    const rows = Array.from(rowsById.values()).sort((left, right) => (right.count - left.count) || left.id.localeCompare(right.id));
+    if (!rows.length) {
+      body.innerHTML = `
+        <article class="seatalk-insight-item">
+          <p>No frequent unknown SeaTalk IDs were found in the last 7 days.</p>
+        </article>
+      `;
+      body.hidden = false;
+      if (actions) actions.hidden = true;
+      return;
+    }
+    body.innerHTML = rows.map((row) => `
+      <div class="seatalk-mapping-row" data-seatalk-mapping-row data-seatalk-mapping-id="${escapeHtml(row.id)}">
+        <div class="seatalk-mapping-id">
+          <strong>${escapeHtml(row.id)}</strong>
+          <span>${escapeHtml(row.type || 'uid')}</span>
+        </div>
+        <div class="seatalk-mapping-count">
+          <strong>${formatNumber(row.count || 0)}</strong>
+          <span>recent mentions</span>
+        </div>
+        <div>
+          <input
+            type="text"
+            value="${escapeHtml(mappings[row.id] || '')}"
+            placeholder="Display name"
+            data-seatalk-mapping-input
+            aria-label="Display name for ${escapeHtml(row.id)}"
+          >
+          ${row.example ? `<div class="seatalk-mapping-example">${escapeHtml(row.example)}</div>` : ''}
+        </div>
+      </div>
+    `).join('');
+    body.hidden = false;
+    if (actions) actions.hidden = false;
+  };
+
+  const collectNameMappings = (root) => {
+    const mappings = {};
+    root.querySelectorAll('[data-seatalk-mapping-row]').forEach((row) => {
+      const id = row.dataset.seatalkMappingId || '';
+      const input = row.querySelector('[data-seatalk-mapping-input]');
+      const value = String(input?.value || '').trim();
+      if (id && value) mappings[id] = value;
+    });
+    return mappings;
+  };
+
+  const loadSeaTalkNameMappings = async (root, mappingsUrl) => {
+    if (!mappingsUrl) return;
+    setScopedStatus(root, '[data-seatalk-mapping-status]', 'Loading frequent unknown IDs…', 'neutral');
+    try {
+      const response = await fetch(mappingsUrl, { method: 'GET' });
+      const payload = await parseDashboardResponse(response);
+      if (!response.ok) throw new Error(payload.message || 'Could not load SeaTalk name mappings.');
+      renderNameMappings(root, payload);
+      hideScopedStatus(root, '[data-seatalk-mapping-status]');
+      root.dataset.seatalkMappingsLoaded = 'true';
+    } catch (error) {
+      setScopedStatus(root, '[data-seatalk-mapping-status]', error.message || 'Could not load SeaTalk name mappings.', 'error');
+    }
+  };
+
+  const saveSeaTalkNameMappings = async (root, mappingsUrl) => {
+    if (!mappingsUrl) return;
+    setScopedStatus(root, '[data-seatalk-mapping-status]', 'Saving name mappings…', 'neutral');
+    try {
+      const response = await fetch(mappingsUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mappings: collectNameMappings(root) }),
+      });
+      const payload = await parseDashboardResponse(response);
+      if (!response.ok) throw new Error(payload.message || 'Could not save SeaTalk name mappings.');
+      setScopedStatus(root, '[data-seatalk-mapping-status]', 'Saved. Exports and Codex evidence will use these names on the next load.', 'success');
+      root.dataset.seatalkMappingsLoaded = '';
+      window.setTimeout(() => loadSeaTalkNameMappings(root, mappingsUrl), 300);
+    } catch (error) {
+      setScopedStatus(root, '[data-seatalk-mapping-status]', error.message || 'Could not save SeaTalk name mappings.', 'error');
+    }
+  };
+
   const renderChart = (container, series) => {
     if (!container) return;
     const rows = Array.isArray(series) ? series : [];
@@ -321,6 +424,7 @@
     const seatalkConfigured = seatalkRoot.dataset.seatalkConfigured === 'true';
     const insightsUrl = seatalkRoot.dataset.seatalkInsightsUrl || '';
     const todoCompleteUrl = seatalkRoot.dataset.seatalkTodoCompleteUrl || '';
+    const nameMappingsUrl = seatalkRoot.dataset.seatalkNameMappingsUrl || '';
     const contentNode = seatalkRoot.querySelector('[data-seatalk-content]');
     const insightsStatusNode = seatalkRoot.querySelector('[data-seatalk-insights-status]');
     const projectUpdatesNode = seatalkRoot.querySelector('[data-seatalk-project-updates]');
@@ -329,6 +433,24 @@
     if (!seatalkConfigured) return;
     if (contentNode) contentNode.hidden = false;
     hideScopedStatus(seatalkRoot, '[data-seatalk-status]');
+    seatalkRoot.querySelectorAll('[data-seatalk-tab]').forEach((tab) => {
+      tab.addEventListener('click', () => {
+        const target = tab.dataset.seatalkTab || 'summary';
+        seatalkRoot.querySelectorAll('[data-seatalk-tab]').forEach((button) => {
+          button.setAttribute('aria-selected', button === tab ? 'true' : 'false');
+        });
+        seatalkRoot.querySelectorAll('[data-seatalk-panel]').forEach((panel) => {
+          panel.hidden = panel.dataset.seatalkPanel !== target;
+        });
+        if (target === 'mapping' && seatalkRoot.dataset.seatalkMappingsLoaded !== 'true') {
+          loadSeaTalkNameMappings(seatalkRoot, nameMappingsUrl);
+        }
+      });
+    });
+    const saveMappingsButton = seatalkRoot.querySelector('[data-seatalk-name-mapping-save]');
+    if (saveMappingsButton) {
+      saveMappingsButton.addEventListener('click', () => saveSeaTalkNameMappings(seatalkRoot, nameMappingsUrl));
+    }
     if (!insightsUrl || !insightsStatusNode) return;
     setScopedStatus(seatalkRoot, '[data-seatalk-insights-status]', 'Loading SeaTalk summary…', 'neutral');
     try {

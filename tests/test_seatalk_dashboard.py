@@ -134,6 +134,7 @@ class SeaTalkDashboardServiceTests(unittest.TestCase):
 
     def test_export_history_text_returns_attachment_content(self):
         calls: list[list[str]] = []
+        overrides_path = Path(self.temp_dir.name) / "seatalk" / "name_overrides.json"
 
         def runner(command: list[str]):
             calls.append(command)
@@ -156,6 +157,7 @@ class SeaTalkDashboardServiceTests(unittest.TestCase):
             owner_email="xiaodong.zheng@npt.sg",
             seatalk_app_path=str(self.app_dir),
             seatalk_data_dir=str(self.data_dir),
+            name_overrides_path=overrides_path,
             command_runner=runner,
         )
 
@@ -164,6 +166,44 @@ class SeaTalkDashboardServiceTests(unittest.TestCase):
         self.assertEqual(content, "demo history")
         self.assertEqual(filename, "seatalk-history-last-7-days.txt")
         self.assertTrue(any(command[1].endswith("seatalk_local_export.js") for command in calls))
+        export_command = next(command for command in calls if command[1].endswith("seatalk_local_export.js"))
+        self.assertIn("--name-overrides", export_command)
+        self.assertIn(str(overrides_path), export_command)
+
+    def test_build_name_mappings_parses_unknown_ids(self):
+        calls: list[list[str]] = []
+
+        def runner(command: list[str]):
+            calls.append(command)
+            return subprocess.CompletedProcess(
+                args=command,
+                returncode=0,
+                stdout=json.dumps(
+                    {
+                        "unknown_ids": [
+                            {"id": "group-123", "type": "group", "count": 9, "example": "2026-04-21: Please review"},
+                            {"id": "UID 888", "type": "uid", "count": "4", "example": "2026-04-21: hello"},
+                        ],
+                        "generated_at": "2026-04-21T21:00:00+08:00",
+                        "period_days": 7,
+                    }
+                ),
+                stderr="",
+            )
+
+        service = SeaTalkDashboardService(
+            owner_email="xiaodong.zheng@npt.sg",
+            seatalk_app_path=str(self.app_dir),
+            seatalk_data_dir=str(self.data_dir),
+            command_runner=runner,
+        )
+
+        result = service.build_name_mappings(now=datetime(2026, 4, 21, 21, 0).astimezone())
+
+        self.assertEqual(result["unknown_ids"][0]["id"], "group-123")
+        self.assertEqual(result["unknown_ids"][0]["count"], 9)
+        self.assertEqual(result["unknown_ids"][1]["id"], "UID 888")
+        self.assertTrue(any("--unknown-ids-json" in command for command in calls))
 
     def test_build_insights_uses_codex_read_only_ephemeral_command(self):
         def local_runner(command: list[str]):

@@ -78,7 +78,8 @@ class GmailSeaTalkDemoRouteTests(unittest.TestCase):
         self.assertNotIn(b"Read Rate", response.data)
         self.assertNotIn(b"Local Status", response.data)
         self.assertNotIn(b"Data Scope", response.data)
-        self.assertNotIn(b"Download 7-Day Chat History", response.data)
+        self.assertIn(b"Download 7-Day Chat History", response.data)
+        self.assertIn(b"/api/gmail-sea-talk-demo/seatalk/export", response.data)
         self.assertNotIn(b"Preparing Gmail download batches", response.data)
         self.assertNotIn(b"data-gmail-demo-root", response.data)
         self.assertNotIn(b"data-gmail-export-manifest-url", response.data)
@@ -86,6 +87,9 @@ class GmailSeaTalkDemoRouteTests(unittest.TestCase):
         self.assertNotIn(b"SeaTalk Overview", response.data)
         self.assertIn(b"Project Updates", response.data)
         self.assertIn(b"To-do Items", response.data)
+        self.assertIn(b"Name Mapping", response.data)
+        self.assertIn(b"data-seatalk-name-mappings-url", response.data)
+        self.assertIn(b"/api/gmail-sea-talk-demo/seatalk/name-mappings", response.data)
         self.assertLess(response.data.index(b"To-do Items"), response.data.index(b"Project Updates"))
         self.assertIn(b"data-seatalk-insights-url", response.data)
         self.assertIn(b"data-seatalk-todo-complete-url", response.data)
@@ -123,6 +127,14 @@ class GmailSeaTalkDemoRouteTests(unittest.TestCase):
         with self.app.test_client() as client:
             self._login_teammate(client)
             response = client.get("/api/gmail-sea-talk-demo/seatalk/insights")
+
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("restricted", response.get_json()["message"])
+
+    def test_non_owner_seatalk_name_mappings_api_is_forbidden(self):
+        with self.app.test_client() as client:
+            self._login_teammate(client)
+            response = client.get("/api/gmail-sea-talk-demo/seatalk/name-mappings")
 
         self.assertEqual(response.status_code, 403)
         self.assertIn("restricted", response.get_json()["message"])
@@ -395,6 +407,44 @@ class GmailSeaTalkDemoRouteTests(unittest.TestCase):
         self.assertEqual(completed.status_code, 200)
         payload = response.get_json()
         self.assertEqual([item["task"] for item in payload["my_todos"]], ["Review GRC lock"])
+
+    def test_owner_can_load_and_save_seatalk_name_mappings(self):
+        class FakeSeaTalkService:
+            def build_name_mappings(self):
+                return {
+                    "unknown_ids": [{"id": "group-123", "type": "group", "count": 12, "example": "2026-04-21: kickoff"}],
+                    "generated_at": "2026-04-21T21:00:00+08:00",
+                    "period_days": 7,
+                }
+
+        with patch("bpmis_jira_tool.web._build_seatalk_dashboard_service", return_value=FakeSeaTalkService()):
+            with self.app.test_client() as client:
+                self._login_owner(client, scopes=[GMAIL_READONLY_SCOPE])
+                saved = client.post(
+                    "/api/gmail-sea-talk-demo/seatalk/name-mappings",
+                    json={"mappings": {"group-123": "Risk Project Group", "UID 888": "Alice", "bad": "ignored"}},
+                )
+                loaded = client.get("/api/gmail-sea-talk-demo/seatalk/name-mappings")
+
+        self.assertEqual(saved.status_code, 200)
+        self.assertEqual(saved.get_json()["mappings"], {"UID 888": "Alice", "group-123": "Risk Project Group"})
+        self.assertEqual(loaded.status_code, 200)
+        payload = loaded.get_json()
+        self.assertEqual(payload["mappings"]["group-123"], "Risk Project Group")
+        self.assertEqual(payload["unknown_ids"][0]["id"], "group-123")
+
+    def test_owner_seatalk_name_mappings_api_reports_export_error(self):
+        class FakeSeaTalkService:
+            def build_name_mappings(self):
+                raise web_module.ToolError("SeaTalk desktop database was not found.")
+
+        with patch("bpmis_jira_tool.web._build_seatalk_dashboard_service", return_value=FakeSeaTalkService()):
+            with self.app.test_client() as client:
+                self._login_owner(client, scopes=[GMAIL_READONLY_SCOPE])
+                response = client.get("/api/gmail-sea-talk-demo/seatalk/name-mappings")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("SeaTalk desktop database", response.get_json()["message"])
 
     def test_non_owner_cannot_complete_seatalk_todo(self):
         with self.app.test_client() as client:

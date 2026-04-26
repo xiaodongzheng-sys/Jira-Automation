@@ -20,7 +20,13 @@ const KNOWN_BOT_BUDDY_IDS = new Set([
 ]);
 
 function parseArgs(argv) {
-  const args = { dataDir: '', days: 7, now: new Date().toISOString() };
+  const args = {
+    dataDir: '',
+    days: 7,
+    now: new Date().toISOString(),
+    nameOverridesPath: '',
+    unknownIdsJson: false,
+  };
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index];
     const value = argv[index + 1];
@@ -33,6 +39,11 @@ function parseArgs(argv) {
     } else if (token === '--now') {
       args.now = value || args.now;
       index += 1;
+    } else if (token === '--name-overrides') {
+      args.nameOverridesPath = value || '';
+      index += 1;
+    } else if (token === '--unknown-ids-json') {
+      args.unknownIdsJson = true;
     }
   }
   return args;
@@ -96,6 +107,98 @@ function safeParseJson(value) {
   }
 }
 
+function loadNameOverrides(filePath) {
+  if (!filePath || !fs.existsSync(filePath)) return new Map();
+  let payload;
+  try {
+    payload = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+  } catch {
+    return new Map();
+  }
+  const source = payload && typeof payload === 'object' && payload.mappings && typeof payload.mappings === 'object'
+    ? payload.mappings
+    : payload;
+  const mappings = new Map();
+  if (!source || typeof source !== 'object' || Array.isArray(source)) return mappings;
+  for (const [rawKey, rawName] of Object.entries(source)) {
+    const key = normalizeMappingKey(rawKey);
+    const name = String(rawName || '').trim();
+    if (key && name) mappings.set(key, name);
+  }
+  return mappings;
+}
+
+function normalizeMappingKey(value) {
+  const key = String(value || '').trim();
+  if (key.startsWith('group-') || key.startsWith('buddy-')) return key;
+  const uidMatch = key.match(/^UID\s+(.+)$/i);
+  if (uidMatch && uidMatch[1].trim()) return `UID ${uidMatch[1].trim()}`;
+  return '';
+}
+
+function tableColumns(db, tableName) {
+  try {
+    return db.prepare(`PRAGMA table_info("${tableName.replaceAll('"', '""')}")`).all()
+      .map((row) => String(row.name || '').trim())
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+function pickColumn(columns, candidates) {
+  const lowerToActual = new Map(columns.map((column) => [column.toLowerCase(), column]));
+  for (const candidate of candidates) {
+    const actual = lowerToActual.get(candidate.toLowerCase());
+    if (actual) return actual;
+  }
+  return '';
+}
+
+function quoteIdentifier(identifier) {
+  return `"${String(identifier).replaceAll('"', '""')}"`;
+}
+
+function firstNonEmpty(row, columns) {
+  for (const column of columns) {
+    const value = row[column];
+    if (value === null || value === undefined) continue;
+    const text = String(value).trim();
+    if (text) return text;
+  }
+  return '';
+}
+
+function loadSessionInfoNames(db) {
+  const sidNames = new Map();
+  const uidNames = new Map();
+  const columns = tableColumns(db, 'session_info');
+  if (!columns.length) return { uidNames, sidNames };
+  const sidColumn = pickColumn(columns, ['sid', 'session_id', 'sessionId', 'id']);
+  if (!sidColumn) return { uidNames, sidNames };
+  const nameColumns = columns.filter((column) => (
+    /name|title|alias|remark|nick|display/i.test(column)
+  ));
+  const uidColumn = pickColumn(columns, ['uid', 'user_id', 'userId', 'buddy_uid', 'buddyUid']);
+  if (!nameColumns.length) return { uidNames, sidNames };
+  const selected = Array.from(new Set([sidColumn, uidColumn, ...nameColumns].filter(Boolean)));
+  try {
+    const rows = db.prepare(`SELECT ${selected.map(quoteIdentifier).join(', ')} FROM session_info`).all();
+    for (const row of rows) {
+      const sid = String(row[sidColumn] || '').trim();
+      const name = firstNonEmpty(row, nameColumns);
+      if (sid && name) sidNames.set(sid, name);
+      if (uidColumn && row[uidColumn] !== null && row[uidColumn] !== undefined && name) {
+        uidNames.set(String(row[uidColumn]).trim(), name);
+      }
+      if (sid.startsWith('buddy-') && name) uidNames.set(sid.slice('buddy-'.length), name);
+    }
+  } catch {
+    return { uidNames: new Map(), sidNames: new Map() };
+  }
+  return { uidNames, sidNames };
+}
+
 function visitNames(obj, rememberUid, rememberSid, sid) {
   if (!obj || typeof obj !== 'object') return;
   if (Array.isArray(obj)) {
@@ -139,7 +242,7 @@ function extractText(row, parsed) {
   return '[empty message]';
 }
 
-function buildNameMaps(rows) {
+function buildNameMaps(rows, db) {
   const uidNames = new Map();
   const sidNames = new Map();
   const rememberUid = (uid, name) => {
@@ -164,6 +267,10 @@ function buildNameMaps(rows) {
     visitNames(quoted, rememberUid, rememberSid, row.sid);
   }
 
+  const metadataNames = loadSessionInfoNames(db);
+  for (const [uid, name] of metadataNames.uidNames.entries()) rememberUid(uid, name);
+  for (const [sid, name] of metadataNames.sidNames.entries()) rememberSid(sid, name);
+
   for (const row of rows) {
     if (row.sid.startsWith('buddy-')) {
       const buddyUid = row.sid.slice('buddy-'.length);
@@ -171,6 +278,24 @@ function buildNameMaps(rows) {
     }
   }
   return { uidNames, sidNames };
+}
+
+function resolveName(id, autoName, overrides) {
+  const override = overrides.get(id);
+  const name = String(override || autoName || '').trim();
+  if (!name || name === id) return { display: id, resolved: false, name: '' };
+  return { display: `${name} (${id})`, resolved: true, name };
+}
+
+function senderIdentity(row, selfUid, uidNames, overrides) {
+  const uid = String(row.u);
+  const id = `UID ${uid}`;
+  const fallback = uid === String(selfUid) ? 'Zheng Xiaodong' : '';
+  return resolveName(id, uidNames.get(uid) || fallback, overrides);
+}
+
+function conversationIdentity(row, sidNames, overrides) {
+  return resolveName(row.sid, sidNames.get(row.sid), overrides);
 }
 
 function formatTimestamp(epochSeconds) {
@@ -184,8 +309,8 @@ function formatTimestamp(epochSeconds) {
   return `${year}-${month}-${day} ${hour}:${minute}:${second}`;
 }
 
-function buildHistoryText(rows, selfUid, days, nowIso) {
-  const { uidNames, sidNames } = buildNameMaps(rows);
+function buildHistoryText(rows, selfUid, days, nowIso, db, overrides) {
+  const { uidNames, sidNames } = buildNameMaps(rows, db);
   const filteredRows = rows.filter((row) => !isBotConversationRow(row, sidNames));
   const lines = [
     'SeaTalk Chat History Export',
@@ -198,17 +323,55 @@ function buildHistoryText(rows, selfUid, days, nowIso) {
   let currentConversation = '';
   for (const row of filteredRows) {
     const parsed = safeParseJson(row.c);
-    const conversationName = sidNames.get(row.sid) || row.sid;
-    const senderName = uidNames.get(String(row.u)) || (String(row.u) === String(selfUid) ? 'Zheng Xiaodong' : `UID ${row.u}`);
+    const conversation = conversationIdentity(row, sidNames, overrides);
+    const sender = senderIdentity(row, selfUid, uidNames, overrides);
     const text = extractText(row, parsed);
-    if (conversationName !== currentConversation) {
-      currentConversation = conversationName;
-      lines.push(`=== ${conversationName} (${row.sid}) ===`);
+    if (row.sid !== currentConversation) {
+      currentConversation = row.sid;
+      lines.push(`=== ${conversation.display} ===`);
     }
     const normalizedText = text.split('\n').map((part, index) => (index === 0 ? part : `    ${part}`)).join('\n');
-    lines.push(`[${formatTimestamp(row.ts)}] ${senderName}: ${normalizedText}`);
+    lines.push(`[${formatTimestamp(row.ts)}] ${sender.display}: ${normalizedText}`);
   }
   return `${lines.join('\n')}\n`;
+}
+
+function collectUnknownIds(rows, selfUid, db, overrides) {
+  const { uidNames, sidNames } = buildNameMaps(rows, db);
+  const filteredRows = rows.filter((row) => !isBotConversationRow(row, sidNames));
+  const unknowns = new Map();
+  const remember = (id, type, row, text) => {
+    const current = unknowns.get(id) || {
+      id,
+      type,
+      count: 0,
+      example: '',
+      first_seen: row.ts ? formatTimestamp(row.ts) : '',
+    };
+    current.count += 1;
+    if (!current.example) {
+      const snippet = String(text || '').replace(/\s+/g, ' ').trim().slice(0, 180);
+      current.example = snippet ? `${formatTimestamp(row.ts)}: ${snippet}` : formatTimestamp(row.ts);
+    }
+    unknowns.set(id, current);
+  };
+
+  for (const row of filteredRows) {
+    const parsed = safeParseJson(row.c);
+    const text = extractText(row, parsed);
+    const conversation = conversationIdentity(row, sidNames, overrides);
+    if (!conversation.resolved) {
+      remember(row.sid, row.sid.startsWith('group-') ? 'group' : 'buddy', row, text);
+    }
+    const sender = senderIdentity(row, selfUid, uidNames, overrides);
+    if (!sender.resolved && String(row.u) !== String(selfUid)) {
+      remember(`UID ${row.u}`, 'uid', row, text);
+    }
+  }
+
+  return Array.from(unknowns.values())
+    .sort((left, right) => (right.count - left.count) || left.id.localeCompare(right.id))
+    .slice(0, 80);
 }
 
 function isBotConversationRow(row, sidNames) {
@@ -228,6 +391,7 @@ function main() {
   const { uid } = loadLocalConfig(args.dataDir);
   const { db } = loadDatabase(args.dataDir, uid);
   const ranges = createLocalDateRange(args.now, args.days);
+  const overrides = loadNameOverrides(args.nameOverridesPath);
   try {
     const excludedTypes = Array.from(EXCLUDED_MESSAGE_TYPES);
     const placeholders = excludedTypes.map(() => '?').join(', ');
@@ -239,7 +403,15 @@ function main() {
         AND t NOT IN (${placeholders})
       ORDER BY sid ASC, ts ASC, mid ASC
     `).all(ranges.periodStartEpoch, ranges.periodEndEpoch, ...excludedTypes);
-    process.stdout.write(buildHistoryText(rows, uid, args.days, args.now));
+    if (args.unknownIdsJson) {
+      process.stdout.write(JSON.stringify({
+        unknown_ids: collectUnknownIds(rows, uid, db, overrides),
+        generated_at: args.now,
+        period_days: args.days,
+      }));
+    } else {
+      process.stdout.write(buildHistoryText(rows, uid, args.days, args.now, db, overrides));
+    }
   } finally {
     db.close();
   }
