@@ -4499,6 +4499,35 @@ select:focus {
   gap: 12px;
   max-height: 460px;
   overflow: auto;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(102, 112, 133, 0.36) transparent;
+}
+
+.source-qa-session-list {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(102, 112, 133, 0.28) transparent;
+}
+
+.source-qa-session-messages::-webkit-scrollbar,
+.source-qa-session-list::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+.source-qa-session-messages::-webkit-scrollbar-track,
+.source-qa-session-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.source-qa-session-messages::-webkit-scrollbar-thumb,
+.source-qa-session-list::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: rgba(102, 112, 133, 0.34);
+}
+
+.source-qa-session-messages::-webkit-scrollbar-thumb:hover,
+.source-qa-session-list::-webkit-scrollbar-thumb:hover {
+  background: rgba(102, 112, 133, 0.5);
 }
 
 .source-qa-message {
