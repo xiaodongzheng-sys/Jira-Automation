@@ -81,6 +81,8 @@ class GmailSeaTalkDemoRouteTests(unittest.TestCase):
         self.assertIn(b"Project Updates", response.data)
         self.assertIn(b"To-do Items", response.data)
         self.assertIn(b"data-seatalk-insights-url", response.data)
+        self.assertIn(b"data-seatalk-todo-complete-url", response.data)
+        self.assertNotIn(b"Team / Follow-up To-dos", response.data)
         self.assertIn(b"Desktop data unavailable", response.data)
 
     def test_owner_page_does_not_require_gmail_scope(self):
@@ -361,7 +363,41 @@ class GmailSeaTalkDemoRouteTests(unittest.TestCase):
         self.assertEqual(payload["status"], "ok")
         self.assertEqual(payload["project_updates"][0]["title"], "AF rollout")
         self.assertEqual(payload["my_todos"][0]["task"], "Follow up rollout")
+        self.assertEqual(payload["team_todos"], [])
         self.assertEqual(payload["model_id"], "codex:gpt-5.5")
+
+    def test_owner_can_complete_seatalk_todo_and_filter_it_from_insights(self):
+        todo = {"task": "Follow up rollout", "domain": "Anti-fraud", "priority": "high", "due": "2026-04-30", "evidence": "Apr 21"}
+        fake_payload = {
+            "project_updates": [],
+            "my_todos": [todo, {"task": "Review GRC lock", "domain": "GRC", "priority": "medium", "due": "unknown", "evidence": "Apr 22"}],
+            "team_todos": [],
+            "generated_at": "2026-04-21T21:00:00+08:00",
+            "model_id": "codex:gpt-5.5",
+            "cache": {"hit": False, "expires_at": "2026-04-22T00:00:00+08:00"},
+            "codex": {"latency_ms": 1200, "session_mode": "ephemeral"},
+        }
+        fake_service = type("FakeSeaTalkService", (), {"build_insights": lambda self: fake_payload})()
+
+        with patch("bpmis_jira_tool.web._build_seatalk_dashboard_service", return_value=fake_service):
+            with self.app.test_client() as client:
+                self._login_owner(client, scopes=[GMAIL_READONLY_SCOPE])
+                completed = client.post("/api/gmail-sea-talk-demo/seatalk/todos/complete", json={"todo": todo})
+                response = client.get("/api/gmail-sea-talk-demo/seatalk/insights")
+
+        self.assertEqual(completed.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual([item["task"] for item in payload["my_todos"]], ["Review GRC lock"])
+
+    def test_non_owner_cannot_complete_seatalk_todo(self):
+        with self.app.test_client() as client:
+            self._login_teammate(client)
+            response = client.post(
+                "/api/gmail-sea-talk-demo/seatalk/todos/complete",
+                json={"todo": {"task": "Follow up rollout", "domain": "Anti-fraud"}},
+            )
+
+        self.assertEqual(response.status_code, 403)
 
     def test_owner_seatalk_insights_api_reports_codex_error(self):
         class FakeSeaTalkService:

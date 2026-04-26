@@ -226,6 +226,7 @@ class SeaTalkDashboardServiceTests(unittest.TestCase):
 
         self.assertEqual(result["project_updates"][0]["title"], "AF rollout")
         self.assertEqual(result["my_todos"][0]["task"], "Follow up AF rollout")
+        self.assertIn("id", result["my_todos"][0])
         self.assertEqual(result["model_id"], "codex:gpt-5.5")
         exec_command = codex_calls[-1][0]
         self.assertIn("--sandbox", exec_command)
@@ -233,6 +234,49 @@ class SeaTalkDashboardServiceTests(unittest.TestCase):
         self.assertIn("--ephemeral", exec_command)
         self.assertIn("--json", exec_command)
         self.assertIn("--output-last-message", exec_command)
+
+    def test_build_insights_sorts_my_todos_by_priority(self):
+        def local_runner(command: list[str]):
+            return subprocess.CompletedProcess(args=command, returncode=0, stdout="SeaTalk Chat History Export\nhello", stderr="")
+
+        def fake_codex_run(command, **kwargs):
+            if "login" in command and "status" in command:
+                return SimpleNamespace(returncode=0, stdout="Logged in using ChatGPT\n", stderr="")
+            output_path = command[command.index("--output-last-message") + 1]
+            Path(output_path).write_text(
+                json.dumps(
+                    {
+                        "project_updates": [],
+                        "my_todos": [
+                            {"task": "Low task", "domain": "GRC", "priority": "low", "due": "2026-04-30", "evidence": "low"},
+                            {"task": "High task", "domain": "Anti-fraud", "priority": "high", "due": "unknown", "evidence": "high"},
+                            {"task": "Medium task", "domain": "Credit Risk", "priority": "medium", "due": "2026-04-28", "evidence": "medium"},
+                        ],
+                        "team_todos": [
+                            {"task": "Someone else's task", "domain": "GRC", "priority": "high", "due": "unknown", "evidence": "team"}
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            return SimpleNamespace(returncode=0, stdout='{"type":"done"}\n', stderr="")
+
+        service = SeaTalkDashboardService(
+            owner_email="xiaodong.zheng@npt.sg",
+            seatalk_app_path=str(self.app_dir),
+            seatalk_data_dir=str(self.data_dir),
+            codex_workspace_root=str(self.temp_dir.name),
+            command_runner=local_runner,
+        )
+
+        with patch("bpmis_jira_tool.source_code_qa.shutil.which", return_value="/usr/local/bin/codex"), patch(
+            "bpmis_jira_tool.source_code_qa.subprocess.run",
+            side_effect=fake_codex_run,
+        ):
+            result = service.build_insights(now=datetime(2026, 4, 21, 21, 0).astimezone())
+
+        self.assertEqual([item["task"] for item in result["my_todos"]], ["High task", "Medium task", "Low task"])
+        self.assertEqual(result["team_todos"], [])
 
     def test_build_insights_reuses_daily_cache(self):
         def local_runner(command: list[str]):

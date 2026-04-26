@@ -5,7 +5,9 @@ import os
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+import hashlib
 from pathlib import Path
+import re
 from threading import Lock
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
@@ -146,8 +148,8 @@ class SeaTalkDashboardService:
         trace = result.payload.get("codex_cli_trace") if isinstance(result.payload.get("codex_cli_trace"), dict) else {}
         payload = {
             "project_updates": parsed["project_updates"],
-            "my_todos": parsed["my_todos"],
-            "team_todos": parsed["team_todos"],
+            "my_todos": self._sort_todos(parsed["my_todos"]),
+            "team_todos": [],
             "generated_at": now.isoformat(),
             "period_days": days,
             "model_id": f"codex:{result.model}",
@@ -299,7 +301,7 @@ class SeaTalkDashboardService:
             "Analyze the last 7 days of SeaTalk messages and write concise English work summaries. "
             "Prioritize Anti-fraud, Credit Risk / Collection, and Ops Risk / GRC topics, but first consider all messages. "
             "Classify action items into my_todos when Xiaodong, Zheng Xiaodong, xiaodong.zheng@npt.sg, or direct second-person requests indicate Xiaodong should act. "
-            "Put other relevant action items into team_todos."
+            "Do not include action items owned by other people."
         )
 
     @staticmethod
@@ -307,8 +309,10 @@ class SeaTalkDashboardService:
         return (
             "Return a JSON object with exactly these top-level keys: project_updates, my_todos, team_todos.\n"
             "project_updates must be an array of objects with keys: domain, title, summary, status, evidence.\n"
-            "my_todos and team_todos must be arrays of objects with keys: task, domain, priority, due, evidence.\n"
+            "my_todos must contain only Xiaodong's own action items. team_todos must always be an empty array.\n"
+            "my_todos objects must have keys: task, domain, priority, due, evidence.\n"
             "Allowed status values: done, in_progress, blocked, unknown. Allowed priority values: high, medium, low, unknown.\n"
+            "For due, extract an explicit deadline if present; otherwise use unknown.\n"
             "Keep each evidence value short: include date/time or conversation if visible, plus a brief snippet. Do not include long raw chat content.\n"
             "If there are no confident items for a section, return an empty array.\n"
             f"Window: last {days} days. Generated at: {now.isoformat()}.\n\n"
@@ -328,7 +332,7 @@ class SeaTalkDashboardService:
         return {
             "project_updates": cls._normalize_project_updates(payload.get("project_updates")),
             "my_todos": cls._normalize_todos(payload.get("my_todos")),
-            "team_todos": cls._normalize_todos(payload.get("team_todos")),
+            "team_todos": [],
         }
 
     @staticmethod
@@ -372,15 +376,51 @@ class SeaTalkDashboardService:
             if not isinstance(row, dict):
                 continue
             normalized.append(
-                {
-                    "task": cls._clean_text(row.get("task"), "Untitled task"),
-                    "domain": cls._clean_text(row.get("domain"), "Unknown"),
-                    "priority": cls._clean_choice(row.get("priority"), {"high", "medium", "low", "unknown"}, "unknown"),
-                    "due": cls._clean_text(row.get("due"), "unknown"),
-                    "evidence": cls._clean_text(row.get("evidence"), ""),
-                }
+                cls._todo_with_id(
+                    {
+                        "task": cls._clean_text(row.get("task"), "Untitled task"),
+                        "domain": cls._clean_text(row.get("domain"), "Unknown"),
+                        "priority": cls._clean_choice(row.get("priority"), {"high", "medium", "low", "unknown"}, "unknown"),
+                        "due": cls._clean_text(row.get("due"), "unknown"),
+                        "evidence": cls._clean_text(row.get("evidence"), ""),
+                    }
+                )
             )
-        return normalized
+        return cls._sort_todos(normalized)
+
+    @classmethod
+    def _todo_with_id(cls, todo: dict[str, str]) -> dict[str, str]:
+        stable_text = "|".join(
+            (
+                cls._fingerprint_text(todo.get("domain")),
+                cls._fingerprint_text(todo.get("task")),
+            )
+        )
+        digest = hashlib.sha256(stable_text.encode("utf-8")).hexdigest()[:16]
+        return {**todo, "id": digest}
+
+    @staticmethod
+    def _fingerprint_text(value: Any) -> str:
+        return re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
+
+    @classmethod
+    def _sort_todos(cls, todos: list[dict[str, str]]) -> list[dict[str, str]]:
+        priority_rank = {"high": 0, "medium": 1, "low": 2, "unknown": 3}
+
+        def due_rank(todo: dict[str, str]) -> tuple[int, str]:
+            due = str(todo.get("due") or "unknown").strip()
+            if not due or due.lower() == "unknown":
+                return (1, "")
+            return (0, due)
+
+        return sorted(
+            todos,
+            key=lambda todo: (
+                priority_rank.get(str(todo.get("priority") or "unknown"), 3),
+                due_rank(todo),
+                str(todo.get("task") or "").lower(),
+            ),
+        )
 
     @staticmethod
     def _clean_choice(value: Any, allowed: set[str], fallback: str) -> str:

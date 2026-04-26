@@ -194,6 +194,20 @@
       background: rgba(248, 251, 255, 0.78);
     }
 
+    .seatalk-todo-item {
+      display: grid;
+      grid-template-columns: 1.35rem minmax(0, 1fr);
+      gap: 0.7rem;
+      align-items: start;
+    }
+
+    .seatalk-todo-item input {
+      width: 1.05rem;
+      height: 1.05rem;
+      margin-top: 0.1rem;
+      accent-color: #2c6de6;
+    }
+
     .seatalk-insight-item h4 {
       margin: 0 0 0.4rem;
       color: #142744;
@@ -329,6 +343,7 @@
     data-seatalk-url="{{ url_for('gmail_seatalk_demo_seatalk_api') }}"
     data-seatalk-export-url="{{ url_for('gmail_seatalk_demo_seatalk_export') }}"
     data-seatalk-insights-url="{{ seatalk_insights_url }}"
+    data-seatalk-todo-complete-url="{{ seatalk_todo_complete_url }}"
     data-seatalk-configured="{{ 'true' if seatalk_configured else 'false' }}"
   >
       <section class="panel panel-wide glass-panel mail-demo-card">
@@ -393,16 +408,9 @@
             <article class="mail-demo-card">
               <div class="mail-demo-pill">Action items</div>
               <h3>To-do Items</h3>
-              <p>My to-dos and team follow-ups inferred from recent SeaTalk messages.</p>
+              <p>My to-dos inferred from recent SeaTalk messages, sorted by priority.</p>
               <div class="seatalk-todo-columns" data-seatalk-todos hidden>
-                <section>
-                  <strong>My To-dos</strong>
-                  <div class="seatalk-insight-list" data-seatalk-my-todos></div>
-                </section>
-                <section>
-                  <strong>Team / Follow-up To-dos</strong>
-                  <div class="seatalk-insight-list" data-seatalk-team-todos></div>
-                </section>
+                <div class="seatalk-insight-list" data-seatalk-my-todos></div>
               </div>
             </article>
           </section>

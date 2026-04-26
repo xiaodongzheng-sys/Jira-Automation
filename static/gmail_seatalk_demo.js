@@ -97,24 +97,58 @@
     container.hidden = false;
   };
 
-  const renderTodos = (container, todos) => {
+  const postCompletedTodo = async (completeUrl, todo) => {
+    if (!completeUrl) return;
+    const response = await fetch(completeUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ todo }),
+    });
+    const payload = await parseDashboardResponse(response);
+    if (!response.ok) throw new Error(payload.message || 'Could not mark the to-do complete.');
+  };
+
+  const renderTodos = (container, todos, completeUrl) => {
     if (!container) return;
     const rows = Array.isArray(todos) ? todos : [];
     if (!rows.length) {
-      renderEmptyInsights(container, 'No confident to-dos were found.');
+      renderEmptyInsights(container, 'No open to-dos were found.');
       return;
     }
-    container.innerHTML = rows.map((item) => `
-      <article class="seatalk-insight-item">
-        <div class="seatalk-insight-meta">
-          <span>${escapeHtml(item.domain || 'Unknown')}</span>
-          <span>${escapeHtml(item.priority || 'unknown')}</span>
-          <span>${escapeHtml(item.due || 'unknown')}</span>
+    container.innerHTML = rows.map((item, index) => `
+      <article class="seatalk-insight-item seatalk-todo-item" data-seatalk-todo-item data-seatalk-todo-index="${index}">
+        <input type="checkbox" data-seatalk-todo-complete aria-label="Mark to-do complete">
+        <div>
+          <div class="seatalk-insight-meta">
+            <span>${escapeHtml(item.domain || 'Unknown')}</span>
+            <span>${escapeHtml(item.priority || 'unknown')}</span>
+            <span>Deadline: ${escapeHtml(item.due || 'unknown')}</span>
+          </div>
+          <h4>${escapeHtml(item.task || 'Untitled task')}</h4>
+          ${item.evidence ? `<div class="seatalk-insight-evidence">${escapeHtml(item.evidence)}</div>` : ''}
         </div>
-        <h4>${escapeHtml(item.task || 'Untitled task')}</h4>
-        ${item.evidence ? `<div class="seatalk-insight-evidence">${escapeHtml(item.evidence)}</div>` : ''}
       </article>
     `).join('');
+    container.querySelectorAll('[data-seatalk-todo-complete]').forEach((checkbox) => {
+      checkbox.addEventListener('change', async (event) => {
+        const itemNode = event.currentTarget.closest('[data-seatalk-todo-item]');
+        const index = Number(itemNode?.dataset.seatalkTodoIndex || -1);
+        const todo = rows[index];
+        if (!todo) return;
+        event.currentTarget.disabled = true;
+        try {
+          await postCompletedTodo(completeUrl, todo);
+          itemNode.remove();
+          if (!container.querySelector('[data-seatalk-todo-item]')) {
+            renderEmptyInsights(container, 'No open to-dos were found.');
+          }
+        } catch (error) {
+          event.currentTarget.checked = false;
+          event.currentTarget.disabled = false;
+          window.alert(error.message || 'Could not mark the to-do complete.');
+        }
+      });
+    });
   };
 
   const renderChart = (container, series) => {
@@ -288,6 +322,7 @@
     const seatalkUrl = seatalkRoot.dataset.seatalkUrl || '';
     const exportUrl = seatalkRoot.dataset.seatalkExportUrl || '';
     const insightsUrl = seatalkRoot.dataset.seatalkInsightsUrl || '';
+    const todoCompleteUrl = seatalkRoot.dataset.seatalkTodoCompleteUrl || '';
     const contentNode = seatalkRoot.querySelector('[data-seatalk-content]');
     const scorecardsNode = seatalkRoot.querySelector('[data-seatalk-scorecards]');
     const receivedChartNode = seatalkRoot.querySelector('[data-seatalk-chart="received"]');
@@ -300,7 +335,6 @@
     const projectUpdatesNode = seatalkRoot.querySelector('[data-seatalk-project-updates]');
     const todosNode = seatalkRoot.querySelector('[data-seatalk-todos]');
     const myTodosNode = seatalkRoot.querySelector('[data-seatalk-my-todos]');
-    const teamTodosNode = seatalkRoot.querySelector('[data-seatalk-team-todos]');
     if (!seatalkConfigured) return;
     if (exportButton && exportUrl) {
       exportButton.href = exportUrl;
@@ -359,8 +393,7 @@
             const insightsPayload = await parseDashboardResponse(insightsResponse);
             if (!insightsResponse.ok) throw new Error(insightsPayload.message || 'Could not load Codex insights.');
             renderProjectUpdates(projectUpdatesNode, insightsPayload.project_updates || []);
-            renderTodos(myTodosNode, insightsPayload.my_todos || []);
-            renderTodos(teamTodosNode, insightsPayload.team_todos || []);
+            renderTodos(myTodosNode, insightsPayload.my_todos || [], todoCompleteUrl);
             if (todosNode) todosNode.hidden = false;
             const cacheText = insightsPayload.cache?.hit ? 'cached' : 'fresh';
             const modelText = insightsPayload.model_id || 'codex';

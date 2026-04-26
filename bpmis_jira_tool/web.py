@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from functools import lru_cache
+import hashlib
 import html
 import io
 from http import HTTPStatus
@@ -212,6 +213,78 @@ class JobStore:
     def snapshot(self, job_id: str) -> dict[str, Any] | None:
         job = self.get(job_id)
         return asdict(job) if job else None
+
+
+class SeaTalkTodoStore:
+    def __init__(self, storage_path: Path | None = None) -> None:
+        self.storage_path = storage_path
+        self._payload = self._load()
+        self._lock = threading.Lock()
+
+    def _load(self) -> dict[str, Any]:
+        if self.storage_path is None or not self.storage_path.exists():
+            return {"owners": {}}
+        try:
+            payload = json.loads(self.storage_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {"owners": {}}
+        return payload if isinstance(payload, dict) else {"owners": {}}
+
+    def _persist_locked(self) -> None:
+        if self.storage_path is None:
+            return
+        try:
+            self.storage_path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {**self._payload, "updated_at": time.time()}
+            temp_path = self.storage_path.with_name(f".{self.storage_path.name}.{os.getpid()}.tmp")
+            temp_path.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True), encoding="utf-8")
+            os.replace(temp_path, self.storage_path)
+        except OSError:
+            return
+
+    @staticmethod
+    def _now() -> str:
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+    @staticmethod
+    def todo_id(todo: dict[str, Any]) -> str:
+        explicit = str(todo.get("id") or "").strip()
+        if explicit:
+            return explicit
+        stable = "|".join(
+            (
+                re.sub(r"[^a-z0-9]+", " ", str(todo.get("domain") or "").lower()).strip(),
+                re.sub(r"[^a-z0-9]+", " ", str(todo.get("task") or "").lower()).strip(),
+            )
+        )
+        return hashlib.sha256(stable.encode("utf-8")).hexdigest()[:16]
+
+    def completed_ids(self, *, owner_email: str) -> set[str]:
+        owner = str(owner_email or "").strip().lower()
+        with self._lock:
+            owners = self._payload.get("owners") if isinstance(self._payload.get("owners"), dict) else {}
+            owner_payload = owners.get(owner) if isinstance(owners.get(owner), dict) else {}
+            completed = owner_payload.get("completed") if isinstance(owner_payload.get("completed"), dict) else {}
+            return {str(todo_id) for todo_id in completed if str(todo_id).strip()}
+
+    def mark_completed(self, *, owner_email: str, todo: dict[str, Any]) -> dict[str, Any]:
+        owner = str(owner_email or "").strip().lower()
+        todo_id = self.todo_id(todo)
+        if not owner or not todo_id:
+            raise ToolError("SeaTalk to-do completion requires a signed-in owner and a valid task.")
+        with self._lock:
+            owners = self._payload.setdefault("owners", {})
+            owner_payload = owners.setdefault(owner, {})
+            completed = owner_payload.setdefault("completed", {})
+            completed[todo_id] = {
+                "id": todo_id,
+                "task": str(todo.get("task") or "").strip(),
+                "domain": str(todo.get("domain") or "").strip(),
+                "due": str(todo.get("due") or "").strip(),
+                "completed_at": self._now(),
+            }
+            self._persist_locked()
+            return {"status": "ok", "todo_id": todo_id, "completed_at": completed[todo_id]["completed_at"]}
 
 
 class SourceCodeQASessionStore:
@@ -731,6 +804,7 @@ def create_app() -> Flask:
     app.config["SETTINGS"] = settings
     app.config["CONFIG_STORE"] = config_store
     app.config["JOB_STORE"] = JobStore(data_root / "run" / "jobs.json")
+    app.config["SEATALK_TODO_STORE"] = SeaTalkTodoStore(data_root / "seatalk" / "completed_todos.json")
     app.config["SOURCE_CODE_QA_SESSION_STORE"] = SourceCodeQASessionStore(data_root / "source_code_qa" / "sessions.json")
     app.config["SOURCE_CODE_QA_MODEL_AVAILABILITY_STORE"] = SourceCodeQAModelAvailabilityStore(
         data_root / "source_code_qa" / "model_availability.json"
@@ -1313,6 +1387,7 @@ def create_app() -> Flask:
             google_connected="google_credentials" in session,
             seatalk_configured=_seatalk_dashboard_is_configured(settings),
             seatalk_insights_url=url_for("gmail_seatalk_demo_seatalk_insights_api"),
+            seatalk_todo_complete_url=url_for("gmail_seatalk_demo_seatalk_todo_complete"),
             asset_revision=_current_release_revision(),
         )
 
@@ -1584,6 +1659,15 @@ def create_app() -> Flask:
             return access_gate
         try:
             payload = _build_seatalk_dashboard_service(settings).build_insights()
+            owner_email = _current_google_email() or settings.gmail_seatalk_demo_owner_email
+            todo_store: SeaTalkTodoStore = current_app.config["SEATALK_TODO_STORE"]
+            completed_ids = todo_store.completed_ids(owner_email=owner_email)
+            payload = dict(payload)
+            payload["my_todos"] = [
+                todo for todo in (payload.get("my_todos") or [])
+                if SeaTalkTodoStore.todo_id(todo) not in completed_ids
+            ]
+            payload["team_todos"] = []
             return jsonify({"status": "ok", **payload})
         except ToolError as error:
             error_details = _classify_portal_error(error)
@@ -1608,6 +1692,23 @@ def create_app() -> Flask:
                 jsonify({"status": "error", "message": "SeaTalk insights could not be loaded right now. Please try again shortly."}),
                 HTTPStatus.INTERNAL_SERVER_ERROR,
             )
+
+    @app.post("/api/gmail-sea-talk-demo/seatalk/todos/complete")
+    def gmail_seatalk_demo_seatalk_todo_complete():
+        access_gate = _require_gmail_seatalk_demo_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        payload = request.get_json(silent=True) or {}
+        todo = payload.get("todo") if isinstance(payload.get("todo"), dict) else payload
+        try:
+            todo_store: SeaTalkTodoStore = current_app.config["SEATALK_TODO_STORE"]
+            result = todo_store.mark_completed(
+                owner_email=_current_google_email() or settings.gmail_seatalk_demo_owner_email,
+                todo=todo,
+            )
+            return jsonify(result)
+        except ToolError as error:
+            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
 
     @app.get("/api/gmail-sea-talk-demo/seatalk/export")
     def gmail_seatalk_demo_seatalk_export():
