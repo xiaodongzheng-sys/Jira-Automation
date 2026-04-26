@@ -170,6 +170,17 @@ class SeaTalkDashboardServiceTests(unittest.TestCase):
         self.assertIn("--name-overrides", export_command)
         self.assertIn(str(overrides_path), export_command)
 
+    def test_person_mapping_aliases_work_for_buddy_and_uid_exports(self):
+        overrides_path = Path(self.temp_dir.name) / "seatalk" / "name_overrides.json"
+        overrides_path.parent.mkdir(parents=True, exist_ok=True)
+        overrides_path.write_text(json.dumps({"mappings": {"buddy-456": "Alice"}}), encoding="utf-8")
+
+        script = Path(__file__).resolve().parents[1] / "bpmis_jira_tool" / "seatalk_local_export.js"
+        source = script.read_text(encoding="utf-8")
+
+        self.assertIn("personMappingAliases(key)", source)
+        self.assertIn("mappings.set(alias, name)", source)
+
     def test_build_name_mappings_parses_unknown_ids(self):
         calls: list[list[str]] = []
 

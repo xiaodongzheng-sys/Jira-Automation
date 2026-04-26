@@ -303,6 +303,21 @@ class SeaTalkNameMappingStore:
             return f"UID {uid_match.group(1).strip()}"
         return ""
 
+    @staticmethod
+    def person_aliases(key: str) -> set[str]:
+        if key.startswith("buddy-"):
+            suffix = key.removeprefix("buddy-").strip()
+            return {f"UID {suffix}"} if suffix else set()
+        uid_match = re.match(r"^UID\s+(.+)$", key, re.IGNORECASE)
+        if uid_match and uid_match.group(1).strip():
+            return {f"buddy-{uid_match.group(1).strip()}"}
+        return set()
+
+    @classmethod
+    def equivalent_keys(cls, value: Any) -> set[str]:
+        key = cls.normalize_key(value)
+        return {key, *cls.person_aliases(key)} if key else set()
+
     @classmethod
     def normalize_mappings(cls, value: Any) -> dict[str, str]:
         if not isinstance(value, dict):
@@ -313,6 +328,8 @@ class SeaTalkNameMappingStore:
             name = " ".join(str(raw_name or "").split())
             if key and name:
                 mappings[key] = name[:180]
+                for alias in cls.person_aliases(key):
+                    mappings[alias] = name[:180]
         return mappings
 
     def _load(self) -> dict[str, Any]:
@@ -1800,10 +1817,11 @@ def create_app() -> Flask:
         try:
             candidates = _build_seatalk_dashboard_service(settings).build_name_mappings()
             mappings = mapping_store.mappings()
+            mapped_keys = {alias for key in mappings for alias in SeaTalkNameMappingStore.equivalent_keys(key)}
             candidates = dict(candidates)
             candidates["unknown_ids"] = [
                 row for row in (candidates.get("unknown_ids") or [])
-                if isinstance(row, dict) and str(row.get("id") or "") not in mappings
+                if isinstance(row, dict) and not (SeaTalkNameMappingStore.equivalent_keys(row.get("id")) & mapped_keys)
             ]
             return jsonify({"status": "ok", "mappings": mappings, **candidates})
         except ToolError as error:

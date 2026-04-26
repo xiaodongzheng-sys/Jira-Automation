@@ -412,7 +412,10 @@ class GmailSeaTalkDemoRouteTests(unittest.TestCase):
         class FakeSeaTalkService:
             def build_name_mappings(self):
                 return {
-                    "unknown_ids": [{"id": "group-123", "type": "group", "count": 12, "example": "2026-04-21: kickoff"}],
+                    "unknown_ids": [
+                        {"id": "group-123", "type": "group", "count": 12, "example": "2026-04-21: kickoff"},
+                        {"id": "UID 456", "type": "uid", "count": 6, "example": "2026-04-21: hello"},
+                    ],
                     "generated_at": "2026-04-21T21:00:00+08:00",
                     "period_days": 7,
                 }
@@ -434,12 +437,19 @@ class GmailSeaTalkDemoRouteTests(unittest.TestCase):
         self.assertEqual(saved.status_code, 200)
         self.assertEqual(
             saved.get_json()["mappings"],
-            {"UID 888": "Alice", "buddy-456": "Important DM", "group-123": "Risk Project Group"},
+            {
+                "UID 456": "Important DM",
+                "UID 888": "Alice",
+                "buddy-456": "Important DM",
+                "buddy-888": "Alice",
+                "group-123": "Risk Project Group",
+            },
         )
         self.assertEqual(loaded.status_code, 200)
         payload = loaded.get_json()
         self.assertEqual(payload["mappings"]["group-123"], "Risk Project Group")
         self.assertEqual(payload["mappings"]["buddy-456"], "Important DM")
+        self.assertEqual(payload["mappings"]["UID 456"], "Important DM")
         self.assertEqual(payload["unknown_ids"], [])
 
     def test_owner_seatalk_name_mappings_api_reports_export_error(self):

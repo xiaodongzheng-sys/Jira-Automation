@@ -158,6 +158,18 @@
     const mappings = payload?.mappings && typeof payload.mappings === 'object' ? payload.mappings : {};
     const unknownRows = Array.isArray(payload?.unknown_ids) ? payload.unknown_ids : [];
     const rowsById = new Map();
+    const personAlias = (id) => {
+      const value = String(id || '');
+      if (value.startsWith('buddy-')) return `UID ${value.slice('buddy-'.length)}`;
+      if (value.startsWith('UID ')) return `buddy-${value.slice('UID '.length)}`;
+      return '';
+    };
+    const canonicalMappingId = (id) => {
+      const value = String(id || '');
+      if (value.startsWith('buddy-')) return `UID ${value.slice('buddy-'.length)}`;
+      return value;
+    };
+    const mappingValueFor = (id) => mappings[id] || mappings[personAlias(id)] || '';
     unknownRows.forEach((row) => {
       if (!row?.id) return;
       rowsById.set(String(row.id), {
@@ -168,8 +180,11 @@
         priorityReason: row.priority_reason || 'Frequent unknown ID',
       });
     });
+    const savedCanonicalIds = new Set(Array.from(rowsById.keys()).map(canonicalMappingId));
     Object.keys(mappings).sort().forEach((id) => {
-      if (!rowsById.has(id)) {
+      const canonicalId = canonicalMappingId(id);
+      if (!savedCanonicalIds.has(canonicalId)) {
+        savedCanonicalIds.add(canonicalId);
         rowsById.set(id, {
           id,
           type: id.startsWith('group-') ? 'group' : id.startsWith('buddy-') ? 'buddy' : 'uid',
@@ -203,7 +218,7 @@
         <div>
           <input
             type="text"
-            value="${escapeHtml(mappings[row.id] || '')}"
+            value="${escapeHtml(mappingValueFor(row.id))}"
             placeholder="Display name"
             data-seatalk-mapping-input
             aria-label="Display name for ${escapeHtml(row.id)}"

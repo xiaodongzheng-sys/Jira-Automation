@@ -123,7 +123,10 @@ function loadNameOverrides(filePath) {
   for (const [rawKey, rawName] of Object.entries(source)) {
     const key = normalizeMappingKey(rawKey);
     const name = String(rawName || '').trim();
-    if (key && name) mappings.set(key, name);
+    if (key && name) {
+      mappings.set(key, name);
+      for (const alias of personMappingAliases(key)) mappings.set(alias, name);
+    }
   }
   return mappings;
 }
@@ -134,6 +137,13 @@ function normalizeMappingKey(value) {
   const uidMatch = key.match(/^UID\s+(.+)$/i);
   if (uidMatch && uidMatch[1].trim()) return `UID ${uidMatch[1].trim()}`;
   return '';
+}
+
+function personMappingAliases(key) {
+  if (key.startsWith('buddy-')) return [`UID ${key.slice('buddy-'.length)}`];
+  const uidMatch = key.match(/^UID\s+(.+)$/i);
+  if (uidMatch && uidMatch[1].trim()) return [`buddy-${uidMatch[1].trim()}`];
+  return [];
 }
 
 function tableColumns(db, tableName) {
