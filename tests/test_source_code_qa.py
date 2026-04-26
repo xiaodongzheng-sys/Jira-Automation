@@ -249,6 +249,8 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertEqual(payload["session_id"], session_id)
         self.assertEqual(payload["session"]["message_count"], 4)
         self.assertEqual(payload["session"]["last_context"]["question"], "follow up")
+        self.assertEqual(payload["session"]["last_context"]["recent_turns"][0]["question"], "first question")
+        self.assertEqual(payload["session"]["last_context"]["recent_turns"][0]["trace_id"], "trace-1")
 
     def test_query_empty_config_is_controlled(self):
         with self.app.test_client() as client:
@@ -6768,6 +6770,15 @@ class SourceCodeQAServiceTests(unittest.TestCase):
                 },
                 "codex_cli_summary": {"prompt_mode": "codex_investigation_brief_v1", "candidate_path_count": 1, "repair_attempted": False},
                 "matches_snapshot": [{"repo": "Portal Repo", "path": "repository/IssueRepository.java", "line_start": 1, "line_end": 3}],
+                "recent_turns": [
+                    {
+                        "question": "earlier session question",
+                        "answer": "earlier session answer",
+                        "trace_id": "trace-earlier",
+                        "matches_snapshot": [{"repo": "Portal Repo", "path": "service/EarlierService.java", "line_start": 2, "line_end": 4}],
+                        "codex_candidate_paths": [{"repo": "Portal Repo", "repo_root": str(repo_path), "path": "service/EarlierService.java"}],
+                    }
+                ],
             },
         )
 
@@ -6783,6 +6794,9 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertIn("service/PriorService.java", brief)
         self.assertIn("Previous citation validation: status=ok", brief)
         self.assertIn("Previous Codex run: prompt_mode=codex_investigation_brief_v1", brief)
+        self.assertIn("Earlier session turns:", brief)
+        self.assertIn("earlier session question", brief)
+        self.assertIn("service/EarlierService.java", brief)
         self.assertNotIn("x" * 100, brief)
 
     def test_codex_candidate_paths_resolve_stale_path_by_filename(self):
@@ -6820,10 +6834,13 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         repo_path = self.service._repo_path(key, entry)
         current_file = repo_path / "controller" / "IssueController.java"
         prior_file = repo_path / "repository" / "IssueRepository.java"
+        earlier_file = repo_path / "service" / "EarlierService.java"
         current_file.parent.mkdir(parents=True)
         prior_file.parent.mkdir(parents=True)
+        earlier_file.parent.mkdir(parents=True)
         current_file.write_text("class IssueController {}\n", encoding="utf-8")
         prior_file.write_text("class IssueRepository {}\n", encoding="utf-8")
+        earlier_file.write_text("class EarlierService {}\n", encoding="utf-8")
         current = self.service._codex_candidate_paths(
             entries=[entry],
             key=key,
@@ -6841,11 +6858,27 @@ class SourceCodeQAServiceTests(unittest.TestCase):
                         "line_start": 1,
                         "line_end": 1,
                     }
-                ]
+                ],
+                "recent_turns": [
+                    {
+                        "codex_candidate_paths": [
+                            {
+                                "repo": "Portal Repo",
+                                "repo_root": str(repo_path),
+                                "path": "service/EarlierService.java",
+                                "line_start": 1,
+                                "line_end": 1,
+                            }
+                        ]
+                    }
+                ],
             },
         )
 
-        self.assertEqual([item["path"] for item in merged], ["controller/IssueController.java", "repository/IssueRepository.java"])
+        self.assertEqual(
+            [item["path"] for item in merged],
+            ["controller/IssueController.java", "repository/IssueRepository.java", "service/EarlierService.java"],
+        )
         self.assertEqual(merged[1]["retrieval"], "previous_codex_context")
 
     def test_codex_citation_validation_accepts_direct_file_reference(self):

@@ -311,6 +311,64 @@ class SourceCodeQASessionStore:
         context = session_payload.get("last_context") if session_payload else None
         return context if isinstance(context, dict) else None
 
+    @staticmethod
+    def _recent_turn_from_context(context: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not isinstance(context, dict):
+            return None
+        question = str(context.get("question") or "").strip()
+        answer = str(context.get("answer") or context.get("rendered_answer") or "").strip()
+        if not question and not answer:
+            return None
+        llm_route = context.get("llm_route") if isinstance(context.get("llm_route"), dict) else {}
+        return {
+            "question": question[:500],
+            "answer": answer[:1200],
+            "summary": str(context.get("summary") or "")[:500],
+            "trace_id": str(context.get("trace_id") or "")[:80],
+            "llm_provider": str(context.get("llm_provider") or "")[:80],
+            "llm_model": str(context.get("llm_model") or "")[:120],
+            "matches_snapshot": [
+                item for item in (context.get("matches_snapshot") or context.get("matches") or [])[:8]
+                if isinstance(item, dict)
+            ],
+            "codex_candidate_paths": [
+                item for item in (
+                    context.get("codex_candidate_paths")
+                    or (llm_route.get("candidate_paths") if isinstance(llm_route, dict) else [])
+                    or []
+                )[:12]
+                if isinstance(item, dict)
+            ],
+            "evidence_pack": (
+                context.get("evidence_pack")
+                if isinstance(context.get("evidence_pack"), dict)
+                else {}
+            ),
+        }
+
+    @classmethod
+    def _extend_recent_turns(cls, context: dict[str, Any], previous_context: dict[str, Any] | None) -> dict[str, Any]:
+        enriched = dict(context or {})
+        recent_turns = [
+            item for item in (
+                previous_context.get("recent_turns", []) if isinstance(previous_context, dict) else []
+            )
+            if isinstance(item, dict)
+        ]
+        previous_turn = cls._recent_turn_from_context(previous_context)
+        if previous_turn:
+            recent_turns.append(previous_turn)
+        deduped: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for item in recent_turns:
+            key = (str(item.get("question") or ""), str(item.get("trace_id") or ""))
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(item)
+        enriched["recent_turns"] = deduped[-3:]
+        return enriched
+
     def append_exchange(
         self,
         session_id: str,
@@ -338,7 +396,8 @@ class SourceCodeQASessionStore:
             session_payload["country"] = str(country or "").strip() or session_payload.get("country") or ALL_COUNTRY
             session_payload["llm_provider"] = SourceCodeQAService.normalize_query_llm_provider(llm_provider)
             session_payload["updated_at"] = now
-            session_payload["last_context"] = context
+            previous_context = session_payload.get("last_context") if isinstance(session_payload.get("last_context"), dict) else None
+            session_payload["last_context"] = self._extend_recent_turns(context, previous_context)
             session_payload["last_trace_id"] = str(result.get("trace_id") or "")
             messages = list(session_payload.get("messages") or [])
             messages.extend(

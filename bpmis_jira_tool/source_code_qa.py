@@ -2948,11 +2948,31 @@ class SourceCodeQAService:
         for key_name in ("confirmed_facts", "inferred_facts", "missing_facts", "tables", "apis", "configs", "impact_surfaces"):
             for value in evidence_pack.get(key_name) or []:
                 terms.extend(IDENTIFIER_PATTERN.findall(str(value or "")))
+        for turn in conversation_context.get("recent_turns") or []:
+            if not isinstance(turn, dict):
+                continue
+            terms.extend(IDENTIFIER_PATTERN.findall(str(turn.get("question") or ""))[:8])
+            terms.extend(IDENTIFIER_PATTERN.findall(str(turn.get("answer") or ""))[:12])
+            for match in turn.get("matches_snapshot") or []:
+                if isinstance(match, dict):
+                    terms.extend(IDENTIFIER_PATTERN.findall(str(match.get("path") or "")))
+                    terms.extend(IDENTIFIER_PATTERN.findall(str(match.get("reason") or ""))[:4])
+            prior_pack = turn.get("evidence_pack") if isinstance(turn.get("evidence_pack"), dict) else {}
+            for key_name in ("confirmed_facts", "tables", "apis", "configs", "impact_surfaces"):
+                for value in prior_pack.get(key_name) or []:
+                    terms.extend(IDENTIFIER_PATTERN.findall(str(value or ""))[:6])
         if self.llm_provider_name == LLM_PROVIDER_CODEX_CLI_BRIDGE:
             for item in conversation_context.get("codex_candidate_paths") or (conversation_context.get("llm_route") or {}).get("candidate_paths") or []:
                 if isinstance(item, dict):
                     terms.extend(IDENTIFIER_PATTERN.findall(str(item.get("path") or "")))
                     terms.extend(IDENTIFIER_PATTERN.findall(str(item.get("reason") or ""))[:6])
+            for turn in conversation_context.get("recent_turns") or []:
+                if not isinstance(turn, dict):
+                    continue
+                for item in turn.get("codex_candidate_paths") or []:
+                    if isinstance(item, dict):
+                        terms.extend(IDENTIFIER_PATTERN.findall(str(item.get("path") or "")))
+                        terms.extend(IDENTIFIER_PATTERN.findall(str(item.get("reason") or ""))[:4])
             validation = conversation_context.get("codex_citation_validation") or {}
             for item in validation.get("direct_file_refs") or []:
                 if isinstance(item, dict):
@@ -3037,6 +3057,10 @@ class SourceCodeQAService:
                 if isinstance(conversation_context.get("evidence_pack"), dict)
                 else {}
             ),
+            "recent_turns": [
+                item for item in (conversation_context.get("recent_turns") or [])[:3]
+                if isinstance(item, dict)
+            ],
         }
 
     def _conversation_repo_scope(
@@ -14913,6 +14937,12 @@ class SourceCodeQAService:
             *((followup_context.get("codex_candidate_paths") or []) if isinstance(followup_context.get("codex_candidate_paths"), list) else []),
             *(((followup_context.get("llm_route") or {}).get("candidate_paths") or []) if isinstance(followup_context.get("llm_route"), dict) else []),
         ]
+        for turn in followup_context.get("recent_turns") or []:
+            if isinstance(turn, dict):
+                prior_items.extend(
+                    item for item in (turn.get("codex_candidate_paths") or [])
+                    if isinstance(item, dict)
+                )
         for prior in prior_items:
             if not isinstance(prior, dict) or len(merged) >= self.codex_top_path_limit:
                 break
@@ -15054,6 +15084,34 @@ class SourceCodeQAService:
                         summary_bits.append(f"{key_name}={values[:3]}")
                 if summary_bits:
                     lines.append(f"- Prior evidence summary: {'; '.join(summary_bits)[:1200]}")
+            recent_turns = [
+                item for item in (followup_context.get("recent_turns") or [])
+                if isinstance(item, dict)
+            ][-3:]
+            if recent_turns:
+                lines.append("- Earlier session turns:")
+                for index, turn in enumerate(recent_turns, start=1):
+                    turn_question = str(turn.get("question") or "").strip()
+                    turn_answer = str(turn.get("answer") or "").strip()
+                    turn_trace_id = str(turn.get("trace_id") or "").strip()
+                    lines.append(f"  - Turn {index} question: {turn_question[:500]}")
+                    if turn_answer:
+                        lines.append(f"    answer: {turn_answer[:700]}")
+                    if turn_trace_id:
+                        lines.append(f"    trace_id: {turn_trace_id[:80]}")
+                    turn_paths = []
+                    for match in turn.get("matches_snapshot") or []:
+                        if isinstance(match, dict) and match.get("path"):
+                            turn_paths.append(f"{match.get('repo')}:{match.get('path')}:{match.get('line_start')}-{match.get('line_end')}")
+                    if turn_paths:
+                        lines.append(f"    cited_paths: {', '.join(turn_paths[:5])}")
+                    turn_candidates = [
+                        item for item in (turn.get("codex_candidate_paths") or [])
+                        if isinstance(item, dict)
+                    ][:5]
+                    if turn_candidates:
+                        candidate_bits = [f"{item.get('repo')}:{item.get('path')}" for item in turn_candidates]
+                        lines.append(f"    candidate_paths: {', '.join(candidate_bits)}")
             lines.append("- Treat this as a follow-up unless the current question clearly redirects scope.")
         if repair_issues:
             lines.extend(["", "Repair required before final answer:"])
