@@ -33,7 +33,7 @@
     .replaceAll('"', '&quot;')
     .replaceAll("'", '&#39;');
 
-  const cssEscape = (value) => window.CSS?.escape
+  const cssEscape = (value) => window.CSS && window.CSS.escape
     ? window.CSS.escape(String(value ?? ''))
     : String(value ?? '').replace(/["\\]/g, '\\$&');
 
@@ -352,7 +352,7 @@
   };
 
   const openCreateJira = async (bpmisId) => {
-    activeProject = projects.find((project) => project.bpmis_id === bpmisId);
+    activeProject = projects.find((project) => String(project.bpmis_id || '') === String(bpmisId || ''));
     if (!activeProject) return;
     modal.hidden = false;
     modal.classList.add('is-visible');
