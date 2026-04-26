@@ -4587,15 +4587,6 @@ select:focus {
   font-family: inherit;
 }
 
-.source-qa-live-note {
-  padding: 8px 10px;
-  border-radius: 8px;
-  background: #dbeafe;
-  color: #1d4ed8 !important;
-  font-size: 0.9rem;
-  font-weight: 700;
-}
-
 .source-qa-answer-list {
   display: grid;
   gap: 10px;

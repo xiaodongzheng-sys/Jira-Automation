@@ -403,7 +403,7 @@
             </strong>
             <span>${escapeHtml(meta)}</span>
           </div>
-          <div class="source-qa-message-body">${message.live ? `<p class="source-qa-live-note">${message.stopped ? 'This run was stopped in the UI and will no longer update this chat.' : 'Codex is still investigating. The final answer will appear as an Assistant message when complete.'}</p><pre>${escapeHtml(text)}</pre>` : (message.role === 'assistant' ? renderReadableAnswerBody(payload, text) : `<p>${escapeHtml(text)}</p>`)}</div>
+          <div class="source-qa-message-body">${message.live ? `<pre>${escapeHtml(text)}</pre>` : (message.role === 'assistant' ? renderReadableAnswerBody(payload, text) : `<p>${escapeHtml(text)}</p>`)}</div>
           ${citations.length ? `<div class="source-qa-message-citations">${citations.map((item) => `<span>${escapeHtml(item)}</span>`).join('')}</div>` : ''}
         </article>
       `;
