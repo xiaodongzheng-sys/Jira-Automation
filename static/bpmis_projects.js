@@ -26,6 +26,10 @@
     return;
   }
 
+  if (modal.parentElement !== document.body) {
+    document.body.appendChild(modal);
+  }
+
   const escapeHtml = (value) => String(value ?? '')
     .replaceAll('&', '&amp;')
     .replaceAll('<', '&lt;')
