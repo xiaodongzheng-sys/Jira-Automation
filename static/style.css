@@ -4317,11 +4317,31 @@ select:focus {
 }
 
 .source-qa-root {
-  margin-bottom: 24px;
+  margin-bottom: 18px;
+  padding: 22px 28px;
 }
 
 .source-qa-hero {
   align-items: center;
+  margin-bottom: 12px;
+}
+
+.source-qa-hero .eyebrow {
+  margin-bottom: 6px;
+  font-size: 0.68rem;
+}
+
+.source-qa-hero h1 {
+  margin-bottom: 8px;
+  font-size: clamp(2.1rem, 3.6vw, 3.25rem);
+  line-height: 1;
+}
+
+.source-qa-hero .lede {
+  max-width: 72rem;
+  margin: 0;
+  font-size: 0.96rem;
+  line-height: 1.45;
 }
 
 .source-qa-mode-card {
@@ -4341,7 +4361,31 @@ select:focus {
 }
 
 .source-qa-selector {
-  margin-top: 18px;
+  margin-top: 12px;
+  padding: 14px;
+  gap: 10px;
+}
+
+.source-qa-config-grid {
+  grid-template-columns: minmax(180px, 1.1fr) minmax(140px, 0.9fr) minmax(150px, 0.85fr) minmax(180px, 1fr);
+  gap: 10px;
+}
+
+.source-qa-selector .field-group {
+  gap: 5px;
+  padding: 10px 12px;
+  border-radius: 12px;
+}
+
+.source-qa-selector .field-group select {
+  min-height: 42px;
+  padding-top: 8px;
+  padding-bottom: 8px;
+}
+
+.source-qa-selector .field-help {
+  font-size: 0.78rem;
+  line-height: 1.25;
 }
 
 .source-qa-tabs {
@@ -4357,13 +4401,13 @@ select:focus {
 }
 
 .source-qa-status {
-  margin-top: 12px;
-  padding: 12px 14px;
+  margin-top: 0;
+  padding: 9px 12px;
   border: 1px solid #e4e7ec;
-  border-radius: 16px;
+  border-radius: 12px;
   background: rgba(248, 250, 252, 0.78);
   color: #667085;
-  line-height: 1.5;
+  line-height: 1.35;
 }
 
 .source-qa-workspace {
@@ -5068,6 +5112,10 @@ select:focus {
 }
 
 @media (max-width: 1100px) {
+  .source-qa-config-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .source-qa-chat-shell {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -5090,6 +5138,16 @@ select:focus {
 
   .source-qa-citations {
     justify-content: flex-start;
+  }
+}
+
+@media (max-width: 720px) {
+  .source-qa-root {
+    padding: 18px;
+  }
+
+  .source-qa-config-grid {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 
