@@ -89,6 +89,7 @@ class GmailSeaTalkDemoRouteTests(unittest.TestCase):
         self.assertIn(b"To-do Items", response.data)
         self.assertIn(b"Name Mapping", response.data)
         self.assertIn(b"data-seatalk-name-mappings-url", response.data)
+        self.assertIn(b"data-seatalk-name-mapping-save-feedback", response.data)
         self.assertIn(b"/api/gmail-sea-talk-demo/seatalk/name-mappings", response.data)
         self.assertLess(response.data.index(b"To-do Items"), response.data.index(b"Project Updates"))
         self.assertIn(b"data-seatalk-insights-url", response.data)

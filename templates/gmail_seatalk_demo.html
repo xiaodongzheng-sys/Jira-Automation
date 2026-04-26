@@ -319,6 +319,20 @@
       background: #ffffff;
     }
 
+    .seatalk-mapping-save-feedback {
+      color: #526380;
+      font-size: 0.88rem;
+      font-weight: 700;
+    }
+
+    .seatalk-mapping-save-feedback[data-tone="success"] {
+      color: #167044;
+    }
+
+    .seatalk-mapping-save-feedback[data-tone="error"] {
+      color: #b42318;
+    }
+
     .mail-demo-source-strip {
       display: flex;
       flex-wrap: wrap;
@@ -476,6 +490,7 @@
               <div class="seatalk-mapping-table" data-seatalk-name-mapping-body hidden></div>
               <div class="button-row" data-seatalk-name-mapping-actions hidden>
                 <button class="button button-primary" type="button" data-seatalk-name-mapping-save>Save Mappings</button>
+                <span class="seatalk-mapping-save-feedback" data-seatalk-name-mapping-save-feedback aria-live="polite"></span>
               </div>
             </article>
           </section>

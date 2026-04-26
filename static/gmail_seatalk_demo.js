@@ -259,6 +259,17 @@
 
   const saveSeaTalkNameMappings = async (root, mappingsUrl) => {
     if (!mappingsUrl) return;
+    const saveButton = root.querySelector('[data-seatalk-name-mapping-save]');
+    const feedbackNode = root.querySelector('[data-seatalk-name-mapping-save-feedback]');
+    const originalButtonText = saveButton?.textContent || 'Save Mappings';
+    if (saveButton) {
+      saveButton.disabled = true;
+      saveButton.textContent = 'Saving...';
+    }
+    if (feedbackNode) {
+      feedbackNode.textContent = 'Saving mappings...';
+      feedbackNode.dataset.tone = 'neutral';
+    }
     setScopedStatus(root, '[data-seatalk-mapping-status]', 'Saving name mappings…', 'neutral');
     try {
       const response = await fetch(mappingsUrl, {
@@ -269,9 +280,28 @@
       const payload = await parseDashboardResponse(response);
       if (!response.ok) throw new Error(payload.message || 'Could not save SeaTalk name mappings.');
       setScopedStatus(root, '[data-seatalk-mapping-status]', 'Saved. Exports and Codex evidence will use these names on the next load.', 'success');
+      if (saveButton) saveButton.textContent = 'Saved';
+      if (feedbackNode) {
+        feedbackNode.textContent = 'Saved. Exports and Codex evidence will use these names on the next load.';
+        feedbackNode.dataset.tone = 'success';
+      }
       root.dataset.seatalkMappingsLoaded = '';
-      window.setTimeout(() => loadSeaTalkNameMappings(root, mappingsUrl), 300);
+      window.setTimeout(() => {
+        if (saveButton) {
+          saveButton.disabled = false;
+          saveButton.textContent = originalButtonText;
+        }
+        loadSeaTalkNameMappings(root, mappingsUrl);
+      }, 700);
     } catch (error) {
+      if (saveButton) {
+        saveButton.disabled = false;
+        saveButton.textContent = originalButtonText;
+      }
+      if (feedbackNode) {
+        feedbackNode.textContent = error.message || 'Could not save SeaTalk name mappings.';
+        feedbackNode.dataset.tone = 'error';
+      }
       setScopedStatus(root, '[data-seatalk-mapping-status]', error.message || 'Could not save SeaTalk name mappings.', 'error');
     }
   };
