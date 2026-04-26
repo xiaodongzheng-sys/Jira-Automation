@@ -96,6 +96,10 @@ class Settings:
     source_code_qa_codex_concurrency: int = 1
     source_code_qa_codex_top_path_limit: int = 30
     source_code_qa_codex_repair_enabled: bool = True
+    source_code_qa_codex_session_mode: str = "ephemeral"
+    source_code_qa_codex_session_max_turns: int = 8
+    source_code_qa_codex_fast_path_enabled: bool = True
+    source_code_qa_codex_cache_followups: bool = False
     source_code_qa_llm_max_retries: int = 2
     source_code_qa_llm_backoff_seconds: float = 1.0
     source_code_qa_llm_max_backoff_seconds: float = 8.0
@@ -192,6 +196,10 @@ class Settings:
             source_code_qa_codex_concurrency=int(_env_str("SOURCE_CODE_QA_CODEX_CONCURRENCY", "1")),
             source_code_qa_codex_top_path_limit=int(_env_str("SOURCE_CODE_QA_CODEX_TOP_PATH_LIMIT", "30")),
             source_code_qa_codex_repair_enabled=_env_bool("SOURCE_CODE_QA_CODEX_REPAIR_ENABLED", True),
+            source_code_qa_codex_session_mode=_env_str("SOURCE_CODE_QA_CODEX_SESSION_MODE", "ephemeral"),
+            source_code_qa_codex_session_max_turns=int(_env_str("SOURCE_CODE_QA_CODEX_SESSION_MAX_TURNS", "8")),
+            source_code_qa_codex_fast_path_enabled=_env_bool("SOURCE_CODE_QA_CODEX_FAST_PATH_ENABLED", True),
+            source_code_qa_codex_cache_followups=_env_bool("SOURCE_CODE_QA_CODEX_CACHE_FOLLOWUPS", False),
             source_code_qa_llm_max_retries=int(_env_str("SOURCE_CODE_QA_LLM_MAX_RETRIES", "2")),
             source_code_qa_llm_backoff_seconds=float(_env_str("SOURCE_CODE_QA_LLM_BACKOFF_SECONDS", "1.0")),
             source_code_qa_llm_max_backoff_seconds=float(_env_str("SOURCE_CODE_QA_LLM_MAX_BACKOFF_SECONDS", "8.0")),

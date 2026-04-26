@@ -78,6 +78,9 @@ class GmailSeaTalkDemoRouteTests(unittest.TestCase):
         self.assertNotIn(b"data-gmail-export-manifest-url", response.data)
         self.assertNotIn(b"Top 10 Senders", response.data)
         self.assertIn(b"SeaTalk Overview", response.data)
+        self.assertIn(b"Project Updates", response.data)
+        self.assertIn(b"To-do Items", response.data)
+        self.assertIn(b"data-seatalk-insights-url", response.data)
         self.assertIn(b"Desktop data unavailable", response.data)
 
     def test_owner_page_does_not_require_gmail_scope(self):
@@ -103,6 +106,14 @@ class GmailSeaTalkDemoRouteTests(unittest.TestCase):
         with self.app.test_client() as client:
             self._login_teammate(client)
             response = client.get("/api/gmail-sea-talk-demo/dashboard")
+
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("restricted", response.get_json()["message"])
+
+    def test_non_owner_seatalk_insights_api_is_forbidden(self):
+        with self.app.test_client() as client:
+            self._login_teammate(client)
+            response = client.get("/api/gmail-sea-talk-demo/seatalk/insights")
 
         self.assertEqual(response.status_code, 403)
         self.assertIn("restricted", response.get_json()["message"])
@@ -327,6 +338,43 @@ class GmailSeaTalkDemoRouteTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.headers["Content-Disposition"], 'attachment; filename=seatalk-history-last-7-days.txt')
         self.assertEqual(response.get_data(as_text=True), "hello history")
+
+    def test_owner_seatalk_insights_api_returns_codex_payload(self):
+        fake_payload = {
+            "project_updates": [{"domain": "Anti-fraud", "title": "AF rollout", "summary": "Progress", "status": "in_progress", "evidence": "Apr 21"}],
+            "my_todos": [{"task": "Follow up rollout", "domain": "Anti-fraud", "priority": "high", "due": "unknown", "evidence": "Apr 21"}],
+            "team_todos": [],
+            "generated_at": "2026-04-21T21:00:00+08:00",
+            "model_id": "codex:gpt-5.5",
+            "cache": {"hit": False, "expires_at": "2026-04-22T00:00:00+08:00"},
+            "codex": {"latency_ms": 1200, "session_mode": "ephemeral"},
+        }
+        fake_service = type("FakeSeaTalkService", (), {"build_insights": lambda self: fake_payload})()
+
+        with patch("bpmis_jira_tool.web._build_seatalk_dashboard_service", return_value=fake_service):
+            with self.app.test_client() as client:
+                self._login_owner(client, scopes=[GMAIL_READONLY_SCOPE])
+                response = client.get("/api/gmail-sea-talk-demo/seatalk/insights")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["project_updates"][0]["title"], "AF rollout")
+        self.assertEqual(payload["my_todos"][0]["task"], "Follow up rollout")
+        self.assertEqual(payload["model_id"], "codex:gpt-5.5")
+
+    def test_owner_seatalk_insights_api_reports_codex_error(self):
+        class FakeSeaTalkService:
+            def build_insights(self):
+                raise web_module.ToolError("Codex is unavailable. Run `codex login` with ChatGPT on this server before using Codex mode.")
+
+        with patch("bpmis_jira_tool.web._build_seatalk_dashboard_service", return_value=FakeSeaTalkService()):
+            with self.app.test_client() as client:
+                self._login_owner(client, scopes=[GMAIL_READONLY_SCOPE])
+                response = client.get("/api/gmail-sea-talk-demo/seatalk/insights")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Codex is unavailable", response.get_json()["message"])
 
 
 if __name__ == "__main__":

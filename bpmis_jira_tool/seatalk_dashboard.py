@@ -8,19 +8,33 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from threading import Lock
 from typing import Any, Callable
+from zoneinfo import ZoneInfo
 
 from bpmis_jira_tool.errors import ConfigError, ToolError
+from bpmis_jira_tool.source_code_qa import (
+    CodexCliBridgeSourceCodeQALLMProvider,
+    DEFAULT_CODEX_CLI_MODEL,
+    DEFAULT_CODEX_TIMEOUT_SECONDS,
+)
 
 
 SEATALK_DASHBOARD_DEFAULT_DAYS = 7
 SEATALK_DASHBOARD_CACHE_TTL_SECONDS = 300
 SEATALK_DEFAULT_APP_PATH = "/Applications/SeaTalk.app"
 SEATALK_DEFAULT_DATA_DIR = "~/Library/Application Support/SeaTalk"
+SEATALK_INSIGHTS_PROMPT_MODE = "seatalk_7_day_insights_v1"
+SEATALK_INSIGHTS_TIMEZONE = ZoneInfo("Asia/Singapore")
 UNAVAILABLE_REASON = "Not available from local SeaTalk desktop data for this scope."
 
 
 @dataclass
 class _SeaTalkDashboardCacheEntry:
+    payload: dict[str, Any]
+    expires_at: datetime
+
+
+@dataclass
+class _SeaTalkInsightsCacheEntry:
     payload: dict[str, Any]
     expires_at: datetime
 
@@ -39,6 +53,8 @@ def _run_subprocess(command: list[str], *, env: dict[str, str], timeout: int) ->
 class SeaTalkDashboardService:
     _dashboard_cache: dict[tuple[str, str, int], _SeaTalkDashboardCacheEntry] = {}
     _dashboard_cache_lock = Lock()
+    _insights_cache: dict[tuple[str, str, int, str], _SeaTalkInsightsCacheEntry] = {}
+    _insights_cache_lock = Lock()
 
     def __init__(
         self,
@@ -46,11 +62,21 @@ class SeaTalkDashboardService:
         owner_email: str,
         seatalk_app_path: str = SEATALK_DEFAULT_APP_PATH,
         seatalk_data_dir: str = SEATALK_DEFAULT_DATA_DIR,
+        codex_workspace_root: str | Path | None = None,
+        codex_model: str | None = None,
+        codex_timeout_seconds: int = DEFAULT_CODEX_TIMEOUT_SECONDS,
+        codex_concurrency: int = 1,
+        codex_binary: str | None = None,
         command_runner: Callable[[list[str]], subprocess.CompletedProcess[str]] | None = None,
     ) -> None:
         self.owner_email = str(owner_email or "").strip().lower()
         self.seatalk_app_path = Path(str(seatalk_app_path or SEATALK_DEFAULT_APP_PATH)).expanduser()
         self.seatalk_data_dir = Path(str(seatalk_data_dir or SEATALK_DEFAULT_DATA_DIR)).expanduser()
+        self.codex_workspace_root = Path(codex_workspace_root or Path.cwd()).expanduser()
+        self.codex_model = str(codex_model or os.getenv("SOURCE_CODE_QA_CODEX_MODEL") or DEFAULT_CODEX_CLI_MODEL).strip() or DEFAULT_CODEX_CLI_MODEL
+        self.codex_timeout_seconds = max(10, int(codex_timeout_seconds or DEFAULT_CODEX_TIMEOUT_SECONDS))
+        self.codex_concurrency = max(1, min(int(codex_concurrency or 1), 4))
+        self.codex_binary = str(codex_binary or os.getenv("SOURCE_CODE_QA_CODEX_BINARY") or "codex").strip() or "codex"
         self._command_runner = command_runner
         if not self.owner_email:
             raise ConfigError("SeaTalk owner email is missing. Set SEATALK_OWNER_EMAIL first.")
@@ -81,6 +107,61 @@ class SeaTalkDashboardService:
         content = self._load_local_history_export(days=days, now=now)
         filename = f"seatalk-history-last-{days}-days.txt"
         return content, filename
+
+    def build_insights(
+        self,
+        *,
+        days: int = SEATALK_DASHBOARD_DEFAULT_DAYS,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        now = now or datetime.now(SEATALK_INSIGHTS_TIMEZONE)
+        cached = self._get_cached_insights(days=days, now=now)
+        if cached is not None:
+            return cached
+        self._validate_local_environment()
+        history_text = self._load_local_history_export(days=days, now=now)
+        if not history_text.strip():
+            payload = self._empty_insights_payload(days=days, now=now, cache_hit=False)
+            self._store_cached_insights(days=days, now=now, payload=payload)
+            return payload
+        provider = CodexCliBridgeSourceCodeQALLMProvider(
+            workspace_root=self.codex_workspace_root,
+            timeout_seconds=self.codex_timeout_seconds,
+            concurrency_limit=self.codex_concurrency,
+            session_mode="ephemeral",
+            codex_binary=self.codex_binary,
+        )
+        prompt_payload = {
+            "codex_prompt_mode": SEATALK_INSIGHTS_PROMPT_MODE,
+            "systemInstruction": {"parts": [{"text": self._insights_system_prompt()}]},
+            "contents": [{"parts": [{"text": self._insights_user_prompt(history_text=history_text, days=days, now=now)}]}],
+        }
+        result = provider.generate(
+            payload=prompt_payload,
+            primary_model=self.codex_model,
+            fallback_model=self.codex_model,
+        )
+        text = provider.extract_text(result.payload)
+        parsed = self._parse_insights_response(text)
+        trace = result.payload.get("codex_cli_trace") if isinstance(result.payload.get("codex_cli_trace"), dict) else {}
+        payload = {
+            "project_updates": parsed["project_updates"],
+            "my_todos": parsed["my_todos"],
+            "team_todos": parsed["team_todos"],
+            "generated_at": now.isoformat(),
+            "period_days": days,
+            "model_id": f"codex:{result.model}",
+            "cache": {
+                "hit": False,
+                "expires_at": self._insights_cache_expiry(now).isoformat(),
+            },
+            "codex": {
+                "latency_ms": int(result.latency_ms or trace.get("latency_ms") or 0),
+                "session_mode": str(trace.get("session_mode") or "ephemeral"),
+            },
+        }
+        self._store_cached_insights(days=days, now=now, payload=payload)
+        return payload
 
     def _validate_local_environment(self) -> None:
         if not self.seatalk_app_path.exists():
@@ -169,7 +250,151 @@ class SeaTalkDashboardService:
                 expires_at=now + timedelta(seconds=SEATALK_DASHBOARD_CACHE_TTL_SECONDS),
             )
 
+    def _get_cached_insights(self, *, days: int, now: datetime) -> dict[str, Any] | None:
+        cache_key = self._insights_cache_key(days)
+        with self._insights_cache_lock:
+            cached = self._insights_cache.get(cache_key)
+            if cached is None or cached.expires_at <= now:
+                return None
+            payload = json.loads(json.dumps(cached.payload))
+            payload["cache"] = dict(payload.get("cache") or {})
+            payload["cache"]["hit"] = True
+            payload["cache"]["expires_at"] = cached.expires_at.isoformat()
+            return payload
+
+    def _store_cached_insights(self, *, days: int, now: datetime, payload: dict[str, Any]) -> None:
+        cache_key = self._insights_cache_key(days)
+        with self._insights_cache_lock:
+            self._insights_cache[cache_key] = _SeaTalkInsightsCacheEntry(
+                payload=json.loads(json.dumps(payload)),
+                expires_at=self._insights_cache_expiry(now),
+            )
+
+    def _insights_cache_key(self, days: int) -> tuple[str, str, int, str]:
+        return (str(self.seatalk_app_path), str(self.seatalk_data_dir), int(days), self.codex_model)
+
+    @staticmethod
+    def _insights_cache_expiry(now: datetime) -> datetime:
+        local_now = now.astimezone(SEATALK_INSIGHTS_TIMEZONE)
+        tomorrow = local_now.date() + timedelta(days=1)
+        return datetime.combine(tomorrow, datetime.min.time(), tzinfo=SEATALK_INSIGHTS_TIMEZONE)
+
+    def _empty_insights_payload(self, *, days: int, now: datetime, cache_hit: bool) -> dict[str, Any]:
+        return {
+            "project_updates": [],
+            "my_todos": [],
+            "team_todos": [],
+            "generated_at": now.isoformat(),
+            "period_days": days,
+            "model_id": f"codex:{self.codex_model}",
+            "cache": {"hit": cache_hit, "expires_at": self._insights_cache_expiry(now).isoformat()},
+            "codex": {"latency_ms": 0, "session_mode": "ephemeral"},
+        }
+
+    @staticmethod
+    def _insights_system_prompt() -> str:
+        return (
+            "You are Codex helping Xiaodong Zheng review SeaTalk chat history. "
+            "You must not modify files or run commands. Produce only valid JSON. "
+            "Analyze the last 7 days of SeaTalk messages and write concise English work summaries. "
+            "Prioritize Anti-fraud, Credit Risk / Collection, and Ops Risk / GRC topics, but first consider all messages. "
+            "Classify action items into my_todos when Xiaodong, Zheng Xiaodong, xiaodong.zheng@npt.sg, or direct second-person requests indicate Xiaodong should act. "
+            "Put other relevant action items into team_todos."
+        )
+
+    @staticmethod
+    def _insights_user_prompt(*, history_text: str, days: int, now: datetime) -> str:
+        return (
+            "Return a JSON object with exactly these top-level keys: project_updates, my_todos, team_todos.\n"
+            "project_updates must be an array of objects with keys: domain, title, summary, status, evidence.\n"
+            "my_todos and team_todos must be arrays of objects with keys: task, domain, priority, due, evidence.\n"
+            "Allowed status values: done, in_progress, blocked, unknown. Allowed priority values: high, medium, low, unknown.\n"
+            "Keep each evidence value short: include date/time or conversation if visible, plus a brief snippet. Do not include long raw chat content.\n"
+            "If there are no confident items for a section, return an empty array.\n"
+            f"Window: last {days} days. Generated at: {now.isoformat()}.\n\n"
+            "SeaTalk chat history export:\n"
+            f"{history_text}"
+        )
+
+    @classmethod
+    def _parse_insights_response(cls, text: str) -> dict[str, list[dict[str, str]]]:
+        cleaned = cls._extract_json_text(text)
+        try:
+            payload = json.loads(cleaned)
+        except json.JSONDecodeError as error:
+            raise ToolError("Codex returned an invalid SeaTalk insights JSON response.") from error
+        if not isinstance(payload, dict):
+            raise ToolError("Codex returned an invalid SeaTalk insights payload.")
+        return {
+            "project_updates": cls._normalize_project_updates(payload.get("project_updates")),
+            "my_todos": cls._normalize_todos(payload.get("my_todos")),
+            "team_todos": cls._normalize_todos(payload.get("team_todos")),
+        }
+
+    @staticmethod
+    def _extract_json_text(text: str) -> str:
+        value = str(text or "").strip()
+        if value.startswith("```"):
+            value = value.strip("`").strip()
+            if value.lower().startswith("json"):
+                value = value[4:].strip()
+        if value.startswith("{") and value.endswith("}"):
+            return value
+        start = value.find("{")
+        end = value.rfind("}")
+        if start >= 0 and end > start:
+            return value[start : end + 1]
+        return value
+
+    @classmethod
+    def _normalize_project_updates(cls, value: Any) -> list[dict[str, str]]:
+        rows = value if isinstance(value, list) else []
+        normalized: list[dict[str, str]] = []
+        for row in rows[:12]:
+            if not isinstance(row, dict):
+                continue
+            normalized.append(
+                {
+                    "domain": cls._clean_text(row.get("domain"), "Unknown"),
+                    "title": cls._clean_text(row.get("title"), "Untitled update"),
+                    "summary": cls._clean_text(row.get("summary"), ""),
+                    "status": cls._clean_choice(row.get("status"), {"done", "in_progress", "blocked", "unknown"}, "unknown"),
+                    "evidence": cls._clean_text(row.get("evidence"), ""),
+                }
+            )
+        return normalized
+
+    @classmethod
+    def _normalize_todos(cls, value: Any) -> list[dict[str, str]]:
+        rows = value if isinstance(value, list) else []
+        normalized: list[dict[str, str]] = []
+        for row in rows[:20]:
+            if not isinstance(row, dict):
+                continue
+            normalized.append(
+                {
+                    "task": cls._clean_text(row.get("task"), "Untitled task"),
+                    "domain": cls._clean_text(row.get("domain"), "Unknown"),
+                    "priority": cls._clean_choice(row.get("priority"), {"high", "medium", "low", "unknown"}, "unknown"),
+                    "due": cls._clean_text(row.get("due"), "unknown"),
+                    "evidence": cls._clean_text(row.get("evidence"), ""),
+                }
+            )
+        return normalized
+
+    @staticmethod
+    def _clean_choice(value: Any, allowed: set[str], fallback: str) -> str:
+        normalized = str(value or "").strip().lower().replace(" ", "_")
+        return normalized if normalized in allowed else fallback
+
+    @staticmethod
+    def _clean_text(value: Any, fallback: str) -> str:
+        text = " ".join(str(value or "").split())
+        return (text or fallback)[:900]
+
     @classmethod
     def clear_cache(cls) -> None:
         with cls._dashboard_cache_lock:
             cls._dashboard_cache.clear()
+        with cls._insights_cache_lock:
+            cls._insights_cache.clear()

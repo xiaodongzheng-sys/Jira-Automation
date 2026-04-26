@@ -66,6 +66,57 @@
     container.innerHTML = rows.map((tag) => `<span class="mail-demo-source-tag">${escapeHtml(tag)}</span>`).join('');
   };
 
+  const renderEmptyInsights = (container, message) => {
+    if (!container) return;
+    container.innerHTML = `
+      <article class="seatalk-insight-item">
+        <p>${escapeHtml(message)}</p>
+      </article>
+    `;
+  };
+
+  const renderProjectUpdates = (container, updates) => {
+    if (!container) return;
+    const rows = Array.isArray(updates) ? updates : [];
+    if (!rows.length) {
+      renderEmptyInsights(container, 'No confident project updates were found in the last 7 days.');
+      container.hidden = false;
+      return;
+    }
+    container.innerHTML = rows.map((item) => `
+      <article class="seatalk-insight-item">
+        <div class="seatalk-insight-meta">
+          <span>${escapeHtml(item.domain || 'Unknown')}</span>
+          <span>${escapeHtml(String(item.status || 'unknown').replaceAll('_', ' '))}</span>
+        </div>
+        <h4>${escapeHtml(item.title || 'Untitled update')}</h4>
+        <p>${escapeHtml(item.summary || '')}</p>
+        ${item.evidence ? `<div class="seatalk-insight-evidence">${escapeHtml(item.evidence)}</div>` : ''}
+      </article>
+    `).join('');
+    container.hidden = false;
+  };
+
+  const renderTodos = (container, todos) => {
+    if (!container) return;
+    const rows = Array.isArray(todos) ? todos : [];
+    if (!rows.length) {
+      renderEmptyInsights(container, 'No confident to-dos were found.');
+      return;
+    }
+    container.innerHTML = rows.map((item) => `
+      <article class="seatalk-insight-item">
+        <div class="seatalk-insight-meta">
+          <span>${escapeHtml(item.domain || 'Unknown')}</span>
+          <span>${escapeHtml(item.priority || 'unknown')}</span>
+          <span>${escapeHtml(item.due || 'unknown')}</span>
+        </div>
+        <h4>${escapeHtml(item.task || 'Untitled task')}</h4>
+        ${item.evidence ? `<div class="seatalk-insight-evidence">${escapeHtml(item.evidence)}</div>` : ''}
+      </article>
+    `).join('');
+  };
+
   const renderChart = (container, series) => {
     if (!container) return;
     const rows = Array.isArray(series) ? series : [];
@@ -236,6 +287,7 @@
     const seatalkConfigured = seatalkRoot.dataset.seatalkConfigured === 'true';
     const seatalkUrl = seatalkRoot.dataset.seatalkUrl || '';
     const exportUrl = seatalkRoot.dataset.seatalkExportUrl || '';
+    const insightsUrl = seatalkRoot.dataset.seatalkInsightsUrl || '';
     const contentNode = seatalkRoot.querySelector('[data-seatalk-content]');
     const scorecardsNode = seatalkRoot.querySelector('[data-seatalk-scorecards]');
     const receivedChartNode = seatalkRoot.querySelector('[data-seatalk-chart="received"]');
@@ -244,6 +296,11 @@
     const scopeNode = seatalkRoot.querySelector('[data-seatalk-scope]');
     const metaNode = seatalkRoot.querySelector('[data-seatalk-meta]');
     const exportButton = seatalkRoot.querySelector('[data-seatalk-export-button]');
+    const insightsStatusNode = seatalkRoot.querySelector('[data-seatalk-insights-status]');
+    const projectUpdatesNode = seatalkRoot.querySelector('[data-seatalk-project-updates]');
+    const todosNode = seatalkRoot.querySelector('[data-seatalk-todos]');
+    const myTodosNode = seatalkRoot.querySelector('[data-seatalk-my-todos]');
+    const teamTodosNode = seatalkRoot.querySelector('[data-seatalk-team-todos]');
     if (!seatalkConfigured) return;
     if (exportButton && exportUrl) {
       exportButton.href = exportUrl;
@@ -295,6 +352,24 @@
       ]);
       if (contentNode) contentNode.hidden = false;
       hideScopedStatus(seatalkRoot, '[data-seatalk-status]');
+      if (insightsUrl && insightsStatusNode) {
+        setScopedStatus(seatalkRoot, '[data-seatalk-insights-status]', 'Loading Codex insights…', 'neutral');
+        fetch(insightsUrl, { method: 'GET' })
+          .then(async (insightsResponse) => {
+            const insightsPayload = await parseDashboardResponse(insightsResponse);
+            if (!insightsResponse.ok) throw new Error(insightsPayload.message || 'Could not load Codex insights.');
+            renderProjectUpdates(projectUpdatesNode, insightsPayload.project_updates || []);
+            renderTodos(myTodosNode, insightsPayload.my_todos || []);
+            renderTodos(teamTodosNode, insightsPayload.team_todos || []);
+            if (todosNode) todosNode.hidden = false;
+            const cacheText = insightsPayload.cache?.hit ? 'cached' : 'fresh';
+            const modelText = insightsPayload.model_id || 'codex';
+            setScopedStatus(seatalkRoot, '[data-seatalk-insights-status]', `Codex insights loaded (${cacheText}, ${modelText}).`, 'success');
+          })
+          .catch((error) => {
+            setScopedStatus(seatalkRoot, '[data-seatalk-insights-status]', error.message || 'Could not load Codex insights.', 'error');
+          });
+      }
     } catch (error) {
       if (contentNode) contentNode.hidden = true;
       setScopedStatus(seatalkRoot, '[data-seatalk-status]', error.message || 'Could not load SeaTalk dashboard data.', 'error');

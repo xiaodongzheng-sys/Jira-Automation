@@ -55,6 +55,8 @@ MARKET_KEYS = ["ID", "SG", "PH", "Regional"]
 TEAM_PROFILE_ADMIN_EMAIL = "xiaodong.zheng@npt.sg"
 _gmail_export_active_users: set[str] = set()
 _gmail_export_active_users_lock = threading.Lock()
+_source_code_qa_codex_session_locks: dict[str, threading.Lock] = {}
+_source_code_qa_codex_session_locks_guard = threading.Lock()
 
 
 @lru_cache(maxsize=1)
@@ -279,6 +281,8 @@ class SourceCodeQASessionStore:
             "messages": [],
             "last_context": None,
             "last_trace_id": "",
+            "archived_at": "",
+            "archived_by": "",
         }
         with self._lock:
             self._sessions[session_payload["id"]] = session_payload
@@ -292,6 +296,7 @@ class SourceCodeQASessionStore:
                 self._public_session(session_payload, include_messages=False)
                 for session_payload in self._sessions.values()
                 if str(session_payload.get("owner_email") or "").strip().lower() == owner
+                and not str(session_payload.get("archived_at") or "").strip()
             ]
         sessions.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
         return sessions[: max(1, min(int(limit or 30), 100))]
@@ -305,6 +310,25 @@ class SourceCodeQASessionStore:
             if str(session_payload.get("owner_email") or "").strip().lower() != owner:
                 return None
             return self._public_session(session_payload, include_messages=True)
+
+    def archive(self, session_id: str, *, owner_email: str) -> dict[str, Any] | None:
+        owner = str(owner_email or "").strip().lower()
+        now = self._now()
+        with self._lock:
+            session_payload = self._sessions.get(str(session_id or ""))
+            if not session_payload:
+                return None
+            if str(session_payload.get("owner_email") or "").strip().lower() != owner:
+                return None
+            session_payload["archived_at"] = now
+            session_payload["archived_by"] = owner
+            session_payload["updated_at"] = now
+            self._persist_locked()
+            return {
+                "status": "ok",
+                "session_id": session_payload.get("id") or "",
+                "archived_at": now,
+            }
 
     def get_context(self, session_id: str, *, owner_email: str) -> dict[str, Any] | None:
         session_payload = self.get(session_id, owner_email=owner_email)
@@ -366,7 +390,11 @@ class SourceCodeQASessionStore:
                 continue
             seen.add(key)
             deduped.append(item)
-        enriched["recent_turns"] = deduped[-3:]
+        try:
+            max_turns = int(enriched.get("codex_session_max_turns") or 8)
+        except (TypeError, ValueError):
+            max_turns = 8
+        enriched["recent_turns"] = deduped[-max(1, min(max_turns, 30)):]
         return enriched
 
     def append_exchange(
@@ -392,12 +420,25 @@ class SourceCodeQASessionStore:
             title = str(session_payload.get("title") or "").strip()
             if not title or title == "New Source Code Chat":
                 session_payload["title"] = self._title_from_question(question)
-            session_payload["pm_team"] = str(pm_team or "").strip() or session_payload.get("pm_team") or "AF"
-            session_payload["country"] = str(country or "").strip() or session_payload.get("country") or ALL_COUNTRY
-            session_payload["llm_provider"] = SourceCodeQAService.normalize_query_llm_provider(llm_provider)
-            session_payload["updated_at"] = now
             previous_context = session_payload.get("last_context") if isinstance(session_payload.get("last_context"), dict) else None
-            session_payload["last_context"] = self._extend_recent_turns(context, previous_context)
+            previous_scope = (
+                str(session_payload.get("pm_team") or ""),
+                str(session_payload.get("country") or ""),
+                str(session_payload.get("llm_provider") or ""),
+            )
+            current_scope = (
+                str(pm_team or "").strip() or str(session_payload.get("pm_team") or ""),
+                str(country or "").strip() or str(session_payload.get("country") or ALL_COUNTRY),
+                SourceCodeQAService.normalize_query_llm_provider(llm_provider),
+            )
+            session_payload["pm_team"] = current_scope[0] or "AF"
+            session_payload["country"] = current_scope[1] or ALL_COUNTRY
+            session_payload["llm_provider"] = current_scope[2]
+            session_payload["updated_at"] = now
+            next_context = self._extend_recent_turns(context, previous_context)
+            if previous_scope != current_scope:
+                next_context.pop("codex_cli_session", None)
+            session_payload["last_context"] = next_context
             session_payload["last_trace_id"] = str(result.get("trace_id") or "")
             messages = list(session_payload.get("messages") or [])
             messages.extend(
@@ -428,6 +469,7 @@ class SourceCodeQASessionStore:
             "llm_provider": session_payload.get("llm_provider") or "codex_cli_bridge",
             "created_at": session_payload.get("created_at") or "",
             "updated_at": session_payload.get("updated_at") or "",
+            "archived_at": session_payload.get("archived_at") or "",
             "last_context": session_payload.get("last_context") if include_messages else None,
             "last_trace_id": session_payload.get("last_trace_id") or "",
             "message_count": len(session_payload.get("messages") or []),
@@ -517,6 +559,18 @@ def _release_gmail_export_lock(email: str) -> None:
         return
     with _gmail_export_active_users_lock:
         _gmail_export_active_users.discard(normalized)
+
+
+def _source_code_qa_codex_session_lock(session_id: str) -> threading.Lock:
+    normalized = str(session_id or "").strip()
+    if not normalized:
+        normalized = "_no_session"
+    with _source_code_qa_codex_session_locks_guard:
+        lock = _source_code_qa_codex_session_locks.get(normalized)
+        if lock is None:
+            lock = threading.Lock()
+            _source_code_qa_codex_session_locks[normalized] = lock
+        return lock
 
 
 def _count_configured_lines(value: Any) -> int:
@@ -724,6 +778,10 @@ def create_app() -> Flask:
         codex_concurrency=settings.source_code_qa_codex_concurrency,
         codex_top_path_limit=settings.source_code_qa_codex_top_path_limit,
         codex_repair_enabled=settings.source_code_qa_codex_repair_enabled,
+        codex_session_mode=settings.source_code_qa_codex_session_mode,
+        codex_session_max_turns=settings.source_code_qa_codex_session_max_turns,
+        codex_fast_path_enabled=settings.source_code_qa_codex_fast_path_enabled,
+        codex_cache_followups=settings.source_code_qa_codex_cache_followups,
         llm_max_retries=settings.source_code_qa_llm_max_retries,
         llm_backoff_seconds=settings.source_code_qa_llm_backoff_seconds,
         llm_max_backoff_seconds=settings.source_code_qa_llm_max_backoff_seconds,
@@ -1089,6 +1147,17 @@ def create_app() -> Flask:
             return jsonify({"status": "error", "message": "Source Code Q&A session was not found."}), HTTPStatus.NOT_FOUND
         return jsonify({"status": "ok", "session": session_payload})
 
+    @app.post("/api/source-code-qa/sessions/<session_id>/archive")
+    def source_code_qa_session_archive_api(session_id: str):
+        access_gate = _require_source_code_qa_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        store: SourceCodeQASessionStore = current_app.config["SOURCE_CODE_QA_SESSION_STORE"]
+        archived = store.archive(session_id, owner_email=_current_google_email() or "local")
+        if archived is None:
+            return jsonify({"status": "error", "message": "Source Code Q&A session was not found."}), HTTPStatus.NOT_FOUND
+        return jsonify(archived)
+
     @app.post("/api/source-code-qa/query")
     def source_code_qa_query_api():
         access_gate = _require_source_code_qa_access(settings, api=True)
@@ -1124,14 +1193,21 @@ def create_app() -> Flask:
                 pm_team=str(payload.get("pm_team") or ""),
                 country=str(payload.get("country") or ""),
             )
-            result = service.query(
-                pm_team=str(payload.get("pm_team") or ""),
-                country=str(payload.get("country") or ""),
-                question=str(payload.get("question") or ""),
-                answer_mode=str(payload.get("answer_mode") or "retrieval_only"),
-                llm_budget_mode="auto",
-                conversation_context=conversation_context,
-            )
+            def run_query() -> dict[str, Any]:
+                return service.query(
+                    pm_team=str(payload.get("pm_team") or ""),
+                    country=str(payload.get("country") or ""),
+                    question=str(payload.get("question") or ""),
+                    answer_mode=str(payload.get("answer_mode") or "retrieval_only"),
+                    llm_budget_mode="auto",
+                    conversation_context=conversation_context,
+                )
+
+            if service.llm_provider_name == "codex_cli_bridge" and session_id:
+                with _source_code_qa_codex_session_lock(session_id):
+                    result = run_query()
+            else:
+                result = run_query()
             result["auto_sync"] = auto_sync
             if session_id:
                 session_payload = session_store.append_exchange(
@@ -1236,6 +1312,7 @@ def create_app() -> Flask:
             user_identity=user_identity,
             google_connected="google_credentials" in session,
             seatalk_configured=_seatalk_dashboard_is_configured(settings),
+            seatalk_insights_url=url_for("gmail_seatalk_demo_seatalk_insights_api"),
             asset_revision=_current_release_revision(),
         )
 
@@ -1497,6 +1574,38 @@ def create_app() -> Flask:
             current_app.logger.exception("SeaTalk dashboard load failed.")
             return (
                 jsonify({"status": "error", "message": "SeaTalk data could not be loaded right now. Please try again shortly."}),
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+
+    @app.get("/api/gmail-sea-talk-demo/seatalk/insights")
+    def gmail_seatalk_demo_seatalk_insights_api():
+        access_gate = _require_gmail_seatalk_demo_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        try:
+            payload = _build_seatalk_dashboard_service(settings).build_insights()
+            return jsonify({"status": "ok", **payload})
+        except ToolError as error:
+            error_details = _classify_portal_error(error)
+            _log_portal_event(
+                "gmail_seatalk_seatalk_insights_tool_error",
+                level=logging.WARNING,
+                **_build_request_log_context(
+                    settings,
+                    user_identity=_get_user_identity(settings),
+                    extra=error_details,
+                ),
+            )
+            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
+        except Exception:
+            _log_portal_event(
+                "gmail_seatalk_seatalk_insights_unexpected_error",
+                level=logging.ERROR,
+                **_build_request_log_context(settings, user_identity=_get_user_identity(settings)),
+            )
+            current_app.logger.exception("SeaTalk insights load failed.")
+            return (
+                jsonify({"status": "error", "message": "SeaTalk insights could not be loaded right now. Please try again shortly."}),
                 HTTPStatus.INTERNAL_SERVER_ERROR,
             )
 
@@ -2186,6 +2295,10 @@ def _build_seatalk_dashboard_service(settings: Settings) -> SeaTalkDashboardServ
         owner_email=settings.seatalk_owner_email,
         seatalk_app_path=settings.seatalk_local_app_path,
         seatalk_data_dir=settings.seatalk_local_data_dir,
+        codex_workspace_root=PROJECT_ROOT,
+        codex_model=os.getenv("SOURCE_CODE_QA_CODEX_MODEL", "codex-cli"),
+        codex_timeout_seconds=settings.source_code_qa_codex_timeout_seconds,
+        codex_concurrency=settings.source_code_qa_codex_concurrency,
     )
 
 
@@ -2329,6 +2442,7 @@ def _compact_source_code_qa_session_payload(result: dict[str, Any]) -> dict[str,
     structured = result.get("structured_answer") if isinstance(result.get("structured_answer"), dict) else {}
     answer_claim_check = result.get("answer_claim_check") if isinstance(result.get("answer_claim_check"), dict) else {}
     llm_route = result.get("llm_route") if isinstance(result.get("llm_route"), dict) else {}
+    codex_trace = result.get("codex_cli_trace") if isinstance(result.get("codex_cli_trace"), dict) else {}
     return {
         "status": result.get("status") or "",
         "trace_id": result.get("trace_id") or "",
@@ -2341,6 +2455,8 @@ def _compact_source_code_qa_session_payload(result: dict[str, Any]) -> dict[str,
             "provider": llm_route.get("provider") or "",
             "prompt_mode": llm_route.get("prompt_mode") or "",
             "candidate_paths": (llm_route.get("candidate_paths") or [])[:30],
+            "candidate_path_layers": llm_route.get("candidate_path_layers") or {},
+            "codex_session_max_turns": llm_route.get("codex_session_max_turns") or 8,
         },
         "structured_answer": {
             "direct_answer": structured.get("direct_answer") or "",
@@ -2352,6 +2468,17 @@ def _compact_source_code_qa_session_payload(result: dict[str, Any]) -> dict[str,
         "answer_contract": result.get("answer_contract") or {},
         "answer_quality": result.get("answer_quality") or {},
         "codex_cli_summary": result.get("codex_cli_summary") or {},
+        "codex_cli_trace": {
+            "session_mode": codex_trace.get("session_mode") or "",
+            "command_mode": codex_trace.get("command_mode") or "",
+            "session_id": codex_trace.get("session_id") or "",
+            "exit_code": codex_trace.get("exit_code"),
+            "latency_ms": codex_trace.get("latency_ms"),
+            "timeout": bool(codex_trace.get("timeout")),
+            "stream_messages": (codex_trace.get("stream_messages") or [])[-20:],
+            "command_summaries": (codex_trace.get("command_summaries") or [])[-12:],
+            "probable_inspected_files": (codex_trace.get("probable_inspected_files") or [])[-20:],
+        },
         "codex_citation_validation": answer_claim_check.get("codex_citation_validation") or {},
         "matches": [
             {
@@ -2373,6 +2500,24 @@ def _compact_source_code_qa_session_payload(result: dict[str, Any]) -> dict[str,
 def _build_source_code_qa_session_context(result: dict[str, Any], request_payload: dict[str, Any]) -> dict[str, Any]:
     compact = _compact_source_code_qa_session_payload(result)
     matches = compact.get("matches") or []
+    codex_trace = compact.get("codex_cli_trace") if isinstance(compact.get("codex_cli_trace"), dict) else {}
+    candidate_paths = (compact.get("llm_route") or {}).get("candidate_paths") or []
+    inspected_paths: list[dict[str, Any]] = []
+    for raw_path in codex_trace.get("probable_inspected_files") or []:
+        raw_text = str(raw_path or "")
+        matched = None
+        for candidate in candidate_paths:
+            if isinstance(candidate, dict) and str(candidate.get("path") or "") and str(candidate.get("path") or "") in raw_text:
+                matched = candidate
+                break
+        if matched:
+            inspected_paths.append({**matched, "source": "codex_cli_trace"})
+    if not inspected_paths:
+        inspected_paths = [
+            item for item in candidate_paths[:5]
+            if isinstance(item, dict) and str(item.get("trace_stage") or "") == "followup_memory"
+        ]
+    session_id = str(codex_trace.get("session_id") or "").strip()
     return {
         "key": f"{request_payload.get('pm_team') or ''}:{request_payload.get('country') or ALL_COUNTRY}",
         "pm_team": request_payload.get("pm_team") or "",
@@ -2385,9 +2530,17 @@ def _build_source_code_qa_session_context(result: dict[str, Any], request_payloa
         "llm_provider": compact.get("llm_provider") or "",
         "llm_model": compact.get("llm_model") or "",
         "llm_route": compact.get("llm_route") or {},
+        "codex_session_max_turns": (compact.get("llm_route") or {}).get("codex_session_max_turns") or 8,
         "codex_cli_summary": compact.get("codex_cli_summary") or {},
+        "codex_cli_trace": codex_trace,
+        "codex_cli_session": {
+            "session_id": session_id,
+            "mode": codex_trace.get("session_mode") or "",
+            "last_used_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        } if session_id else {},
+        "codex_inspected_paths": inspected_paths[:12],
         "codex_citation_validation": compact.get("codex_citation_validation") or {},
-        "codex_candidate_paths": (compact.get("llm_route") or {}).get("candidate_paths") or [],
+        "codex_candidate_paths": candidate_paths,
         "repo_scope": list(dict.fromkeys([match.get("repo") for match in matches if match.get("repo")]))[:8],
         "matches": matches[:8],
         "matches_snapshot": matches[:10],
@@ -2762,15 +2915,23 @@ def _run_source_code_qa_query_job(app: Flask, job_id: str, payload: dict[str, An
                 progress_callback("auto_sync_completed", "Repository auto-sync completed; starting code search.", 1, 1)
             else:
                 progress_callback("auto_sync_completed", "Repository indexes do not need scheduled sync; starting code search.", 1, 1)
-            result = service.query(
-                pm_team=pm_team,
-                country=country,
-                question=str(payload.get("question") or ""),
-                answer_mode=str(payload.get("answer_mode") or "retrieval_only"),
-                llm_budget_mode="auto",
-                conversation_context=conversation_context,
-                progress_callback=progress_callback,
-            )
+            def run_query() -> dict[str, Any]:
+                return service.query(
+                    pm_team=pm_team,
+                    country=country,
+                    question=str(payload.get("question") or ""),
+                    answer_mode=str(payload.get("answer_mode") or "retrieval_only"),
+                    llm_budget_mode="auto",
+                    conversation_context=conversation_context,
+                    progress_callback=progress_callback,
+                )
+
+            if service.llm_provider_name == "codex_cli_bridge" and session_id:
+                progress_callback("codex_session_lock", "Waiting for this chat's Codex session slot.", 0, 1)
+                with _source_code_qa_codex_session_lock(session_id):
+                    result = run_query()
+            else:
+                result = run_query()
             result["auto_sync"] = auto_sync
             if session_id:
                 session_payload = session_store.append_exchange(

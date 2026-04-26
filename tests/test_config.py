@@ -64,6 +64,10 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(settings.source_code_qa_codex_concurrency, 1)
         self.assertEqual(settings.source_code_qa_codex_top_path_limit, 30)
         self.assertTrue(settings.source_code_qa_codex_repair_enabled)
+        self.assertEqual(settings.source_code_qa_codex_session_mode, "ephemeral")
+        self.assertEqual(settings.source_code_qa_codex_session_max_turns, 8)
+        self.assertTrue(settings.source_code_qa_codex_fast_path_enabled)
+        self.assertFalse(settings.source_code_qa_codex_cache_followups)
         self.assertEqual(settings.source_code_qa_llm_max_retries, 2)
         self.assertEqual(settings.source_code_qa_llm_backoff_seconds, 1.0)
         self.assertEqual(settings.source_code_qa_llm_max_backoff_seconds, 8.0)
@@ -76,6 +80,24 @@ class ConfigTests(unittest.TestCase):
             settings = Settings.from_env()
 
         self.assertEqual(settings.source_code_qa_codex_concurrency, 2)
+
+    def test_source_code_qa_codex_chat_optimization_config_from_env(self):
+        env = {
+            "SOURCE_CODE_QA_CODEX_SESSION_MODE": "resume",
+            "SOURCE_CODE_QA_CODEX_SESSION_MAX_TURNS": "6",
+            "SOURCE_CODE_QA_CODEX_FAST_PATH_ENABLED": "false",
+            "SOURCE_CODE_QA_CODEX_CACHE_FOLLOWUPS": "true",
+        }
+        with patch.dict(os.environ, env, clear=True), patch(
+            "bpmis_jira_tool.config.find_dotenv",
+            return_value="",
+        ):
+            settings = Settings.from_env()
+
+        self.assertEqual(settings.source_code_qa_codex_session_mode, "resume")
+        self.assertEqual(settings.source_code_qa_codex_session_max_turns, 6)
+        self.assertFalse(settings.source_code_qa_codex_fast_path_enabled)
+        self.assertTrue(settings.source_code_qa_codex_cache_followups)
 
     def test_source_code_qa_vertex_config_from_env(self):
         env = {

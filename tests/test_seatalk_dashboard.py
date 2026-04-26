@@ -6,6 +6,8 @@ import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from bpmis_jira_tool.errors import ConfigError, ToolError
 from bpmis_jira_tool.seatalk_dashboard import SeaTalkDashboardService
@@ -162,6 +164,155 @@ class SeaTalkDashboardServiceTests(unittest.TestCase):
         self.assertEqual(content, "demo history")
         self.assertEqual(filename, "seatalk-history-last-7-days.txt")
         self.assertTrue(any(command[1].endswith("seatalk_local_export.js") for command in calls))
+
+    def test_build_insights_uses_codex_read_only_ephemeral_command(self):
+        def local_runner(command: list[str]):
+            return subprocess.CompletedProcess(
+                args=command,
+                returncode=0,
+                stdout="SeaTalk Chat History Export\n[2026-04-21 10:00:00] Alice: @Xiaodong please follow up AF rollout.\n",
+                stderr="",
+            )
+
+        codex_calls = []
+
+        def fake_codex_run(command, **kwargs):
+            codex_calls.append((command, kwargs))
+            if "login" in command and "status" in command:
+                return SimpleNamespace(returncode=0, stdout="Logged in using ChatGPT\n", stderr="")
+            output_path = command[command.index("--output-last-message") + 1]
+            Path(output_path).write_text(
+                json.dumps(
+                    {
+                        "project_updates": [
+                            {
+                                "domain": "Anti-fraud",
+                                "title": "AF rollout",
+                                "summary": "AF rollout needs follow-up.",
+                                "status": "in_progress",
+                                "evidence": "Apr 21, Alice asked Xiaodong to follow up.",
+                            }
+                        ],
+                        "my_todos": [
+                            {
+                                "task": "Follow up AF rollout",
+                                "domain": "Anti-fraud",
+                                "priority": "high",
+                                "due": "unknown",
+                                "evidence": "Apr 21, Alice: @Xiaodong please follow up AF rollout.",
+                            }
+                        ],
+                        "team_todos": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            return SimpleNamespace(returncode=0, stdout='{"type":"done"}\n', stderr="")
+
+        service = SeaTalkDashboardService(
+            owner_email="xiaodong.zheng@npt.sg",
+            seatalk_app_path=str(self.app_dir),
+            seatalk_data_dir=str(self.data_dir),
+            codex_workspace_root=str(self.temp_dir.name),
+            codex_model="gpt-5.5",
+            command_runner=local_runner,
+        )
+
+        with patch("bpmis_jira_tool.source_code_qa.shutil.which", return_value="/usr/local/bin/codex"), patch(
+            "bpmis_jira_tool.source_code_qa.subprocess.run",
+            side_effect=fake_codex_run,
+        ):
+            result = service.build_insights(now=datetime(2026, 4, 21, 21, 0).astimezone())
+
+        self.assertEqual(result["project_updates"][0]["title"], "AF rollout")
+        self.assertEqual(result["my_todos"][0]["task"], "Follow up AF rollout")
+        self.assertEqual(result["model_id"], "codex:gpt-5.5")
+        exec_command = codex_calls[-1][0]
+        self.assertIn("--sandbox", exec_command)
+        self.assertIn("read-only", exec_command)
+        self.assertIn("--ephemeral", exec_command)
+        self.assertIn("--json", exec_command)
+        self.assertIn("--output-last-message", exec_command)
+
+    def test_build_insights_reuses_daily_cache(self):
+        def local_runner(command: list[str]):
+            return subprocess.CompletedProcess(args=command, returncode=0, stdout="SeaTalk Chat History Export\nhello", stderr="")
+
+        codex_exec_count = 0
+
+        def fake_codex_run(command, **kwargs):
+            nonlocal codex_exec_count
+            if "login" in command and "status" in command:
+                return SimpleNamespace(returncode=0, stdout="Logged in using ChatGPT\n", stderr="")
+            codex_exec_count += 1
+            output_path = command[command.index("--output-last-message") + 1]
+            Path(output_path).write_text('{"project_updates":[],"my_todos":[],"team_todos":[]}', encoding="utf-8")
+            return SimpleNamespace(returncode=0, stdout='{"type":"done"}\n', stderr="")
+
+        service = SeaTalkDashboardService(
+            owner_email="xiaodong.zheng@npt.sg",
+            seatalk_app_path=str(self.app_dir),
+            seatalk_data_dir=str(self.data_dir),
+            codex_workspace_root=str(self.temp_dir.name),
+            command_runner=local_runner,
+        )
+        now = datetime(2026, 4, 21, 21, 0).astimezone()
+
+        with patch("bpmis_jira_tool.source_code_qa.shutil.which", return_value="/usr/local/bin/codex"), patch(
+            "bpmis_jira_tool.source_code_qa.subprocess.run",
+            side_effect=fake_codex_run,
+        ):
+            first = service.build_insights(now=now)
+            second = service.build_insights(now=now)
+
+        self.assertEqual(codex_exec_count, 1)
+        self.assertFalse(first["cache"]["hit"])
+        self.assertTrue(second["cache"]["hit"])
+
+    def test_build_insights_invalid_codex_json_raises_tool_error(self):
+        def local_runner(command: list[str]):
+            return subprocess.CompletedProcess(args=command, returncode=0, stdout="SeaTalk Chat History Export\nhello", stderr="")
+
+        def fake_codex_run(command, **kwargs):
+            if "login" in command and "status" in command:
+                return SimpleNamespace(returncode=0, stdout="Logged in using ChatGPT\n", stderr="")
+            output_path = command[command.index("--output-last-message") + 1]
+            Path(output_path).write_text("not json", encoding="utf-8")
+            return SimpleNamespace(returncode=0, stdout='{"type":"done"}\n', stderr="")
+
+        service = SeaTalkDashboardService(
+            owner_email="xiaodong.zheng@npt.sg",
+            seatalk_app_path=str(self.app_dir),
+            seatalk_data_dir=str(self.data_dir),
+            codex_workspace_root=str(self.temp_dir.name),
+            command_runner=local_runner,
+        )
+
+        with patch("bpmis_jira_tool.source_code_qa.shutil.which", return_value="/usr/local/bin/codex"), patch(
+            "bpmis_jira_tool.source_code_qa.subprocess.run",
+            side_effect=fake_codex_run,
+        ):
+            with self.assertRaisesRegex(ToolError, "invalid SeaTalk insights JSON"):
+                service.build_insights(now=datetime(2026, 4, 21, 21, 0).astimezone())
+
+    def test_build_insights_requires_codex_login(self):
+        def local_runner(command: list[str]):
+            return subprocess.CompletedProcess(args=command, returncode=0, stdout="SeaTalk Chat History Export\nhello", stderr="")
+
+        service = SeaTalkDashboardService(
+            owner_email="xiaodong.zheng@npt.sg",
+            seatalk_app_path=str(self.app_dir),
+            seatalk_data_dir=str(self.data_dir),
+            codex_workspace_root=str(self.temp_dir.name),
+            command_runner=local_runner,
+        )
+
+        with patch("bpmis_jira_tool.source_code_qa.shutil.which", return_value="/usr/local/bin/codex"), patch(
+            "bpmis_jira_tool.source_code_qa.subprocess.run",
+            return_value=SimpleNamespace(returncode=1, stdout="", stderr="not logged in"),
+        ):
+            with self.assertRaisesRegex(ToolError, "Codex is unavailable"):
+                service.build_insights(now=datetime(2026, 4, 21, 21, 0).astimezone())
 
 
 if __name__ == "__main__":

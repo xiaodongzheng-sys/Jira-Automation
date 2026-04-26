@@ -195,6 +195,38 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertEqual(listed.get_json()["sessions"][0]["id"], session_payload["id"])
         self.assertEqual(loaded.get_json()["session"]["llm_provider"], "vertex_ai")
 
+    def test_source_code_qa_session_archive_hides_but_preserves_session(self):
+        with self.app.test_client() as client:
+            self._login(client, "teammate@npt.sg")
+            created = client.post(
+                "/api/source-code-qa/sessions",
+                json={"pm_team": "AF", "country": "All", "llm_provider": "codex_cli_bridge"},
+            )
+            session_id = created.get_json()["session"]["id"]
+            archived = client.post(f"/api/source-code-qa/sessions/{session_id}/archive")
+            listed = client.get("/api/source-code-qa/sessions")
+            loaded = client.get(f"/api/source-code-qa/sessions/{session_id}")
+
+        self.assertEqual(archived.status_code, 200)
+        self.assertEqual(archived.get_json()["status"], "ok")
+        self.assertEqual(listed.status_code, 200)
+        self.assertEqual(listed.get_json()["sessions"], [])
+        self.assertEqual(loaded.status_code, 200)
+        self.assertEqual(loaded.get_json()["session"]["archived_at"], archived.get_json()["archived_at"])
+
+    def test_source_code_qa_session_archive_rejects_other_owner(self):
+        with self.app.test_client() as client:
+            self._login(client, "owner@npt.sg")
+            created = client.post(
+                "/api/source-code-qa/sessions",
+                json={"pm_team": "AF", "country": "All", "llm_provider": "codex_cli_bridge"},
+            )
+            session_id = created.get_json()["session"]["id"]
+            self._login(client, "other@npt.sg")
+            archived = client.post(f"/api/source-code-qa/sessions/{session_id}/archive")
+
+        self.assertEqual(archived.status_code, 404)
+
     def test_query_api_uses_session_context_and_appends_exchange(self):
         captured = {}
 
@@ -6616,6 +6648,43 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertTrue(exec_envs)
         self.assertTrue(str(exec_envs[-1].get("PATH") or "").startswith("/opt/tools"))
 
+    def test_codex_cli_bridge_resume_mode_uses_resume_command(self):
+        provider = CodexCliBridgeSourceCodeQALLMProvider(
+            workspace_root=Path(self.temp_dir.name),
+            timeout_seconds=20,
+            codex_binary="codex",
+            session_mode="resume",
+        )
+        calls = []
+
+        def fake_run(command, **kwargs):
+            calls.append((command, kwargs))
+            if "login" in command and "status" in command:
+                return SimpleNamespace(returncode=0, stdout="Logged in using ChatGPT\n", stderr="")
+            output_path = command[command.index("--output-last-message") + 1]
+            Path(output_path).write_text(
+                '{"direct_answer":"ok","claims":[],"missing_evidence":[],"confidence":"high"}',
+                encoding="utf-8",
+            )
+            return SimpleNamespace(returncode=0, stdout='{"session_id":"session-123","type":"done"}\n', stderr="")
+
+        with patch("bpmis_jira_tool.source_code_qa.shutil.which", return_value="/usr/local/bin/codex"), patch(
+            "bpmis_jira_tool.source_code_qa.subprocess.run",
+            side_effect=fake_run,
+        ):
+            result = provider.generate(
+                payload={"contents": [{"parts": [{"text": "hi"}]}], "codex_cli_session_id": "session-123"},
+                primary_model="codex-cli",
+                fallback_model="codex-cli",
+            )
+
+        exec_command = calls[-1][0]
+        self.assertIn("resume", exec_command)
+        self.assertIn("session-123", exec_command)
+        self.assertNotIn("--ephemeral", exec_command)
+        self.assertEqual(result.attempt_log[0]["session_mode"], "resume")
+        self.assertEqual(result.payload["codex_cli_trace"]["session_id"], "session-123")
+
     def test_codex_cli_bridge_streams_json_progress_events(self):
         provider = CodexCliBridgeSourceCodeQALLMProvider(
             workspace_root=Path(self.temp_dir.name),
@@ -6782,7 +6851,9 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             },
         )
 
-        self.assertIn("Prompt mode: codex_investigation_brief_v1", brief)
+        self.assertIn("Prompt mode: codex_investigation_brief_v2", brief)
+        self.assertIn("Candidate path layers:", brief)
+        self.assertIn("current_high_confidence_paths", brief)
         self.assertIn(str(repo_path), brief)
         self.assertIn("relative_root=AF-All", brief)
         self.assertIn("path=repository/IssueRepository.java", brief)
@@ -6975,7 +7046,8 @@ class SourceCodeQAServiceTests(unittest.TestCase):
 
         exec_calls = [item for item in calls if "exec" in item[0]]
         self.assertEqual(len(exec_calls), 1)
-        self.assertEqual(payload["llm_route"]["prompt_mode"], "codex_investigation_brief_v1")
+        self.assertEqual(payload["llm_route"]["prompt_mode"], "codex_investigation_brief_v2")
+        self.assertIn("candidate_path_layers", payload["llm_route"])
         self.assertFalse(payload["llm_route"]["codex_repair_attempted"])
         self.assertEqual(payload["answer_claim_check"]["status"], "skipped")
         self.assertEqual(payload["codex_cli_summary"]["citation_validation_status"], "skipped")

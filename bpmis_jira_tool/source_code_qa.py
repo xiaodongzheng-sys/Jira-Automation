@@ -69,7 +69,9 @@ DEFAULT_LLM_MAX_BACKOFF_SECONDS = 8.0
 DEFAULT_CODEX_CLI_MODEL = "codex-cli"
 DEFAULT_CODEX_TIMEOUT_SECONDS = 240
 DEFAULT_CODEX_TOP_PATH_LIMIT = 30
-CODEX_INVESTIGATION_PROMPT_MODE = "codex_investigation_brief_v1"
+CODEX_INVESTIGATION_PROMPT_MODE = "codex_investigation_brief_v2"
+CODEX_SESSION_MODE_EPHEMERAL = "ephemeral"
+CODEX_SESSION_MODE_RESUME = "resume"
 DEFAULT_INDEX_LOCK_STALE_SECONDS = 15 * 60
 DEFAULT_AUTO_SYNC_START_DATE = date(2026, 5, 8)
 DEFAULT_AUTO_SYNC_INTERVAL_DAYS = 14
@@ -887,11 +889,14 @@ class CodexCliBridgeSourceCodeQALLMProvider(SourceCodeQALLMProvider):
         workspace_root: Path,
         timeout_seconds: int = DEFAULT_LLM_TIMEOUT_SECONDS,
         concurrency_limit: int = 1,
+        session_mode: str = CODEX_SESSION_MODE_EPHEMERAL,
         codex_binary: str | None = None,
     ) -> None:
         self.workspace_root = Path(workspace_root)
         self.timeout_seconds = max(10, int(timeout_seconds or DEFAULT_LLM_TIMEOUT_SECONDS))
         self.concurrency_limit = max(1, min(int(concurrency_limit or 1), 4))
+        normalized_session_mode = str(session_mode or CODEX_SESSION_MODE_EPHEMERAL).strip().lower()
+        self.session_mode = normalized_session_mode if normalized_session_mode in {CODEX_SESSION_MODE_EPHEMERAL, CODEX_SESSION_MODE_RESUME} else CODEX_SESSION_MODE_EPHEMERAL
         self.codex_binary = str(codex_binary or os.getenv("SOURCE_CODE_QA_CODEX_BINARY") or "codex").strip() or "codex"
 
     @classmethod
@@ -939,22 +944,12 @@ class CodexCliBridgeSourceCodeQALLMProvider(SourceCodeQALLMProvider):
         model = str(primary_model or "codex-cli").strip() or "codex-cli"
         with tempfile.NamedTemporaryFile("w+", encoding="utf-8", delete=True) as output_file:
             prompt_mode = str(payload.get("codex_prompt_mode") or "").strip()
-            command = [
-                self.codex_binary,
-                "exec",
-                "--cd",
-                str(self.workspace_root),
-                "--skip-git-repo-check",
-                "--sandbox",
-                "read-only",
-                "--ephemeral",
-                "--json",
-                "--output-last-message",
-                output_file.name,
-                "-",
-            ]
-            if model not in {"codex-cli", "codex"}:
-                command[2:2] = ["--model", model]
+            codex_cli_session_id = str(payload.get("codex_cli_session_id") or "").strip()
+            command, command_mode = self._build_codex_command(
+                output_file=output_file.name,
+                model=model,
+                session_id=codex_cli_session_id,
+            )
             queue_started = time.time()
             queue_wait_ms = 0
             try:
@@ -1009,8 +1004,23 @@ class CodexCliBridgeSourceCodeQALLMProvider(SourceCodeQALLMProvider):
         if not answer:
             raise ToolError("Codex unavailable; used code search fallback. Codex CLI returned no readable answer.")
         latency_ms = int((time.time() - started_at) * 1000)
+        trace = self._extract_codex_trace(result.stdout, result.stderr)
+        trace.update(
+            {
+                "session_mode": self.session_mode,
+                "command_mode": command_mode,
+                "session_id": trace.get("session_id") or codex_cli_session_id,
+                "exit_code": result.returncode,
+                "latency_ms": latency_ms,
+                "timeout": False,
+            }
+        )
         return LLMGenerateResult(
-            payload={"text": answer, "finish_reason": "codex_cli_completed"},
+            payload={
+                "text": answer,
+                "finish_reason": "codex_cli_completed",
+                "codex_cli_trace": trace,
+            },
             usage={},
             model=model,
             attempts=1,
@@ -1029,10 +1039,63 @@ class CodexCliBridgeSourceCodeQALLMProvider(SourceCodeQALLMProvider):
                     "prompt_mode": prompt_mode,
                     "concurrency_limit": self.concurrency_limit,
                     "queue_wait_ms": queue_wait_ms,
+                    "session_mode": self.session_mode,
+                    "command_mode": command_mode,
+                    "codex_cli_session_id": trace.get("session_id") or "",
                     "command": self._command_summary(command),
                 },
             ),
         )
+
+    def _build_codex_command(self, *, output_file: str, model: str, session_id: str = "") -> tuple[list[str], str]:
+        if self.session_mode == CODEX_SESSION_MODE_RESUME:
+            command = [self.codex_binary, "exec"]
+            if model not in {"codex-cli", "codex"}:
+                command.extend(["--model", model])
+            if session_id:
+                command.extend(
+                    [
+                        "resume",
+                        "--skip-git-repo-check",
+                        "--json",
+                        "--output-last-message",
+                        output_file,
+                        session_id,
+                        "-",
+                    ]
+                )
+                return command, "resume"
+            command.extend(
+                [
+                    "--cd",
+                    str(self.workspace_root),
+                    "--skip-git-repo-check",
+                    "--sandbox",
+                    "read-only",
+                    "--json",
+                    "--output-last-message",
+                    output_file,
+                    "-",
+                ]
+            )
+            return command, "new_persistent"
+        command = [
+            self.codex_binary,
+            "exec",
+            "--cd",
+            str(self.workspace_root),
+            "--skip-git-repo-check",
+            "--sandbox",
+            "read-only",
+            "--ephemeral",
+            "--json",
+            "--output-last-message",
+            output_file,
+            "-",
+        ]
+        if model not in {"codex-cli", "codex"}:
+            command[2:2] = ["--model", model]
+        return command, "ephemeral"
 
     def _run_codex_streaming(self, *, command: list[str], prompt: str, progress_callback: Any) -> Any:
         process = subprocess.Popen(
@@ -1151,7 +1214,12 @@ class CodexCliBridgeSourceCodeQALLMProvider(SourceCodeQALLMProvider):
             "provider": self.name,
             "ready": self.ready(),
             "workspace_root": str(self.workspace_root),
-            "runtime": {"timeout_seconds": self.timeout_seconds, "concurrency": 1, "sandbox": "read-only"},
+            "runtime": {
+                "timeout_seconds": self.timeout_seconds,
+                "concurrency": self.concurrency_limit,
+                "sandbox": "read-only",
+                "session_mode": self.session_mode,
+            },
         }
 
     @staticmethod
@@ -1226,6 +1294,67 @@ class CodexCliBridgeSourceCodeQALLMProvider(SourceCodeQALLMProvider):
                         if isinstance(value, str) and value.strip():
                             candidates.append(value.strip())
         return candidates[-1] if candidates else ""
+
+    @classmethod
+    def _extract_codex_trace(cls, stdout: str, stderr: str) -> dict[str, Any]:
+        stream_messages: list[str] = []
+        command_summaries: list[str] = []
+        inspected_paths: list[str] = []
+        session_id = ""
+        path_pattern = re.compile(
+            r"([A-Za-z0-9_.@/$-]+/(?:src|config|spec|app|web|test|tests|resources|pages|components|mapper)/"
+            r"[A-Za-z0-9_./$@-]+\.(?:java|xml|kt|groovy|md|sql|yml|yaml|properties|json|ts|tsx|js|py))"
+        )
+        command_pattern = re.compile(r"\b(rg|grep|find|sed|nl|cat|ls)\b(?:\s+[^`'\n]{0,220})?")
+        seen_messages: set[str] = set()
+        seen_commands: set[str] = set()
+        seen_paths: set[str] = set()
+        for raw_line in f"{stdout or ''}\n{stderr or ''}".splitlines():
+            message = cls._extract_progress_json_event_message(raw_line)
+            if message and message not in seen_messages:
+                seen_messages.add(message)
+                stream_messages.append(message[:1200])
+            try:
+                event = json.loads(raw_line)
+            except json.JSONDecodeError:
+                event = {}
+            if isinstance(event, dict):
+                for key in ("session_id", "conversation_id"):
+                    value = str(event.get(key) or "").strip()
+                    if value:
+                        session_id = value
+                item = event.get("item")
+                if isinstance(item, dict):
+                    for key in ("session_id", "conversation_id", "id"):
+                        value = str(item.get(key) or "").strip()
+                        if value and ("session" in key or str(item.get("type") or "").lower().find("session") >= 0):
+                            session_id = value
+                    for key in ("command", "cmd"):
+                        value = item.get(key)
+                        if isinstance(value, str) and value.strip() and value not in seen_commands:
+                            seen_commands.add(value)
+                            command_summaries.append(value[:240])
+                for key in ("command", "cmd"):
+                    value = event.get(key)
+                    if isinstance(value, str) and value.strip() and value not in seen_commands:
+                        seen_commands.add(value)
+                        command_summaries.append(value[:240])
+            for match in command_pattern.finditer(raw_line):
+                command = match.group(0).strip()
+                if command and command not in seen_commands:
+                    seen_commands.add(command)
+                    command_summaries.append(command[:240])
+            for match in path_pattern.finditer(raw_line):
+                path = match.group(1).strip()
+                if path and path not in seen_paths:
+                    seen_paths.add(path)
+                    inspected_paths.append(path[:300])
+        return {
+            "stream_messages": stream_messages[-40:],
+            "command_summaries": command_summaries[-30:],
+            "probable_inspected_files": inspected_paths[-40:],
+            "session_id": session_id,
+        }
 
     @staticmethod
     def _sanitize_cli_output(output: str) -> str:
@@ -1935,6 +2064,10 @@ class SourceCodeQAService:
         codex_concurrency: int = 1,
         codex_top_path_limit: int = DEFAULT_CODEX_TOP_PATH_LIMIT,
         codex_repair_enabled: bool = True,
+        codex_session_mode: str = CODEX_SESSION_MODE_EPHEMERAL,
+        codex_session_max_turns: int = 8,
+        codex_fast_path_enabled: bool = True,
+        codex_cache_followups: bool = False,
         llm_max_retries: int = DEFAULT_LLM_MAX_RETRIES,
         llm_backoff_seconds: float = DEFAULT_LLM_BACKOFF_SECONDS,
         llm_max_backoff_seconds: float = DEFAULT_LLM_MAX_BACKOFF_SECONDS,
@@ -1997,6 +2130,11 @@ class SourceCodeQAService:
         self.codex_concurrency = max(1, min(int(codex_concurrency or 1), 4))
         self.codex_top_path_limit = max(5, min(int(codex_top_path_limit or DEFAULT_CODEX_TOP_PATH_LIMIT), 80))
         self.codex_repair_enabled = bool(codex_repair_enabled)
+        normalized_codex_session_mode = str(codex_session_mode or CODEX_SESSION_MODE_EPHEMERAL).strip().lower()
+        self.codex_session_mode = normalized_codex_session_mode if normalized_codex_session_mode in {CODEX_SESSION_MODE_EPHEMERAL, CODEX_SESSION_MODE_RESUME} else CODEX_SESSION_MODE_EPHEMERAL
+        self.codex_session_max_turns = max(1, min(int(codex_session_max_turns or 8), 30))
+        self.codex_fast_path_enabled = bool(codex_fast_path_enabled)
+        self.codex_cache_followups = bool(codex_cache_followups)
         self.llm_max_retries = max(0, int(llm_max_retries or 0))
         self.llm_backoff_seconds = max(0.0, float(llm_backoff_seconds or 0.0))
         self.llm_max_backoff_seconds = max(
@@ -2059,6 +2197,10 @@ class SourceCodeQAService:
             codex_concurrency=self.codex_concurrency,
             codex_top_path_limit=self.codex_top_path_limit,
             codex_repair_enabled=self.codex_repair_enabled,
+            codex_session_mode=self.codex_session_mode,
+            codex_session_max_turns=self.codex_session_max_turns,
+            codex_fast_path_enabled=self.codex_fast_path_enabled,
+            codex_cache_followups=self.codex_cache_followups,
             llm_max_retries=self.llm_max_retries,
             llm_backoff_seconds=self.llm_backoff_seconds,
             llm_max_backoff_seconds=self.llm_max_backoff_seconds,
@@ -2213,6 +2355,7 @@ class SourceCodeQAService:
                 workspace_root=self.repo_root,
                 timeout_seconds=self.codex_timeout_seconds,
                 concurrency_limit=self.codex_concurrency,
+                session_mode=self.codex_session_mode,
             )
         if self.llm_provider_name == LLM_PROVIDER_VERTEX_AI:
             return VertexAISourceCodeQALLMProvider(
@@ -3903,9 +4046,19 @@ class SourceCodeQAService:
                 started_at=started_at,
             )
             return payload
-        report("evidence_pack", "Building evidence pack and answer context.", 0, 0)
-        evidence_summary = self._compress_evidence_cached(question, top_matches, request_cache=request_cache)
-        quality_gate = self._quality_gate_cached(question, evidence_summary, request_cache=request_cache)
+        codex_fast_path = self._codex_fast_path_active(answer_mode)
+        report(
+            "evidence_pack",
+            "Preparing Codex navigation hints." if codex_fast_path else "Building evidence pack and answer context.",
+            0,
+            0,
+        )
+        if codex_fast_path:
+            evidence_summary = self._codex_fast_evidence_summary(question, top_matches)
+            quality_gate = self._codex_fast_quality_gate(top_matches)
+        else:
+            evidence_summary = self._compress_evidence_cached(question, top_matches, request_cache=request_cache)
+            quality_gate = self._quality_gate_cached(question, evidence_summary, request_cache=request_cache)
         trace_paths = [] if exact_lookup_sufficient or not should_expand_matches else self._build_trace_paths(entries=query_entries, key=key, matches=top_matches, question=question, request_cache=request_cache)
         if trace_paths:
             evidence_summary["trace_paths"] = trace_paths
@@ -3919,12 +4072,16 @@ class SourceCodeQAService:
             if exact_lookup_sufficient or not should_expand_matches
             else self._build_repo_dependency_graph(key=key, entries=query_entries, request_cache=request_cache)
         )
-        evidence_pack = self._build_evidence_pack(
-            question=question,
-            evidence_summary=evidence_summary,
-            matches=top_matches,
-            trace_paths=trace_paths,
-            quality_gate=quality_gate,
+        evidence_pack = (
+            self._codex_fast_evidence_pack(top_matches, trace_paths)
+            if codex_fast_path
+            else self._build_evidence_pack(
+                question=question,
+                evidence_summary=evidence_summary,
+                matches=top_matches,
+                trace_paths=trace_paths,
+                quality_gate=quality_gate,
+            )
         )
         payload = {
             "status": "ok",
@@ -4066,6 +4223,66 @@ class SourceCodeQAService:
                 }
             )
         return statuses
+
+    def _codex_fast_path_active(self, answer_mode: str | None = None) -> bool:
+        normalized_answer_mode = str(answer_mode or "").strip() or ANSWER_MODE
+        return (
+            self.llm_provider_name == LLM_PROVIDER_CODEX_CLI_BRIDGE
+            and self.codex_fast_path_enabled
+            and normalized_answer_mode in {ANSWER_MODE_AUTO, ANSWER_MODE_GEMINI}
+        )
+
+    @staticmethod
+    def _codex_fast_quality_gate(matches: list[dict[str, Any]]) -> dict[str, Any]:
+        return {
+            "status": "codex_fast_path_skipped",
+            "confidence": "unknown",
+            "reason": "Codex reads the candidate files directly; Gemini-style answer quality gate is skipped.",
+            "missing": [] if matches else ["candidate paths"],
+        }
+
+    @staticmethod
+    def _codex_fast_evidence_summary(question: str, matches: list[dict[str, Any]]) -> dict[str, Any]:
+        return {
+            "version": 1,
+            "mode": "codex_fast_path",
+            "question": str(question or "")[:500],
+            "supporting_count": len(matches),
+            "top_paths": [
+                {
+                    "source_id": f"S{index}",
+                    "repo": match.get("repo"),
+                    "path": match.get("path"),
+                    "line_start": match.get("line_start"),
+                    "line_end": match.get("line_end"),
+                    "retrieval": match.get("retrieval"),
+                    "trace_stage": match.get("trace_stage"),
+                    "reason": match.get("reason"),
+                }
+                for index, match in enumerate(matches[:30], start=1)
+                if isinstance(match, dict)
+            ],
+        }
+
+    @staticmethod
+    def _codex_fast_evidence_pack(matches: list[dict[str, Any]], trace_paths: list[dict[str, Any]]) -> dict[str, Any]:
+        top_paths = [
+            f"{match.get('repo')}:{match.get('path')}:{match.get('line_start')}-{match.get('line_end')} [S{index}]"
+            for index, match in enumerate(matches[:12], start=1)
+            if isinstance(match, dict)
+        ]
+        return {
+            "version": 2,
+            "mode": "codex_navigation_hints",
+            "entry_points": top_paths[:6],
+            "call_chain": top_paths[6:10],
+            "read_write_points": [],
+            "tables": [],
+            "apis": [],
+            "configs": [],
+            "missing_hops": [],
+            "trace_paths": trace_paths[:5],
+        }
 
     def index_health_payload(self) -> dict[str, Any]:
         config = self.load_config()
@@ -14651,14 +14868,20 @@ class SourceCodeQAService:
             candidate_matches = selected_matches
         candidate_paths = self._codex_candidate_paths(entries=entries, key=key, matches=candidate_matches)
         candidate_paths = self._merge_codex_followup_candidate_paths(candidate_paths, followup_context)
+        candidate_path_layers = self._codex_candidate_path_layers(candidate_paths, followup_context)
         llm_route = {
             **llm_route,
             "answer_model": selected_model,
             "prompt_mode": CODEX_INVESTIGATION_PROMPT_MODE,
             "candidate_paths": candidate_paths,
+            "candidate_path_layers": candidate_path_layers,
             "candidate_repo_count": len({item.get("repo") for item in candidate_paths}),
             "candidate_path_count": len(candidate_paths),
             "codex_repair_enabled": self.codex_repair_enabled,
+            "codex_fast_path_enabled": self.codex_fast_path_enabled,
+            "codex_session_mode": self.codex_session_mode,
+            "codex_session_max_turns": self.codex_session_max_turns,
+            "codex_cache_followups": self.codex_cache_followups,
         }
         prompt_context = self._codex_investigation_brief(
             pm_team=pm_team,
@@ -14669,6 +14892,7 @@ class SourceCodeQAService:
             quality_gate=quality_gate,
             followup_context=followup_context,
         )
+        is_followup = bool(followup_context and (followup_context.get("used") or followup_context.get("question") or followup_context.get("recent_turns")))
         cache_key = self._answer_cache_key(
             provider=self.llm_provider.name,
             model=selected_model,
@@ -14677,7 +14901,7 @@ class SourceCodeQAService:
             llm_budget_mode=routed_budget_mode,
             context=prompt_context,
         )
-        cached = self._load_cached_answer(cache_key)
+        cached = None if (is_followup and not self.codex_cache_followups) else self._load_cached_answer(cache_key)
         if cached is not None:
             cached_answer = str(cached["answer"])
             cached_structured = self._parse_structured_answer(cached_answer)
@@ -14730,7 +14954,15 @@ class SourceCodeQAService:
                 "evidence_pack": evidence_pack,
                 "codex_cli_summary": cached_summary,
             }
-        payload = self._codex_payload(prompt_context, progress_callback=progress_callback)
+        codex_cli_session_id = ""
+        if self.codex_session_mode == CODEX_SESSION_MODE_RESUME and isinstance(followup_context, dict):
+            session_meta = followup_context.get("codex_cli_session") if isinstance(followup_context.get("codex_cli_session"), dict) else {}
+            codex_cli_session_id = str(session_meta.get("session_id") or "").strip()
+        payload = self._codex_payload(
+            prompt_context,
+            progress_callback=progress_callback,
+            codex_cli_session_id=codex_cli_session_id,
+        )
         result = self.llm_provider.generate(
             payload=payload,
             primary_model=selected_model,
@@ -14744,6 +14976,7 @@ class SourceCodeQAService:
         llm_latency_ms = int(result.latency_ms or 0)
         llm_attempt_log = [dict(item) for item in result.attempt_log]
         finish_reason = self._llm_finish_reason(result.payload)
+        codex_cli_trace = result.payload.get("codex_cli_trace") if isinstance(result.payload.get("codex_cli_trace"), dict) else {}
         claim_check = self._trusted_provider_check()
         codex_validation = self._skipped_codex_validation()
         claim_check = {**claim_check, "codex_citation_validation": codex_validation}
@@ -14767,16 +15000,17 @@ class SourceCodeQAService:
             "codex_repair_attempted": repair_attempted,
             "codex_cited_path_count": codex_validation.get("cited_path_count", 0),
         }
-        self._store_cached_answer(
-            cache_key,
-            answer=final["answer"],
-            usage=usage,
-            answer_quality=quality_gate,
-            provider=self.llm_provider.name,
-            model=effective_model,
-            thinking_budget=0,
-            finish_reason=finish_reason,
-        )
+        if not (is_followup and not self.codex_cache_followups):
+            self._store_cached_answer(
+                cache_key,
+                answer=final["answer"],
+                usage=usage,
+                answer_quality=quality_gate,
+                provider=self.llm_provider.name,
+                model=effective_model,
+                thinking_budget=0,
+                finish_reason=finish_reason,
+            )
         codex_cli_summary = {
             "prompt_mode": llm_route.get("prompt_mode"),
             "candidate_repo_count": llm_route.get("candidate_repo_count"),
@@ -14787,6 +15021,11 @@ class SourceCodeQAService:
             "cli_latency_ms": llm_latency_ms,
             "exit_codes": [item.get("exit_code") for item in llm_attempt_log if item.get("exit_code") is not None],
             "timeout": any(bool(item.get("timeout")) for item in llm_attempt_log),
+            "stream_message_count": len(codex_cli_trace.get("stream_messages") or []),
+            "command_count": len(codex_cli_trace.get("command_summaries") or []),
+            "probable_inspected_file_count": len(codex_cli_trace.get("probable_inspected_files") or []),
+            "session_mode": self.codex_session_mode,
+            "session_id": codex_cli_trace.get("session_id") or "",
         }
         return {
             "llm_answer": final["answer"],
@@ -14803,22 +15042,31 @@ class SourceCodeQAService:
             "llm_attempt_log": llm_attempt_log,
             "llm_finish_reason": finish_reason,
             "answer_quality": quality_gate,
-            "answer_self_check": self._answer_self_check(question, answer, evidence_summary, quality_gate),
+            "answer_self_check": self._skipped_codex_answer_check(),
             "answer_claim_check": claim_check,
             "answer_judge": answer_judge,
             "structured_answer": final["structured_answer"],
             "answer_contract": answer_contract,
             "evidence_pack": evidence_pack,
             "codex_cli_summary": codex_cli_summary,
+            "codex_cli_trace": codex_cli_trace,
         }
 
-    def _codex_payload(self, prompt: str, *, progress_callback: Any | None = None) -> dict[str, Any]:
+    def _codex_payload(
+        self,
+        prompt: str,
+        *,
+        progress_callback: Any | None = None,
+        codex_cli_session_id: str = "",
+    ) -> dict[str, Any]:
         payload = {
             "codex_prompt_mode": CODEX_INVESTIGATION_PROMPT_MODE,
             "contents": [{"parts": [{"text": prompt}]}],
             "systemInstruction": {"parts": [{"text": self._codex_system_instruction()}]},
             "generationConfig": {"temperature": 0.1, "responseMimeType": "application/json"},
         }
+        if codex_cli_session_id:
+            payload["codex_cli_session_id"] = codex_cli_session_id
         if progress_callback:
             payload["_progress_callback"] = progress_callback
         return payload
@@ -14934,6 +15182,7 @@ class SourceCodeQAService:
         merged = list(candidate_paths)
         seen = {(str(item.get("repo") or ""), str(item.get("path") or "")) for item in merged}
         prior_items = [
+            *((followup_context.get("codex_inspected_paths") or []) if isinstance(followup_context.get("codex_inspected_paths"), list) else []),
             *((followup_context.get("codex_candidate_paths") or []) if isinstance(followup_context.get("codex_candidate_paths"), list) else []),
             *(((followup_context.get("llm_route") or {}).get("candidate_paths") or []) if isinstance(followup_context.get("llm_route"), dict) else []),
         ]
@@ -14987,6 +15236,39 @@ class SourceCodeQAService:
         except ValueError:
             return ""
 
+    def _codex_candidate_path_layers(
+        self,
+        candidate_paths: list[dict[str, Any]],
+        followup_context: dict[str, Any] | None,
+    ) -> dict[str, list[dict[str, Any]]]:
+        confirmed_keys: set[tuple[str, str]] = set()
+        for item in (followup_context or {}).get("codex_inspected_paths") or []:
+            if isinstance(item, dict):
+                confirmed_keys.add((str(item.get("repo") or ""), str(item.get("path") or "")))
+        for item in (followup_context or {}).get("codex_candidate_paths") or []:
+            if isinstance(item, dict) and str(item.get("trace_stage") or "") == "followup_memory":
+                confirmed_keys.add((str(item.get("repo") or ""), str(item.get("path") or "")))
+        layers = {
+            "confirmed_previous_paths": [],
+            "current_high_confidence_paths": [],
+            "current_supporting_paths": [],
+            "maybe_relevant_paths": [],
+        }
+        for item in candidate_paths:
+            key = (str(item.get("repo") or ""), str(item.get("path") or ""))
+            stage = str(item.get("trace_stage") or "").lower()
+            retrieval = str(item.get("retrieval") or "").lower()
+            exists = bool(item.get("file_exists"))
+            if key in confirmed_keys or stage == "followup_memory" or retrieval == "previous_codex_context":
+                layers["confirmed_previous_paths"].append(item)
+            elif exists and stage in {"direct", "call_chain", "read_write", "semantic", "token"}:
+                layers["current_high_confidence_paths"].append(item)
+            elif exists:
+                layers["current_supporting_paths"].append(item)
+            else:
+                layers["maybe_relevant_paths"].append(item)
+        return layers
+
     def _codex_investigation_brief(
         self,
         *,
@@ -14999,6 +15281,7 @@ class SourceCodeQAService:
         followup_context: dict[str, Any] | None,
         repair_issues: list[str] | None = None,
     ) -> str:
+        candidate_path_layers = self._codex_candidate_path_layers(candidate_paths, followup_context)
         lines = [
             f"Prompt mode: {CODEX_INVESTIGATION_PROMPT_MODE}",
             f"PM Team: {pm_team}",
@@ -15014,26 +15297,32 @@ class SourceCodeQAService:
             "- Candidate `root` values are absolute synced repo roots. Candidate `relative_root` values are relative to the current repos parent.",
             "- Use either `cd relative_root` from the repos parent or use the absolute `root`; do not use only the final directory basename.",
             "- Candidate `path` values are relative to that repo root; inspect files as root/path.",
+            "- First confirm the cwd/repo root, then read at least one candidate file or run one repository search before answering unless there are no candidate paths.",
+            "- Prioritize confirmed_previous_paths, then current_high_confidence_paths, then current_supporting_paths; use maybe_relevant_paths only to redirect a search.",
             "",
-            "Candidate repository workspaces and top paths:",
+            "Candidate path layers:",
         ]
-        for item in candidate_paths[: self.codex_top_path_limit]:
-            original_path = str(item.get("original_path") or "").strip()
-            path_note = f" original_path={original_path}" if original_path else ""
-            alternatives = item.get("alternative_paths") or []
-            alternative_note = f" alternatives={alternatives[:5]}" if alternatives else ""
-            lines.extend(
-                [
-                    (
-                        f"- {item.get('id')} repo={item.get('repo')} root={item.get('repo_root')} "
-                        f"relative_root={item.get('repo_relative_root')} "
-                        f"path={item.get('path')}{path_note} file_exists={item.get('file_exists')} "
-                        f"path_status={item.get('path_status')}{alternative_note} "
-                        f"lines={item.get('line_start')}-{item.get('line_end')}"
-                    ),
-                    f"  retrieval={item.get('retrieval')} trace_stage={item.get('trace_stage')} reason={item.get('reason')}",
-                ]
-            )
+        for layer_name, layer_items in candidate_path_layers.items():
+            if not layer_items:
+                continue
+            lines.append(f"- {layer_name}:")
+            for item in layer_items[: self.codex_top_path_limit]:
+                original_path = str(item.get("original_path") or "").strip()
+                path_note = f" original_path={original_path}" if original_path else ""
+                alternatives = item.get("alternative_paths") or []
+                alternative_note = f" alternatives={alternatives[:5]}" if alternatives else ""
+                lines.extend(
+                    [
+                        (
+                            f"  - {item.get('id')} repo={item.get('repo')} root={item.get('repo_root')} "
+                            f"relative_root={item.get('repo_relative_root')} "
+                            f"path={item.get('path')}{path_note} file_exists={item.get('file_exists')} "
+                            f"path_status={item.get('path_status')}{alternative_note} "
+                            f"lines={item.get('line_start')}-{item.get('line_end')}"
+                        ),
+                        f"    retrieval={item.get('retrieval')} trace_stage={item.get('trace_stage')} reason={item.get('reason')}",
+                    ]
+                )
         if followup_context:
             lines.extend(["", "Follow-up context:"])
             for label, key_name in (
@@ -15075,6 +15364,17 @@ class SourceCodeQAService:
                     f"- Previous Codex run: prompt_mode={codex_summary.get('prompt_mode')} "
                     f"paths={codex_summary.get('candidate_path_count')} repair={codex_summary.get('repair_attempted')}"
                 )
+            inspected_paths = [
+                item for item in (followup_context.get("codex_inspected_paths") or [])
+                if isinstance(item, dict)
+            ][:10]
+            if inspected_paths:
+                lines.append("- Previous Codex inspected paths:")
+                for item in inspected_paths:
+                    lines.append(
+                        f"  - {item.get('repo')} root={item.get('repo_root')} path={item.get('path')} "
+                        f"source={item.get('source') or 'trace'}"
+                    )
             prior_pack = followup_context.get("evidence_pack") or {}
             if isinstance(prior_pack, dict):
                 summary_bits = []
@@ -15087,7 +15387,7 @@ class SourceCodeQAService:
             recent_turns = [
                 item for item in (followup_context.get("recent_turns") or [])
                 if isinstance(item, dict)
-            ][-3:]
+            ][-self.codex_session_max_turns:]
             if recent_turns:
                 lines.append("- Earlier session turns:")
                 for index, turn in enumerate(recent_turns, start=1):
@@ -15117,12 +15417,15 @@ class SourceCodeQAService:
             lines.extend(["", "Repair required before final answer:"])
             lines.extend(f"- {issue}" for issue in repair_issues[:8])
             lines.append("- Re-open the files as needed and return claims with valid citations.")
-        lines.extend(["", "Evidence pack navigation hints:"])
+        lines.extend(["", "Evidence pack navigation hints only, not an answer-quality gate:"])
         for key_name in ("entry_points", "call_chain", "read_write_points", "tables", "apis", "configs", "missing_hops"):
             values = evidence_pack.get(key_name) or []
             if values:
                 lines.append(f"- {key_name}: {values[:6]}")
-        lines.append(f"- Quality gate: {quality_gate.get('status')} confidence={quality_gate.get('confidence')} missing={quality_gate.get('missing') or []}")
+        lines.append(
+            f"- Local narrowing status: {quality_gate.get('status')} "
+            f"confidence={quality_gate.get('confidence')} missing={quality_gate.get('missing') or []}"
+        )
         lines.extend(
             [
                 "",
@@ -15719,6 +16022,15 @@ class SourceCodeQAService:
             "direct_file_refs": [],
             "issues": [],
             "unsupported_claims": [],
+        }
+
+    @staticmethod
+    def _skipped_codex_answer_check() -> dict[str, Any]:
+        return {
+            "status": "skipped",
+            "reason": "codex_fast_path_passthrough",
+            "issues": [],
+            "missing": [],
         }
 
     def _finalize_trusted_model_answer(
@@ -16667,6 +16979,7 @@ class SourceCodeQAService:
         llm_route = payload.get("llm_route") or {}
         validation = ((payload.get("answer_claim_check") or {}).get("codex_citation_validation") or {})
         attempts = payload.get("llm_attempt_log") or []
+        trace = payload.get("codex_cli_trace") if isinstance(payload.get("codex_cli_trace"), dict) else {}
         exit_codes = [
             item.get("exit_code")
             for item in attempts
@@ -16682,6 +16995,11 @@ class SourceCodeQAService:
             "cli_latency_ms": payload.get("llm_latency_ms"),
             "exit_codes": exit_codes,
             "timeout": any(bool(item.get("timeout")) for item in attempts if isinstance(item, dict)),
+            "session_mode": trace.get("session_mode") or llm_route.get("codex_session_mode"),
+            "command_mode": trace.get("command_mode"),
+            "stream_message_count": len(trace.get("stream_messages") or []),
+            "command_count": len(trace.get("command_summaries") or []),
+            "probable_inspected_file_count": len(trace.get("probable_inspected_files") or []),
         }
 
     def _select_llm_matches(self, matches: list[dict[str, Any]], limit: int, *, question: str = "") -> list[dict[str, Any]]:

@@ -65,6 +65,8 @@
   let activeSession = null;
   let activeSessionId = '';
   let activeQueryProgress = null;
+  let sessionHistoryExpanded = false;
+  let liveAssistantMessage = null;
   const preferenceKey = 'source-code-qa:last-query-config:v1';
 
   const escapeHtml = (value) => String(value ?? '')
@@ -280,19 +282,40 @@
       sessionList.innerHTML = '<div class="source-qa-empty">No chats yet.</div>';
       return;
     }
-    sessionList.innerHTML = sourceSessions.map((item) => {
+    const visibleSessions = sessionHistoryExpanded ? sourceSessions : sourceSessions.slice(0, 5);
+    sessionList.innerHTML = visibleSessions.map((item) => {
       const activeClass = item.id === activeSessionId ? ' is-active' : '';
       const scope = [item.pm_team || '', item.country || 'All', providerLabel(item.llm_provider)].filter(Boolean).join(' · ');
       return `
-        <button class="source-qa-session-item${activeClass}" type="button" data-source-session-id="${escapeHtml(item.id)}">
-          <span>${escapeHtml(item.title || 'New Source Code Chat')}</span>
-          <small>${escapeHtml(scope)} · ${escapeHtml(formatSessionTime(item.updated_at))}</small>
-        </button>
+        <div class="source-qa-session-row${activeClass}">
+          <button class="source-qa-session-item" type="button" data-source-session-id="${escapeHtml(item.id)}">
+            <span>${escapeHtml(item.title || 'New Source Code Chat')}</span>
+            <small>${escapeHtml(scope)} · ${escapeHtml(formatSessionTime(item.updated_at))}</small>
+          </button>
+          <button class="source-qa-session-archive" type="button" data-source-session-archive="${escapeHtml(item.id)}" aria-label="Archive chat">Archive</button>
+        </div>
       `;
-    }).join('');
+    }).join('') + (sourceSessions.length > 5 ? `
+      <button class="source-qa-session-more" type="button" data-source-session-more>
+        ${sessionHistoryExpanded ? 'Show less' : `Show more (${sourceSessions.length - 5})`}
+      </button>
+    ` : '');
     sessionList.querySelectorAll('[data-source-session-id]').forEach((button) => {
       button.addEventListener('click', () => loadSession(button.dataset.sourceSessionId || ''));
     });
+    sessionList.querySelectorAll('[data-source-session-archive]').forEach((button) => {
+      button.addEventListener('click', (event) => {
+        event.stopPropagation();
+        archiveSession(button.dataset.sourceSessionArchive || '');
+      });
+    });
+    const moreButton = sessionList.querySelector('[data-source-session-more]');
+    if (moreButton) {
+      moreButton.addEventListener('click', () => {
+        sessionHistoryExpanded = !sessionHistoryExpanded;
+        renderSessionList();
+      });
+    }
   };
 
   const citationPattern = /\[((?:S\d+|[\w./-]+\.(?:java|xml|kt|groovy|md|sql|yml|yaml|properties|json|ts|tsx|js):\d+(?:-\d+)?)(?:\]\s*\[)?(?:[^\]]*)?)\]/g;
@@ -327,7 +350,19 @@
 
   const renderSessionMessages = (session) => {
     if (!sessionMessages) return;
-    const messages = session?.messages || [];
+    const messages = [...(session?.messages || [])];
+    if (liveAssistantMessage?.text) {
+      messages.push({
+        role: 'assistant',
+        text: liveAssistantMessage.text,
+        created_at: liveAssistantMessage.created_at || '',
+        live: true,
+        payload: {
+          llm_provider: selectedLlmProvider(),
+          llm_model: liveAssistantMessage.meta || 'streaming CLI output',
+        },
+      });
+    }
     if (!messages.length) {
       sessionMessages.innerHTML = '<div class="source-qa-empty">Start a chat to build a reusable investigation context.</div>';
       return;
@@ -345,12 +380,12 @@
         .map((item) => typeof item === 'string' ? item : item.path)
         .filter(Boolean);
       return `
-        <article class="source-qa-message source-qa-message-${escapeHtml(message.role || 'assistant')}">
+        <article class="source-qa-message source-qa-message-${escapeHtml(message.role || 'assistant')}${message.live ? ' is-live' : ''}">
           <div class="source-qa-message-head">
-            <strong>${message.role === 'user' ? 'You' : 'Assistant'}</strong>
+            <strong>${message.live ? 'Codex Live' : (message.role === 'user' ? 'You' : 'Assistant')}</strong>
             <span>${escapeHtml(meta)}</span>
           </div>
-          <div class="source-qa-message-body">${message.role === 'assistant' ? renderAnswerText(text) : `<p>${escapeHtml(text)}</p>`}</div>
+          <div class="source-qa-message-body">${message.live ? `<pre>${escapeHtml(text)}</pre>` : (message.role === 'assistant' ? renderReadableAnswerBody(payload, text) : `<p>${escapeHtml(text)}</p>`)}</div>
           ${citations.length ? `<div class="source-qa-message-citations">${citations.map((item) => `<span>${escapeHtml(item)}</span>`).join('')}</div>` : ''}
         </article>
       `;
@@ -420,11 +455,35 @@
     if (!sessionsUrl || !sessionId) return null;
     try {
       const payload = await fetch(`${sessionsUrl}/${encodeURIComponent(sessionId)}`).then(readJson);
+      liveAssistantMessage = null;
       applyActiveSession(payload.session || null);
       return payload.session || null;
     } catch (error) {
       if (queryStatus) queryStatus.textContent = error.message || 'Session could not be loaded.';
       return null;
+    }
+  };
+
+  const archiveSession = async (sessionId) => {
+    if (!sessionsUrl || !sessionId) return;
+    try {
+      await apiFetchJson(`${sessionsUrl}/${encodeURIComponent(sessionId)}/archive`, { method: 'POST' });
+      sourceSessions = sourceSessions.filter((item) => item.id !== sessionId);
+      if (activeSessionId === sessionId) {
+        liveAssistantMessage = null;
+        activeSessionId = '';
+        activeSession = null;
+        conversationContext = null;
+        if (sourceSessions.length) {
+          await loadSession(sourceSessions[0].id);
+        } else {
+          applyActiveSession(null);
+        }
+      } else {
+        renderSessionList();
+      }
+    } catch (error) {
+      if (queryStatus) queryStatus.textContent = error.message || 'Chat could not be archived.';
     }
   };
 
@@ -443,6 +502,7 @@
     if (session) {
       sourceSessions = [session, ...sourceSessions.filter((item) => item.id !== session.id)].slice(0, 30);
       conversationContext = null;
+      liveAssistantMessage = null;
       applyActiveSession(session);
     }
     return session;
@@ -1050,12 +1110,12 @@
     if (directAnswer || claims.length || missing.length) {
       return `
         <section class="source-qa-answer-section source-qa-answer-direct">
-          <strong>Direct Answer</strong>
+          <strong>Answer</strong>
           ${directAnswer ? `<p>${escapeHtml(directAnswer)}</p>` : '<p>No direct answer returned.</p>'}
         </section>
         ${claims.length ? `
           <section class="source-qa-answer-section">
-            <strong>Evidence-backed Claims</strong>
+            <strong>Evidence</strong>
             <div class="source-qa-claim-list">
               ${claims.map((claim) => `
                 <div class="source-qa-claim-item">
@@ -1143,23 +1203,27 @@
   };
 
   const renderLiveAnswer = (message, options = {}) => {
-    if (!liveAnswer) return;
     const text = String(message || '').trim();
     if (!text) {
-      liveAnswer.hidden = true;
-      liveAnswer.innerHTML = '';
+      liveAssistantMessage = null;
+      if (liveAnswer) {
+        liveAnswer.hidden = true;
+        liveAnswer.innerHTML = '';
+      }
+      renderSessionMessages(activeSession);
       return;
     }
-    liveAnswer.hidden = false;
-    liveAnswer.innerHTML = `
-      <div class="source-qa-live-card${options.pending ? ' is-pending' : ''}">
-        <div class="source-qa-live-head">
-          <strong>${escapeHtml(options.title || 'Codex Live')}</strong>
-          <span>${escapeHtml(options.meta || 'read-only investigation')}</span>
-        </div>
-        <pre>${escapeHtml(text)}</pre>
-      </div>
-    `;
+    liveAssistantMessage = {
+      text,
+      title: options.title || 'Codex Live',
+      meta: options.meta || 'read-only investigation',
+      created_at: new Date().toISOString(),
+    };
+    if (liveAnswer) {
+      liveAnswer.hidden = true;
+      liveAnswer.innerHTML = '';
+    }
+    renderSessionMessages(activeSession);
   };
 
   const renderFallbackNotice = (payload) => {
@@ -1282,7 +1346,11 @@
       renderFallbackNotice(payload);
       renderStatus(payload.repo_status || []);
       renderLiveAnswer('');
-      renderLlmAnswer(payload);
+      if (selectedProvider === 'codex_cli_bridge') {
+        renderLlmAnswer({});
+      } else {
+        renderLlmAnswer(payload);
+      }
       renderEvidenceSummary(null);
       renderDebugTrace(null);
       if (results) {

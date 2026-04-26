@@ -174,6 +174,67 @@
       line-height: 1.5;
     }
 
+    .seatalk-insights-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.15fr) minmax(0, 0.85fr);
+      gap: 1rem;
+      align-items: start;
+    }
+
+    .seatalk-insight-list {
+      display: grid;
+      gap: 0.85rem;
+      margin-top: 1rem;
+    }
+
+    .seatalk-insight-item {
+      padding: 1rem;
+      border-radius: 16px;
+      border: 1px solid rgba(110, 139, 194, 0.16);
+      background: rgba(248, 251, 255, 0.78);
+    }
+
+    .seatalk-insight-item h4 {
+      margin: 0 0 0.4rem;
+      color: #142744;
+      font-size: 0.98rem;
+    }
+
+    .seatalk-insight-item p {
+      margin: 0;
+      line-height: 1.5;
+    }
+
+    .seatalk-insight-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.45rem;
+      margin-bottom: 0.55rem;
+    }
+
+    .seatalk-insight-meta span {
+      display: inline-flex;
+      align-items: center;
+      padding: 0.28rem 0.55rem;
+      border-radius: 999px;
+      background: rgba(24, 58, 118, 0.08);
+      color: #355180;
+      font-size: 0.74rem;
+      font-weight: 700;
+    }
+
+    .seatalk-insight-evidence {
+      margin-top: 0.7rem;
+      color: #6b7897;
+      font-size: 0.86rem;
+    }
+
+    .seatalk-todo-columns {
+      display: grid;
+      gap: 1rem;
+      margin-top: 1rem;
+    }
+
     .mail-demo-source-strip {
       display: flex;
       flex-wrap: wrap;
@@ -195,7 +256,8 @@
     @media (max-width: 900px) {
       .mail-demo-scorecards,
       .mail-demo-chart-grid,
-      .mail-demo-note-grid {
+      .mail-demo-note-grid,
+      .seatalk-insights-grid {
         grid-template-columns: 1fr;
       }
     }
@@ -266,6 +328,7 @@
     data-seatalk-demo-root
     data-seatalk-url="{{ url_for('gmail_seatalk_demo_seatalk_api') }}"
     data-seatalk-export-url="{{ url_for('gmail_seatalk_demo_seatalk_export') }}"
+    data-seatalk-insights-url="{{ seatalk_insights_url }}"
     data-seatalk-configured="{{ 'true' if seatalk_configured else 'false' }}"
   >
       <section class="panel panel-wide glass-panel mail-demo-card">
@@ -314,6 +377,32 @@
               <p data-seatalk-scope>The portal will summarize the local SeaTalk desktop account visible on this Mac.</p>
               <div class="mail-demo-source-strip" data-seatalk-meta>
                 <span class="mail-demo-source-tag">7-day window</span>
+              </div>
+            </article>
+          </section>
+          <section class="seatalk-insights-grid" data-seatalk-insights-content>
+            <article class="mail-demo-card">
+              <div class="mail-demo-pill">Codex insights</div>
+              <h3>Project Updates</h3>
+              <p>Major updates from the last 7 days across your SeaTalk conversations.</p>
+              <div class="empty-state mail-demo-status" data-seatalk-insights-status data-tone="neutral">
+                <p>Loading Codex insights…</p>
+              </div>
+              <div class="seatalk-insight-list" data-seatalk-project-updates hidden></div>
+            </article>
+            <article class="mail-demo-card">
+              <div class="mail-demo-pill">Action items</div>
+              <h3>To-do Items</h3>
+              <p>My to-dos and team follow-ups inferred from recent SeaTalk messages.</p>
+              <div class="seatalk-todo-columns" data-seatalk-todos hidden>
+                <section>
+                  <strong>My To-dos</strong>
+                  <div class="seatalk-insight-list" data-seatalk-my-todos></div>
+                </section>
+                <section>
+                  <strong>Team / Follow-up To-dos</strong>
+                  <div class="seatalk-insight-list" data-seatalk-team-todos></div>
+                </section>
               </div>
             </article>
           </section>
