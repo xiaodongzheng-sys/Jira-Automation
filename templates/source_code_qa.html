@@ -51,11 +51,8 @@
         <label class="field-group">
           <span>Answer Type</span>
           <select data-source-answer-mode>
-            {% for mode in options.answer_modes %}
-              <option value="{{ mode.value }}">{{ mode.label }}</option>
-            {% endfor %}
+            <option value="auto">Smart Answer</option>
           </select>
-          <small class="field-help">Smart Answer searches first, calls LLM only when useful, and skips LLM for deterministic no-hit lookups.</small>
         </label>
         <label class="field-group">
           <span>Model</span>
