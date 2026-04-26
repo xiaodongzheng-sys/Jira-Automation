@@ -308,7 +308,7 @@
         ? [payload.llm_provider ? providerLabel(payload.llm_provider) : '', payload.llm_model || '', payload.trace_id ? `trace ${payload.trace_id}` : ''].filter(Boolean).join(' · ')
         : formatSessionTime(message.created_at);
       const text = message.role === 'assistant'
-        ? (payload.structured_answer?.direct_answer || message.text || payload.summary || 'Answer completed.')
+        ? (message.text || payload.llm_answer || payload.structured_answer?.direct_answer || payload.summary || 'Answer completed.')
         : message.text;
       const citations = (payload.structured_answer?.citations || payload.matches || [])
         .slice(0, 4)
