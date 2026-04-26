@@ -432,6 +432,9 @@ class SeaTalkDashboardServiceTests(unittest.TestCase):
         self.assertIn("Key Project table", prompt)
         self.assertIn("slide", prompt.lower())
         self.assertIn("leadership", system_prompt)
+        self.assertIn("broad awareness radar", system_prompt)
+        self.assertIn("anything worth Xiaodong's awareness", prompt)
+        self.assertIn("It is OK for a General update to have no Xiaodong-owned todo", prompt)
 
     def test_insights_normalizes_update_and_todo_domains(self):
         parsed = SeaTalkDashboardService._parse_insights_response(
