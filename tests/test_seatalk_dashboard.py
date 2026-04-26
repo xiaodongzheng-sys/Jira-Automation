@@ -180,6 +180,8 @@ class SeaTalkDashboardServiceTests(unittest.TestCase):
 
         self.assertIn("personMappingAliases(key)", source)
         self.assertIn("mappings.set(alias, name)", source)
+        self.assertIn("slice(0, 520)", source)
+        self.assertIn("exampleScore(candidateExample)", source)
 
     def test_build_name_mappings_parses_unknown_ids(self):
         calls: list[list[str]] = []

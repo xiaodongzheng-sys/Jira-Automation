@@ -308,6 +308,22 @@ function conversationIdentity(row, sidNames, overrides) {
   return resolveName(row.sid, sidNames.get(row.sid), overrides);
 }
 
+function buildMappingExample(row, text) {
+  const snippet = String(text || '').replace(/\s+/g, ' ').trim().slice(0, 520);
+  return snippet ? `${formatTimestamp(row.ts)}: ${snippet}` : formatTimestamp(row.ts);
+}
+
+function exampleScore(example) {
+  const text = String(example || '');
+  const lowered = text.toLowerCase();
+  let score = Math.min(text.length, 520);
+  if (/@|xiaodong|zheng xiaodong|deadline|please|pls|follow|check|confirm|review|uat|prod|risk|credit|collection|grc|ops|fraud/.test(lowered)) {
+    score += 220;
+  }
+  if (text.includes('：') || text.includes(':')) score += 20;
+  return score;
+}
+
 function mentionsSelf(text, selfUid) {
   const value = String(text || '').toLowerCase();
   const compact = value.replace(/\s+/g, ' ');
@@ -391,9 +407,9 @@ function collectUnknownIds(rows, selfUid, db, overrides) {
       current.priority_rank = rank;
       current.priority_reason = priorityLabel[reason] || priorityLabel.frequent;
     }
-    if (!current.example) {
-      const snippet = String(text || '').replace(/\s+/g, ' ').trim().slice(0, 180);
-      current.example = snippet ? `${formatTimestamp(row.ts)}: ${snippet}` : formatTimestamp(row.ts);
+    const candidateExample = buildMappingExample(row, text);
+    if (!current.example || exampleScore(candidateExample) > exampleScore(current.example)) {
+      current.example = candidateExample;
     }
     unknowns.set(id, current);
   };
