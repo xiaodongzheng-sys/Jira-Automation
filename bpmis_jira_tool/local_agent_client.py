@@ -63,7 +63,10 @@ class LocalAgentClient:
     def _request(self, method: str, path: str, payload: dict[str, Any] | None = None, *, signed: bool = True) -> dict[str, Any]:
         url = urljoin(self.base_url, path.lstrip("/"))
         body = b""
-        headers = {"Accept": "application/json"}
+        headers = {
+            "Accept": "application/json",
+            "ngrok-skip-browser-warning": "true",
+        }
         if method.upper() != "GET":
             body = json.dumps(payload or {}, ensure_ascii=False, sort_keys=True).encode("utf-8")
             headers["Content-Type"] = "application/json"

@@ -1106,6 +1106,8 @@ def create_app() -> Flask:
     @app.before_request
     def enforce_team_access():
         g.request_id = uuid.uuid4().hex[:12]
+        if request.path.rstrip("/") == "/healthz":
+            return jsonify({"status": "ok", "revision": _current_release_revision()}), HTTPStatus.OK
         if request.endpoint in {
             None,
             "static",
