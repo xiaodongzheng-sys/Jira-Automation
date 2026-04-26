@@ -63,6 +63,10 @@ class BPMISClient(ABC):
     def get_issue_detail(self, issue_id: str | int) -> dict[str, Any]:
         raise NotImplementedError
 
+    @abstractmethod
+    def get_jira_ticket_detail(self, ticket_key: str) -> dict[str, Any]:
+        raise NotImplementedError
+
 
 class BPMISDirectApiClient(BPMISClient):
     BIZ_PROJECT_TYPE_ID = 1
@@ -395,6 +399,41 @@ class BPMISDirectApiClient(BPMISClient):
                 return detail
         return {}
 
+    def get_jira_ticket_detail(self, ticket_key: str) -> dict[str, Any]:
+        normalized_ticket_key = self._extract_issue_key(str(ticket_key or "")) or str(ticket_key or "").strip()
+        if not normalized_ticket_key:
+            return {}
+
+        detail_attempts = [
+            ("GET", "/api/v1/issues/detail", {"jiraKey": normalized_ticket_key}, None),
+            ("GET", "/api/v1/issues/detail", {"jiraIssueKey": normalized_ticket_key}, None),
+            ("GET", "/api/v1/issues/detail", {"key": normalized_ticket_key}, None),
+            ("GET", "/api/v1/issue/detail", {"jiraKey": normalized_ticket_key}, None),
+            ("GET", "/api/v1/issue/detail", {"jiraIssueKey": normalized_ticket_key}, None),
+            ("GET", "/api/v1/issue/detail", {"key": normalized_ticket_key}, None),
+        ]
+        for method, path, params, body in detail_attempts:
+            payload = self._safe_api_request(path, method=method, params=params, body=body)
+            detail = self._extract_issue_detail_payload(payload)
+            if detail and self._row_matches_jira_key(detail, normalized_ticket_key):
+                return detail
+
+        for search_payload in self._jira_ticket_search_payloads(normalized_ticket_key):
+            payload = self._safe_api_request(
+                "/api/v1/issues/list",
+                params={"search": json.dumps(search_payload)},
+            )
+            rows = ((payload or {}).get("data") or {}).get("rows") or []
+            match = next((row for row in rows if self._row_matches_jira_key(row, normalized_ticket_key)), None)
+            if match:
+                issue_id = self._extract_issue_identifier(match)
+                if issue_id:
+                    detail = self.get_issue_detail(issue_id)
+                    if detail:
+                        return self._merge_issue_payloads(match, detail)
+                return match
+        return {}
+
     def _build_create_payload(
         self,
         project: ProjectMatch,
@@ -536,6 +575,26 @@ class BPMISDirectApiClient(BPMISClient):
                 if text:
                     return text
         return self._extract_issue_key(str(self._find_first_value(row, "jiraLink") or ""))
+
+    def _row_matches_jira_key(self, row: dict[str, Any], ticket_key: str) -> bool:
+        return self._extract_issue_key_from_row(row).lower() == str(ticket_key or "").strip().lower()
+
+    def _jira_ticket_search_payloads(self, ticket_key: str) -> list[dict[str, Any]]:
+        base = {"page": 1, "pageSize": 10, "mapping": True}
+        return [
+            {**base, "jiraKey": ticket_key},
+            {**base, "issueKey": ticket_key},
+            {**base, "key": ticket_key},
+            {**base, "keyword": ticket_key},
+            {
+                **base,
+                "joinType": "and",
+                "subQueries": [
+                    {"typeId": [self.TASK_TYPE_ID]},
+                    {"jiraKey": [ticket_key]},
+                ],
+            },
+        ]
 
     def _extract_issue_description(self, row: dict[str, Any]) -> str:
         for key in ("desc", "description", "jiraDescription"):

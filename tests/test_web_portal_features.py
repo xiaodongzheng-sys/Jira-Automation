@@ -42,6 +42,14 @@ class _PortalFakeBPMISClient:
         self.last_create = (project, fields, preformatted_summary)
         return CreatedTicket(ticket_key="AF-1", ticket_link="https://jira/browse/AF-1", raw={"ok": True})
 
+    def get_jira_ticket_detail(self, ticket_key):
+        return {
+            "jiraKey": ticket_key,
+            "summary": "Live Fraud Task",
+            "status": {"label": "In Progress"},
+            "fixVersionId": [{"fullName": "Planning_26Q2"}],
+        }
+
 
 class WebPortalFeatureTests(unittest.TestCase):
     def test_classify_portal_error_categorizes_duplicate_route_rule(self):
@@ -1416,6 +1424,17 @@ class WebPortalFeatureTests(unittest.TestCase):
                 app.config["BPMIS_PROJECT_STORE"].list_projects(user_key="anon:create-user")[0]["jira_tickets"][0]["ticket_link"],
                 "https://jira/browse/AF-1",
             )
+
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["anonymous_user_key"] = "create-user"
+                tickets_response = client.get("/api/bpmis-projects/225159/jira-tickets")
+
+            self.assertEqual(tickets_response.status_code, 200)
+            tickets_payload = tickets_response.get_json()
+            self.assertEqual(tickets_payload["tickets"][0]["live_jira_title"], "Live Fraud Task")
+            self.assertEqual(tickets_payload["tickets"][0]["live_jira_status"], "In Progress")
+            self.assertEqual(tickets_payload["tickets"][0]["live_fix_version"], "Planning_26Q2")
 
     def test_team_defaults_allow_saving_setup_without_manual_advanced_mapping(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(

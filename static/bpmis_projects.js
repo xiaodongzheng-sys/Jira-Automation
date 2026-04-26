@@ -33,6 +33,10 @@
     .replaceAll('"', '&quot;')
     .replaceAll("'", '&#39;');
 
+  const cssEscape = (value) => window.CSS?.escape
+    ? window.CSS.escape(String(value ?? ''))
+    : String(value ?? '').replace(/["\\]/g, '\\$&');
+
   const readJson = async (response, fallbackMessage) => {
     const payload = await response.json().catch(() => ({}));
     if (!response.ok || payload.status === 'error') {
@@ -56,16 +60,49 @@
     wizardStatus.dataset.tone = tone;
   };
 
-  const ticketMarkup = (tickets) => {
-    if (!Array.isArray(tickets) || !tickets.length) return '-';
+  const ticketCount = (project) => Array.isArray(project.jira_tickets) ? project.jira_tickets.length : 0;
+
+  const ticketLabel = (countValue) => {
+    if (!countValue) return 'Tasks';
+    return `Tasks (${countValue})`;
+  };
+
+  const taskStatusClass = (value) => {
+    const normalized = String(value || '').trim().toLowerCase();
+    if (!normalized) return '';
+    if (normalized.includes('done') || normalized.includes('closed') || normalized.includes('resolved')) return ' is-done';
+    if (normalized.includes('progress') || normalized.includes('doing')) return ' is-progress';
+    return '';
+  };
+
+  const taskMarkup = (tickets) => {
+    if (!Array.isArray(tickets) || !tickets.length) {
+      return '<div class="bpmis-task-empty">No Jira tasks created for this project yet.</div>';
+    }
     return tickets.map((ticket) => {
-      const label = escapeHtml(ticket.ticket_key || ticket.ticket_link || 'Jira');
+      const key = escapeHtml(ticket.ticket_key || ticket.ticket_link || 'Jira');
+      const title = escapeHtml(ticket.live_jira_title || ticket.jira_title || '-');
+      const statusText = escapeHtml(ticket.live_jira_status || ticket.status || '-');
+      const version = escapeHtml(ticket.live_fix_version || ticket.fix_version_name || '-');
+      const link = ticket.ticket_link
+        ? `<a href="${escapeHtml(ticket.ticket_link)}" target="_blank" rel="noreferrer">${key}</a>`
+        : `<span>${key}</span>`;
       const meta = [ticket.component, ticket.market].filter(Boolean).join(' / ');
-      const suffix = meta ? `<span>${escapeHtml(meta)}</span>` : '';
-      if (ticket.ticket_link) {
-        return `<div class="bpmis-jira-link"><a href="${escapeHtml(ticket.ticket_link)}" target="_blank" rel="noreferrer">${label}</a>${suffix}</div>`;
-      }
-      return `<div class="bpmis-jira-link">${label}${suffix}</div>`;
+      const metaMarkup = meta ? `<span>${escapeHtml(meta)}</span>` : '';
+      const liveError = ticket.live_error ? `<p class="bpmis-task-warning">${escapeHtml(ticket.live_error)}</p>` : '';
+      return `
+        <article class="bpmis-task-card">
+          <div class="bpmis-task-main">
+            <div class="bpmis-task-id">${link}${metaMarkup}</div>
+            <div class="bpmis-task-title">${title}</div>
+          </div>
+          <div class="bpmis-task-meta">
+            <span class="bpmis-task-status${taskStatusClass(statusText)}">${statusText}</span>
+            <span>Version: ${version}</span>
+          </div>
+          ${liveError}
+        </article>
+      `;
     }).join('');
   };
 
@@ -85,21 +122,63 @@
     }
     tableWrap.hidden = false;
     empty.hidden = true;
-    body.innerHTML = projects.map((project) => `
-      <tr>
+    body.innerHTML = projects.map((project) => {
+      const countValue = ticketCount(project);
+      const taskButton = `<button class="button button-secondary" type="button" data-toggle-tasks="${escapeHtml(project.bpmis_id)}" aria-expanded="false">${escapeHtml(ticketLabel(countValue))}</button>`;
+      return `
+      <tr class="bpmis-project-row" data-project-row="${escapeHtml(project.bpmis_id)}">
         <td>${escapeHtml(project.bpmis_id || '-')}</td>
         <td>${escapeHtml(project.project_name || '-')}</td>
         <td>${brdMarkup(project.brd_link)}</td>
         <td>${escapeHtml(project.market || '-')}</td>
-        <td>${ticketMarkup(project.jira_tickets)}</td>
         <td>
           <div class="button-row bpmis-project-actions">
+            ${taskButton}
             <button class="button button-secondary" type="button" data-create-jira="${escapeHtml(project.bpmis_id)}">Create Jira</button>
             <button class="button button-secondary danger-button" type="button" data-delete-project="${escapeHtml(project.bpmis_id)}">Delete</button>
           </div>
         </td>
       </tr>
-    `).join('');
+      <tr class="bpmis-task-row" data-task-row="${escapeHtml(project.bpmis_id)}" hidden>
+        <td colspan="5">
+          <div class="bpmis-task-panel" data-task-panel="${escapeHtml(project.bpmis_id)}">
+            <div class="bpmis-task-loading">Loading Jira tasks...</div>
+          </div>
+        </td>
+      </tr>
+    `;
+    }).join('');
+  };
+
+  const loadTasks = async (bpmisId, { force = false } = {}) => {
+    const panel = body.querySelector(`[data-task-panel="${cssEscape(bpmisId)}"]`);
+    if (!panel) return;
+    if (panel.dataset.loaded === 'true' && !force) return;
+    panel.innerHTML = '<div class="bpmis-task-loading">Loading Jira tasks...</div>';
+    try {
+      const response = await fetch(`${projectsUrl}/${encodeURIComponent(bpmisId)}/jira-tickets`, {
+        headers: { Accept: 'application/json' },
+        credentials: 'same-origin',
+      });
+      const payload = await readJson(response, 'Could not load Jira tasks.');
+      panel.innerHTML = taskMarkup(Array.isArray(payload.tickets) ? payload.tickets : []);
+      panel.dataset.loaded = 'true';
+    } catch (error) {
+      panel.innerHTML = `<div class="bpmis-task-empty">${escapeHtml(error.message || 'Could not load Jira tasks.')}</div>`;
+      panel.dataset.loaded = 'false';
+    }
+  };
+
+  const toggleTasks = async (button) => {
+    const bpmisId = button.dataset.toggleTasks || '';
+    const row = body.querySelector(`[data-task-row="${cssEscape(bpmisId)}"]`);
+    if (!row) return;
+    const willOpen = row.hidden;
+    row.hidden = !willOpen;
+    button.setAttribute('aria-expanded', willOpen ? 'true' : 'false');
+    if (willOpen) {
+      await loadTasks(bpmisId);
+    }
   };
 
   const loadProjects = async () => {
@@ -327,6 +406,11 @@
     const createButton = event.target.closest('[data-create-jira]');
     if (createButton) {
       await openCreateJira(createButton.dataset.createJira || '');
+      return;
+    }
+    const taskButton = event.target.closest('[data-toggle-tasks]');
+    if (taskButton) {
+      await toggleTasks(taskButton);
       return;
     }
     const deleteButton = event.target.closest('[data-delete-project]');

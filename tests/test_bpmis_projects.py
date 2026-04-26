@@ -33,6 +33,14 @@ class FakeBPMISClient:
             raise BPMISError("component failed")
         return CreatedTicket(ticket_key="AF-1", ticket_link="https://jira/browse/AF-1", raw={"ok": True})
 
+    def get_jira_ticket_detail(self, ticket_key):
+        return {
+            "jiraKey": ticket_key,
+            "summary": "Live Jira title",
+            "status": {"label": "In Progress"},
+            "fixVersionId": [{"fullName": "Live_26Q2"}],
+        }
+
 
 class BPMISProjectStoreTests(unittest.TestCase):
     def test_store_upsert_soft_delete_and_duplicate_tickets(self):
@@ -171,6 +179,11 @@ class BPMISProjectStoreTests(unittest.TestCase):
             self.assertTrue(all(call[2] for call in bpmis_client.create_calls))
             self.assertEqual("[Feature][AF]Fraud Rule Upgrade", bpmis_client.create_calls[0][1]["Summary"])
             self.assertEqual(len(store.list_projects(user_key="google:pm@npt.sg")[0]["jira_tickets"]), 2)
+
+            tickets = service.list_tickets(user_key="google:pm@npt.sg", bpmis_id="225159")
+            self.assertEqual(tickets[0]["live_jira_title"], "Live Jira title")
+            self.assertEqual(tickets[0]["live_jira_status"], "In Progress")
+            self.assertEqual(tickets[0]["live_fix_version"], "Live_26Q2")
 
 
 if __name__ == "__main__":

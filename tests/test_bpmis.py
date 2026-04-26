@@ -680,6 +680,50 @@ class BPMISClientTests(unittest.TestCase):
             self.assertEqual(rows[0]["jiraPrdLink"], "https://confluence/prd-1")
             self.assertEqual(rows[0]["jiraRegionalPmPicId"][0]["displayName"], "Alice PM")
 
+    def test_get_jira_ticket_detail_uses_jira_key_detail_lookup(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings = Settings(
+                flask_secret_key="secret",
+                google_oauth_client_secret_file=Path(temp_dir) / "client.json",
+                google_oauth_redirect_uri=None,
+                team_portal_host="127.0.0.1",
+                team_portal_port=5000,
+                team_portal_base_url=None,
+                team_allowed_emails=(),
+                team_allowed_email_domains=(),
+                team_portal_data_dir=Path(temp_dir),
+                spreadsheet_id="sheet",
+                common_tab_name="Common",
+                input_tab_name="Input",
+                bpmis_base_url="https://example.com",
+                bpmis_api_access_token="token",
+            )
+
+            client = BPMISDirectApiClient(settings)
+            calls: list[tuple[str, dict | None]] = []
+
+            def fake_api_request(path, method="GET", params=None, body=None):
+                calls.append((path, params))
+                return {
+                    "data": {
+                        "row": {
+                            "jiraKey": "AF-101",
+                            "summary": "Live AF task",
+                            "status": {"label": "In Progress"},
+                            "fixVersionId": [{"fullName": "Planning_26Q2"}],
+                        }
+                    }
+                }
+
+            client._api_request = fake_api_request  # type: ignore[method-assign]
+
+            detail = client.get_jira_ticket_detail("https://jira.shopee.io/browse/AF-101")
+
+            self.assertEqual(calls[0][0], "/api/v1/issues/detail")
+            self.assertEqual(calls[0][1]["jiraKey"], "AF-101")
+            self.assertEqual(detail["summary"], "Live AF task")
+            self.assertEqual(detail["fixVersionId"][0]["fullName"], "Planning_26Q2")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -458,6 +458,87 @@ class PortalJiraCreationService:
                 results.append({"status": "error", "component": component, "market": market, "message": str(error)})
         return results
 
+    def list_tickets(self, *, user_key: str, bpmis_id: str) -> list[dict[str, Any]]:
+        project = self.store.get_project(user_key=user_key, bpmis_id=bpmis_id)
+        if project is None:
+            raise ToolError("BPMIS project was not found.")
+
+        tickets = project.get("jira_tickets") if isinstance(project, dict) else []
+        if not isinstance(tickets, list):
+            return []
+        return [self._ticket_with_live_jira_fields(ticket) for ticket in tickets]
+
+    def _ticket_with_live_jira_fields(self, ticket: dict[str, Any]) -> dict[str, Any]:
+        item = dict(ticket)
+        ticket_key = str(item.get("ticket_key") or item.get("ticket_link") or "").strip()
+        live_detail: dict[str, Any] = {}
+        if ticket_key and hasattr(self.bpmis_client, "get_jira_ticket_detail"):
+            try:
+                live_detail = self.bpmis_client.get_jira_ticket_detail(ticket_key) or {}
+            except BPMISError as error:
+                item["live_error"] = str(error)
+
+        item["live_jira_title"] = self._extract_first_text(live_detail, "summary", "title", "jiraSummary") or str(
+            item.get("jira_title") or ""
+        ).strip()
+        item["live_jira_status"] = self._extract_first_text(
+            live_detail, "status", "statusId", "jiraStatus", "jiraStatusId"
+        ) or str(item.get("status") or "").strip()
+        item["live_fix_version"] = self._extract_first_text(
+            live_detail, "fixVersionId", "fixVersion", "fixVersions", "version", "versions"
+        ) or str(item.get("fix_version_name") or "").strip()
+        return item
+
+    @classmethod
+    def _extract_first_text(cls, row: dict[str, Any], *keys: str) -> str:
+        for key in keys:
+            text = cls._stringify_value(cls._extract_first_value(row, key))
+            if text:
+                return text
+        return ""
+
+    @staticmethod
+    def _extract_first_value(row: dict[str, Any], key: str) -> Any:
+        if not isinstance(row, dict):
+            return None
+        containers = [row]
+        for nested_key in ("fields", "mapping", "data", "detail", "row"):
+            nested = row.get(nested_key)
+            if isinstance(nested, dict):
+                containers.append(nested)
+        lowered_key = key.lower()
+        for container in containers:
+            for candidate_key, value in container.items():
+                if str(candidate_key).lower() == lowered_key:
+                    return value
+        return None
+
+    @classmethod
+    def _stringify_status(cls, value: Any) -> str:
+        return cls._stringify_value(value)
+
+    @classmethod
+    def _stringify_version(cls, value: Any) -> str:
+        return cls._stringify_value(value)
+
+    @classmethod
+    def _stringify_value(cls, value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value.strip()
+        if isinstance(value, dict):
+            for key in ("fullName", "name", "label", "displayName", "value"):
+                text = cls._stringify_value(value.get(key))
+                if text:
+                    return text
+            return ""
+        if isinstance(value, list):
+            rendered = [cls._stringify_value(item) for item in value]
+            rendered = [item for item in rendered if item]
+            return ", ".join(rendered)
+        return str(value).strip()
+
     def _need_uat_for_market(self, market: str) -> str:
         need_uat = self.config_data.get("need_uat_by_market", {})
         if not isinstance(need_uat, dict):

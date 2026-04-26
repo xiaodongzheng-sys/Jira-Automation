@@ -38,7 +38,7 @@
 
 .bpmis-project-actions {
   gap: 8px;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
 }
 
 .danger-button {
@@ -46,20 +46,94 @@
   color: #b42318;
 }
 
-.bpmis-jira-link {
+.bpmis-project-row + .bpmis-task-row td {
+  padding-top: 0;
+}
+
+.bpmis-task-panel {
+  display: grid;
+  gap: 10px;
+  margin: 0 0 8px 28px;
+  padding: 12px;
+  border: 1px solid rgba(106, 119, 149, 0.16);
+  border-radius: 10px;
+  background: rgba(248, 251, 255, 0.92);
+}
+
+.bpmis-task-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: start;
+  padding: 12px;
+  border: 1px solid rgba(106, 119, 149, 0.14);
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.bpmis-task-main {
+  min-width: 0;
+}
+
+.bpmis-task-id {
   display: flex;
-  flex-direction: column;
-  gap: 2px;
-  margin-bottom: 8px;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  font-size: 0.82rem;
+  font-weight: 700;
 }
 
-.bpmis-jira-link:last-child {
-  margin-bottom: 0;
-}
-
-.bpmis-jira-link span {
+.bpmis-task-id span,
+.bpmis-task-meta span {
   color: var(--muted);
-  font-size: 0.78rem;
+}
+
+.bpmis-task-title {
+  margin-top: 4px;
+  color: var(--ink);
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+
+.bpmis-task-meta {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: 180px;
+  font-size: 0.82rem;
+}
+
+.bpmis-task-status {
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: #edf4ff;
+  color: #155eef;
+  font-weight: 700;
+}
+
+.bpmis-task-status.is-done {
+  background: #ecfdf3;
+  color: #027a48;
+}
+
+.bpmis-task-status.is-progress {
+  background: #fff7e6;
+  color: #b54708;
+}
+
+.bpmis-task-empty,
+.bpmis-task-loading,
+.bpmis-task-warning {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.bpmis-task-warning {
+  grid-column: 1 / -1;
+  color: #b54708;
 }
 
 .jira-wizard-modal {
