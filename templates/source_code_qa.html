@@ -19,10 +19,6 @@
       <div>
         <p class="eyebrow">Code-Grounded Answers</p>
         <h1>Source Code Q&amp;A</h1>
-        <p class="lede">
-          Ask questions against manually synced source repositories. The portal focuses on direct answers,
-          with local retrieval used behind the scenes to narrow the candidate repositories and paths before Codex reads the files.
-        </p>
       </div>
     </div>
 
@@ -47,19 +43,12 @@
           <small class="field-help">Credit Risk only; other teams use All.</small>
         </label>
         <label class="field-group">
-          <span>Answer Type</span>
-          <select data-source-answer-mode>
-            <option value="auto">Smart Answer</option>
-          </select>
-        </label>
-        <label class="field-group">
           <span>Model</span>
           <select data-source-llm-provider>
             {% for provider in options.llm_providers %}
               <option value="{{ provider.value }}" {% if provider.disabled %}disabled{% endif %}>{{ provider.label }}</option>
             {% endfor %}
           </select>
-          <small class="field-help">Codex default; Gemini disabled.</small>
         </label>
       </div>
       <div class="source-qa-status" data-source-config-status>
