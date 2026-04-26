@@ -265,84 +265,15 @@
         data-sync-job-url="{{ url_for('create_sync_bpmis_projects_job') }}"
         data-version-url="{{ url_for('productization_upgrade_summary_versions') }}"
       >
-        <div class="panel-head">
-          <div>
-            <h2>My Projects</h2>
-            <p class="step-copy">Sync BPMIS projects into the portal, then create Jira tickets from each project row.</p>
-            <p class="help-text">
-              Jira links are saved under the BPMIS ID in the portal. A project can have multiple Jira tickets.
-            </p>
-            <div class="result-tips">
-              <span>Sync updates portal records without using Google Sheets.</span>
-              <span>Only BPMIS Biz projects that are not done will be synced.</span>
-              <span>Deleted project records stay hidden on later syncs.</span>
-              <span>Create Jira appends a new ticket link.</span>
-            </div>
-          </div>
-          <div class="button-row">
-            <form method="post" action="#" data-job-form data-job-url="{{ url_for('create_sync_bpmis_projects_job') }}" data-job-label="Sync BPMIS Projects">
-              <button class="button button-secondary" type="submit">Sync BPMIS Projects</button>
-            </form>
-          </div>
-        </div>
-
-        <div class="run-progress" data-run-progress hidden>
-          <div class="run-progress-head">
-            <strong data-run-progress-title>Working…</strong>
-            <span data-run-progress-count></span>
-          </div>
-          <p class="run-progress-message" data-run-progress-message>Please wait.</p>
-          <div class="run-progress-bar">
-            <div class="run-progress-fill" data-run-progress-fill></div>
-          </div>
-        </div>
-
-        <div data-results-table-wrap {% if not results %}hidden{% endif %}>
-          <div class="table-wrap premium-table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Row</th>
-                  <th>Issue ID</th>
-                  <th>Status</th>
-                  <th>Project</th>
-                  <th>Ticket</th>
-                  <th>Message</th>
-                </tr>
-              </thead>
-              <tbody data-results-body>
-                {% for result in results %}
-                  <tr>
-                    <td>{{ result.row_number }}</td>
-                    <td>{{ result.issue_id or "-" }}</td>
-                    <td><span class="badge badge-{{ result.status }}">{{ result.status }}</span></td>
-                    <td>{{ result.project_label or result.matched_project_id or "-" }}</td>
-                    <td>
-                      {% if result.ticket_link %}
-                        <a href="{{ result.ticket_link }}" target="_blank" rel="noreferrer">{{ result.ticket_key or result.ticket_link }}</a>
-                      {% elif result.ticket_key %}
-                        {{ result.ticket_key }}
-                      {% else %}
-                        -
-                      {% endif %}
-                    </td>
-                    <td>{{ result.message }}</td>
-                  </tr>
-                {% endfor %}
-              </tbody>
-            </table>
-          </div>
-        </div>
-        <div class="empty-state" data-results-empty {% if results %}hidden{% endif %}>
-          <p>No sync results yet.</p>
-        </div>
-
         <section class="bpmis-projects-section">
           <div class="productization-section-head">
             <div>
               <h3>BPMIS Projects</h3>
               <span data-bpmis-project-count>Loading projects…</span>
             </div>
+            <form method="post" action="#" data-job-form data-job-url="{{ url_for('create_sync_bpmis_projects_job') }}" data-job-label="Sync BPMIS Projects">
+              <button class="button button-secondary" type="submit">Sync BPMIS Projects</button>
+            </form>
           </div>
           <div class="table-wrap premium-table-wrap" data-bpmis-project-table-wrap hidden>
             <table class="bpmis-project-table">
@@ -363,6 +294,57 @@
             <p>No BPMIS projects synced yet.</p>
           </div>
           <p class="productization-inline-status" data-bpmis-project-status></p>
+
+          <div class="run-progress" data-run-progress hidden>
+            <div class="run-progress-head">
+              <strong data-run-progress-title>Working…</strong>
+              <span data-run-progress-count></span>
+            </div>
+            <p class="run-progress-message" data-run-progress-message>Please wait.</p>
+            <div class="run-progress-bar">
+              <div class="run-progress-fill" data-run-progress-fill></div>
+            </div>
+          </div>
+
+          <div data-results-table-wrap {% if not results %}hidden{% endif %}>
+            <div class="table-wrap premium-table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Row</th>
+                    <th>Issue ID</th>
+                    <th>Status</th>
+                    <th>Project</th>
+                    <th>Ticket</th>
+                    <th>Message</th>
+                  </tr>
+                </thead>
+                <tbody data-results-body>
+                  {% for result in results %}
+                    <tr>
+                      <td>{{ result.row_number }}</td>
+                      <td>{{ result.issue_id or "-" }}</td>
+                      <td><span class="badge badge-{{ result.status }}">{{ result.status }}</span></td>
+                      <td>{{ result.project_label or result.matched_project_id or "-" }}</td>
+                      <td>
+                        {% if result.ticket_link %}
+                          <a href="{{ result.ticket_link }}" target="_blank" rel="noreferrer">{{ result.ticket_key or result.ticket_link }}</a>
+                        {% elif result.ticket_key %}
+                          {{ result.ticket_key }}
+                        {% else %}
+                          -
+                        {% endif %}
+                      </td>
+                      <td>{{ result.message }}</td>
+                    </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+          </div>
+          <div class="empty-state compact-empty-state" data-results-empty {% if results %}hidden{% endif %}>
+            <p>No sync results yet.</p>
+          </div>
         </section>
       </section>
     </section>

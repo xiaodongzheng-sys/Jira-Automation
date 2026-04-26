@@ -13,7 +13,17 @@
 }
 
 .bpmis-projects-section {
-  margin-top: 28px;
+  margin-top: 0;
+}
+
+.bpmis-projects-section .run-progress,
+.bpmis-projects-section [data-results-table-wrap],
+.bpmis-projects-section [data-results-empty] {
+  margin-top: 16px;
+}
+
+.compact-empty-state {
+  min-height: 84px;
 }
 
 .bpmis-project-table th:nth-child(1),
