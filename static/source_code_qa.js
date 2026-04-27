@@ -40,7 +40,6 @@
   const evidenceSummary = document.querySelector('[data-source-evidence-summary]');
   const debugTrace = document.querySelector('[data-source-debug-trace]');
   const indexHealth = document.querySelector('[data-source-index-health]');
-  const releaseGate = document.querySelector('[data-source-release-gate]');
   const modelAvailability = document.querySelector('[data-source-model-availability]');
   const modelAvailabilityStatus = document.querySelector('[data-source-model-availability-status]');
   const saveModelAvailabilityButton = document.querySelector('[data-source-save-model-availability]');
@@ -60,7 +59,6 @@
   let modelAvailabilityPayload = {};
   let llmPolicy = {};
   let indexHealthPayload = {};
-  let releaseGatePayload = {};
   let configLoadState = 'idle';
   let lastPayload = null;
   let conversationContext = null;
@@ -629,27 +627,6 @@
     `;
   };
 
-  const renderReleaseGate = (gate = {}) => {
-    if (!releaseGate) return;
-    const latestEval = gate.latest_eval || {};
-    const evalSummary = latestEval.eval || {};
-    const llmSmoke = latestEval.llm_smoke || {};
-    const status = gate.status || 'missing';
-    releaseGate.innerHTML = `
-      <div class="source-qa-health-head">
-        <strong>Gate ${escapeHtml(status)}</strong>
-        <span>${escapeHtml(gate.updated_at || 'not run')}</span>
-      </div>
-      <div class="source-qa-health-metrics">
-        <span>eval ${escapeHtml(evalSummary.status || 'n/a')}</span>
-        <span>${compactNumber(evalSummary.total)} cases</span>
-        <span>${compactNumber(evalSummary.failed)} failed</span>
-        <span>smoke ${escapeHtml(llmSmoke.status || 'n/a')}</span>
-      </div>
-      <p>${escapeHtml(gate.summary || 'Run the Source Code Q&A release gate before publishing retrieval or prompt changes.')}</p>
-    `;
-  };
-
   const renderModelAvailability = () => {
     if (!modelAvailability) return;
     modelAvailability.querySelectorAll('input[type="checkbox"]').forEach((input) => {
@@ -709,7 +686,6 @@
       path: entry.url,
     })));
     renderIndexHealth(indexHealthPayload);
-    renderReleaseGate(releaseGatePayload);
   };
 
   const parseRepoLines = () => {
@@ -739,7 +715,6 @@
       modelAvailabilityPayload = payload.model_availability || {};
       llmPolicy = payload.llm_policy || {};
       indexHealthPayload = payload.index_health || {};
-      releaseGatePayload = payload.release_gate || {};
       updateLlmProviderOptions(payload.options?.llm_providers || []);
       renderModelAvailability();
       if (!gitAuthReady && adminStatus) {
@@ -752,7 +727,6 @@
       updateAnswerModeState();
       renderSelectedConfig();
       renderIndexHealth(indexHealthPayload);
-      renderReleaseGate(releaseGatePayload);
     } catch (error) {
       configLoadState = 'error';
       configStatus.textContent = error.message || 'Repository config could not be loaded.';
