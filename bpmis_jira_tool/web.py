@@ -5,6 +5,7 @@ import difflib
 from functools import lru_cache
 import hashlib
 import html
+import inspect
 import io
 from http import HTTPStatus
 import json
@@ -298,6 +299,27 @@ class SeaTalkTodoStore:
             owner_payload = owners.get(owner) if isinstance(owners.get(owner), dict) else {}
             completed = owner_payload.get("completed") if isinstance(owner_payload.get("completed"), dict) else {}
             return {str(todo_id) for todo_id in completed if str(todo_id).strip()}
+
+    def processed_until(self, *, owner_email: str) -> str:
+        owner = str(owner_email or "").strip().lower()
+        with self._lock:
+            owners = self._payload.get("owners") if isinstance(self._payload.get("owners"), dict) else {}
+            owner_payload = owners.get(owner) if isinstance(owners.get(owner), dict) else {}
+            return str(owner_payload.get("todo_processed_until") or "").strip()
+
+    def mark_processed_until(self, *, owner_email: str, processed_until: str) -> None:
+        owner = str(owner_email or "").strip().lower()
+        value = str(processed_until or "").strip()
+        if not owner or not value:
+            return
+        with self._lock:
+            owners = self._payload.setdefault("owners", {})
+            owner_payload = owners.setdefault(owner, {})
+            current_value = str(owner_payload.get("todo_processed_until") or "").strip()
+            if current_value and current_value >= value:
+                return
+            owner_payload["todo_processed_until"] = value
+            self._persist_locked()
 
     def open_todos(self, *, owner_email: str) -> list[dict[str, Any]]:
         owner = str(owner_email or "").strip().lower()
@@ -1921,14 +1943,23 @@ def create_app() -> Flask:
         if access_gate is not None:
             return access_gate
         try:
-            payload = _build_seatalk_dashboard_service(settings).build_insights()
             owner_email = _current_google_email() or settings.gmail_seatalk_demo_owner_email
             todo_store = _get_seatalk_todo_store(settings)
+            service = _build_seatalk_dashboard_service(settings)
+            todo_since = todo_store.processed_until(owner_email=owner_email)
+            if _callable_accepts_keyword(service.build_insights, "todo_since"):
+                payload = service.build_insights(todo_since=todo_since)
+            else:
+                payload = service.build_insights()
             completed_ids = todo_store.completed_ids(owner_email=owner_email)
             payload = dict(payload)
             open_todos = todo_store.merge_open_todos(
                 owner_email=owner_email,
                 todos=[todo for todo in (payload.get("my_todos") or []) if isinstance(todo, dict)],
+            )
+            todo_store.mark_processed_until(
+                owner_email=owner_email,
+                processed_until=str(payload.get("todo_processed_until") or ""),
             )
             payload["my_todos"] = [
                 todo for todo in SeaTalkDashboardService._sort_todos(open_todos)
@@ -3464,6 +3495,17 @@ def _read_json_file(path: Path) -> dict[str, Any]:
     except (OSError, json.JSONDecodeError):
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+def _callable_accepts_keyword(func: Any, keyword: str) -> bool:
+    try:
+        signature = inspect.signature(func)
+    except (TypeError, ValueError):
+        return True
+    return any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD or name == keyword
+        for name, parameter in signature.parameters.items()
+    )
 
 
 def _source_code_qa_release_gate_payload(settings: Settings) -> dict[str, Any]:

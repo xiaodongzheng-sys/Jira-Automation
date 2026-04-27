@@ -68,10 +68,51 @@
     return text.replace(/\r/g, '').replace(/\n{3,}/g, '\n\n').trim();
   };
 
-  const formatDetailedFeatureHtml = (value) => formatDetailedFeatureText(value)
-    .split(/\n+/)
-    .map((line) => `<div class="productization-detail-line">${escapeHtml(line || '-')}</div>`)
-    .join('');
+  const stripListMarker = (value) => String(value || '').replace(/^(\d+[.)]|[-*•])\s+/, '').trim();
+
+  const splitDetailedFeatureItems = (value) => {
+    const text = formatDetailedFeatureText(value);
+    if (text === '-') return ['-'];
+    const explicitLines = text
+      .replace(/\s+(\d+[.)])\s+/g, '\n$1 ')
+      .split(/\n+/)
+      .map((line) => stripListMarker(line))
+      .filter(Boolean);
+    if (explicitLines.length > 1) return explicitLines;
+
+    const sentenceLike = text
+      .match(/.+?(?:[.;](?=\s+[A-Z0-9])|$)/g)
+      ?.map((item) => stripListMarker(item))
+      .filter(Boolean) || [];
+    if (sentenceLike.length > 1 && text.length > 140) return sentenceLike;
+    return [text];
+  };
+
+  const formatDetailedFeatureHtml = (value) => {
+    const items = splitDetailedFeatureItems(value);
+    if (items.length <= 1) {
+      return `<div class="productization-detail-line">${escapeHtml(items[0] || '-')}</div>`;
+    }
+    return `
+      <ul class="productization-detail-list">
+        ${items.map((item) => `<li>${escapeHtml(item)}</li>`).join('')}
+      </ul>
+    `;
+  };
+
+  const formatDetailedFeatureCopyText = (value) => {
+    const items = splitDetailedFeatureItems(value);
+    if (items.length <= 1) return items[0] || '-';
+    return items.map((item) => `- ${item}`).join('\n');
+  };
+
+  const formatDetailedFeatureCopyHtml = (value) => {
+    const items = splitDetailedFeatureItems(value);
+    if (items.length <= 1) {
+      return escapeHtml(items[0] || '-');
+    }
+    return items.map((item) => `<div>- ${escapeHtml(item)}</div>`).join('');
+  };
 
   const setStatus = (message, tone = 'neutral') => {
     status.textContent = message;
@@ -106,7 +147,7 @@
         rows.push([
           item.jira_ticket_number || '-',
           item.feature_summary || '-',
-          formatDetailedFeatureText(item.detailed_feature || '-'),
+          formatDetailedFeatureCopyText(item.detailed_feature || '-'),
         ]);
       });
     });
@@ -134,7 +175,7 @@
           <tr>
             <td style="white-space:pre-wrap;vertical-align:top;">${jiraCell}</td>
             <td style="white-space:pre-wrap;vertical-align:top;">${escapeHtml(item.feature_summary || '-').replaceAll('\n', '<br>')}</td>
-            <td style="white-space:pre-wrap;vertical-align:top;">${escapeHtml(formatDetailedFeatureText(item.detailed_feature || '-')).replaceAll('\n', '<br>')}</td>
+            <td style="white-space:pre-wrap;vertical-align:top;">${formatDetailedFeatureCopyHtml(item.detailed_feature || '-')}</td>
           </tr>
         `;
       }).join('');

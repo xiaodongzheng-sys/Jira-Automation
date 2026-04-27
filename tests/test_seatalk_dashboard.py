@@ -372,6 +372,114 @@ class SeaTalkDashboardServiceTests(unittest.TestCase):
         self.assertIn("@Xiaodong please follow up Credit Risk approval", prompts[0])
         self.assertIn("[Most recent lines]", prompts[0])
 
+    def test_build_insights_uses_incremental_history_for_todos(self):
+        calls: list[list[str]] = []
+
+        def local_runner(command: list[str]):
+            calls.append(command)
+            if "--since" in command:
+                return subprocess.CompletedProcess(
+                    args=command,
+                    returncode=0,
+                    stdout="SeaTalk Chat History Export\nWindow: since 2026-04-27T00:00:00+08:00\n[2026-04-28 10:00:00] Alice: @Xiaodong please review the new rollout note.\n",
+                    stderr="",
+                )
+            return subprocess.CompletedProcess(
+                args=command,
+                returncode=0,
+                stdout="SeaTalk Chat History Export\nWindow: last 7 days\n[2026-04-22 10:00:00] Alice: @Xiaodong old to-do already processed.\n[2026-04-28 10:00:00] Alice: @Xiaodong please review the new rollout note.\n",
+                stderr="",
+            )
+
+        prompts: list[str] = []
+
+        def fake_codex_run(command, **kwargs):
+            if "login" in command and "status" in command:
+                return SimpleNamespace(returncode=0, stdout="Logged in using ChatGPT\n", stderr="")
+            prompts.append(str(kwargs.get("input") or ""))
+            output_path = command[command.index("--output-last-message") + 1]
+            Path(output_path).write_text(
+                '{"project_updates":[],"my_todos":[{"task":"Review the new rollout note","domain":"Anti-fraud","priority":"medium","due":"unknown","evidence":"Apr 28 Alice"}],"team_todos":[]}',
+                encoding="utf-8",
+            )
+            return SimpleNamespace(returncode=0, stdout='{"type":"done"}\n', stderr="")
+
+        service = SeaTalkDashboardService(
+            owner_email="xiaodong.zheng@npt.sg",
+            seatalk_app_path=str(self.app_dir),
+            seatalk_data_dir=str(self.data_dir),
+            codex_workspace_root=str(self.temp_dir.name),
+            command_runner=local_runner,
+        )
+
+        with patch("bpmis_jira_tool.source_code_qa.shutil.which", return_value="/usr/local/bin/codex"), patch(
+            "bpmis_jira_tool.source_code_qa.subprocess.run",
+            side_effect=fake_codex_run,
+        ):
+            result = service.build_insights(
+                now=datetime(2026, 4, 29, 9, 0).astimezone(),
+                todo_since="2026-04-27T00:00:00+08:00",
+            )
+
+        self.assertEqual(len([command for command in calls if command[1].endswith("seatalk_local_export.js")]), 2)
+        incremental_command = next(command for command in calls if "--since" in command)
+        self.assertIn("2026-04-27T00:00:00+08:00", incremental_command)
+        self.assertIn("[Project update history - use for project_updates only]", prompts[0])
+        self.assertIn("old to-do already processed", prompts[0].split("[New to-do history - use for my_todos only]")[0])
+        self.assertNotIn("old to-do already processed", prompts[0].split("[New to-do history - use for my_todos only]")[1])
+        self.assertEqual(result["my_todos"][0]["task"], "Review the new rollout note")
+        self.assertEqual(result["todo_processed_from"], "2026-04-27T00:00:00+08:00")
+        self.assertTrue(result["todo_processed_until"].startswith("2026-04-29T09:00:00"))
+
+    def test_build_insights_reuses_same_day_cache_after_todo_cursor_advances(self):
+        local_call_count = 0
+
+        def local_runner(command: list[str]):
+            nonlocal local_call_count
+            local_call_count += 1
+            return subprocess.CompletedProcess(
+                args=command,
+                returncode=0,
+                stdout="SeaTalk Chat History Export\n[2026-04-29 10:00:00] Alice: @Xiaodong please review the rollout note.\n",
+                stderr="",
+            )
+
+        codex_exec_count = 0
+
+        def fake_codex_run(command, **kwargs):
+            nonlocal codex_exec_count
+            if "login" in command and "status" in command:
+                return SimpleNamespace(returncode=0, stdout="Logged in using ChatGPT\n", stderr="")
+            codex_exec_count += 1
+            output_path = command[command.index("--output-last-message") + 1]
+            Path(output_path).write_text(
+                '{"project_updates":[],"my_todos":[{"task":"Review rollout note","domain":"Anti-fraud","priority":"medium","due":"unknown","evidence":"Apr 29 Alice"}],"team_todos":[]}',
+                encoding="utf-8",
+            )
+            return SimpleNamespace(returncode=0, stdout='{"type":"done"}\n', stderr="")
+
+        service = SeaTalkDashboardService(
+            owner_email="xiaodong.zheng@npt.sg",
+            seatalk_app_path=str(self.app_dir),
+            seatalk_data_dir=str(self.data_dir),
+            codex_workspace_root=str(self.temp_dir.name),
+            daily_cache_dir=Path(self.temp_dir.name) / "cache",
+            command_runner=local_runner,
+        )
+        now = datetime(2026, 4, 29, 11, 0).astimezone()
+
+        with patch("bpmis_jira_tool.source_code_qa.shutil.which", return_value="/usr/local/bin/codex"), patch(
+            "bpmis_jira_tool.source_code_qa.subprocess.run",
+            side_effect=fake_codex_run,
+        ):
+            first = service.build_insights(now=now, todo_since="2026-04-28T00:00:00+08:00")
+            second = service.build_insights(now=now, todo_since=first["todo_processed_until"])
+
+        self.assertEqual(codex_exec_count, 1)
+        self.assertEqual(local_call_count, 2)
+        self.assertFalse(first["cache"]["hit"])
+        self.assertTrue(second["cache"]["hit"])
+
     def test_build_insights_filters_system_generated_group_messages(self):
         history = "\n".join(
             [

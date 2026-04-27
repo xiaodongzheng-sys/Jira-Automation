@@ -619,44 +619,22 @@ class BPMISDirectApiClient(BPMISClient):
         if not self._issue_is_linked_to_parent(normalized_ticket_key, normalized_project_id):
             return self.get_jira_ticket_detail(normalized_ticket_key)
 
-        detail = self.get_jira_ticket_detail(normalized_ticket_key)
-        issue_id = self._extract_issue_identifier(detail)
-        identifiers: list[dict[str, Any]] = [
-            {"jiraKey": normalized_ticket_key},
-            {"jiraIssueKey": normalized_ticket_key},
-            {"key": normalized_ticket_key},
-        ]
-        if issue_id:
-            identifiers.extend([{"id": issue_id}, {"issueId": issue_id}])
-        parent_clear_values = [
-            {"parentIssueId": None},
-            {"parentIssueId": 0},
-            {"parentIssueId": ""},
-            {"parentIds": []},
-        ]
-        attempts = [
-            ("POST", "/api/v1/issues/update"),
-            ("PUT", "/api/v1/issues/update"),
-            ("POST", "/api/v1/issue/update"),
-            ("PUT", "/api/v1/issue/update"),
-        ]
-        last_error: BPMISError | None = None
-        for identifier in identifiers:
-            for parent_clear_value in parent_clear_values:
-                body = {**identifier, **parent_clear_value}
-                for method, path in attempts:
-                    try:
-                        self._api_request(path, method=method, body=body)
-                        if not self._issue_is_linked_to_parent(normalized_ticket_key, normalized_project_id):
-                            return self.get_jira_ticket_detail(normalized_ticket_key)
-                    except BPMISError as error:
-                        last_error = error
-        if last_error is not None:
+        issue_id = self._find_linked_bpmis_task_id(normalized_ticket_key, normalized_project_id)
+        if not issue_id:
             raise BPMISError(
                 "Could not delink Jira task from BPMIS Biz Project. "
-                f"Last error: {last_error}"
-            ) from last_error
-        raise BPMISError("Could not delink Jira task from BPMIS Biz Project.")
+                "BPMIS did not return the linked task issue ID."
+            )
+        try:
+            self._api_request(f"/api/v1/issues/removeTask/{issue_id}", method="DELETE")
+        except BPMISError as error:
+            raise BPMISError(
+                "Could not delink Jira task from BPMIS Biz Project. "
+                f"Last error: {error}"
+            ) from error
+        if self._issue_is_linked_to_parent(normalized_ticket_key, normalized_project_id):
+            raise BPMISError("BPMIS accepted the delink request, but the Jira task is still linked to this Biz Project.")
+        return self.get_jira_ticket_detail(normalized_ticket_key)
 
     def _build_create_payload(
         self,
@@ -851,6 +829,40 @@ class BPMISDirectApiClient(BPMISClient):
             raise
         rows = ((response.get("data") or {}).get("rows") or []) if isinstance(response, dict) else []
         return any(isinstance(row, dict) and self._row_matches_jira_key(row, ticket_key) for row in rows)
+
+    def _find_linked_bpmis_task_id(self, ticket_key: str, project_issue_id: str | int) -> str:
+        normalized_project_id = str(project_issue_id or "").strip()
+        try:
+            response = self._api_request(
+                "/api/v1/issues/list",
+                params={
+                    "search": json.dumps(
+                        {
+                            "joinType": "and",
+                            "subQueries": [
+                                {"typeId": [self.TASK_TYPE_ID]},
+                                {"parentIds": [int(normalized_project_id)]},
+                            ],
+                            "page": 1,
+                            "pageSize": 50,
+                            "mapping": True,
+                        }
+                    )
+                },
+            )
+        except (BPMISError, ValueError):
+            response = {}
+        rows = ((response.get("data") or {}).get("rows") or []) if isinstance(response, dict) else []
+        for row in rows:
+            if isinstance(row, dict) and self._row_matches_jira_key(row, ticket_key):
+                issue_id = self._extract_issue_identifier(row)
+                if issue_id:
+                    return issue_id
+
+        detail = self.get_jira_ticket_detail(ticket_key)
+        if "raw_jira" not in detail and normalized_project_id in self._extract_parent_issue_ids(detail):
+            return self._extract_issue_identifier(detail)
+        return ""
 
     def _row_matches_jira_key(self, row: dict[str, Any], ticket_key: str) -> bool:
         row_key = self._extract_issue_key_from_row(row)

@@ -92,8 +92,8 @@ class LocalAgentClient:
     def seatalk_overview(self) -> dict[str, Any]:
         return self._request("POST", "/api/local-agent/seatalk/overview", {})
 
-    def seatalk_insights(self, *, name_mappings: dict[str, str] | None = None) -> dict[str, Any]:
-        return self._request("POST", "/api/local-agent/seatalk/insights", {"name_mappings": name_mappings or {}})
+    def seatalk_insights(self, *, name_mappings: dict[str, str] | None = None, todo_since: str | None = None) -> dict[str, Any]:
+        return self._request("POST", "/api/local-agent/seatalk/insights", {"name_mappings": name_mappings or {}, "todo_since": todo_since or ""})
 
     def seatalk_name_mappings(self) -> dict[str, Any]:
         return self._request("POST", "/api/local-agent/seatalk/name-mappings", {})
@@ -266,6 +266,17 @@ class LocalAgentClient:
         ids = payload.get("completed_ids")
         return [str(item) for item in ids] if isinstance(ids, list) else []
 
+    def seatalk_todos_processed_until(self, *, owner_email: str) -> str:
+        payload = self._request("POST", "/api/local-agent/seatalk/todos/processed-until", {"owner_email": owner_email})
+        return str(payload.get("processed_until") or "")
+
+    def seatalk_todos_mark_processed_until(self, *, owner_email: str, processed_until: str) -> None:
+        self._request(
+            "POST",
+            "/api/local-agent/seatalk/todos/mark-processed-until",
+            {"owner_email": owner_email, "processed_until": processed_until},
+        )
+
     def seatalk_todos_merge_open(self, *, owner_email: str, todos: list[dict[str, Any]]) -> list[dict[str, Any]]:
         payload = self._request("POST", "/api/local-agent/seatalk/todos/merge-open", {"owner_email": owner_email, "todos": todos})
         items = payload.get("todos")
@@ -324,8 +335,8 @@ class RemoteSeaTalkDashboardService:
     def build_overview(self) -> dict[str, Any]:
         return _strip_status(self.client.seatalk_overview())
 
-    def build_insights(self) -> dict[str, Any]:
-        return _strip_status(self.client.seatalk_insights(name_mappings=self.name_mappings_provider()))
+    def build_insights(self, *, todo_since: str | None = None) -> dict[str, Any]:
+        return _strip_status(self.client.seatalk_insights(name_mappings=self.name_mappings_provider(), todo_since=todo_since))
 
     def build_name_mappings(self) -> dict[str, Any]:
         return _strip_status(self.client.seatalk_name_mappings())
@@ -580,6 +591,12 @@ class RemoteSeaTalkTodoStore:
 
     def completed_ids(self, *, owner_email: str) -> set[str]:
         return set(self.client.seatalk_todos_completed_ids(owner_email=owner_email))
+
+    def processed_until(self, *, owner_email: str) -> str:
+        return self.client.seatalk_todos_processed_until(owner_email=owner_email)
+
+    def mark_processed_until(self, *, owner_email: str, processed_until: str) -> None:
+        self.client.seatalk_todos_mark_processed_until(owner_email=owner_email, processed_until=processed_until)
 
     def merge_open_todos(self, *, owner_email: str, todos: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return self.client.seatalk_todos_merge_open(owner_email=owner_email, todos=todos)

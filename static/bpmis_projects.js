@@ -334,15 +334,28 @@
     }
   };
 
-  const renderVersionOptions = (items) => (items.length
-    ? items.slice(0, 8).map((item) => {
+  const uniqueVersionItems = (items) => {
+    const seen = new Set();
+    return items.filter((item) => {
+      const key = displayVersionName(item).trim().toLowerCase();
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  };
+
+  const renderVersionOptions = (items, { dedupeByName = false } = {}) => {
+    const options = dedupeByName ? uniqueVersionItems(items) : items;
+    return options.length
+    ? options.slice(0, 8).map((item) => {
       const versionName = displayVersionName(item);
       const versionId = item?.version_id || item?.id || item?.versionId || '';
       return `<button type="button" data-version-name="${escapeHtml(versionName)}" data-version-id="${escapeHtml(versionId)}">${escapeHtml(versionName)}</button>`;
     }).join('')
-    : '<div class="productization-typeahead-empty">No matching versions.</div>');
+    : '<div class="productization-typeahead-empty">No matching versions.</div>';
+  };
 
-  const wireVersionTypeahead = (input, menu) => {
+  const wireVersionTypeahead = (input, menu, options = {}) => {
     let timer = null;
     input.addEventListener('input', () => {
       window.clearTimeout(timer);
@@ -365,7 +378,10 @@
           const payload = await readJson(response, 'Could not search Fix Versions.');
           const items = Array.isArray(payload.items) ? payload.items : [];
           menu.hidden = false;
-          menu.innerHTML = renderVersionOptions(items);
+          menu.innerHTML = renderVersionOptions(items, options);
+          if (options.scrollMenuIntoView) {
+            window.requestAnimationFrame(() => menu.scrollIntoView({ block: 'nearest' }));
+          }
         } catch (error) {
           if (error.name !== 'AbortError') {
             menu.hidden = false;
@@ -383,6 +399,9 @@
       input.value = option.dataset.versionName || '';
       input.dataset.versionId = option.dataset.versionId || '';
       menu.hidden = true;
+      if (typeof options.onSelect === 'function') {
+        options.onSelect(input, option);
+      }
     });
   };
 
@@ -394,19 +413,19 @@
     cell.innerHTML = `
       <div class="bpmis-task-version-editor">
         <input class="bpmis-task-version-input" type="text" value="${escapeHtml(currentVersion === '-' ? '' : currentVersion)}" autocomplete="off" aria-label="Update Jira fix version">
-        <button class="button button-secondary bpmis-task-version-save" type="button">Save</button>
         <div class="productization-typeahead jira-version-typeahead bpmis-task-version-menu" data-version-menu hidden></div>
       </div>
     `;
     const input = cell.querySelector('.bpmis-task-version-input');
-    const saveButton = cell.querySelector('.bpmis-task-version-save');
     const menu = cell.querySelector('[data-version-menu]');
-    if (!input || !saveButton || !menu) return;
+    if (!input || !menu) return;
     input.dataset.versionTask = button.dataset.versionTask || '';
     input.dataset.versionProject = button.dataset.versionProject || '';
-    wireVersionTypeahead(input, menu);
-    const save = () => updateTaskVersion(input, saveButton);
-    saveButton.addEventListener('click', save);
+    const save = () => updateTaskVersion(input);
+    wireVersionTypeahead(input, menu, {
+      onSelect: save,
+      scrollMenuIntoView: true,
+    });
     input.addEventListener('keydown', (event) => {
       if (event.key === 'Enter') {
         event.preventDefault();
@@ -427,7 +446,7 @@
     input.select();
   };
 
-  const updateTaskVersion = async (input, saveButton) => {
+  const updateTaskVersion = async (input) => {
     const bpmisId = input.dataset.versionProject || '';
     const ticketId = input.dataset.versionTask || '';
     const versionName = input.value.trim();
@@ -436,7 +455,6 @@
     if (!bpmisId || !ticketId || !versionName || !panel) return;
     input.dataset.saving = 'true';
     input.disabled = true;
-    saveButton.disabled = true;
     const cell = input.closest('.bpmis-task-cell');
     if (cell) {
       cell.innerHTML = '<span class="bpmis-task-status is-loading">Updating...</span>';
@@ -553,7 +571,7 @@
     };
   });
 
-  const bindVersionSearch = wireVersionTypeahead;
+  const bindVersionSearch = (input, menu) => wireVersionTypeahead(input, menu, { dedupeByName: true });
 
   const renderJiraForms = () => {
     const selections = selectedComponents();

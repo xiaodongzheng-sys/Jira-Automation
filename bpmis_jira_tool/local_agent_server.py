@@ -278,7 +278,14 @@ def create_local_agent_app() -> Flask:
     def seatalk_insights():
         payload = request.get_json(silent=True) or {}
         with _seatalk_name_overrides(payload.get("name_mappings")) as name_overrides_path:
-            return jsonify({"status": "ok", **_build_seatalk_service(settings, name_overrides_path=name_overrides_path).build_insights()})
+            return jsonify(
+                {
+                    "status": "ok",
+                    **_build_seatalk_service(settings, name_overrides_path=name_overrides_path).build_insights(
+                        todo_since=str(payload.get("todo_since") or "")
+                    ),
+                }
+            )
 
     @app.post("/api/local-agent/seatalk/name-mappings")
     def seatalk_name_mappings():
@@ -289,6 +296,21 @@ def create_local_agent_app() -> Flask:
         payload = request.get_json(silent=True) or {}
         completed = sorted(_build_seatalk_todo_store(settings).completed_ids(owner_email=str(payload.get("owner_email") or "")))
         return jsonify({"status": "ok", "completed_ids": completed})
+
+    @app.post("/api/local-agent/seatalk/todos/processed-until")
+    def seatalk_todos_processed_until():
+        payload = request.get_json(silent=True) or {}
+        processed_until = _build_seatalk_todo_store(settings).processed_until(owner_email=str(payload.get("owner_email") or ""))
+        return jsonify({"status": "ok", "processed_until": processed_until})
+
+    @app.post("/api/local-agent/seatalk/todos/mark-processed-until")
+    def seatalk_todos_mark_processed_until():
+        payload = request.get_json(silent=True) or {}
+        _build_seatalk_todo_store(settings).mark_processed_until(
+            owner_email=str(payload.get("owner_email") or ""),
+            processed_until=str(payload.get("processed_until") or ""),
+        )
+        return jsonify({"status": "ok"})
 
     @app.post("/api/local-agent/seatalk/todos/merge-open")
     def seatalk_todos_merge_open():

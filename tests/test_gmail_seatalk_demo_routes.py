@@ -476,6 +476,43 @@ class GmailSeaTalkDemoRouteTests(unittest.TestCase):
             ["Follow up rollout", "Review GRC lock"],
         )
 
+    def test_seatalk_insights_passes_previous_todo_cursor_to_service(self):
+        calls: list[str] = []
+
+        class FakeSeaTalkService:
+            def build_insights(self, *, todo_since=""):
+                calls.append(todo_since)
+                if not todo_since:
+                    return {
+                        "project_updates": [],
+                        "my_todos": [
+                            {"task": "First task", "domain": "General", "priority": "medium", "due": "unknown", "evidence": "Apr 27"}
+                        ],
+                        "team_todos": [],
+                        "generated_at": "2026-04-27T21:00:00+08:00",
+                        "todo_processed_until": "2026-04-27T21:00:00+08:00",
+                    }
+                return {
+                    "project_updates": [],
+                    "my_todos": [
+                        {"task": "Second task", "domain": "General", "priority": "medium", "due": "unknown", "evidence": "Apr 29"}
+                    ],
+                    "team_todos": [],
+                    "generated_at": "2026-04-29T09:00:00+08:00",
+                    "todo_processed_until": "2026-04-29T09:00:00+08:00",
+                }
+
+        with patch("bpmis_jira_tool.web._build_seatalk_dashboard_service", return_value=FakeSeaTalkService()):
+            with self.app.test_client() as client:
+                self._login_owner(client, scopes=[GMAIL_READONLY_SCOPE])
+                first = client.get("/api/gmail-sea-talk-demo/seatalk/insights")
+                second = client.get("/api/gmail-sea-talk-demo/seatalk/insights")
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(calls, ["", "2026-04-27T21:00:00+08:00"])
+        self.assertEqual([item["task"] for item in second.get_json()["my_todos"]], ["First task", "Second task"])
+
     def test_similar_uncompleted_seatalk_todos_are_not_duplicated(self):
         first_todo = {
             "task": "Prepare PM AI sharing session",

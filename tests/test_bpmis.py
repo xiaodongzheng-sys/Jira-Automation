@@ -853,8 +853,8 @@ class BPMISClientTests(unittest.TestCase):
                     }
                 if path == "/api/v1/issues/list":
                     return {"data": {"rows": [{"id": 9001, "jiraKey": "AF-101"}] if state["linked"] else []}}
-                if path == "/api/v1/issues/update":
-                    self.assertIn(body, ({"jiraKey": "AF-101", "parentIssueId": None}, {"id": "9001", "parentIssueId": None}))
+                if path == "/api/v1/issues/removeTask/9001":
+                    self.assertEqual(method, "DELETE")
                     state["linked"] = False
                     return {"data": {"ok": True}}
                 raise AssertionError(path)
@@ -863,9 +863,8 @@ class BPMISClientTests(unittest.TestCase):
 
             detail = client.delink_jira_ticket_from_project("AF-101", "225159")
 
-            update_call = next(call for call in calls if call[0] == "/api/v1/issues/update")
-            self.assertEqual(update_call[1], "POST")
-            self.assertEqual(update_call[3], {"jiraKey": "AF-101", "parentIssueId": None})
+            update_call = next(call for call in calls if call[0] == "/api/v1/issues/removeTask/9001")
+            self.assertEqual(update_call[1], "DELETE")
             self.assertEqual(detail["parentIds"], [])
 
     def test_get_jira_ticket_detail_uses_direct_jira_api_when_token_configured(self):

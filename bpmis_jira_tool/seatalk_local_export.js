@@ -24,6 +24,7 @@ function parseArgs(argv) {
     dataDir: '',
     days: 7,
     now: new Date().toISOString(),
+    since: '',
     nameOverridesPath: '',
     unknownIdsJson: false,
   };
@@ -38,6 +39,9 @@ function parseArgs(argv) {
       index += 1;
     } else if (token === '--now') {
       args.now = value || args.now;
+      index += 1;
+    } else if (token === '--since') {
+      args.since = value || '';
       index += 1;
     } else if (token === '--name-overrides') {
       args.nameOverridesPath = value || '';
@@ -79,7 +83,7 @@ function loadDatabase(dataDir, uid) {
   return { db };
 }
 
-function createLocalDateRange(nowIso, days) {
+function createLocalDateRange(nowIso, days, sinceIso = '') {
   const now = new Date(nowIso);
   if (Number.isNaN(now.getTime())) {
     throw new Error('Invalid --now timestamp for SeaTalk local export.');
@@ -87,8 +91,21 @@ function createLocalDateRange(nowIso, days) {
   const periodStart = new Date(now.getTime());
   periodStart.setHours(0, 0, 0, 0);
   periodStart.setDate(periodStart.getDate() - (days - 1));
+  if (sinceIso) {
+    const since = new Date(sinceIso);
+    if (Number.isNaN(since.getTime())) {
+      throw new Error('Invalid --since timestamp for SeaTalk local export.');
+    }
+    if (since > periodStart) {
+      periodStart.setTime(since.getTime());
+    }
+  }
   const periodEnd = new Date(periodStart.getTime());
-  periodEnd.setDate(periodEnd.getDate() + days);
+  if (sinceIso) {
+    periodEnd.setTime(now.getTime());
+  } else {
+    periodEnd.setDate(periodEnd.getDate() + days);
+  }
   return {
     now,
     periodStart,
@@ -348,12 +365,12 @@ function formatTimestamp(epochSeconds) {
   return `${year}-${month}-${day} ${hour}:${minute}:${second}`;
 }
 
-function buildHistoryText(rows, selfUid, days, nowIso, db, overrides) {
+function buildHistoryText(rows, selfUid, days, nowIso, db, overrides, sinceIso = '') {
   const { uidNames, sidNames } = buildNameMaps(rows, db);
   const filteredRows = rows.filter((row) => !isBotConversationRow(row, sidNames));
   const lines = [
     'SeaTalk Chat History Export',
-    `Window: last ${days} days`,
+    sinceIso ? `Window: since ${sinceIso}` : `Window: last ${days} days`,
     `Generated at: ${nowIso}`,
     `Includes thread replies when they are stored as regular message rows in the local SeaTalk database.`,
     'Private SeaTalk bot conversations are excluded from this export.',
@@ -458,7 +475,7 @@ function main() {
   }
   const { uid } = loadLocalConfig(args.dataDir);
   const { db } = loadDatabase(args.dataDir, uid);
-  const ranges = createLocalDateRange(args.now, args.days);
+  const ranges = createLocalDateRange(args.now, args.days, args.since);
   const overrides = loadNameOverrides(args.nameOverridesPath);
   try {
     const excludedTypes = Array.from(EXCLUDED_MESSAGE_TYPES);
@@ -478,7 +495,7 @@ function main() {
         period_days: args.days,
       }));
     } else {
-      process.stdout.write(buildHistoryText(rows, uid, args.days, args.now, db, overrides));
+      process.stdout.write(buildHistoryText(rows, uid, args.days, args.now, db, overrides, args.since));
     }
   } finally {
     db.close();
