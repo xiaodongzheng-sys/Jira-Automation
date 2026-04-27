@@ -162,8 +162,9 @@
     const rows = buildCopyRows();
     if (!rows.length) return '';
 
+    const detailedFeatureCopyStyle = 'white-space:normal;overflow-wrap:break-word;word-break:break-word;vertical-align:top;min-width:360px;width:360px;';
     const headerCells = rows[0]
-      .map((cell) => `<th style="text-align:left;font-weight:700;">${escapeHtml(cell)}</th>`)
+      .map((cell) => `<th style="text-align:left;font-weight:700;${cell === 'Detailed Feature' ? detailedFeatureCopyStyle : ''}">${escapeHtml(cell)}</th>`)
       .join('');
     const bodyRows = selectedVersions.map((entry, index) => {
       const sectionRow = `<tr><td colspan="3" style="font-weight:700;background:#eef4ff;">${escapeHtml(entry.label)}</td></tr>`;
@@ -175,7 +176,7 @@
           <tr>
             <td style="white-space:pre-wrap;vertical-align:top;">${jiraCell}</td>
             <td style="white-space:pre-wrap;vertical-align:top;">${escapeHtml(item.feature_summary || '-').replaceAll('\n', '<br>')}</td>
-            <td style="white-space:pre-wrap;vertical-align:top;">${formatDetailedFeatureCopyHtml(item.detailed_feature || '-')}</td>
+            <td style="${detailedFeatureCopyStyle}">${formatDetailedFeatureCopyHtml(item.detailed_feature || '-')}</td>
           </tr>
         `;
       }).join('');
@@ -183,7 +184,12 @@
     }).join('');
 
     return `
-      <table border="1" cellspacing="0" cellpadding="6" style="border-collapse:collapse;">
+      <table border="1" cellspacing="0" cellpadding="6" style="border-collapse:collapse;table-layout:fixed;">
+        <colgroup>
+          <col style="width:160px;">
+          <col style="width:260px;">
+          <col style="width:360px;white-space:normal;overflow-wrap:break-word;word-break:break-word;">
+        </colgroup>
         <thead><tr>${headerCells}</tr></thead>
         <tbody>${bodyRows}</tbody>
       </table>
