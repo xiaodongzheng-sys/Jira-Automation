@@ -1179,10 +1179,17 @@ class BPMISDirectApiClient(BPMISClient):
     def _issue_created_by(self, row: dict[str, Any], email: str, user_ids: list[int]) -> bool:
         normalized_email = str(email or "").strip().lower()
         user_id_values = {str(user_id).strip() for user_id in user_ids if str(user_id).strip()}
+        has_creator_signal = False
         for key in self._issue_creator_field_names():
             value = self._find_first_value(row, key)
+            has_creator_signal = has_creator_signal or value is not None
             if self._value_matches_user(value, normalized_email, user_id_values):
                 return True
+        if not has_creator_signal:
+            for key in self._issue_creator_fallback_field_names():
+                value = self._find_first_value(row, key)
+                if self._value_matches_user(value, normalized_email, user_id_values):
+                    return True
         return False
 
     @staticmethod
@@ -1203,6 +1210,14 @@ class BPMISDirectApiClient(BPMISClient):
             "authorId",
             "owner",
             "ownerId",
+        )
+
+    @staticmethod
+    def _issue_creator_fallback_field_names() -> tuple[str, ...]:
+        return (
+            "reporter",
+            "reporterId",
+            "reporterEmail",
         )
 
     def _value_matches_user(self, value: Any, email: str, user_ids: set[str]) -> bool:

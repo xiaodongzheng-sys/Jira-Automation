@@ -1087,6 +1087,12 @@ class BPMISClientTests(unittest.TestCase):
 	                                "creator": {"emailAddress": "other@npt.sg"},
 	                            },
 	                            {
+	                                "id": 994,
+	                                "jiraKey": "AF-994",
+	                                "summary": "BPMIS reporter-as-creator task",
+	                                "reporter": {"emailAddress": "pm@npt.sg"},
+	                            },
+	                            {
 	                                "id": 993,
 	                                "jiraKey": "AF-993",
 	                                "summary": "Other task",
@@ -1100,12 +1106,13 @@ class BPMISClientTests(unittest.TestCase):
 
             tasks = client.list_jira_tasks_for_project_created_by_email("225159", "pm@npt.sg")
 
-            self.assertEqual(len(tasks), 1)
+            self.assertEqual(len(tasks), 2)
             self.assertEqual(tasks[0]["ticket_key"], "AF-991")
             self.assertEqual(tasks[0]["ticket_link"], "https://jira.shopee.io/browse/AF-991")
             self.assertEqual(tasks[0]["jira_title"], "[Feature][AF]Existing task")
             self.assertEqual(tasks[0]["status"], "Developing")
             self.assertEqual(tasks[0]["fix_version_name"], "Planning_26Q2")
+            self.assertEqual(tasks[1]["ticket_key"], "AF-994")
             self.assertEqual(tasks[0]["component"], "DBP-Anti-fraud")
             self.assertEqual(tasks[0]["market"], "SG")
 
