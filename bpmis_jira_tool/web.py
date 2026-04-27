@@ -3420,7 +3420,7 @@ def _build_local_agent_client(settings: Settings) -> LocalAgentClient:
 
 def _proxy_local_agent_request(agent_path: str):
     settings: Settings = current_app.config["SETTINGS"]
-    local_base_url = _local_agent_loopback_base_url()
+    local_base_url = (settings.local_agent_base_url or "").strip().rstrip("/") or _local_agent_loopback_base_url()
     normalized_agent_path = agent_path.lstrip("/")
     target_path = "/healthz" if normalized_agent_path == "healthz" else f"/api/local-agent/{normalized_agent_path}"
     target_url = f"{local_base_url}{target_path}"

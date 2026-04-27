@@ -279,6 +279,7 @@ class TeamPortalAccessTests(unittest.TestCase):
                 "TEAM_PORTAL_BASE_URL": "",
                 "TEAM_ALLOWED_EMAIL_DOMAINS": "",
                 "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
+                "LOCAL_AGENT_BASE_URL": "",
                 "LOCAL_AGENT_HOST": "127.0.0.1",
                 "LOCAL_AGENT_PORT": "8123",
                 "LOCAL_AGENT_TIMEOUT_SECONDS": "7",
@@ -317,6 +318,7 @@ class TeamPortalAccessTests(unittest.TestCase):
                 "TEAM_PORTAL_BASE_URL": "",
                 "TEAM_ALLOWED_EMAIL_DOMAINS": "",
                 "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
+                "LOCAL_AGENT_BASE_URL": "",
                 "LOCAL_AGENT_HOST": "127.0.0.1",
                 "LOCAL_AGENT_PORT": "8123",
             },
@@ -331,6 +333,31 @@ class TeamPortalAccessTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         _method, target_url = proxy_request.call_args.args[:2]
         self.assertEqual(target_url, "http://127.0.0.1:8123/healthz")
+
+    def test_public_local_agent_proxy_prefers_configured_agent_base_url(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
+                "LOCAL_AGENT_BASE_URL": "https://agent.example.test",
+                "LOCAL_AGENT_HOST": "127.0.0.1",
+                "LOCAL_AGENT_PORT": "8123",
+            },
+            clear=False,
+        ), patch("bpmis_jira_tool.web.requests.request", return_value=_FakeProxyResponse()) as proxy_request:
+            app = create_app()
+            app.testing = True
+
+            with app.test_client() as client:
+                response = client.get("/api/local-agent/healthz")
+
+        self.assertEqual(response.status_code, 200)
+        _method, target_url = proxy_request.call_args.args[:2]
+        self.assertEqual(target_url, "https://agent.example.test/healthz")
 
     def test_default_sheet_template_download_returns_csv(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
