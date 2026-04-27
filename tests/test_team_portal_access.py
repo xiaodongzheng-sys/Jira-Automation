@@ -334,7 +334,7 @@ class TeamPortalAccessTests(unittest.TestCase):
         _method, target_url = proxy_request.call_args.args[:2]
         self.assertEqual(target_url, "http://127.0.0.1:8123/healthz")
 
-    def test_public_local_agent_proxy_prefers_configured_agent_base_url(self):
+    def test_public_local_agent_proxy_prefers_configured_portal_agent_proxy_url(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
@@ -357,7 +357,7 @@ class TeamPortalAccessTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         _method, target_url = proxy_request.call_args.args[:2]
-        self.assertEqual(target_url, "https://agent.example.test/healthz")
+        self.assertEqual(target_url, "https://agent.example.test/api/local-agent/healthz")
 
     def test_default_sheet_template_download_returns_csv(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
