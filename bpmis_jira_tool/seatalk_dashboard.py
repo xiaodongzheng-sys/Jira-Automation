@@ -26,9 +26,12 @@ SEATALK_DEFAULT_APP_PATH = "/Applications/SeaTalk.app"
 SEATALK_DEFAULT_DATA_DIR = "~/Library/Application Support/SeaTalk"
 SEATALK_INSIGHTS_PROMPT_MODE = "seatalk_7_day_insights_v4"
 SEATALK_INSIGHTS_TIMEZONE = ZoneInfo("Asia/Singapore")
-SEATALK_INSIGHTS_HISTORY_MAX_CHARS = 620_000
-SEATALK_INSIGHTS_SIGNAL_MAX_CHARS = 360_000
-SEATALK_INSIGHTS_RECENT_MAX_CHARS = 240_000
+SEATALK_INSIGHTS_HISTORY_MAX_CHARS = 520_000
+SEATALK_INSIGHTS_TODO_HISTORY_MAX_CHARS = 260_000
+SEATALK_INSIGHTS_SIGNAL_MAX_CHARS = 300_000
+SEATALK_INSIGHTS_RECENT_MAX_CHARS = 190_000
+SEATALK_INSIGHTS_TODO_SIGNAL_MAX_CHARS = 160_000
+SEATALK_INSIGHTS_TODO_RECENT_MAX_CHARS = 80_000
 UNAVAILABLE_REASON = "Not available from local SeaTalk desktop data for this scope."
 
 
@@ -141,13 +144,23 @@ class SeaTalkDashboardService:
             self._store_daily_cache(kind="insights", days=days, now=now, payload=payload)
             return payload
         history_text = self._filter_system_generated_history(history_text)
-        history_text = self._compact_history_for_insights(history_text)
+        history_text = self._compact_history_for_insights(
+            history_text,
+            max_chars=SEATALK_INSIGHTS_HISTORY_MAX_CHARS,
+            signal_max_chars=SEATALK_INSIGHTS_SIGNAL_MAX_CHARS,
+            recent_max_chars=SEATALK_INSIGHTS_RECENT_MAX_CHARS,
+        )
         if todo_since_dt is None:
-            todo_history_text = history_text
+            todo_history_text = ""
         else:
             todo_history_text = self._load_local_history_export(days=days, now=now, since=todo_since_dt)
             todo_history_text = self._filter_system_generated_history(todo_history_text)
-            todo_history_text = self._compact_history_for_insights(todo_history_text)
+            todo_history_text = self._compact_history_for_insights(
+                todo_history_text,
+                max_chars=SEATALK_INSIGHTS_TODO_HISTORY_MAX_CHARS,
+                signal_max_chars=SEATALK_INSIGHTS_TODO_SIGNAL_MAX_CHARS,
+                recent_max_chars=SEATALK_INSIGHTS_TODO_RECENT_MAX_CHARS,
+            )
         provider = CodexCliBridgeSourceCodeQALLMProvider(
             workspace_root=self.codex_workspace_root,
             timeout_seconds=self.codex_timeout_seconds,
@@ -506,14 +519,18 @@ class SeaTalkDashboardService:
             if todo_since is not None
             else f"Generate my_todos from the same last {days} days because there is no previous to-do cursor yet."
         )
-        todo_history = todo_history_text if todo_history_text is not None else history_text
+        todo_history = (
+            todo_history_text
+            if todo_history_text
+            else "[Initial run: use the Project update history above as the New to-do history source.]"
+        )
         return (
             "Return a JSON object with exactly these top-level keys: project_updates, my_todos, team_todos.\n"
             "project_updates must be an array of objects with keys: domain, title, summary, status, evidence.\n"
             "For every project_updates item, domain must be exactly one of: Anti-fraud, Credit Risk, Ops Risk, General.\n"
             "For General project_updates, scan the entire chat history for anything worth Xiaodong's awareness, not only traditional product projects. Include other banking product lines, cross-product updates, leadership or boss updates, AI sharing, Key Project, slide, reporting, planning, org/process changes, incidents, launches, dependencies, and important discussions. It is OK for a General update to have no Xiaodong-owned todo.\n"
             "Do a separate General pass and put 3 to 6 General project_updates first whenever the history has any such signal. Do not leave General empty merely because the item is not Xiaodong's owned product line or is not an action item.\n"
-            f"my_todos must contain only Xiaodong's own action items from the New to-do history section. {todo_window} Do not create my_todos from the Project update history section unless the same message appears in New to-do history. team_todos must always be an empty array.\n"
+            f"my_todos must contain only Xiaodong's own action items from the New to-do history section. {todo_window} When the New to-do history section says this is an initial run, use the Project update history above as the to-do source too. Otherwise, do not create my_todos from the Project update history section unless the same message appears in New to-do history. team_todos must always be an empty array.\n"
             "my_todos objects must have keys: task, domain, priority, due, evidence.\n"
             "For every my_todos item, domain must be exactly one of: Anti-fraud, Credit Risk, Ops Risk, General.\n"
             "Do include Xiaodong-owned General tasks such as AI sharing, updating the Key Project table, updating slides, preparing reports, meeting prep, and boss or leadership follow-ups.\n"
@@ -530,9 +547,16 @@ class SeaTalkDashboardService:
         )
 
     @classmethod
-    def _compact_history_for_insights(cls, history_text: str) -> str:
+    def _compact_history_for_insights(
+        cls,
+        history_text: str,
+        *,
+        max_chars: int = SEATALK_INSIGHTS_HISTORY_MAX_CHARS,
+        signal_max_chars: int = SEATALK_INSIGHTS_SIGNAL_MAX_CHARS,
+        recent_max_chars: int = SEATALK_INSIGHTS_RECENT_MAX_CHARS,
+    ) -> str:
         text = str(history_text or "")
-        if len(text) <= SEATALK_INSIGHTS_HISTORY_MAX_CHARS:
+        if len(text) <= max_chars:
             return text
         lines = text.splitlines()
         header = "\n".join(lines[:8]).strip()
@@ -583,7 +607,7 @@ class SeaTalkDashboardService:
                 continue
             signal_lines.append(line)
             signal_chars += len(line) + 1
-            if signal_chars >= SEATALK_INSIGHTS_SIGNAL_MAX_CHARS:
+            if signal_chars >= signal_max_chars:
                 break
 
         recent_lines: list[str] = []
@@ -591,7 +615,7 @@ class SeaTalkDashboardService:
         for line in reversed(lines):
             recent_lines.append(line)
             recent_chars += len(line) + 1
-            if recent_chars >= SEATALK_INSIGHTS_RECENT_MAX_CHARS:
+            if recent_chars >= recent_max_chars:
                 break
         recent_lines.reverse()
 
@@ -607,8 +631,8 @@ class SeaTalkDashboardService:
             )
             if part is not None
         ).strip()
-        if len(compacted) > SEATALK_INSIGHTS_HISTORY_MAX_CHARS:
-            compacted = compacted[-SEATALK_INSIGHTS_HISTORY_MAX_CHARS:]
+        if len(compacted) > max_chars:
+            compacted = compacted[-max_chars:]
         return compacted
 
     @classmethod

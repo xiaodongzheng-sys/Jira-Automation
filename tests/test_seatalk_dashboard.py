@@ -372,6 +372,47 @@ class SeaTalkDashboardServiceTests(unittest.TestCase):
         self.assertIn("@Xiaodong please follow up Credit Risk approval", prompts[0])
         self.assertIn("[Most recent lines]", prompts[0])
 
+    def test_initial_insights_prompt_does_not_duplicate_history_for_todos(self):
+        huge_history = "\n".join(
+            [
+                "SeaTalk Chat History Export",
+                *[f"[2026-04-21 09:{index % 60:02d}:00] Noise: routine chat line {index} " + ("x" * 1200) for index in range(950)],
+                "[2026-04-21 18:00:00] Alice: @Xiaodong please follow up Anti-fraud rollout.",
+            ]
+        )
+
+        def local_runner(command: list[str]):
+            return subprocess.CompletedProcess(args=command, returncode=0, stdout=huge_history, stderr="")
+
+        prompts: list[str] = []
+
+        def fake_codex_run(command, **kwargs):
+            if "login" in command and "status" in command:
+                return SimpleNamespace(returncode=0, stdout="Logged in using ChatGPT\n", stderr="")
+            prompts.append(str(kwargs.get("input") or ""))
+            output_path = command[command.index("--output-last-message") + 1]
+            Path(output_path).write_text('{"project_updates":[],"my_todos":[],"team_todos":[]}', encoding="utf-8")
+            return SimpleNamespace(returncode=0, stdout='{"type":"done"}\n', stderr="")
+
+        service = SeaTalkDashboardService(
+            owner_email="xiaodong.zheng@npt.sg",
+            seatalk_app_path=str(self.app_dir),
+            seatalk_data_dir=str(self.data_dir),
+            codex_workspace_root=str(self.temp_dir.name),
+            command_runner=local_runner,
+        )
+
+        with patch("bpmis_jira_tool.source_code_qa.shutil.which", return_value="/usr/local/bin/codex"), patch(
+            "bpmis_jira_tool.source_code_qa.subprocess.run",
+            side_effect=fake_codex_run,
+        ):
+            service.build_insights(now=datetime(2026, 4, 21, 21, 0).astimezone())
+
+        self.assertTrue(prompts)
+        self.assertLess(len(prompts[0]), 900_000)
+        self.assertEqual(prompts[0].count("SeaTalk Chat History Export"), 1)
+        self.assertIn("Initial run: use the Project update history above", prompts[0])
+
     def test_build_insights_uses_incremental_history_for_todos(self):
         calls: list[list[str]] = []
 
