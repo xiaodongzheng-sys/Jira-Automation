@@ -254,14 +254,20 @@
       </tr>
     `;
     }).join('');
+    body.querySelectorAll('[data-project-comment]').forEach((textarea) => {
+      textarea.dataset.savedComment = textarea.value;
+    });
   };
 
-  const saveProjectComment = async (textarea) => {
+  const saveProjectComment = async (textarea, { force = false } = {}) => {
     const bpmisId = textarea.dataset.projectComment || '';
     if (!bpmisId) return;
     const nextComment = textarea.value;
-    if (nextComment === textarea.dataset.savedComment) return;
+    if (!force && nextComment === textarea.dataset.savedComment) return;
+    const saveToken = `${Date.now()}:${Math.random()}`;
     textarea.dataset.saving = 'true';
+    textarea.dataset.saveToken = saveToken;
+    setStatus('Saving PM comment...');
     try {
       const response = await fetch(`${projectsUrl}/${encodeURIComponent(bpmisId)}/comment`, {
         method: 'PATCH',
@@ -270,22 +276,30 @@
         body: JSON.stringify({ pm_comment: nextComment }),
       });
       await readJson(response, 'Could not save PM comment.');
+      if (textarea.value !== nextComment) {
+        textarea.dataset.savedComment = nextComment;
+        if (textarea.dataset.saveToken === saveToken) {
+          textarea.dataset.saving = 'false';
+        }
+        scheduleProjectCommentSave(textarea, 0, { force: true });
+        return;
+      }
       textarea.dataset.savedComment = nextComment;
-      textarea.dataset.saving = 'false';
+      if (textarea.dataset.saveToken === saveToken) textarea.dataset.saving = 'false';
       const project = projectById(bpmisId);
       if (project) project.pm_comment = nextComment;
       setStatus('PM comment saved.', 'success');
     } catch (error) {
-      textarea.dataset.saving = 'false';
+      if (textarea.dataset.saveToken === saveToken) textarea.dataset.saving = 'false';
       setStatus(error.message || 'Could not save PM comment.', 'error');
     }
   };
 
-  const scheduleProjectCommentSave = (textarea, delay = 700) => {
+  const scheduleProjectCommentSave = (textarea, delay = 700, options = {}) => {
     const bpmisId = textarea.dataset.projectComment || '';
     if (!bpmisId) return;
     window.clearTimeout(commentTimers.get(bpmisId));
-    commentTimers.set(bpmisId, window.setTimeout(() => saveProjectComment(textarea), delay));
+    commentTimers.set(bpmisId, window.setTimeout(() => saveProjectComment(textarea, options), delay));
   };
 
   const loadTasks = async (bpmisId, { force = false } = {}) => {
