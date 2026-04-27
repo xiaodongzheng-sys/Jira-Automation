@@ -13,12 +13,36 @@ class FakeBPMISClient:
         self.create_calls = []
         self.detail_calls = []
         self.status_calls = []
+        self.version_calls = []
+        self.delink_calls = []
 
     def list_biz_projects_for_pm_email(self, _email):
         return [
             {"issue_id": "225159", "project_name": "Fraud Rule Upgrade", "market": "SG"},
             {"issue_id": "225160", "project_name": "Deleted Project", "market": "ID"},
         ]
+
+    def list_jira_tasks_for_project_created_by_email(self, project_issue_id, email):
+        if str(email).lower() != "pm@npt.sg":
+            return []
+        return {
+            "225159": [
+                {
+                    "component": "DBP-Anti-fraud",
+                    "market": "SG",
+                    "system": "AF",
+                    "jira_title": "[Feature][AF]Existing synced task",
+                    "prd_link": "https://docs/prd-1",
+                    "description": "Existing task description",
+                    "fix_version_name": "Planning_26Q2",
+                    "ticket_key": "AF-EXIST-1",
+                    "ticket_link": "https://jira/browse/AF-EXIST-1",
+                    "status": "Developing",
+                    "raw_response": {"id": 991},
+                }
+            ],
+            "225160": [],
+        }.get(str(project_issue_id), [])
 
     def get_brd_doc_links_for_projects(self, issue_ids):
         return {
@@ -47,6 +71,14 @@ class FakeBPMISClient:
     def update_jira_ticket_status(self, ticket_key, status):
         self.status_calls.append((ticket_key, status))
         return {"jiraKey": ticket_key, "status": {"label": status}}
+
+    def update_jira_ticket_fix_version(self, ticket_key, version_name, version_id=None):
+        self.version_calls.append((ticket_key, version_name, version_id))
+        return {"jiraKey": ticket_key, "fixVersions": [version_name]}
+
+    def delink_jira_ticket_from_project(self, ticket_key, project_issue_id):
+        self.delink_calls.append((ticket_key, project_issue_id))
+        return {"jiraKey": ticket_key, "parentIds": []}
 
 
 class BPMISProjectStoreTests(unittest.TestCase):
@@ -103,11 +135,13 @@ class BPMISProjectStoreTests(unittest.TestCase):
                     brd_link="https://docs/brd",
                     market="SG",
                 ),
-                "deleted",
+                "restored",
             )
-            self.assertEqual(store.list_projects(user_key="google:pm@npt.sg"), [])
+            restored_projects = store.list_projects(user_key="google:pm@npt.sg")
+            self.assertEqual(len(restored_projects), 1)
+            self.assertEqual([first["id"], second["id"]], [ticket["id"] for ticket in restored_projects[0]["jira_tickets"]])
 
-    def test_portal_sync_skips_deleted_projects(self):
+    def test_portal_sync_restores_portal_removed_projects_returned_by_bpmis(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             store = BPMISProjectStore(Path(temp_dir) / "team_portal.db")
             store.upsert_project(
@@ -122,10 +156,15 @@ class BPMISProjectStoreTests(unittest.TestCase):
 
             results = service.sync_projects(user_key="google:pm@npt.sg", pm_email="pm@npt.sg")
 
-            self.assertEqual(["created", "skipped"], [result.status for result in results])
+            self.assertEqual(["created", "updated"], [result.status for result in results])
+            self.assertEqual("Restored because this BPMIS project is still returned by BPMIS sync.", results[1].message)
             projects = store.list_projects(user_key="google:pm@npt.sg")
-            self.assertEqual([project["bpmis_id"] for project in projects], ["225159"])
-            self.assertEqual(projects[0]["brd_link"], "https://docs/brd-1")
+            projects_by_id = {project["bpmis_id"]: project for project in projects}
+            self.assertEqual(set(projects_by_id), {"225159", "225160"})
+            self.assertEqual(projects_by_id["225159"]["brd_link"], "https://docs/brd-1")
+            self.assertEqual(projects_by_id["225160"]["brd_link"], "https://docs/brd-2")
+            self.assertEqual(projects_by_id["225159"]["jira_tickets"][0]["ticket_key"], "AF-EXIST-1")
+            self.assertEqual(projects_by_id["225159"]["jira_tickets"][0]["jira_title"], "[Feature][AF]Existing synced task")
 
     def test_portal_sync_skips_unchanged_existing_projects(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -142,7 +181,32 @@ class BPMISProjectStoreTests(unittest.TestCase):
             results = service.sync_projects(user_key="google:pm@npt.sg", pm_email="pm@npt.sg")
 
             self.assertEqual(["skipped", "created"], [result.status for result in results])
-            self.assertEqual("Skipped because this BPMIS project is already up to date.", results[0].message)
+            self.assertEqual(
+                "Skipped because this BPMIS project is already up to date. Synced 1 existing Jira task created by this user.",
+                results[0].message,
+            )
+
+    def test_portal_sync_dedupes_existing_jira_tasks_on_repeated_sync(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = BPMISProjectStore(Path(temp_dir) / "team_portal.db")
+            service = PortalProjectSyncService(store, FakeBPMISClient())
+
+            service.sync_projects(user_key="google:pm@npt.sg", pm_email="pm@npt.sg")
+            service.sync_projects(user_key="google:pm@npt.sg", pm_email="pm@npt.sg")
+
+            tickets = store.get_project(user_key="google:pm@npt.sg", bpmis_id="225159")["jira_tickets"]
+            self.assertEqual(["AF-EXIST-1"], [ticket["ticket_key"] for ticket in tickets])
+            self.assertEqual(tickets[0]["status"], "Developing")
+
+    def test_portal_sync_does_not_import_other_users_jira_tasks(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = BPMISProjectStore(Path(temp_dir) / "team_portal.db")
+            service = PortalProjectSyncService(store, FakeBPMISClient())
+
+            service.sync_projects(user_key="google:other@npt.sg", pm_email="other@npt.sg")
+
+            project = store.get_project(user_key="google:other@npt.sg", bpmis_id="225159")
+            self.assertEqual(project["jira_tickets"], [])
 
     def test_portal_sync_updates_when_existing_project_fields_change(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -238,7 +302,23 @@ class BPMISProjectStoreTests(unittest.TestCase):
             )
             self.assertEqual(bpmis_client.status_calls, [("AF-1", "Testing")])
             self.assertEqual(updated["live_jira_status"], "In Progress")
+
+            updated = service.update_ticket_version(
+                user_key="google:pm@npt.sg",
+                bpmis_id="225159",
+                ticket_id=tickets[0]["id"],
+                version_name="Planning_26Q4",
+                version_id="991",
+            )
+            self.assertEqual(bpmis_client.version_calls, [("AF-1", "Planning_26Q4", "991")])
+            self.assertEqual(updated["fix_version_name"], "Planning_26Q4")
+            self.assertEqual(store.list_projects(user_key="google:pm@npt.sg")[0]["jira_tickets"][0]["fix_version_name"], "Planning_26Q4")
+            self.assertEqual(
+                service.list_tickets(user_key="google:pm@npt.sg", bpmis_id="225159")[0]["status"],
+                "Testing",
+            )
             self.assertTrue(service.delete_ticket(user_key="google:pm@npt.sg", bpmis_id="225159", ticket_id=tickets[0]["id"]))
+            self.assertEqual(bpmis_client.delink_calls, [("AF-1", "225159")])
             self.assertEqual(len(service.list_tickets(user_key="google:pm@npt.sg", bpmis_id="225159")), 1)
 
 

@@ -578,6 +578,63 @@ class SeaTalkDashboardServiceTests(unittest.TestCase):
         self.assertEqual(local_call_count, 1)
         self.assertTrue(third["cache"]["hit"])
 
+    def test_build_insights_daily_cache_is_scoped_to_name_mapping_version(self):
+        cache_dir = Path(self.temp_dir.name) / "cache"
+        first_overrides = Path(self.temp_dir.name) / "seatalk" / "first_name_overrides.json"
+        second_overrides = Path(self.temp_dir.name) / "seatalk" / "second_name_overrides.json"
+        first_overrides.parent.mkdir(parents=True, exist_ok=True)
+        first_overrides.write_text(json.dumps({"mappings": {"buddy-992470": "Sabrina Chan"}}), encoding="utf-8")
+        second_overrides.write_text(json.dumps({"mappings": {"buddy-992470": "Ming Ming"}}), encoding="utf-8")
+        local_call_count = 0
+
+        def local_runner(command: list[str]):
+            nonlocal local_call_count
+            local_call_count += 1
+            return subprocess.CompletedProcess(args=command, returncode=0, stdout="SeaTalk Chat History Export\nhello", stderr="")
+
+        codex_exec_count = 0
+
+        def fake_codex_run(command, **kwargs):
+            nonlocal codex_exec_count
+            if "login" in command and "status" in command:
+                return SimpleNamespace(returncode=0, stdout="Logged in using ChatGPT\n", stderr="")
+            codex_exec_count += 1
+            output_path = command[command.index("--output-last-message") + 1]
+            Path(output_path).write_text('{"project_updates":[],"my_todos":[],"team_todos":[]}', encoding="utf-8")
+            return SimpleNamespace(returncode=0, stdout='{"type":"done"}\n', stderr="")
+
+        now = datetime(2026, 4, 21, 21, 0).astimezone()
+        first_service = SeaTalkDashboardService(
+            owner_email="xiaodong.zheng@npt.sg",
+            seatalk_app_path=str(self.app_dir),
+            seatalk_data_dir=str(self.data_dir),
+            codex_workspace_root=str(self.temp_dir.name),
+            daily_cache_dir=cache_dir,
+            name_overrides_path=first_overrides,
+            command_runner=local_runner,
+        )
+        second_service = SeaTalkDashboardService(
+            owner_email="xiaodong.zheng@npt.sg",
+            seatalk_app_path=str(self.app_dir),
+            seatalk_data_dir=str(self.data_dir),
+            codex_workspace_root=str(self.temp_dir.name),
+            daily_cache_dir=cache_dir,
+            name_overrides_path=second_overrides,
+            command_runner=local_runner,
+        )
+
+        with patch("bpmis_jira_tool.source_code_qa.shutil.which", return_value="/usr/local/bin/codex"), patch(
+            "bpmis_jira_tool.source_code_qa.subprocess.run",
+            side_effect=fake_codex_run,
+        ):
+            first_service.build_insights(now=now)
+            SeaTalkDashboardService.clear_cache()
+            second_service.build_insights(now=now)
+
+        self.assertEqual(codex_exec_count, 2)
+        self.assertEqual(local_call_count, 2)
+        self.assertEqual(len(list(cache_dir.glob("insights_*_last_7_days_2026-04-21.json"))), 2)
+
     def test_build_insights_invalid_codex_json_raises_tool_error(self):
         def local_runner(command: list[str]):
             return subprocess.CompletedProcess(args=command, returncode=0, stdout="SeaTalk Chat History Export\nhello", stderr="")

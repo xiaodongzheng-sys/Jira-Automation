@@ -94,7 +94,7 @@
 .bpmis-task-list-head,
 .bpmis-task-card {
   display: grid;
-  grid-template-columns: 136px minmax(360px, 560px) 76px 116px 150px 170px;
+  grid-template-columns: 126px minmax(300px, 1.8fr) 72px 116px minmax(132px, 0.8fr) minmax(126px, 0.8fr) 86px;
   column-gap: 16px;
   align-items: center;
 }
@@ -109,8 +109,7 @@
 }
 
 .bpmis-task-card {
-  position: relative;
-  padding: 12px 116px 12px 12px;
+  padding: 12px;
   border: 1px solid rgba(106, 119, 149, 0.14);
   border-radius: 8px;
   background: #ffffff;
@@ -137,10 +136,6 @@
 }
 
 .bpmis-task-actions {
-  position: absolute;
-  top: 50%;
-  right: 12px;
-  transform: translateY(-50%);
   display: flex;
   justify-content: flex-end;
 }
@@ -162,6 +157,59 @@
 
 .bpmis-task-status:hover {
   box-shadow: 0 0 0 3px rgba(21, 94, 239, 0.12);
+}
+
+.bpmis-task-version {
+  width: 100%;
+  min-height: 36px;
+  padding: 6px 10px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: #475467;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 800;
+  text-align: center;
+}
+
+.bpmis-task-version:hover {
+  border-color: #bfd7ff;
+  background: #edf4ff;
+  color: #155eef;
+}
+
+.bpmis-task-version-cell {
+  position: relative;
+}
+
+.bpmis-task-version-editor {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.bpmis-task-version-input {
+  min-width: 0;
+  min-height: 36px;
+  border: 1px solid #bfd7ff;
+  border-radius: 8px;
+  color: #1f2937;
+  font: inherit;
+  font-size: 0.82rem;
+  font-weight: 700;
+  padding: 6px 8px;
+}
+
+.bpmis-task-version-save {
+  min-height: 36px;
+  padding: 6px 10px;
+}
+
+.bpmis-task-version-menu {
+  min-width: 220px;
 }
 
 .bpmis-task-status-select {
@@ -4302,6 +4350,10 @@ body {
   color: #0f766e;
 }
 
+.productization-inline-status[data-tone="warning"] {
+  color: #b54708;
+}
+
 .productization-inline-status[data-tone="error"] {
   color: #b42318;
 }
@@ -4816,6 +4868,29 @@ select:focus {
 
 .source-qa-tabs {
   margin-bottom: 24px;
+  display: inline-flex;
+  gap: 6px;
+  padding: 6px;
+  border: 1px solid rgba(191, 207, 232, 0.9);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.88);
+  box-shadow: 0 14px 28px rgba(29, 49, 83, 0.08);
+}
+
+.source-qa-tab {
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: #40516d;
+  cursor: pointer;
+  font-weight: 700;
+  padding: 10px 18px;
+}
+
+.source-qa-tab.is-active {
+  background: #2f6df6;
+  color: #fff;
+  box-shadow: 0 10px 20px rgba(47, 109, 246, 0.22);
 }
 
 .source-qa-panel {

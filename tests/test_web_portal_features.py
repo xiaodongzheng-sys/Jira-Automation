@@ -3,30 +3,29 @@ import os
 import tempfile
 import time
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from cryptography.fernet import Fernet
 from openpyxl import load_workbook
 
+import bpmis_jira_tool.web as web_module
 from bpmis_jira_tool.config import Settings
 from bpmis_jira_tool.errors import ToolError
 from bpmis_jira_tool.models import CreatedTicket
+from bpmis_jira_tool.user_config import WebConfigStore
 from bpmis_jira_tool.web import (
     _build_team_profiles_for_display,
     _classify_portal_error,
     _load_effective_team_profiles,
-    _build_productization_argos_translator,
-    _clean_productization_detail_line,
-    _clean_productization_detail_text,
+    _format_productization_description_text,
     _hydrate_setup_defaults,
-    _looks_like_productization_outline_fragment,
     _normalize_productization_issue_row,
     _normalize_productization_ticket_url,
     _results_for_display,
     _resolve_bpmis_access_token,
+    _parse_codex_json_object,
     _serialize_productization_version_candidate,
-    _summarize_productization_detail,
-    _translate_productization_text_to_english,
     create_app,
 )
 
@@ -35,6 +34,8 @@ class _PortalFakeBPMISClient:
     def __init__(self):
         self.detail_calls = []
         self.status_calls = []
+        self.version_calls = []
+        self.delink_calls = []
 
     def list_biz_projects_for_pm_email(self, _email):
         return [{"issue_id": "225159", "project_name": "Fraud Rule Upgrade", "market": "SG"}]
@@ -58,6 +59,49 @@ class _PortalFakeBPMISClient:
     def update_jira_ticket_status(self, ticket_key, status):
         self.status_calls.append((ticket_key, status))
         return {"jiraKey": ticket_key, "status": {"label": status}}
+
+    def update_jira_ticket_fix_version(self, ticket_key, version_name, version_id=None):
+        self.version_calls.append((ticket_key, version_name, version_id))
+        return {"jiraKey": ticket_key, "fixVersions": [version_name]}
+
+    def delink_jira_ticket_from_project(self, ticket_key, project_issue_id):
+        self.delink_calls.append((ticket_key, project_issue_id))
+        return {"jiraKey": ticket_key, "parentIds": []}
+
+
+class _RemoteBPMISConfigClient:
+    def __init__(self, data_root):
+        self.store = WebConfigStore(data_root)
+
+    def bpmis_config_load(self, *, user_key):
+        return self.store.load(user_key)
+
+    def bpmis_config_save(self, *, user_key, config):
+        return self.store.save(config, user_key)
+
+    def bpmis_config_migrate(self, *, from_user_key, to_user_key):
+        self.store.migrate(from_user_key, to_user_key)
+
+    def bpmis_team_profiles_load(self):
+        return self.store.load_team_profiles()
+
+    def bpmis_team_profile_save(self, *, team_key, profile):
+        return self.store.save_team_profile(team_key, profile)
+
+
+class _FakeLocalAgentConfigClient:
+    def __init__(self):
+        self.configs = {}
+
+    def bpmis_config_load(self, *, user_key):
+        return self.configs.get(user_key)
+
+    def bpmis_config_save(self, *, user_key, config):
+        self.configs[user_key] = dict(config)
+        return self.configs[user_key]
+
+    def bpmis_team_profiles_load(self):
+        return {}
 
 
 class WebPortalFeatureTests(unittest.TestCase):
@@ -563,6 +607,70 @@ class WebPortalFeatureTests(unittest.TestCase):
             saved = app.config["CONFIG_STORE"].load("anon:save-token-user")
             self.assertEqual(saved["bpmis_api_access_token"], "portal-token")
 
+    def test_cloud_run_local_agent_mode_saves_setup_in_remote_persistent_store(self):
+        with tempfile.TemporaryDirectory() as cloud_dir_one, tempfile.TemporaryDirectory() as cloud_dir_two, tempfile.TemporaryDirectory() as remote_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": cloud_dir_one,
+                "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_ALLOWED_EMAILS": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
+                "LOCAL_AGENT_MODE": "sync",
+                "LOCAL_AGENT_BASE_URL": "https://agent.example",
+                "LOCAL_AGENT_HMAC_SECRET": "shared-secret",
+                "LOCAL_AGENT_BPMIS_ENABLED": "true",
+            },
+            clear=True,
+        ), patch("bpmis_jira_tool.config.find_dotenv", return_value=""):
+            remote_client = _RemoteBPMISConfigClient(Path(remote_dir))
+            with patch("bpmis_jira_tool.web._build_local_agent_client", return_value=remote_client):
+                app = create_app()
+                app.testing = True
+
+                with app.test_client() as client:
+                    with client.session_transaction() as session:
+                        session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
+                    response = client.post(
+                        "/config/save",
+                        data={
+                            "spreadsheet_link": "",
+                            "input_tab_name": "Sheet1",
+                            "bpmis_api_access_token": "",
+                            "pm_team": "AF",
+                            "sync_pm_email": "spoofed@npt.sg",
+                            "component_route_rules_text": "AF | SG | DBP-Anti-fraud",
+                            "component_default_rules_text": "DBP-Anti-fraud | owner@npt.sg | dev@npt.sg | qa@npt.sg | Planning_26Q2",
+                            "market_header": "Market",
+                            "system_header": "System",
+                            "task_type_value": "Feature",
+                            "priority_value": "P1",
+                            "product_manager_value": "pm@npt.sg",
+                            "reporter_value": "reporter@npt.sg",
+                            "biz_pic_value": "biz@npt.sg",
+                        },
+                        follow_redirects=False,
+                    )
+
+                self.assertEqual(response.status_code, 302)
+                self.assertIsNone(app.config["CONFIG_STORE"].load("google:teammate@npt.sg"))
+                remote_saved = remote_client.store.load("google:teammate@npt.sg")
+                self.assertEqual(remote_saved["pm_team"], "AF")
+                self.assertEqual(remote_saved["sync_pm_email"], "teammate@npt.sg")
+
+                os.environ["TEAM_PORTAL_DATA_DIR"] = cloud_dir_two
+                app_after_redeploy = create_app()
+                app_after_redeploy.testing = True
+                with app_after_redeploy.test_client() as client:
+                    with client.session_transaction() as session:
+                        session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
+                    index_response = client.get("/")
+
+                self.assertEqual(index_response.status_code, 200)
+                self.assertIn(b'value="AF" selected', index_response.data)
+                self.assertIn(b'data-default-tab="run"', index_response.data)
+
     def test_index_renders_setup_run_and_productization_tabs(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
@@ -599,6 +707,9 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertNotIn(b"Matching Versions", response.data)
         self.assertIn(b"Version Keyword", response.data)
         self.assertIn(b"Type a version keyword", response.data)
+        self.assertIn(b"Generate LLM Description", response.data)
+        self.assertIn(b"data-productization-llm-description-button", response.data)
+        self.assertNotIn(b"data-productization-generate-button", response.data)
         self.assertIn(b"Copy whole table", response.data)
         self.assertIn(b"Jira Link", response.data)
         self.assertIn(b"productization_upgrade_summary.js", response.data)
@@ -813,8 +924,136 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertEqual(payload["items"][0]["jira_ticket_number"], "ABC-101")
         self.assertEqual(payload["items"][0]["jira_ticket_url"], "https://jira.shopee.io/browse/ABC-101")
         self.assertEqual(payload["items"][0]["feature_summary"], "Upgrade wallet flow")
+        self.assertEqual(payload["items"][0]["detailed_feature"], "Improve rollback handling.\nSupport retry.")
+        self.assertEqual(payload["items"][0]["detailed_feature_source"], "jira_description")
+        self.assertFalse(payload["llm_description_generated"])
+        self.assertEqual(payload["llm_generated_count"], 0)
         self.assertEqual(payload["items"][0]["pm"], "Alice PM")
         self.assertEqual(payload["items"][0]["prd_links"], [{"label": "https://confluence/prd-1", "url": "https://confluence/prd-1"}])
+
+    def test_productization_llm_descriptions_api_generates_description_separately(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_ALLOWED_EMAILS": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
+            },
+            clear=False,
+        ):
+            app = create_app()
+            app.testing = True
+
+            fake_client = type(
+                "FakeProductizationClient",
+                (),
+                {
+                    "list_issues_for_version": lambda self, version_id: [
+                        {
+                            "jiraKey": "ABC-101",
+                            "summary": "Upgrade wallet flow",
+                            "desc": "<p>Improve rollback handling.</p><p>Support retry.</p>",
+                        }
+                    ],
+                },
+            )()
+            codex_items = [{"jira_ticket_number": "ABC-101", "detailed_feature": "Improve wallet rollback handling and retry support."}]
+
+            with patch("bpmis_jira_tool.web._build_bpmis_client_for_current_user", return_value=fake_client), patch(
+                "bpmis_jira_tool.web._generate_productization_detailed_features_with_codex",
+                return_value=codex_items,
+            ):
+                with app.test_client() as client:
+                    with client.session_transaction() as session:
+                        session["anonymous_user_key"] = "productization-user"
+                        session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
+                        session["google_credentials"] = {"token": "x"}
+
+                    response = client.get("/api/productization-upgrade-summary/llm-descriptions?version_id=88")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertTrue(payload["llm_description_generated"])
+        self.assertEqual(payload["llm_generated_count"], 1)
+        self.assertTrue(payload["codex_detailed_feature"])
+        self.assertEqual(payload["codex_generated_count"], 1)
+        self.assertEqual(payload["items"][0]["detailed_feature"], "Improve wallet rollback handling and retry support.")
+        self.assertEqual(payload["items"][0]["detailed_feature_source"], "codex")
+
+    def test_productization_llm_description_generator_uses_local_agent_when_enabled(self):
+        class FakeLocalAgentClient:
+            def productization_llm_descriptions(self, *, items):
+                self.items = items
+                return [{"jira_ticket_number": "ABC-101", "detailed_feature": "Remote generated feature."}]
+
+        fake_client = FakeLocalAgentClient()
+        with patch("bpmis_jira_tool.web._local_agent_source_code_qa_enabled", return_value=True), patch(
+            "bpmis_jira_tool.web._build_local_agent_client",
+            return_value=fake_client,
+        ), patch("bpmis_jira_tool.web._generate_productization_detailed_features_with_local_codex") as local_generate:
+            items = web_module._generate_productization_detailed_features_with_codex(
+                [{"jira_ticket_number": "ABC-101", "jira_description": "Raw Jira description"}],
+                settings=object(),
+            )
+
+        self.assertEqual(items[0]["detailed_feature"], "Remote generated feature.")
+        self.assertEqual(fake_client.items[0]["jira_ticket_number"], "ABC-101")
+        local_generate.assert_not_called()
+
+    def test_productization_issues_api_keeps_jira_description_when_codex_param_is_sent(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_ALLOWED_EMAILS": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
+            },
+            clear=False,
+        ):
+            app = create_app()
+            app.testing = True
+
+            fake_client = type(
+                "FakeProductizationClient",
+                (),
+                {
+                    "list_issues_for_version": lambda self, version_id: [
+                        {
+                            "jiraKey": "ABC-101",
+                            "summary": "Upgrade wallet flow",
+                            "desc": "<p>Jira description stays visible.</p>",
+                        }
+                    ],
+                },
+            )()
+
+            with patch("bpmis_jira_tool.web._build_bpmis_client_for_current_user", return_value=fake_client), patch(
+                "bpmis_jira_tool.web._generate_productization_detailed_features_with_codex",
+                return_value=[{"jira_ticket_number": "ABC-101", "detailed_feature": "Generated text"}],
+            ) as generate:
+                with app.test_client() as client:
+                    with client.session_transaction() as session:
+                        session["anonymous_user_key"] = "productization-user"
+                        session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
+                        session["google_credentials"] = {"token": "x"}
+
+                    response = client.get("/api/productization-upgrade-summary/issues?version_id=88&codex_detailed_feature=1")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertFalse(payload["llm_description_generated"])
+        self.assertEqual(payload["llm_generated_count"], 0)
+        self.assertFalse(payload["codex_detailed_feature"])
+        self.assertEqual(payload["codex_generated_count"], 0)
+        self.assertEqual(payload["items"][0]["detailed_feature"], "Jira description stays visible.")
+        self.assertEqual(payload["items"][0]["detailed_feature_source"], "jira_description")
+        generate.assert_not_called()
 
     def test_productization_issues_api_filters_to_anti_fraud_components_for_af_team(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
@@ -1062,76 +1301,14 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertEqual(normalized_issue["jira_ticket_number"], "ABC-88")
         self.assertEqual(normalized_issue["pm"], "-")
         self.assertEqual(normalized_issue["prd_links"], [])
-        self.assertEqual(_summarize_productization_detail(""), "-")
+        self.assertEqual(normalized_issue["detailed_feature_source"], "jira_description")
         self.assertIn("First line.", normalized_issue["detailed_feature"])
 
-    def test_clean_productization_detail_text_strips_html(self):
-        cleaned = _clean_productization_detail_text("<p>First line.</p><p>Second line.</p>")
+    def test_format_productization_description_text_strips_html_without_rule_summary(self):
+        cleaned = _format_productization_description_text("<p>[Productization effort] Add fields to ivlog, refer to ivlog sheet:</p><p>PRD: https://confluence/prd</p>")
 
-        self.assertEqual(cleaned, "First line.\nSecond line.")
-
-    def test_clean_productization_detail_text_removes_links_and_noise_prefixes(self):
-        cleaned = _clean_productization_detail_text(
-            """
-            <p>[Productization effort] Add fields to ivlog, refer to ivlog sheet:</p>
-            <p>[https://docs.google.com/spreadsheets/d/example/edit#gid=123]</p>
-            <p>PRD: https://confluence.shopee.io/x/abc123</p>
-            """
-        )
-
-        self.assertEqual(cleaned, "Add fields to ivlog")
-
-    def test_clean_productization_detail_line_removes_reference_phrases(self):
-        self.assertEqual(
-            _clean_productization_detail_line("Add fields to ivlog, refer to ivlog sheet"),
-            "Add fields to ivlog",
-        )
-        self.assertEqual(
-            _clean_productization_detail_line("Drainage改造：2way改造，支持FE展示，详见：PRD"),
-            "Drainage改造：2way改造，支持FE展示",
-        )
-
-    def test_clean_productization_detail_line_removes_section_and_urls(self):
-        cleaned = _clean_productization_detail_line(
-            "[https://confluence.shopee.io/x/ww6Itw] section 4.6 PRD: https://confluence.shopee.io/x/ww6Itw"
-        )
-
-        self.assertEqual(cleaned, "")
-
-    def test_clean_productization_detail_line_removes_low_value_versions_and_row_references(self):
-        cleaned = _clean_productization_detail_line(
-            "Upgrade product version: v2.0.33_2060410 PRD: scenarioL1 = MCCManualSplit 4. new scenario for MCA v1.1(FCYConversion for retail and SME, main track Jira: ) new scenarios for card self-uplift Authentication Scenarios Row 499-501 2."
-        )
-
-        self.assertNotIn("v2.0.33_2060410", cleaned)
-        self.assertNotIn("v1.1", cleaned)
-        self.assertNotIn("Row 499-501", cleaned)
-        self.assertNotIn("scenarioL1", cleaned)
-        self.assertIn("new scenario for MCA", cleaned)
-
-    def test_clean_productization_detail_line_removes_antifraud_version_plan_header(self):
-        cleaned = _clean_productization_detail_line(
-            "SG AntiFraud verision plan _feature timeline: new scenarios for card self-uplift"
-        )
-
-        self.assertEqual(cleaned, "new scenarios for card self-uplift")
-
-    def test_clean_productization_detail_line_keeps_actionable_feature_sentence(self):
-        cleaned = _clean_productization_detail_line(
-            "F30 function update to add new identifier F30 enhancement to support card self-uplift"
-        )
-
-        self.assertEqual(
-            cleaned,
-            "F30 function update to add new identifier F30 enhancement to support card self-uplift",
-        )
-
-    def test_outline_fragment_detection_filters_directory_like_text(self):
-        self.assertTrue(_looks_like_productization_outline_fragment("FE UI Pages"))
-        self.assertTrue(_looks_like_productization_outline_fragment("UI Data Points"))
-        self.assertFalse(
-            _looks_like_productization_outline_fragment("Add FE UI pages for multi-currency account settings")
-        )
+        self.assertIn("[Productization effort] Add fields to ivlog, refer to ivlog sheet:", cleaned)
+        self.assertIn("PRD: https://confluence/prd", cleaned)
 
     def test_productization_summary_normalizes_ticket_url_from_issue_key(self):
         normalized_issue = _normalize_productization_issue_row(
@@ -1151,36 +1328,10 @@ class WebPortalFeatureTests(unittest.TestCase):
             "https://jira.shopee.io/browse/ABC-99",
         )
 
-    def test_productization_summary_returns_full_cleaned_text_without_summarizing(self):
-        summary = _summarize_productization_detail("<p>First line.</p><p>Second line.</p>")
+    def test_parse_codex_json_object_accepts_fenced_json(self):
+        payload = _parse_codex_json_object('```json\n{"items":[{"jira_ticket_number":"ABC-1","detailed_feature":"Done"}]}\n```')
 
-        self.assertEqual(summary, "First line.\nSecond line.")
-
-    def test_productization_summary_does_not_append_ellipsis_for_long_text(self):
-        long_summary = " ".join(["Detailed"] * 80)
-        summary = _summarize_productization_detail(long_summary)
-
-        self.assertEqual(summary, long_summary)
-        self.assertNotIn("...", summary)
-
-    def test_productization_summary_keeps_chinese_text_without_translation(self):
-        summary = _summarize_productization_detail("支持FE展示；新增字段")
-
-        self.assertEqual(summary, "支持FE展示；新增字段")
-
-    def test_translate_productization_text_to_english_translates_cjk_lines(self):
-        fake_translator = type("FakeTranslator", (), {"translate": lambda self, text: "Support FE display"})()
-
-        with patch("bpmis_jira_tool.web._build_productization_argos_translator", return_value=fake_translator):
-            translated = _translate_productization_text_to_english("支持FE展示")
-
-        self.assertEqual(translated, "Support FE display")
-
-    def test_translate_productization_text_to_english_keeps_english_lines(self):
-        with patch("bpmis_jira_tool.web._build_productization_argos_translator", return_value=None):
-            translated = _translate_productization_text_to_english("Add fields to ivlog")
-
-        self.assertEqual(translated, "Add fields to ivlog")
+        self.assertEqual(payload["items"][0]["jira_ticket_number"], "ABC-1")
 
     def test_save_mapping_config_fills_email_defaults_for_google_user(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
@@ -1365,6 +1516,7 @@ class WebPortalFeatureTests(unittest.TestCase):
                 list_response = client.get("/api/bpmis-projects")
 
             self.assertEqual(delete_response.status_code, 200)
+            self.assertEqual(delete_response.get_json()["scope"], "portal_only")
             self.assertEqual(list_response.get_json()["projects"], [])
             self.assertEqual(len(store.list_projects(user_key="anon:second")), 1)
 
@@ -1471,11 +1623,28 @@ class WebPortalFeatureTests(unittest.TestCase):
             with app.test_client() as client:
                 with client.session_transaction() as session:
                     session["anonymous_user_key"] = "create-user"
+                version_response = client.patch(
+                    f"/api/bpmis-projects/225159/jira-tickets/{ticket_id}/version",
+                    json={"version_name": "Planning_26Q4", "version_id": "991"},
+                )
+
+            self.assertEqual(version_response.status_code, 200)
+            self.assertEqual(fake_client.version_calls, [("AF-1", "Planning_26Q4", "991")])
+            self.assertEqual(
+                app.config["BPMIS_PROJECT_STORE"].list_projects(user_key="anon:create-user")[0]["jira_tickets"][0]["fix_version_name"],
+                "Planning_26Q4",
+            )
+
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["anonymous_user_key"] = "create-user"
                 delete_ticket_response = client.delete(f"/api/bpmis-projects/225159/jira-tickets/{ticket_id}")
                 tickets_after_delete_response = client.get("/api/bpmis-projects/225159/jira-tickets")
 
             self.assertEqual(delete_ticket_response.status_code, 200)
             self.assertTrue(delete_ticket_response.get_json()["deleted"])
+            self.assertEqual(delete_ticket_response.get_json()["scope"], "bpmis_and_portal")
+            self.assertEqual(fake_client.delink_calls, [("AF-1", "225159")])
             self.assertEqual(tickets_after_delete_response.get_json()["tickets"], [])
 
     def test_team_defaults_allow_saving_setup_without_manual_advanced_mapping(self):
@@ -1517,6 +1686,59 @@ class WebPortalFeatureTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"Your web Jira config was saved for this user", response.data)
+
+    def test_cloud_run_local_agent_mode_persists_setup_outside_ephemeral_data_dir(self):
+        remote_client = _FakeLocalAgentConfigClient()
+        env = {
+            "FLASK_SECRET_KEY": "test-secret",
+            "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg",
+            "TEAM_PORTAL_BASE_URL": "https://jira-tool.example.com",
+            "LOCAL_AGENT_MODE": "sync",
+            "LOCAL_AGENT_BASE_URL": "https://agent.example.com",
+            "LOCAL_AGENT_HMAC_SECRET": "shared-secret",
+            "LOCAL_AGENT_BPMIS_ENABLED": "true",
+            "BPMIS_CALL_MODE": "local_agent",
+            "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
+        }
+        with tempfile.TemporaryDirectory() as first_temp, patch.dict(
+            os.environ,
+            {**env, "TEAM_PORTAL_DATA_DIR": first_temp},
+            clear=False,
+        ), patch("bpmis_jira_tool.web._build_local_agent_client", return_value=remote_client):
+            app = create_app()
+            app.testing = True
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
+                    session["google_credentials"] = {"token": "x"}
+                save_response = client.post(
+                    "/config/save",
+                    data={
+                        "spreadsheet_link": "sheet-123",
+                        "input_tab_name": "Sheet1",
+                        "pm_team": "AF",
+                    },
+                    follow_redirects=False,
+                )
+            self.assertIsNone(app.config["CONFIG_STORE"].load("google:teammate@npt.sg"))
+
+        with tempfile.TemporaryDirectory() as second_temp, patch.dict(
+            os.environ,
+            {**env, "TEAM_PORTAL_DATA_DIR": second_temp},
+            clear=False,
+        ), patch("bpmis_jira_tool.web._build_local_agent_client", return_value=remote_client):
+            redeployed_app = create_app()
+            redeployed_app.testing = True
+            with redeployed_app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
+                    session["google_credentials"] = {"token": "x"}
+                page_response = client.get("/")
+
+        self.assertEqual(save_response.status_code, 302)
+        self.assertIn("google:teammate@npt.sg", remote_client.configs)
+        self.assertIn("AF | SG | DBP-Anti-fraud", remote_client.configs["google:teammate@npt.sg"]["component_route_rules_text"])
+        self.assertIn(b'data-default-tab="run"', page_response.data)
 
     def test_index_renders_team_templates_with_actual_email_for_google_user(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(

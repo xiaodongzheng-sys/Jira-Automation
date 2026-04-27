@@ -90,7 +90,19 @@ class SourceCodeQARouteTests(unittest.TestCase):
             teammate_response = client.get("/source-code-qa")
 
         self.assertIn(b"Repository Mapping", owner_response.data)
+        self.assertIn(b"Repo Admin", owner_response.data)
+        self.assertIn(b'data-tab-trigger="admin"', owner_response.data)
+        self.assertIn(b'data-source-view-tab="admin"', owner_response.data)
+        self.assertIn(b'data-tab-panel="admin"', owner_response.data)
+        self.assertIn(b'data-source-view-panel="admin"', owner_response.data)
+        self.assertIn(b"Save Config", owner_response.data)
+        self.assertIn(b"Sync / Refresh", owner_response.data)
         self.assertNotIn(b"Repository Mapping", teammate_response.data)
+        self.assertNotIn(b"Repo Admin", teammate_response.data)
+        self.assertNotIn(b'data-tab-trigger="admin"', teammate_response.data)
+        self.assertNotIn(b'data-source-view-tab="admin"', teammate_response.data)
+        self.assertNotIn(b"Save Config", teammate_response.data)
+        self.assertNotIn(b"Sync / Refresh", teammate_response.data)
         self.assertIn(b"data-source-question", teammate_response.data)
         self.assertIn(b"data-source-live-answer", teammate_response.data)
         self.assertNotIn(b"LLM Budget", teammate_response.data)
@@ -103,6 +115,116 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertIn(b"Vertex AI", teammate_response.data)
         self.assertIn(b"Model Availability", owner_response.data)
         self.assertNotIn(b"Model Availability", teammate_response.data)
+
+    def test_source_code_qa_admin_allowlist_can_manage_repositories(self):
+        with patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": self.temp_dir.name,
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg",
+                "SOURCE_CODE_QA_ADMIN_EMAILS": "other-owner@npt.sg,xiaodong.zheng1991@gmail.com",
+            },
+            clear=False,
+        ):
+            app = create_app()
+            app.testing = True
+
+        with app.test_client() as client:
+            self._login(client, "xiaodong.zheng1991@gmail.com")
+            page_response = client.get("/source-code-qa")
+            config_response = client.get("/api/source-code-qa/config")
+
+        self.assertIn(b"Repository Mapping", page_response.data)
+        self.assertTrue(config_response.get_json()["can_manage"])
+
+    def test_source_code_qa_builtin_owner_can_manage_when_env_owner_changes(self):
+        with patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": self.temp_dir.name,
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg",
+                "SOURCE_CODE_QA_OWNER_EMAIL": "temporary-owner@npt.sg",
+                "SOURCE_CODE_QA_ADMIN_EMAILS": "",
+            },
+            clear=False,
+        ):
+            app = create_app()
+            app.testing = True
+
+        with app.test_client() as client:
+            self._login(client, "xiaodong.zheng@npt.sg")
+            page_response = client.get("/source-code-qa")
+            config_response = client.get("/api/source-code-qa/config")
+
+        config_payload = config_response.get_json()
+        self.assertIn(b"Repository Mapping", page_response.data)
+        self.assertTrue(config_payload["can_manage"])
+        self.assertEqual(config_payload["auth"]["admin_match_source"], "builtin_admin")
+
+    def test_source_code_qa_default_owner_alias_can_manage_repositories(self):
+        with patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": self.temp_dir.name,
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg",
+                "SOURCE_CODE_QA_GITLAB_TOKEN": "secret-token",
+            },
+            clear=True,
+        ):
+            app = create_app()
+            app.testing = True
+
+        sync_result = {
+            "status": "ok",
+            "key": "AF:All",
+            "results": [{"state": "ok", "display_name": "Repo One"}],
+            "repo_status": [{"display_name": "Repo One", "state": "synced", "message": "ready"}],
+        }
+        with patch("bpmis_jira_tool.source_code_qa.SourceCodeQAService.sync", return_value=sync_result):
+            with app.test_client() as client:
+                self._login(client, "xiaodong.zheng1991@gmail.com")
+                page_response = client.get("/source-code-qa")
+                config_response = client.get("/api/source-code-qa/config")
+                save_response = client.post(
+                    "/api/source-code-qa/config",
+                    json={"pm_team": "AF", "country": "All", "repositories": [{"url": "https://git.example.com/team/repo.git"}]},
+                )
+                sync_response = client.post("/api/source-code-qa/sync", json={"pm_team": "AF", "country": "All"})
+                sync_payload = sync_response.get_json()
+                sync_snapshot = {}
+                for _ in range(20):
+                    job_response = client.get(f"/api/jobs/{sync_payload['job_id']}")
+                    sync_snapshot = job_response.get_json()
+                    if sync_snapshot.get("state") == "completed":
+                        break
+                    time.sleep(0.05)
+
+        config_payload = config_response.get_json()
+        self.assertIn(b"Repository Mapping", page_response.data)
+        self.assertTrue(config_payload["can_manage"])
+        self.assertEqual(config_payload["auth"]["signed_in_email"], "xiaodong.zheng1991@gmail.com")
+        self.assertEqual(config_payload["auth"]["admin_match_source"], "admin_allowlist")
+        self.assertEqual(save_response.status_code, 200)
+        self.assertEqual(sync_response.status_code, 200)
+        self.assertEqual(sync_payload["status"], "queued")
+        self.assertEqual(sync_snapshot.get("state"), "completed")
+
+    def test_source_code_qa_manage_forbidden_reports_signed_in_email(self):
+        with self.app.test_client() as client:
+            self._login(client, "teammate@npt.sg")
+            response = client.post(
+                "/api/source-code-qa/config",
+                json={"pm_team": "AF", "country": "All", "repositories": [{"url": "https://git.example.com/team/repo.git"}]},
+            )
+
+        payload = response.get_json()
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(payload["auth"]["signed_in_email"], "teammate@npt.sg")
+        self.assertFalse(payload["auth"]["can_manage"])
+        self.assertIn("Signed in as teammate@npt.sg", payload["message"])
 
     def test_config_save_is_owner_only_and_validates_https(self):
         with self.app.test_client() as client:
@@ -507,6 +629,53 @@ class SourceCodeQARouteTests(unittest.TestCase):
         ensure_synced.assert_called_once_with(pm_team="AF", country="All")
         self.assertTrue(response.get_json()["auto_sync"]["attempted"])
 
+    def test_cloud_run_local_agent_query_queues_auto_sync_in_background(self):
+        calls = []
+
+        class FakeLocalAgentClient:
+            def source_code_qa_ensure_synced_today(self, *, pm_team, country, background=False):
+                calls.append(("ensure", pm_team, country, background))
+                return {"status": "background_queued", "attempted": False, "key": f"{pm_team}:{country}"}
+
+            def source_code_qa_query(self, payload, *, progress_callback=None):
+                calls.append(("query", payload["pm_team"], payload["country"], payload.get("question")))
+                if progress_callback:
+                    progress_callback("codex_stream", "Reading repo files.", 0, 0)
+                return {"status": "ok", "answer_mode": "auto", "summary": "agent answer", "matches": []}
+
+        with patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": self.temp_dir.name,
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg",
+                "LOCAL_AGENT_MODE": "sync",
+                "LOCAL_AGENT_BASE_URL": "https://agent.example",
+                "LOCAL_AGENT_HMAC_SECRET": "shared-secret",
+                "LOCAL_AGENT_SOURCE_CODE_QA_ENABLED": "true",
+                "SOURCE_CODE_QA_QUERY_SYNC_MODE": "background",
+            },
+            clear=False,
+        ):
+            app = create_app()
+            app.testing = True
+
+        with patch("bpmis_jira_tool.web._source_code_qa_provider_available", return_value=True), patch(
+            "bpmis_jira_tool.web._build_local_agent_client",
+            return_value=FakeLocalAgentClient(),
+        ):
+            with app.test_client() as client:
+                self._login(client, "teammate@npt.sg")
+                response = client.post(
+                    "/api/source-code-qa/query",
+                    json={"pm_team": "AF", "country": "All", "question": "where is createIssue", "llm_provider": "codex_cli_bridge"},
+                )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(calls[0], ("ensure", "AF", "All", True))
+        self.assertEqual(calls[1], ("query", "AF", "All", "where is createIssue"))
+        self.assertEqual(response.get_json()["auto_sync"]["status"], "background_queued")
+
     def test_config_api_reports_llm_not_ready_by_default(self):
         with self.app.test_client() as client:
             self._login(client, "teammate@npt.sg")
@@ -628,6 +797,20 @@ class SourceCodeQARouteTests(unittest.TestCase):
         first_store.complete(job.job_id, results=[{"status": "ok"}], notice={"summary": "done"})
 
         second_store = JobStore(path)
+        snapshot = second_store.snapshot(job.job_id)
+
+        self.assertIsNotNone(snapshot)
+        self.assertEqual(snapshot["state"], "completed")
+        self.assertEqual(snapshot["results"][0]["status"], "ok")
+
+    def test_job_store_refreshes_snapshots_written_by_another_worker(self):
+        path = Path(self.temp_dir.name) / "run" / "jobs.json"
+        first_store = JobStore(path)
+        second_store = JobStore(path)
+        job = first_store.create("source-code-qa-sync", "Sync Source Code Repositories")
+        first_store.update(job.job_id, state="running", message="Indexing.")
+        first_store.complete(job.job_id, results=[{"status": "ok"}], notice={"summary": "done"})
+
         snapshot = second_store.snapshot(job.job_id)
 
         self.assertIsNotNone(snapshot)

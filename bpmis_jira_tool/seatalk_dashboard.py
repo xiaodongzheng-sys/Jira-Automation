@@ -385,7 +385,9 @@ class SeaTalkDashboardService:
         safe_kind = re.sub(r"[^a-z0-9_]+", "_", kind.lower()).strip("_")
         if safe_kind == "insights":
             safe_mode = re.sub(r"[^a-z0-9_]+", "_", SEATALK_INSIGHTS_PROMPT_MODE.lower()).strip("_")
-            safe_kind = f"{safe_kind}_{safe_mode}"
+            mapping_token = self._name_overrides_cache_token()
+            mapping_digest = hashlib.sha1(mapping_token.encode("utf-8")).hexdigest()[:12] if mapping_token else "nomap"
+            safe_kind = f"{safe_kind}_{safe_mode}_{mapping_digest}"
         cache_date = now.astimezone(SEATALK_INSIGHTS_TIMEZONE).date().isoformat()
         return self.daily_cache_dir / f"{safe_kind}_last_{int(days)}_days_{cache_date}.json"
 
@@ -431,6 +433,7 @@ class SeaTalkDashboardService:
             "You are Codex helping Xiaodong Zheng review SeaTalk chat history. "
             "You must not modify files or run commands. Produce only valid JSON. "
             "Analyze the last 7 days of SeaTalk messages and write concise English work summaries. "
+            "Use sender and conversation labels exactly as evidence. Do not replace unresolved UID, buddy, or group IDs with guessed names. "
             "Prioritize Anti-fraud, Credit Risk / Collection, and Ops Risk / GRC topics, but first consider all messages. "
             "Classify project update domains as exactly one of Anti-fraud, Credit Risk, Ops Risk, General. "
             "Use General as a broad awareness radar: include any noteworthy update Xiaodong should know from the whole chat history that does not fit the three owned product lines. "

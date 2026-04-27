@@ -7,13 +7,14 @@ This deployment keeps the Flask team portal on Google Cloud Run while Mac-only c
 ```text
 Cloud Run team portal
   -> Google OAuth
-  -> BPMIS API directly from GCP
+  -> BPMIS API through Mac local-agent when VPN-only
   -> Mac local-agent through fixed ngrok URL
        -> Codex CLI
        -> SeaTalk desktop data
+       -> BPMIS API through the Mac VPN
 ```
 
-`BPMIS_CALL_MODE=direct` is the first assumption. Only switch BPMIS to the local-agent path later if Cloud Run cannot reach BPMIS.
+Use `BPMIS_CALL_MODE=local_agent` when Cloud Run cannot reach BPMIS directly but the Mac can reach it through VPN.
 
 ## Mac Host
 
@@ -26,8 +27,10 @@ LOCAL_AGENT_PUBLIC_URL=https://your-fixed-agent-domain.ngrok.app
 LOCAL_AGENT_HMAC_SECRET=<shared-random-secret>
 LOCAL_AGENT_SOURCE_CODE_QA_ENABLED=true
 LOCAL_AGENT_SEATALK_ENABLED=true
-LOCAL_AGENT_BPMIS_ENABLED=false
-BPMIS_CALL_MODE=direct
+LOCAL_AGENT_BPMIS_ENABLED=true
+LOCAL_AGENT_TEAM_PORTAL_DATA_DIR=/absolute/path/to/team-portal-data
+SOURCE_CODE_QA_QUERY_SYNC_MODE=background
+BPMIS_CALL_MODE=local_agent
 ```
 
 Start the local capability server and tunnel:
@@ -41,6 +44,7 @@ curl http://127.0.0.1:7007/healthz
 The local-agent reads the same Mac-local state as the current portal:
 
 - Codex CLI login and synced repos under `TEAM_PORTAL_DATA_DIR/source_code_qa`
+- Set `LOCAL_AGENT_TEAM_PORTAL_DATA_DIR` to the stable Mac data directory that already contains `source_code_qa/repos` and `source_code_qa/indexes`. Do not let Source Code Q&A use the Cloud Run `/tmp/team-portal` directory as its repo/index store.
 - SeaTalk app and data from `SEATALK_LOCAL_APP_PATH` / `SEATALK_LOCAL_DATA_DIR`
 - Source Code Q&A GitLab token from `SOURCE_CODE_QA_GITLAB_TOKEN`
 
@@ -65,6 +69,40 @@ LOCAL_AGENT_BASE_URL=https://your-fixed-agent-domain.ngrok.app \
 ./scripts/deploy_cloud_run.sh
 ```
 
+For quick validation without starting a Cloud Build, run the same command with:
+
+```bash
+CLOUD_RUN_DEPLOY_DRY_RUN=1 ./scripts/deploy_cloud_run.sh
+```
+
+For routine redeploys, the script records a `TEAM_PORTAL_DEPLOY_HASH` on the Cloud Run revision. If you want the script to skip Cloud Build when the local source plus deploy env are unchanged, use:
+
+```bash
+CLOUD_RUN_SKIP_UNCHANGED=1 ./scripts/deploy_cloud_run.sh
+```
+
+If CI or an operator has already built and pushed an image to Artifact Registry, deploy that exact image digest/tag and skip the local source build:
+
+```bash
+CLOUD_RUN_IMAGE=asia-southeast1-docker.pkg.dev/PROJECT/REPO/team-portal:TAG \
+./scripts/deploy_cloud_run.sh
+```
+
+This still applies the same Cloud Run environment variables and secret references; it only replaces `--source .` with `--image`.
+
+To build that image through Cloud Build first, use the opt-in helper:
+
+```bash
+GOOGLE_CLOUD_PROJECT=PROJECT \
+CLOUD_RUN_REGION=asia-southeast1 \
+CLOUD_RUN_ARTIFACT_REPOSITORY=team-portal \
+CLOUD_RUN_IMAGE_NAME=team-portal \
+CLOUD_RUN_IMAGE_TAG=manual-$(date +%Y%m%d-%H%M%S) \
+./scripts/build_cloud_run_image.sh
+```
+
+The helper only builds and pushes the image. It does not deploy by itself; use the printed `CLOUD_RUN_IMAGE=... ./scripts/deploy_cloud_run.sh` command when you are ready.
+
 Attach file/env secrets:
 
 ```bash
@@ -74,6 +112,28 @@ gcloud run services update team-portal \
   --set-secrets FLASK_SECRET_KEY=team-portal-flask-secret:latest,TEAM_PORTAL_CONFIG_ENCRYPTION_KEY=team-portal-config-encryption-key:latest,LOCAL_AGENT_HMAC_SECRET=local-agent-hmac-secret:latest \
   --set-env-vars GOOGLE_OAUTH_CLIENT_SECRET_FILE=/secrets/google/client_secret.json
 ```
+
+Use `./scripts/deploy_cloud_run_full.sh` for first-time bootstrap or when secrets/IAM may need repair. To keep repeated full deploys predictable, it reuses the existing Flask secret by default and only adds new Secret Manager versions when values change. Set `CLOUD_RUN_ROTATE_FLASK_SECRET=1` to intentionally rotate Flask sessions, or `CLOUD_RUN_FORCE_SECRET_VERSION=1` to force new secret versions.
+
+## Deployment Speed Notes
+
+Current bottlenecks:
+
+- `gcloud run deploy --source .` packages the local source, runs Cloud Build, and stores the resulting image in Artifact Registry.
+- Rebuilding dependencies is expensive when `requirements-cloud-run.txt` or the dependency layer changes.
+- Repeated first-time bootstrap work can be slow if every run enables services, reapplies IAM, or creates new secret versions.
+
+Fast paths now available:
+
+- `CLOUD_RUN_DEPLOY_DRY_RUN=1` validates local config without starting Cloud Build.
+- `CLOUD_RUN_SKIP_UNCHANGED=1` skips a no-op source deploy when the runtime source, image value, and deploy env match the last revision hash.
+- `CLOUD_RUN_IMAGE=...` deploys a prebuilt Artifact Registry image and skips the source-build step.
+- `./scripts/build_cloud_run_image.sh` is an opt-in Cloud Build image path; it does not change the default source deploy.
+- `CLOUD_RUN_SKIP_SERVICE_ENABLE=1` and `CLOUD_RUN_SKIP_IAM_BINDINGS=1` can trim repeated full-bootstrap checks after the project is already configured.
+
+For Source Code Q&A, Cloud Run deploys set `SOURCE_CODE_QA_QUERY_SYNC_MODE=background` by default. User questions start against the last usable Mac-local index while the Mac local-agent queues the daily freshness check in the background, so repo clone/pull/index work no longer blocks the answer path.
+
+The source upload is also trimmed by `.gcloudignore`: docs, tests, eval fixtures, local caches, runtime data, SQLite files, logs, and secrets are excluded from source deploy uploads. Runtime folders such as `bpmis_jira_tool`, `config`, `prd_briefing`, `static`, and `templates` remain included.
 
 Add this OAuth redirect in Google Cloud Console:
 
@@ -93,6 +153,6 @@ curl https://your-fixed-agent-domain.ngrok.app/healthz
 Then verify in the portal:
 
 - Google OAuth login succeeds.
-- BPMIS setup and create flow still uses direct `BPMIS_BASE_URL`.
+- BPMIS setup and create flow succeeds through the Mac local-agent proxy.
 - Source Code Q&A with Codex returns an answer from the Mac local-agent.
 - SeaTalk Summary reads the Mac SeaTalk desktop data through the local-agent.

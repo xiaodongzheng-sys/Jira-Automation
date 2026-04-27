@@ -61,6 +61,23 @@ class UserConfigStoreTests(unittest.TestCase):
             self.assertEqual(store.load()["spreadsheet_link"], "legacy-sheet")
             self.assertTrue((data_root / "team_portal.db").exists())
 
+    def test_user_config_persistence_depends_on_same_data_root(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            first_root = temp_path / "first"
+            second_root = temp_path / "second"
+
+            WebConfigStore(first_root).save(
+                {"pm_team": "AF", "sync_pm_email": "pm@npt.sg"},
+                user_key="google:user@example.com",
+            )
+
+            self.assertEqual(
+                WebConfigStore(first_root).load("google:user@example.com")["pm_team"],
+                "AF",
+            )
+            self.assertIsNone(WebConfigStore(second_root).load("google:user@example.com"))
+
     def test_build_field_mappings_supports_system_market_component_routing(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             store = WebConfigStore(Path(temp_dir))

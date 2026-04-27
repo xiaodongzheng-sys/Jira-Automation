@@ -45,6 +45,8 @@
   const modelAvailabilityStatus = document.querySelector('[data-source-model-availability-status]');
   const saveModelAvailabilityButton = document.querySelector('[data-source-save-model-availability]');
   const newSessionButton = document.querySelector('[data-source-new-session]');
+  const viewTabs = Array.from(document.querySelectorAll('[data-source-view-tab]'));
+  const viewPanels = Array.from(document.querySelectorAll('[data-source-view-panel]'));
   const sessionList = document.querySelector('[data-source-session-list]');
   const sessionTitle = document.querySelector('[data-source-session-title]');
   const sessionContext = document.querySelector('[data-source-session-context]');
@@ -59,6 +61,7 @@
   let llmPolicy = {};
   let indexHealthPayload = {};
   let releaseGatePayload = {};
+  let configLoadState = 'idle';
   let lastPayload = null;
   let conversationContext = null;
   let sourceSessions = [];
@@ -70,6 +73,23 @@
   let pendingUserMessage = null;
   let activeQueryControl = null;
   const preferenceKey = 'source-code-qa:last-query-config:v1';
+
+  const setSourceView = (view) => {
+    const nextView = view === 'admin' && canManage ? 'admin' : 'chat';
+    viewTabs.forEach((tab) => {
+      const active = tab.dataset.sourceViewTab === nextView;
+      tab.classList.toggle('is-active', active);
+      tab.setAttribute('aria-selected', active ? 'true' : 'false');
+    });
+    viewPanels.forEach((panel) => {
+      const active = panel.dataset.sourceViewPanel === nextView;
+      panel.classList.toggle('is-active', active);
+      panel.hidden = !active;
+    });
+    if (nextView === 'admin') {
+      renderSelectedConfig();
+    }
+  };
 
   const escapeHtml = (value) => String(value ?? '')
     .replaceAll('&', '&amp;')
@@ -370,6 +390,7 @@
       messages.push({
         role: 'assistant',
         text: liveAssistantMessage.text,
+        title: liveAssistantMessage.title || 'Codex Live',
         created_at: liveAssistantMessage.created_at || '',
         live: true,
         stopped: Boolean(liveAssistantMessage.stopped),
@@ -399,7 +420,7 @@
         <article class="source-qa-message source-qa-message-${escapeHtml(message.role || 'assistant')}${message.live ? ' is-live' : ''}">
           <div class="source-qa-message-head">
             <strong>
-              ${message.live ? `Codex Live <em>${message.stopped ? 'Stopped' : 'Running - not final answer'}</em>` : (message.role === 'user' ? 'You' : 'Assistant')}
+              ${message.live ? `${escapeHtml(message.title || 'Codex Live')} <em>${message.stopped ? 'Stopped' : 'Running - not final answer'}</em>` : (message.role === 'user' ? 'You' : 'Assistant')}
             </strong>
             <span>${escapeHtml(meta)}</span>
           </div>
@@ -460,12 +481,12 @@
     }
   };
 
-  const loadSession = async (sessionId) => {
+  const loadSession = async (sessionId, options = {}) => {
     if (!sessionsUrl || !sessionId) return null;
     try {
       const payload = await fetch(`${sessionsUrl}/${encodeURIComponent(sessionId)}`).then(readJson);
-      liveAssistantMessage = null;
-      pendingUserMessage = null;
+      if (!options.preserveLive) liveAssistantMessage = null;
+      if (!options.preservePending) pendingUserMessage = null;
       applyActiveSession(payload.session || null);
       return payload.session || null;
     } catch (error) {
@@ -498,7 +519,7 @@
     }
   };
 
-  const createSession = async () => {
+  const createSession = async (options = {}) => {
     if (!sessionsUrl) return null;
     const payload = await fetch(sessionsUrl, {
       method: 'POST',
@@ -513,16 +534,16 @@
     if (session) {
       sourceSessions = [session, ...sourceSessions.filter((item) => item.id !== session.id)].slice(0, 30);
       conversationContext = null;
-      liveAssistantMessage = null;
-      pendingUserMessage = null;
+      if (!options.preserveLive) liveAssistantMessage = null;
+      if (!options.preservePending) pendingUserMessage = null;
       applyActiveSession(session);
     }
     return session;
   };
 
-  const ensureActiveSession = async () => {
+  const ensureActiveSession = async (options = {}) => {
     if (activeSessionId) return activeSession;
-    return createSession();
+    return createSession(options);
   };
 
   const updateCountryVisibility = () => {
@@ -652,6 +673,24 @@
   };
 
   const renderSelectedConfig = () => {
+    if (configLoadState !== 'loaded') {
+      const loading = configLoadState === 'loading' || configLoadState === 'idle';
+      if (configStatus) {
+        configStatus.textContent = loading
+          ? `Loading repository configuration for ${currentKey()}...`
+          : 'Repository config could not be loaded. Refresh the page or try again.';
+      }
+      if (reposInput) {
+        reposInput.value = loading ? 'Loading repository mapping...' : '';
+        reposInput.disabled = loading;
+      }
+      if (saveButton) saveButton.disabled = true;
+      if (syncButton) syncButton.disabled = true;
+      if (repoStatus) {
+        repoStatus.innerHTML = `<div class="source-qa-empty">${loading ? 'Repository status is loading.' : 'Repository status is unavailable until config loads.'}</div>`;
+      }
+      return;
+    }
     const entries = config.mappings?.[currentKey()] || [];
     const count = entries.length;
     configStatus.textContent = count
@@ -659,7 +698,10 @@
       : `No repositories configured for ${currentKey()} yet.`;
     if (reposInput) {
       reposInput.value = entries.map((entry) => `${entry.display_name} | ${entry.url}`).join('\n');
+      reposInput.disabled = false;
     }
+    if (saveButton) saveButton.disabled = false;
+    if (syncButton) syncButton.disabled = !gitAuthReady;
     renderStatus(entries.map((entry) => ({
       ...entry,
       state: 'configured',
@@ -685,9 +727,12 @@
   };
 
   const loadConfig = async () => {
+    configLoadState = 'loading';
+    renderSelectedConfig();
     try {
       const payload = await apiFetchJson(configUrl, {}, { attempts: 5 });
       config = payload.config || { mappings: {} };
+      configLoadState = 'loaded';
       gitAuthReady = Boolean(payload.git_auth_ready);
       llmReady = Boolean(payload.llm_ready);
       llmProviders = payload.llm_providers || {};
@@ -709,12 +754,19 @@
       renderIndexHealth(indexHealthPayload);
       renderReleaseGate(releaseGatePayload);
     } catch (error) {
+      configLoadState = 'error';
       configStatus.textContent = error.message || 'Repository config could not be loaded.';
+      if (adminStatus) adminStatus.textContent = error.message || 'Repository config could not be loaded.';
+      renderSelectedConfig();
     }
   };
 
   const saveConfig = async () => {
     if (!canManage) return;
+    if (configLoadState !== 'loaded') {
+      adminStatus.textContent = 'Repository configuration is still loading. Please wait before saving.';
+      return;
+    }
     adminStatus.textContent = 'Saving repository mapping...';
     try {
       const payload = await apiFetchJson(saveUrl, {
@@ -782,6 +834,10 @@
 
   const syncRepos = async () => {
     if (!canManage) return;
+    if (configLoadState !== 'loaded') {
+      adminStatus.textContent = 'Repository configuration is still loading. Please wait before syncing.';
+      return;
+    }
     if (!gitAuthReady) {
       adminStatus.textContent = 'SOURCE_CODE_QA_GITLAB_TOKEN is missing on the server.';
       return;
@@ -1248,6 +1304,41 @@
     renderSessionMessages(activeSession);
   };
 
+  const countAssistantMessages = (session) =>
+    (session?.messages || []).filter((message) => message.role === 'assistant').length;
+
+  const finalAnswerTextFromPayload = (payload) => {
+    const structuredAnswer = payload?.structured_answer?.direct_answer;
+    return String(
+      structuredAnswer ||
+      payload?.llm_answer ||
+      payload?.summary ||
+      ''
+    ).trim();
+  };
+
+  const finalizeLiveAnswer = async (payload, previousAssistantCount, provider) => {
+    if (provider !== 'codex_cli_bridge') {
+      renderLiveAnswer('');
+      return;
+    }
+    let refreshedSession = activeSession;
+    if (activeSessionId && countAssistantMessages(refreshedSession) <= previousAssistantCount) {
+      await sleep(300);
+      refreshedSession = await loadSession(activeSessionId, { preserveLive: true, preservePending: true });
+    }
+    if (countAssistantMessages(refreshedSession) > previousAssistantCount) {
+      pendingUserMessage = null;
+      renderLiveAnswer('');
+      return;
+    }
+    const fallbackText = finalAnswerTextFromPayload(payload);
+    renderLiveAnswer(
+      fallbackText || 'Codex completed, but the saved chat has not refreshed yet. Please keep this page open while the session catches up.',
+      { title: 'Assistant', meta: fallbackText ? 'final answer fallback' : 'session refresh pending', stopped: true }
+    );
+  };
+
   const renderFallbackNotice = (payload) => {
     if (!fallbackNotice) return;
     const notice = payload?.fallback_notice;
@@ -1343,8 +1434,9 @@
     if (questionInput) questionInput.value = '';
     renderPendingQuery(submittedQuestion, effectiveAnswerMode);
     try {
-      const session = await ensureActiveSession();
+      const session = await ensureActiveSession({ preserveLive: true, preservePending: true });
       if (queryControl.stopped) return;
+      const previousAssistantCount = countAssistantMessages(session || activeSession);
       renderOptimisticUserMessage(submittedQuestion);
       const initialPayload = await apiFetchJson(queryUrl, {
         method: 'POST',
@@ -1376,7 +1468,7 @@
         applyActiveSession(payload.session);
       } else if (activeSessionId) {
         pendingUserMessage = null;
-        await loadSession(activeSessionId);
+        await loadSession(activeSessionId, { preserveLive: true });
       }
       rememberLastQueryConfig(effectiveAnswerMode, selectedProvider);
       summary.textContent = payload.summary || 'Search completed.';
@@ -1391,7 +1483,7 @@
       renderUsageBadges(payload);
       renderFallbackNotice(payload);
       renderStatus(payload.repo_status || []);
-      renderLiveAnswer('');
+      await finalizeLiveAnswer(payload, previousAssistantCount, selectedProvider);
       if (selectedProvider === 'codex_cli_bridge') {
         renderLlmAnswer({});
       } else {
@@ -1417,7 +1509,11 @@
       if (queryStatus) queryStatus.textContent = `${error.message || 'Search failed.'} elapsed ${formatElapsed(progress.startedAt)}`;
       renderUsageBadges({});
       renderFallbackNotice({});
-      renderLiveAnswer('');
+      if (selectedProvider === 'codex_cli_bridge') {
+        renderLiveAnswer(error.message || 'Source Code Q&A failed.', { title: 'Codex Live', meta: 'error', stopped: true });
+      } else {
+        renderLiveAnswer('');
+      }
       renderLlmAnswer({});
       renderEvidenceSummary(null);
       renderDebugTrace(null);
@@ -1496,10 +1592,19 @@
   saveModelAvailabilityButton?.addEventListener('click', saveModelAvailability);
   syncButton?.addEventListener('click', syncRepos);
   queryButton?.addEventListener('click', queryCode);
+  viewTabs.forEach((tab) => {
+    tab.addEventListener('click', () => setSourceView(tab.dataset.sourceViewTab));
+  });
+  window.addEventListener('portal:tab-activated', (event) => {
+    if (event.detail?.tabName === 'admin') {
+      renderSelectedConfig();
+    }
+  });
   document.querySelectorAll('[data-source-feedback-rating]').forEach((button) => {
     button.addEventListener('click', () => sendFeedback(button.dataset.sourceFeedbackRating));
   });
 
+  setSourceView('chat');
   restoreLastQueryConfig();
   applyActiveSession(null);
   updateAnswerModeState();

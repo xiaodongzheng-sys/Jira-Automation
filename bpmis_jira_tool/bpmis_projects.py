@@ -43,12 +43,11 @@ class BPMISProjectStore:
                 """,
                 (owner, issue_id),
             ).fetchone()
-            if row and row[3]:
-                return "deleted"
             if row and (
                 str(row[0] or "") == normalized_project_name
                 and str(row[1] or "") == normalized_brd_link
                 and str(row[2] or "") == normalized_market
+                and not row[3]
             ):
                 return "skipped"
             connection.execute(
@@ -61,9 +60,9 @@ class BPMISProjectStore:
                     project_name = excluded.project_name,
                     brd_link = excluded.brd_link,
                     market = excluded.market,
+                    deleted_at = NULL,
                     synced_at = CURRENT_TIMESTAMP,
                     updated_at = CURRENT_TIMESTAMP
-                WHERE bpmis_projects.deleted_at IS NULL
                 """,
                 (
                     owner,
@@ -74,6 +73,8 @@ class BPMISProjectStore:
                 ),
             )
             connection.commit()
+        if row and row[3]:
+            return "restored"
         return "updated" if row else "created"
 
     def list_projects(self, *, user_key: str) -> list[dict[str, Any]]:
@@ -202,6 +203,140 @@ class BPMISProjectStore:
         ticket["raw_response"] = self._loads_json(ticket.pop("raw_response_json", ""))
         return ticket
 
+    def upsert_synced_jira_ticket(
+        self,
+        *,
+        user_key: str,
+        bpmis_id: str,
+        component: str = "",
+        market: str = "",
+        system: str = "",
+        jira_title: str = "",
+        prd_link: str = "",
+        description: str = "",
+        fix_version_name: str = "",
+        fix_version_id: str = "",
+        ticket_key: str = "",
+        ticket_link: str = "",
+        status: str = "",
+        message: str = "Imported from BPMIS project sync.",
+        raw_response: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        owner = self._require_user_key(user_key)
+        issue_id = self._require_bpmis_id(bpmis_id)
+        normalized_ticket_key = str(ticket_key or "").strip()
+        normalized_ticket_link = str(ticket_link or "").strip()
+        if not normalized_ticket_key and not normalized_ticket_link:
+            return None
+
+        with sqlite3.connect(self.db_path) as connection:
+            connection.row_factory = sqlite3.Row
+            row = connection.execute(
+                """
+                SELECT id
+                FROM bpmis_project_jira_tickets
+                WHERE user_key = ? AND bpmis_id = ?
+                  AND (
+                    (? != '' AND lower(ticket_key) = lower(?))
+                    OR (? != '' AND lower(ticket_link) = lower(?))
+                  )
+                ORDER BY id ASC
+                LIMIT 1
+                """,
+                (
+                    owner,
+                    issue_id,
+                    normalized_ticket_key,
+                    normalized_ticket_key,
+                    normalized_ticket_link,
+                    normalized_ticket_link,
+                ),
+            ).fetchone()
+            if row is None:
+                return self.add_jira_ticket(
+                    user_key=owner,
+                    bpmis_id=issue_id,
+                    component=component,
+                    market=market,
+                    system=system,
+                    jira_title=jira_title,
+                    prd_link=prd_link,
+                    description=description,
+                    fix_version_name=fix_version_name,
+                    fix_version_id=fix_version_id,
+                    ticket_key=normalized_ticket_key,
+                    ticket_link=normalized_ticket_link,
+                    status=status or "synced",
+                    message=message,
+                    raw_response=raw_response,
+                )
+
+            existing_id = row["id"]
+            connection.execute(
+                """
+                UPDATE bpmis_project_jira_tickets
+                SET component = CASE WHEN ? != '' THEN ? ELSE component END,
+                    market = CASE WHEN ? != '' THEN ? ELSE market END,
+                    system = CASE WHEN ? != '' THEN ? ELSE system END,
+                    jira_title = CASE WHEN ? != '' THEN ? ELSE jira_title END,
+                    prd_link = CASE WHEN ? != '' THEN ? ELSE prd_link END,
+                    description = CASE WHEN ? != '' THEN ? ELSE description END,
+                    fix_version_name = CASE WHEN ? != '' THEN ? ELSE fix_version_name END,
+                    fix_version_id = CASE WHEN ? != '' THEN ? ELSE fix_version_id END,
+                    ticket_key = CASE WHEN ? != '' THEN ? ELSE ticket_key END,
+                    ticket_link = CASE WHEN ? != '' THEN ? ELSE ticket_link END,
+                    status = CASE WHEN ? != '' THEN ? ELSE status END,
+                    message = CASE WHEN ? != '' THEN ? ELSE message END,
+                    raw_response_json = CASE WHEN ? != '{}' THEN ? ELSE raw_response_json END
+                WHERE id = ? AND user_key = ? AND bpmis_id = ?
+                """,
+                (
+                    str(component or "").strip(),
+                    str(component or "").strip(),
+                    str(market or "").strip(),
+                    str(market or "").strip(),
+                    str(system or "").strip(),
+                    str(system or "").strip(),
+                    str(jira_title or "").strip(),
+                    str(jira_title or "").strip(),
+                    str(prd_link or "").strip(),
+                    str(prd_link or "").strip(),
+                    str(description or "").strip(),
+                    str(description or "").strip(),
+                    str(fix_version_name or "").strip(),
+                    str(fix_version_name or "").strip(),
+                    str(fix_version_id or "").strip(),
+                    str(fix_version_id or "").strip(),
+                    normalized_ticket_key,
+                    normalized_ticket_key,
+                    normalized_ticket_link,
+                    normalized_ticket_link,
+                    str(status or "").strip(),
+                    str(status or "").strip(),
+                    str(message or "").strip(),
+                    str(message or "").strip(),
+                    json.dumps(raw_response or {}, ensure_ascii=False),
+                    json.dumps(raw_response or {}, ensure_ascii=False),
+                    existing_id,
+                    owner,
+                    issue_id,
+                ),
+            )
+            updated = connection.execute(
+                """
+                SELECT id, user_key, bpmis_id, component, market, system, jira_title, prd_link,
+                       description, fix_version_name, fix_version_id, ticket_key, ticket_link,
+                       status, message, raw_response_json, created_at
+                FROM bpmis_project_jira_tickets
+                WHERE id = ?
+                """,
+                (existing_id,),
+            ).fetchone()
+            connection.commit()
+        ticket = self._row_to_dict(updated)
+        ticket["raw_response"] = self._loads_json(ticket.pop("raw_response_json", ""))
+        return ticket
+
     def delete_jira_ticket(self, *, user_key: str, bpmis_id: str, ticket_id: str | int) -> bool:
         owner = self._require_user_key(user_key)
         issue_id = self._require_bpmis_id(bpmis_id)
@@ -215,6 +350,57 @@ class BPMISProjectStore:
                 WHERE id = ? AND user_key = ? AND bpmis_id = ?
                 """,
                 (normalized_ticket_id, owner, issue_id),
+            )
+            connection.commit()
+        return cursor.rowcount > 0
+
+    def update_jira_ticket_status(self, *, user_key: str, bpmis_id: str, ticket_id: str | int, status: str) -> bool:
+        owner = self._require_user_key(user_key)
+        issue_id = self._require_bpmis_id(bpmis_id)
+        normalized_ticket_id = str(ticket_id or "").strip()
+        normalized_status = str(status or "").strip()
+        if not normalized_ticket_id:
+            raise ToolError("Jira task ID is required.")
+        if not normalized_status:
+            raise ToolError("Jira status is required.")
+        with sqlite3.connect(self.db_path) as connection:
+            cursor = connection.execute(
+                """
+                UPDATE bpmis_project_jira_tickets
+                SET status = ?
+                WHERE id = ? AND user_key = ? AND bpmis_id = ?
+                """,
+                (normalized_status, normalized_ticket_id, owner, issue_id),
+            )
+            connection.commit()
+        return cursor.rowcount > 0
+
+    def update_jira_ticket_version(
+        self,
+        *,
+        user_key: str,
+        bpmis_id: str,
+        ticket_id: str | int,
+        version_name: str,
+        version_id: str = "",
+    ) -> bool:
+        owner = self._require_user_key(user_key)
+        issue_id = self._require_bpmis_id(bpmis_id)
+        normalized_ticket_id = str(ticket_id or "").strip()
+        normalized_version_name = str(version_name or "").strip()
+        normalized_version_id = str(version_id or "").strip()
+        if not normalized_ticket_id:
+            raise ToolError("Jira task ID is required.")
+        if not normalized_version_name and not normalized_version_id:
+            raise ToolError("Jira fix version is required.")
+        with sqlite3.connect(self.db_path) as connection:
+            cursor = connection.execute(
+                """
+                UPDATE bpmis_project_jira_tickets
+                SET fix_version_name = ?, fix_version_id = ?
+                WHERE id = ? AND user_key = ? AND bpmis_id = ?
+                """,
+                (normalized_version_name or normalized_version_id, normalized_version_id, normalized_ticket_id, owner, issue_id),
             )
             connection.commit()
         return cursor.rowcount > 0
@@ -321,42 +507,90 @@ class PortalProjectSyncService:
                 brd_link=brd_link,
                 market=market,
             )
-            if status == "deleted":
+            if status == "restored":
+                imported_count = self._sync_project_jira_tasks(user_key=user_key, bpmis_id=issue_id, pm_email=pm_email)
                 results.append(
                     RunResult(
                         row_number=0,
                         issue_id=issue_id,
-                        status="skipped",
-                        message="Skipped because this BPMIS project was deleted in the portal.",
+                        status="updated",
+                        message=self._sync_message(
+                            "Restored because this BPMIS project is still returned by BPMIS sync.",
+                            imported_count,
+                        ),
                         project_label=project_name or issue_id,
                         matched_project_id=market or None,
                     )
                 )
                 continue
             if status == "skipped":
+                imported_count = self._sync_project_jira_tasks(user_key=user_key, bpmis_id=issue_id, pm_email=pm_email)
                 results.append(
                     RunResult(
                         row_number=0,
                         issue_id=issue_id,
                         status="skipped",
-                        message="Skipped because this BPMIS project is already up to date.",
+                        message=self._sync_message("Skipped because this BPMIS project is already up to date.", imported_count),
                         project_label=project_name or issue_id,
                         matched_project_id=market or None,
                     )
                 )
                 continue
+            imported_count = self._sync_project_jira_tasks(user_key=user_key, bpmis_id=issue_id, pm_email=pm_email)
             results.append(
                 RunResult(
                     row_number=0,
                     issue_id=issue_id,
                     status="created" if status == "created" else "updated",
-                    message="Saved BPMIS project in the portal." if status == "created" else "Updated BPMIS project in the portal.",
+                    message=self._sync_message(
+                        "Saved BPMIS project in the portal." if status == "created" else "Updated BPMIS project in the portal.",
+                        imported_count,
+                    ),
                     project_label=project_name or issue_id,
                     matched_project_id=market or None,
                 )
             )
         self._emit_progress(progress_callback, "completed", "BPMIS sync finished.", total, total)
         return results
+
+    def _sync_project_jira_tasks(self, *, user_key: str, bpmis_id: str, pm_email: str) -> int:
+        if not hasattr(self.bpmis_client, "list_jira_tasks_for_project_created_by_email"):
+            return 0
+        try:
+            tasks = self.bpmis_client.list_jira_tasks_for_project_created_by_email(bpmis_id, pm_email) or []
+        except BPMISError:
+            return 0
+        imported = 0
+        for task in tasks:
+            if not isinstance(task, dict):
+                continue
+            stored = self.store.upsert_synced_jira_ticket(
+                user_key=user_key,
+                bpmis_id=bpmis_id,
+                component=str(task.get("component") or ""),
+                market=str(task.get("market") or ""),
+                system=str(task.get("system") or ""),
+                jira_title=str(task.get("jira_title") or task.get("summary") or ""),
+                prd_link=str(task.get("prd_link") or ""),
+                description=str(task.get("description") or ""),
+                fix_version_name=str(task.get("fix_version_name") or task.get("fix_version") or ""),
+                fix_version_id=str(task.get("fix_version_id") or ""),
+                ticket_key=str(task.get("ticket_key") or ""),
+                ticket_link=str(task.get("ticket_link") or ""),
+                status=str(task.get("status") or "synced"),
+                message=str(task.get("message") or "Imported from BPMIS project sync."),
+                raw_response=task.get("raw_response") if isinstance(task.get("raw_response"), dict) else task,
+            )
+            if stored is not None:
+                imported += 1
+        return imported
+
+    @staticmethod
+    def _sync_message(base_message: str, imported_count: int) -> str:
+        if imported_count <= 0:
+            return base_message
+        noun = "Jira task" if imported_count == 1 else "Jira tasks"
+        return f"{base_message} Synced {imported_count} existing {noun} created by this user."
 
     @staticmethod
     def _emit_progress(progress_callback, stage: str, message: str, current: int, total: int) -> None:
@@ -516,6 +750,19 @@ class PortalJiraCreationService:
         project = self.store.get_project(user_key=user_key, bpmis_id=bpmis_id)
         if project is None:
             raise ToolError("BPMIS project was not found.")
+        tickets = project.get("jira_tickets") if isinstance(project, dict) else []
+        ticket = next((item for item in tickets if str(item.get("id") or "") == str(ticket_id or "")), None)
+        if not isinstance(ticket, dict):
+            raise ToolError("Jira task was not found.")
+        ticket_key = str(ticket.get("ticket_key") or ticket.get("ticket_link") or "").strip()
+        if not ticket_key:
+            raise ToolError("Jira task does not have a Jira key.")
+        if not hasattr(self.bpmis_client, "delink_jira_ticket_from_project"):
+            raise ToolError("BPMIS client does not support delinking Jira tasks.")
+        try:
+            self.bpmis_client.delink_jira_ticket_from_project(ticket_key, bpmis_id)
+        except BPMISError as error:
+            raise ToolError(str(error)) from error
         return self.store.delete_jira_ticket(user_key=user_key, bpmis_id=bpmis_id, ticket_id=ticket_id)
 
     def update_ticket_status(
@@ -542,6 +789,57 @@ class PortalJiraCreationService:
             self.bpmis_client.update_jira_ticket_status(ticket_key, status)
         except BPMISError as error:
             raise ToolError(str(error)) from error
+        self.store.update_jira_ticket_status(
+            user_key=user_key,
+            bpmis_id=bpmis_id,
+            ticket_id=ticket_id,
+            status=status,
+        )
+        ticket["status"] = str(status or "").strip()
+        return self._ticket_with_live_jira_fields(ticket)
+
+    def update_ticket_version(
+        self,
+        *,
+        user_key: str,
+        bpmis_id: str,
+        ticket_id: str | int,
+        version_name: str,
+        version_id: str = "",
+    ) -> dict[str, Any]:
+        project = self.store.get_project(user_key=user_key, bpmis_id=bpmis_id)
+        if project is None:
+            raise ToolError("BPMIS project was not found.")
+        tickets = project.get("jira_tickets") if isinstance(project, dict) else []
+        ticket = next((item for item in tickets if str(item.get("id") or "") == str(ticket_id or "")), None)
+        if not isinstance(ticket, dict):
+            raise ToolError("Jira task was not found.")
+        ticket_key = str(ticket.get("ticket_key") or ticket.get("ticket_link") or "").strip()
+        if not ticket_key:
+            raise ToolError("Jira task does not have a Jira key.")
+        normalized_version_name = str(version_name or "").strip()
+        normalized_version_id = str(version_id or "").strip()
+        if not normalized_version_name and not normalized_version_id:
+            raise ToolError("Jira fix version is required.")
+        if not hasattr(self.bpmis_client, "update_jira_ticket_fix_version"):
+            raise ToolError("BPMIS client does not support updating Jira fix version.")
+        try:
+            self.bpmis_client.update_jira_ticket_fix_version(
+                ticket_key,
+                normalized_version_name or normalized_version_id,
+                version_id=normalized_version_id or None,
+            )
+        except BPMISError as error:
+            raise ToolError(str(error)) from error
+        self.store.update_jira_ticket_version(
+            user_key=user_key,
+            bpmis_id=bpmis_id,
+            ticket_id=ticket_id,
+            version_name=normalized_version_name or normalized_version_id,
+            version_id=normalized_version_id,
+        )
+        ticket["fix_version_name"] = normalized_version_name or normalized_version_id
+        ticket["fix_version_id"] = normalized_version_id
         return self._ticket_with_live_jira_fields(ticket)
 
     def _ticket_with_live_jira_fields(self, ticket: dict[str, Any]) -> dict[str, Any]:

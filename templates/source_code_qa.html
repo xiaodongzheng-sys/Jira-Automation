@@ -57,7 +57,14 @@
     </div>
   </section>
 
-  <section class="workspace-panel source-qa-panel is-active">
+  {% if can_manage_source_code_qa %}
+    <nav class="source-qa-tabs" aria-label="Source Code Q&A views" data-default-tab="chat">
+      <button class="source-qa-tab workspace-tab is-active" type="button" role="tab" data-tab-trigger="chat" data-source-view-tab="chat" aria-selected="true">Chat</button>
+      <button class="source-qa-tab workspace-tab" type="button" role="tab" data-tab-trigger="admin" data-source-view-tab="admin" aria-selected="false">Repo Admin</button>
+    </nav>
+  {% endif %}
+
+  <section class="workspace-panel source-qa-panel is-active" data-tab-panel="chat" data-source-view-panel="chat">
     <section class="source-qa-chat-shell">
       <aside class="source-qa-session-sidebar" aria-label="Source Code Q&A chat history">
         <div class="source-qa-session-sidebar-head">
@@ -129,7 +136,7 @@
   </section>
 
   {% if can_manage_source_code_qa %}
-    <section class="workspace-panel source-qa-panel">
+    <section class="workspace-panel source-qa-panel" data-tab-panel="admin" data-source-view-panel="admin" hidden>
       <section class="grid source-qa-workspace">
         <section class="panel panel-wide source-qa-admin">
           <div class="panel-head">
@@ -209,5 +216,5 @@
 {% endblock %}
 
 {% block extra_head %}
-  <script defer src="{{ url_for('static', filename='source_code_qa.js') }}?v={{ asset_revision }}&qa=20260425d"></script>
+  <script defer src="{{ url_for('static', filename='source_code_qa.js') }}?v={{ asset_revision }}&qa=20260427-live-final"></script>
 {% endblock %}

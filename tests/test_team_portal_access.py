@@ -15,6 +15,12 @@ class _FakeSyncBPMISClient:
         return {}
 
 
+class _FakeProxyResponse:
+    status_code = 200
+    content = b'{"status":"ok","result":[]}'
+    headers = {"Content-Type": "application/json", "Content-Length": "27"}
+
+
 class TeamPortalAccessTests(unittest.TestCase):
     def test_shared_mode_renders_login_gate_for_anonymous_user(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
@@ -33,7 +39,7 @@ class TeamPortalAccessTests(unittest.TestCase):
             with app.test_client() as client:
                 response = client.get("/", follow_redirects=False)
                 self.assertEqual(response.status_code, 200)
-                self.assertIn(b"Sign in to open the BPMIS Automation Tool", response.data)
+                self.assertIn(b"Sign in to Risk PM Tool", response.data)
                 self.assertIn(b"Continue with Google", response.data)
 
     def test_shared_mode_redirects_protected_route_to_login_gate(self):
@@ -263,6 +269,68 @@ class TeamPortalAccessTests(unittest.TestCase):
                     if job_payload["state"] == "completed":
                         break
                     time.sleep(0.01)
+
+    def test_public_local_agent_proxy_forwards_signed_request_to_loopback_agent(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
+                "LOCAL_AGENT_HOST": "127.0.0.1",
+                "LOCAL_AGENT_PORT": "8123",
+                "LOCAL_AGENT_TIMEOUT_SECONDS": "7",
+            },
+            clear=False,
+        ), patch("bpmis_jira_tool.web.requests.request", return_value=_FakeProxyResponse()) as proxy_request:
+            app = create_app()
+            app.testing = True
+
+            with app.test_client() as client:
+                response = client.post(
+                    "/api/local-agent/bpmis/call",
+                    data=b'{"operation":"ping"}',
+                    headers={
+                        "Content-Type": "application/json",
+                        "X-Local-Agent-Timestamp": "123",
+                        "X-Local-Agent-Nonce": "abc",
+                        "X-Local-Agent-Signature": "sig",
+                    },
+                )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["status"], "ok")
+        proxy_request.assert_called_once()
+        _method, target_url = proxy_request.call_args.args[:2]
+        self.assertEqual(target_url, "http://127.0.0.1:8123/api/local-agent/bpmis/call")
+        self.assertEqual(proxy_request.call_args.kwargs["data"], b'{"operation":"ping"}')
+        self.assertEqual(proxy_request.call_args.kwargs["headers"]["X-Local-Agent-Signature"], "sig")
+
+    def test_public_local_agent_proxy_forwards_healthz_to_loopback_agent_health(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
+                "LOCAL_AGENT_HOST": "127.0.0.1",
+                "LOCAL_AGENT_PORT": "8123",
+            },
+            clear=False,
+        ), patch("bpmis_jira_tool.web.requests.request", return_value=_FakeProxyResponse()) as proxy_request:
+            app = create_app()
+            app.testing = True
+
+            with app.test_client() as client:
+                response = client.get("/api/local-agent/healthz")
+
+        self.assertEqual(response.status_code, 200)
+        _method, target_url = proxy_request.call_args.args[:2]
+        self.assertEqual(target_url, "http://127.0.0.1:8123/healthz")
 
     def test_default_sheet_template_download_returns_csv(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(

@@ -42,6 +42,10 @@ class BPMISClient(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def list_jira_tasks_for_project_created_by_email(self, project_issue_id: str, email: str) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
+    @abstractmethod
     def get_single_brd_doc_link_for_project(self, project_issue_id: str) -> str:
         raise NotImplementedError
 
@@ -71,6 +75,14 @@ class BPMISClient(ABC):
 
     @abstractmethod
     def update_jira_ticket_status(self, ticket_key: str, status: str) -> dict[str, Any]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def update_jira_ticket_fix_version(self, ticket_key: str, version_name: str, version_id: str | None = None) -> dict[str, Any]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def delink_jira_ticket_from_project(self, ticket_key: str, project_issue_id: str | int) -> dict[str, Any]:
         raise NotImplementedError
 
 
@@ -301,6 +313,65 @@ class BPMISDirectApiClient(BPMISClient):
             ]
         return resolved_links
 
+    def list_jira_tasks_for_project_created_by_email(self, project_issue_id: str, email: str) -> list[dict[str, Any]]:
+        normalized_issue_id = str(project_issue_id or "").strip()
+        normalized_email = str(email or "").strip().lower()
+        if not normalized_issue_id or not normalized_email:
+            return []
+
+        try:
+            parent_issue_id = int(normalized_issue_id)
+        except ValueError:
+            return []
+
+        user_ids = self._resolve_bpmis_user_ids_by_email(normalized_email)
+        rows: list[dict[str, Any]] = []
+        page = 1
+        page_size = 200
+        while True:
+            response = self._api_request(
+                "/api/v1/issues/list",
+                params={
+                    "search": json.dumps(
+                        {
+                            "joinType": "and",
+                            "subQueries": [
+                                {"typeId": [self.TASK_TYPE_ID]},
+                                {"parentIds": [parent_issue_id]},
+                            ],
+                            "page": page,
+                            "pageSize": page_size,
+                            "mapping": True,
+                        }
+                    )
+                },
+            )
+            page_rows = (response.get("data") or {}).get("rows") or []
+            rows.extend(page_rows)
+            if len(page_rows) < page_size:
+                break
+            page += 1
+
+        tasks: list[dict[str, Any]] = []
+        seen_issue_ids: set[str] = set()
+        for row in rows:
+            issue_id = self._extract_issue_identifier(row)
+            issue_key = self._extract_issue_key_from_row(row)
+            dedupe_key = issue_key or issue_id
+            if dedupe_key and dedupe_key in seen_issue_ids:
+                continue
+            if dedupe_key:
+                seen_issue_ids.add(dedupe_key)
+
+            if self._issue_requires_user_enrichment(row, normalized_email, user_ids) and issue_id:
+                detail = self.get_issue_detail(issue_id)
+                if detail:
+                    row = self._merge_issue_payloads(row, detail)
+            if not self._issue_created_by(row, normalized_email, user_ids):
+                continue
+            tasks.append(self._normalize_project_jira_task(row))
+        return tasks
+
     def search_versions(self, query: str) -> list[dict[str, Any]]:
         normalized_query = query.strip()
         if not normalized_query:
@@ -518,6 +589,75 @@ class BPMISDirectApiClient(BPMISClient):
             "The current BPMIS API token does not expose a working Jira workflow transition endpoint."
         )
 
+    def update_jira_ticket_fix_version(self, ticket_key: str, version_name: str, version_id: str | None = None) -> dict[str, Any]:
+        normalized_ticket_key = self._extract_issue_key(str(ticket_key or "")) or str(ticket_key or "").strip()
+        normalized_version_name = str(version_name or "").strip()
+        normalized_version_id = str(version_id or "").strip()
+        if not normalized_ticket_key:
+            raise BPMISError("Jira ticket key is required.")
+        if not normalized_version_name and not normalized_version_id:
+            raise BPMISError("Jira fix version is required.")
+
+        version_payload = {"id": normalized_version_id} if normalized_version_id else {"name": normalized_version_name}
+        direct_jira_detail = self._update_jira_ticket_fix_version_via_jira(normalized_ticket_key, version_payload)
+        if direct_jira_detail is not None:
+            return direct_jira_detail
+
+        raise BPMISError(
+            "Could not update Jira fix version. "
+            "A direct Jira API token is required for editing an existing Jira ticket's Fix Version."
+        )
+
+    def delink_jira_ticket_from_project(self, ticket_key: str, project_issue_id: str | int) -> dict[str, Any]:
+        normalized_ticket_key = self._extract_issue_key(str(ticket_key or "")) or str(ticket_key or "").strip()
+        normalized_project_id = str(project_issue_id or "").strip()
+        if not normalized_ticket_key:
+            raise BPMISError("Jira ticket key is required.")
+        if not normalized_project_id:
+            raise BPMISError("BPMIS project issue ID is required.")
+
+        if not self._issue_is_linked_to_parent(normalized_ticket_key, normalized_project_id):
+            return self.get_jira_ticket_detail(normalized_ticket_key)
+
+        detail = self.get_jira_ticket_detail(normalized_ticket_key)
+        issue_id = self._extract_issue_identifier(detail)
+        identifiers: list[dict[str, Any]] = [
+            {"jiraKey": normalized_ticket_key},
+            {"jiraIssueKey": normalized_ticket_key},
+            {"key": normalized_ticket_key},
+        ]
+        if issue_id:
+            identifiers.extend([{"id": issue_id}, {"issueId": issue_id}])
+        parent_clear_values = [
+            {"parentIssueId": None},
+            {"parentIssueId": 0},
+            {"parentIssueId": ""},
+            {"parentIds": []},
+        ]
+        attempts = [
+            ("POST", "/api/v1/issues/update"),
+            ("PUT", "/api/v1/issues/update"),
+            ("POST", "/api/v1/issue/update"),
+            ("PUT", "/api/v1/issue/update"),
+        ]
+        last_error: BPMISError | None = None
+        for identifier in identifiers:
+            for parent_clear_value in parent_clear_values:
+                body = {**identifier, **parent_clear_value}
+                for method, path in attempts:
+                    try:
+                        self._api_request(path, method=method, body=body)
+                        if not self._issue_is_linked_to_parent(normalized_ticket_key, normalized_project_id):
+                            return self.get_jira_ticket_detail(normalized_ticket_key)
+                    except BPMISError as error:
+                        last_error = error
+        if last_error is not None:
+            raise BPMISError(
+                "Could not delink Jira task from BPMIS Biz Project. "
+                f"Last error: {last_error}"
+            ) from last_error
+        raise BPMISError("Could not delink Jira task from BPMIS Biz Project.")
+
     def _build_create_payload(
         self,
         project: ProjectMatch,
@@ -660,6 +800,58 @@ class BPMISDirectApiClient(BPMISClient):
                     return text
         return self._extract_issue_key(str(self._find_first_value(row, "jiraLink") or ""))
 
+    def _extract_parent_issue_ids(self, row: dict[str, Any]) -> list[str]:
+        parent_values = self._find_first_value(row, "parentIds")
+        if parent_values is None:
+            parent_values = self._find_first_value(row, "parentIssueId")
+        if parent_values is None:
+            parent_values = self._find_first_value(row, "parentId")
+        if parent_values is None:
+            return []
+        if not isinstance(parent_values, list):
+            parent_values = [parent_values]
+        parent_ids: list[str] = []
+        for parent_ref in parent_values:
+            if isinstance(parent_ref, dict):
+                value = parent_ref.get("id") or parent_ref.get("issueId") or parent_ref.get("value")
+            else:
+                value = parent_ref
+            text = str(value or "").strip()
+            if text:
+                parent_ids.append(text)
+        return parent_ids
+
+    def _issue_is_linked_to_parent(self, ticket_key: str, project_issue_id: str | int) -> bool:
+        normalized_project_id = str(project_issue_id or "").strip()
+        detail = self.get_jira_ticket_detail(ticket_key)
+        parent_ids = self._extract_parent_issue_ids(detail)
+        if normalized_project_id in parent_ids:
+            return True
+        try:
+            response = self._api_request(
+                "/api/v1/issues/list",
+                params={
+                    "search": json.dumps(
+                        {
+                            "joinType": "and",
+                            "subQueries": [
+                                {"typeId": [self.TASK_TYPE_ID]},
+                                {"parentIds": [int(normalized_project_id)]},
+                            ],
+                            "page": 1,
+                            "pageSize": 50,
+                            "mapping": True,
+                        }
+                    )
+                },
+            )
+        except (BPMISError, ValueError):
+            if parent_ids:
+                return normalized_project_id in parent_ids
+            raise
+        rows = ((response.get("data") or {}).get("rows") or []) if isinstance(response, dict) else []
+        return any(isinstance(row, dict) and self._row_matches_jira_key(row, ticket_key) for row in rows)
+
     def _row_matches_jira_key(self, row: dict[str, Any], ticket_key: str) -> bool:
         row_key = self._extract_issue_key_from_row(row)
         normalized_ticket_key = str(ticket_key or "").strip()
@@ -688,11 +880,16 @@ class BPMISDirectApiClient(BPMISClient):
         return allowed.get(normalized.lower(), "")
 
     def _get_jira_ticket_detail_via_jira(self, ticket_key: str) -> dict[str, Any] | None:
-        payload = self._jira_api_request(
-            "GET",
-            f"/rest/api/2/issue/{ticket_key}",
-            params={"fields": "summary,status,fixVersions,components"},
-        )
+        try:
+            payload = self._jira_api_request(
+                "GET",
+                f"/rest/api/2/issue/{ticket_key}",
+                params={"fields": "summary,status,fixVersions,components"},
+            )
+        except BPMISError as error:
+            if self._jira_api_error_is_fallbackable(error):
+                return None
+            raise
         if payload is None:
             return None
 
@@ -720,10 +917,15 @@ class BPMISDirectApiClient(BPMISClient):
         }
 
     def _update_jira_ticket_status_via_jira(self, ticket_key: str, status: str) -> dict[str, Any] | None:
-        transitions_payload = self._jira_api_request(
-            "GET",
-            f"/rest/api/2/issue/{ticket_key}/transitions",
-        )
+        try:
+            transitions_payload = self._jira_api_request(
+                "GET",
+                f"/rest/api/2/issue/{ticket_key}/transitions",
+            )
+        except BPMISError as error:
+            if self._jira_api_error_is_fallbackable(error):
+                return None
+            raise
         if transitions_payload is None:
             return None
 
@@ -763,6 +965,29 @@ class BPMISDirectApiClient(BPMISClient):
         if updated_status and not self._status_labels_match(updated_status, status):
             raise BPMISError(f"Jira transition request completed, but Jira is still '{updated_status}'.")
         return detail
+
+    def _update_jira_ticket_fix_version_via_jira(self, ticket_key: str, version_payload: dict[str, str]) -> dict[str, Any] | None:
+        if not self._jira_token():
+            return None
+        try:
+            self._jira_api_request(
+                "PUT",
+                f"/rest/api/2/issue/{ticket_key}",
+                body={"fields": {"fixVersions": [version_payload]}},
+                expected_statuses={200, 204},
+                allow_empty=True,
+            )
+        except BPMISError as error:
+            if self._jira_api_error_is_fallbackable(error):
+                return None
+            raise
+        detail = self._get_jira_ticket_detail_via_jira(ticket_key)
+        return detail or {"jiraKey": ticket_key, "fixVersions": [version_payload.get("name") or version_payload.get("id") or ""]}
+
+    @staticmethod
+    def _jira_api_error_is_fallbackable(error: BPMISError) -> bool:
+        message = str(error)
+        return "status 401" in message or "status 403" in message or "status 404" in message
 
     def _jira_api_request(
         self,
@@ -933,6 +1158,89 @@ class BPMISDirectApiClient(BPMISClient):
             if item not in deduped:
                 deduped.append(item)
         return deduped
+
+    def _issue_requires_user_enrichment(self, row: dict[str, Any], email: str, user_ids: list[int]) -> bool:
+        if self._issue_created_by(row, email, user_ids):
+            return False
+        return not any(self._find_first_value(row, key) is not None for key in self._issue_creator_field_names())
+
+    def _issue_created_by(self, row: dict[str, Any], email: str, user_ids: list[int]) -> bool:
+        normalized_email = str(email or "").strip().lower()
+        user_id_values = {str(user_id).strip() for user_id in user_ids if str(user_id).strip()}
+        for key in self._issue_creator_field_names():
+            value = self._find_first_value(row, key)
+            if self._value_matches_user(value, normalized_email, user_id_values):
+                return True
+        return False
+
+    @staticmethod
+    def _issue_creator_field_names() -> tuple[str, ...]:
+        return (
+            "creator",
+            "creatorId",
+            "creatorEmail",
+            "createdBy",
+            "createdById",
+            "createBy",
+            "createById",
+            "createUser",
+            "createUserId",
+            "createdUser",
+            "createdUserId",
+            "author",
+            "authorId",
+            "owner",
+            "ownerId",
+        )
+
+    def _value_matches_user(self, value: Any, email: str, user_ids: set[str]) -> bool:
+        if value is None:
+            return False
+        if isinstance(value, list):
+            return any(self._value_matches_user(item, email, user_ids) for item in value)
+        if isinstance(value, dict):
+            for key in ("emailAddress", "email", "mail", "username", "name", "displayName", "label", "value"):
+                if self._value_matches_user(value.get(key), email, user_ids):
+                    return True
+            for key in ("id", "userId", "jiraUserId", "value"):
+                raw_id = value.get(key)
+                if raw_id is not None and str(raw_id).strip() in user_ids:
+                    return True
+            return False
+        text = str(value or "").strip()
+        if not text:
+            return False
+        lowered = text.lower()
+        if email and (lowered == email or email in lowered):
+            return True
+        return text in user_ids
+
+    def _normalize_project_jira_task(self, row: dict[str, Any]) -> dict[str, Any]:
+        ticket_key = self._extract_issue_key_from_row(row)
+        ticket_link = self._normalize_ticket_link(self._issue_first_text(row, "jiraLink", "ticketLink", "link", "self") or ticket_key)
+        prd_links = self._extract_issue_prd_links(row)
+        fix_version = self._issue_first_text(row, "fixVersionId", "fixVersion", "fixVersions", "version", "versions")
+        return {
+            "component": self._issue_first_text(row, "componentId", "component", "components"),
+            "market": self._issue_first_text(row, "marketId", "market", "country"),
+            "system": self._issue_first_text(row, "system", "systemId", "track", "scope"),
+            "jira_title": self._issue_first_text(row, "summary", "title", "jiraSummary"),
+            "prd_link": "\n".join(prd_links),
+            "description": self._extract_issue_description(row),
+            "fix_version_name": fix_version,
+            "ticket_key": ticket_key,
+            "ticket_link": ticket_link or "",
+            "status": self._extract_jira_status_label(row),
+            "message": "Imported from BPMIS project sync.",
+            "raw_response": row,
+        }
+
+    def _issue_first_text(self, row: dict[str, Any], *keys: str) -> str:
+        for key in keys:
+            text = self._stringify_value(self._find_first_value(row, key))
+            if text:
+                return text
+        return ""
 
     def _extract_version_name(self, row: dict[str, Any]) -> str:
         for key in ("fullName", "name", "versionName", "label"):
@@ -1189,7 +1497,7 @@ class BPMISDirectApiClient(BPMISClient):
                 timeout=60,
             )
         except requests.RequestException as error:
-            raise BPMISError(f"BPMIS API request failed for '{path}'.") from error
+            raise BPMISError(f"BPMIS API request failed for '{path}': {error}") from error
 
         if response.status_code >= 400:
             raise BPMISError(f"BPMIS API request failed for '{path}' with status {response.status_code}.")

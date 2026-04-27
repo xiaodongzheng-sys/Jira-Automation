@@ -815,6 +815,59 @@ class BPMISClientTests(unittest.TestCase):
             self.assertEqual(update_call[3], {"jiraKey": "AF-101", "statusId": 44})
             self.assertEqual(detail["status"]["label"], "Testing")
 
+    def test_delink_jira_ticket_from_project_clears_parent_issue(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings = Settings(
+                flask_secret_key="secret",
+                google_oauth_client_secret_file=Path(temp_dir) / "client.json",
+                google_oauth_redirect_uri=None,
+                team_portal_host="127.0.0.1",
+                team_portal_port=5000,
+                team_portal_base_url=None,
+                team_allowed_emails=(),
+                team_allowed_email_domains=(),
+                team_portal_data_dir=Path(temp_dir),
+                spreadsheet_id="sheet",
+                common_tab_name="Common",
+                input_tab_name="Input",
+                bpmis_base_url="https://example.com",
+                bpmis_api_access_token="token",
+            )
+
+            client = BPMISDirectApiClient(settings)
+            calls: list[tuple[str, str, dict | None, dict | None]] = []
+            state = {"linked": True}
+
+            def fake_api_request(path, method="GET", params=None, body=None):
+                calls.append((path, method, params, body))
+                if path == "/api/v1/issues/detail":
+                    return {
+                        "data": {
+                            "row": {
+                                "id": 9001,
+                                "jiraKey": "AF-101",
+                                "summary": "Live AF task",
+                                "parentIds": [225159] if state["linked"] else [],
+                            }
+                        }
+                    }
+                if path == "/api/v1/issues/list":
+                    return {"data": {"rows": [{"id": 9001, "jiraKey": "AF-101"}] if state["linked"] else []}}
+                if path == "/api/v1/issues/update":
+                    self.assertIn(body, ({"jiraKey": "AF-101", "parentIssueId": None}, {"id": "9001", "parentIssueId": None}))
+                    state["linked"] = False
+                    return {"data": {"ok": True}}
+                raise AssertionError(path)
+
+            client._api_request = fake_api_request  # type: ignore[method-assign]
+
+            detail = client.delink_jira_ticket_from_project("AF-101", "225159")
+
+            update_call = next(call for call in calls if call[0] == "/api/v1/issues/update")
+            self.assertEqual(update_call[1], "POST")
+            self.assertEqual(update_call[3], {"jiraKey": "AF-101", "parentIssueId": None})
+            self.assertEqual(detail["parentIds"], [])
+
     def test_get_jira_ticket_detail_uses_direct_jira_api_when_token_configured(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             settings = Settings(
@@ -986,6 +1039,76 @@ class BPMISClientTests(unittest.TestCase):
 
             with self.assertRaises(BPMISError):
                 client.update_jira_ticket_status("AF-101", "Not a workflow status")
+
+    def test_list_jira_tasks_for_project_created_by_email_filters_and_normalizes_rows(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings = Settings(
+                flask_secret_key="secret",
+                google_oauth_client_secret_file=Path(temp_dir) / "client.json",
+                google_oauth_redirect_uri=None,
+                team_portal_host="127.0.0.1",
+                team_portal_port=5000,
+                team_portal_base_url=None,
+                team_allowed_emails=(),
+                team_allowed_email_domains=(),
+                team_portal_data_dir=Path(temp_dir),
+                spreadsheet_id="sheet",
+                common_tab_name="Common",
+                input_tab_name="Input",
+                bpmis_base_url="https://example.com",
+                bpmis_api_access_token="token",
+            )
+
+            client = BPMISDirectApiClient(settings)
+            client._resolve_bpmis_user_ids_by_email = lambda email: [14420]  # type: ignore[method-assign]
+
+            def fake_api_request(path, method="GET", params=None, body=None):
+                self.assertEqual(path, "/api/v1/issues/list")
+                search = json.loads((params or {}).get("search") or "{}")
+                self.assertEqual(search["subQueries"][1], {"parentIds": [225159]})
+                return {
+                    "data": {
+                        "rows": [
+	                            {
+	                                "id": 991,
+	                                "jiraKey": "AF-991",
+	                                "summary": "[Feature][AF]Existing task",
+	                                "creator": {"emailAddress": "pm@npt.sg"},
+	                                "status": {"label": "Developing"},
+	                                "fixVersions": [{"name": "Planning_26Q2"}],
+	                                "componentId": {"label": "DBP-Anti-fraud"},
+	                                "marketId": {"label": "SG"},
+	                                "jiraPrdLink": "https://docs/prd",
+	                            },
+	                            {
+	                                "id": 992,
+	                                "jiraKey": "AF-992",
+	                                "summary": "Reporter-only task",
+	                                "reporter": {"emailAddress": "pm@npt.sg"},
+	                                "creator": {"emailAddress": "other@npt.sg"},
+	                            },
+	                            {
+	                                "id": 993,
+	                                "jiraKey": "AF-993",
+	                                "summary": "Other task",
+	                                "creator": {"emailAddress": "other@npt.sg"},
+	                            },
+                        ]
+                    }
+                }
+
+            client._api_request = fake_api_request  # type: ignore[method-assign]
+
+            tasks = client.list_jira_tasks_for_project_created_by_email("225159", "pm@npt.sg")
+
+            self.assertEqual(len(tasks), 1)
+            self.assertEqual(tasks[0]["ticket_key"], "AF-991")
+            self.assertEqual(tasks[0]["ticket_link"], "https://jira.shopee.io/browse/AF-991")
+            self.assertEqual(tasks[0]["jira_title"], "[Feature][AF]Existing task")
+            self.assertEqual(tasks[0]["status"], "Developing")
+            self.assertEqual(tasks[0]["fix_version_name"], "Planning_26Q2")
+            self.assertEqual(tasks[0]["component"], "DBP-Anti-fraud")
+            self.assertEqual(tasks[0]["market"], "SG")
 
 
 if __name__ == "__main__":

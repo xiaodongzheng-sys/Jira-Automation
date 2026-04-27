@@ -19,11 +19,12 @@ import time
 from typing import Any
 import uuid
 
-from flask import Flask, current_app, flash, g, jsonify, redirect, render_template, request, send_file, session, url_for
+from flask import Flask, current_app, flash, g, has_app_context, jsonify, redirect, render_template, request, send_file, session, url_for
 from dotenv import load_dotenv
 from google.oauth2.credentials import Credentials
 from openpyxl import Workbook
 from openpyxl.styles import Font
+import requests
 
 from bpmis_jira_tool.config import Settings
 from bpmis_jira_tool.errors import ConfigError, ToolError
@@ -32,14 +33,23 @@ from bpmis_jira_tool.google_auth import (
     finish_google_oauth,
     get_google_credentials,
 )
-from bpmis_jira_tool.local_agent_client import LocalAgentClient, RemoteSeaTalkDashboardService, RemoteSourceCodeQAService
+from bpmis_jira_tool.local_agent_client import (
+    LocalAgentClient,
+    RemoteBPMISProjectStore,
+    RemoteSeaTalkDashboardService,
+    RemoteSeaTalkNameMappingStore,
+    RemoteSeaTalkTodoStore,
+    RemoteSourceCodeQAModelAvailabilityStore,
+    RemoteSourceCodeQASessionStore,
+    RemoteSourceCodeQAService,
+)
 from bpmis_jira_tool.gmail_dashboard import GMAIL_READONLY_SCOPE, GmailDashboardService
 from bpmis_jira_tool.seatalk_dashboard import SeaTalkDashboardService
 from bpmis_jira_tool.google_sheets import GoogleSheetsService
 from bpmis_jira_tool.bpmis_projects import BPMISProjectStore, PortalJiraCreationService, PortalProjectSyncService
 from bpmis_jira_tool.project_sync import BPMISProjectSyncService
 from bpmis_jira_tool.service import JiraCreationService, build_bpmis_client
-from bpmis_jira_tool.source_code_qa import CRMS_COUNTRIES, ALL_COUNTRY, SourceCodeQAService
+from bpmis_jira_tool.source_code_qa import CRMS_COUNTRIES, ALL_COUNTRY, CodexCliBridgeSourceCodeQALLMProvider, SourceCodeQAService
 from bpmis_jira_tool.user_config import (
     CONFIGURED_FIELDS,
     DEFAULT_DIRECT_VALUES,
@@ -58,6 +68,8 @@ load_dotenv(PROJECT_ROOT / ".env")
 MARKET_KEYS = ["ID", "SG", "PH", "Regional"]
 TEAM_PROFILE_ADMIN_EMAIL = "xiaodong.zheng@npt.sg"
 SYNC_EMAIL_EDIT_ALLOWLIST = {"xiaodong.zheng@npt.sg", "xiaodong.zheng1991@gmail.com"}
+SOURCE_CODE_QA_BUILTIN_ADMIN_EMAILS = {"xiaodong.zheng@npt.sg"}
+GMAIL_SEATALK_BUILTIN_OWNER_EMAILS = {"xiaodong.zheng@npt.sg"}
 _gmail_export_active_users: set[str] = set()
 _gmail_export_active_users_lock = threading.Lock()
 _source_code_qa_codex_session_locks: dict[str, threading.Lock] = {}
@@ -103,13 +115,13 @@ class JobStore:
     def __init__(self, storage_path: Path | None = None) -> None:
         self.storage_path = storage_path
         self._loaded_jobs_interrupted = False
-        self._jobs: dict[str, JobState] = self._load()
+        self._jobs: dict[str, JobState] = self._load(mark_interrupted=True)
         self._lock = threading.Lock()
         if self._loaded_jobs_interrupted:
             with self._lock:
                 self._persist_locked()
 
-    def _load(self) -> dict[str, JobState]:
+    def _load(self, *, mark_interrupted: bool = False) -> dict[str, JobState]:
         if self.storage_path is None or not self.storage_path.exists():
             return {}
         try:
@@ -124,7 +136,7 @@ class JobStore:
                 job = JobState(**raw_job)
             except TypeError:
                 continue
-            if job.state in {"queued", "running"}:
+            if mark_interrupted and job.state in {"queued", "running"}:
                 job.state = "failed"
                 job.stage = "failed"
                 job.message = "This job was interrupted by a server restart. Please start it again."
@@ -133,6 +145,15 @@ class JobStore:
                 self._loaded_jobs_interrupted = True
             jobs[str(job_id)] = job
         return jobs
+
+    def _refresh_locked(self) -> None:
+        if self.storage_path is None:
+            return
+        loaded_jobs = self._load(mark_interrupted=False)
+        for job_id, loaded_job in loaded_jobs.items():
+            current_job = self._jobs.get(job_id)
+            if current_job is None or loaded_job.updated_at >= current_job.updated_at:
+                self._jobs[job_id] = loaded_job
 
     def _persist_locked(self) -> None:
         if self.storage_path is None:
@@ -172,6 +193,8 @@ class JobStore:
         total: int | None = None,
     ) -> None:
         with self._lock:
+            if job_id not in self._jobs:
+                self._refresh_locked()
             job = self._jobs[job_id]
             if state is not None:
                 job.state = state
@@ -188,6 +211,8 @@ class JobStore:
 
     def complete(self, job_id: str, *, results: list[dict[str, Any]], notice: dict[str, Any]) -> None:
         with self._lock:
+            if job_id not in self._jobs:
+                self._refresh_locked()
             job = self._jobs[job_id]
             job.state = "completed"
             job.stage = "completed"
@@ -199,6 +224,8 @@ class JobStore:
 
     def fail(self, job_id: str, error: str) -> None:
         with self._lock:
+            if job_id not in self._jobs:
+                self._refresh_locked()
             job = self._jobs[job_id]
             job.state = "failed"
             job.stage = "failed"
@@ -209,6 +236,7 @@ class JobStore:
 
     def get(self, job_id: str) -> JobState | None:
         with self._lock:
+            self._refresh_locked()
             job = self._jobs.get(job_id)
             if job is None:
                 return None
@@ -324,7 +352,19 @@ class SeaTalkTodoStore:
         sequence_score = difflib.SequenceMatcher(None, left_task, right_task).ratio()
         token_score = cls._token_overlap_score(left_task, right_task)
         score = max(sequence_score, token_score)
-        return score >= (0.78 if same_domain else 0.9)
+        if score >= (0.78 if same_domain else 0.9):
+            return True
+        if not same_domain:
+            return False
+        if not cls._todo_due_compatible(left.get("due"), right.get("due")):
+            return False
+        left_tokens = cls._informative_todo_tokens(left)
+        right_tokens = cls._informative_todo_tokens(right)
+        if not left_tokens or not right_tokens:
+            return False
+        overlap_count = len(left_tokens & right_tokens)
+        overlap_ratio = overlap_count / max(1, min(len(left_tokens), len(right_tokens)))
+        return overlap_count >= 4 and overlap_ratio >= 0.42
 
     @staticmethod
     def _similarity_text(value: Any) -> str:
@@ -337,6 +377,40 @@ class SeaTalkTodoStore:
         if not left_tokens or not right_tokens:
             return 0.0
         return len(left_tokens & right_tokens) / len(left_tokens | right_tokens)
+
+    @classmethod
+    def _informative_todo_tokens(cls, todo: dict[str, Any]) -> set[str]:
+        text = cls._similarity_text(f"{todo.get('task') or ''} {todo.get('evidence') or ''}")
+        stopwords = {
+            "about", "accepted", "after", "aligned", "also", "and", "another", "any", "are", "arrange",
+            "asks", "attend", "complete", "discussion", "follow", "for", "from", "help", "if", "invited",
+            "join", "keep", "meeting", "needed", "on", "or", "plan", "prepare", "remaining", "says", "session",
+            "support", "task", "the", "to", "tool", "up", "with", "xiaodong",
+        }
+        tokens = {token for token in text.split() if len(token) > 1 and token not in stopwords}
+        normalized: set[str] = set()
+        for token in tokens:
+            normalized.add(token)
+            if "-" in token:
+                normalized.update(part for part in token.split("-") if len(part) > 1 and part not in stopwords)
+        return normalized
+
+    @classmethod
+    def _todo_due_compatible(cls, left: Any, right: Any) -> bool:
+        left_text = str(left or "").strip().lower()
+        right_text = str(right or "").strip().lower()
+        if not left_text or left_text == "unknown" or not right_text or right_text == "unknown":
+            return True
+        left_date = cls._todo_due_date(left_text)
+        right_date = cls._todo_due_date(right_text)
+        if left_date and right_date:
+            return left_date == right_date
+        return left_text == right_text
+
+    @staticmethod
+    def _todo_due_date(value: str) -> str:
+        match = re.search(r"\b(20\d{2}-\d{2}-\d{2})\b", value)
+        return match.group(1) if match else ""
 
     @classmethod
     def _merge_similar_open_todo(cls, *, existing: dict[str, Any], incoming: dict[str, Any], todo_id: str) -> dict[str, Any]:
@@ -1108,6 +1182,8 @@ def create_app() -> Flask:
         g.request_id = uuid.uuid4().hex[:12]
         if request.path.rstrip("/") == "/healthz":
             return jsonify({"status": "ok", "revision": _current_release_revision()}), HTTPStatus.OK
+        if request.path.startswith("/api/local-agent/"):
+            return None
         if request.endpoint in {
             None,
             "static",
@@ -1178,7 +1254,7 @@ def create_app() -> Flask:
         run_notice = session.pop("run_notice", None)
         user_identity = _get_user_identity(settings)
         config_key = user_identity.get("config_key")
-        raw_config_data = config_store.load(config_key) if config_key else None
+        raw_config_data = _load_user_config_for_identity(settings, user_identity) if config_key else None
         effective_team_profiles = _load_effective_team_profiles(config_store)
         config_data = raw_config_data or config_store._normalize({})
         config_data = _hydrate_setup_defaults(config_data, user_identity, team_profiles=effective_team_profiles)
@@ -1280,7 +1356,8 @@ def create_app() -> Flask:
                     "status": "ok",
                     "answer_mode": "auto",
                     "can_manage": _can_manage_source_code_qa(settings),
-                    "git_auth_ready": bool(settings.source_code_qa_gitlab_token),
+                    "auth": _source_code_qa_auth_payload(settings),
+                    "git_auth_ready": _source_code_qa_git_auth_ready(service, settings),
                     "llm_ready": service.llm_ready(),
                     "llm_provider": settings.source_code_qa_llm_provider,
                     "llm_providers": {
@@ -1342,7 +1419,7 @@ def create_app() -> Flask:
             return access_gate
         payload = request.get_json(silent=True) or {}
         raw_availability = payload.get("availability") if isinstance(payload.get("availability"), dict) else {}
-        store: SourceCodeQAModelAvailabilityStore = current_app.config["SOURCE_CODE_QA_MODEL_AVAILABILITY_STORE"]
+        store = _get_source_code_qa_model_availability_store()
         availability = store.save(raw_availability)
         return jsonify(
             {
@@ -1376,7 +1453,7 @@ def create_app() -> Flask:
         access_gate = _require_source_code_qa_access(settings, api=True)
         if access_gate is not None:
             return access_gate
-        store: SourceCodeQASessionStore = current_app.config["SOURCE_CODE_QA_SESSION_STORE"]
+        store = _get_source_code_qa_session_store()
         owner_email = _current_google_email() or "local"
         if request.method == "GET":
             limit = request.args.get("limit", "30")
@@ -1401,7 +1478,7 @@ def create_app() -> Flask:
         access_gate = _require_source_code_qa_access(settings, api=True)
         if access_gate is not None:
             return access_gate
-        store: SourceCodeQASessionStore = current_app.config["SOURCE_CODE_QA_SESSION_STORE"]
+        store = _get_source_code_qa_session_store()
         session_payload = store.get(session_id, owner_email=_current_google_email() or "local")
         if session_payload is None:
             return jsonify({"status": "error", "message": "Source Code Q&A session was not found."}), HTTPStatus.NOT_FOUND
@@ -1412,7 +1489,7 @@ def create_app() -> Flask:
         access_gate = _require_source_code_qa_access(settings, api=True)
         if access_gate is not None:
             return access_gate
-        store: SourceCodeQASessionStore = current_app.config["SOURCE_CODE_QA_SESSION_STORE"]
+        store = _get_source_code_qa_session_store()
         archived = store.archive(session_id, owner_email=_current_google_email() or "local")
         if archived is None:
             return jsonify({"status": "error", "message": "Source Code Q&A session was not found."}), HTTPStatus.NOT_FOUND
@@ -1443,20 +1520,19 @@ def create_app() -> Flask:
             if not _source_code_qa_provider_available(payload.get("llm_provider")):
                 raise ToolError("Selected Source Code Q&A model is unavailable.")
             service = _build_source_code_qa_service(payload.get("llm_provider"))
-            session_store: SourceCodeQASessionStore = current_app.config["SOURCE_CODE_QA_SESSION_STORE"]
+            session_store = _get_source_code_qa_session_store()
             session_id = str(payload.get("session_id") or "").strip()
             owner_email = _current_google_email() or "local"
             conversation_context = payload.get("conversation_context") if isinstance(payload.get("conversation_context"), dict) else None
             if conversation_context is None and session_id:
                 conversation_context = session_store.get_context(session_id, owner_email=owner_email)
-            auto_sync = service.ensure_synced_today(
-                pm_team=str(payload.get("pm_team") or ""),
-                country=str(payload.get("country") or ""),
-            )
+            pm_team = str(payload.get("pm_team") or "")
+            country = str(payload.get("country") or "")
+            auto_sync = _prepare_source_code_qa_auto_sync(service, pm_team=pm_team, country=country)
             def run_query() -> dict[str, Any]:
                 return service.query(
-                    pm_team=str(payload.get("pm_team") or ""),
-                    country=str(payload.get("country") or ""),
+                    pm_team=pm_team,
+                    country=country,
                     question=str(payload.get("question") or ""),
                     answer_mode=_source_code_qa_public_answer_mode(payload.get("answer_mode")),
                     llm_budget_mode="auto",
@@ -1544,7 +1620,7 @@ def create_app() -> Flask:
                 return redirect(url_for("access_denied"))
             current_identity = _get_user_identity(settings)
             if previous_identity.get("config_key") and current_identity.get("config_key"):
-                config_store.migrate(previous_identity["config_key"], current_identity["config_key"])
+                _migrate_user_config(settings, previous_identity["config_key"], current_identity["config_key"])
             _log_portal_event(
                 "google_callback_success",
                 **_build_request_log_context(settings, user_identity=current_identity),
@@ -1847,7 +1923,7 @@ def create_app() -> Flask:
         try:
             payload = _build_seatalk_dashboard_service(settings).build_insights()
             owner_email = _current_google_email() or settings.gmail_seatalk_demo_owner_email
-            todo_store: SeaTalkTodoStore = current_app.config["SEATALK_TODO_STORE"]
+            todo_store = _get_seatalk_todo_store(settings)
             completed_ids = todo_store.completed_ids(owner_email=owner_email)
             payload = dict(payload)
             open_todos = todo_store.merge_open_todos(
@@ -1892,7 +1968,7 @@ def create_app() -> Flask:
         payload = request.get_json(silent=True) or {}
         todo = payload.get("todo") if isinstance(payload.get("todo"), dict) else payload
         try:
-            todo_store: SeaTalkTodoStore = current_app.config["SEATALK_TODO_STORE"]
+            todo_store = _get_seatalk_todo_store(settings)
             result = todo_store.mark_completed(
                 owner_email=_current_google_email() or settings.gmail_seatalk_demo_owner_email,
                 todo=todo,
@@ -1906,7 +1982,7 @@ def create_app() -> Flask:
         access_gate = _require_gmail_seatalk_demo_access(settings, api=True)
         if access_gate is not None:
             return access_gate
-        mapping_store: SeaTalkNameMappingStore = current_app.config["SEATALK_NAME_MAPPING_STORE"]
+        mapping_store = _get_seatalk_name_mapping_store(settings)
         if request.method == "POST":
             payload = request.get_json(silent=True) or {}
             mappings = mapping_store.merge_mappings(payload.get("mappings") if isinstance(payload, dict) else {})
@@ -1997,7 +2073,7 @@ def create_app() -> Flask:
             return login_gate
         try:
             user_identity = _get_user_identity(settings)
-            existing_config = config_store.load(user_identity["config_key"]) or config_store._normalize({})
+            existing_config = _load_user_config_for_identity(settings, user_identity) or config_store._normalize({})
             save_mode = str(request.form.get("save_mode", "") or "").strip()
             config = {
                 "spreadsheet_link": request.form.get("spreadsheet_link", ""),
@@ -2044,7 +2120,7 @@ def create_app() -> Flask:
             )
             if save_mode == "route_only":
                 _validate_config_security(settings, config)
-                _save_route_only_config(existing_config, config, user_identity["config_key"])
+                _save_route_only_config(existing_config, config, user_identity)
                 _log_portal_event(
                     "config_save_success",
                     **_build_request_log_context(
@@ -2060,7 +2136,7 @@ def create_app() -> Flask:
             _validate_team_profile_setup(config, team_profiles=_load_effective_team_profiles(config_store))
 
             config_store.build_field_mappings(config)
-            config_store.save(config, user_identity["config_key"])
+            _save_user_config_for_identity(settings, user_identity, config)
             _log_portal_event(
                 "config_save_success",
                 **_build_request_log_context(
@@ -2093,7 +2169,7 @@ def create_app() -> Flask:
             return login_gate
         try:
             user_identity = _get_user_identity(settings)
-            existing_config = config_store.load(user_identity["config_key"]) or config_store._normalize({})
+            existing_config = _load_user_config_for_identity(settings, user_identity) or config_store._normalize({})
             payload = request.get_json(silent=True) or {}
             config = config_store._normalize(
                 _hydrate_setup_defaults(
@@ -2112,7 +2188,7 @@ def create_app() -> Flask:
             saved = _save_route_only_config(
                 existing_config,
                 config,
-                user_identity["config_key"],
+                user_identity,
                 default_text_override=str(payload.get("component_default_rules_text", "") or ""),
             )
             _log_portal_event(
@@ -2150,7 +2226,7 @@ def create_app() -> Flask:
     def _save_route_only_config(
         existing_config: dict[str, Any],
         config: dict[str, Any],
-        user_key: str,
+        user_identity: dict[str, str | None],
         *,
         default_text_override: str = "",
     ) -> dict[str, Any]:
@@ -2166,7 +2242,7 @@ def create_app() -> Flask:
             default_seed_text,
         )
         normalized = config_store._normalize(route_only_config)
-        config_store.save(normalized, user_key)
+        _save_user_config_for_identity(settings, user_identity, normalized)
         return normalized
 
     @app.post("/admin/team-profiles/save")
@@ -2183,7 +2259,7 @@ def create_app() -> Flask:
             team_profiles = _load_effective_team_profiles(config_store)
             if team_key not in team_profiles:
                 raise ToolError(f"Unsupported PM Team: {team_key}.")
-            saved_profile = config_store.save_team_profile(
+            saved_profile = _save_team_profile(settings, config_store,
                 team_key,
                 {
                     "label": str(team_profiles[team_key].get("label", "") or ""),
@@ -2354,6 +2430,10 @@ def create_app() -> Flask:
     def create_sync_bpmis_projects_job():
         return _start_job("sync-bpmis-projects", dry_run=False)
 
+    @app.route("/api/local-agent/<path:agent_path>", methods=["GET", "POST", "PATCH", "DELETE"])
+    def local_agent_public_proxy(agent_path: str):
+        return _proxy_local_agent_request(agent_path)
+
     @app.get("/api/bpmis-projects")
     def bpmis_projects():
         login_gate = _require_google_login(settings, api=True)
@@ -2370,7 +2450,7 @@ def create_app() -> Flask:
             return login_gate
         user_identity = _get_user_identity(settings)
         deleted = _get_bpmis_project_store().soft_delete_project(user_key=user_identity["config_key"], bpmis_id=bpmis_id)
-        return jsonify({"status": "ok", "deleted": deleted})
+        return jsonify({"status": "ok", "deleted": deleted, "scope": "portal_only"})
 
     @app.get("/api/bpmis-projects/<bpmis_id>/jira-options")
     def bpmis_project_jira_options(bpmis_id: str):
@@ -2416,7 +2496,7 @@ def create_app() -> Flask:
                 bpmis_id=bpmis_id,
                 ticket_id=ticket_id,
             )
-            return jsonify({"status": "ok", "deleted": deleted})
+            return jsonify({"status": "ok", "deleted": deleted, "scope": "bpmis_and_portal"})
         except ToolError as error:
             return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
 
@@ -2437,6 +2517,30 @@ def create_app() -> Flask:
                 bpmis_id=bpmis_id,
                 ticket_id=ticket_id,
                 status=status_value,
+            )
+            return jsonify({"status": "ok", "ticket": ticket})
+        except ToolError as error:
+            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
+
+    @app.patch("/api/bpmis-projects/<bpmis_id>/jira-tickets/<ticket_id>/version")
+    def update_bpmis_project_jira_ticket_version(bpmis_id: str, ticket_id: str):
+        login_gate = _require_google_login(settings, api=True)
+        if login_gate is not None:
+            return login_gate
+        payload = request.get_json(silent=True) or {}
+        version_name = str(payload.get("version_name") or "").strip() if isinstance(payload, dict) else ""
+        version_id = str(payload.get("version_id") or "").strip() if isinstance(payload, dict) else ""
+        if not version_name and not version_id:
+            return jsonify({"status": "error", "message": "Jira fix version is required."}), HTTPStatus.BAD_REQUEST
+        try:
+            user_identity = _get_user_identity(settings)
+            service = _build_portal_jira_creation_service(settings)
+            ticket = service.update_ticket_version(
+                user_key=user_identity["config_key"],
+                bpmis_id=bpmis_id,
+                ticket_id=ticket_id,
+                version_name=version_name,
+                version_id=version_id,
             )
             return jsonify({"status": "ok", "ticket": ticket})
         except ToolError as error:
@@ -2530,12 +2634,17 @@ def create_app() -> Flask:
                 config_data,
                 show_all_before_team_filtering=show_all_before_team_filtering,
             )
+            normalized_items = [_normalize_productization_issue_row(item) for item in rows]
             return jsonify(
                 {
                     "status": "ok",
-                    "items": [_normalize_productization_issue_row(item) for item in rows],
+                    "items": normalized_items,
                     "raw_count": raw_count,
                     "filtered_count": len(rows),
+                    "llm_description_generated": False,
+                    "llm_generated_count": 0,
+                    "codex_detailed_feature": False,
+                    "codex_generated_count": 0,
                     **filter_metadata,
                 }
             )
@@ -2559,6 +2668,78 @@ def create_app() -> Flask:
                     {
                         "status": "error",
                         "message": "Unable to load upgrade tickets right now. Please try again shortly.",
+                    }
+                ),
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+
+    @app.get("/api/productization-upgrade-summary/llm-descriptions")
+    def productization_upgrade_summary_llm_descriptions():
+        login_gate = _require_google_login(settings, api=True)
+        if login_gate is not None:
+            return login_gate
+
+        version_id = str(request.args.get("version_id") or "").strip()
+        show_all_before_team_filtering = str(request.args.get("show_all_before_team_filtering") or "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        if not version_id:
+            return jsonify({"status": "error", "message": "version_id is required."}), HTTPStatus.BAD_REQUEST
+
+        try:
+            bpmis_client = _build_bpmis_client_for_current_user(settings)
+            rows = bpmis_client.list_issues_for_version(version_id)
+            config_data = _load_current_user_config(settings)
+            raw_count = len(rows)
+            rows, filter_metadata = _filter_productization_issue_rows_for_pm_team(
+                rows,
+                config_data,
+                show_all_before_team_filtering=show_all_before_team_filtering,
+            )
+            normalized_items = [_normalize_productization_issue_row(item) for item in rows]
+            codex_metadata = _apply_codex_productization_detailed_features(
+                normalized_items,
+                rows,
+                settings=settings,
+            )
+            return jsonify(
+                {
+                    "status": "ok",
+                    "items": normalized_items,
+                    "raw_count": raw_count,
+                    "filtered_count": len(rows),
+                    **codex_metadata,
+                    **filter_metadata,
+                }
+            )
+        except ToolError as error:
+            error_details = _classify_portal_error(error)
+            _log_portal_event(
+                "productization_llm_description_tool_error",
+                level=logging.WARNING,
+                **_build_request_log_context(settings, extra=error_details),
+            )
+            return jsonify({"status": "error", "message": str(error), **error_details}), HTTPStatus.BAD_REQUEST
+        except Exception:
+            request_id = getattr(g, "request_id", "")
+            _log_portal_event(
+                "productization_llm_description_unexpected_error",
+                level=logging.ERROR,
+                **_build_request_log_context(settings, extra={"version_id": version_id}),
+            )
+            current_app.logger.exception("Productization LLM Description generation failed.")
+            return (
+                jsonify(
+                    {
+                        "status": "error",
+                        "message": "Productization LLM Description generation failed unexpectedly. Please retry or share the request ID.",
+                        "request_id": request_id,
+                        "error_category": "unexpected_internal",
+                        "error_code": "server_error",
+                        "error_retryable": True,
                     }
                 ),
                 HTTPStatus.INTERNAL_SERVER_ERROR,
@@ -2639,7 +2820,7 @@ def create_app() -> Flask:
             return jsonify({"status": "error", "message": "Please connect Google Sheets first."}), 400
 
         user_identity = _get_user_identity(settings)
-        config_data = config_store.load(user_identity["config_key"]) or config_store._normalize({})
+        config_data = _load_user_config_for_identity(settings, user_identity) or config_store._normalize({})
         config_data = _hydrate_setup_defaults(config_data, user_identity)
         _apply_sync_email_policy(config_data, user_identity)
         config_data["_user_key"] = user_identity["config_key"]
@@ -2674,7 +2855,7 @@ def create_app() -> Flask:
 def _build_service(settings: Settings) -> JiraCreationService:
     user_identity = _get_user_identity(settings)
     config_store = _get_config_store()
-    config_data = config_store.load(user_identity["config_key"]) or config_store._normalize({})
+    config_data = _load_user_config_for_identity(settings, user_identity) or config_store._normalize({})
     sheets = _build_sheets_service(settings, config_data)
     field_mappings_override = config_store.build_field_mappings(config_data)
     access_token = _resolve_bpmis_access_token(config_data, settings)
@@ -2695,7 +2876,7 @@ def _build_bpmis_client_for_current_user(settings: Settings):
 def _load_current_user_config(settings: Settings) -> dict[str, Any]:
     user_identity = _get_user_identity(settings)
     config_store = _get_config_store()
-    config_data = config_store.load(user_identity["config_key"]) or config_store._normalize({})
+    config_data = _load_user_config_for_identity(settings, user_identity) or config_store._normalize({})
     hydrated = _hydrate_setup_defaults(config_data, user_identity)
     _apply_sync_email_policy(hydrated, user_identity)
     return hydrated
@@ -2756,7 +2937,7 @@ def _build_gmail_dashboard_service() -> GmailDashboardService:
 
 def _build_seatalk_dashboard_service(settings: Settings) -> SeaTalkDashboardService:
     if _local_agent_seatalk_enabled(settings):
-        name_mapping_store = current_app.config.get("SEATALK_NAME_MAPPING_STORE") if current_app else None
+        name_mapping_store = _get_seatalk_name_mapping_store(settings) if current_app else None
         return RemoteSeaTalkDashboardService(
             _build_local_agent_client(settings),
             name_mappings_provider=lambda: name_mapping_store.mappings() if name_mapping_store else {},
@@ -2820,7 +3001,76 @@ def _get_config_store() -> WebConfigStore:
 
 
 def _get_bpmis_project_store() -> BPMISProjectStore:
+    settings: Settings = current_app.config["SETTINGS"]
+    if _remote_bpmis_config_enabled(settings):
+        return RemoteBPMISProjectStore(_build_local_agent_client(settings))
     return current_app.config["BPMIS_PROJECT_STORE"]
+
+
+def _get_source_code_qa_session_store():
+    settings: Settings = current_app.config["SETTINGS"]
+    if _local_agent_source_code_qa_enabled(settings):
+        return RemoteSourceCodeQASessionStore(_build_local_agent_client(settings))
+    return current_app.config["SOURCE_CODE_QA_SESSION_STORE"]
+
+
+def _get_source_code_qa_model_availability_store():
+    settings: Settings = current_app.config["SETTINGS"]
+    if _local_agent_source_code_qa_enabled(settings):
+        return RemoteSourceCodeQAModelAvailabilityStore(_build_local_agent_client(settings))
+    return current_app.config["SOURCE_CODE_QA_MODEL_AVAILABILITY_STORE"]
+
+
+def _get_seatalk_todo_store(settings: Settings):
+    if _local_agent_seatalk_enabled(settings):
+        return RemoteSeaTalkTodoStore(_build_local_agent_client(settings))
+    return current_app.config["SEATALK_TODO_STORE"]
+
+
+def _get_seatalk_name_mapping_store(settings: Settings):
+    if _local_agent_seatalk_enabled(settings):
+        return RemoteSeaTalkNameMappingStore(_build_local_agent_client(settings))
+    return current_app.config["SEATALK_NAME_MAPPING_STORE"]
+
+
+def _remote_bpmis_config_enabled(settings: Settings) -> bool:
+    return bool(
+        _local_agent_mode_enabled(settings)
+        and settings.local_agent_base_url
+        and settings.local_agent_hmac_secret
+        and settings.local_agent_bpmis_enabled
+    )
+
+
+def _load_user_config_for_identity(settings: Settings, user_identity: dict[str, str | None]) -> dict[str, Any] | None:
+    user_key = str(user_identity.get("config_key") or "").strip()
+    if not user_key:
+        return None
+    if _remote_bpmis_config_enabled(settings):
+        return _build_local_agent_client(settings).bpmis_config_load(user_key=user_key)
+    return _get_config_store().load(user_key)
+
+
+def _save_user_config_for_identity(settings: Settings, user_identity: dict[str, str | None], config: dict[str, Any]) -> dict[str, Any]:
+    user_key = str(user_identity.get("config_key") or "").strip()
+    if not user_key:
+        raise ToolError("Sign in before saving Setup.")
+    if _remote_bpmis_config_enabled(settings):
+        return _build_local_agent_client(settings).bpmis_config_save(user_key=user_key, config=config)
+    return _get_config_store().save(config, user_key)
+
+
+def _migrate_user_config(settings: Settings, from_user_key: str, to_user_key: str) -> None:
+    if _remote_bpmis_config_enabled(settings):
+        _build_local_agent_client(settings).bpmis_config_migrate(from_user_key=from_user_key, to_user_key=to_user_key)
+        return
+    _get_config_store().migrate(from_user_key, to_user_key)
+
+
+def _save_team_profile(settings: Settings, config_store: WebConfigStore, team_key: str, profile: dict[str, Any]) -> dict[str, Any]:
+    if _remote_bpmis_config_enabled(settings):
+        return _build_local_agent_client(settings).bpmis_team_profile_save(team_key=team_key, profile=profile)
+    return config_store.save_team_profile(team_key, profile)
 
 
 def _current_google_profile() -> dict[str, Any]:
@@ -2870,7 +3120,11 @@ def _can_access_prd_briefing(settings: Settings) -> bool:
 
 def _can_access_gmail_seatalk_demo(settings: Settings) -> bool:
     email = _current_google_email()
-    return bool(email and email == settings.gmail_seatalk_demo_owner_email.strip().lower())
+    allowed_emails = {
+        settings.gmail_seatalk_demo_owner_email.strip().lower(),
+        *GMAIL_SEATALK_BUILTIN_OWNER_EMAILS,
+    }
+    return bool(email and email in {item for item in allowed_emails if item})
 
 
 def _can_access_source_code_qa(settings: Settings) -> bool:
@@ -2886,7 +3140,40 @@ def _can_access_source_code_qa(settings: Settings) -> bool:
 
 def _can_manage_source_code_qa(settings: Settings) -> bool:
     email = _current_google_email()
-    return bool(email and email == settings.source_code_qa_owner_email.strip().lower())
+    admin_emails = {
+        settings.source_code_qa_owner_email.strip().lower(),
+        *settings.source_code_qa_admin_emails,
+        *SOURCE_CODE_QA_BUILTIN_ADMIN_EMAILS,
+    }
+    return bool(email and email in {item for item in admin_emails if item})
+
+
+def _source_code_qa_auth_payload(settings: Settings) -> dict[str, Any]:
+    email = _current_google_email()
+    owner_email = settings.source_code_qa_owner_email.strip().lower()
+    admin_emails = {owner_email, *settings.source_code_qa_admin_emails, *SOURCE_CODE_QA_BUILTIN_ADMIN_EMAILS}
+    normalized_admins = {item for item in admin_emails if item}
+    if email == owner_email:
+        match_source = "owner"
+    elif email and email in SOURCE_CODE_QA_BUILTIN_ADMIN_EMAILS:
+        match_source = "builtin_admin"
+    elif email and email in normalized_admins:
+        match_source = "admin_allowlist"
+    else:
+        match_source = ""
+    return {
+        "signed_in_email": email,
+        "can_manage": bool(email and email in normalized_admins),
+        "owner_email": owner_email,
+        "admin_email_count": len(normalized_admins),
+        "admin_match_source": match_source,
+    }
+
+
+def _source_code_qa_git_auth_ready(service: Any, settings: Settings) -> bool:
+    if hasattr(service, "git_auth_ready"):
+        return bool(service.git_auth_ready())
+    return bool(settings.source_code_qa_gitlab_token)
 
 
 def _build_source_code_qa_service(llm_provider: str | None = None) -> SourceCodeQAService:
@@ -2897,12 +3184,110 @@ def _build_source_code_qa_service(llm_provider: str | None = None) -> SourceCode
     return resolved
 
 
+def _source_code_qa_query_sync_mode(settings: Settings) -> str:
+    mode = str(os.getenv("SOURCE_CODE_QA_QUERY_SYNC_MODE") or "").strip().lower()
+    if mode in {"blocking", "background", "disabled"}:
+        return mode
+    return "background" if _local_agent_source_code_qa_enabled(settings) else "blocking"
+
+
+def _prepare_source_code_qa_auto_sync(
+    service: Any,
+    *,
+    pm_team: str,
+    country: str,
+    progress_callback: Any | None = None,
+) -> dict[str, Any]:
+    settings: Settings = current_app.config["SETTINGS"]
+    mode = _source_code_qa_query_sync_mode(settings)
+    key = service.mapping_key(pm_team, country) if hasattr(service, "mapping_key") else f"{pm_team}:{country}"
+    if mode == "disabled":
+        return {
+            "attempted": False,
+            "status": "skipped",
+            "reason": "query-time repository auto-sync is disabled",
+            "key": key,
+        }
+    if mode == "background":
+        if progress_callback:
+            progress_callback("auto_sync_queued", "Repository freshness check is running in the background.", 0, 1)
+        if hasattr(service, "ensure_synced_today_background"):
+            return service.ensure_synced_today_background(pm_team=pm_team, country=country)
+
+        app_obj = current_app._get_current_object()
+        logger = current_app.logger
+
+        def run_background_sync() -> None:
+            with app_obj.app_context():
+                try:
+                    service.ensure_synced_today(pm_team=pm_team, country=country)
+                except Exception:
+                    logger.exception("Source Code Q&A background auto-sync failed for %s.", key)
+
+        threading.Thread(target=run_background_sync, daemon=True).start()
+        return {
+            "attempted": False,
+            "status": "background_queued",
+            "reason": "repository freshness check queued in the background",
+            "key": key,
+        }
+    if progress_callback:
+        progress_callback("auto_sync_check", "Checking repository sync schedule.", 0, 1)
+    result = service.ensure_synced_today(pm_team=pm_team, country=country)
+    if progress_callback:
+        if result.get("attempted"):
+            progress_callback("auto_sync_completed", "Repository auto-sync completed; starting code search.", 1, 1)
+        else:
+            progress_callback("auto_sync_completed", "Repository indexes do not need scheduled sync; starting code search.", 1, 1)
+    return result
+
+
 def _build_local_agent_client(settings: Settings) -> LocalAgentClient:
     return LocalAgentClient(
         base_url=settings.local_agent_base_url or "",
         hmac_secret=settings.local_agent_hmac_secret or "",
         timeout_seconds=settings.local_agent_timeout_seconds,
     )
+
+
+def _proxy_local_agent_request(agent_path: str):
+    settings: Settings = current_app.config["SETTINGS"]
+    local_base_url = _local_agent_loopback_base_url()
+    normalized_agent_path = agent_path.lstrip("/")
+    target_path = "/healthz" if normalized_agent_path == "healthz" else f"/api/local-agent/{normalized_agent_path}"
+    target_url = f"{local_base_url}{target_path}"
+    headers = {
+        key: value
+        for key, value in request.headers.items()
+        if key.lower()
+        not in {
+            "host",
+            "content-length",
+            "connection",
+            "accept-encoding",
+        }
+    }
+    try:
+        response = requests.request(
+            request.method,
+            target_url,
+            params=request.args,
+            data=request.get_data() if request.method != "GET" else None,
+            headers=headers,
+            timeout=settings.local_agent_timeout_seconds,
+        )
+    except requests.RequestException as error:
+        return jsonify({"status": "error", "message": f"Mac local-agent is unavailable: {error}"}), HTTPStatus.BAD_GATEWAY
+
+    excluded_headers = {"content-encoding", "content-length", "connection", "transfer-encoding"}
+    proxy_headers = [(key, value) for key, value in response.headers.items() if key.lower() not in excluded_headers]
+    return current_app.response_class(response.content, status=response.status_code, headers=proxy_headers)
+
+
+def _local_agent_loopback_base_url() -> str:
+    host = str(os.environ.get("LOCAL_AGENT_HOST") or "127.0.0.1").strip() or "127.0.0.1"
+    port = str(os.environ.get("LOCAL_AGENT_PORT") or "7007").strip() or "7007"
+    return f"http://{host}:{port}".rstrip("/")
 
 
 def _local_agent_mode_enabled(settings: Settings) -> bool:
@@ -2929,8 +3314,7 @@ def _local_agent_seatalk_enabled(settings: Settings) -> bool:
 
 
 def _source_code_qa_model_availability() -> dict[str, bool]:
-    store: SourceCodeQAModelAvailabilityStore = current_app.config["SOURCE_CODE_QA_MODEL_AVAILABILITY_STORE"]
-    return store.get()
+    return _get_source_code_qa_model_availability_store().get()
 
 
 def _source_code_qa_options_payload(service: SourceCodeQAService) -> dict[str, Any]:
@@ -3173,10 +3557,14 @@ def _require_source_code_qa_manage_access(settings: Settings, *, api: bool = Fal
     access_gate = _require_source_code_qa_access(settings, api=api)
     if access_gate is not None:
         return access_gate
-    message = f"Source Code Q&A repository admin is restricted to {settings.source_code_qa_owner_email.strip().lower()}."
+    auth_payload = _source_code_qa_auth_payload(settings)
+    message = (
+        f"Source Code Q&A repository admin is restricted to {auth_payload['owner_email']} "
+        f"and configured admin allowlist. Signed in as {auth_payload['signed_in_email'] or 'unknown'}."
+    )
     if not _can_manage_source_code_qa(settings):
         if api:
-            return jsonify({"status": "error", "message": message}), HTTPStatus.FORBIDDEN
+            return jsonify({"status": "error", "message": message, "auth": auth_payload}), HTTPStatus.FORBIDDEN
         flash(message, "error")
         return redirect(url_for("source_code_qa"))
     return None
@@ -3192,7 +3580,12 @@ def _validate_config_security(settings: Settings, config_data: dict[str, Any]) -
 
 def _load_effective_team_profiles(config_store: WebConfigStore) -> dict[str, dict[str, Any]]:
     profiles = {team_key: dict(profile) for team_key, profile in TEAM_PROFILE_DEFAULTS.items()}
-    for team_key, stored_profile in config_store.load_team_profiles().items():
+    stored_profiles = config_store.load_team_profiles()
+    if has_app_context():
+        settings = current_app.config.get("SETTINGS")
+        if isinstance(settings, Settings) and _remote_bpmis_config_enabled(settings):
+            stored_profiles = _build_local_agent_client(settings).bpmis_team_profiles_load()
+    for team_key, stored_profile in stored_profiles.items():
         if team_key not in profiles:
             continue
         profiles[team_key].update(stored_profile)
@@ -3438,18 +3831,18 @@ def _run_source_code_qa_query_job(app: Flask, job_id: str, payload: dict[str, An
             service = _build_source_code_qa_service(payload.get("llm_provider"))
             pm_team = str(payload.get("pm_team") or "")
             country = str(payload.get("country") or "")
-            session_store: SourceCodeQASessionStore = app.config["SOURCE_CODE_QA_SESSION_STORE"]
+            session_store = _get_source_code_qa_session_store()
             session_id = str(payload.get("session_id") or "").strip()
             owner_email = str(payload.get("_session_owner_email") or "").strip().lower() or "local"
             conversation_context = payload.get("conversation_context") if isinstance(payload.get("conversation_context"), dict) else None
             if conversation_context is None and session_id:
                 conversation_context = session_store.get_context(session_id, owner_email=owner_email)
-            progress_callback("auto_sync_check", "Checking repository sync schedule.", 0, 1)
-            auto_sync = service.ensure_synced_today(pm_team=pm_team, country=country)
-            if auto_sync.get("attempted"):
-                progress_callback("auto_sync_completed", "Repository auto-sync completed; starting code search.", 1, 1)
-            else:
-                progress_callback("auto_sync_completed", "Repository indexes do not need scheduled sync; starting code search.", 1, 1)
+            auto_sync = _prepare_source_code_qa_auto_sync(
+                service,
+                pm_team=pm_team,
+                country=country,
+                progress_callback=progress_callback,
+            )
             def run_query() -> dict[str, Any]:
                 return service.query(
                     pm_team=pm_team,
@@ -3647,9 +4040,10 @@ def _normalize_productization_issue_row(row: dict[str, Any]) -> dict[str, Any]:
         "jira_ticket_number": ticket_key or "-",
         "jira_ticket_url": ticket_link or "",
         "feature_summary": _extract_first_text(row, "summary", "title", "jiraSummary") or "-",
-        "detailed_feature": _summarize_productization_detail(
+        "detailed_feature": _format_productization_description_text(
             _extract_first_text(row, "desc", "description", "jiraDescription")
         ),
+        "detailed_feature_source": "jira_description",
         "pm": _extract_person_display(
             _extract_first_value(row, "jiraRegionalPmPicId", "regionalPmPic", "productManager", "pm", "regionalPm")
         )
@@ -3658,6 +4052,148 @@ def _normalize_productization_issue_row(row: dict[str, Any]) -> dict[str, Any]:
             _extract_first_value(row, "jiraPrdLink", "prdLink", "prdLinks", "prd", "brdLink")
         ),
     }
+
+
+def _apply_codex_productization_detailed_features(
+    normalized_items: list[dict[str, Any]],
+    raw_rows: list[dict[str, Any]],
+    *,
+    settings: Settings,
+) -> dict[str, Any]:
+    if not normalized_items:
+        return {
+            "llm_description_generated": True,
+            "llm_generated_count": 0,
+            "codex_detailed_feature": True,
+            "codex_generated_count": 0,
+        }
+
+    prompt_items = []
+    for normalized, raw in zip(normalized_items, raw_rows):
+        prompt_items.append(
+            {
+                "jira_ticket_number": str(normalized.get("jira_ticket_number") or "-"),
+                "feature_summary": str(normalized.get("feature_summary") or "-"),
+                "jira_description": _format_productization_description_text(
+                    _extract_first_text(raw, "desc", "description", "jiraDescription")
+                )[:6000],
+            }
+        )
+
+    generated = _generate_productization_detailed_features_with_codex(prompt_items, settings=settings)
+    generated_by_ticket = {
+        str(item.get("jira_ticket_number") or "").strip(): str(item.get("detailed_feature") or "").strip()
+        for item in generated
+        if isinstance(item, dict)
+    }
+
+    generated_count = 0
+    for item in normalized_items:
+        ticket_number = str(item.get("jira_ticket_number") or "").strip()
+        detailed_feature = generated_by_ticket.get(ticket_number, "")
+        if detailed_feature:
+            item["detailed_feature"] = detailed_feature
+            item["detailed_feature_source"] = "codex"
+            generated_count += 1
+    return {
+        "llm_description_generated": True,
+        "llm_generated_count": generated_count,
+        "codex_detailed_feature": True,
+        "codex_generated_count": generated_count,
+    }
+
+
+def _generate_productization_detailed_features_with_codex(
+    prompt_items: list[dict[str, str]],
+    *,
+    settings: Settings,
+) -> list[dict[str, str]]:
+    if _local_agent_source_code_qa_enabled(settings):
+        return [
+            {
+                "jira_ticket_number": str(item.get("jira_ticket_number") or "").strip(),
+                "detailed_feature": _clean_codex_productization_detailed_feature(str(item.get("detailed_feature") or "")),
+            }
+            for item in _build_local_agent_client(settings).productization_llm_descriptions(items=prompt_items)
+            if isinstance(item, dict)
+        ]
+    return _generate_productization_detailed_features_with_local_codex(prompt_items, settings=settings)
+
+
+def _generate_productization_detailed_features_with_local_codex(
+    prompt_items: list[dict[str, str]],
+    *,
+    settings: Settings,
+) -> list[dict[str, str]]:
+    provider = CodexCliBridgeSourceCodeQALLMProvider(
+        workspace_root=PROJECT_ROOT,
+        timeout_seconds=settings.source_code_qa_codex_timeout_seconds,
+        concurrency_limit=settings.source_code_qa_codex_concurrency,
+        session_mode="ephemeral",
+        codex_binary=os.getenv("SOURCE_CODE_QA_CODEX_BINARY") or None,
+    )
+    prompt = (
+        "Generate English Detailed Feature text for each Jira ticket from its Jira Description.\n"
+        "Rules:\n"
+        "- Output strict JSON only, with shape: {\"items\":[{\"jira_ticket_number\":\"...\",\"detailed_feature\":\"...\"}]}.\n"
+        "- Keep one item per input Jira ticket and preserve the jira_ticket_number exactly.\n"
+        "- Write in clear product/engineering English.\n"
+        "- Summarize the functional change and expected behavior, not implementation chatter.\n"
+        "- If the description is empty or not meaningful, use \"-\".\n"
+        "- Do not include Markdown fences, citations, explanations, or Chinese text.\n\n"
+        f"Input JSON:\n{json.dumps({'items': prompt_items}, ensure_ascii=False)}"
+    )
+    result = provider.generate(
+        payload={
+            "systemInstruction": {"parts": [{"text": "You are a concise product feature summarizer."}]},
+            "contents": [{"parts": [{"text": prompt}]}],
+            "codex_prompt_mode": "productization_detailed_feature_v1",
+        },
+        primary_model=os.getenv("SOURCE_CODE_QA_CODEX_MODEL", "codex-cli"),
+        fallback_model=os.getenv("SOURCE_CODE_QA_CODEX_MODEL", "codex-cli"),
+    )
+    text = provider.extract_text(result.payload)
+    payload = _parse_codex_json_object(text)
+    items = payload.get("items") if isinstance(payload, dict) else None
+    if not isinstance(items, list):
+        raise ToolError("Codex returned an invalid Detailed Feature payload.")
+    return [
+        {
+            "jira_ticket_number": str(item.get("jira_ticket_number") or "").strip(),
+            "detailed_feature": _clean_codex_productization_detailed_feature(str(item.get("detailed_feature") or "")),
+        }
+        for item in items
+        if isinstance(item, dict)
+    ]
+
+
+def _parse_codex_json_object(text: str) -> dict[str, Any]:
+    raw = str(text or "").strip()
+    if raw.startswith("```"):
+        raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.I)
+        raw = re.sub(r"\s*```$", "", raw)
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as error:
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start < 0 or end <= start:
+            raise ToolError("Codex returned unreadable Detailed Feature JSON.") from error
+        try:
+            payload = json.loads(raw[start : end + 1])
+        except json.JSONDecodeError as nested_error:
+            raise ToolError("Codex returned unreadable Detailed Feature JSON.") from nested_error
+    if not isinstance(payload, dict):
+        raise ToolError("Codex returned an invalid Detailed Feature payload.")
+    return payload
+
+
+def _clean_codex_productization_detailed_feature(value: str) -> str:
+    text = _format_productization_description_text(value)
+    if not text:
+        return "-"
+    text = re.sub(r"```(?:json)?|```", "", text, flags=re.I).strip()
+    return text or "-"
 
 
 def _filter_productization_issue_rows_for_pm_team(
@@ -3736,220 +4272,18 @@ def _normalize_productization_ticket_url(value: str) -> str:
     return text
 
 
-def _summarize_productization_detail(value: str) -> str:
-    text = _clean_productization_detail_text(value)
-    if not text:
-        return "-"
-    return text
-
-
-def _clean_productization_detail_text(value: str) -> str:
+def _format_productization_description_text(value: str) -> str:
     if not str(value or "").strip():
-        return ""
+        return "-"
 
     text = html.unescape(value)
     text = re.sub(r"<br\s*/?>", "\n", text, flags=re.I)
     text = re.sub(r"</p\s*>", "\n", text, flags=re.I)
     text = re.sub(r"<[^>]+>", " ", text)
     text = text.replace("\r", "\n")
-    lines = [_clean_productization_detail_line(line) for line in text.split("\n")]
+    lines = [re.sub(r"\s+", " ", line).strip() for line in text.split("\n")]
     chunks = [line for line in lines if line]
-    return "\n".join(chunks).strip()
-
-
-def _clean_productization_detail_line(line: str) -> str:
-    text = re.sub(r"\s+", " ", str(line or "")).strip(" -*\t")
-    if not text:
-        return ""
-
-    text = re.sub(r"\[(?:https?://[^\]]+|[^\]]*link[^\]]*)\]", " ", text, flags=re.I)
-    text = re.sub(r"\[(https?://[^\]]+)\]", " ", text, flags=re.I)
-    text = re.sub(r"https?://\S+", " ", text, flags=re.I)
-    text = re.sub(r"\[\s*\d+(?:\.\d+)+\s*", "", text)
-    text = re.sub(
-        r"^(?:\[(?:feature|productization effort|tech|support)\]\s*)+",
-        "",
-        text,
-        flags=re.I,
-    )
-    text = re.sub(r"^(?:prd|sheet|link|docs?)\s*:\s*", "", text, flags=re.I)
-    text = re.sub(r"section\s+\d+(?:\.\d+)+\s*", "", text, flags=re.I)
-    text = re.sub(r"\b(?:scenario|scene)\s*[a-z]*\d+\b", " ", text, flags=re.I)
-    text = re.sub(r"\brow\s*\d+(?:\s*-\s*\d+)?\b", " ", text, flags=re.I)
-    text = re.sub(r"\bmain\s+track\s+jira\s*:\s*", " ", text, flags=re.I)
-    text = re.sub(
-        r"\b[a-z]{2}\s+anti\s*fraud\s+ver(?:sion|ision)\s+plan\s*_?feature\s+timeline\s*:?\s*",
-        " ",
-        text,
-        flags=re.I,
-    )
-    text = re.sub(r"\bprd\s*:?\s*", " ", text, flags=re.I)
-    text = re.sub(r"\b(?:infra|version|release)\s*[:：]?\s*v?\d+(?:\.\d+)+(?:[_-]\d+)?\b", " ", text, flags=re.I)
-    text = re.sub(r"\bv?\d+(?:\.\d+){1,}(?:[_-]\d+)?\b", " ", text, flags=re.I)
-    text = re.sub(r"\|\s*", " ", text)
-    text = re.sub(r"\[\s*\]", " ", text)
-    text = re.sub(r"\(\s*\)", " ", text)
-    text = text.replace("[", " ").replace("]", " ")
-    text = re.sub(
-        r"(?i)(?:,?\s*(?:refer to|see also|see|please refer to|please see)\b.*$)",
-        "",
-        text,
-    )
-    text = re.sub(r"(?:，?\s*(?:详见|见|请参考|参考)\s*[:：]?\s*.*$)", "", text)
-    text = re.sub(r"\b(?:for\s+(?:retail|sme|retail and sme))\b", " ", text, flags=re.I)
-    text = re.sub(r"\(\s*[^)]*\s*\)", lambda match: " " if len(match.group(0)) <= 24 else match.group(0), text)
-    text = re.sub(r"\s+", " ", text).strip(" ,;:-")
-    if text.lower() in {"prd", "sheet", "link", "docs", "doc"}:
-        return ""
-
-    if not text:
-        return ""
-    if re.fullmatch(r"[^\w\u4e00-\u9fff]*", text):
-        return ""
-    if _looks_like_productization_outline_fragment(text):
-        return ""
-    return text
-
-
-def _looks_like_productization_outline_fragment(text: str) -> bool:
-    normalized = text.strip().lower()
-    if not normalized:
-        return True
-
-    outline_markers = (
-        "fe ui pages",
-        "be ui pages",
-        "ui data points",
-        "data points",
-        "prd section",
-        "appendix",
-        "checklist",
-        "release note",
-        "reference",
-    )
-    if any(marker in normalized for marker in outline_markers):
-        token_count = len(re.findall(r"[a-zA-Z\u4e00-\u9fff0-9]+", normalized))
-        has_action_word = bool(
-            re.search(
-                r"\b(add|update|support|enable|disable|improve|optimi[sz]e|create|build|fix|remove|change|migrate|"
-                r"launch|implement|allow|introduce|enhance)\b",
-                normalized,
-            )
-        )
-        if token_count <= 12 and not has_action_word:
-            return True
-    return False
-
-
-@lru_cache(maxsize=1)
-def _build_productization_argos_translator():
-    try:
-        from argostranslate import package, translate
-    except ImportError:
-        return None
-
-    installed_languages = translate.get_installed_languages()
-    from_language = next((language for language in installed_languages if language.code == "zh"), None)
-    to_language = next((language for language in installed_languages if language.code == "en"), None)
-    if from_language is None or to_language is None:
-        return None
-
-    try:
-        return from_language.get_translation(to_language)
-    except Exception:
-        return None
-
-
-def _translate_productization_text_to_english(text: str) -> str:
-    normalized = str(text or "").strip()
-    if not normalized or not re.search(r"[\u4e00-\u9fff]", normalized):
-        return normalized
-
-    translator = _build_productization_argos_translator()
-    if translator is None:
-        return normalized
-
-    translated_lines: list[str] = []
-    for line in normalized.split("\n"):
-        cleaned_line = line.strip()
-        if not cleaned_line:
-            continue
-        if not re.search(r"[\u4e00-\u9fff]", cleaned_line):
-            translated_lines.append(cleaned_line)
-            continue
-        try:
-            translated_line = translator.translate(cleaned_line).strip()
-        except Exception:
-            translated_line = cleaned_line
-        translated_lines.append(translated_line or cleaned_line)
-    return "\n".join(translated_lines).strip()
-
-
-@lru_cache(maxsize=1)
-def _build_productization_textrank_pipeline():
-    try:
-        import pytextrank  # noqa: F401
-        import spacy
-    except ImportError:
-        return None
-
-    nlp = None
-    for model_name in ("en_core_web_sm", "en_core_web_md"):
-        try:
-            nlp = spacy.load(model_name)
-            break
-        except OSError:
-            continue
-
-    if nlp is None:
-        nlp = spacy.blank("en")
-        if "sentencizer" not in nlp.pipe_names:
-            nlp.add_pipe("sentencizer")
-
-    if "textrank" not in nlp.pipe_names:
-        nlp.add_pipe("textrank")
-    return nlp
-
-
-def _try_productization_textrank_summary(text: str) -> str:
-    nlp = _build_productization_textrank_pipeline()
-    if nlp is None:
-        return ""
-
-    try:
-        doc = nlp(text)
-        summary_spans = list(doc._.textrank.summary(limit_phrases=12, limit_sentences=2))
-    except Exception:
-        return ""
-
-    summary = " ".join(span.text.strip() for span in summary_spans if span.text.strip())
-    return re.sub(r"\s+", " ", summary).strip()
-
-
-def _fallback_productization_summary(text: str) -> str:
-    lines = [re.sub(r"\s+", " ", line).strip(" -*\t") for line in text.split("\n")]
-    chunks = [line for line in lines if line]
-    if not chunks:
-        return "-"
-
-    selected: list[str] = []
-    for chunk in chunks:
-        parts = [part.strip() for part in re.split(r"(?<=[.!?;。！？；])\s+", chunk) if part.strip()]
-        for part in parts or [chunk]:
-            if len(part) >= 8:
-                selected.append(part)
-            if len(selected) == 2:
-                break
-        if len(selected) == 2:
-            break
-
-    summary = " ".join(selected or chunks[:1]).strip()
-    return _trim_productization_summary(summary)
-
-
-def _trim_productization_summary(summary: str) -> str:
-    summary = re.sub(r"\s+", " ", summary).strip()
-    return summary or "-"
+    return "\n".join(chunks).strip() if chunks else "-"
 
 
 def _extract_first_value(row: dict[str, Any], *keys: str) -> Any:

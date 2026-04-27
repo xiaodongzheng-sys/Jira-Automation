@@ -367,6 +367,7 @@
                 <input type="checkbox" data-productization-show-all-toggle>
                 <span>Show all tickets before team filtering</span>
               </label>
+              <button class="button button-secondary" type="button" data-productization-llm-description-button disabled>Generate LLM Description</button>
               <button class="button button-secondary" type="button" data-productization-copy-button disabled>Copy whole table</button>
             </div>
           </div>
@@ -459,8 +460,8 @@
 {% endblock %}
 
 {% block extra_scripts %}
-  <script src="{{ url_for('static', filename='bpmis_projects.js') }}?v=20260426-jirastatus2"></script>
-  <script src="{{ url_for('static', filename='productization_upgrade_summary.js') }}"></script>
+  <script src="{{ url_for('static', filename='bpmis_projects.js') }}?v=20260427-status-one-click"></script>
+  <script src="{{ url_for('static', filename='productization_upgrade_summary.js') }}?v=20260427-visible-refresh"></script>
   <script id="team-profile-data" type="application/json">{{ team_profiles | tojson }}</script>
   <script>
     (() => {

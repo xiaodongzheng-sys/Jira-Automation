@@ -54,6 +54,26 @@ class GmailSeaTalkDemoRouteTests(unittest.TestCase):
         self.assertLess(html.index("SeaTalk Summary"), html.index("PRD Briefing Tool"))
         self.assertNotIn("Gmail &amp; SeaTalk Demo", html)
 
+    def test_builtin_owner_sees_seatalk_summary_when_env_owner_changes(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "GMAIL_SEATALK_DEMO_OWNER_EMAIL": "other-owner@npt.sg",
+            },
+            clear=False,
+        ):
+            app = create_app()
+            app.testing = True
+
+            with app.test_client() as client:
+                self._login_owner(client, scopes=[GMAIL_READONLY_SCOPE])
+                response = client.get("/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"SeaTalk Summary", response.data)
+
     def test_non_owner_does_not_see_seatalk_summary_tab(self):
         with self.app.test_client() as client:
             self._login_teammate(client)
@@ -511,6 +531,43 @@ class GmailSeaTalkDemoRouteTests(unittest.TestCase):
         self.assertEqual(second_items[0]["task"], "Prepare PM AI sharing session")
         self.assertEqual(second_items[0]["priority"], "high")
         self.assertEqual(second_items[0]["due"], "2026-05-06")
+
+    def test_reworded_meeting_todos_with_same_entities_are_not_duplicated(self):
+        first_todo = {
+            "task": "Join the Monday discussion on ALC v12 force-upgrade and Android minimum-version timeline if invited, and keep AF position aligned with v3.45/v3.46 plan.",
+            "domain": "Anti-fraud",
+            "priority": "medium",
+            "due": "2026-04-27 16:30",
+            "evidence": "FV Upgrade, 2026-04-24 10:50-10:57: Monday 4:30-5PM discussion accepted.",
+        }
+        second_todo = {
+            "task": "Join or support Monday discussion on ID ALC v12, Android minimum version, and force-upgrade timeline.",
+            "domain": "Anti-fraud",
+            "priority": "medium",
+            "due": "2026-04-27 16:30-17:00 SGT",
+            "evidence": "2026-04-24 FV Upgrade: Tasya asks for Monday 4:30-5PM discussion; Xiaodong says OK",
+        }
+        payloads = [
+            {"project_updates": [], "my_todos": [first_todo], "team_todos": [], "generated_at": "2026-04-24T21:00:00+08:00"},
+            {"project_updates": [], "my_todos": [second_todo], "team_todos": [], "generated_at": "2026-04-25T21:00:00+08:00"},
+        ]
+
+        class FakeSeaTalkService:
+            def build_insights(self):
+                return payloads.pop(0)
+
+        with patch("bpmis_jira_tool.web._build_seatalk_dashboard_service", return_value=FakeSeaTalkService()):
+            with self.app.test_client() as client:
+                self._login_owner(client, scopes=[GMAIL_READONLY_SCOPE])
+                first = client.get("/api/gmail-sea-talk-demo/seatalk/insights")
+                second = client.get("/api/gmail-sea-talk-demo/seatalk/insights")
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        second_items = second.get_json()["my_todos"]
+        self.assertEqual(len(second_items), 1)
+        self.assertEqual(second_items[0]["id"], first.get_json()["my_todos"][0]["id"])
+        self.assertIn("ALC v12", second_items[0]["task"])
 
     def test_owner_can_load_and_save_seatalk_name_mappings(self):
         class FakeSeaTalkService:

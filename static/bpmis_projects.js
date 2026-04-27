@@ -124,6 +124,17 @@
     >${statusText}</button>
   `;
 
+  const versionButtonMarkup = (ticket, versionText) => `
+    <button
+      class="bpmis-task-version"
+      type="button"
+      data-update-version
+      data-version-task="${escapeHtml(ticket.id || '')}"
+      data-version-project="${escapeHtml(ticket.bpmis_id || '')}"
+      data-current-version="${escapeHtml(versionText)}"
+    >${escapeHtml(versionText || '-')}</button>
+  `;
+
   const taskMarkup = (tickets) => {
     if (!Array.isArray(tickets) || !tickets.length) {
       return '<div class="bpmis-task-empty">No Jira tasks created for this project yet.</div>';
@@ -133,7 +144,7 @@
       const title = escapeHtml(ticket.live_jira_title || ticket.jira_title || '-');
       const rawStatus = displayTaskStatus(ticket.live_jira_status || ticket.status);
       const statusText = escapeHtml(rawStatus);
-      const version = escapeHtml(ticket.live_fix_version || ticket.fix_version_name || '-');
+      const version = ticket.live_fix_version || ticket.fix_version_name || '-';
       const market = escapeHtml(ticket.market || '-');
       const component = escapeHtml(ticket.component || '-');
       const link = ticket.ticket_link
@@ -148,7 +159,7 @@
           <div class="bpmis-task-cell" data-label="Status">
             ${statusButtonMarkup(ticket, rawStatus, statusText)}
           </div>
-          <div class="bpmis-task-cell" data-label="Version">${version}</div>
+          <div class="bpmis-task-cell bpmis-task-version-cell" data-label="Version">${versionButtonMarkup(ticket, version)}</div>
           <div class="bpmis-task-cell" data-label="Component">${component}</div>
           <div class="bpmis-task-cell bpmis-task-actions">
             <button class="button button-secondary danger-button bpmis-task-delink" type="button" data-delink-task="${escapeHtml(ticket.id || '')}" data-delink-project="${escapeHtml(ticket.bpmis_id || '')}">Delink</button>
@@ -166,6 +177,7 @@
           <span>Status</span>
           <span>Version</span>
           <span>Component</span>
+          <span>Action</span>
         </div>
         ${rows}
       </div>
@@ -278,8 +290,16 @@
     select.addEventListener('change', () => updateTaskStatus(select));
     select.addEventListener('blur', () => {
       if (select.dataset.saving === 'true') return;
-      cell.innerHTML = originalMarkup;
+      window.setTimeout(() => {
+        if (select.dataset.saving === 'true') return;
+        if (document.activeElement !== select) cell.innerHTML = originalMarkup;
+      }, 120);
     }, { once: true });
+    window.setTimeout(() => {
+      if (!select.isConnected || select.disabled) return;
+      select.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
+      select.click();
+    }, 0);
   };
 
   const updateTaskStatus = async (select) => {
@@ -309,6 +329,133 @@
       setStatus(`Jira status updated to ${nextStatus}.`, 'success');
     } catch (error) {
       setStatus(error.message || 'Could not update Jira status.', 'error');
+      panel.dataset.liveLoaded = 'false';
+      await loadTasks(bpmisId, { force: true });
+    }
+  };
+
+  const renderVersionOptions = (items) => (items.length
+    ? items.slice(0, 8).map((item) => {
+      const versionName = displayVersionName(item);
+      const versionId = item?.version_id || item?.id || item?.versionId || '';
+      return `<button type="button" data-version-name="${escapeHtml(versionName)}" data-version-id="${escapeHtml(versionId)}">${escapeHtml(versionName)}</button>`;
+    }).join('')
+    : '<div class="productization-typeahead-empty">No matching versions.</div>');
+
+  const wireVersionTypeahead = (input, menu) => {
+    let timer = null;
+    input.addEventListener('input', () => {
+      window.clearTimeout(timer);
+      input.dataset.versionId = '';
+      const query = input.value.trim();
+      if (query.length < 2) {
+        menu.hidden = true;
+        menu.innerHTML = '';
+        return;
+      }
+      timer = window.setTimeout(async () => {
+        if (versionController) versionController.abort();
+        versionController = new AbortController();
+        try {
+          const response = await fetch(`${versionUrl}?q=${encodeURIComponent(query)}`, {
+            headers: { Accept: 'application/json' },
+            credentials: 'same-origin',
+            signal: versionController.signal,
+          });
+          const payload = await readJson(response, 'Could not search Fix Versions.');
+          const items = Array.isArray(payload.items) ? payload.items : [];
+          menu.hidden = false;
+          menu.innerHTML = renderVersionOptions(items);
+        } catch (error) {
+          if (error.name !== 'AbortError') {
+            menu.hidden = false;
+            menu.innerHTML = `<div class="productization-typeahead-empty">${escapeHtml(error.message || 'Could not search Fix Versions.')}</div>`;
+          }
+        }
+      }, 250);
+    });
+    menu.addEventListener('mousedown', (event) => {
+      event.preventDefault();
+    });
+    menu.addEventListener('click', (event) => {
+      const option = event.target.closest('[data-version-name]');
+      if (!option) return;
+      input.value = option.dataset.versionName || '';
+      input.dataset.versionId = option.dataset.versionId || '';
+      menu.hidden = true;
+    });
+  };
+
+  const openVersionEditor = (button) => {
+    const cell = button.closest('.bpmis-task-cell');
+    if (!cell) return;
+    const originalMarkup = button.outerHTML;
+    const currentVersion = button.dataset.currentVersion || button.textContent || '';
+    cell.innerHTML = `
+      <div class="bpmis-task-version-editor">
+        <input class="bpmis-task-version-input" type="text" value="${escapeHtml(currentVersion === '-' ? '' : currentVersion)}" autocomplete="off" aria-label="Update Jira fix version">
+        <button class="button button-secondary bpmis-task-version-save" type="button">Save</button>
+        <div class="productization-typeahead jira-version-typeahead bpmis-task-version-menu" data-version-menu hidden></div>
+      </div>
+    `;
+    const input = cell.querySelector('.bpmis-task-version-input');
+    const saveButton = cell.querySelector('.bpmis-task-version-save');
+    const menu = cell.querySelector('[data-version-menu]');
+    if (!input || !saveButton || !menu) return;
+    input.dataset.versionTask = button.dataset.versionTask || '';
+    input.dataset.versionProject = button.dataset.versionProject || '';
+    wireVersionTypeahead(input, menu);
+    const save = () => updateTaskVersion(input, saveButton);
+    saveButton.addEventListener('click', save);
+    input.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        save();
+      }
+      if (event.key === 'Escape') {
+        cell.innerHTML = originalMarkup;
+      }
+    });
+    input.addEventListener('blur', () => {
+      window.setTimeout(() => {
+        if (input.dataset.saving === 'true') return;
+        if (cell.contains(document.activeElement)) return;
+        cell.innerHTML = originalMarkup;
+      }, 160);
+    });
+    input.focus();
+    input.select();
+  };
+
+  const updateTaskVersion = async (input, saveButton) => {
+    const bpmisId = input.dataset.versionProject || '';
+    const ticketId = input.dataset.versionTask || '';
+    const versionName = input.value.trim();
+    const versionId = input.dataset.versionId || '';
+    const panel = body.querySelector(`[data-task-panel="${cssEscape(bpmisId)}"]`);
+    if (!bpmisId || !ticketId || !versionName || !panel) return;
+    input.dataset.saving = 'true';
+    input.disabled = true;
+    saveButton.disabled = true;
+    const cell = input.closest('.bpmis-task-cell');
+    if (cell) {
+      cell.innerHTML = '<span class="bpmis-task-status is-loading">Updating...</span>';
+    }
+    setStatus(`Updating Jira fix version to ${versionName}...`, 'neutral');
+    try {
+      const response = await fetch(`${projectsUrl}/${encodeURIComponent(bpmisId)}/jira-tickets/${encodeURIComponent(ticketId)}/version`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ version_name: versionName, version_id: versionId }),
+      });
+      await readJson(response, 'Could not update Jira fix version.');
+      panel.dataset.loaded = 'false';
+      panel.dataset.liveLoaded = 'false';
+      await loadTasks(bpmisId, { force: true });
+      setStatus(`Jira fix version updated to ${versionName}.`, 'success');
+    } catch (error) {
+      setStatus(error.message || 'Could not update Jira fix version.', 'error');
       panel.dataset.liveLoaded = 'false';
       await loadTasks(bpmisId, { force: true });
     }
@@ -406,49 +553,7 @@
     };
   });
 
-  const bindVersionSearch = (input, menu) => {
-    let timer = null;
-    input.addEventListener('input', () => {
-      window.clearTimeout(timer);
-      const query = input.value.trim();
-      if (query.length < 2) {
-        menu.hidden = true;
-        menu.innerHTML = '';
-        return;
-      }
-      timer = window.setTimeout(async () => {
-        if (versionController) versionController.abort();
-        versionController = new AbortController();
-        try {
-          const response = await fetch(`${versionUrl}?q=${encodeURIComponent(query)}`, {
-            headers: { Accept: 'application/json' },
-            credentials: 'same-origin',
-            signal: versionController.signal,
-          });
-          const payload = await readJson(response, 'Could not search Fix Versions.');
-          const items = Array.isArray(payload.items) ? payload.items : [];
-          menu.hidden = false;
-          menu.innerHTML = items.length
-            ? items.slice(0, 8).map((item) => {
-              const versionName = displayVersionName(item);
-              return `<button type="button" data-version-name="${escapeHtml(versionName)}">${escapeHtml(versionName)}</button>`;
-            }).join('')
-            : '<div class="productization-typeahead-empty">No matching versions.</div>';
-        } catch (error) {
-          if (error.name !== 'AbortError') {
-            menu.hidden = false;
-            menu.innerHTML = `<div class="productization-typeahead-empty">${escapeHtml(error.message || 'Could not search Fix Versions.')}</div>`;
-          }
-        }
-      }, 250);
-    });
-    menu.addEventListener('click', (event) => {
-      const option = event.target.closest('[data-version-name]');
-      if (!option) return;
-      input.value = option.dataset.versionName || '';
-      menu.hidden = true;
-    });
-  };
+  const bindVersionSearch = wireVersionTypeahead;
 
   const renderJiraForms = () => {
     const selections = selectedComponents();
@@ -573,7 +678,7 @@
     const bpmisId = button.dataset.delinkProject || '';
     const ticketId = button.dataset.delinkTask || '';
     if (!bpmisId || !ticketId) return;
-    if (!window.confirm('Delink this Jira from the BPMIS project?')) return;
+    if (!window.confirm('Delink this Jira task from the BPMIS Biz Project?')) return;
     button.disabled = true;
     try {
       const response = await fetch(`${projectsUrl}/${encodeURIComponent(bpmisId)}/jira-tickets/${encodeURIComponent(ticketId)}`, {
@@ -581,12 +686,12 @@
         headers: { Accept: 'application/json' },
         credentials: 'same-origin',
       });
-      await readJson(response, 'Could not delink Jira task.');
+      await readJson(response, 'Could not delink Jira task from BPMIS Biz Project.');
       expandedProjectId = bpmisId;
       await loadProjects();
-      setStatus('Jira task delinked from BPMIS project.', 'success');
+      setStatus('Jira task delinked from BPMIS Biz Project.', 'success');
     } catch (error) {
-      setStatus(error.message || 'Could not delink Jira task.', 'error');
+      setStatus(error.message || 'Could not delink Jira task from BPMIS Biz Project.', 'error');
     } finally {
       button.disabled = false;
     }
@@ -613,10 +718,15 @@
       openStatusSelect(statusButton);
       return;
     }
+    const versionButton = event.target.closest('[data-update-version]');
+    if (versionButton) {
+      openVersionEditor(versionButton);
+      return;
+    }
     const deleteButton = event.target.closest('[data-delete-project]');
     if (!deleteButton) return;
     const bpmisId = deleteButton.dataset.deleteProject || '';
-    if (!window.confirm(`Delete BPMIS project ${bpmisId} from this portal?`)) return;
+    if (!window.confirm(`Remove BPMIS project ${bpmisId} from this portal? This will not change BPMIS.`)) return;
     deleteButton.disabled = true;
     try {
       const response = await fetch(`${projectsUrl}/${encodeURIComponent(bpmisId)}`, {
@@ -624,10 +734,11 @@
         headers: { Accept: 'application/json' },
         credentials: 'same-origin',
       });
-      await readJson(response, 'Could not delete BPMIS project.');
+      await readJson(response, 'Could not remove BPMIS project from this portal.');
       await loadProjects();
+      setStatus('BPMIS project removed from this portal. BPMIS itself was not changed.', 'success');
     } catch (error) {
-      setStatus(error.message || 'Could not delete BPMIS project.', 'error');
+      setStatus(error.message || 'Could not remove BPMIS project from this portal.', 'error');
     } finally {
       deleteButton.disabled = false;
     }
@@ -641,5 +752,10 @@
     if (event.target === modal) closeModal();
   });
   window.addEventListener('bpmis-job-completed', loadProjects);
+  window.addEventListener('portal:tab-activated', (event) => {
+    if (event.detail?.tabName === 'run') {
+      loadProjects();
+    }
+  });
   loadProjects();
 })();

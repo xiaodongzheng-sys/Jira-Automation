@@ -69,6 +69,9 @@ esac
             "scripts/install_team_portal_launchd.sh",
             "scripts/install_ngrok_launchd.sh",
             "scripts/install_team_stack_launchd.sh",
+            "scripts/deploy_cloud_run.sh",
+            "scripts/deploy_cloud_run_full.sh",
+            "scripts/build_cloud_run_image.sh",
         ]
 
         for relative_path in script_paths:
@@ -84,6 +87,230 @@ esac
                 0,
                 msg=f"{relative_path} failed bash -n:\nSTDOUT:\n{completed.stdout}\nSTDERR:\n{completed.stderr}",
             )
+
+    def test_cloud_run_deploy_script_supports_dry_run_without_deploying(self):
+        deploy_script = PROJECT_ROOT / "scripts/deploy_cloud_run.sh"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            fake_bin = temp_path / "bin"
+            fake_bin.mkdir()
+            gcloud_path = fake_bin / "gcloud"
+            gcloud_path.write_text(
+                """#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "$*" == "run services describe"* ]]; then
+  printf 'https://team-portal-example.run.app\\n'
+  exit 0
+fi
+if [[ "$*" == "run deploy"* ]]; then
+  echo "unexpected deploy" >&2
+  exit 44
+fi
+exit 0
+""",
+                encoding="utf-8",
+            )
+            gcloud_path.chmod(0o755)
+
+            completed = subprocess.run(
+                ["bash", str(deploy_script)],
+                capture_output=True,
+                text=True,
+                check=False,
+                env={
+                    **os.environ,
+                    "PATH": f"{fake_bin}:{os.environ['PATH']}",
+                    "PYTHON_BIN": sys.executable,
+                    "CLOUD_RUN_DEPLOY_DRY_RUN": "1",
+                    "CLOUD_RUN_LOCAL_AGENT_BASE_URL": "https://agent.example.ngrok.app",
+                    "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg",
+                    "BPMIS_BASE_URL": "https://bpmis.example.test",
+                },
+                cwd=PROJECT_ROOT,
+            )
+
+            self.assertEqual(completed.returncode, 0, msg=completed.stderr)
+            self.assertIn("Cloud Run service: team-portal", completed.stdout)
+            self.assertIn("Cloud Run source hash:", completed.stdout)
+            self.assertIn("Dry run only", completed.stdout)
+            self.assertNotIn("unexpected deploy", completed.stderr)
+
+    def test_cloud_run_default_deploy_still_uses_source(self):
+        deploy_script = PROJECT_ROOT / "scripts/deploy_cloud_run.sh"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            fake_bin = temp_path / "bin"
+            fake_bin.mkdir()
+            calls_path = temp_path / "gcloud-calls.log"
+            gcloud_path = fake_bin / "gcloud"
+            gcloud_path.write_text(
+                """#!/usr/bin/env bash
+set -euo pipefail
+
+printf '%s\\n' "$*" >> "$FAKE_GCLOUD_CALLS"
+if [[ "$*" == "run services describe"* ]]; then
+  printf 'https://team-portal-example.run.app\\n'
+  exit 0
+fi
+if [[ "$*" == "run deploy"* ]]; then
+  exit 0
+fi
+exit 0
+""",
+                encoding="utf-8",
+            )
+            gcloud_path.chmod(0o755)
+
+            completed = subprocess.run(
+                ["bash", str(deploy_script)],
+                capture_output=True,
+                text=True,
+                check=False,
+                env={
+                    **os.environ,
+                    "PATH": f"{fake_bin}:{os.environ['PATH']}",
+                    "PYTHON_BIN": sys.executable,
+                    "FAKE_GCLOUD_CALLS": str(calls_path),
+                    "CLOUD_RUN_LOCAL_AGENT_BASE_URL": "https://agent.example.ngrok.app",
+                    "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg",
+                    "BPMIS_BASE_URL": "https://bpmis.example.test",
+                },
+                cwd=PROJECT_ROOT,
+            )
+
+            self.assertEqual(completed.returncode, 0, msg=completed.stderr)
+            calls = calls_path.read_text(encoding="utf-8")
+            deploy_calls = [line for line in calls.splitlines() if line.startswith("run deploy")]
+            self.assertEqual(len(deploy_calls), 1, msg=calls)
+            self.assertIn("--source .", deploy_calls[0])
+            self.assertNotIn("--image", deploy_calls[0])
+
+    def test_cloud_run_image_deploy_path_is_opt_in(self):
+        deploy_script = PROJECT_ROOT / "scripts/deploy_cloud_run.sh"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            fake_bin = temp_path / "bin"
+            fake_bin.mkdir()
+            calls_path = temp_path / "gcloud-calls.log"
+            gcloud_path = fake_bin / "gcloud"
+            gcloud_path.write_text(
+                """#!/usr/bin/env bash
+set -euo pipefail
+
+printf '%s\\n' "$*" >> "$FAKE_GCLOUD_CALLS"
+if [[ "$*" == "run services describe"* ]]; then
+  printf 'https://team-portal-example.run.app\\n'
+  exit 0
+fi
+if [[ "$*" == "run deploy"* ]]; then
+  exit 0
+fi
+exit 0
+""",
+                encoding="utf-8",
+            )
+            gcloud_path.chmod(0o755)
+            image = "asia-southeast1-docker.pkg.dev/demo/team-portal/team-portal:test"
+
+            completed = subprocess.run(
+                ["bash", str(deploy_script)],
+                capture_output=True,
+                text=True,
+                check=False,
+                env={
+                    **os.environ,
+                    "PATH": f"{fake_bin}:{os.environ['PATH']}",
+                    "PYTHON_BIN": sys.executable,
+                    "FAKE_GCLOUD_CALLS": str(calls_path),
+                    "CLOUD_RUN_IMAGE": image,
+                    "CLOUD_RUN_LOCAL_AGENT_BASE_URL": "https://agent.example.ngrok.app",
+                    "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg",
+                    "BPMIS_BASE_URL": "https://bpmis.example.test",
+                },
+                cwd=PROJECT_ROOT,
+            )
+
+            self.assertEqual(completed.returncode, 0, msg=completed.stderr)
+            calls = calls_path.read_text(encoding="utf-8")
+            deploy_calls = [line for line in calls.splitlines() if line.startswith("run deploy")]
+            self.assertEqual(len(deploy_calls), 1, msg=calls)
+            self.assertIn(f"--image {image}", deploy_calls[0])
+            self.assertNotIn("--source .", deploy_calls[0])
+
+    def test_cloud_run_image_build_script_is_dry_run_safe(self):
+        build_script = PROJECT_ROOT / "scripts/build_cloud_run_image.sh"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            fake_bin = temp_path / "bin"
+            fake_bin.mkdir()
+            gcloud_path = fake_bin / "gcloud"
+            gcloud_path.write_text(
+                """#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "$*" == "config get-value project"* ]]; then
+  printf 'demo-project\\n'
+  exit 0
+fi
+if [[ "$*" == "builds submit"* ]]; then
+  echo "unexpected build" >&2
+  exit 45
+fi
+exit 0
+""",
+                encoding="utf-8",
+            )
+            gcloud_path.chmod(0o755)
+
+            completed = subprocess.run(
+                ["bash", str(build_script)],
+                capture_output=True,
+                text=True,
+                check=False,
+                env={
+                    **os.environ,
+                    "PATH": f"{fake_bin}:{os.environ['PATH']}",
+                    "PYTHON_BIN": sys.executable,
+                    "CLOUD_RUN_BUILD_IMAGE_DRY_RUN": "1",
+                    "CLOUD_RUN_IMAGE_TAG": "test-tag",
+                },
+                cwd=PROJECT_ROOT,
+            )
+
+            self.assertEqual(completed.returncode, 0, msg=completed.stderr)
+            self.assertIn(
+                "asia-southeast1-docker.pkg.dev/demo-project/team-portal/team-portal:test-tag",
+                completed.stdout,
+            )
+            self.assertIn("Dry run only", completed.stdout)
+            self.assertNotIn("unexpected build", completed.stderr)
+
+    def test_gcloudignore_excludes_non_runtime_uploads_but_keeps_runtime_inputs(self):
+        ignored = (PROJECT_ROOT / ".gcloudignore").read_text(encoding="utf-8").splitlines()
+
+        for expected in ("docs/", "tests/", "evals/", ".team-portal/", ".secrets/", "*.db"):
+            self.assertIn(expected, ignored)
+        for runtime_path in ("bpmis_jira_tool/", "config/", "static/", "templates/", "prd_briefing/"):
+            self.assertNotIn(runtime_path, ignored)
+
+    def test_cloud_run_dockerfile_copies_runtime_inputs_explicitly(self):
+        dockerfile = (PROJECT_ROOT / "Dockerfile").read_text(encoding="utf-8")
+
+        self.assertNotIn("COPY . .", dockerfile)
+        for expected in (
+            "COPY app.py local_agent.py jira_web_config.json ./",
+            "COPY bpmis_jira_tool ./bpmis_jira_tool",
+            "COPY config ./config",
+            "COPY prd_briefing ./prd_briefing",
+            "COPY static ./static",
+            "COPY templates ./templates",
+        ):
+            self.assertIn(expected, dockerfile)
 
     def test_team_env_helper_reads_multiple_values(self):
         helper_path = PROJECT_ROOT / "scripts/lib/team_env.sh"

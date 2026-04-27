@@ -11,6 +11,7 @@ PORT="${LOCAL_AGENT_PORT:-$(read_env_value LOCAL_AGENT_PORT)}"
 PORT="${PORT:-7007}"
 DATA_DIR="$(resolve_team_data_dir "${TEAM_PORTAL_DATA_DIR:-$(read_env_value TEAM_PORTAL_DATA_DIR)}")"
 FOREGROUND_SCRIPT="$ROOT_DIR/scripts/run_local_agent_foreground.sh"
+SCREEN_SESSION="${LOCAL_AGENT_SCREEN_SESSION:-bpmis-local-agent}"
 
 mkdir -p "$DATA_DIR/logs" "$DATA_DIR/run"
 
@@ -46,8 +47,13 @@ start() {
   fi
 
   cd "$ROOT_DIR"
-  nohup "$FOREGROUND_SCRIPT" >"$LOG_FILE" 2>&1 < /dev/null &
-  echo $! >"$PID_FILE"
+  if command -v screen >/dev/null 2>&1; then
+    screen -S "$SCREEN_SESSION" -X quit >/dev/null 2>&1 || true
+    screen -dmS "$SCREEN_SESSION" /bin/bash -lc "cd '$ROOT_DIR' && exec '$FOREGROUND_SCRIPT' >>'$LOG_FILE' 2>&1"
+  else
+    nohup "$FOREGROUND_SCRIPT" >"$LOG_FILE" 2>&1 < /dev/null &
+    echo $! >"$PID_FILE"
+  fi
 
   for _ in {1..20}; do
     if is_running; then
@@ -65,6 +71,9 @@ start() {
 }
 
 stop() {
+  if command -v screen >/dev/null 2>&1; then
+    screen -S "$SCREEN_SESSION" -X quit >/dev/null 2>&1 || true
+  fi
   if [[ -f "$PID_FILE" ]]; then
     kill "$(cat "$PID_FILE")" >/dev/null 2>&1 || true
     rm -f "$PID_FILE"

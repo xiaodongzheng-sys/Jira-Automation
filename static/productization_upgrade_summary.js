@@ -13,9 +13,10 @@
   const resultsEmpty = root.querySelector('[data-productization-results-empty]');
   const resultsTitle = root.querySelector('[data-productization-results-title]');
   const copyButton = root.querySelector('[data-productization-copy-button]');
+  const llmDescriptionButton = root.querySelector('[data-productization-llm-description-button]');
   const showAllToggle = root.querySelector('[data-productization-show-all-toggle]');
 
-  if (!form || !input || !typeahead || !selectedNode || !selectedEmpty || !status || !tableWrap || !resultsBody || !resultsEmpty || !resultsTitle || !copyButton || !showAllToggle) {
+  if (!form || !input || !typeahead || !selectedNode || !selectedEmpty || !status || !tableWrap || !resultsBody || !resultsEmpty || !resultsTitle || !copyButton || !llmDescriptionButton || !showAllToggle) {
     return;
   }
 
@@ -64,52 +65,13 @@
   const formatDetailedFeatureText = (value) => {
     const text = String(value ?? '').trim();
     if (!text || text === '-') return '-';
-
-    return text
-      .replace(/\(?P\d+\)?/gi, ' ')
-      .replace(/\s+(?=\d+\.\s*[A-Za-z\u4e00-\u9fff(])/g, '\n')
-      .replace(/\s+(?=scenario\d+\b)/gi, '\n')
-      .replace(/\s+(?=\d+\s*-\s*[A-Za-z\u4e00-\u9fff(])/g, '\n')
-      .replace(/\s*;\s*/g, ';\n')
-      .replace(/\s*；\s*/g, '；\n')
-      .replace(/\s{2,}/g, ' ')
-      .replace(/\n{3,}/g, '\n\n')
-      .trim();
+    return text.replace(/\r/g, '').replace(/\n{3,}/g, '\n\n').trim();
   };
 
-  const buildDetailedFeatureSegments = (value) => {
-    const text = formatDetailedFeatureText(value);
-    if (text === '-') {
-      return [{ type: 'plain', text: '-' }];
-    }
-
-    let numberedIndex = 0;
-    return text
-      .split(/\n+/)
-      .map((line) => line.trim())
-      .filter(Boolean)
-      .map((line) => {
-        const normalizedLine = line.replace(/^\(?P\d+\)?\s*/i, '').trim();
-        const numberedMatch = normalizedLine.match(/^(\d+\.)\s*(.+)$/);
-        if (numberedMatch) {
-          numberedIndex += 1;
-          return { type: 'numbered', marker: `${numberedIndex}.`, text: numberedMatch[2] || '' };
-        }
-        return { type: 'plain', text: normalizedLine };
-      });
-  };
-
-  const formatDetailedFeatureHtml = (value) => buildDetailedFeatureSegments(value).map((segment) => {
-    if (segment.type === 'numbered') {
-      return `
-        <div class="productization-detail-line productization-detail-line-numbered">
-          <span class="productization-detail-marker">${escapeHtml(segment.marker)}</span>
-          <span>${escapeHtml(segment.text)}</span>
-        </div>
-      `;
-    }
-    return `<div class="productization-detail-line">${escapeHtml(segment.text)}</div>`;
-  }).join('');
+  const formatDetailedFeatureHtml = (value) => formatDetailedFeatureText(value)
+    .split(/\n+/)
+    .map((line) => `<div class="productization-detail-line">${escapeHtml(line || '-')}</div>`)
+    .join('');
 
   const setStatus = (message, tone = 'neutral') => {
     status.textContent = message;
@@ -122,6 +84,7 @@
     tableWrap.hidden = true;
     resultsEmpty.hidden = false;
     copyButton.disabled = true;
+    llmDescriptionButton.disabled = true;
     const textNode = resultsEmpty.querySelector('p');
     if (textNode) textNode.textContent = message;
   };
@@ -202,6 +165,7 @@
 
     resultsTitle.textContent = 'Upgrade Tickets';
     copyButton.disabled = false;
+    llmDescriptionButton.disabled = false;
     resultsEmpty.hidden = true;
     tableWrap.hidden = false;
     resultsBody.innerHTML = readySections.map((entry) => {
@@ -349,6 +313,66 @@
       renderSelectedVersions();
       renderResults();
       setStatus(error.message || 'Could not load Jira tickets for that version.', 'error');
+    }
+  };
+
+  const generateLlmDescriptions = async () => {
+    const readySelections = selectedVersions.filter((entry) => Array.isArray(entry.items) && entry.items.length);
+    if (!readySelections.length) return;
+
+    llmDescriptionButton.disabled = true;
+    copyButton.disabled = true;
+    setStatus(
+      readySelections.length > 1
+        ? `Generating LLM Description for ${readySelections.length} versions in parallel...`
+        : `Generating LLM Description for ${readySelections[0].label}...`,
+      'neutral',
+    );
+    try {
+      const results = await Promise.allSettled(readySelections.map(async (selection) => {
+        const response = await fetch(
+          `/api/productization-upgrade-summary/llm-descriptions?version_id=${encodeURIComponent(selection.version_id)}&show_all_before_team_filtering=${isShowAllEnabled() ? '1' : '0'}`
+        );
+        const payload = await readJsonOrThrow(response, 'Could not generate LLM Description.');
+        return { selection, payload };
+      }));
+
+      let generatedTotal = 0;
+      const failed = [];
+      results.forEach((result, index) => {
+        if (result.status === 'rejected') {
+          failed.push({
+            label: readySelections[index]?.label || `Version ${index + 1}`,
+            message: result.reason?.message || 'Could not generate LLM Description.',
+          });
+          return;
+        }
+        const { selection, payload } = result.value;
+        selection.items = payload.items || [];
+        selection.rawCount = Number(payload.raw_count || 0);
+        selection.filteredCount = Number(payload.filtered_count || 0);
+        selection.teamFilterApplied = Boolean(payload.team_filter_applied);
+        selection.showAllBeforeTeamFiltering = Boolean(payload.show_all_before_team_filtering);
+        selection.llmDescriptionGenerated = Boolean(payload.llm_description_generated);
+        selection.llmGeneratedCount = Number(payload.llm_generated_count || 0);
+        generatedTotal += selection.llmGeneratedCount;
+      });
+      renderResults();
+
+      if (failed.length) {
+        setStatus(
+          generatedTotal
+            ? `LLM generated ${generatedTotal} Description value${generatedTotal === 1 ? '' : 's'}, but ${failed.length} version${failed.length === 1 ? '' : 's'} failed: ${failed[0].label}.`
+            : `${failed.length} LLM Description request${failed.length === 1 ? '' : 's'} failed: ${failed[0].message}`,
+          generatedTotal ? 'warning' : 'error',
+        );
+        return;
+      }
+      setStatus(`LLM generated ${generatedTotal} Description value${generatedTotal === 1 ? '' : 's'} across ${readySelections.length} version${readySelections.length === 1 ? '' : 's'}.`, 'success');
+    } catch (error) {
+      setStatus(error.message || 'Could not generate LLM Description.', 'error');
+    } finally {
+      renderResults();
     }
   };
 
@@ -507,6 +531,10 @@
     }
   });
 
+  llmDescriptionButton.addEventListener('click', () => {
+    void generateLlmDescriptions();
+  });
+
   copyButton.addEventListener('click', async () => {
     const readySelections = selectedVersions.filter((entry) => Array.isArray(entry.items) && entry.items.length);
     if (!readySelections.length) {
@@ -529,6 +557,13 @@
       setStatus(`Copied ${totalRows} rows across ${readySelections.length} selected version${readySelections.length === 1 ? '' : 's'}.`, 'success');
     } catch (error) {
       setStatus(error.message || 'Could not copy this table.', 'error');
+    }
+  });
+
+  window.addEventListener('portal:tab-activated', (event) => {
+    if (event.detail?.tabName === 'productization-upgrade-summary') {
+      renderSelectedVersions();
+      renderResults();
     }
   });
 

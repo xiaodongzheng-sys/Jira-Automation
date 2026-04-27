@@ -3,6 +3,7 @@
 .gcloudignore
 .env
 .env.*
+.secrets/
 .venv/
 .team-portal/
 __pycache__/
@@ -10,3 +11,15 @@ __pycache__/
 .DS_Store
 tmp/
 node_modules/
+docs/
+tests/
+evals/
+*.db
+*.sqlite
+*.sqlite3
+*.log
+coverage/
+.coverage
+htmlcov/
+dist/
+build/

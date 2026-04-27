@@ -55,6 +55,7 @@ class Settings:
     prd_briefing_owner_email: str = "xiaodong.zheng@npt.sg"
     gmail_seatalk_demo_owner_email: str = "xiaodong.zheng@npt.sg"
     source_code_qa_owner_email: str = "xiaodong.zheng@npt.sg"
+    source_code_qa_admin_emails: tuple[str, ...] = ()
     source_code_qa_git_timeout_seconds: int = 90
     source_code_qa_max_file_bytes: int = 500_000
     source_code_qa_gitlab_token: str | None = None
@@ -150,6 +151,14 @@ class Settings:
         if not client_secret:
             client_secret = "google-client-secret.json"
 
+        source_code_qa_owner_email = _env_str("SOURCE_CODE_QA_OWNER_EMAIL", "xiaodong.zheng@npt.sg")
+        source_code_qa_admin_emails = _env_csv("SOURCE_CODE_QA_ADMIN_EMAILS")
+        if (
+            not source_code_qa_admin_emails
+            and str(source_code_qa_owner_email or "").strip().lower() == "xiaodong.zheng@npt.sg"
+        ):
+            source_code_qa_admin_emails = ("xiaodong.zheng1991@gmail.com",)
+
         return cls(
             flask_secret_key=_env_str("FLASK_SECRET_KEY", "dev-secret-key"),
             google_oauth_client_secret_file=Path(client_secret),
@@ -162,7 +171,8 @@ class Settings:
             team_portal_data_dir=Path(_env_str("TEAM_PORTAL_DATA_DIR", ".")),
             prd_briefing_owner_email=_env_str("PRD_BRIEFING_OWNER_EMAIL", "xiaodong.zheng@npt.sg"),
             gmail_seatalk_demo_owner_email=_env_str("GMAIL_SEATALK_DEMO_OWNER_EMAIL", "xiaodong.zheng@npt.sg"),
-            source_code_qa_owner_email=_env_str("SOURCE_CODE_QA_OWNER_EMAIL", "xiaodong.zheng@npt.sg"),
+            source_code_qa_owner_email=source_code_qa_owner_email,
+            source_code_qa_admin_emails=source_code_qa_admin_emails,
             source_code_qa_git_timeout_seconds=int(_env_str("SOURCE_CODE_QA_GIT_TIMEOUT_SECONDS", "90")),
             source_code_qa_max_file_bytes=int(_env_str("SOURCE_CODE_QA_MAX_FILE_BYTES", "500000")),
             source_code_qa_gitlab_token=_env_str("SOURCE_CODE_QA_GITLAB_TOKEN"),
