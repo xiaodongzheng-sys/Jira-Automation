@@ -74,6 +74,7 @@
   let activeOptions = null;
   let versionController = null;
   let expandedProjectId = '';
+  const commentTimers = new Map();
 
   const setStatus = (message, tone = 'neutral') => {
     status.textContent = message || '';
@@ -215,6 +216,14 @@
         <td>${brdMarkup(project.brd_link)}</td>
         <td>${escapeHtml(project.market || '-')}</td>
         <td>
+          <textarea
+            class="bpmis-project-comment"
+            rows="2"
+            data-project-comment="${escapeHtml(project.bpmis_id)}"
+            aria-label="PM Comment for BPMIS ${escapeHtml(project.bpmis_id || '')}"
+          >${escapeHtml(project.pm_comment || '')}</textarea>
+        </td>
+        <td>
           <div class="button-row bpmis-project-actions">
             <button class="button button-secondary" type="button" data-create-jira="${escapeHtml(project.bpmis_id)}">Create Jira</button>
             <button class="button button-secondary danger-button" type="button" data-delete-project="${escapeHtml(project.bpmis_id)}">Delete</button>
@@ -222,7 +231,7 @@
         </td>
       </tr>
       <tr class="bpmis-task-row" data-task-row="${escapeHtml(project.bpmis_id)}" hidden>
-        <td colspan="6">
+        <td colspan="7">
           <div class="bpmis-task-panel" data-task-panel="${escapeHtml(project.bpmis_id)}">
             <div class="bpmis-task-loading">Loading Jira tasks...</div>
           </div>
@@ -230,6 +239,38 @@
       </tr>
     `;
     }).join('');
+  };
+
+  const saveProjectComment = async (textarea) => {
+    const bpmisId = textarea.dataset.projectComment || '';
+    if (!bpmisId) return;
+    const nextComment = textarea.value;
+    if (nextComment === textarea.dataset.savedComment) return;
+    textarea.dataset.saving = 'true';
+    try {
+      const response = await fetch(`${projectsUrl}/${encodeURIComponent(bpmisId)}/comment`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ pm_comment: nextComment }),
+      });
+      await readJson(response, 'Could not save PM comment.');
+      textarea.dataset.savedComment = nextComment;
+      textarea.dataset.saving = 'false';
+      const project = projectById(bpmisId);
+      if (project) project.pm_comment = nextComment;
+      setStatus('PM comment saved.', 'success');
+    } catch (error) {
+      textarea.dataset.saving = 'false';
+      setStatus(error.message || 'Could not save PM comment.', 'error');
+    }
+  };
+
+  const scheduleProjectCommentSave = (textarea, delay = 700) => {
+    const bpmisId = textarea.dataset.projectComment || '';
+    if (!bpmisId) return;
+    window.clearTimeout(commentTimers.get(bpmisId));
+    commentTimers.set(bpmisId, window.setTimeout(() => saveProjectComment(textarea), delay));
   };
 
   const loadTasks = async (bpmisId, { force = false } = {}) => {
@@ -826,6 +867,26 @@
     } finally {
       deleteButton.disabled = false;
     }
+  });
+
+  body.addEventListener('input', (event) => {
+    const textarea = event.target.closest('[data-project-comment]');
+    if (!textarea) return;
+    scheduleProjectCommentSave(textarea);
+  });
+
+  body.addEventListener('focusin', (event) => {
+    const textarea = event.target.closest('[data-project-comment]');
+    if (!textarea) return;
+    textarea.dataset.savedComment = textarea.value;
+  });
+
+  body.addEventListener('focusout', (event) => {
+    const textarea = event.target.closest('[data-project-comment]');
+    if (!textarea) return;
+    const bpmisId = textarea.dataset.projectComment || '';
+    window.clearTimeout(commentTimers.get(bpmisId));
+    saveProjectComment(textarea);
   });
 
   nextButton.addEventListener('click', renderJiraForms);

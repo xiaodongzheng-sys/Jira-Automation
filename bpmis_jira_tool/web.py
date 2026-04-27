@@ -2620,6 +2620,20 @@ def create_app() -> Flask:
         deleted = _get_bpmis_project_store().soft_delete_project(user_key=user_identity["config_key"], bpmis_id=bpmis_id)
         return jsonify({"status": "ok", "deleted": deleted, "scope": "portal_only"})
 
+    @app.patch("/api/bpmis-projects/<bpmis_id>/comment")
+    def update_bpmis_project_comment(bpmis_id: str):
+        login_gate = _require_google_login(settings, api=True)
+        if login_gate is not None:
+            return login_gate
+        payload = request.get_json(silent=True) or {}
+        user_identity = _get_user_identity(settings)
+        updated = _get_bpmis_project_store().update_project_comment(
+            user_key=user_identity["config_key"],
+            bpmis_id=bpmis_id,
+            pm_comment=str(payload.get("pm_comment") or ""),
+        )
+        return jsonify({"status": "ok", "updated": updated, "scope": "portal_only"})
+
     @app.get("/api/bpmis-projects/<bpmis_id>/jira-options")
     def bpmis_project_jira_options(bpmis_id: str):
         login_gate = _require_google_login(settings, api=True)

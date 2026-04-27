@@ -486,6 +486,18 @@ def create_local_agent_app() -> Flask:
         )
         return jsonify({"status": "ok", "deleted": deleted, "scope": "portal_only"})
 
+    @app.post("/api/local-agent/bpmis/projects/comment")
+    def bpmis_project_comment():
+        if not settings.local_agent_bpmis_enabled:
+            raise ToolError("BPMIS local-agent proxy is disabled.")
+        payload = request.get_json(silent=True) or {}
+        updated = _build_bpmis_project_store(settings).update_project_comment(
+            user_key=str(payload.get("user_key") or ""),
+            bpmis_id=str(payload.get("bpmis_id") or ""),
+            pm_comment=str(payload.get("pm_comment") or ""),
+        )
+        return jsonify({"status": "ok", "updated": updated, "scope": "portal_only"})
+
     @app.post("/api/local-agent/bpmis/projects/jira-tickets/add")
     def bpmis_project_ticket_add():
         if not settings.local_agent_bpmis_enabled:

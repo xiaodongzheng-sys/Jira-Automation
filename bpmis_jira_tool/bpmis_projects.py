@@ -83,7 +83,7 @@ class BPMISProjectStore:
             connection.row_factory = sqlite3.Row
             project_rows = connection.execute(
                 """
-                SELECT user_key, bpmis_id, project_name, brd_link, market, synced_at, created_at, updated_at
+                SELECT user_key, bpmis_id, project_name, brd_link, market, pm_comment, synced_at, created_at, updated_at
                 FROM bpmis_projects
                 WHERE user_key = ? AND deleted_at IS NULL
                 ORDER BY updated_at DESC, bpmis_id DESC
@@ -122,6 +122,22 @@ class BPMISProjectStore:
             if str(project.get("bpmis_id") or "") == issue_id:
                 return project
         return None
+
+    def update_project_comment(self, *, user_key: str, bpmis_id: str, pm_comment: str) -> bool:
+        owner = self._require_user_key(user_key)
+        issue_id = self._require_bpmis_id(bpmis_id)
+        normalized_comment = str(pm_comment or "")
+        with sqlite3.connect(self.db_path) as connection:
+            cursor = connection.execute(
+                """
+                UPDATE bpmis_projects
+                SET pm_comment = ?
+                WHERE user_key = ? AND bpmis_id = ? AND deleted_at IS NULL
+                """,
+                (normalized_comment, owner, issue_id),
+            )
+            connection.commit()
+        return cursor.rowcount > 0
 
     def soft_delete_project(self, *, user_key: str, bpmis_id: str) -> bool:
         owner = self._require_user_key(user_key)
@@ -415,6 +431,7 @@ class BPMISProjectStore:
                     project_name TEXT NOT NULL DEFAULT '',
                     brd_link TEXT NOT NULL DEFAULT '',
                     market TEXT NOT NULL DEFAULT '',
+                    pm_comment TEXT NOT NULL DEFAULT '',
                     deleted_at TEXT,
                     synced_at TEXT,
                     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
@@ -423,6 +440,9 @@ class BPMISProjectStore:
                 )
                 """
             )
+            columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(bpmis_projects)").fetchall()}
+            if "pm_comment" not in columns:
+                connection.execute("ALTER TABLE bpmis_projects ADD COLUMN pm_comment TEXT NOT NULL DEFAULT ''")
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS bpmis_project_jira_tickets (

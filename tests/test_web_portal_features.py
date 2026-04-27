@@ -1512,9 +1512,15 @@ class WebPortalFeatureTests(unittest.TestCase):
                 with client.session_transaction() as session:
                     session["anonymous_user_key"] = "first"
 
+                comment_response = client.patch("/api/bpmis-projects/225159/comment", json={"pm_comment": "Need PM follow-up"})
+                first_projects_after_comment = store.list_projects(user_key="anon:first")
+                second_projects_after_comment = store.list_projects(user_key="anon:second")
                 delete_response = client.delete("/api/bpmis-projects/225159")
                 list_response = client.get("/api/bpmis-projects")
 
+            self.assertEqual(comment_response.status_code, 200)
+            self.assertEqual(first_projects_after_comment[0]["pm_comment"], "Need PM follow-up")
+            self.assertEqual(second_projects_after_comment[0]["pm_comment"], "")
             self.assertEqual(delete_response.status_code, 200)
             self.assertEqual(delete_response.get_json()["scope"], "portal_only")
             self.assertEqual(list_response.get_json()["projects"], [])

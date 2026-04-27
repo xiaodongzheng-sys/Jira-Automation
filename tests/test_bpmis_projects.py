@@ -125,6 +125,15 @@ class BPMISProjectStoreTests(unittest.TestCase):
 
             projects = store.list_projects(user_key="google:pm@npt.sg")
             self.assertEqual(len(projects), 1)
+            self.assertEqual(projects[0]["pm_comment"], "")
+            self.assertTrue(
+                store.update_project_comment(
+                    user_key="google:pm@npt.sg",
+                    bpmis_id="225159",
+                    pm_comment="Follow up with Huixian.",
+                )
+            )
+            self.assertEqual(store.list_projects(user_key="google:pm@npt.sg")[0]["pm_comment"], "Follow up with Huixian.")
             self.assertEqual([first["id"], second["id"]], [ticket["id"] for ticket in projects[0]["jira_tickets"]])
             self.assertTrue(store.soft_delete_project(user_key="google:pm@npt.sg", bpmis_id="225159"))
             self.assertEqual(
@@ -139,6 +148,7 @@ class BPMISProjectStoreTests(unittest.TestCase):
             )
             restored_projects = store.list_projects(user_key="google:pm@npt.sg")
             self.assertEqual(len(restored_projects), 1)
+            self.assertEqual(restored_projects[0]["pm_comment"], "Follow up with Huixian.")
             self.assertEqual([first["id"], second["id"]], [ticket["id"] for ticket in restored_projects[0]["jira_tickets"]])
 
     def test_portal_sync_restores_portal_removed_projects_returned_by_bpmis(self):

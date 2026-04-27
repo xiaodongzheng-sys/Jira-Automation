@@ -43,7 +43,36 @@
 
 .bpmis-project-table th:nth-child(6),
 .bpmis-project-table td:nth-child(6) {
+  min-width: 260px;
+  width: 260px;
+}
+
+.bpmis-project-table th:nth-child(7),
+.bpmis-project-table td:nth-child(7) {
   min-width: 180px;
+}
+
+.bpmis-project-comment {
+  background: #ffffff;
+  border: 1px solid rgba(22, 119, 255, 0.42);
+  border-radius: 6px;
+  color: #111827;
+  display: block;
+  font: inherit;
+  font-size: 0.9rem;
+  height: 56px;
+  line-height: 1.35;
+  max-height: 56px;
+  min-height: 56px;
+  padding: 8px 10px;
+  resize: none;
+  width: 100%;
+}
+
+.bpmis-project-comment:focus {
+  border-color: #2563eb;
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.16);
+  outline: 0;
 }
 
 .bpmis-task-toggle {

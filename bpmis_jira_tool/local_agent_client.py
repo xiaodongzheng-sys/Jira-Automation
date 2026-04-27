@@ -179,6 +179,14 @@ class LocalAgentClient:
         payload = self._request("POST", "/api/local-agent/bpmis/projects/delete", {"user_key": user_key, "bpmis_id": bpmis_id})
         return bool(payload.get("deleted"))
 
+    def bpmis_project_comment_update(self, *, user_key: str, bpmis_id: str, pm_comment: str) -> bool:
+        payload = self._request(
+            "POST",
+            "/api/local-agent/bpmis/projects/comment",
+            {"user_key": user_key, "bpmis_id": bpmis_id, "pm_comment": pm_comment},
+        )
+        return bool(payload.get("updated"))
+
     def bpmis_project_ticket_add(self, **ticket: Any) -> dict[str, Any]:
         payload = self._request("POST", "/api/local-agent/bpmis/projects/jira-tickets/add", ticket)
         stored = payload.get("ticket")
@@ -532,6 +540,9 @@ class RemoteBPMISProjectStore:
 
     def soft_delete_project(self, *, user_key: str, bpmis_id: str) -> bool:
         return self.client.bpmis_project_delete(user_key=user_key, bpmis_id=bpmis_id)
+
+    def update_project_comment(self, *, user_key: str, bpmis_id: str, pm_comment: str) -> bool:
+        return self.client.bpmis_project_comment_update(user_key=user_key, bpmis_id=bpmis_id, pm_comment=pm_comment)
 
     def add_jira_ticket(self, **ticket: Any) -> dict[str, Any]:
         return self.client.bpmis_project_ticket_add(**ticket)

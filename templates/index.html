@@ -272,6 +272,7 @@
                   <th>Project Name</th>
                   <th>BRD Link</th>
                   <th>Market</th>
+                  <th>PM Comment</th>
                   <th>Actions</th>
                 </tr>
               </thead>
@@ -460,7 +461,7 @@
 {% endblock %}
 
 {% block extra_scripts %}
-  <script src="{{ url_for('static', filename='bpmis_projects.js') }}?v=20260427-status-one-click"></script>
+  <script src="{{ url_for('static', filename='bpmis_projects.js') }}?v=20260427-pm-comment"></script>
   <script src="{{ url_for('static', filename='productization_upgrade_summary.js') }}?v=20260427-visible-refresh"></script>
   <script id="team-profile-data" type="application/json">{{ team_profiles | tojson }}</script>
   <script>
