@@ -49,7 +49,8 @@
 
 .bpmis-project-table th:nth-child(7),
 .bpmis-project-table td:nth-child(7) {
-  min-width: 180px;
+  min-width: 96px;
+  width: 96px;
 }
 
 .bpmis-project-comment {
@@ -97,7 +98,25 @@
 
 .bpmis-project-actions {
   gap: 8px;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+}
+
+.bpmis-project-action-icon.button {
+  width: 36px;
+  height: 36px;
+  min-width: 36px;
+  padding: 0;
+  border-radius: 10px;
+}
+
+.bpmis-project-action-icon svg {
+  width: 17px;
+  height: 17px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2;
 }
 
 .danger-button {
@@ -293,6 +312,19 @@
 .bpmis-status-menu button.is-selected {
   background: #eef4ff;
   font-weight: 800;
+}
+
+.bpmis-status-picker .bpmis-status-control {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.bpmis-status-picker .bpmis-inline-clear {
+  display: none;
+}
+
+.bpmis-status-menu.bpmis-inline-menu {
+  max-height: none;
+  overflow: visible;
 }
 
 .bpmis-task-version-menu {

@@ -190,6 +190,58 @@ exit 0
             self.assertIn("--source .", deploy_calls[0])
             self.assertNotIn("--image", deploy_calls[0])
 
+    def test_cloud_run_deploy_skips_iam_binding_when_invoker_iam_is_disabled(self):
+        deploy_script = PROJECT_ROOT / "scripts/deploy_cloud_run.sh"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            fake_bin = temp_path / "bin"
+            fake_bin.mkdir()
+            calls_path = temp_path / "gcloud-calls.log"
+            gcloud_path = fake_bin / "gcloud"
+            gcloud_path.write_text(
+                """#!/usr/bin/env bash
+set -euo pipefail
+
+printf '%s\\n' "$*" >> "$FAKE_GCLOUD_CALLS"
+if [[ "$*" == "run services describe"* ]]; then
+  printf '{"metadata":{"annotations":{"run.googleapis.com/invoker-iam-disabled":"true"}},"status":{"url":"https://team-portal-example.run.app"}}\\n'
+  exit 0
+fi
+if [[ "$*" == "run deploy"* ]]; then
+  exit 0
+fi
+exit 0
+""",
+                encoding="utf-8",
+            )
+            gcloud_path.chmod(0o755)
+
+            completed = subprocess.run(
+                ["bash", str(deploy_script)],
+                capture_output=True,
+                text=True,
+                check=False,
+                env={
+                    **os.environ,
+                    "PATH": f"{fake_bin}:{os.environ['PATH']}",
+                    "PYTHON_BIN": sys.executable,
+                    "FAKE_GCLOUD_CALLS": str(calls_path),
+                    "CLOUD_RUN_LOCAL_AGENT_BASE_URL": "https://agent.example.ngrok.app",
+                    "CLOUD_RUN_RESTART_LOCAL_AGENT_AFTER_DEPLOY": "0",
+                    "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg",
+                    "BPMIS_BASE_URL": "https://bpmis.example.test",
+                },
+                cwd=PROJECT_ROOT,
+            )
+
+            self.assertEqual(completed.returncode, 0, msg=completed.stderr)
+            calls = calls_path.read_text(encoding="utf-8")
+            deploy_calls = [line for line in calls.splitlines() if line.startswith("run deploy")]
+            self.assertEqual(len(deploy_calls), 1, msg=calls)
+            self.assertNotIn("--allow-unauthenticated", deploy_calls[0])
+            self.assertIn("invoker IAM check is disabled", completed.stdout)
+
     def test_cloud_run_image_deploy_path_is_opt_in(self):
         deploy_script = PROJECT_ROOT / "scripts/deploy_cloud_run.sh"
 

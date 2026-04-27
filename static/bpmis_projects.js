@@ -225,8 +225,23 @@
         </td>
         <td>
           <div class="button-row bpmis-project-actions">
-            <button class="button button-secondary" type="button" data-create-jira="${escapeHtml(project.bpmis_id)}">Create Jira</button>
-            <button class="button button-secondary danger-button" type="button" data-delete-project="${escapeHtml(project.bpmis_id)}">Delete</button>
+            <button class="button button-secondary bpmis-project-action-icon" type="button" data-create-jira="${escapeHtml(project.bpmis_id)}" aria-label="Create Jira for BPMIS ${escapeHtml(project.bpmis_id || '')}" title="Create Jira">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"></path>
+                <path d="M14 3v5h5"></path>
+                <path d="M12 11v6"></path>
+                <path d="M9 14h6"></path>
+              </svg>
+            </button>
+            <button class="button button-secondary danger-button bpmis-project-action-icon" type="button" data-delete-project="${escapeHtml(project.bpmis_id)}" aria-label="Delete BPMIS ${escapeHtml(project.bpmis_id || '')}" title="Delete">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M3 6h18"></path>
+                <path d="M8 6V4h8v2"></path>
+                <path d="M19 6l-1 14H6L5 6"></path>
+                <path d="M10 11v5"></path>
+                <path d="M14 11v5"></path>
+              </svg>
+            </button>
           </div>
         </td>
       </tr>
@@ -323,18 +338,14 @@
   };
 
   const renderStatusOptions = (input, menu, currentStatus) => {
-    const query = input.value.trim().toLowerCase();
     const current = currentStatus.trim().toLowerCase();
-    const options = JIRA_STATUS_OPTIONS.filter((option) => !query || option.toLowerCase().includes(query));
-    menu.innerHTML = options.length
-      ? options.map((option) => `
+    menu.innerHTML = JIRA_STATUS_OPTIONS.map((option) => `
         <button
           class="${option.toLowerCase() === current ? 'is-selected' : ''}"
           type="button"
           data-status-option="${escapeHtml(option)}"
         >${escapeHtml(option)}</button>
-      `).join('')
-      : '<div class="productization-typeahead-empty">No matching status.</div>';
+      `).join('');
   };
 
   const openStatusEditor = (button) => {
@@ -344,8 +355,8 @@
     const originalMarkup = button.outerHTML;
     cell.innerHTML = `
       <div class="bpmis-inline-picker bpmis-status-picker">
-        <div class="bpmis-inline-control">
-          <input class="bpmis-inline-input bpmis-task-status-input" type="text" value="${escapeHtml(currentStatus)}" autocomplete="off" aria-label="Update Jira status">
+        <div class="bpmis-inline-control bpmis-status-control">
+          <input class="bpmis-inline-input bpmis-task-status-input" type="text" value="${escapeHtml(currentStatus)}" autocomplete="off" aria-label="Update Jira status" readonly>
           <button class="bpmis-inline-clear" type="button" aria-label="Clear status search">&times;</button>
         </div>
         <div class="productization-typeahead bpmis-inline-menu bpmis-status-menu" data-status-menu></div>
@@ -362,7 +373,6 @@
       cell.innerHTML = originalMarkup;
     };
     renderStatusOptions(input, menu, currentStatus);
-    input.addEventListener('input', () => renderStatusOptions(input, menu, currentStatus));
     input.addEventListener('keydown', (event) => {
       if (event.key === 'Escape') {
         event.preventDefault();
@@ -376,11 +386,7 @@
         }
       }
     });
-    clearButton.addEventListener('click', () => {
-      input.value = '';
-      renderStatusOptions(input, menu, currentStatus);
-      input.focus();
-    });
+    clearButton.addEventListener('click', () => input.focus());
     menu.addEventListener('mousedown', (event) => event.preventDefault());
     menu.addEventListener('click', (event) => {
       const option = event.target.closest('[data-status-option]');
@@ -524,6 +530,7 @@
     input.dataset.versionProject = button.dataset.versionProject || '';
     const save = () => updateTaskVersion(input);
     wireVersionTypeahead(input, menu, {
+      dedupeByName: true,
       onSelect: save,
       scrollMenuIntoView: true,
     });

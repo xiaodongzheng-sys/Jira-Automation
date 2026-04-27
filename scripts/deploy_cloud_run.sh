@@ -119,7 +119,22 @@ PY
 }
 
 DESCRIBE_STARTED_AT="$(date +%s)"
-EXISTING_SERVICE_URL="$("$GCLOUD_BIN" run services describe "$SERVICE" ${PROJECT_ARGS[@]+"${PROJECT_ARGS[@]}"} --region "$REGION" --format='value(status.url)' 2>/dev/null || true)"
+SERVICE_DESCRIBE_JSON="$("$GCLOUD_BIN" run services describe "$SERVICE" ${PROJECT_ARGS[@]+"${PROJECT_ARGS[@]}"} --region "$REGION" --format=json 2>/dev/null || true)"
+DESCRIBE_VALUES="$(CLOUD_RUN_SERVICE_JSON="$SERVICE_DESCRIBE_JSON" "$PYTHON_BIN" - <<'PY'
+import json
+import os
+
+try:
+    payload = json.loads(os.environ.get("CLOUD_RUN_SERVICE_JSON") or "{}")
+except json.JSONDecodeError:
+    payload = {}
+annotations = payload.get("metadata", {}).get("annotations", {})
+print(payload.get("status", {}).get("url", ""))
+print(annotations.get("run.googleapis.com/invoker-iam-disabled", ""))
+PY
+)"
+EXISTING_SERVICE_URL="$(printf '%s\n' "$DESCRIBE_VALUES" | sed -n '1p')"
+INVOKER_IAM_DISABLED="$(printf '%s\n' "$DESCRIBE_VALUES" | sed -n '2p')"
 DESCRIBE_FINISHED_AT="$(date +%s)"
 echo "Cloud Run describe completed in $((DESCRIBE_FINISHED_AT - DESCRIBE_STARTED_AT))s"
 BASE_URL="${CLOUD_RUN_TEAM_PORTAL_BASE_URL:-${EXISTING_SERVICE_URL:-}}"
@@ -192,12 +207,19 @@ DEPLOY_SOURCE_ARGS=(--source .)
 if [[ -n "$CLOUD_RUN_IMAGE" ]]; then
   DEPLOY_SOURCE_ARGS=(--image "$CLOUD_RUN_IMAGE")
 fi
+AUTH_ARGS=(--allow-unauthenticated)
+if [[ "${CLOUD_RUN_ALLOW_UNAUTHENTICATED:-auto}" == "0" || "${CLOUD_RUN_ALLOW_UNAUTHENTICATED:-auto}" == "false" ]]; then
+  AUTH_ARGS=()
+elif [[ "${CLOUD_RUN_ALLOW_UNAUTHENTICATED:-auto}" == "auto" && "$INVOKER_IAM_DISABLED" == "true" ]]; then
+  AUTH_ARGS=()
+  echo "Cloud Run invoker IAM check is disabled; skipping --allow-unauthenticated IAM binding update."
+fi
 DEPLOY_STARTED_AT="$(date +%s)"
 "$GCLOUD_BIN" run deploy "$SERVICE" \
   ${PROJECT_ARGS[@]+"${PROJECT_ARGS[@]}"} \
   --region "$REGION" \
   "${DEPLOY_SOURCE_ARGS[@]}" \
-  --allow-unauthenticated \
+  ${AUTH_ARGS[@]+"${AUTH_ARGS[@]}"} \
   --max-instances="${CLOUD_RUN_MAX_INSTANCES:-1}" \
   --set-env-vars "^|^$ENV_VARS_JOINED"
 DEPLOY_FINISHED_AT="$(date +%s)"
