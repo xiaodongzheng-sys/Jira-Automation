@@ -271,46 +271,101 @@
     }
   };
 
-  const openStatusSelect = (button) => {
+  const closeInlineEditorOnBlur = (editor, restore) => {
+    editor.addEventListener('focusout', () => {
+      window.setTimeout(() => {
+        if (editor.dataset.saving === 'true') return;
+        if (editor.contains(document.activeElement)) return;
+        restore();
+      }, 120);
+    });
+  };
+
+  const renderStatusOptions = (input, menu, currentStatus) => {
+    const query = input.value.trim().toLowerCase();
+    const current = currentStatus.trim().toLowerCase();
+    const options = JIRA_STATUS_OPTIONS.filter((option) => !query || option.toLowerCase().includes(query));
+    menu.innerHTML = options.length
+      ? options.map((option) => `
+        <button
+          class="${option.toLowerCase() === current ? 'is-selected' : ''}"
+          type="button"
+          data-status-option="${escapeHtml(option)}"
+        >${escapeHtml(option)}</button>
+      `).join('')
+      : '<div class="productization-typeahead-empty">No matching status.</div>';
+  };
+
+  const openStatusEditor = (button) => {
     const cell = button.closest('.bpmis-task-cell');
     if (!cell) return;
     const currentStatus = button.dataset.currentStatus || button.textContent || '';
     const originalMarkup = button.outerHTML;
-    const select = document.createElement('select');
-    select.className = 'bpmis-task-status-select';
-    select.dataset.statusTask = button.dataset.statusTask || '';
-    select.dataset.statusProject = button.dataset.statusProject || '';
-    select.setAttribute('aria-label', 'Update Jira status');
-    select.innerHTML = JIRA_STATUS_OPTIONS
-      .map((option) => `<option value="${escapeHtml(option)}"${option.toLowerCase() === currentStatus.trim().toLowerCase() ? ' selected' : ''}>${escapeHtml(option)}</option>`)
-      .join('');
-    cell.innerHTML = '';
-    cell.appendChild(select);
-    select.focus();
-    select.addEventListener('change', () => updateTaskStatus(select));
-    select.addEventListener('blur', () => {
-      if (select.dataset.saving === 'true') return;
-      window.setTimeout(() => {
-        if (select.dataset.saving === 'true') return;
-        if (document.activeElement !== select) cell.innerHTML = originalMarkup;
-      }, 120);
-    }, { once: true });
-    window.setTimeout(() => {
-      if (!select.isConnected || select.disabled) return;
-      select.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
-      select.click();
-    }, 0);
+    cell.innerHTML = `
+      <div class="bpmis-inline-picker bpmis-status-picker">
+        <div class="bpmis-inline-control">
+          <input class="bpmis-inline-input bpmis-task-status-input" type="text" value="${escapeHtml(currentStatus)}" autocomplete="off" aria-label="Update Jira status">
+          <button class="bpmis-inline-clear" type="button" aria-label="Clear status search">&times;</button>
+        </div>
+        <div class="productization-typeahead bpmis-inline-menu bpmis-status-menu" data-status-menu></div>
+      </div>
+    `;
+    const editor = cell.querySelector('.bpmis-inline-picker');
+    const input = cell.querySelector('.bpmis-task-status-input');
+    const menu = cell.querySelector('[data-status-menu]');
+    const clearButton = cell.querySelector('.bpmis-inline-clear');
+    if (!editor || !input || !menu || !clearButton) return;
+    input.dataset.statusTask = button.dataset.statusTask || '';
+    input.dataset.statusProject = button.dataset.statusProject || '';
+    const restore = () => {
+      cell.innerHTML = originalMarkup;
+    };
+    renderStatusOptions(input, menu, currentStatus);
+    input.addEventListener('input', () => renderStatusOptions(input, menu, currentStatus));
+    input.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        restore();
+      }
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        const firstOption = menu.querySelector('[data-status-option]');
+        if (firstOption) {
+          updateTaskStatus(input, firstOption.dataset.statusOption || '');
+        }
+      }
+    });
+    clearButton.addEventListener('click', () => {
+      input.value = '';
+      renderStatusOptions(input, menu, currentStatus);
+      input.focus();
+    });
+    menu.addEventListener('mousedown', (event) => event.preventDefault());
+    menu.addEventListener('click', (event) => {
+      const option = event.target.closest('[data-status-option]');
+      if (!option) return;
+      const nextStatus = option.dataset.statusOption || '';
+      if (nextStatus.trim().toLowerCase() === currentStatus.trim().toLowerCase()) {
+        restore();
+        return;
+      }
+      updateTaskStatus(input, nextStatus);
+    });
+    closeInlineEditorOnBlur(editor, restore);
+    input.focus();
+    input.select();
   };
 
-  const updateTaskStatus = async (select) => {
-    const bpmisId = select.dataset.statusProject || '';
-    const ticketId = select.dataset.statusTask || '';
-    const nextStatus = select.value || '';
+  const updateTaskStatus = async (control, nextStatus) => {
+    const bpmisId = control.dataset.statusProject || '';
+    const ticketId = control.dataset.statusTask || '';
     const panel = body.querySelector(`[data-task-panel="${cssEscape(bpmisId)}"]`);
     if (!bpmisId || !ticketId || !nextStatus || !panel) return;
-    select.dataset.saving = 'true';
-    select.disabled = true;
-    const cell = select.closest('.bpmis-task-cell');
+    const editor = control.closest('.bpmis-inline-picker');
+    if (editor) editor.dataset.saving = 'true';
+    control.dataset.saving = 'true';
+    control.disabled = true;
+    const cell = control.closest('.bpmis-task-cell');
     if (cell) {
       cell.innerHTML = '<span class="bpmis-task-status is-loading">Updating...</span>';
     }
@@ -411,14 +466,19 @@
     const originalMarkup = button.outerHTML;
     const currentVersion = button.dataset.currentVersion || button.textContent || '';
     cell.innerHTML = `
-      <div class="bpmis-task-version-editor">
-        <input class="bpmis-task-version-input" type="text" value="${escapeHtml(currentVersion === '-' ? '' : currentVersion)}" autocomplete="off" aria-label="Update Jira fix version">
-        <div class="productization-typeahead jira-version-typeahead bpmis-task-version-menu" data-version-menu hidden></div>
+      <div class="bpmis-inline-picker bpmis-task-version-editor">
+        <div class="bpmis-inline-control">
+          <input class="bpmis-inline-input bpmis-task-version-input" type="text" value="${escapeHtml(currentVersion === '-' ? '' : currentVersion)}" autocomplete="off" aria-label="Update Jira fix version">
+          <button class="bpmis-inline-clear" type="button" aria-label="Clear version search">&times;</button>
+        </div>
+        <div class="productization-typeahead jira-version-typeahead bpmis-inline-menu bpmis-task-version-menu" data-version-menu hidden></div>
       </div>
     `;
+    const editor = cell.querySelector('.bpmis-inline-picker');
     const input = cell.querySelector('.bpmis-task-version-input');
     const menu = cell.querySelector('[data-version-menu]');
-    if (!input || !menu) return;
+    const clearButton = cell.querySelector('.bpmis-inline-clear');
+    if (!editor || !input || !menu || !clearButton) return;
     input.dataset.versionTask = button.dataset.versionTask || '';
     input.dataset.versionProject = button.dataset.versionProject || '';
     const save = () => updateTaskVersion(input);
@@ -435,12 +495,15 @@
         cell.innerHTML = originalMarkup;
       }
     });
-    input.addEventListener('blur', () => {
-      window.setTimeout(() => {
-        if (input.dataset.saving === 'true') return;
-        if (cell.contains(document.activeElement)) return;
-        cell.innerHTML = originalMarkup;
-      }, 160);
+    clearButton.addEventListener('click', () => {
+      input.value = '';
+      input.dataset.versionId = '';
+      menu.hidden = true;
+      menu.innerHTML = '';
+      input.focus();
+    });
+    closeInlineEditorOnBlur(editor, () => {
+      cell.innerHTML = originalMarkup;
     });
     input.focus();
     input.select();
@@ -453,6 +516,8 @@
     const versionId = input.dataset.versionId || '';
     const panel = body.querySelector(`[data-task-panel="${cssEscape(bpmisId)}"]`);
     if (!bpmisId || !ticketId || !versionName || !panel) return;
+    const editor = input.closest('.bpmis-inline-picker');
+    if (editor) editor.dataset.saving = 'true';
     input.dataset.saving = 'true';
     input.disabled = true;
     const cell = input.closest('.bpmis-task-cell');
@@ -733,7 +798,7 @@
     }
     const statusButton = event.target.closest('[data-update-status]');
     if (statusButton) {
-      openStatusSelect(statusButton);
+      openStatusEditor(statusButton);
       return;
     }
     const versionButton = event.target.closest('[data-update-version]');
