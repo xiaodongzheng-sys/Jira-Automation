@@ -1629,7 +1629,7 @@ class WebPortalFeatureTests(unittest.TestCase):
                 )
 
             self.assertEqual(version_response.status_code, 200)
-            self.assertEqual(fake_client.version_calls, [("AF-1", "Planning_26Q4", "991")])
+            self.assertEqual(fake_client.version_calls, [("AF-1", "Planning_26Q4", None)])
             self.assertEqual(
                 app.config["BPMIS_PROJECT_STORE"].list_projects(user_key="anon:create-user")[0]["jira_tickets"][0]["fix_version_name"],
                 "Planning_26Q4",

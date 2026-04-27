@@ -597,7 +597,7 @@ class BPMISDirectApiClient(BPMISClient):
         if not normalized_version_name and not normalized_version_id:
             raise BPMISError("Jira fix version is required.")
 
-        version_payload = {"id": normalized_version_id} if normalized_version_id else {"name": normalized_version_name}
+        version_payload = {"name": normalized_version_name} if normalized_version_name else {"id": normalized_version_id}
         direct_jira_detail = self._update_jira_ticket_fix_version_via_jira(normalized_ticket_key, version_payload)
         if direct_jira_detail is not None:
             return direct_jira_detail
@@ -1039,7 +1039,8 @@ class BPMISDirectApiClient(BPMISClient):
             if response.status_code in {401, 403} and len(candidates) > 1:
                 continue
             if response.status_code not in expected:
-                raise BPMISError(f"Jira API request failed for '{path}' with status {response.status_code}.")
+                detail = f": {last_text}" if last_text else "."
+                raise BPMISError(f"Jira API request failed for '{path}' with status {response.status_code}{detail}")
             if response.status_code == 204 or not response.text.strip():
                 return {} if allow_empty else {}
             try:
@@ -1290,7 +1291,7 @@ class BPMISDirectApiClient(BPMISClient):
         if isinstance(value, str):
             return value.strip()
         if isinstance(value, dict):
-            for key in ("label", "name", "displayName", "emailAddress", "value"):
+            for key in ("fullName", "label", "name", "displayName", "emailAddress", "value"):
                 text = str(value.get(key) or "").strip()
                 if text:
                     return text

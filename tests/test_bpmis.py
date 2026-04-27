@@ -1039,6 +1039,54 @@ class BPMISClientTests(unittest.TestCase):
             with self.assertRaises(BPMISError):
                 client.update_jira_ticket_status("AF-101", "Not a workflow status")
 
+    def test_update_jira_ticket_fix_version_prefers_name_over_bpmis_version_id(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings = Settings(
+                flask_secret_key="secret",
+                google_oauth_client_secret_file=Path(temp_dir) / "client.json",
+                google_oauth_redirect_uri=None,
+                team_portal_host="127.0.0.1",
+                team_portal_port=5000,
+                team_portal_base_url=None,
+                team_allowed_emails=(),
+                team_allowed_email_domains=(),
+                team_portal_data_dir=Path(temp_dir),
+                spreadsheet_id="sheet",
+                common_tab_name="Common",
+                input_tab_name="Input",
+                bpmis_base_url="https://example.com",
+                bpmis_api_access_token="token",
+            )
+            client = BPMISDirectApiClient(settings)
+            calls = []
+
+            def fake_request(**kwargs):
+                calls.append(kwargs)
+                if kwargs["method"] == "PUT":
+                    return self._FakeResponse(204, None)
+                return self._FakeResponse(
+                    200,
+                    {
+                        "key": "AF-101",
+                        "fields": {
+                            "summary": "Live AF task",
+                            "fixVersions": [{"name": "Planning_26Q4"}],
+                        },
+                    },
+                )
+
+            env = {
+                "JIRA_API_TOKEN": "token",
+                "JIRA_AUTH_SCHEME": "bearer",
+                "JIRA_BASE_URL": "https://jira.example.test",
+            }
+            with patch.dict(os.environ, env), patch("bpmis_jira_tool.bpmis.requests.request", side_effect=fake_request):
+                detail = client.update_jira_ticket_fix_version("AF-101", "Planning_26Q4", version_id="991")
+
+            update_call = next(call for call in calls if call["method"] == "PUT")
+            self.assertEqual(update_call["json"], {"fields": {"fixVersions": [{"name": "Planning_26Q4"}]}})
+            self.assertEqual(detail["fixVersions"], ["Planning_26Q4"])
+
     def test_list_jira_tasks_for_project_created_by_email_filters_and_normalizes_rows(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             settings = Settings(
@@ -1086,6 +1134,7 @@ class BPMISClientTests(unittest.TestCase):
 	                                "summary": "[Feature][AF]Existing task",
 	                                "reporter": {"emailAddress": "pm@npt.sg"},
 	                                "creator": {"emailAddress": "other@npt.sg"},
+	                                "fixVersionId": [{"name": "26Q2", "fullName": "Planning_26Q2"}],
 	                            },
 	                            {
 	                                "id": 994,
@@ -1113,7 +1162,7 @@ class BPMISClientTests(unittest.TestCase):
             self.assertEqual(tasks[0]["ticket_link"], "https://jira.shopee.io/browse/AF-992")
             self.assertEqual(tasks[0]["jira_title"], "[Feature][AF]Existing task")
             self.assertEqual(tasks[0]["status"], "")
-            self.assertEqual(tasks[0]["fix_version_name"], "")
+            self.assertEqual(tasks[0]["fix_version_name"], "Planning_26Q2")
             self.assertEqual(tasks[1]["ticket_key"], "AF-994")
             self.assertEqual(tasks[0]["component"], "")
             self.assertEqual(tasks[0]["market"], "")

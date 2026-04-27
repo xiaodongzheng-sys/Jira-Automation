@@ -827,7 +827,7 @@ class PortalJiraCreationService:
             self.bpmis_client.update_jira_ticket_fix_version(
                 ticket_key,
                 normalized_version_name or normalized_version_id,
-                version_id=normalized_version_id or None,
+                version_id=None,
             )
         except BPMISError as error:
             raise ToolError(str(error)) from error

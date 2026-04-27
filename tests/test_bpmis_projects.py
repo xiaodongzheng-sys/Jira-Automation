@@ -310,7 +310,7 @@ class BPMISProjectStoreTests(unittest.TestCase):
                 version_name="Planning_26Q4",
                 version_id="991",
             )
-            self.assertEqual(bpmis_client.version_calls, [("AF-1", "Planning_26Q4", "991")])
+            self.assertEqual(bpmis_client.version_calls, [("AF-1", "Planning_26Q4", None)])
             self.assertEqual(updated["fix_version_name"], "Planning_26Q4")
             self.assertEqual(store.list_projects(user_key="google:pm@npt.sg")[0]["jira_tickets"][0]["fix_version_name"], "Planning_26Q4")
             self.assertEqual(
