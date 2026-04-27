@@ -369,6 +369,25 @@ class LocalAgentClientTests(unittest.TestCase):
         self.assertEqual(request.call_args.args[1], "https://portal.example/api/local-agent/healthz")
         self.assertEqual(request.call_args.kwargs["timeout"], (10, 300))
 
+    def test_client_uses_configured_connect_timeout(self):
+        class FakeResponse:
+            status_code = 200
+            text = '{"status":"ok"}'
+
+            def json(self):
+                return {"status": "ok", "capabilities": {"source_code_qa": True}}
+
+        client = LocalAgentClient(
+            base_url="https://portal.example",
+            hmac_secret="shared-secret",
+            timeout_seconds=120,
+            connect_timeout_seconds=4,
+        )
+        with patch("bpmis_jira_tool.local_agent_client._LOCAL_AGENT_SESSION.request", return_value=FakeResponse()) as request:
+            client.get_health()
+
+        self.assertEqual(request.call_args.kwargs["timeout"], (4, 120))
+
     def test_unreadable_response_includes_status_and_preview(self):
         class FakeResponse:
             status_code = 404

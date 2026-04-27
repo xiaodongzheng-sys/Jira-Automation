@@ -173,8 +173,31 @@ IFS='|'
 ENV_VARS_JOINED="${ENV_VARS[*]}"
 unset IFS
 
+RUNTIME_ARGS=()
+if [[ -n "${CLOUD_RUN_MIN_INSTANCES:-}" ]]; then
+  RUNTIME_ARGS+=(--min-instances="$CLOUD_RUN_MIN_INSTANCES")
+fi
+if [[ -n "${CLOUD_RUN_CPU:-}" ]]; then
+  RUNTIME_ARGS+=(--cpu="$CLOUD_RUN_CPU")
+fi
+if [[ -n "${CLOUD_RUN_MEMORY:-}" ]]; then
+  RUNTIME_ARGS+=(--memory="$CLOUD_RUN_MEMORY")
+fi
+if [[ -n "${CLOUD_RUN_CONCURRENCY:-}" ]]; then
+  RUNTIME_ARGS+=(--concurrency="$CLOUD_RUN_CONCURRENCY")
+fi
+if [[ -n "${CLOUD_RUN_CPU_BOOST:-}" ]]; then
+  RUNTIME_ARGS+=(--cpu-boost="$CLOUD_RUN_CPU_BOOST")
+fi
+if [[ -n "${CLOUD_RUN_TIMEOUT:-}" ]]; then
+  RUNTIME_ARGS+=(--timeout="$CLOUD_RUN_TIMEOUT")
+fi
+IFS='|'
+RUNTIME_ARGS_JOINED="${RUNTIME_ARGS[*]-}"
+unset IFS
+
 SOURCE_HASH="$(cloud_run_hash)"
-DEPLOY_HASH="$(printf '%s\n%s\n%s\n' "$SOURCE_HASH" "$ENV_VARS_JOINED" "$CLOUD_RUN_IMAGE" | hash_text)"
+DEPLOY_HASH="$(printf '%s\n%s\n%s\n%s\n' "$SOURCE_HASH" "$ENV_VARS_JOINED" "$CLOUD_RUN_IMAGE" "$RUNTIME_ARGS_JOINED" | hash_text)"
 ENV_VARS+=("TEAM_PORTAL_DEPLOY_HASH=$DEPLOY_HASH")
 IFS='|'
 ENV_VARS_JOINED="${ENV_VARS[*]}"
@@ -221,6 +244,7 @@ DEPLOY_STARTED_AT="$(date +%s)"
   "${DEPLOY_SOURCE_ARGS[@]}" \
   ${AUTH_ARGS[@]+"${AUTH_ARGS[@]}"} \
   --max-instances="${CLOUD_RUN_MAX_INSTANCES:-1}" \
+  ${RUNTIME_ARGS[@]+"${RUNTIME_ARGS[@]}"} \
   --set-env-vars "^|^$ENV_VARS_JOINED"
 DEPLOY_FINISHED_AT="$(date +%s)"
 echo "Cloud Run deploy completed in $((DEPLOY_FINISHED_AT - DEPLOY_STARTED_AT))s"

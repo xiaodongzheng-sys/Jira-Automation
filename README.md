@@ -78,6 +78,7 @@ The team edition prototype and future deployment guidance live in:
 
 - [docs/team-edition.md](/Users/NPTSG0388/Documents/New%20project/docs/team-edition.md)
 - [docs/team-deployment.md](/Users/NPTSG0388/Documents/New%20project/docs/team-deployment.md)
+- [docs/release-checklist.md](/Users/NPTSG0388/Documents/New%20project/docs/release-checklist.md)
 - [docs/team-member-quickstart.md](/Users/NPTSG0388/Documents/New%20project/docs/team-member-quickstart.md)
 - [docs/team-member-local-setup.md](/Users/NPTSG0388/Documents/New%20project/docs/team-member-local-setup.md)
 

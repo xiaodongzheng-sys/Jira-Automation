@@ -46,6 +46,7 @@ from bpmis_jira_tool.local_agent_client import (
     _LOCAL_AGENT_SESSION,
 )
 from bpmis_jira_tool.gmail_dashboard import GMAIL_READONLY_SCOPE, GmailDashboardService
+from bpmis_jira_tool.gmail_sender import StoredGoogleCredentials
 from bpmis_jira_tool.seatalk_dashboard import SeaTalkDashboardService
 from bpmis_jira_tool.google_sheets import GoogleSheetsService
 from bpmis_jira_tool.bpmis_projects import BPMISProjectStore, PortalJiraCreationService, PortalProjectSyncService
@@ -1084,6 +1085,10 @@ def create_app() -> Flask:
     app.config["SEATALK_TODO_STORE"] = SeaTalkTodoStore(data_root / "seatalk" / "completed_todos.json")
     app.config["SEATALK_NAME_MAPPING_STORE"] = SeaTalkNameMappingStore(data_root / "seatalk" / "name_overrides.json")
     app.config["SEATALK_DAILY_CACHE_DIR"] = data_root / "seatalk" / "cache"
+    app.config["GOOGLE_CREDENTIAL_STORE"] = StoredGoogleCredentials(
+        data_root / "google" / "credentials.json",
+        encryption_key=settings.team_portal_config_encryption_key,
+    )
     app.config["SOURCE_CODE_QA_SESSION_STORE"] = SourceCodeQASessionStore(data_root / "source_code_qa" / "sessions.json")
     app.config["SOURCE_CODE_QA_MODEL_AVAILABILITY_STORE"] = SourceCodeQAModelAvailabilityStore(
         data_root / "source_code_qa" / "model_availability.json"
@@ -1644,6 +1649,7 @@ def create_app() -> Flask:
             current_identity = _get_user_identity(settings)
             if previous_identity.get("config_key") and current_identity.get("config_key"):
                 _migrate_user_config(settings, previous_identity["config_key"], current_identity["config_key"])
+            _persist_owner_google_credentials(settings)
             _log_portal_event(
                 "google_callback_success",
                 **_build_request_log_context(settings, user_identity=current_identity),
@@ -3118,6 +3124,18 @@ def _build_gmail_dashboard_service() -> GmailDashboardService:
     return GmailDashboardService(credentials=credentials, cache_key=_current_google_email())
 
 
+def _persist_owner_google_credentials(settings: Settings) -> None:
+    owner_email = str(settings.gmail_seatalk_demo_owner_email or settings.seatalk_owner_email or "").strip().lower()
+    current_email = _current_google_email()
+    if not owner_email or current_email != owner_email:
+        return
+    store = current_app.config.get("GOOGLE_CREDENTIAL_STORE") if current_app else None
+    credentials_payload = dict(session.get("google_credentials") or {})
+    if store is None or not credentials_payload:
+        return
+    store.save(owner_email=owner_email, credentials_payload=credentials_payload)
+
+
 def _build_seatalk_dashboard_service(settings: Settings) -> SeaTalkDashboardService:
     if _local_agent_seatalk_enabled(settings):
         name_mapping_store = _get_seatalk_name_mapping_store(settings) if current_app else None
@@ -3430,6 +3448,7 @@ def _build_local_agent_client(settings: Settings) -> LocalAgentClient:
         base_url=settings.local_agent_base_url or "",
         hmac_secret=settings.local_agent_hmac_secret or "",
         timeout_seconds=settings.local_agent_timeout_seconds,
+        connect_timeout_seconds=settings.local_agent_connect_timeout_seconds,
     )
 
 
@@ -3455,7 +3474,13 @@ def _proxy_local_agent_request(agent_path: str):
         }
     }
     try:
-        connect_timeout_seconds = max(1, min(10, int(settings.local_agent_timeout_seconds or 300)))
+        connect_timeout_seconds = max(
+            1,
+            min(
+                int(settings.local_agent_connect_timeout_seconds or 10),
+                int(settings.local_agent_timeout_seconds or 300),
+            ),
+        )
         response = _LOCAL_AGENT_SESSION.request(
             request.method,
             target_url,

@@ -20,6 +20,7 @@ def build_bpmis_client(settings: Settings, access_token: str | None = None) -> B
                 base_url=settings.local_agent_base_url or "",
                 hmac_secret=settings.local_agent_hmac_secret or "",
                 timeout_seconds=settings.local_agent_timeout_seconds,
+                connect_timeout_seconds=settings.local_agent_connect_timeout_seconds,
             ),
             access_token=access_token,
         )

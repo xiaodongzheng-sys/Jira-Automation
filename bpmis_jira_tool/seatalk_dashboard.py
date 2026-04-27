@@ -126,6 +126,17 @@ class SeaTalkDashboardService:
         filename = f"seatalk-history-last-{days}-days.txt"
         return content, filename
 
+    def export_history_since(
+        self,
+        *,
+        since: datetime,
+        now: datetime | None = None,
+        days: int = SEATALK_DASHBOARD_DEFAULT_DAYS,
+    ) -> str:
+        now = now or datetime.now().astimezone()
+        self._validate_local_environment()
+        return self._load_local_history_export(days=days, now=now, since=since)
+
     def build_insights(
         self,
         *,
@@ -894,6 +905,8 @@ class SeaTalkDashboardService:
         return {
             "project_updates": cls._normalize_project_updates(payload.get("project_updates")),
             "my_todos": cls._normalize_todos(payload.get("my_todos")),
+            "other_updates": cls._normalize_project_updates(payload.get("other_updates")),
+            "team_member_reminders": cls._normalize_team_member_reminders(payload.get("team_member_reminders")),
             "team_todos": [],
         }
 
@@ -949,6 +962,23 @@ class SeaTalkDashboardService:
                 )
             )
         return cls._sort_todos(normalized)
+
+    @classmethod
+    def _normalize_team_member_reminders(cls, value: Any) -> list[dict[str, str]]:
+        rows = value if isinstance(value, list) else []
+        normalized: list[dict[str, str]] = []
+        for row in rows[:20]:
+            if not isinstance(row, dict):
+                continue
+            normalized.append(
+                {
+                    "domain": cls._normalize_insight_domain(row.get("domain")),
+                    "person": cls._clean_text(row.get("person"), "Unknown"),
+                    "reminder": cls._clean_text(row.get("reminder"), "Untitled reminder"),
+                    "evidence": cls._clean_text(row.get("evidence"), ""),
+                }
+            )
+        return normalized
 
     @classmethod
     def _todo_with_id(cls, todo: dict[str, str]) -> dict[str, str]:

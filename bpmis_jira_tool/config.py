@@ -136,6 +136,7 @@ class Settings:
     local_agent_base_url: str | None = None
     local_agent_hmac_secret: str | None = None
     local_agent_timeout_seconds: int = 300
+    local_agent_connect_timeout_seconds: int = 10
     local_agent_mode: str = "disabled"
     local_agent_source_code_qa_enabled: bool = False
     local_agent_seatalk_enabled: bool = False
@@ -258,6 +259,7 @@ class Settings:
             local_agent_base_url=_env_str("LOCAL_AGENT_BASE_URL"),
             local_agent_hmac_secret=_env_str("LOCAL_AGENT_HMAC_SECRET"),
             local_agent_timeout_seconds=int(_env_str("LOCAL_AGENT_TIMEOUT_SECONDS", "300")),
+            local_agent_connect_timeout_seconds=int(_env_str("LOCAL_AGENT_CONNECT_TIMEOUT_SECONDS", "10")),
             local_agent_mode=_env_str("LOCAL_AGENT_MODE", "disabled"),
             local_agent_source_code_qa_enabled=_env_bool("LOCAL_AGENT_SOURCE_CODE_QA_ENABLED", False),
             local_agent_seatalk_enabled=_env_bool("LOCAL_AGENT_SEATALK_ENABLED", False),

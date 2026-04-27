@@ -71,6 +71,16 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(settings.source_code_qa_llm_max_retries, 2)
         self.assertEqual(settings.source_code_qa_llm_backoff_seconds, 1.0)
         self.assertEqual(settings.source_code_qa_llm_max_backoff_seconds, 8.0)
+        self.assertEqual(settings.local_agent_connect_timeout_seconds, 10)
+
+    def test_local_agent_connect_timeout_from_env(self):
+        with patch.dict(os.environ, {"LOCAL_AGENT_CONNECT_TIMEOUT_SECONDS": "4"}, clear=True), patch(
+            "bpmis_jira_tool.config.find_dotenv",
+            return_value="",
+        ):
+            settings = Settings.from_env()
+
+        self.assertEqual(settings.local_agent_connect_timeout_seconds, 4)
 
     def test_source_code_qa_codex_concurrency_from_env(self):
         with patch.dict(os.environ, {"SOURCE_CODE_QA_CODEX_CONCURRENCY": "2"}, clear=True), patch(
