@@ -522,14 +522,18 @@
   const renderSeaTalk = async () => {
     if (!seatalkRoot) return;
     const seatalkConfigured = seatalkRoot.dataset.seatalkConfigured === 'true';
-    const insightsUrl = seatalkRoot.dataset.seatalkInsightsUrl || '';
+    const projectUpdatesUrl = seatalkRoot.dataset.seatalkProjectUpdatesUrl || seatalkRoot.dataset.seatalkInsightsUrl || '';
+    const todosUrl = seatalkRoot.dataset.seatalkTodosUrl || seatalkRoot.dataset.seatalkInsightsUrl || '';
     const todoCompleteUrl = seatalkRoot.dataset.seatalkTodoCompleteUrl || '';
     const nameMappingsUrl = seatalkRoot.dataset.seatalkNameMappingsUrl || '';
     const contentNode = seatalkRoot.querySelector('[data-seatalk-content]');
-    const insightsStatusNode = seatalkRoot.querySelector('[data-seatalk-insights-status]');
+    const todosStatusNode = seatalkRoot.querySelector('[data-seatalk-todos-status]');
+    const projectUpdatesStatusNode = seatalkRoot.querySelector('[data-seatalk-project-updates-status]');
     const projectUpdatesNode = seatalkRoot.querySelector('[data-seatalk-project-updates]');
     const todosNode = seatalkRoot.querySelector('[data-seatalk-todos]');
     const myTodosNode = seatalkRoot.querySelector('[data-seatalk-my-todos]');
+    const generateTodosButton = seatalkRoot.querySelector('[data-seatalk-generate-todos]');
+    const generateProjectUpdatesButton = seatalkRoot.querySelector('[data-seatalk-generate-project-updates]');
     if (!seatalkConfigured) return;
     if (contentNode) contentNode.hidden = false;
     hideScopedStatus(seatalkRoot, '[data-seatalk-status]');
@@ -551,18 +555,54 @@
     if (saveMappingsButton) {
       saveMappingsButton.addEventListener('click', () => saveSeaTalkNameMappings(seatalkRoot, nameMappingsUrl));
     }
-    if (!insightsUrl || !insightsStatusNode) return;
-    setScopedStatus(seatalkRoot, '[data-seatalk-insights-status]', 'Loading SeaTalk summary…', 'neutral');
-    try {
-      const insightsResponse = await fetch(insightsUrl, { method: 'GET' });
-      const insightsPayload = await parseDashboardResponse(insightsResponse);
-      if (!insightsResponse.ok) throw new Error(insightsPayload.message || 'Could not load SeaTalk summary.');
-      renderTodos(myTodosNode, insightsPayload.my_todos || [], todoCompleteUrl);
-      renderProjectUpdates(projectUpdatesNode, insightsPayload.project_updates || []);
-      if (todosNode) todosNode.hidden = false;
-      hideScopedStatus(seatalkRoot, '[data-seatalk-insights-status]');
-    } catch (error) {
-      setScopedStatus(seatalkRoot, '[data-seatalk-insights-status]', error.message || 'Could not load SeaTalk summary.', 'error');
+
+    if (generateTodosButton && todosUrl && todosStatusNode) {
+      generateTodosButton.addEventListener('click', async () => {
+        generateTodosButton.disabled = true;
+        setScopedStatus(seatalkRoot, '[data-seatalk-todos-status]', 'Generating to-dos…', 'neutral');
+        try {
+          const response = await fetch(todosUrl, { method: 'GET' });
+          const payload = await parseDashboardResponse(response);
+          if (!response.ok) throw new Error(payload.message || 'Could not load SeaTalk to-dos.');
+          renderTodos(myTodosNode, payload.my_todos || [], todoCompleteUrl);
+          if (todosNode) todosNode.hidden = false;
+          hideScopedStatus(seatalkRoot, '[data-seatalk-todos-status]');
+        } catch (error) {
+          setScopedStatus(seatalkRoot, '[data-seatalk-todos-status]', error.message || 'Could not load SeaTalk to-dos.', 'error');
+        } finally {
+          generateTodosButton.disabled = false;
+        }
+      });
+    }
+
+    if (generateProjectUpdatesButton && projectUpdatesUrl && projectUpdatesStatusNode) {
+      generateProjectUpdatesButton.addEventListener('click', async () => {
+        generateProjectUpdatesButton.disabled = true;
+        setScopedStatus(seatalkRoot, '[data-seatalk-project-updates-status]', 'Generating project updates…', 'neutral');
+        try {
+          const response = await fetch(projectUpdatesUrl, { method: 'GET' });
+          const payload = await parseDashboardResponse(response);
+          if (!response.ok) throw new Error(payload.message || 'Could not load SeaTalk project updates.');
+          renderProjectUpdates(projectUpdatesNode, payload.project_updates || []);
+          hideScopedStatus(seatalkRoot, '[data-seatalk-project-updates-status]');
+        } catch (error) {
+          setScopedStatus(
+            seatalkRoot,
+            '[data-seatalk-project-updates-status]',
+            error.message || 'Could not load SeaTalk project updates.',
+            'error',
+          );
+        } finally {
+          generateProjectUpdatesButton.disabled = false;
+        }
+      });
+    }
+
+    if (!todosUrl && todosStatusNode) {
+      setScopedStatus(seatalkRoot, '[data-seatalk-todos-status]', 'SeaTalk to-do generation is unavailable.', 'error');
+    }
+    if (!projectUpdatesUrl && projectUpdatesStatusNode) {
+      setScopedStatus(seatalkRoot, '[data-seatalk-project-updates-status]', 'SeaTalk project update generation is unavailable.', 'error');
     }
   };
 

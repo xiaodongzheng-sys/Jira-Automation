@@ -119,6 +119,13 @@ class GmailSeaTalkDemoRouteTests(unittest.TestCase):
         self.assertIn(b"/api/gmail-sea-talk-demo/seatalk/name-mappings", response.data)
         self.assertLess(response.data.index(b"To-do Items"), response.data.index(b"Project Updates"))
         self.assertIn(b"data-seatalk-insights-url", response.data)
+        self.assertIn(b"data-seatalk-project-updates-url", response.data)
+        self.assertIn(b"data-seatalk-todos-url", response.data)
+        self.assertIn(b"Generate To-dos", response.data)
+        self.assertIn(b"Generate Project Updates", response.data)
+        self.assertIn(b"Click Generate To-dos to load action items.", response.data)
+        self.assertIn(b"Click Generate Project Updates to load updates.", response.data)
+        self.assertNotIn(b"Loading SeaTalk summary", response.data)
         self.assertIn(b"data-seatalk-todo-complete-url", response.data)
         self.assertNotIn(b"Team / Follow-up To-dos", response.data)
         self.assertIn(b"SeaTalk unavailable", response.data)
@@ -157,6 +164,17 @@ class GmailSeaTalkDemoRouteTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 403)
         self.assertIn("restricted", response.get_json()["message"])
+
+    def test_non_owner_split_seatalk_apis_are_forbidden(self):
+        with self.app.test_client() as client:
+            self._login_teammate(client)
+            updates = client.get("/api/gmail-sea-talk-demo/seatalk/project-updates")
+            todos = client.get("/api/gmail-sea-talk-demo/seatalk/todos")
+
+        self.assertEqual(updates.status_code, 403)
+        self.assertEqual(todos.status_code, 403)
+        self.assertIn("restricted", updates.get_json()["message"])
+        self.assertIn("restricted", todos.get_json()["message"])
 
     def test_non_owner_seatalk_name_mappings_api_is_forbidden(self):
         with self.app.test_client() as client:
@@ -411,6 +429,62 @@ class GmailSeaTalkDemoRouteTests(unittest.TestCase):
         self.assertEqual(payload["my_todos"][0]["task"], "Follow up rollout")
         self.assertEqual(payload["team_todos"], [])
         self.assertEqual(payload["model_id"], "codex:gpt-5.5")
+
+    def test_owner_seatalk_project_updates_api_returns_updates_only(self):
+        fake_payload = {
+            "project_updates": [{"domain": "General", "title": "AI sharing", "summary": "Deck updated", "status": "done", "evidence": "Apr 27"}],
+            "my_todos": [{"task": "Should not leak", "domain": "General", "priority": "low", "due": "unknown", "evidence": "Apr 27"}],
+            "team_todos": [{"task": "Should not leak", "domain": "General", "owner": "Team", "evidence": "Apr 27"}],
+            "generated_at": "2026-04-27T21:00:00+08:00",
+            "model_id": "codex:gpt-5.5",
+        }
+
+        class FakeSeaTalkService:
+            def build_project_updates(self):
+                return fake_payload
+
+        with patch("bpmis_jira_tool.web._build_seatalk_dashboard_service", return_value=FakeSeaTalkService()):
+            with self.app.test_client() as client:
+                self._login_owner(client, scopes=[GMAIL_READONLY_SCOPE])
+                response = client.get("/api/gmail-sea-talk-demo/seatalk/project-updates")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["project_updates"][0]["title"], "AI sharing")
+        self.assertEqual(payload["my_todos"], [])
+        self.assertEqual(payload["team_todos"], [])
+
+    def test_owner_seatalk_todos_api_returns_todos_only_and_advances_cursor(self):
+        calls: list[str] = []
+
+        class FakeSeaTalkService:
+            def build_todos(self, *, todo_since=""):
+                calls.append(todo_since)
+                return {
+                    "project_updates": [{"domain": "General", "title": "Should not leak", "summary": "x", "status": "done", "evidence": "Apr 27"}],
+                    "my_todos": [
+                        {"task": "Prepare AI sharing", "domain": "General", "priority": "medium", "due": "unknown", "evidence": "Apr 28"}
+                    ],
+                    "team_todos": [],
+                    "generated_at": "2026-04-29T09:00:00+08:00",
+                    "todo_processed_until": "2026-04-29T09:00:00+08:00",
+                    "model_id": "codex:gpt-5.5",
+                }
+
+        with patch("bpmis_jira_tool.web._build_seatalk_dashboard_service", return_value=FakeSeaTalkService()):
+            with self.app.test_client() as client:
+                self._login_owner(client, scopes=[GMAIL_READONLY_SCOPE])
+                first = client.get("/api/gmail-sea-talk-demo/seatalk/todos")
+                second = client.get("/api/gmail-sea-talk-demo/seatalk/todos")
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(calls, ["", "2026-04-29T09:00:00+08:00"])
+        payload = second.get_json()
+        self.assertEqual(payload["project_updates"], [])
+        self.assertEqual(payload["team_todos"], [])
+        self.assertEqual(payload["my_todos"][0]["task"], "Prepare AI sharing")
 
     def test_owner_can_complete_seatalk_todo_and_filter_it_from_insights(self):
         todo = {"task": "Follow up rollout", "domain": "Anti-fraud", "priority": "high", "due": "2026-04-30", "evidence": "Apr 21"}

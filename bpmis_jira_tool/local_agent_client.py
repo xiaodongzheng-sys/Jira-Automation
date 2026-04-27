@@ -95,6 +95,12 @@ class LocalAgentClient:
     def seatalk_insights(self, *, name_mappings: dict[str, str] | None = None, todo_since: str | None = None) -> dict[str, Any]:
         return self._request("POST", "/api/local-agent/seatalk/insights", {"name_mappings": name_mappings or {}, "todo_since": todo_since or ""})
 
+    def seatalk_project_updates(self, *, name_mappings: dict[str, str] | None = None) -> dict[str, Any]:
+        return self._request("POST", "/api/local-agent/seatalk/project-updates", {"name_mappings": name_mappings or {}})
+
+    def seatalk_todos(self, *, name_mappings: dict[str, str] | None = None, todo_since: str | None = None) -> dict[str, Any]:
+        return self._request("POST", "/api/local-agent/seatalk/todos", {"name_mappings": name_mappings or {}, "todo_since": todo_since or ""})
+
     def seatalk_name_mappings(self) -> dict[str, Any]:
         return self._request("POST", "/api/local-agent/seatalk/name-mappings", {})
 
@@ -337,6 +343,12 @@ class RemoteSeaTalkDashboardService:
 
     def build_insights(self, *, todo_since: str | None = None) -> dict[str, Any]:
         return _strip_status(self.client.seatalk_insights(name_mappings=self.name_mappings_provider(), todo_since=todo_since))
+
+    def build_project_updates(self) -> dict[str, Any]:
+        return _strip_status(self.client.seatalk_project_updates(name_mappings=self.name_mappings_provider()))
+
+    def build_todos(self, *, todo_since: str | None = None) -> dict[str, Any]:
+        return _strip_status(self.client.seatalk_todos(name_mappings=self.name_mappings_provider(), todo_since=todo_since))
 
     def build_name_mappings(self) -> dict[str, Any]:
         return _strip_status(self.client.seatalk_name_mappings())

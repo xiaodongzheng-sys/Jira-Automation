@@ -287,6 +287,30 @@ def create_local_agent_app() -> Flask:
                 }
             )
 
+    @app.post("/api/local-agent/seatalk/project-updates")
+    def seatalk_project_updates():
+        payload = request.get_json(silent=True) or {}
+        with _seatalk_name_overrides(payload.get("name_mappings")) as name_overrides_path:
+            return jsonify(
+                {
+                    "status": "ok",
+                    **_build_seatalk_service(settings, name_overrides_path=name_overrides_path).build_project_updates(),
+                }
+            )
+
+    @app.post("/api/local-agent/seatalk/todos")
+    def seatalk_todos():
+        payload = request.get_json(silent=True) or {}
+        with _seatalk_name_overrides(payload.get("name_mappings")) as name_overrides_path:
+            return jsonify(
+                {
+                    "status": "ok",
+                    **_build_seatalk_service(settings, name_overrides_path=name_overrides_path).build_todos(
+                        todo_since=str(payload.get("todo_since") or "")
+                    ),
+                }
+            )
+
     @app.post("/api/local-agent/seatalk/name-mappings")
     def seatalk_name_mappings():
         return jsonify({"status": "ok", **_build_seatalk_service(settings).build_name_mappings()})

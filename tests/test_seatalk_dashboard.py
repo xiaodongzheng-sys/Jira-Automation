@@ -330,6 +330,98 @@ class SeaTalkDashboardServiceTests(unittest.TestCase):
         self.assertIn("--json", exec_command)
         self.assertIn("--output-last-message", exec_command)
 
+    def test_build_project_updates_uses_update_only_prompt(self):
+        def local_runner(command: list[str]):
+            return subprocess.CompletedProcess(
+                args=command,
+                returncode=0,
+                stdout="SeaTalk Chat History Export\n[2026-04-27 10:00:00] Alice: AI sharing deck is ready.\n",
+                stderr="",
+            )
+
+        prompts: list[str] = []
+
+        def fake_codex_run(command, **kwargs):
+            if "login" in command and "status" in command:
+                return SimpleNamespace(returncode=0, stdout="Logged in using ChatGPT\n", stderr="")
+            prompts.append(str(kwargs.get("input") or ""))
+            output_path = command[command.index("--output-last-message") + 1]
+            Path(output_path).write_text(
+                '{"project_updates":[{"domain":"General","title":"AI sharing","summary":"Deck is ready.","status":"done","evidence":"Apr 27 Alice"}],"my_todos":[],"team_todos":[]}',
+                encoding="utf-8",
+            )
+            return SimpleNamespace(returncode=0, stdout='{"type":"done"}\n', stderr="")
+
+        service = SeaTalkDashboardService(
+            owner_email="xiaodong.zheng@npt.sg",
+            seatalk_app_path=str(self.app_dir),
+            seatalk_data_dir=str(self.data_dir),
+            codex_workspace_root=str(self.temp_dir.name),
+            command_runner=local_runner,
+        )
+
+        with patch("bpmis_jira_tool.source_code_qa.shutil.which", return_value="/usr/local/bin/codex"), patch(
+            "bpmis_jira_tool.source_code_qa.subprocess.run",
+            side_effect=fake_codex_run,
+        ):
+            result = service.build_project_updates(now=datetime(2026, 4, 27, 21, 0).astimezone())
+
+        self.assertEqual(result["project_updates"][0]["title"], "AI sharing")
+        self.assertEqual(result.get("my_todos"), None)
+        self.assertTrue(prompts)
+        self.assertIn("my_todos and team_todos must both be empty arrays", prompts[0])
+        self.assertIn("not action extraction", prompts[0])
+
+    def test_build_todos_uses_todo_only_incremental_prompt(self):
+        calls: list[list[str]] = []
+
+        def local_runner(command: list[str]):
+            calls.append(command)
+            return subprocess.CompletedProcess(
+                args=command,
+                returncode=0,
+                stdout="SeaTalk Chat History Export\nWindow: since 2026-04-27T00:00:00+08:00\n[2026-04-28 10:00:00] Alice: @Xiaodong please prepare AI sharing follow-up.\n",
+                stderr="",
+            )
+
+        prompts: list[str] = []
+
+        def fake_codex_run(command, **kwargs):
+            if "login" in command and "status" in command:
+                return SimpleNamespace(returncode=0, stdout="Logged in using ChatGPT\n", stderr="")
+            prompts.append(str(kwargs.get("input") or ""))
+            output_path = command[command.index("--output-last-message") + 1]
+            Path(output_path).write_text(
+                '{"project_updates":[],"my_todos":[{"task":"Prepare AI sharing follow-up","domain":"General","priority":"medium","due":"unknown","evidence":"Apr 28 Alice"}],"team_todos":[]}',
+                encoding="utf-8",
+            )
+            return SimpleNamespace(returncode=0, stdout='{"type":"done"}\n', stderr="")
+
+        service = SeaTalkDashboardService(
+            owner_email="xiaodong.zheng@npt.sg",
+            seatalk_app_path=str(self.app_dir),
+            seatalk_data_dir=str(self.data_dir),
+            codex_workspace_root=str(self.temp_dir.name),
+            command_runner=local_runner,
+        )
+
+        with patch("bpmis_jira_tool.source_code_qa.shutil.which", return_value="/usr/local/bin/codex"), patch(
+            "bpmis_jira_tool.source_code_qa.subprocess.run",
+            side_effect=fake_codex_run,
+        ):
+            result = service.build_todos(
+                now=datetime(2026, 4, 29, 9, 0).astimezone(),
+                todo_since="2026-04-27T00:00:00+08:00",
+            )
+
+        self.assertEqual(result["my_todos"][0]["task"], "Prepare AI sharing follow-up")
+        self.assertEqual(result.get("project_updates"), None)
+        self.assertEqual(len([command for command in calls if command[1].endswith("seatalk_local_export.js")]), 1)
+        self.assertIn("--since", calls[0])
+        self.assertTrue(prompts)
+        self.assertIn("project_updates and team_todos must both be empty arrays", prompts[0])
+        self.assertIn("Only generate my_todos from messages after 2026-04-27T00:00:00+08:00", prompts[0])
+
     def test_build_insights_compacts_large_history_before_codex(self):
         huge_history = "\n".join(
             [

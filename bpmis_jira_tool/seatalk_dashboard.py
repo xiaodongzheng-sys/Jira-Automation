@@ -32,6 +32,12 @@ SEATALK_INSIGHTS_SIGNAL_MAX_CHARS = 300_000
 SEATALK_INSIGHTS_RECENT_MAX_CHARS = 190_000
 SEATALK_INSIGHTS_TODO_SIGNAL_MAX_CHARS = 160_000
 SEATALK_INSIGHTS_TODO_RECENT_MAX_CHARS = 80_000
+SEATALK_PROJECT_UPDATES_HISTORY_MAX_CHARS = 760_000
+SEATALK_PROJECT_UPDATES_SIGNAL_MAX_CHARS = 440_000
+SEATALK_PROJECT_UPDATES_RECENT_MAX_CHARS = 280_000
+SEATALK_TODO_HISTORY_MAX_CHARS = 620_000
+SEATALK_TODO_SIGNAL_MAX_CHARS = 400_000
+SEATALK_TODO_RECENT_MAX_CHARS = 180_000
 UNAVAILABLE_REASON = "Not available from local SeaTalk desktop data for this scope."
 
 
@@ -217,6 +223,86 @@ class SeaTalkDashboardService:
         self._store_daily_cache(kind="insights", days=days, now=now, payload=payload)
         return payload
 
+    def build_project_updates(
+        self,
+        *,
+        days: int = SEATALK_DASHBOARD_DEFAULT_DAYS,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        now = now or datetime.now(SEATALK_INSIGHTS_TIMEZONE)
+        cached = self._load_daily_cache(kind="project_updates", days=days, now=now)
+        if cached is not None:
+            return self._mark_cache_hit(cached, expires_at=self._insights_cache_expiry(now))
+        self._validate_local_environment()
+        history_text = self._filter_system_generated_history(self._load_local_history_export(days=days, now=now))
+        history_text = self._compact_history_for_insights(
+            history_text,
+            max_chars=SEATALK_PROJECT_UPDATES_HISTORY_MAX_CHARS,
+            signal_max_chars=SEATALK_PROJECT_UPDATES_SIGNAL_MAX_CHARS,
+            recent_max_chars=SEATALK_PROJECT_UPDATES_RECENT_MAX_CHARS,
+        )
+        result, parsed = self._run_codex_insights_prompt(
+            prompt=self._project_updates_user_prompt(history_text=history_text, days=days, now=now),
+            system_prompt=self._project_updates_system_prompt(),
+        )
+        trace = result.payload.get("codex_cli_trace") if isinstance(result.payload.get("codex_cli_trace"), dict) else {}
+        payload = {
+            "project_updates": parsed["project_updates"],
+            "generated_at": now.isoformat(),
+            "period_days": days,
+            "model_id": f"codex:{result.model}",
+            "cache": {"hit": False, "expires_at": self._insights_cache_expiry(now).isoformat()},
+            "codex": {
+                "latency_ms": int(result.latency_ms or trace.get("latency_ms") or 0),
+                "session_mode": str(trace.get("session_mode") or "ephemeral"),
+            },
+        }
+        self._store_daily_cache(kind="project_updates", days=days, now=now, payload=payload)
+        return payload
+
+    def build_todos(
+        self,
+        *,
+        days: int = SEATALK_DASHBOARD_DEFAULT_DAYS,
+        now: datetime | None = None,
+        todo_since: str | datetime | None = None,
+    ) -> dict[str, Any]:
+        now = now or datetime.now(SEATALK_INSIGHTS_TIMEZONE)
+        todo_since_dt = self._parse_todo_since(todo_since, now=now, days=days)
+        cached = self._load_daily_cache(kind=self._todo_cache_kind(todo_since_dt), days=days, now=now)
+        if cached is not None:
+            return self._mark_cache_hit(cached, expires_at=self._insights_cache_expiry(now))
+        self._validate_local_environment()
+        history_text = self._load_local_history_export(days=days, now=now, since=todo_since_dt)
+        history_text = self._filter_system_generated_history(history_text)
+        history_text = self._compact_history_for_insights(
+            history_text,
+            max_chars=SEATALK_TODO_HISTORY_MAX_CHARS,
+            signal_max_chars=SEATALK_TODO_SIGNAL_MAX_CHARS,
+            recent_max_chars=SEATALK_TODO_RECENT_MAX_CHARS,
+        )
+        result, parsed = self._run_codex_insights_prompt(
+            prompt=self._todos_user_prompt(history_text=history_text, days=days, now=now, todo_since=todo_since_dt),
+            system_prompt=self._todos_system_prompt(),
+        )
+        trace = result.payload.get("codex_cli_trace") if isinstance(result.payload.get("codex_cli_trace"), dict) else {}
+        payload = {
+            "my_todos": self._sort_todos(parsed["my_todos"]),
+            "team_todos": [],
+            "generated_at": now.isoformat(),
+            "period_days": days,
+            "todo_processed_from": todo_since_dt.isoformat() if todo_since_dt else "",
+            "todo_processed_until": now.astimezone(SEATALK_INSIGHTS_TIMEZONE).isoformat(),
+            "model_id": f"codex:{result.model}",
+            "cache": {"hit": False, "expires_at": self._insights_cache_expiry(now).isoformat()},
+            "codex": {
+                "latency_ms": int(result.latency_ms or trace.get("latency_ms") or 0),
+                "session_mode": str(trace.get("session_mode") or "ephemeral"),
+            },
+        }
+        self._store_daily_cache(kind=self._todo_cache_kind(todo_since_dt), days=days, now=now, payload=payload)
+        return payload
+
     def build_name_mappings(
         self,
         *,
@@ -297,6 +383,27 @@ class SeaTalkDashboardService:
                 message = "SeaTalk chat history could not be exported right now."
             raise ToolError(message)
         return result.stdout
+
+    def _run_codex_insights_prompt(self, *, prompt: str, system_prompt: str | None = None):
+        provider = CodexCliBridgeSourceCodeQALLMProvider(
+            workspace_root=self.codex_workspace_root,
+            timeout_seconds=self.codex_timeout_seconds,
+            concurrency_limit=self.codex_concurrency,
+            session_mode="ephemeral",
+            codex_binary=self.codex_binary,
+        )
+        prompt_payload = {
+            "codex_prompt_mode": SEATALK_INSIGHTS_PROMPT_MODE,
+            "systemInstruction": {"parts": [{"text": system_prompt or self._insights_system_prompt()}]},
+            "contents": [{"parts": [{"text": prompt}]}],
+        }
+        result = provider.generate(
+            payload=prompt_payload,
+            primary_model=self.codex_model,
+            fallback_model=self.codex_model,
+        )
+        text = provider.extract_text(result.payload)
+        return result, self._parse_insights_response(text)
 
     def _run_local_helper(
         self,
@@ -421,13 +528,21 @@ class SeaTalkDashboardService:
         if self.daily_cache_dir is None:
             return None
         safe_kind = re.sub(r"[^a-z0-9_]+", "_", kind.lower()).strip("_")
-        if safe_kind == "insights":
+        if safe_kind == "insights" or safe_kind == "project_updates" or safe_kind.startswith("todos"):
             safe_mode = re.sub(r"[^a-z0-9_]+", "_", SEATALK_INSIGHTS_PROMPT_MODE.lower()).strip("_")
             mapping_token = self._name_overrides_cache_token()
             mapping_digest = hashlib.sha1(mapping_token.encode("utf-8")).hexdigest()[:12] if mapping_token else "nomap"
             safe_kind = f"{safe_kind}_{safe_mode}_{mapping_digest}"
         cache_date = now.astimezone(SEATALK_INSIGHTS_TIMEZONE).date().isoformat()
         return self.daily_cache_dir / f"{safe_kind}_last_{int(days)}_days_{cache_date}.json"
+
+    @staticmethod
+    def _todo_cache_kind(todo_since: datetime | None) -> str:
+        if todo_since is None:
+            return "todos_initial"
+        cursor = todo_since.astimezone(SEATALK_INSIGHTS_TIMEZONE).isoformat()
+        digest = hashlib.sha1(cursor.encode("utf-8")).hexdigest()[:12]
+        return f"todos_since_{digest}"
 
     def _insights_cache_key(self, days: int) -> tuple[str, str, int, str, str]:
         return (
@@ -506,6 +621,29 @@ class SeaTalkDashboardService:
         )
 
     @staticmethod
+    def _project_updates_system_prompt() -> str:
+        return (
+            "You are Codex helping Xiaodong Zheng review SeaTalk chat history. "
+            "You must not modify files or run commands. Produce only valid JSON. "
+            "This call is only for project updates and awareness summaries from recent SeaTalk messages. "
+            "Do not extract action items, do not infer to-dos, and keep my_todos and team_todos empty. "
+            "Use sender and conversation labels exactly as evidence. Do not replace unresolved UID, buddy, or group IDs with guessed names. "
+            "Classify project update domains as exactly one of Anti-fraud, Credit Risk, Ops Risk, General. "
+            "Use General as a broad awareness radar for leadership, AI sharing, Key Project table, slides, reporting, org/process changes, incidents, launches, dependencies, and important non-owned product lines."
+        )
+
+    @staticmethod
+    def _todos_system_prompt() -> str:
+        return (
+            "You are Codex helping Xiaodong Zheng extract his own action items from SeaTalk chat history. "
+            "You must not modify files or run commands. Produce only valid JSON. "
+            "This call is only for Xiaodong-owned to-dos from the provided incremental history. "
+            "Do not summarize project updates and keep project_updates and team_todos empty. "
+            "Classify my_todos only when Xiaodong, Zheng Xiaodong, xiaodong.zheng@npt.sg, @Xiaodong, or direct second-person wording indicates Xiaodong should act. "
+            "Do not include action items owned by other people. Use sender and conversation labels exactly as evidence and keep evidence short."
+        )
+
+    @staticmethod
     def _insights_user_prompt(
         *,
         history_text: str,
@@ -544,6 +682,44 @@ class SeaTalkDashboardService:
             f"{history_text}\n\n"
             "[New to-do history - use for my_todos only]\n"
             f"{todo_history}"
+        )
+
+    @staticmethod
+    def _project_updates_user_prompt(*, history_text: str, days: int, now: datetime) -> str:
+        return (
+            "Return a JSON object with exactly these top-level keys: project_updates, my_todos, team_todos.\n"
+            "project_updates must be an array of objects with keys: domain, title, summary, status, evidence.\n"
+            "my_todos and team_todos must both be empty arrays.\n"
+            "Use the full available SeaTalk history below only for project updates and awareness summaries, not action extraction.\n"
+            "For every project_updates item, domain must be exactly one of: Anti-fraud, Credit Risk, Ops Risk, General.\n"
+            "Allowed status values: done, in_progress, blocked, unknown.\n"
+            "Prioritize General awareness first when present: include 3 to 6 General updates for leadership, AI sharing, Key Project table, slides, reporting, org/process changes, incidents, launches, dependencies, or important non-owned product lines.\n"
+            "Then include concise Anti-fraud, Credit Risk, and Ops Risk updates. Keep evidence short with date/time or conversation plus a brief snippet.\n"
+            f"Window: last {days} days. Generated at: {now.isoformat()}.\n\n"
+            "SeaTalk project-update history:\n"
+            f"{history_text}"
+        )
+
+    @staticmethod
+    def _todos_user_prompt(*, history_text: str, days: int, now: datetime, todo_since: datetime | None = None) -> str:
+        todo_window = (
+            f"Only generate my_todos from messages after {todo_since.isoformat()}."
+            if todo_since is not None
+            else f"Generate my_todos from the last {days} days because there is no previous to-do cursor yet."
+        )
+        return (
+            "Return a JSON object with exactly these top-level keys: project_updates, my_todos, team_todos.\n"
+            "project_updates and team_todos must both be empty arrays.\n"
+            f"my_todos must contain only Xiaodong's own action items. {todo_window}\n"
+            "Classify action items into my_todos only when Xiaodong, Zheng Xiaodong, xiaodong.zheng@npt.sg, @Xiaodong, or direct second-person wording indicates Xiaodong should act.\n"
+            "Do not include action items owned by other people. Do include Xiaodong-owned General tasks such as AI sharing, Key Project table updates, slide updates, reporting, meeting prep, and leadership follow-ups.\n"
+            "my_todos objects must have keys: task, domain, priority, due, evidence.\n"
+            "For every my_todos item, domain must be exactly one of: Anti-fraud, Credit Risk, Ops Risk, General.\n"
+            "Allowed priority values: high, medium, low, unknown. For due, extract an explicit deadline if present; otherwise use unknown.\n"
+            "Keep evidence short with date/time or conversation plus a brief snippet. If there are no confident Xiaodong-owned items, return an empty my_todos array.\n"
+            f"Window: last {days} days. Generated at: {now.isoformat()}.\n\n"
+            "SeaTalk to-do history:\n"
+            f"{history_text}"
         )
 
     @classmethod

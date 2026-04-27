@@ -1671,6 +1671,8 @@ def create_app() -> Flask:
             google_connected="google_credentials" in session,
             seatalk_configured=_seatalk_dashboard_is_configured(settings),
             seatalk_insights_url=url_for("gmail_seatalk_demo_seatalk_insights_api"),
+            seatalk_project_updates_url=url_for("gmail_seatalk_demo_seatalk_project_updates_api"),
+            seatalk_todos_url=url_for("gmail_seatalk_demo_seatalk_todos_api"),
             seatalk_todo_complete_url=url_for("gmail_seatalk_demo_seatalk_todo_complete"),
             seatalk_name_mappings_url=url_for("gmail_seatalk_demo_seatalk_name_mappings"),
             asset_revision=_current_release_revision(),
@@ -1988,6 +1990,102 @@ def create_app() -> Flask:
             current_app.logger.exception("SeaTalk insights load failed.")
             return (
                 jsonify({"status": "error", "message": "SeaTalk insights could not be loaded right now. Please try again shortly."}),
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+
+    @app.get("/api/gmail-sea-talk-demo/seatalk/project-updates")
+    def gmail_seatalk_demo_seatalk_project_updates_api():
+        access_gate = _require_gmail_seatalk_demo_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        try:
+            service = _build_seatalk_dashboard_service(settings)
+            if hasattr(service, "build_project_updates"):
+                payload = service.build_project_updates()
+            else:
+                payload = service.build_insights()
+            payload = dict(payload)
+            payload["my_todos"] = []
+            payload["team_todos"] = []
+            return jsonify({"status": "ok", **payload})
+        except ToolError as error:
+            error_details = _classify_portal_error(error)
+            _log_portal_event(
+                "gmail_seatalk_seatalk_project_updates_tool_error",
+                level=logging.WARNING,
+                **_build_request_log_context(
+                    settings,
+                    user_identity=_get_user_identity(settings),
+                    extra=error_details,
+                ),
+            )
+            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
+        except Exception:
+            _log_portal_event(
+                "gmail_seatalk_seatalk_project_updates_unexpected_error",
+                level=logging.ERROR,
+                **_build_request_log_context(settings, user_identity=_get_user_identity(settings)),
+            )
+            current_app.logger.exception("SeaTalk project updates load failed.")
+            return (
+                jsonify({"status": "error", "message": "SeaTalk project updates could not be loaded right now. Please try again shortly."}),
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+
+    @app.get("/api/gmail-sea-talk-demo/seatalk/todos")
+    def gmail_seatalk_demo_seatalk_todos_api():
+        access_gate = _require_gmail_seatalk_demo_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        try:
+            owner_email = _current_google_email() or settings.gmail_seatalk_demo_owner_email
+            todo_store = _get_seatalk_todo_store(settings)
+            service = _build_seatalk_dashboard_service(settings)
+            todo_since = todo_store.processed_until(owner_email=owner_email)
+            if hasattr(service, "build_todos") and _callable_accepts_keyword(service.build_todos, "todo_since"):
+                payload = service.build_todos(todo_since=todo_since)
+            elif _callable_accepts_keyword(service.build_insights, "todo_since"):
+                payload = service.build_insights(todo_since=todo_since)
+            else:
+                payload = service.build_insights()
+            completed_ids = todo_store.completed_ids(owner_email=owner_email)
+            payload = dict(payload)
+            open_todos = todo_store.merge_open_todos(
+                owner_email=owner_email,
+                todos=[todo for todo in (payload.get("my_todos") or []) if isinstance(todo, dict)],
+            )
+            todo_store.mark_processed_until(
+                owner_email=owner_email,
+                processed_until=str(payload.get("todo_processed_until") or ""),
+            )
+            payload["project_updates"] = []
+            payload["my_todos"] = [
+                todo for todo in SeaTalkDashboardService._sort_todos(open_todos)
+                if SeaTalkTodoStore.todo_id(todo) not in completed_ids
+            ]
+            payload["team_todos"] = []
+            return jsonify({"status": "ok", **payload})
+        except ToolError as error:
+            error_details = _classify_portal_error(error)
+            _log_portal_event(
+                "gmail_seatalk_seatalk_todos_tool_error",
+                level=logging.WARNING,
+                **_build_request_log_context(
+                    settings,
+                    user_identity=_get_user_identity(settings),
+                    extra=error_details,
+                ),
+            )
+            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
+        except Exception:
+            _log_portal_event(
+                "gmail_seatalk_seatalk_todos_unexpected_error",
+                level=logging.ERROR,
+                **_build_request_log_context(settings, user_identity=_get_user_identity(settings)),
+            )
+            current_app.logger.exception("SeaTalk to-do load failed.")
+            return (
+                jsonify({"status": "error", "message": "SeaTalk to-dos could not be loaded right now. Please try again shortly."}),
                 HTTPStatus.INTERNAL_SERVER_ERROR,
             )
 

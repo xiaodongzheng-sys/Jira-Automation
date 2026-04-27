@@ -151,6 +151,16 @@
       color: #10203d;
     }
 
+    .mail-demo-card .panel-head-compact {
+      align-items: start;
+      gap: 0.9rem;
+      margin: 0 0 0.9rem;
+    }
+
+    .mail-demo-card .panel-head-compact p {
+      margin: 0;
+    }
+
     .mail-demo-chart {
       width: 100%;
       height: 230px;
@@ -494,6 +504,8 @@
     <section
       data-seatalk-demo-root
       data-seatalk-insights-url="{{ seatalk_insights_url }}"
+      data-seatalk-project-updates-url="{{ seatalk_project_updates_url }}"
+      data-seatalk-todos-url="{{ seatalk_todos_url }}"
       data-seatalk-todo-complete-url="{{ seatalk_todo_complete_url }}"
       data-seatalk-name-mappings-url="{{ seatalk_name_mappings_url }}"
       data-seatalk-configured="{{ 'true' if seatalk_configured else 'false' }}"
@@ -513,7 +525,7 @@
         </div>
         <div class="empty-state mail-demo-status" data-seatalk-status data-tone="neutral">
           {% if seatalk_configured %}
-            <p>Loading SeaTalk summary…</p>
+            <p>Choose a section to generate.</p>
           {% else %}
             <p>SeaTalk desktop data is not available yet. Open the SeaTalk Mac app on this machine to enable the summary.</p>
           {% endif %}
@@ -527,10 +539,15 @@
             <section class="seatalk-insights-grid" data-seatalk-insights-content>
               <article class="mail-demo-card">
                 <div class="mail-demo-pill">Action items</div>
-                <h3>To-do Items</h3>
-                <p>My to-dos inferred from recent SeaTalk messages, sorted by priority.</p>
-                <div class="empty-state mail-demo-status" data-seatalk-insights-status data-tone="neutral">
-                  <p>Loading SeaTalk summary…</p>
+                <div class="panel-head panel-head-compact">
+                  <div>
+                    <h3>To-do Items</h3>
+                    <p>My to-dos inferred from new SeaTalk messages, sorted by priority.</p>
+                  </div>
+                  <button class="button button-primary" type="button" data-seatalk-generate-todos>Generate To-dos</button>
+                </div>
+                <div class="empty-state mail-demo-status" data-seatalk-todos-status data-tone="neutral">
+                  <p>Click Generate To-dos to load action items.</p>
                 </div>
                 <div class="seatalk-todo-columns" data-seatalk-todos hidden>
                   <div class="seatalk-insight-list" data-seatalk-my-todos></div>
@@ -538,8 +555,16 @@
               </article>
               <article class="mail-demo-card">
                 <div class="mail-demo-pill">Project updates</div>
-                <h3>Project Updates</h3>
-                <p>Major updates from the last 7 days across your SeaTalk conversations.</p>
+                <div class="panel-head panel-head-compact">
+                  <div>
+                    <h3>Project Updates</h3>
+                    <p>Major updates from the last 7 days across your SeaTalk conversations.</p>
+                  </div>
+                  <button class="button button-primary" type="button" data-seatalk-generate-project-updates>Generate Project Updates</button>
+                </div>
+                <div class="empty-state mail-demo-status" data-seatalk-project-updates-status data-tone="neutral">
+                  <p>Click Generate Project Updates to load updates.</p>
+                </div>
                 <div data-seatalk-project-updates hidden>
                   <div class="seatalk-project-tabs" role="tablist" aria-label="Project update product lines">
                     <button class="seatalk-project-tab" type="button" role="tab" aria-selected="true">Anti-fraud</button>
