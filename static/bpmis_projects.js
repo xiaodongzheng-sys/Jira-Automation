@@ -507,6 +507,7 @@
     });
     input.focus();
     input.select();
+    input.dispatchEvent(new Event('input', { bubbles: true }));
   };
 
   const updateTaskVersion = async (input) => {
