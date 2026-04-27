@@ -207,6 +207,10 @@
 }
 
 .bpmis-inline-input {
+  appearance: none;
+  background: transparent;
+  border-radius: 0;
+  box-shadow: none;
   min-width: 0;
   min-height: 36px;
   border: 0;
