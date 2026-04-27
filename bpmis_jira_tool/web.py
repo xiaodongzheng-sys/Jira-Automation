@@ -43,6 +43,7 @@ from bpmis_jira_tool.local_agent_client import (
     RemoteSourceCodeQAModelAvailabilityStore,
     RemoteSourceCodeQASessionStore,
     RemoteSourceCodeQAService,
+    _LOCAL_AGENT_SESSION,
 )
 from bpmis_jira_tool.gmail_dashboard import GMAIL_READONLY_SCOPE, GmailDashboardService
 from bpmis_jira_tool.seatalk_dashboard import SeaTalkDashboardService
@@ -3454,13 +3455,14 @@ def _proxy_local_agent_request(agent_path: str):
         }
     }
     try:
-        response = requests.request(
+        connect_timeout_seconds = max(1, min(10, int(settings.local_agent_timeout_seconds or 300)))
+        response = _LOCAL_AGENT_SESSION.request(
             request.method,
             target_url,
             params=request.args,
             data=request.get_data() if request.method != "GET" else None,
             headers=headers,
-            timeout=settings.local_agent_timeout_seconds,
+            timeout=(connect_timeout_seconds, settings.local_agent_timeout_seconds),
         )
     except requests.RequestException as error:
         return jsonify({"status": "error", "message": f"Mac local-agent is unavailable: {error}"}), HTTPStatus.BAD_GATEWAY

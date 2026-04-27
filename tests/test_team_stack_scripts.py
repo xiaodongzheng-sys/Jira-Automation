@@ -252,6 +252,95 @@ exit 0
         self.assertIn("CLOUD_RUN_RESTART_LOCAL_AGENT_AFTER_DEPLOY:-1", contents)
         self.assertIn('"$ROOT_DIR/scripts/run_local_agent.sh" restart', contents)
 
+    def test_cloud_run_full_deploy_skips_base_url_update_when_service_exists(self):
+        deploy_script = PROJECT_ROOT / "scripts/deploy_cloud_run_full.sh"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            fake_bin = temp_path / "bin"
+            fake_bin.mkdir()
+            calls_path = temp_path / "gcloud-calls.log"
+            google_secret = temp_path / "google-client-secret.json"
+            google_secret.write_text('{"web":{}}', encoding="utf-8")
+            gcloud_path = fake_bin / "gcloud"
+            gcloud_path.write_text(
+                """#!/usr/bin/env bash
+set -euo pipefail
+
+printf '%s\\n' "$*" >> "$FAKE_GCLOUD_CALLS"
+if [[ "$*" == "auth list"* ]]; then
+  printf 'teammate@example.com\\n'
+  exit 0
+fi
+if [[ "$*" == "run services describe"* ]]; then
+  printf 'https://team-portal-example.run.app\\n'
+  exit 0
+fi
+if [[ "$*" == "projects describe"* ]]; then
+  printf '123456789\\n'
+  exit 0
+fi
+if [[ "$*" == "secrets describe"* ]]; then
+  exit 0
+fi
+if [[ "$*" == *"secrets versions access latest"* && "$*" == *"team-portal-config-encryption-key"* ]]; then
+  printf 'config-key'
+  exit 0
+fi
+if [[ "$*" == *"secrets versions access latest"* && "$*" == *"local-agent-hmac-secret"* ]]; then
+  printf 'shared-secret'
+  exit 0
+fi
+if [[ "$*" == *"secrets versions access latest"* && "$*" == *"google-oauth-client-secret-json"* ]]; then
+  printf '{"web":{}}'
+  exit 0
+fi
+if [[ "$*" == "run deploy"* ]]; then
+  exit 0
+fi
+if [[ "$*" == "run services update"* ]]; then
+  echo "unexpected update" >&2
+  exit 46
+fi
+exit 0
+""",
+                encoding="utf-8",
+            )
+            gcloud_path.chmod(0o755)
+
+            completed = subprocess.run(
+                ["bash", str(deploy_script)],
+                capture_output=True,
+                text=True,
+                check=False,
+                env={
+                    **os.environ,
+                    "PATH": f"{fake_bin}:{os.environ['PATH']}",
+                    "PYTHON_BIN": sys.executable,
+                    "FAKE_GCLOUD_CALLS": str(calls_path),
+                    "GOOGLE_CLOUD_PROJECT": "demo-project",
+                    "CLOUD_RUN_SKIP_SERVICE_ENABLE": "1",
+                    "CLOUD_RUN_SKIP_IAM_BINDINGS": "1",
+                    "CLOUD_RUN_LOCAL_AGENT_BASE_URL": "https://agent.example.ngrok.app",
+                    "LOCAL_AGENT_HMAC_SECRET": "shared-secret",
+                    "GOOGLE_OAUTH_CLIENT_SECRET_FILE": str(google_secret),
+                    "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "config-key",
+                    "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg",
+                    "BPMIS_BASE_URL": "https://bpmis.example.test",
+                },
+                cwd=PROJECT_ROOT,
+            )
+
+            self.assertEqual(completed.returncode, 0, msg=f"STDOUT:\n{completed.stdout}\nSTDERR:\n{completed.stderr}")
+            calls = calls_path.read_text(encoding="utf-8")
+            deploy_calls = [line for line in calls.splitlines() if line.startswith("run deploy")]
+            update_calls = [line for line in calls.splitlines() if line.startswith("run services update")]
+            self.assertEqual(len(deploy_calls), 1, msg=calls)
+            self.assertEqual(update_calls, [], msg=calls)
+            self.assertIn("TEAM_PORTAL_BASE_URL=https://team-portal-example.run.app", deploy_calls[0])
+            self.assertIn("base URL update skipped", completed.stdout)
+            self.assertNotIn("unexpected update", completed.stderr)
+
     def test_cloud_run_image_build_script_is_dry_run_safe(self):
         build_script = PROJECT_ROOT / "scripts/build_cloud_run_image.sh"
 
@@ -322,6 +411,21 @@ exit 0
             "COPY templates ./templates",
         ):
             self.assertIn(expected, dockerfile)
+
+    def test_local_agent_foreground_prefers_gunicorn_single_worker_threads(self):
+        script = (PROJECT_ROOT / "scripts/run_local_agent_foreground.sh").read_text(encoding="utf-8")
+
+        self.assertIn("-m gunicorn", script)
+        self.assertIn('--workers "${LOCAL_AGENT_WORKERS:-1}"', script)
+        self.assertIn('--threads "${LOCAL_AGENT_THREADS:-8}"', script)
+        self.assertIn("-m flask --app local_agent run", script)
+
+    def test_cloud_build_uses_latest_image_as_layer_cache(self):
+        config = (PROJECT_ROOT / "cloudbuild.yaml").read_text(encoding="utf-8")
+
+        self.assertIn("docker pull", config)
+        self.assertIn("--cache-from", config)
+        self.assertIn("${_IMAGE_NAME}:latest", config)
 
     def test_team_env_helper_reads_multiple_values(self):
         helper_path = PROJECT_ROOT / "scripts/lib/team_env.sh"

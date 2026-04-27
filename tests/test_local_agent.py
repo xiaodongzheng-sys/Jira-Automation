@@ -92,6 +92,14 @@ class LocalAgentServerTests(unittest.TestCase):
         self.assertEqual(payload["status"], "ok")
         self.assertTrue(payload["capabilities"]["source_code_qa"])
 
+    def test_proxy_style_healthz_alias_is_public_for_direct_agent_url(self):
+        response = self.app.test_client().get("/api/local-agent/healthz")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["status"], "ok")
+        self.assertTrue(payload["capabilities"]["source_code_qa"])
+
     def test_signed_source_code_query_delegates_to_local_service(self):
         with patch(
             "bpmis_jira_tool.source_code_qa.SourceCodeQAService.query",
@@ -136,6 +144,17 @@ class LocalAgentServerTests(unittest.TestCase):
         payload = status_response.get_json()
         self.assertEqual(payload["state"], "completed")
         self.assertEqual(payload["result"]["summary"], "agent answer")
+
+    def test_source_code_async_query_jobs_cleanup_old_terminal_snapshots(self):
+        from bpmis_jira_tool.local_agent_server import _snapshot_query_job
+
+        with self.app.app_context():
+            jobs = self.app.config["SOURCE_CODE_QA_QUERY_JOBS"]
+            jobs["old-completed"] = {"state": "completed", "updated_at": time.time() - 4000}
+            jobs["running"] = {"state": "running", "updated_at": time.time() - 4000}
+
+            self.assertIsNone(_snapshot_query_job("old-completed"))
+            self.assertIn("running", jobs)
 
     def test_signed_source_code_auto_sync_can_queue_background_refresh(self):
         class ImmediateThread:
@@ -341,13 +360,14 @@ class LocalAgentClientTests(unittest.TestCase):
 
         client = LocalAgentClient(base_url="https://portal.example", hmac_secret="shared-secret")
         with patch(
-            "bpmis_jira_tool.local_agent_client.requests.request",
+            "bpmis_jira_tool.local_agent_client._LOCAL_AGENT_SESSION.request",
             return_value=FakeResponse({"status": "ok", "capabilities": {"seatalk_configured": True}}),
         ) as request:
             payload = client.get_health()
 
         self.assertTrue(payload["capabilities"]["seatalk_configured"])
         self.assertEqual(request.call_args.args[1], "https://portal.example/api/local-agent/healthz")
+        self.assertEqual(request.call_args.kwargs["timeout"], (10, 300))
 
     def test_unreadable_response_includes_status_and_preview(self):
         class FakeResponse:
@@ -358,7 +378,7 @@ class LocalAgentClientTests(unittest.TestCase):
                 raise ValueError("not json")
 
         client = LocalAgentClient(base_url="https://portal.example", hmac_secret="shared-secret")
-        with patch("bpmis_jira_tool.local_agent_client.requests.request", return_value=FakeResponse()):
+        with patch("bpmis_jira_tool.local_agent_client._LOCAL_AGENT_SESSION.request", return_value=FakeResponse()):
             with self.assertRaises(ToolError) as context:
                 client.bpmis_call(operation="ping", access_token="token")
 
@@ -397,6 +417,55 @@ class LocalAgentClientTests(unittest.TestCase):
         self.assertEqual(remote.update_jira_ticket_fix_version("SPDBP-95742", "Planning_26Q4")["fixVersions"], ["Planning_26Q4"])
         self.assertEqual(remote.delink_jira_ticket_from_project("SPDBP-95742", "221664")["parentIds"], [])
         self.assertEqual(calls[0], ("get_jira_ticket_detail", "token", ["SPDBP-95742"], {}))
+
+    def test_remote_source_code_qa_service_reuses_config_payload_within_instance(self):
+        class FakeClient:
+            def __init__(self):
+                self.calls = 0
+
+            def source_code_qa_config(self, *, llm_provider=None):
+                self.calls += 1
+                return {
+                    "status": "ok",
+                    "config": {"mappings": {"AF:All": []}},
+                    "llm_ready": True,
+                    "git_auth_ready": True,
+                    "llm_policy": {"provider": llm_provider},
+                    "index_health": {"status": "ok"},
+                    "domain_knowledge": {"enabled": True},
+                }
+
+            def source_code_qa_save_mapping(self, *, pm_team, country, repositories):
+                return {"status": "ok", "pm_team": pm_team, "country": country, "repositories": repositories}
+
+        class FakeFallbackService:
+            llm_provider_name = "codex_cli_bridge"
+            llm_budgets = {}
+
+            def normalize_query_llm_provider(self, llm_provider):
+                return llm_provider or self.llm_provider_name
+
+            def llm_policy_payload(self):
+                return {"provider": "fallback"}
+
+            def with_llm_provider(self, llm_provider):
+                return self
+
+        from bpmis_jira_tool.local_agent_client import RemoteSourceCodeQAService
+
+        client = FakeClient()
+        remote = RemoteSourceCodeQAService(client, FakeFallbackService(), llm_provider="codex_cli_bridge")
+
+        self.assertTrue(remote.llm_ready())
+        self.assertTrue(remote.git_auth_ready())
+        self.assertEqual(remote.llm_policy_payload()["provider"], "codex_cli_bridge")
+        self.assertEqual(remote.index_health_payload()["status"], "ok")
+        self.assertTrue(remote.domain_knowledge_payload()["enabled"])
+        self.assertIn("AF:All", remote.load_config()["mappings"])
+        self.assertEqual(client.calls, 1)
+        remote.save_mapping(pm_team="AF", country="All", repositories=[])
+        self.assertIn("AF:All", remote.load_config()["mappings"])
+        self.assertEqual(client.calls, 2)
 
 
 class LocalAgentBPMISClientSelectionTests(unittest.TestCase):

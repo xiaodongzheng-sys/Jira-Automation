@@ -6,17 +6,50 @@ from typing import Any, Callable
 from urllib.parse import urljoin, urlsplit
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 from bpmis_jira_tool.errors import ToolError
 from bpmis_jira_tool.local_agent_protocol import sign_headers
 from bpmis_jira_tool.models import CreatedTicket, ProjectMatch
 
 
+def _build_local_agent_session() -> requests.Session:
+    session = requests.Session()
+    retry = Retry(
+        total=2,
+        connect=2,
+        read=0,
+        status=2,
+        backoff_factor=0.25,
+        status_forcelist=(502, 503, 504),
+        allowed_methods=frozenset({"GET", "HEAD", "OPTIONS"}),
+        respect_retry_after_header=True,
+    )
+    adapter = HTTPAdapter(max_retries=retry, pool_connections=16, pool_maxsize=32)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    return session
+
+
+_LOCAL_AGENT_SESSION = _build_local_agent_session()
+
+
 class LocalAgentClient:
-    def __init__(self, *, base_url: str, hmac_secret: str, timeout_seconds: int = 300) -> None:
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        hmac_secret: str,
+        timeout_seconds: int = 300,
+        connect_timeout_seconds: int = 10,
+        session: requests.Session | None = None,
+    ) -> None:
         self.base_url = str(base_url or "").rstrip("/") + "/"
         self.hmac_secret = str(hmac_secret or "")
         self.timeout_seconds = max(5, int(timeout_seconds or 300))
+        self.connect_timeout_seconds = max(1, min(int(connect_timeout_seconds or 10), self.timeout_seconds))
+        self.session = session or _LOCAL_AGENT_SESSION
         if not self.base_url.strip("/"):
             raise ToolError("LOCAL_AGENT_BASE_URL is required before using Mac local-agent capabilities.")
         if not self.hmac_secret:
@@ -328,7 +361,13 @@ class LocalAgentClient:
             request_path = urlsplit(url).path or "/"
             headers.update(sign_headers(secret=self.hmac_secret, method=method, path=request_path, body=body))
         try:
-            response = requests.request(method, url, data=body if body else None, headers=headers, timeout=self.timeout_seconds)
+            response = self.session.request(
+                method,
+                url,
+                data=body if body else None,
+                headers=headers,
+                timeout=(self.connect_timeout_seconds, self.timeout_seconds),
+            )
         except requests.RequestException as error:
             raise ToolError(f"Mac local-agent is unavailable: {error}") from error
         try:
@@ -376,37 +415,45 @@ class RemoteSourceCodeQAService:
         self.fallback_service = fallback_service
         self.llm_provider_name = fallback_service.normalize_query_llm_provider(llm_provider) if llm_provider else fallback_service.llm_provider_name
         self.llm_budgets = fallback_service.llm_budgets
+        self._config_payload: dict[str, Any] | None = None
 
     def with_llm_provider(self, llm_provider: str) -> "RemoteSourceCodeQAService":
         return RemoteSourceCodeQAService(self.client, self.fallback_service.with_llm_provider(llm_provider), llm_provider=llm_provider)
 
+    def _source_code_qa_config_payload(self) -> dict[str, Any]:
+        if self._config_payload is None:
+            self._config_payload = _strip_status(self.client.source_code_qa_config(llm_provider=self.llm_provider_name))
+        return self._config_payload
+
     def load_config(self) -> dict[str, Any]:
-        return _strip_status(self.client.source_code_qa_config(llm_provider=self.llm_provider_name)).get("config") or {}
+        return self._source_code_qa_config_payload().get("config") or {}
 
     def llm_ready(self) -> bool:
-        return bool(_strip_status(self.client.source_code_qa_config(llm_provider=self.llm_provider_name)).get("llm_ready"))
+        return bool(self._source_code_qa_config_payload().get("llm_ready"))
 
     def git_auth_ready(self) -> bool:
-        return bool(_strip_status(self.client.source_code_qa_config(llm_provider=self.llm_provider_name)).get("git_auth_ready"))
+        return bool(self._source_code_qa_config_payload().get("git_auth_ready"))
 
     def options_payload(self) -> dict[str, Any]:
         return self.fallback_service.options_payload()
 
     def llm_policy_payload(self) -> dict[str, Any]:
-        payload = _strip_status(self.client.source_code_qa_config(llm_provider=self.llm_provider_name))
+        payload = self._source_code_qa_config_payload()
         return payload.get("llm_policy") or self.fallback_service.llm_policy_payload()
 
     def index_health_payload(self) -> dict[str, Any]:
-        return _strip_status(self.client.source_code_qa_config(llm_provider=self.llm_provider_name)).get("index_health") or {}
+        return self._source_code_qa_config_payload().get("index_health") or {}
 
     def domain_knowledge_payload(self) -> dict[str, Any]:
-        return _strip_status(self.client.source_code_qa_config(llm_provider=self.llm_provider_name)).get("domain_knowledge") or {}
+        return self._source_code_qa_config_payload().get("domain_knowledge") or {}
 
     def _llm_fallback_model(self) -> str:
         return self.fallback_service._llm_fallback_model()
 
     def save_mapping(self, *, pm_team: str, country: str, repositories: list[dict[str, Any]]) -> dict[str, Any]:
-        return self.client.source_code_qa_save_mapping(pm_team=pm_team, country=country, repositories=repositories)
+        result = self.client.source_code_qa_save_mapping(pm_team=pm_team, country=country, repositories=repositories)
+        self._config_payload = None
+        return result
 
     def sync(self, *, pm_team: str, country: str) -> dict[str, Any]:
         return self.client.source_code_qa_sync(pm_team=pm_team, country=country)

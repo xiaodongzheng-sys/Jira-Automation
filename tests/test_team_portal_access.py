@@ -285,7 +285,7 @@ class TeamPortalAccessTests(unittest.TestCase):
                 "LOCAL_AGENT_TIMEOUT_SECONDS": "7",
             },
             clear=False,
-        ), patch("bpmis_jira_tool.web.requests.request", return_value=_FakeProxyResponse()) as proxy_request:
+        ), patch("bpmis_jira_tool.web._LOCAL_AGENT_SESSION.request", return_value=_FakeProxyResponse()) as proxy_request:
             app = create_app()
             app.testing = True
 
@@ -308,6 +308,7 @@ class TeamPortalAccessTests(unittest.TestCase):
         self.assertEqual(target_url, "http://127.0.0.1:8123/api/local-agent/bpmis/call")
         self.assertEqual(proxy_request.call_args.kwargs["data"], b'{"operation":"ping"}')
         self.assertEqual(proxy_request.call_args.kwargs["headers"]["X-Local-Agent-Signature"], "sig")
+        self.assertEqual(proxy_request.call_args.kwargs["timeout"], (7, 7))
 
     def test_public_local_agent_proxy_forwards_healthz_to_loopback_agent_health(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
@@ -323,7 +324,7 @@ class TeamPortalAccessTests(unittest.TestCase):
                 "LOCAL_AGENT_PORT": "8123",
             },
             clear=False,
-        ), patch("bpmis_jira_tool.web.requests.request", return_value=_FakeProxyResponse()) as proxy_request:
+        ), patch("bpmis_jira_tool.web._LOCAL_AGENT_SESSION.request", return_value=_FakeProxyResponse()) as proxy_request:
             app = create_app()
             app.testing = True
 
@@ -348,7 +349,7 @@ class TeamPortalAccessTests(unittest.TestCase):
                 "LOCAL_AGENT_PORT": "8123",
             },
             clear=False,
-        ), patch("bpmis_jira_tool.web.requests.request", return_value=_FakeProxyResponse()) as proxy_request:
+        ), patch("bpmis_jira_tool.web._LOCAL_AGENT_SESSION.request", return_value=_FakeProxyResponse()) as proxy_request:
             app = create_app()
             app.testing = True
 

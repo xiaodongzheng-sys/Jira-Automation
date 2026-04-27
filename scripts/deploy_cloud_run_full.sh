@@ -33,6 +33,8 @@ fi
 SERVICE="${CLOUD_RUN_SERVICE:-team-portal}"
 REGION="${CLOUD_RUN_REGION:-asia-southeast1}"
 CLOUD_RUN_IMAGE="${CLOUD_RUN_IMAGE:-}"
+EXISTING_SERVICE_URL="$("$GCLOUD_BIN" run services describe "$SERVICE" --project "$PROJECT_ID" --region "$REGION" --format='value(status.url)' 2>/dev/null || true)"
+BASE_URL="${CLOUD_RUN_TEAM_PORTAL_BASE_URL:-${EXISTING_SERVICE_URL:-}}"
 PROJECT_NUMBER="$("$GCLOUD_BIN" projects describe "$PROJECT_ID" --format='value(projectNumber)')"
 RUNTIME_SERVICE_ACCOUNT="${CLOUD_RUN_SERVICE_ACCOUNT:-$PROJECT_NUMBER-compute@developer.gserviceaccount.com}"
 LOCAL_AGENT_URL="${CLOUD_RUN_LOCAL_AGENT_BASE_URL:-${LOCAL_AGENT_PUBLIC_URL:-$(read_env_value LOCAL_AGENT_PUBLIC_URL)}}"
@@ -174,6 +176,9 @@ ENV_VARS=(
   "GUNICORN_WORKERS=${GUNICORN_WORKERS:-1}"
   "GOOGLE_OAUTH_CLIENT_SECRET_FILE=/secrets/google/client_secret.json"
 )
+if [[ -n "$BASE_URL" ]]; then
+  ENV_VARS+=("TEAM_PORTAL_BASE_URL=$BASE_URL")
+fi
 IFS='|'
 ENV_VARS_JOINED="${ENV_VARS[*]}"
 unset IFS
@@ -197,15 +202,20 @@ DEPLOY_STARTED_AT="$(date +%s)"
 DEPLOY_FINISHED_AT="$(date +%s)"
 echo "Cloud Run deploy completed in $((DEPLOY_FINISHED_AT - DEPLOY_STARTED_AT))s"
 
-SERVICE_URL="$("$GCLOUD_BIN" run services describe "$SERVICE" --project "$PROJECT_ID" --region "$REGION" --format='value(status.url)')"
-
-UPDATE_STARTED_AT="$(date +%s)"
-"$GCLOUD_BIN" run services update "$SERVICE" \
-  --project "$PROJECT_ID" \
-  --region "$REGION" \
-  --update-env-vars "TEAM_PORTAL_BASE_URL=$SERVICE_URL"
-UPDATE_FINISHED_AT="$(date +%s)"
-echo "Cloud Run base URL update completed in $((UPDATE_FINISHED_AT - UPDATE_STARTED_AT))s"
+SERVICE_URL="${BASE_URL:-}"
+if [[ -z "$SERVICE_URL" ]]; then
+  SERVICE_URL="$("$GCLOUD_BIN" run services describe "$SERVICE" --project "$PROJECT_ID" --region "$REGION" --format='value(status.url)')"
+  UPDATE_STARTED_AT="$(date +%s)"
+  "$GCLOUD_BIN" run services update "$SERVICE" \
+    --project "$PROJECT_ID" \
+    --region "$REGION" \
+    --update-env-vars "TEAM_PORTAL_BASE_URL=$SERVICE_URL"
+  UPDATE_FINISHED_AT="$(date +%s)"
+  echo "Cloud Run base URL update completed in $((UPDATE_FINISHED_AT - UPDATE_STARTED_AT))s"
+else
+  UPDATE_FINISHED_AT="$(date +%s)"
+  echo "Cloud Run base URL update skipped because TEAM_PORTAL_BASE_URL is already known."
+fi
 
 echo "Cloud Run deployed: $SERVICE_URL"
 echo "Cloud Run full script completed in $((UPDATE_FINISHED_AT - SCRIPT_STARTED_AT))s"

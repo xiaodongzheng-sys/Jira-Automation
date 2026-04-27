@@ -4,6 +4,7 @@ import json
 import os
 import tempfile
 import threading
+import time
 from dataclasses import asdict, is_dataclass
 from http import HTTPStatus
 from pathlib import Path
@@ -50,6 +51,7 @@ BPMIS_PROXY_OPERATIONS = {
 
 _SOURCE_CODE_QA_AUTO_SYNC_LOCK = threading.Lock()
 _SOURCE_CODE_QA_AUTO_SYNC_KEYS: set[str] = set()
+_SOURCE_CODE_QA_QUERY_JOB_TTL_SECONDS = 3600
 
 
 def create_local_agent_app() -> Flask:
@@ -62,7 +64,7 @@ def create_local_agent_app() -> Flask:
 
     @app.before_request
     def verify_local_agent_signature():
-        if request.path == "/healthz":
+        if request.path in {"/healthz", "/api/local-agent/healthz"}:
             return None
         try:
             verify_signature(
@@ -79,6 +81,7 @@ def create_local_agent_app() -> Flask:
         return None
 
     @app.get("/healthz")
+    @app.get("/api/local-agent/healthz")
     def healthz():
         service: SourceCodeQAService = app.config["SOURCE_CODE_QA_SERVICE"]
         return jsonify(
@@ -665,8 +668,10 @@ def _update_query_job(job_id: str, **fields: Any) -> None:
     jobs = current_app.config["SOURCE_CODE_QA_QUERY_JOBS"]
     lock = current_app.config["SOURCE_CODE_QA_QUERY_JOBS_LOCK"]
     with lock:
+        _cleanup_query_jobs_locked(jobs)
         snapshot = dict(jobs.get(job_id) or {})
         snapshot.update(fields)
+        snapshot["updated_at"] = time.time()
         jobs[job_id] = snapshot
 
 
@@ -674,8 +679,29 @@ def _snapshot_query_job(job_id: str) -> dict[str, Any] | None:
     jobs = current_app.config["SOURCE_CODE_QA_QUERY_JOBS"]
     lock = current_app.config["SOURCE_CODE_QA_QUERY_JOBS_LOCK"]
     with lock:
+        _cleanup_query_jobs_locked(jobs)
         snapshot = jobs.get(job_id)
         return dict(snapshot) if isinstance(snapshot, dict) else None
+
+
+def _cleanup_query_jobs_locked(jobs: dict[str, Any]) -> None:
+    cutoff = time.time() - _SOURCE_CODE_QA_QUERY_JOB_TTL_SECONDS
+    expired = [
+        job_id
+        for job_id, snapshot in jobs.items()
+        if isinstance(snapshot, dict)
+        and str(snapshot.get("state") or "") in {"completed", "failed"}
+        and _query_job_updated_at(snapshot) < cutoff
+    ]
+    for job_id in expired:
+        jobs.pop(job_id, None)
+
+
+def _query_job_updated_at(snapshot: dict[str, Any]) -> float:
+    try:
+        return float(snapshot.get("updated_at") or 0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _run_source_code_qa_query_job(app: Flask, job_id: str, payload: dict[str, Any]) -> None:

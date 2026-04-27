@@ -85,4 +85,13 @@ if [[ ! -x "$PYTHON_BIN" ]]; then
 fi
 
 cd "$ROOT_DIR"
+if "$PYTHON_BIN" -c "import gunicorn.app.wsgiapp" >/dev/null 2>&1; then
+  exec "$PYTHON_BIN" -m gunicorn \
+    --bind "$HOST:$PORT" \
+    --workers "${LOCAL_AGENT_WORKERS:-1}" \
+    --threads "${LOCAL_AGENT_THREADS:-8}" \
+    --timeout "${LOCAL_AGENT_GUNICORN_TIMEOUT:-360}" \
+    local_agent:app
+fi
+
 exec "$PYTHON_BIN" -m flask --app local_agent run --host "$HOST" --port "$PORT"
