@@ -1071,8 +1071,9 @@ class BPMISClientTests(unittest.TestCase):
 	                            {
 	                                "id": 991,
 	                                "jiraKey": "AF-991",
-	                                "summary": "[Feature][AF]Existing task",
+	                                "summary": "Creator-only task",
 	                                "creator": {"emailAddress": "pm@npt.sg"},
+	                                "reporter": {"emailAddress": "other@npt.sg"},
 	                                "status": {"label": "Developing"},
 	                                "fixVersions": [{"name": "Planning_26Q2"}],
 	                                "componentId": {"label": "DBP-Anti-fraud"},
@@ -1082,14 +1083,14 @@ class BPMISClientTests(unittest.TestCase):
 	                            {
 	                                "id": 992,
 	                                "jiraKey": "AF-992",
-	                                "summary": "Reporter-only task",
+	                                "summary": "[Feature][AF]Existing task",
 	                                "reporter": {"emailAddress": "pm@npt.sg"},
 	                                "creator": {"emailAddress": "other@npt.sg"},
 	                            },
 	                            {
 	                                "id": 994,
 	                                "jiraKey": "AF-994",
-	                                "summary": "BPMIS reporter-as-creator task",
+	                                "summary": "BPMIS reporter task",
 	                                "reporter": {"emailAddress": "pm@npt.sg"},
 	                            },
 	                            {
@@ -1097,6 +1098,7 @@ class BPMISClientTests(unittest.TestCase):
 	                                "jiraKey": "AF-993",
 	                                "summary": "Other task",
 	                                "creator": {"emailAddress": "other@npt.sg"},
+	                                "reporter": {"emailAddress": "other@npt.sg"},
 	                            },
                         ]
                     }
@@ -1107,14 +1109,14 @@ class BPMISClientTests(unittest.TestCase):
             tasks = client.list_jira_tasks_for_project_created_by_email("225159", "pm@npt.sg")
 
             self.assertEqual(len(tasks), 2)
-            self.assertEqual(tasks[0]["ticket_key"], "AF-991")
-            self.assertEqual(tasks[0]["ticket_link"], "https://jira.shopee.io/browse/AF-991")
+            self.assertEqual(tasks[0]["ticket_key"], "AF-992")
+            self.assertEqual(tasks[0]["ticket_link"], "https://jira.shopee.io/browse/AF-992")
             self.assertEqual(tasks[0]["jira_title"], "[Feature][AF]Existing task")
-            self.assertEqual(tasks[0]["status"], "Developing")
-            self.assertEqual(tasks[0]["fix_version_name"], "Planning_26Q2")
+            self.assertEqual(tasks[0]["status"], "")
+            self.assertEqual(tasks[0]["fix_version_name"], "")
             self.assertEqual(tasks[1]["ticket_key"], "AF-994")
-            self.assertEqual(tasks[0]["component"], "DBP-Anti-fraud")
-            self.assertEqual(tasks[0]["market"], "SG")
+            self.assertEqual(tasks[0]["component"], "")
+            self.assertEqual(tasks[0]["market"], "")
 
 
 if __name__ == "__main__":

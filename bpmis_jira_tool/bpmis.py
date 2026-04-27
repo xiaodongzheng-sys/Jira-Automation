@@ -324,7 +324,6 @@ class BPMISDirectApiClient(BPMISClient):
         except ValueError:
             return []
 
-        user_ids = self._resolve_bpmis_user_ids_by_email(normalized_email)
         rows: list[dict[str, Any]] = []
         page = 1
         page_size = 200
@@ -363,11 +362,11 @@ class BPMISDirectApiClient(BPMISClient):
             if dedupe_key:
                 seen_issue_ids.add(dedupe_key)
 
-            if self._issue_requires_user_enrichment(row, normalized_email, user_ids) and issue_id:
+            if self._issue_requires_user_enrichment(row, normalized_email) and issue_id:
                 detail = self.get_issue_detail(issue_id)
                 if detail:
                     row = self._merge_issue_payloads(row, detail)
-            if not self._issue_created_by(row, normalized_email, user_ids):
+            if not self._issue_reported_by(row, normalized_email):
                 continue
             tasks.append(self._normalize_project_jira_task(row))
         return tasks
@@ -1171,54 +1170,40 @@ class BPMISDirectApiClient(BPMISClient):
                 deduped.append(item)
         return deduped
 
-    def _issue_requires_user_enrichment(self, row: dict[str, Any], email: str, user_ids: list[int]) -> bool:
-        if self._issue_created_by(row, email, user_ids):
+    def _issue_requires_user_enrichment(self, row: dict[str, Any], email: str) -> bool:
+        if self._issue_reported_by(row, email):
             return False
-        return not any(self._find_first_value(row, key) is not None for key in self._issue_creator_field_names())
+        return not any(self._find_first_value(row, key) is not None for key in self._issue_reporter_field_names())
 
-    def _issue_created_by(self, row: dict[str, Any], email: str, user_ids: list[int]) -> bool:
+    def _issue_reported_by(self, row: dict[str, Any], email: str) -> bool:
         normalized_email = str(email or "").strip().lower()
-        user_id_values = {str(user_id).strip() for user_id in user_ids if str(user_id).strip()}
-        has_creator_signal = False
-        for key in self._issue_creator_field_names():
+        for key in self._issue_reporter_field_names():
             value = self._find_first_value(row, key)
-            has_creator_signal = has_creator_signal or value is not None
-            if self._value_matches_user(value, normalized_email, user_id_values):
+            if self._value_matches_email(value, normalized_email):
                 return True
-        if not has_creator_signal:
-            for key in self._issue_creator_fallback_field_names():
-                value = self._find_first_value(row, key)
-                if self._value_matches_user(value, normalized_email, user_id_values):
-                    return True
         return False
 
     @staticmethod
-    def _issue_creator_field_names() -> tuple[str, ...]:
+    def _issue_reporter_field_names() -> tuple[str, ...]:
         return (
-            "creator",
-            "creatorId",
-            "creatorEmail",
-            "createdBy",
-            "createdById",
-            "createBy",
-            "createById",
-            "createUser",
-            "createUserId",
-            "createdUser",
-            "createdUserId",
-            "author",
-            "authorId",
-            "owner",
-            "ownerId",
-        )
-
-    @staticmethod
-    def _issue_creator_fallback_field_names() -> tuple[str, ...]:
-        return (
+            "reporter.email",
+            "reporter.emailAddress",
+            "reporter.mail",
             "reporter",
-            "reporterId",
             "reporterEmail",
         )
+
+    def _value_matches_email(self, value: Any, email: str) -> bool:
+        if value is None:
+            return False
+        if isinstance(value, list):
+            return any(self._value_matches_email(item, email) for item in value)
+        if isinstance(value, dict):
+            for key in ("email", "emailAddress", "mail"):
+                if self._value_matches_email(value.get(key), email):
+                    return True
+            return False
+        return bool(email and str(value).strip().lower() == email)
 
     def _value_matches_user(self, value: Any, email: str, user_ids: set[str]) -> bool:
         if value is None:
