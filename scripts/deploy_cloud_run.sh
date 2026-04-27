@@ -202,4 +202,19 @@ DEPLOY_STARTED_AT="$(date +%s)"
   --set-env-vars "^|^$ENV_VARS_JOINED"
 DEPLOY_FINISHED_AT="$(date +%s)"
 echo "Cloud Run deploy completed in $((DEPLOY_FINISHED_AT - DEPLOY_STARTED_AT))s"
-echo "Cloud Run script completed in $((DEPLOY_FINISHED_AT - SCRIPT_STARTED_AT))s"
+
+if [[ "${CLOUD_RUN_RESTART_LOCAL_AGENT_AFTER_DEPLOY:-1}" == "1" ]]; then
+  LOCAL_AGENT_RESTART_STARTED_AT="$(date +%s)"
+  echo "Restarting Mac local-agent so Cloud Run and local-agent routes stay in sync..."
+  if "$ROOT_DIR/scripts/run_local_agent.sh" restart; then
+    LOCAL_AGENT_RESTART_FINISHED_AT="$(date +%s)"
+    echo "Mac local-agent restart completed in $((LOCAL_AGENT_RESTART_FINISHED_AT - LOCAL_AGENT_RESTART_STARTED_AT))s"
+  else
+    echo "Mac local-agent restart failed after Cloud Run deploy."
+    echo "Set CLOUD_RUN_RESTART_LOCAL_AGENT_AFTER_DEPLOY=0 only if this deploy does not use Mac local-agent routes."
+    exit 1
+  fi
+fi
+
+SCRIPT_FINISHED_AT="$(date +%s)"
+echo "Cloud Run script completed in $((SCRIPT_FINISHED_AT - SCRIPT_STARTED_AT))s"

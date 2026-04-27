@@ -125,6 +125,7 @@ exit 0
                     "PYTHON_BIN": sys.executable,
                     "CLOUD_RUN_DEPLOY_DRY_RUN": "1",
                     "CLOUD_RUN_LOCAL_AGENT_BASE_URL": "https://agent.example.ngrok.app",
+                    "CLOUD_RUN_RESTART_LOCAL_AGENT_AFTER_DEPLOY": "0",
                     "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg",
                     "BPMIS_BASE_URL": "https://bpmis.example.test",
                 },
@@ -175,6 +176,7 @@ exit 0
                     "PYTHON_BIN": sys.executable,
                     "FAKE_GCLOUD_CALLS": str(calls_path),
                     "CLOUD_RUN_LOCAL_AGENT_BASE_URL": "https://agent.example.ngrok.app",
+                    "CLOUD_RUN_RESTART_LOCAL_AGENT_AFTER_DEPLOY": "0",
                     "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg",
                     "BPMIS_BASE_URL": "https://bpmis.example.test",
                 },
@@ -228,6 +230,7 @@ exit 0
                     "FAKE_GCLOUD_CALLS": str(calls_path),
                     "CLOUD_RUN_IMAGE": image,
                     "CLOUD_RUN_LOCAL_AGENT_BASE_URL": "https://agent.example.ngrok.app",
+                    "CLOUD_RUN_RESTART_LOCAL_AGENT_AFTER_DEPLOY": "0",
                     "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg",
                     "BPMIS_BASE_URL": "https://bpmis.example.test",
                 },
@@ -240,6 +243,14 @@ exit 0
             self.assertEqual(len(deploy_calls), 1, msg=calls)
             self.assertIn(f"--image {image}", deploy_calls[0])
             self.assertNotIn("--source .", deploy_calls[0])
+
+    def test_cloud_run_deploy_script_restarts_local_agent_by_default(self):
+        deploy_script = PROJECT_ROOT / "scripts/deploy_cloud_run.sh"
+
+        contents = deploy_script.read_text(encoding="utf-8")
+
+        self.assertIn("CLOUD_RUN_RESTART_LOCAL_AGENT_AFTER_DEPLOY:-1", contents)
+        self.assertIn('"$ROOT_DIR/scripts/run_local_agent.sh" restart', contents)
 
     def test_cloud_run_image_build_script_is_dry_run_safe(self):
         build_script = PROJECT_ROOT / "scripts/build_cloud_run_image.sh"
