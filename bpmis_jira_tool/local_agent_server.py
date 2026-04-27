@@ -321,6 +321,12 @@ def create_local_agent_app() -> Flask:
         completed = sorted(_build_seatalk_todo_store(settings).completed_ids(owner_email=str(payload.get("owner_email") or "")))
         return jsonify({"status": "ok", "completed_ids": completed})
 
+    @app.post("/api/local-agent/seatalk/todos/open")
+    def seatalk_todos_open():
+        payload = request.get_json(silent=True) or {}
+        todos = _build_seatalk_todo_store(settings).open_todos(owner_email=str(payload.get("owner_email") or ""))
+        return jsonify({"status": "ok", "todos": todos})
+
     @app.post("/api/local-agent/seatalk/todos/processed-until")
     def seatalk_todos_processed_until():
         payload = request.get_json(silent=True) or {}

@@ -121,9 +121,10 @@ class GmailSeaTalkDemoRouteTests(unittest.TestCase):
         self.assertIn(b"data-seatalk-insights-url", response.data)
         self.assertIn(b"data-seatalk-project-updates-url", response.data)
         self.assertIn(b"data-seatalk-todos-url", response.data)
+        self.assertIn(b"data-seatalk-open-todos-url", response.data)
         self.assertIn(b"Generate To-dos", response.data)
         self.assertIn(b"Generate Project Updates", response.data)
-        self.assertIn(b"Click Generate To-dos to load action items.", response.data)
+        self.assertIn(b"Loading saved to-dos", response.data)
         self.assertIn(b"Click Generate Project Updates to load updates.", response.data)
         self.assertNotIn(b"Loading SeaTalk summary", response.data)
         self.assertIn(b"data-seatalk-todo-complete-url", response.data)
@@ -485,6 +486,47 @@ class GmailSeaTalkDemoRouteTests(unittest.TestCase):
         self.assertEqual(payload["project_updates"], [])
         self.assertEqual(payload["team_todos"], [])
         self.assertEqual(payload["my_todos"][0]["task"], "Prepare AI sharing")
+
+    def test_owner_seatalk_open_todos_api_returns_saved_unfinished_todos_without_generation(self):
+        saved_todo = {
+            "task": "Follow up rollout",
+            "domain": "Anti-fraud",
+            "priority": "high",
+            "due": "2026-04-30",
+            "evidence": "Apr 21",
+        }
+
+        class FakeSeaTalkService:
+            def build_todos(self, *, todo_since=""):
+                raise AssertionError("open to-dos should not generate new SeaTalk insight data")
+
+        with self.app.test_client() as client:
+            self._login_owner(client, scopes=[GMAIL_READONLY_SCOPE])
+            with patch(
+                "bpmis_jira_tool.web._build_seatalk_dashboard_service",
+                return_value=type(
+                    "SeedService",
+                    (),
+                    {
+                        "build_todos": lambda self, **kwargs: {
+                            "project_updates": [],
+                            "my_todos": [saved_todo],
+                            "team_todos": [],
+                            "todo_processed_until": "2026-04-27T21:00:00+08:00",
+                        }
+                    },
+                )(),
+            ):
+                seeded = client.get("/api/gmail-sea-talk-demo/seatalk/todos")
+            with patch("bpmis_jira_tool.web._build_seatalk_dashboard_service", return_value=FakeSeaTalkService()):
+                response = client.get("/api/gmail-sea-talk-demo/seatalk/todos/open")
+
+        self.assertEqual(seeded.status_code, 200)
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["project_updates"], [])
+        self.assertEqual(payload["team_todos"], [])
+        self.assertEqual([item["task"] for item in payload["my_todos"]], ["Follow up rollout"])
 
     def test_owner_can_complete_seatalk_todo_and_filter_it_from_insights(self):
         todo = {"task": "Follow up rollout", "domain": "Anti-fraud", "priority": "high", "due": "2026-04-30", "evidence": "Apr 21"}

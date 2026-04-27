@@ -506,6 +506,7 @@
       data-seatalk-insights-url="{{ seatalk_insights_url }}"
       data-seatalk-project-updates-url="{{ seatalk_project_updates_url }}"
       data-seatalk-todos-url="{{ seatalk_todos_url }}"
+      data-seatalk-open-todos-url="{{ seatalk_open_todos_url }}"
       data-seatalk-todo-complete-url="{{ seatalk_todo_complete_url }}"
       data-seatalk-name-mappings-url="{{ seatalk_name_mappings_url }}"
       data-seatalk-configured="{{ 'true' if seatalk_configured else 'false' }}"
@@ -547,7 +548,7 @@
                   <button class="button button-primary" type="button" data-seatalk-generate-todos>Generate To-dos</button>
                 </div>
                 <div class="empty-state mail-demo-status" data-seatalk-todos-status data-tone="neutral">
-                  <p>Click Generate To-dos to load action items.</p>
+                  <p>Loading saved to-dos...</p>
                 </div>
                 <div class="seatalk-todo-columns" data-seatalk-todos hidden>
                   <div class="seatalk-insight-list" data-seatalk-my-todos></div>

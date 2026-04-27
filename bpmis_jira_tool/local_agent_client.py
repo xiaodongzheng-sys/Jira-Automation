@@ -272,6 +272,11 @@ class LocalAgentClient:
         ids = payload.get("completed_ids")
         return [str(item) for item in ids] if isinstance(ids, list) else []
 
+    def seatalk_todos_open(self, *, owner_email: str) -> list[dict[str, Any]]:
+        payload = self._request("POST", "/api/local-agent/seatalk/todos/open", {"owner_email": owner_email})
+        items = payload.get("todos")
+        return [item for item in items if isinstance(item, dict)] if isinstance(items, list) else []
+
     def seatalk_todos_processed_until(self, *, owner_email: str) -> str:
         payload = self._request("POST", "/api/local-agent/seatalk/todos/processed-until", {"owner_email": owner_email})
         return str(payload.get("processed_until") or "")
@@ -603,6 +608,9 @@ class RemoteSeaTalkTodoStore:
 
     def completed_ids(self, *, owner_email: str) -> set[str]:
         return set(self.client.seatalk_todos_completed_ids(owner_email=owner_email))
+
+    def open_todos(self, *, owner_email: str) -> list[dict[str, Any]]:
+        return self.client.seatalk_todos_open(owner_email=owner_email)
 
     def processed_until(self, *, owner_email: str) -> str:
         return self.client.seatalk_todos_processed_until(owner_email=owner_email)

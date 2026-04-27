@@ -524,6 +524,7 @@
     const seatalkConfigured = seatalkRoot.dataset.seatalkConfigured === 'true';
     const projectUpdatesUrl = seatalkRoot.dataset.seatalkProjectUpdatesUrl || seatalkRoot.dataset.seatalkInsightsUrl || '';
     const todosUrl = seatalkRoot.dataset.seatalkTodosUrl || seatalkRoot.dataset.seatalkInsightsUrl || '';
+    const openTodosUrl = seatalkRoot.dataset.seatalkOpenTodosUrl || '';
     const todoCompleteUrl = seatalkRoot.dataset.seatalkTodoCompleteUrl || '';
     const nameMappingsUrl = seatalkRoot.dataset.seatalkNameMappingsUrl || '';
     const contentNode = seatalkRoot.querySelector('[data-seatalk-content]');
@@ -556,6 +557,26 @@
       saveMappingsButton.addEventListener('click', () => saveSeaTalkNameMappings(seatalkRoot, nameMappingsUrl));
     }
 
+    const loadOpenTodos = async () => {
+      if (!openTodosUrl || !todosStatusNode) return;
+      setScopedStatus(seatalkRoot, '[data-seatalk-todos-status]', 'Loading saved to-dos…', 'neutral');
+      try {
+        const response = await fetch(openTodosUrl, { method: 'GET' });
+        const payload = await parseDashboardResponse(response);
+        if (!response.ok) throw new Error(payload.message || 'Could not load saved SeaTalk to-dos.');
+        const todos = payload.my_todos || [];
+        renderTodos(myTodosNode, todos, todoCompleteUrl);
+        if (todosNode) todosNode.hidden = false;
+        if (todos.length) {
+          hideScopedStatus(seatalkRoot, '[data-seatalk-todos-status]');
+        } else {
+          setScopedStatus(seatalkRoot, '[data-seatalk-todos-status]', 'No saved unfinished to-dos. Click Generate To-dos to scan new messages.', 'neutral');
+        }
+      } catch (error) {
+        setScopedStatus(seatalkRoot, '[data-seatalk-todos-status]', error.message || 'Could not load saved SeaTalk to-dos.', 'error');
+      }
+    };
+
     if (generateTodosButton && todosUrl && todosStatusNode) {
       generateTodosButton.addEventListener('click', async () => {
         generateTodosButton.disabled = true;
@@ -574,6 +595,8 @@
         }
       });
     }
+
+    loadOpenTodos();
 
     if (generateProjectUpdatesButton && projectUpdatesUrl && projectUpdatesStatusNode) {
       generateProjectUpdatesButton.addEventListener('click', async () => {

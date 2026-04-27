@@ -182,6 +182,28 @@ class LocalAgentServerTests(unittest.TestCase):
 
         self.assertEqual(str(service.daily_cache_dir), os.path.join(self.temp_dir.name, "seatalk", "cache"))
 
+    def test_signed_seatalk_open_todos_returns_agent_store_items(self):
+        seed = self._post_signed(
+            "/api/local-agent/seatalk/todos/merge-open",
+            {
+                "owner_email": "xiaodong.zheng@npt.sg",
+                "todos": [
+                    {
+                        "task": "Follow up rollout",
+                        "domain": "Anti-fraud",
+                        "priority": "high",
+                        "due": "2026-04-30",
+                        "evidence": "Apr 21",
+                    }
+                ],
+            },
+        )
+        response = self._post_signed("/api/local-agent/seatalk/todos/open", {"owner_email": "xiaodong.zheng@npt.sg"})
+
+        self.assertEqual(seed.status_code, 200)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([todo["task"] for todo in response.get_json()["todos"]], ["Follow up rollout"])
+
     def test_unsigned_source_code_query_is_rejected(self):
         response = self.app.test_client().post("/api/local-agent/source-code-qa/query", json={"question": "hello"})
 
