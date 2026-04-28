@@ -182,8 +182,9 @@
       : 'Could not reconnect to the job status API after retrying.');
   };
 
-  const currentCountry = () => (pmTeam.value === 'CRMS' ? country.value : 'All');
-  const currentKey = () => `${pmTeam.value}:${currentCountry()}`;
+  const currentCountry = () => country.value || 'All';
+  const currentRepositoryCountry = () => (pmTeam.value === 'CRMS' ? currentCountry() : 'All');
+  const currentKey = () => `${pmTeam.value}:${currentRepositoryCountry()}`;
   const currentRepoCount = () => (config.mappings?.[currentKey()] || []).length;
   const defaultLlmProvider = () => {
     if (!llmProvider) return 'codex_cli_bridge';
@@ -363,8 +364,9 @@
       pmTeam.value = saved.pm_team;
     }
     updateCountryVisibility();
-    if (pmTeam.value === 'CRMS' && selectHasValue(country, saved.country)) {
+    if (selectHasValue(country, saved.country)) {
       country.value = saved.country;
+      updateCountryVisibility();
     }
     if (selectHasValue(answerMode, saved.answer_mode)) {
       answerMode.value = saved.answer_mode;
@@ -657,13 +659,11 @@
 
   const updateCountryVisibility = () => {
     const isCreditRisk = pmTeam.value === 'CRMS';
-    country.disabled = !isCreditRisk;
-    countryWrap.classList.toggle('source-qa-country-disabled', !isCreditRisk);
-    if (!isCreditRisk) {
-      country.value = 'All';
-    } else if (!country.value && Array.isArray(options.countries) && options.countries.length) {
-      country.value = options.countries[0];
-    } else if (country.value === 'All' && Array.isArray(options.countries) && options.countries.length) {
+    country.disabled = false;
+    countryWrap.classList.remove('source-qa-country-disabled');
+    if (!country.value) {
+      country.value = isCreditRisk && Array.isArray(options.countries) && options.countries.length ? options.countries[0] : 'All';
+    } else if (isCreditRisk && country.value === 'All' && Array.isArray(options.countries) && options.countries.length) {
       country.value = options.countries[0];
     }
   };
@@ -781,9 +781,12 @@
     }
     const entries = config.mappings?.[currentKey()] || [];
     const count = entries.length;
+    const runtimeScopeNote = currentCountry() !== currentRepositoryCountry()
+      ? ` Runtime evidence scope: ${pmTeam.value}:${currentCountry()}.`
+      : '';
     configStatus.textContent = count
-      ? `${count} repositories configured for ${currentKey()}.`
-      : `No repositories configured for ${currentKey()} yet.`;
+      ? `${count} repositories configured for ${currentKey()}.${runtimeScopeNote}`
+      : `No repositories configured for ${currentKey()} yet.${runtimeScopeNote}`;
     if (reposInput) {
       reposInput.value = entries.map((entry) => `${entry.display_name} | ${entry.url}`).join('\n');
       reposInput.disabled = false;
@@ -859,7 +862,7 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           pm_team: pmTeam.value,
-          country: currentCountry(),
+          country: currentRepositoryCountry(),
           repositories: parseRepoLines(),
         }),
       }, { attempts: 3 });
@@ -1015,14 +1018,14 @@
       adminStatus.textContent = 'SOURCE_CODE_QA_GITLAB_TOKEN is missing on the server.';
       return;
     }
-    const syncScope = `${pmTeam.value}:${currentCountry()}`;
+    const syncScope = currentKey();
     adminStatus.textContent = `Syncing ${syncScope}. This can take a minute on first clone...`;
     if (syncButton) syncButton.disabled = true;
     try {
       const payload = await apiFetchJson(syncUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ pm_team: pmTeam.value, country: currentCountry() }),
+        body: JSON.stringify({ pm_team: pmTeam.value, country: currentRepositoryCountry() }),
       }, { attempts: 5, delayMs: 700 });
       if (payload.status === 'queued' && payload.job_id) {
         await pollSyncJob(payload.job_id);

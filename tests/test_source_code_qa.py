@@ -681,6 +681,50 @@ class SourceCodeQARouteTests(unittest.TestCase):
         ensure_synced.assert_called_once()
         self.assertEqual(response.get_json()["auto_sync"]["status"], "fresh")
 
+    def test_af_country_query_uses_country_runtime_evidence_with_shared_repo_scope(self):
+        captured = {}
+
+        def fake_query(**kwargs):
+            captured.update(kwargs)
+            return {
+                "status": "ok",
+                "answer_mode": "auto",
+                "matches": [],
+                "trace_id": "trace-af-ph",
+                "summary": "answer",
+            }
+
+        with self.app.test_client() as client:
+            self._login(client, "xiaodong.zheng@npt.sg")
+            upload = client.post(
+                "/api/source-code-qa/runtime-evidence",
+                data={
+                    "pm_team": "AF",
+                    "country": "PH",
+                    "source_type": "apollo",
+                    "file": (io.BytesIO(b"apollo.ph.only=true"), "apollo-ph.properties"),
+                },
+                content_type="multipart/form-data",
+            )
+            self._login(client, "teammate@npt.sg")
+            with patch("bpmis_jira_tool.source_code_qa.SourceCodeQAService.query", side_effect=fake_query), patch(
+                "bpmis_jira_tool.source_code_qa.SourceCodeQAService.ensure_synced_today",
+                return_value={"attempted": False, "status": "fresh", "key": "AF:All"},
+            ) as ensure_synced:
+                response = client.post(
+                    "/api/source-code-qa/query",
+                    json={"pm_team": "AF", "country": "PH", "question": "check PH config", "answer_mode": "auto"},
+                )
+
+        self.assertEqual(upload.status_code, 200)
+        self.assertEqual(response.status_code, 200)
+        ensure_synced.assert_called_once_with(pm_team="AF", country="PH")
+        self.assertEqual(captured["pm_team"], "AF")
+        self.assertEqual(captured["country"], "PH")
+        self.assertEqual(captured["runtime_evidence"][0]["country"], "PH")
+        self.assertIn("apollo.ph.only=true", captured["runtime_evidence"][0]["text"])
+        self.assertEqual(response.get_json()["runtime_evidence"][0]["country"], "PH")
+
     def test_query_api_coerces_legacy_retrieval_only_to_auto(self):
         captured = {}
 
@@ -1276,6 +1320,11 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertEqual(parts[0], {"text": "Question prompt"})
         self.assertEqual(parts[1]["inlineData"]["mimeType"], "image/png")
         self.assertTrue(parts[1]["inlineData"]["data"])
+
+    def test_non_crms_country_normalizes_to_shared_repository_mapping(self):
+        self.assertEqual(self.service.mapping_key("AF", "PH"), "AF:All")
+        self.assertEqual(self.service.mapping_key("GRC", "SG"), "GRC:All")
+        self.assertEqual(self.service.mapping_key("CRMS", "PH"), "CRMS:PH")
 
     def test_sync_subprocess_timeout_is_controlled(self):
         self.service.save_mapping(
