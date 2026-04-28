@@ -123,8 +123,15 @@
   const sleep = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms));
   const jobStatusUrl = (jobId) => jobsUrlTemplate.replace('__JOB_ID__', encodeURIComponent(jobId));
   const isTransientJobStatusError = (error) => {
-    const message = String(error?.message || '');
-    return Boolean(error?.transientPortalHtml) || message.includes('HTML error/timeout page') || message.includes('non-JSON response');
+    const message = String(error?.message || '').toLowerCase();
+    return Boolean(error?.transientPortalHtml)
+      || message.includes('html error/timeout page')
+      || message.includes('non-json response')
+      || message.includes('failed to fetch')
+      || message.includes('load failed')
+      || message.includes('networkerror')
+      || message.includes('network request failed')
+      || message.includes('internet connection appears to be offline');
   };
   const apiFetchJson = async (url, options = {}, retryOptions = {}) => {
     const attempts = Number(retryOptions.attempts || 1);
