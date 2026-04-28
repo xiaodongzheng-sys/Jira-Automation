@@ -471,6 +471,35 @@ class LocalAgentClientTests(unittest.TestCase):
         self.assertIn("HTTP 404 from portal.example", message)
         self.assertIn("<!doctype html>", message)
 
+    def test_ngrok_offline_unreadable_response_is_retried(self):
+        class FakeResponse:
+            def __init__(self, status_code, text, payload=None):
+                self.status_code = status_code
+                self.text = text
+                self._payload = payload
+
+            def json(self):
+                if self._payload is None:
+                    raise ValueError("not json")
+                return self._payload
+
+        responses = [
+            FakeResponse(
+                404,
+                "The endpoint breeze-lung-clunky.ngrok-free.dev is offline. ERR_NGROK_3200",
+            ),
+            FakeResponse(200, '{"status":"ok","result":"pong"}', {"status": "ok", "result": "pong"}),
+        ]
+        client = LocalAgentClient(base_url="https://portal.example", hmac_secret="shared-secret")
+        with patch("bpmis_jira_tool.local_agent_client._LOCAL_AGENT_SESSION.request", side_effect=responses) as request, patch(
+            "bpmis_jira_tool.local_agent_client.time.sleep"
+        ) as sleep_mock:
+            result = client.bpmis_call(operation="ping", access_token="token")
+
+        self.assertEqual(result, "pong")
+        self.assertEqual(request.call_count, 2)
+        sleep_mock.assert_called_once_with(1.0)
+
     def test_remote_bpmis_client_exposes_live_jira_operations(self):
         calls = []
 

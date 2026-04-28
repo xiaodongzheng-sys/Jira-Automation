@@ -15,6 +15,15 @@ from bpmis_jira_tool.local_agent_protocol import sign_headers
 from bpmis_jira_tool.models import CreatedTicket, ProjectMatch
 
 
+LOCAL_AGENT_TRANSIENT_UNREADABLE_RETRY_DELAYS_SECONDS = (1.0, 2.0, 4.0)
+LOCAL_AGENT_TRANSIENT_UNREADABLE_HINTS = (
+    "err_ngrok_3200",
+    "endpoint",
+    "is offline",
+    "ngrok",
+)
+
+
 def _build_local_agent_session() -> requests.Session:
     session = requests.Session()
     retry = Retry(
@@ -34,6 +43,13 @@ def _build_local_agent_session() -> requests.Session:
 
 
 _LOCAL_AGENT_SESSION = _build_local_agent_session()
+
+
+def _is_transient_unreadable_local_agent_response(*, status_code: int, body_preview: str) -> bool:
+    if int(status_code or 0) not in {404, 502, 503, 504}:
+        return False
+    normalized = str(body_preview or "").lower()
+    return "err_ngrok_3200" in normalized or all(hint in normalized for hint in LOCAL_AGENT_TRANSIENT_UNREADABLE_HINTS)
 
 
 class LocalAgentClient:
@@ -461,25 +477,34 @@ class LocalAgentClient:
         if signed:
             request_path = urlsplit(url).path or "/"
             headers.update(sign_headers(secret=self.hmac_secret, method=method, path=request_path, body=body))
-        try:
-            response = self.session.request(
-                method,
-                url,
-                data=body if body else None,
-                headers=headers,
-                timeout=(self.connect_timeout_seconds, self.timeout_seconds),
-            )
-        except requests.RequestException as error:
-            raise ToolError(f"Mac local-agent is unavailable: {error}") from error
-        try:
-            response_payload = response.json()
-        except ValueError as error:
-            body_preview = response.text.strip().replace("\n", " ")[:160]
-            host = urlsplit(url).netloc or self.base_url
-            detail = f" HTTP {response.status_code} from {host}."
-            if body_preview:
-                detail += f" Response starts with: {body_preview}"
-            raise ToolError(f"Mac local-agent returned an unreadable response.{detail}") from error
+        max_attempts = len(LOCAL_AGENT_TRANSIENT_UNREADABLE_RETRY_DELAYS_SECONDS) + 1
+        for attempt in range(max_attempts):
+            try:
+                response = self.session.request(
+                    method,
+                    url,
+                    data=body if body else None,
+                    headers=headers,
+                    timeout=(self.connect_timeout_seconds, self.timeout_seconds),
+                )
+            except requests.RequestException as error:
+                raise ToolError(f"Mac local-agent is unavailable: {error}") from error
+            try:
+                response_payload = response.json()
+                break
+            except ValueError as error:
+                body_preview = response.text.strip().replace("\n", " ")[:160]
+                if (
+                    attempt < max_attempts - 1
+                    and _is_transient_unreadable_local_agent_response(status_code=response.status_code, body_preview=body_preview)
+                ):
+                    time.sleep(LOCAL_AGENT_TRANSIENT_UNREADABLE_RETRY_DELAYS_SECONDS[attempt])
+                    continue
+                host = urlsplit(url).netloc or self.base_url
+                detail = f" HTTP {response.status_code} from {host}."
+                if body_preview:
+                    detail += f" Response starts with: {body_preview}"
+                raise ToolError(f"Mac local-agent returned an unreadable response.{detail}") from error
         if response.status_code >= 400 or response_payload.get("status") == "error":
             message = str(response_payload.get("message") or f"Mac local-agent request failed with HTTP {response.status_code}.")
             raise ToolError(message)
