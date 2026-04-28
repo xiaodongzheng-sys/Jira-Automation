@@ -37,8 +37,7 @@ EXISTING_SERVICE_URL="$("$GCLOUD_BIN" run services describe "$SERVICE" --project
 BASE_URL="${CLOUD_RUN_TEAM_PORTAL_BASE_URL:-${EXISTING_SERVICE_URL:-}}"
 PROJECT_NUMBER="$("$GCLOUD_BIN" projects describe "$PROJECT_ID" --format='value(projectNumber)')"
 RUNTIME_SERVICE_ACCOUNT="${CLOUD_RUN_SERVICE_ACCOUNT:-$PROJECT_NUMBER-compute@developer.gserviceaccount.com}"
-LOCAL_AGENT_URL="${CLOUD_RUN_LOCAL_AGENT_BASE_URL:-${LOCAL_AGENT_PUBLIC_URL:-$(read_env_value LOCAL_AGENT_PUBLIC_URL)}}"
-LOCAL_AGENT_URL="${LOCAL_AGENT_URL:-${LOCAL_AGENT_BASE_URL:-$(read_env_value LOCAL_AGENT_BASE_URL)}}"
+LOCAL_AGENT_URL="$(resolve_cloud_run_local_agent_url)"
 LOCAL_AGENT_SECRET="${LOCAL_AGENT_HMAC_SECRET:-$(read_env_value LOCAL_AGENT_HMAC_SECRET)}"
 GOOGLE_SECRET_FILE="${GOOGLE_OAUTH_CLIENT_SECRET_FILE:-$(read_env_value GOOGLE_OAUTH_CLIENT_SECRET_FILE)}"
 CONFIG_KEY="${TEAM_PORTAL_CONFIG_ENCRYPTION_KEY:-$(read_env_value TEAM_PORTAL_CONFIG_ENCRYPTION_KEY)}"
@@ -50,9 +49,10 @@ if [[ -z "$LOCAL_AGENT_URL" || -z "$LOCAL_AGENT_SECRET" ]]; then
   echo "CLOUD_RUN_LOCAL_AGENT_BASE_URL or LOCAL_AGENT_PUBLIC_URL, plus LOCAL_AGENT_HMAC_SECRET, are required."
   exit 1
 fi
-if [[ "$LOCAL_AGENT_URL" =~ ^https?://(127\.0\.0\.1|localhost)(:|/) ]]; then
+if is_loopback_http_url "$LOCAL_AGENT_URL"; then
   echo "Cloud Run cannot reach a localhost LOCAL_AGENT_BASE_URL."
   echo "Set CLOUD_RUN_LOCAL_AGENT_BASE_URL or LOCAL_AGENT_PUBLIC_URL to the Mac local-agent public URL."
+  echo "If the Mac portal ngrok proxies /api/local-agent/*, TEAM_PORTAL_BASE_URL can be used as the fallback."
   exit 1
 fi
 if [[ -z "$GOOGLE_SECRET_FILE" || ! -f "$GOOGLE_SECRET_FILE" ]]; then

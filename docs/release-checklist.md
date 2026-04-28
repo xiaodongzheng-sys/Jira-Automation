@@ -54,6 +54,13 @@ BPMIS_CALL_MODE
 CLOUD_RUN_DEPLOY_DRY_RUN=1 ./scripts/deploy_cloud_run.sh
 ```
 
+- If the active personal `gcloud` account needs browser reauthentication, use the configured deploy service account for non-interactive release checks:
+
+```bash
+CLOUD_RUN_DEPLOY_ACCOUNT=vertex-ai-user@civil-partition-492805-v7.iam.gserviceaccount.com \
+CLOUD_RUN_DEPLOY_DRY_RUN=1 ./scripts/deploy_cloud_run.sh
+```
+
 - Deploy Cloud Run from source, or deploy a prebuilt image if one was already produced:
 
 ```bash
@@ -77,7 +84,7 @@ LOCAL_AGENT_SEATALK_ENABLED=true
 LOCAL_AGENT_BPMIS_ENABLED=true
 ```
 
-- Do not point Cloud Run at a localhost local-agent URL. Cloud Run needs the public Mac local-agent URL, normally from `LOCAL_AGENT_PUBLIC_URL` or `CLOUD_RUN_LOCAL_AGENT_BASE_URL`.
+- Do not point Cloud Run at a localhost local-agent URL. Cloud Run needs the public Mac local-agent URL, normally from `LOCAL_AGENT_PUBLIC_URL` or `CLOUD_RUN_LOCAL_AGENT_BASE_URL`. If those are not set and `LOCAL_AGENT_BASE_URL` is localhost, the deploy scripts fall back to non-localhost `TEAM_PORTAL_BASE_URL` because the Mac portal exposes `/api/local-agent/*` as a proxy.
 
 ## 3. Mac Local-Agent Release
 
@@ -125,6 +132,8 @@ Run these after Cloud Run and the Mac local-agent are both updated:
 
 - Cloud Run `/healthz` returns the expected revision and deploy hash.
 - Mac local-agent `/healthz` reports enabled capabilities for Source Code Q&A, SeaTalk, and BPMIS proxy when those are expected.
+- Cloud Run `gcloud run services describe` reports the latest ready revision serving `100%` traffic, and `TEAM_PORTAL_DEPLOY_HASH` matches the deploy script's local hash.
+- Cloud Run `/api/local-agent/healthz` returns `source_code_qa: true` and `codex_ready: true` through the public Mac local-agent path.
 - Google OAuth login returns to the released portal URL.
 - BPMIS Setup can save/load config through the local-agent when Cloud Run uses BPMIS proxy mode.
 - BPMIS Create Jira succeeds with Jira-resolvable NPT user emails in owner fields.

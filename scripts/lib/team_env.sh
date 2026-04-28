@@ -112,6 +112,33 @@ print(value if value is not None else "")
 PY
 }
 
+is_loopback_http_url() {
+  local value="${1:-}"
+  [[ "$value" =~ ^https?://(127\.0\.0\.1|localhost)(:|/) ]]
+}
+
+resolve_cloud_run_local_agent_url() {
+  local explicit_url="${CLOUD_RUN_LOCAL_AGENT_BASE_URL:-${LOCAL_AGENT_PUBLIC_URL:-$(read_env_value LOCAL_AGENT_PUBLIC_URL)}}"
+  if [[ -n "$explicit_url" ]]; then
+    printf '%s\n' "$explicit_url"
+    return 0
+  fi
+
+  local local_agent_url="${LOCAL_AGENT_BASE_URL:-$(read_env_value LOCAL_AGENT_BASE_URL)}"
+  if [[ -n "$local_agent_url" ]] && ! is_loopback_http_url "$local_agent_url"; then
+    printf '%s\n' "$local_agent_url"
+    return 0
+  fi
+
+  local portal_url="${TEAM_PORTAL_BASE_URL:-$(read_env_value TEAM_PORTAL_BASE_URL)}"
+  if [[ -n "$portal_url" ]] && ! is_loopback_http_url "$portal_url"; then
+    printf '%s\n' "$portal_url"
+    return 0
+  fi
+
+  printf '%s\n' "$local_agent_url"
+}
+
 read_env_values() {
   if [[ $# -eq 0 ]]; then
     return 0

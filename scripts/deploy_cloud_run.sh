@@ -173,11 +173,11 @@ INVOKER_IAM_DISABLED="$(printf '%s\n' "$DESCRIBE_VALUES" | sed -n '2p')"
 DESCRIBE_FINISHED_AT="$(date +%s)"
 echo "Cloud Run describe completed in $((DESCRIBE_FINISHED_AT - DESCRIBE_STARTED_AT))s"
 BASE_URL="${CLOUD_RUN_TEAM_PORTAL_BASE_URL:-${EXISTING_SERVICE_URL:-}}"
-LOCAL_AGENT_URL="${CLOUD_RUN_LOCAL_AGENT_BASE_URL:-${LOCAL_AGENT_PUBLIC_URL:-$(read_env_value LOCAL_AGENT_PUBLIC_URL)}}"
-LOCAL_AGENT_URL="${LOCAL_AGENT_URL:-${LOCAL_AGENT_BASE_URL:-$(read_env_value LOCAL_AGENT_BASE_URL)}}"
-if [[ "$LOCAL_AGENT_URL" =~ ^https?://(127\.0\.0\.1|localhost)(:|/) ]]; then
+LOCAL_AGENT_URL="$(resolve_cloud_run_local_agent_url)"
+if is_loopback_http_url "$LOCAL_AGENT_URL"; then
   echo "Cloud Run cannot reach a localhost LOCAL_AGENT_BASE_URL."
   echo "Set CLOUD_RUN_LOCAL_AGENT_BASE_URL or LOCAL_AGENT_PUBLIC_URL to the Mac local-agent public URL."
+  echo "If the Mac portal ngrok proxies /api/local-agent/*, TEAM_PORTAL_BASE_URL can be used as the fallback."
   exit 1
 fi
 
