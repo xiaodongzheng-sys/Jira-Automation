@@ -25,6 +25,9 @@
       <button class="workspace-tab is-active" type="button" role="tab" aria-selected="true" data-tab-trigger="setup">Setup</button>
       <button class="workspace-tab" type="button" role="tab" aria-selected="false" data-tab-trigger="run">My Projects</button>
       <button class="workspace-tab" type="button" role="tab" aria-selected="false" data-tab-trigger="productization-upgrade-summary">Productization Upgrade Summary</button>
+      {% if team_dashboard_enabled %}
+        <button class="workspace-tab" type="button" role="tab" aria-selected="false" data-tab-trigger="team-dashboard">Team Dashboard</button>
+      {% endif %}
       {% if team_profile_admin_enabled %}
         <button class="workspace-tab" type="button" role="tab" aria-selected="false" data-tab-trigger="team-default-admin">Team Default Admin</button>
       {% endif %}
@@ -378,6 +381,71 @@
       </section>
     </section>
 
+    {% if team_dashboard_enabled %}
+      <section class="workspace-panel" data-tab-panel="team-dashboard">
+        <section class="panel panel-wide glass-panel team-dashboard-panel"
+          data-team-dashboard
+          data-config-url="{{ url_for('team_dashboard_config') }}"
+          data-save-url="{{ url_for('save_team_dashboard_members') }}"
+          data-tasks-url="{{ url_for('team_dashboard_tasks') }}"
+        >
+          <div class="panel-head">
+            <div>
+              <h2>Team Dashboard</h2>
+              <p class="step-copy">Review team Jira tasks by creator and keep team member email lists up to date.</p>
+            </div>
+          </div>
+
+          <div class="workspace-tabs team-dashboard-tabs" role="tablist" aria-label="Team Dashboard sections">
+            <button class="workspace-tab is-active" type="button" role="tab" aria-selected="true" data-team-dashboard-tab="tasks">Task List</button>
+            <button class="workspace-tab" type="button" role="tab" aria-selected="false" data-team-dashboard-tab="admin">Team Admin</button>
+          </div>
+
+          <section data-team-dashboard-panel="tasks">
+            <div class="productization-section-head">
+              <div>
+                <h3>Task List</h3>
+                <span data-team-dashboard-task-summary>Click Update to pull the latest Jira information.</span>
+              </div>
+              <button class="button button-secondary" type="button" data-team-dashboard-update>Update</button>
+            </div>
+            <p class="productization-inline-status" data-team-dashboard-task-status></p>
+            <div class="team-dashboard-team-list" data-team-dashboard-task-list></div>
+          </section>
+
+          <section data-team-dashboard-panel="admin" hidden>
+            <form method="post" action="{{ url_for('save_team_dashboard_members') }}" class="stack" data-team-dashboard-admin-form>
+              <div class="config-grid setup-grid">
+                {% for team_key, team in team_dashboard_config.teams.items() %}
+                  <div class="config-card config-card-wide">
+                    <div class="field-label-row">
+                      <h3>{{ team.label }}</h3>
+                      <span class="field-badge">Team Admin</span>
+                    </div>
+                    <p class="card-help">One email per line. Task List matches Jira tasks whose creator is in this list.</p>
+                    <div class="field-group">
+                      <label for="team_dashboard_members_{{ team_key }}">{{ team.label }} Member Emails</label>
+                      <textarea
+                        id="team_dashboard_members_{{ team_key }}"
+                        rows="9"
+                        spellcheck="false"
+                        name="team_dashboard_members_{{ team_key }}"
+                        data-team-dashboard-members="{{ team_key }}"
+                      >{{ team.member_emails | join('\n') }}</textarea>
+                    </div>
+                  </div>
+                {% endfor %}
+              </div>
+              <div class="button-row">
+                <button class="button" type="submit">Save Team Emails</button>
+              </div>
+              <p class="productization-inline-status" data-team-dashboard-admin-status></p>
+            </form>
+          </section>
+        </section>
+      </section>
+    {% endif %}
+
     {% if team_profile_admin_enabled %}
       <section class="workspace-panel" data-tab-panel="team-default-admin">
         <section class="panel panel-wide glass-panel">
@@ -450,6 +518,9 @@
 {% block extra_scripts %}
   <script src="{{ url_for('static', filename='bpmis_projects.js') }}?v=20260428-bpmis-card-drag"></script>
   <script src="{{ url_for('static', filename='productization_upgrade_summary.js') }}?v=20260427-copy-wrap"></script>
+  {% if team_dashboard_enabled %}
+    <script src="{{ url_for('static', filename='team_dashboard.js') }}?v=20260428-team-dashboard"></script>
+  {% endif %}
   <script id="team-profile-data" type="application/json">{{ team_profiles | tojson }}</script>
   <script>
     (() => {

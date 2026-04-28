@@ -641,6 +641,9 @@ class RemoteBPMISClient:
     def list_jira_tasks_for_project_created_by_email(self, project_issue_id: str, email: str) -> list[dict[str, Any]]:
         return self._call("list_jira_tasks_for_project_created_by_email", project_issue_id, email) or []
 
+    def list_jira_tasks_created_by_emails(self, emails: list[str]) -> list[dict[str, Any]]:
+        return self._call("list_jira_tasks_created_by_emails", emails) or []
+
     def get_single_brd_doc_link_for_project(self, project_issue_id: str) -> str:
         return str(self._call("get_single_brd_doc_link_for_project", project_issue_id) or "")
 

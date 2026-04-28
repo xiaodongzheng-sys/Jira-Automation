@@ -40,6 +40,7 @@ BPMIS_PROXY_OPERATIONS = {
     "create_jira_ticket",
     "list_biz_projects_for_pm_email",
     "list_jira_tasks_for_project_created_by_email",
+    "list_jira_tasks_created_by_emails",
     "get_single_brd_doc_link_for_project",
     "get_single_brd_doc_links_for_projects",
     "get_brd_doc_links_for_projects",

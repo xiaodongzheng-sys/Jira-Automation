@@ -1167,6 +1167,117 @@ class BPMISClientTests(unittest.TestCase):
             self.assertEqual(tasks[0]["component"], "")
             self.assertEqual(tasks[0]["market"], "")
 
+    def test_list_jira_tasks_created_by_emails_filters_and_normalizes_rows(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings = Settings(
+                flask_secret_key="secret",
+                google_oauth_client_secret_file=Path(temp_dir) / "client.json",
+                google_oauth_redirect_uri=None,
+                team_portal_host="127.0.0.1",
+                team_portal_port=5000,
+                team_portal_base_url=None,
+                team_allowed_emails=(),
+                team_allowed_email_domains=(),
+                team_portal_data_dir=Path(temp_dir),
+                spreadsheet_id="sheet",
+                common_tab_name="Common",
+                input_tab_name="Input",
+                bpmis_base_url="https://example.com",
+                bpmis_api_access_token="token",
+            )
+
+            client = BPMISDirectApiClient(settings)
+            client._resolve_bpmis_user_ids_by_email = lambda email: {  # type: ignore[method-assign]
+                "pm1@npt.sg": [101],
+                "pm2@npt.sg": [202],
+            }.get(email, [])
+            calls = []
+
+            def fake_api_request(path, method="GET", params=None, body=None):
+                if path == "/api/v1/issues/detail":
+                    issue_id = str((params or {}).get("id") or (params or {}).get("issueId") or "")
+                    return {
+                        "data": {
+                            "id": issue_id,
+                            "summary": f"Parent Project {issue_id}",
+                            "marketId": {"label": "SG"},
+                            "bizPriorityId": {"label": "P1"},
+                            "regionalPmPicId": [{"emailAddress": "rpm@npt.sg"}],
+                        }
+                    }
+                self.assertEqual(path, "/api/v1/issues/list")
+                search = json.loads((params or {}).get("search") or "{}")
+                calls.append(search)
+                self.assertEqual(search["subQueries"][0], {"typeId": [BPMISDirectApiClient.TASK_TYPE_ID]})
+                self.assertEqual(search["subQueries"][1], {"creator": [101, 202]})
+                if search["page"] == 1:
+                    filler_rows = [
+                        {
+                            "id": 2000 + index,
+                            "jiraKey": f"AF-X{index}",
+                            "summary": "Filler wrong creator",
+                            "creator": {"emailAddress": "other@npt.sg"},
+                        }
+                        for index in range(198)
+                    ]
+                    return {
+                        "data": {
+                            "rows": [
+                                {
+                                    "id": 991,
+                                    "jiraKey": "AF-991",
+                                    "summary": "PRD task",
+                                    "creator": {"emailAddress": "pm1@npt.sg"},
+                                    "status": {"label": "PRD Reviewed"},
+                                    "fixVersions": [{"name": "Planning_26Q2"}],
+                                    "jiraPrdLink": "https://docs/prd-1",
+                                    "parentIds": [225159],
+                                },
+                                {
+                                    "id": 992,
+                                    "jiraKey": "AF-992",
+                                    "summary": "Wrong creator",
+                                    "creator": {"emailAddress": "other@npt.sg"},
+                                },
+                                *filler_rows,
+                            ]
+                        }
+                    }
+                return {
+                    "data": {
+                        "rows": [
+                            {
+                                "id": 993,
+                                "jiraKey": "AF-993",
+                                "summary": "Pending task",
+                                "creator": {"id": 202},
+                                "status": {"label": "Testing"},
+                                "fixVersionId": [{"fullName": "Planning_26Q3"}],
+                                "jiraPrdLink": [{"url": "https://docs/prd-2"}],
+                                "parentIds": [{"id": 225160}],
+                            }
+                        ]
+                    }
+                }
+
+            client._api_request = fake_api_request  # type: ignore[method-assign]
+
+            tasks = client.list_jira_tasks_created_by_emails(["PM1@npt.sg", "pm2@npt.sg", "pm1@npt.sg"])
+
+            self.assertEqual(len(calls), 2)
+            self.assertEqual([task["jira_id"] for task in tasks], ["AF-991", "AF-993"])
+            self.assertEqual(tasks[0]["pm_email"], "pm1@npt.sg")
+            self.assertEqual(tasks[0]["jira_status"], "PRD Reviewed")
+            self.assertEqual(tasks[0]["version"], "Planning_26Q2")
+            self.assertEqual(tasks[0]["prd_links"], ["https://docs/prd-1"])
+            self.assertEqual(tasks[0]["parent_project"]["bpmis_id"], "225159")
+            self.assertEqual(tasks[0]["parent_project"]["project_name"], "Parent Project 225159")
+            self.assertEqual(tasks[0]["parent_project"]["priority"], "P1")
+            self.assertEqual(tasks[0]["parent_project"]["regional_pm_pic"], "rpm@npt.sg")
+            self.assertEqual(tasks[1]["pm_email"], "pm2@npt.sg")
+            self.assertEqual(tasks[1]["version"], "Planning_26Q3")
+            self.assertEqual(tasks[1]["parent_project"]["bpmis_id"], "225160")
+
 
 if __name__ == "__main__":
     unittest.main()

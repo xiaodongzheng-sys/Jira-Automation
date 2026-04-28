@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import sqlite3
 import subprocess
 import threading
 import time
@@ -78,6 +79,26 @@ TEAM_PROFILE_ADMIN_EMAIL = "xiaodong.zheng@npt.sg"
 SYNC_EMAIL_EDIT_ALLOWLIST = {"xiaodong.zheng@npt.sg", "xiaodong.zheng1991@gmail.com"}
 SOURCE_CODE_QA_BUILTIN_ADMIN_EMAILS = {"xiaodong.zheng@npt.sg"}
 GMAIL_SEATALK_BUILTIN_OWNER_EMAILS = {"xiaodong.zheng@npt.sg"}
+TEAM_DASHBOARD_ADMIN_EMAIL = "xiaodong.zheng@npt.sg"
+TEAM_DASHBOARD_DEFAULT_MEMBER_EMAILS = (
+    "huixian.nah@npt.sg",
+    "jireh.tanyx@npt.sg",
+    "keryin.lim@npt.sg",
+    "liye.ng@npt.sg",
+    "mingming.yeo@npt.sg",
+    "chongzj@npt.sg",
+    "sabrina.chan@npt.sg",
+    "sophia.wangzj@npt.sg",
+    "chang.wang@npt.sg",
+    "zoey.luxy@npt.sg",
+)
+TEAM_DASHBOARD_TEAMS = {
+    "AF": "Anti-fraud",
+    "CRMS": "Credit Risk",
+    "GRC": "Ops Risk",
+}
+TEAM_DASHBOARD_UNDER_PRD_STATUSES = {"waiting", "prd in progress", "prd reviewed"}
+TEAM_DASHBOARD_EXCLUDED_PENDING_STATUSES = {"icebox", "closed", "done"}
 _gmail_export_active_users: set[str] = set()
 _gmail_export_active_users_lock = threading.Lock()
 _source_code_qa_codex_session_locks: dict[str, threading.Lock] = {}
@@ -260,6 +281,85 @@ class JobStore:
     def snapshot(self, job_id: str) -> dict[str, Any] | None:
         job = self.get(job_id)
         return asdict(job) if job else None
+
+
+class TeamDashboardConfigStore:
+    CONFIG_KEY = "team_dashboard"
+
+    def __init__(self, db_path: Path) -> None:
+        self.db_path = db_path
+        self._ensure_db()
+
+    def load(self) -> dict[str, Any]:
+        with sqlite3.connect(self.db_path) as connection:
+            row = connection.execute(
+                "SELECT config_json FROM team_dashboard_configs WHERE config_key = ?",
+                (self.CONFIG_KEY,),
+            ).fetchone()
+        if not row:
+            return self.default_config()
+        try:
+            payload = json.loads(row[0])
+        except (TypeError, json.JSONDecodeError):
+            return self.default_config()
+        return self.normalize_config(payload)
+
+    def save(self, config: dict[str, Any]) -> dict[str, Any]:
+        normalized = self.normalize_config(config)
+        with sqlite3.connect(self.db_path) as connection:
+            connection.execute(
+                """
+                INSERT INTO team_dashboard_configs (config_key, config_json, updated_at)
+                VALUES (?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(config_key) DO UPDATE SET
+                    config_json = excluded.config_json,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (self.CONFIG_KEY, json.dumps(normalized, ensure_ascii=False)),
+            )
+            connection.commit()
+        return normalized
+
+    def default_config(self) -> dict[str, Any]:
+        return {
+            "teams": {
+                team_key: {
+                    "label": label,
+                    "member_emails": list(TEAM_DASHBOARD_DEFAULT_MEMBER_EMAILS),
+                }
+                for team_key, label in TEAM_DASHBOARD_TEAMS.items()
+            }
+        }
+
+    def normalize_config(self, config: dict[str, Any]) -> dict[str, Any]:
+        raw_teams = config.get("teams") if isinstance(config, dict) else {}
+        raw_teams = raw_teams if isinstance(raw_teams, dict) else {}
+        default = self.default_config()
+        normalized_teams: dict[str, dict[str, Any]] = {}
+        for team_key, label in TEAM_DASHBOARD_TEAMS.items():
+            raw_team = raw_teams.get(team_key) if isinstance(raw_teams.get(team_key), dict) else {}
+            raw_emails = raw_team.get("member_emails") if isinstance(raw_team, dict) else None
+            if raw_emails is None:
+                raw_emails = default["teams"][team_key]["member_emails"]
+            normalized_teams[team_key] = {
+                "label": label,
+                "member_emails": _normalize_team_dashboard_emails(raw_emails),
+            }
+        return {"teams": normalized_teams}
+
+    def _ensure_db(self) -> None:
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(self.db_path) as connection:
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS team_dashboard_configs (
+                    config_key TEXT PRIMARY KEY,
+                    config_json TEXT NOT NULL,
+                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            connection.commit()
 
 
 class SeaTalkTodoStore:
@@ -1646,6 +1746,7 @@ def create_app() -> Flask:
     app.config["SETTINGS"] = settings
     app.config["CONFIG_STORE"] = config_store
     app.config["BPMIS_PROJECT_STORE"] = BPMISProjectStore(config_store.db_path)
+    app.config["TEAM_DASHBOARD_CONFIG_STORE"] = TeamDashboardConfigStore(config_store.db_path)
     app.config["JOB_STORE"] = JobStore(data_root / "run" / "jobs.json")
     app.config["SEATALK_TODO_STORE"] = SeaTalkTodoStore(data_root / "seatalk" / "completed_todos.json")
     app.config["SEATALK_NAME_MAPPING_STORE"] = SeaTalkNameMappingStore(data_root / "seatalk" / "name_overrides.json")
@@ -1907,6 +2008,8 @@ def create_app() -> Flask:
             ),
             team_profile_admin_configs=effective_team_profiles,
             team_profile_admin_enabled=_is_team_profile_admin(user_identity),
+            team_dashboard_enabled=_can_access_team_dashboard(user_identity),
+            team_dashboard_config=_get_team_dashboard_config_store().load(),
             default_workspace_tab=session.pop("default_workspace_tab", "run" if has_saved_config else "setup"),
             input_headers=input_headers,
             google_authorized=True,
@@ -3238,6 +3341,88 @@ def create_app() -> Flask:
             flash(str(error), "error")
         return redirect(url_for("index"))
 
+    @app.get("/api/team-dashboard/config")
+    def team_dashboard_config():
+        access_gate = _require_team_dashboard_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        return jsonify({"status": "ok", "config": _get_team_dashboard_config_store().load()})
+
+    @app.post("/admin/team-dashboard/members")
+    def save_team_dashboard_members():
+        access_gate = _require_team_dashboard_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            payload = {
+                "teams": {
+                    team_key: {"member_emails": request.form.get(f"team_dashboard_members_{team_key}", "")}
+                    for team_key in TEAM_DASHBOARD_TEAMS
+                }
+            }
+        saved = _get_team_dashboard_config_store().save(payload)
+        _log_portal_event(
+            "team_dashboard_members_save_success",
+            **_build_request_log_context(
+                settings,
+                user_identity=_get_user_identity(settings),
+                extra={
+                    "team_counts": {
+                        team_key: len(team.get("member_emails") or [])
+                        for team_key, team in (saved.get("teams") or {}).items()
+                        if isinstance(team, dict)
+                    }
+                },
+            ),
+        )
+        return jsonify({"status": "ok", "config": saved})
+
+    @app.get("/api/team-dashboard/tasks")
+    def team_dashboard_tasks():
+        access_gate = _require_team_dashboard_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        config = _get_team_dashboard_config_store().load()
+        bpmis_client = _build_bpmis_client_for_current_user(settings)
+        team_payloads: list[dict[str, Any]] = []
+        has_error = False
+        for team_key, label in TEAM_DASHBOARD_TEAMS.items():
+            team_config = (config.get("teams") or {}).get(team_key) or {}
+            emails = _normalize_team_dashboard_emails(team_config.get("member_emails") or [])
+            try:
+                tasks = bpmis_client.list_jira_tasks_created_by_emails(emails)
+                team_payloads.append(_build_team_dashboard_task_group(team_key, label, emails, tasks))
+            except Exception as error:  # noqa: BLE001 - keep other team groups renderable.
+                has_error = True
+                error_details = _classify_portal_error(error)
+                _log_portal_event(
+                    "team_dashboard_tasks_team_error",
+                    level=logging.WARNING,
+                    **_build_request_log_context(
+                        settings,
+                        user_identity=_get_user_identity(settings),
+                        extra={**error_details, "team_key": team_key},
+                    ),
+                )
+                team_payloads.append(
+                    {
+                        "team_key": team_key,
+                        "label": label,
+                        "member_emails": emails,
+                        "under_prd": [],
+                        "pending_live": [],
+                        "error": str(error),
+                    }
+                )
+        return jsonify(
+            {
+                "status": "partial" if has_error else "ok",
+                "teams": team_payloads,
+                "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            }
+        )
+
     @app.get("/download/default-sheet-template.csv")
     def download_default_sheet_template():
         sample_row = [
@@ -3989,6 +4174,10 @@ def _get_bpmis_project_store() -> BPMISProjectStore:
     return current_app.config["BPMIS_PROJECT_STORE"]
 
 
+def _get_team_dashboard_config_store() -> TeamDashboardConfigStore:
+    return current_app.config["TEAM_DASHBOARD_CONFIG_STORE"]
+
+
 def _get_source_code_qa_session_store():
     settings: Settings = current_app.config["SETTINGS"]
     if _local_agent_source_code_qa_enabled(settings):
@@ -4653,6 +4842,20 @@ def _require_source_code_qa_manage_access(settings: Settings, *, api: bool = Fal
     return None
 
 
+def _require_team_dashboard_access(settings: Settings, *, api: bool = False):
+    login_gate = _require_google_login(settings, api=api)
+    if login_gate is not None:
+        return login_gate
+    user_identity = _get_user_identity(settings)
+    message = f"Team Dashboard is restricted to {TEAM_DASHBOARD_ADMIN_EMAIL}."
+    if not _can_access_team_dashboard(user_identity):
+        if api:
+            return jsonify({"status": "error", "message": message}), HTTPStatus.FORBIDDEN
+        flash(message, "error")
+        return redirect(url_for("access_denied"))
+    return None
+
+
 def _validate_config_security(settings: Settings, config_data: dict[str, Any]) -> None:
     portal_token = str(config_data.get("bpmis_api_access_token", "") or "").strip()
     if _shared_portal_enabled(settings) and portal_token and not settings.team_portal_config_encryption_key:
@@ -4677,6 +4880,10 @@ def _load_effective_team_profiles(config_store: WebConfigStore) -> dict[str, dic
 
 def _is_team_profile_admin(user_identity: dict[str, str | None]) -> bool:
     return str(user_identity.get("email") or "").strip().lower() == TEAM_PROFILE_ADMIN_EMAIL
+
+
+def _can_access_team_dashboard(user_identity: dict[str, str | None]) -> bool:
+    return str(user_identity.get("email") or "").strip().lower() == TEAM_DASHBOARD_ADMIN_EMAIL
 
 
 def _can_edit_sync_email(user_identity: dict[str, str | None]) -> bool:
@@ -5090,6 +5297,143 @@ def _csv_escape(value: str) -> str:
 def _resolve_bpmis_access_token(config_data: dict[str, Any], settings: Settings) -> str | None:
     configured_token = str(config_data.get("bpmis_api_access_token", "") or "").strip()
     return configured_token or settings.bpmis_api_access_token
+
+
+def _normalize_team_dashboard_emails(value: Any) -> list[str]:
+    if isinstance(value, str):
+        raw_values = re.split(r"[\s,;]+", value)
+    elif isinstance(value, list):
+        raw_values = value
+    else:
+        raw_values = []
+    normalized: list[str] = []
+    for raw_email in raw_values:
+        email = str(raw_email or "").strip().lower()
+        if email and email not in normalized:
+            normalized.append(email)
+    return normalized
+
+
+def _build_team_dashboard_task_group(
+    team_key: str,
+    label: str,
+    member_emails: list[str],
+    tasks: list[dict[str, Any]],
+) -> dict[str, Any]:
+    under_prd: list[dict[str, Any]] = []
+    pending_live: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for task in tasks:
+        normalized_task = _normalize_team_dashboard_task(task)
+        dedupe_key = normalized_task["jira_id"] or normalized_task["issue_id"]
+        if dedupe_key and dedupe_key in seen:
+            continue
+        if dedupe_key:
+            seen.add(dedupe_key)
+        status_key = normalized_task["jira_status"].strip().casefold()
+        if status_key in TEAM_DASHBOARD_UNDER_PRD_STATUSES:
+            under_prd.append(normalized_task)
+        elif status_key not in TEAM_DASHBOARD_EXCLUDED_PENDING_STATUSES:
+            pending_live.append(normalized_task)
+    under_prd_projects = _group_team_dashboard_tasks_by_project(under_prd)
+    pending_live_projects = _group_team_dashboard_tasks_by_project(pending_live)
+    return {
+        "team_key": team_key,
+        "label": label,
+        "member_emails": member_emails,
+        "under_prd": under_prd_projects,
+        "pending_live": pending_live_projects,
+        "error": "",
+    }
+
+
+def _normalize_team_dashboard_task(task: dict[str, Any]) -> dict[str, Any]:
+    jira_id = str(task.get("jira_id") or task.get("ticket_key") or "").strip()
+    issue_id = str(task.get("issue_id") or "").strip()
+    jira_link = str(task.get("jira_link") or task.get("ticket_link") or "").strip()
+    if not jira_link and jira_id:
+        jira_link = f"{_jira_browse_base_url()}{jira_id}"
+    raw_prd_links = task.get("prd_links")
+    if not raw_prd_links and task.get("prd_link"):
+        raw_prd_links = str(task.get("prd_link") or "").splitlines()
+    prd_links = _team_dashboard_link_items(raw_prd_links)
+    return {
+        "issue_id": issue_id,
+        "jira_id": jira_id or issue_id,
+        "jira_link": jira_link,
+        "jira_title": str(task.get("jira_title") or "").strip(),
+        "pm_email": str(task.get("pm_email") or "").strip().lower(),
+        "jira_status": str(task.get("jira_status") or task.get("status") or "").strip(),
+        "version": str(task.get("version") or task.get("fix_version_name") or "").strip(),
+        "prd_links": prd_links,
+        "parent_project": _normalize_team_dashboard_project(task.get("parent_project") if isinstance(task.get("parent_project"), dict) else {}),
+    }
+
+
+def _normalize_team_dashboard_project(project: dict[str, Any]) -> dict[str, str]:
+    bpmis_id = str(project.get("bpmis_id") or project.get("issue_id") or "").strip()
+    return {
+        "bpmis_id": bpmis_id,
+        "project_name": str(project.get("project_name") or "").strip(),
+        "market": str(project.get("market") or "").strip(),
+        "priority": str(project.get("priority") or "").strip(),
+        "regional_pm_pic": str(project.get("regional_pm_pic") or "").strip(),
+    }
+
+
+def _group_team_dashboard_tasks_by_project(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[str, dict[str, Any]] = {}
+    for task in tasks:
+        project = task.get("parent_project") if isinstance(task.get("parent_project"), dict) else {}
+        project = _normalize_team_dashboard_project(project)
+        key = project.get("bpmis_id") or f"unknown:{task.get('jira_id') or task.get('issue_id') or len(grouped)}"
+        if key not in grouped:
+            grouped[key] = {
+                **project,
+                "jira_tickets": [],
+                "task_count": 0,
+            }
+        grouped[key]["jira_tickets"].append(task)
+        grouped[key]["task_count"] = len(grouped[key]["jira_tickets"])
+
+    projects = list(grouped.values())
+    for project in projects:
+        project["jira_tickets"].sort(key=_team_dashboard_sort_key)
+    projects.sort(
+        key=lambda project: (
+            str(project.get("project_name") or "").casefold(),
+            str(project.get("bpmis_id") or "").casefold(),
+        )
+    )
+    return projects
+
+
+def _team_dashboard_link_items(value: Any) -> list[dict[str, str]]:
+    raw_links: list[str] = []
+    if isinstance(value, list):
+        for item in value:
+            if isinstance(item, dict):
+                raw_links.append(str(item.get("url") or item.get("label") or "").strip())
+            else:
+                raw_links.append(str(item or "").strip())
+    elif isinstance(value, str):
+        raw_links.extend(item.strip() for item in re.split(r"[\n,]+", value) if item.strip())
+    deduped: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for link in raw_links:
+        if not link or link in seen:
+            continue
+        seen.add(link)
+        deduped.append({"label": link, "url": link})
+    return deduped
+
+
+def _team_dashboard_sort_key(task: dict[str, Any]) -> tuple[str, str, str]:
+    return (
+        str(task.get("pm_email") or "").casefold(),
+        str(task.get("version") or "").casefold(),
+        str(task.get("jira_id") or "").casefold(),
+    )
 
 
 def _serialize_productization_version_candidate(row: dict[str, Any]) -> dict[str, str]:

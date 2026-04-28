@@ -787,7 +787,173 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertEqual(admin_response.status_code, 200)
         self.assertIn(b">Team Default Admin<", admin_response.data)
         self.assertIn(b"Save Anti-fraud Defaults", admin_response.data)
+        self.assertIn(b">Team Dashboard<", admin_response.data)
+        self.assertIn(b"Team Admin", admin_response.data)
         self.assertNotIn(b">Team Default Admin<", user_response.data)
+        self.assertNotIn(b">Team Dashboard<", user_response.data)
+
+    def test_team_dashboard_config_defaults_and_save_are_admin_only(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_ALLOWED_EMAILS": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
+            },
+            clear=True,
+        ):
+            app = create_app()
+            app.testing = True
+
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
+                    session["google_credentials"] = {"token": "x"}
+                forbidden_response = client.get("/api/team-dashboard/config")
+
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong"}
+                    session["google_credentials"] = {"token": "x"}
+                config_response = client.get("/api/team-dashboard/config")
+                save_response = client.post(
+                    "/admin/team-dashboard/members",
+                    json={
+                        "teams": {
+                            "AF": {"member_emails": [" PM1@npt.sg ", "pm1@npt.sg", "pm2@npt.sg"]},
+                            "CRMS": {"member_emails": ["cr@npt.sg"]},
+                            "GRC": {"member_emails": "ops@npt.sg\nops2@npt.sg"},
+                        }
+                    },
+                )
+
+        self.assertEqual(forbidden_response.status_code, 403)
+        self.assertEqual(config_response.status_code, 200)
+        config_payload = config_response.get_json()
+        self.assertEqual(set(config_payload["config"]["teams"].keys()), {"AF", "CRMS", "GRC"})
+        self.assertIn("huixian.nah@npt.sg", config_payload["config"]["teams"]["AF"]["member_emails"])
+        self.assertEqual(save_response.status_code, 200)
+        saved_payload = save_response.get_json()
+        self.assertEqual(saved_payload["config"]["teams"]["AF"]["member_emails"], ["pm1@npt.sg", "pm2@npt.sg"])
+        self.assertEqual(saved_payload["config"]["teams"]["GRC"]["member_emails"], ["ops@npt.sg", "ops2@npt.sg"])
+
+    def test_team_dashboard_tasks_api_groups_under_prd_and_pending_live_by_team(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_ALLOWED_EMAILS": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
+            },
+            clear=True,
+        ):
+            app = create_app()
+            app.testing = True
+            app.config["TEAM_DASHBOARD_CONFIG_STORE"].save(
+                {
+                    "teams": {
+                        "AF": {"member_emails": ["af@npt.sg"]},
+                        "CRMS": {"member_emails": ["cr@npt.sg"]},
+                        "GRC": {"member_emails": ["ops@npt.sg"]},
+                    }
+                }
+            )
+
+            class FakeTeamDashboardClient:
+                def list_jira_tasks_created_by_emails(self, emails):
+                    if emails == ["af@npt.sg"]:
+                        return [
+                            {
+                                "jira_id": "AF-1",
+                                "jira_link": "",
+                                "jira_title": "PRD item",
+                                "pm_email": "af@npt.sg",
+                                "jira_status": "Waiting",
+                                "version": "Planning_26Q2",
+                                "prd_links": ["https://docs/prd"],
+                                "parent_project": {
+                                    "bpmis_id": "225159",
+                                    "project_name": "Fraud Project",
+                                    "market": "SG",
+                                    "priority": "P1",
+                                    "regional_pm_pic": "regional@npt.sg",
+                                },
+                            },
+                            {
+                                "jira_id": "AF-2",
+                                "jira_title": "Pending item",
+                                "pm_email": "af@npt.sg",
+                                "jira_status": "Testing",
+                                "version": "Planning_26Q3",
+                                "prd_links": [],
+                                "parent_project": {
+                                    "bpmis_id": "225159",
+                                    "project_name": "Fraud Project",
+                                    "market": "SG",
+                                    "priority": "P1",
+                                    "regional_pm_pic": "regional@npt.sg",
+                                },
+                            },
+                            {
+                                "jira_id": "AF-3",
+                                "jira_title": "Done item",
+                                "pm_email": "af@npt.sg",
+                                "jira_status": "Done",
+                            },
+                        ]
+                    if emails == ["cr@npt.sg"]:
+                        return [
+                            {
+                                "jira_id": "CR-1",
+                                "jira_title": "Credit PRD",
+                                "pm_email": "cr@npt.sg",
+                                "jira_status": "PRD in Progress",
+                                "parent_project": {
+                                    "bpmis_id": "225200",
+                                    "project_name": "Credit Project",
+                                    "market": "ID",
+                                    "priority": "P2",
+                                    "regional_pm_pic": "credit@npt.sg",
+                                },
+                            },
+                            {
+                                "jira_id": "CR-2",
+                                "jira_title": "Icebox item",
+                                "pm_email": "cr@npt.sg",
+                                "jira_status": "IceBox",
+                            },
+                        ]
+                    return []
+
+            with patch("bpmis_jira_tool.web._build_bpmis_client_for_current_user", return_value=FakeTeamDashboardClient()):
+                with app.test_client() as client:
+                    with client.session_transaction() as session:
+                        session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong"}
+                        session["google_credentials"] = {"token": "x"}
+                    response = client.get("/api/team-dashboard/tasks")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["status"], "ok")
+        teams = {team["team_key"]: team for team in payload["teams"]}
+        self.assertEqual(teams["AF"]["under_prd"][0]["bpmis_id"], "225159")
+        self.assertEqual(teams["AF"]["under_prd"][0]["project_name"], "Fraud Project")
+        self.assertEqual(teams["AF"]["under_prd"][0]["market"], "SG")
+        self.assertEqual(teams["AF"]["under_prd"][0]["priority"], "P1")
+        self.assertEqual(teams["AF"]["under_prd"][0]["regional_pm_pic"], "regional@npt.sg")
+        self.assertEqual([item["jira_id"] for item in teams["AF"]["under_prd"][0]["jira_tickets"]], ["AF-1"])
+        self.assertEqual([item["jira_id"] for item in teams["AF"]["pending_live"][0]["jira_tickets"]], ["AF-2"])
+        self.assertEqual(teams["AF"]["under_prd"][0]["jira_tickets"][0]["jira_link"], "https://jira.shopee.io/browse/AF-1")
+        self.assertEqual(teams["CRMS"]["under_prd"][0]["bpmis_id"], "225200")
+        self.assertEqual([item["jira_id"] for item in teams["CRMS"]["under_prd"][0]["jira_tickets"]], ["CR-1"])
+        self.assertEqual(teams["CRMS"]["pending_live"], [])
+        self.assertEqual(teams["GRC"]["under_prd"], [])
 
     def test_team_default_admin_save_persists_route_override(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(

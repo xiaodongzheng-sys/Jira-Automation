@@ -6402,6 +6402,101 @@ select:focus {
   margin-top: 4px;
 }
 
+.team-dashboard-panel {
+  display: grid;
+  gap: 22px;
+}
+
+.team-dashboard-tabs {
+  margin-bottom: 2px;
+}
+
+.team-dashboard-team-list {
+  display: grid;
+  gap: 24px;
+}
+
+.team-dashboard-team {
+  display: grid;
+  gap: 18px;
+  padding-top: 18px;
+  border-top: 1px solid #e6ebf2;
+}
+
+.team-dashboard-team-head,
+.team-dashboard-section-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.team-dashboard-team-head h3,
+.team-dashboard-section-head h4 {
+  margin: 0;
+  color: #14213d;
+}
+
+.team-dashboard-team-head span,
+.team-dashboard-section-head span {
+  display: block;
+  margin-top: 4px;
+  color: #667085;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.team-dashboard-team-head strong {
+  min-width: 42px;
+  min-height: 32px;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  background: #edf6ff;
+  color: #0b5cab;
+}
+
+.team-dashboard-task-section {
+  display: grid;
+  gap: 10px;
+}
+
+.team-dashboard-project-list {
+  display: grid;
+  gap: 12px;
+}
+
+.team-dashboard-project-card .bpmis-project-card-main {
+  grid-template-columns: auto minmax(110px, 0.8fr) minmax(180px, 1.4fr) minmax(90px, 0.7fr) minmax(90px, 0.7fr) minmax(150px, 1fr) minmax(70px, 0.4fr);
+}
+
+.team-dashboard-project-count span {
+  display: block;
+  color: #667085;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.team-dashboard-project-count strong {
+  display: block;
+  margin-top: 5px;
+  color: #14213d;
+}
+
+.team-dashboard-table {
+  min-width: 980px;
+}
+
+.team-dashboard-table td {
+  vertical-align: top;
+}
+
+.team-dashboard-empty-cell {
+  color: #667085;
+  text-align: center;
+}
+
 @media (max-width: 1180px) {
   .showcase-grid,
   .workspace-grid,
