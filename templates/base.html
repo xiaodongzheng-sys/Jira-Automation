@@ -289,11 +289,13 @@
         document.querySelectorAll('[data-default-tab]').forEach((tabContainer) => {
           const tabTriggers = [...tabContainer.querySelectorAll('[data-tab-trigger]')];
           const tabNames = new Set(tabTriggers.map((trigger) => trigger.dataset.tabTrigger).filter(Boolean));
+          const requestedInitialTab = tabContainer.dataset.defaultTab || tabTriggers.find((trigger) => trigger.classList.contains('is-active'))?.dataset.tabTrigger;
+          if (requestedInitialTab) tabNames.add(requestedInitialTab);
           const tabPanels = [...document.querySelectorAll('[data-tab-panel]')]
             .filter((panel) => tabNames.has(panel.dataset.tabPanel));
           if (!tabTriggers.length || !tabPanels.length) return;
 
-          let initialTab = tabContainer.dataset.defaultTab || tabTriggers.find((trigger) => trigger.classList.contains('is-active'))?.dataset.tabTrigger;
+          let initialTab = requestedInitialTab;
 
           activateTab(initialTab || tabTriggers[0].dataset.tabTrigger, tabTriggers, tabPanels);
 

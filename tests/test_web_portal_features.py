@@ -104,6 +104,43 @@ class _FakeLocalAgentConfigClient:
         return {}
 
 
+class _FakePRDReviewService:
+    def __init__(self):
+        self.requests = []
+
+    def review(self, request):
+        self.requests.append(request)
+        if not request.prd_url:
+            raise ToolError("PRD link is required.")
+        return {
+            "status": "ok",
+            "cached": False,
+            "review": {
+                "jira_id": request.jira_id,
+                "jira_link": request.jira_link,
+                "prd_url": request.prd_url,
+                "status": "completed",
+                "result_markdown": "### Review\n- Good",
+                "updated_at": "2026-04-28T00:00:00Z",
+            },
+            "prd": {"title": "PRD"},
+        }
+
+
+class _FakePRDReviewLocalAgentClient:
+    def prd_review(self, payload):
+        return {
+            "status": "ok",
+            "cached": True,
+            "review": {
+                "jira_id": payload["jira_id"],
+                "status": "completed",
+                "result_markdown": "### Cached",
+                "updated_at": "2026-04-28T00:00:00Z",
+            },
+        }
+
+
 class WebPortalFeatureTests(unittest.TestCase):
     def test_classify_portal_error_categorizes_duplicate_route_rule(self):
         details = _classify_portal_error(
@@ -790,6 +827,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertIn(b">Team Dashboard<", admin_response.data)
         self.assertIn(b'href="/?workspace=team-dashboard"', admin_response.data)
         self.assertIn(b'data-default-tab="setup"', admin_response.data)
+        self.assertNotIn(b'data-tab-trigger="team-dashboard"', admin_response.data)
         self.assertIn(b"Team Admin", admin_response.data)
         self.assertNotIn(b">Team Default Admin<", user_response.data)
         self.assertNotIn(b">Team Dashboard<", user_response.data)
@@ -822,6 +860,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertIn(b">Team Dashboard<", source_response.data)
         self.assertEqual(dashboard_response.status_code, 200)
         self.assertIn(b'data-default-tab="team-dashboard"', dashboard_response.data)
+        self.assertNotIn(b'data-tab-trigger="team-dashboard"', dashboard_response.data)
 
     def test_team_dashboard_config_defaults_and_save_are_admin_only(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
@@ -2195,6 +2234,115 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertNotIn(b"Recovered legacy config", response.data)
         self.assertNotIn(b"Legacy Market to Component", response.data)
         self.assertIn(b"Planning_26Q2", response.data)
+
+    def test_team_dashboard_prd_review_requires_admin_access(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+            },
+            clear=False,
+        ):
+            app = create_app()
+            app.testing = True
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
+                    session["google_credentials"] = {"token": "x"}
+                response = client.post(
+                    "/api/team-dashboard/prd-review",
+                    json={"jira_id": "AF-1", "prd_url": "https://confluence/prd"},
+                )
+
+        self.assertEqual(response.status_code, 403)
+
+    @patch("bpmis_jira_tool.web._build_prd_review_service", return_value=_FakePRDReviewService())
+    def test_team_dashboard_prd_review_returns_portal_result(self, _mock_service):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+            },
+            clear=False,
+        ):
+            app = create_app()
+            app.testing = True
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong Zheng"}
+                    session["google_credentials"] = {"token": "x"}
+                response = client.post(
+                    "/api/team-dashboard/prd-review",
+                    json={
+                        "jira_id": "AF-1",
+                        "jira_link": "https://jira/browse/AF-1",
+                        "prd_url": "https://confluence/prd",
+                    },
+                )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["review"]["jira_id"], "AF-1")
+        self.assertIn("### Review", payload["review"]["result_markdown"])
+
+    @patch("bpmis_jira_tool.web._build_prd_review_service", return_value=_FakePRDReviewService())
+    def test_team_dashboard_prd_review_validates_required_prd_link(self, _mock_service):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+            },
+            clear=False,
+        ):
+            app = create_app()
+            app.testing = True
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong Zheng"}
+                    session["google_credentials"] = {"token": "x"}
+                response = client.post("/api/team-dashboard/prd-review", json={"jira_id": "AF-1"})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("PRD link is required", response.get_json()["message"])
+
+    @patch("bpmis_jira_tool.web._local_agent_source_code_qa_enabled", return_value=True)
+    @patch("bpmis_jira_tool.web._build_local_agent_client", return_value=_FakePRDReviewLocalAgentClient())
+    def test_team_dashboard_prd_review_can_route_to_local_agent(self, _mock_client, _mock_enabled):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+            },
+            clear=False,
+        ):
+            app = create_app()
+            app.testing = True
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong Zheng"}
+                    session["google_credentials"] = {"token": "x"}
+                response = client.post(
+                    "/api/team-dashboard/prd-review",
+                    json={"jira_id": "AF-1", "prd_url": "https://confluence/prd"},
+                )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertTrue(payload["cached"])
+        self.assertEqual(payload["review"]["result_markdown"], "### Cached")
 
 
 if __name__ == "__main__":
