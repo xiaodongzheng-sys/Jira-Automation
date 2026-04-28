@@ -198,7 +198,7 @@
             <div>
               <p class="eyebrow">Runtime Evidence</p>
               <h2>DB / Apollo Uploads</h2>
-              <p class="card-help">Upload production DB exports or Apollo config snapshots by system and country. Answers use them as runtime evidence, separate from source-code evidence.</p>
+              <p class="card-help">Upload DB exports or UAT Apollo config snapshots by system and country. Answers use them as reference evidence, separate from source-code evidence.</p>
             </div>
             <button class="button button-secondary" type="button" data-source-runtime-evidence-upload>Upload Evidence</button>
           </div>
@@ -222,7 +222,7 @@
             <label class="field-group">
               <span>Source Type</span>
               <select data-source-runtime-source-type>
-                <option value="apollo">Apollo config</option>
+                <option value="apollo">Apollo config (UAT reference)</option>
                 <option value="db">DB data</option>
                 <option value="other">Other runtime evidence</option>
               </select>
@@ -238,7 +238,7 @@
             <div class="source-qa-empty">No runtime evidence loaded for this scope.</div>
           </div>
           <div class="source-qa-status" data-source-runtime-evidence-status>
-            Runtime evidence is scoped by system and country. AF/GRC code can stay shared while Apollo snapshots stay country-specific.
+            Runtime evidence is scoped by system and country. Apollo uploads are treated as UAT/non-Live reference only unless Live evidence is explicitly uploaded.
           </div>
         </section>
 

@@ -903,7 +903,7 @@
   });
 
   const runtimeEvidenceTypeLabel = (sourceType) => ({
-    apollo: 'Apollo',
+    apollo: 'Apollo UAT reference',
     db: 'DB',
     other: 'Other',
   }[sourceType] || sourceType || 'Runtime');

@@ -549,6 +549,25 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertTrue(any("apollo.sg.rule.enabled" in item.get("text", "") for item in captured["runtime_evidence"]))
         self.assertEqual(response.get_json()["runtime_evidence"][0]["pm_team"], "AF")
 
+    def test_runtime_evidence_prompt_marks_apollo_as_uat_reference_only(self):
+        section = SourceCodeQAService._runtime_evidence_prompt_section(
+            [
+                {
+                    "id": "e1",
+                    "filename": "apollo.properties",
+                    "source_type": "apollo",
+                    "pm_team": "AF",
+                    "country": "SG",
+                    "kind": "text",
+                    "text": "feature.enabled=true",
+                }
+            ]
+        )
+
+        self.assertIn("UAT/non-Live", section)
+        self.assertIn("never use them as confirmed Live/production configuration facts", section)
+        self.assertNotIn("production DB/Apollo/config snapshots", section)
+
     def test_query_empty_config_is_controlled(self):
         with self.app.test_client() as client:
             self._login(client, "teammate@npt.sg")

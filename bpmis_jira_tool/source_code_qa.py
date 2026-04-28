@@ -15591,7 +15591,8 @@ class SourceCodeQAService:
             return ""
         lines = [
             "Uploaded runtime evidence:",
-            "- Treat these files as user-uploaded production DB/Apollo/config snapshots, not repository source code.",
+            "- Treat these files as user-uploaded runtime/reference evidence, not repository source code.",
+            "- Apollo uploads are UAT/non-Live configuration references unless the user explicitly proves otherwise; never use them as confirmed Live/production configuration facts.",
             "- Separate source-code evidence, runtime evidence, attachment evidence, and missing evidence in the answer.",
             "- Runtime evidence can be stale or partial; use its pm_team/country/source_type labels and do not generalize it across countries unless the file proves that.",
             "- If runtime evidence conflicts with source code, describe the conflict instead of silently choosing one.",
@@ -16501,6 +16502,7 @@ class SourceCodeQAService:
             "- Treat raw code snippets as the source of truth when they are provided as primary evidence; use compressed facts as navigation hints and consistency checks.\n"
             "- If user attachments are present, label their contribution as attachment evidence and do not present it as source-code evidence.\n"
             "- If uploaded runtime evidence is present, label DB/Apollo/config facts as runtime evidence, keep country scope explicit, and do not present them as source-code evidence.\n"
+            "- Treat uploaded Apollo config as UAT/non-Live reference only unless the user explicitly provides Live evidence; do not conclude current production behavior from UAT Apollo uploads alone.\n"
             "- Follow the domain-specific evidence rules and answer blueprint when present.\n"
             "- Apply evidence priority: production code and mapper/client/SQL evidence beat config snapshots, tests, and docs/spec/generated files.\n"
             "- For data-source questions, a DTO/Input/Info class is not a final data source. Trace backward to the provider/builder/setter and then to repository/mapper/client/API/table when evidence exists.\n"
