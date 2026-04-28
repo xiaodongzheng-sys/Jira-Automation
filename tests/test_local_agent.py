@@ -114,6 +114,51 @@ class LocalAgentServerTests(unittest.TestCase):
         self.assertEqual(response.get_json()["summary"], "agent answer")
         query.assert_called_once()
 
+    def test_signed_source_code_query_forwards_attachments(self):
+        with patch(
+            "bpmis_jira_tool.source_code_qa.SourceCodeQAService.query",
+            return_value={"status": "ok", "summary": "agent answer", "matches": []},
+        ) as query:
+            response = self._post_signed(
+                "/api/local-agent/source-code-qa/query",
+                {
+                    "pm_team": "AF",
+                    "country": "All",
+                    "question": "use file",
+                    "attachments": [{"id": "att-1", "filename": "notes.txt", "kind": "text"}],
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(query.call_args.kwargs["attachments"][0]["id"], "att-1")
+
+    def test_signed_source_code_attachment_save_and_resolve(self):
+        save_response = self._post_signed(
+            "/api/local-agent/source-code-qa/attachments/save",
+            {
+                "owner_email": "teammate@npt.sg",
+                "session_id": "session1234",
+                "filename": "notes.txt",
+                "mime_type": "text/plain",
+                "content_base64": "aGVsbG8gYXR0YWNobWVudA==",
+            },
+        )
+        attachment_id = save_response.get_json()["attachment"]["id"]
+        resolve_response = self._post_signed(
+            "/api/local-agent/source-code-qa/attachments/resolve",
+            {
+                "owner_email": "teammate@npt.sg",
+                "session_id": "session1234",
+                "attachment_ids": [attachment_id],
+            },
+        )
+
+        self.assertEqual(save_response.status_code, 200)
+        self.assertEqual(resolve_response.status_code, 200)
+        resolved = resolve_response.get_json()["attachments"][0]
+        self.assertEqual(resolved["filename"], "notes.txt")
+        self.assertIn("hello attachment", resolved["text"])
+
     def test_signed_source_code_async_query_streams_progress(self):
         class ImmediateThread:
             def __init__(self, *, target, args=(), daemon=False):

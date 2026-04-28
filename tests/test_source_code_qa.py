@@ -1,4 +1,5 @@
 import json
+import io
 import os
 from datetime import date, timedelta
 from pathlib import Path
@@ -406,6 +407,83 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertEqual(payload["session"]["last_context"]["question"], "follow up")
         self.assertEqual(payload["session"]["last_context"]["recent_turns"][0]["question"], "first question")
         self.assertEqual(payload["session"]["last_context"]["recent_turns"][0]["trace_id"], "trace-1")
+
+    def test_source_code_qa_attachment_upload_is_session_scoped(self):
+        with self.app.test_client() as client:
+            self._login(client, "teammate@npt.sg")
+            created = client.post("/api/source-code-qa/sessions", json={"pm_team": "AF", "country": "All", "llm_provider": "codex_cli_bridge"})
+            session_id = created.get_json()["session"]["id"]
+            upload = client.post(
+                "/api/source-code-qa/attachments",
+                data={
+                    "session_id": session_id,
+                    "file": (io.BytesIO(b"ticket field notes"), "notes.txt"),
+                },
+                content_type="multipart/form-data",
+            )
+            attachment = upload.get_json()["attachment"]
+            downloaded = client.get(f"/api/source-code-qa/attachments/{attachment['id']}?session_id={session_id}")
+
+            self._login(client, "other@npt.sg")
+            blocked = client.get(f"/api/source-code-qa/attachments/{attachment['id']}?session_id={session_id}")
+
+        self.assertEqual(upload.status_code, 200)
+        self.assertEqual(attachment["filename"], "notes.txt")
+        self.assertEqual(attachment["kind"], "text")
+        self.assertEqual(downloaded.status_code, 200)
+        self.assertEqual(downloaded.data, b"ticket field notes")
+        self.assertEqual(blocked.status_code, 404)
+
+    def test_query_passes_attachment_metadata_and_text_to_service(self):
+        captured = {}
+
+        def fake_query(**kwargs):
+            captured.update(kwargs)
+            return {
+                "status": "ok",
+                "answer_mode": "auto",
+                "summary": "answer summary",
+                "llm_answer": "direct answer",
+                "llm_provider": "codex_cli_bridge",
+                "llm_model": "codex-cli",
+                "trace_id": "trace-attachment",
+                "matches": [],
+            }
+
+        with self.app.test_client() as client:
+            self._login(client, "teammate@npt.sg")
+            created = client.post("/api/source-code-qa/sessions", json={"pm_team": "AF", "country": "All", "llm_provider": "codex_cli_bridge"})
+            session_id = created.get_json()["session"]["id"]
+            uploaded = client.post(
+                "/api/source-code-qa/attachments",
+                data={
+                    "session_id": session_id,
+                    "file": (io.BytesIO(b"uploaded source question context"), "context.md"),
+                },
+                content_type="multipart/form-data",
+            ).get_json()["attachment"]
+            with patch("bpmis_jira_tool.source_code_qa.SourceCodeQAService.ensure_synced_today", return_value={"attempted": False, "status": "fresh"}), patch(
+                "bpmis_jira_tool.source_code_qa.SourceCodeQAService.query",
+                side_effect=fake_query,
+            ):
+                response = client.post(
+                    "/api/source-code-qa/query",
+                    json={
+                        "session_id": session_id,
+                        "pm_team": "AF",
+                        "country": "All",
+                        "question": "use attachment",
+                        "llm_provider": "codex_cli_bridge",
+                        "attachment_ids": [uploaded["id"]],
+                    },
+                )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(captured["attachments"][0]["filename"], "context.md")
+        self.assertIn("uploaded source question context", captured["attachments"][0]["text"])
+        self.assertEqual(payload["attachments"][0]["id"], uploaded["id"])
+        self.assertEqual(payload["session"]["messages"][-2]["attachments"][0]["filename"], "context.md")
 
     def test_query_empty_config_is_controlled(self):
         with self.app.test_client() as client:
@@ -1013,6 +1091,28 @@ class SourceCodeQAServiceTests(unittest.TestCase):
                 repo_path = target_service._repo_path(key, repo_entry)
                 if (repo_path / ".git").exists():
                     target_service._build_repo_index(key, repo_entry, repo_path)
+
+    def test_attachment_prompt_and_gemini_parts_keep_attachment_evidence_separate(self):
+        image_path = Path(self.temp_dir.name) / "screen.png"
+        image_path.write_bytes(b"fake-image")
+        attachment = {
+            "id": "att-1",
+            "filename": "screen.png",
+            "mime_type": "image/png",
+            "kind": "image",
+            "size": 10,
+            "sha256": "a" * 64,
+            "path": str(image_path),
+        }
+
+        section = self.service._attachment_prompt_section([attachment])
+        parts = self.service._llm_payload_parts("Question prompt", [attachment])
+
+        self.assertIn("User attachments", section)
+        self.assertIn("not repository facts", section)
+        self.assertEqual(parts[0], {"text": "Question prompt"})
+        self.assertEqual(parts[1]["inlineData"]["mimeType"], "image/png")
+        self.assertTrue(parts[1]["inlineData"]["data"])
 
     def test_sync_subprocess_timeout_is_controlled(self):
         self.service.save_mapping(
@@ -7011,6 +7111,9 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             "systemInstruction": {"parts": [{"text": "system"}]},
             "contents": [{"parts": [{"text": "Question: where is createIssue"}]}],
         }
+        image_path = Path(self.temp_dir.name) / "screenshot.png"
+        image_path.write_bytes(b"fake-png")
+        payload["_codex_image_paths"] = [str(image_path)]
         with patch("bpmis_jira_tool.source_code_qa.shutil.which", return_value="/usr/local/bin/codex"), patch(
             "bpmis_jira_tool.source_code_qa.subprocess.run",
             side_effect=fake_run,
@@ -7024,6 +7127,8 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertIn("--ephemeral", exec_command)
         self.assertIn("--json", exec_command)
         self.assertIn("--skip-git-repo-check", exec_command)
+        self.assertIn("--image", exec_command)
+        self.assertIn(str(image_path), exec_command)
         self.assertEqual(result.model, "codex-cli")
         self.assertEqual(result.attempt_log[0]["exit_code"], 0)
         self.assertEqual(result.attempt_log[0]["workspace_root"], self.temp_dir.name)

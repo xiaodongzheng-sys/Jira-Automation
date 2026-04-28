@@ -8,6 +8,7 @@
     data-save-url="{{ url_for('source_code_qa_save_config_api') }}"
     data-sync-url="{{ url_for('source_code_qa_sync_api') }}"
     data-query-url="{{ url_for('source_code_qa_query_api') }}"
+    data-attachment-url="{{ url_for('source_code_qa_attachments_api') }}"
     data-jobs-url="{{ url_for('get_job', job_id='__JOB_ID__') }}"
     data-feedback-url="{{ url_for('source_code_qa_feedback_api') }}"
     data-sessions-url="{{ url_for('source_code_qa_sessions_api') }}"
@@ -98,6 +99,17 @@
           <div class="source-qa-live-answer" data-source-live-answer hidden></div>
           <div class="source-qa-chat-composer source-qa-composer">
             <textarea data-source-question rows="4"></textarea>
+            <input
+              type="file"
+              data-source-attachment-input
+              multiple
+              hidden
+              accept="image/png,image/jpeg,image/webp,image/gif,.txt,.md,.csv,.json,.xml,.yaml,.yml,.log,.java,.py,.js,.ts,.tsx,.sql,.properties,.kt,.go,.rb,.php,.html,.css,.sh,.pdf,.docx,.xlsx"
+            >
+            <div class="source-qa-attachment-bar">
+              <button class="button button-secondary source-qa-attachment-button" type="button" data-source-attachment-upload>Add photos &amp; files</button>
+              <div class="source-qa-attachment-list" data-source-attachments hidden></div>
+            </div>
             <button class="button source-qa-send-button" type="button" data-source-query aria-label="Send question">Send</button>
             <span class="microcopy" data-source-query-status hidden>Ready.</span>
           </div>

@@ -6,6 +6,7 @@
   const saveUrl = root.dataset.saveUrl;
   const syncUrl = root.dataset.syncUrl;
   const queryUrl = root.dataset.queryUrl;
+  const attachmentUrl = root.dataset.attachmentUrl;
   const jobsUrlTemplate = root.dataset.jobsUrl || '/api/jobs/__JOB_ID__';
   const feedbackUrl = root.dataset.feedbackUrl;
   const sessionsUrl = root.dataset.sessionsUrl;
@@ -26,6 +27,9 @@
   const questionInput = document.querySelector('[data-source-question]');
   const queryButton = document.querySelector('[data-source-query]');
   const queryStatus = document.querySelector('[data-source-query-status]');
+  const attachmentInput = document.querySelector('[data-source-attachment-input]');
+  const attachmentUploadButton = document.querySelector('[data-source-attachment-upload]');
+  const attachmentsList = document.querySelector('[data-source-attachments]');
   const repoStatus = document.querySelector('[data-source-repo-status]');
   const summary = document.querySelector('[data-source-summary]');
   const results = document.querySelector('[data-source-results]');
@@ -69,6 +73,7 @@
   let sessionHistoryExpanded = false;
   let liveAssistantMessage = null;
   let pendingUserMessage = null;
+  let pendingAttachments = [];
   let activeQueryControl = null;
   const preferenceKey = 'source-code-qa:last-query-config:v1';
 
@@ -184,6 +189,90 @@
   const formatElapsed = (startedAt) => {
     const seconds = Math.max(0, (performance.now() - startedAt) / 1000);
     return seconds < 10 ? `${seconds.toFixed(1)}s` : `${Math.round(seconds)}s`;
+  };
+  const formatAttachmentSize = (bytes) => {
+    const size = Number(bytes || 0);
+    if (size >= 1024 * 1024) return `${(size / 1024 / 1024).toFixed(1)} MB`;
+    if (size >= 1024) return `${Math.round(size / 1024)} KB`;
+    return `${size} B`;
+  };
+  const renderAttachmentChips = (items = []) => {
+    if (!items.length) return '';
+    return `
+      <div class="source-qa-message-attachments">
+        ${items.map((item) => `
+          <span class="source-qa-attachment-chip">
+            <strong>${escapeHtml(item.filename || 'attachment')}</strong>
+            <small>${escapeHtml(item.kind || item.mime_type || 'file')} · ${escapeHtml(formatAttachmentSize(item.size))}</small>
+          </span>
+        `).join('')}
+      </div>
+    `;
+  };
+  const renderPendingAttachments = () => {
+    if (!attachmentsList) return;
+    if (!pendingAttachments.length) {
+      attachmentsList.hidden = true;
+      attachmentsList.innerHTML = '';
+      return;
+    }
+    attachmentsList.hidden = false;
+    attachmentsList.innerHTML = pendingAttachments.map((item) => `
+      <span class="source-qa-attachment-chip">
+        <strong>${escapeHtml(item.filename || 'attachment')}</strong>
+        <small>${escapeHtml(item.kind || item.mime_type || 'file')} · ${escapeHtml(formatAttachmentSize(item.size))}</small>
+        <button type="button" aria-label="Remove ${escapeHtml(item.filename || 'attachment')}" data-source-remove-attachment="${escapeHtml(item.id || '')}">x</button>
+      </span>
+    `).join('');
+  };
+  const clearPendingAttachments = () => {
+    pendingAttachments = [];
+    if (attachmentInput) attachmentInput.value = '';
+    renderPendingAttachments();
+  };
+  const uploadSourceAttachment = async (file, sessionId) => {
+    if (!attachmentUrl) throw new Error('Attachment API is not configured.');
+    const form = new FormData();
+    form.append('session_id', sessionId);
+    form.append('file', file);
+    const payload = await fetch(attachmentUrl, {
+      method: 'POST',
+      headers: { Accept: 'application/json' },
+      body: form,
+    }).then(readJson);
+    return payload.attachment;
+  };
+  const addAttachmentFiles = async (files) => {
+    const selectedFiles = Array.from(files || []);
+    if (!selectedFiles.length) return;
+    if (pendingAttachments.length + selectedFiles.length > 5) {
+      if (queryStatus) queryStatus.textContent = 'At most 5 attachments are supported per question.';
+      return;
+    }
+    const existingImages = pendingAttachments.filter((item) => item.kind === 'image').length;
+    const nextImages = selectedFiles.filter((file) => String(file.type || '').startsWith('image/')).length;
+    if (existingImages + nextImages > 3) {
+      if (queryStatus) queryStatus.textContent = 'At most 3 image attachments are supported per question.';
+      return;
+    }
+    const session = await ensureActiveSession({ preserveLive: true, preservePending: true });
+    if (!session?.id) throw new Error('Could not create a chat session for attachments.');
+    if (attachmentUploadButton) attachmentUploadButton.disabled = true;
+    try {
+      for (const file of selectedFiles) {
+        if (file.size > 10 * 1024 * 1024) {
+          throw new Error(`${file.name} is larger than 10MB.`);
+        }
+        if (queryStatus) queryStatus.textContent = `Uploading ${file.name}...`;
+        const uploaded = await uploadSourceAttachment(file, session.id);
+        pendingAttachments.push(uploaded);
+        renderPendingAttachments();
+      }
+      if (queryStatus) queryStatus.textContent = 'Attachment uploaded.';
+    } finally {
+      if (attachmentUploadButton) attachmentUploadButton.disabled = false;
+      if (attachmentInput) attachmentInput.value = '';
+    }
   };
 
   const stopQueryProgress = () => {
@@ -380,6 +469,7 @@
           role: 'user',
           text: pendingUserMessage.text,
           created_at: pendingUserMessage.created_at || '',
+          attachments: pendingUserMessage.attachments || [],
           pending: true,
         });
       }
@@ -410,6 +500,7 @@
       const text = message.role === 'assistant'
         ? (message.text || payload.llm_answer || payload.structured_answer?.direct_answer || payload.summary || 'Answer completed.')
         : message.text;
+      const attachmentItems = Array.isArray(message.attachments) ? message.attachments : (Array.isArray(payload.attachments) ? payload.attachments : []);
       const citations = (payload.structured_answer?.citations || payload.matches || [])
         .slice(0, 4)
         .map((item) => typeof item === 'string' ? item : item.path)
@@ -422,7 +513,10 @@
             </strong>
             <span>${escapeHtml(meta)}</span>
           </div>
-          <div class="source-qa-message-body">${message.live ? `<pre>${escapeHtml(text)}</pre>` : (message.role === 'assistant' ? renderReadableAnswerBody(payload, text) : `<p>${escapeHtml(text)}</p>`)}</div>
+          <div class="source-qa-message-body">
+            ${message.live ? `<pre>${escapeHtml(text)}</pre>` : (message.role === 'assistant' ? renderReadableAnswerBody(payload, text) : `<p>${escapeHtml(text)}</p>`)}
+            ${renderAttachmentChips(attachmentItems)}
+          </div>
           ${citations.length ? `<div class="source-qa-message-citations">${citations.map((item) => `<span>${escapeHtml(item)}</span>`).join('')}</div>` : ''}
         </article>
       `;
@@ -430,13 +524,14 @@
     sessionMessages.scrollTop = sessionMessages.scrollHeight;
   };
 
-  const renderOptimisticUserMessage = (question) => {
+  const renderOptimisticUserMessage = (question, attachments = []) => {
     if (!sessionMessages) return;
     const text = String(question || '').trim();
     if (!text) return;
     pendingUserMessage = {
       text,
       created_at: new Date().toISOString(),
+      attachments: attachments.map((item) => ({ ...item })),
     };
     renderSessionMessages(activeSession);
   };
@@ -883,6 +978,7 @@
     summary: payload?.summary || '',
     answer: payload?.llm_answer || '',
     rendered_answer: payload?.llm_answer || '',
+    attachments: (payload?.attachments || []).slice(0, 5),
     llm_provider: payload?.llm_provider || '',
     llm_model: payload?.llm_model || '',
     llm_route: payload?.llm_route || {},
@@ -1411,7 +1507,9 @@
       const session = await ensureActiveSession({ preserveLive: true, preservePending: true });
       if (queryControl.stopped) return;
       const previousAssistantCount = countAssistantMessages(session || activeSession);
-      renderOptimisticUserMessage(submittedQuestion);
+      const attachmentsForQuestion = pendingAttachments.map((item) => ({ ...item }));
+      renderOptimisticUserMessage(submittedQuestion, attachmentsForQuestion);
+      clearPendingAttachments();
       const initialPayload = await apiFetchJson(queryUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1423,6 +1521,7 @@
           answer_mode: effectiveAnswerMode,
           llm_provider: selectedProvider,
           llm_budget_mode: 'auto',
+          attachment_ids: attachmentsForQuestion.map((item) => item.id).filter(Boolean),
           conversation_context: conversationContext,
           async: true,
         }),
@@ -1548,6 +1647,7 @@
     try {
       await createSession();
       if (questionInput) questionInput.value = '';
+      clearPendingAttachments();
       if (summary) summary.textContent = 'No question asked yet.';
       if (results) results.innerHTML = '<div class="source-qa-empty">Ask a question to generate an answer. Retrieval details stay in the background unless Codex is unavailable.</div>';
       renderUsageBadges({});
@@ -1566,6 +1666,22 @@
   saveModelAvailabilityButton?.addEventListener('click', saveModelAvailability);
   syncButton?.addEventListener('click', syncRepos);
   queryButton?.addEventListener('click', queryCode);
+  attachmentUploadButton?.addEventListener('click', () => attachmentInput?.click());
+  attachmentInput?.addEventListener('change', async () => {
+    try {
+      await addAttachmentFiles(attachmentInput.files);
+    } catch (error) {
+      if (queryStatus) queryStatus.textContent = error.message || 'Attachment upload failed.';
+      if (attachmentInput) attachmentInput.value = '';
+    }
+  });
+  attachmentsList?.addEventListener('click', (event) => {
+    const button = event.target.closest('[data-source-remove-attachment]');
+    if (!button) return;
+    const attachmentId = button.dataset.sourceRemoveAttachment || '';
+    pendingAttachments = pendingAttachments.filter((item) => item.id !== attachmentId);
+    renderPendingAttachments();
+  });
   viewTabs.forEach((tab) => {
     tab.addEventListener('click', () => setSourceView(tab.dataset.sourceViewTab));
   });

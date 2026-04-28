@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
 import tempfile
@@ -25,6 +26,7 @@ from bpmis_jira_tool.user_config import TEAM_PROFILE_DEFAULTS, WebConfigStore
 from bpmis_jira_tool.web import (
     SeaTalkNameMappingStore,
     SeaTalkTodoStore,
+    SourceCodeQAAttachmentStore,
     SourceCodeQAModelAvailabilityStore,
     SourceCodeQASessionStore,
     _generate_productization_detailed_features_with_local_codex,
@@ -156,6 +158,7 @@ def create_local_agent_app() -> Flask:
             answer_mode=str(payload.get("answer_mode") or "auto"),
             llm_budget_mode=str(payload.get("llm_budget_mode") or "auto"),
             conversation_context=payload.get("conversation_context") if isinstance(payload.get("conversation_context"), dict) else None,
+            attachments=payload.get("attachments") if isinstance(payload.get("attachments"), list) else None,
         )
         return jsonify({"status": "ok", **result})
 
@@ -258,8 +261,57 @@ def create_local_agent_app() -> Flask:
             question=str(payload.get("question") or ""),
             result=payload.get("result") if isinstance(payload.get("result"), dict) else {},
             context=payload.get("context") if isinstance(payload.get("context"), dict) else {},
+            attachments=payload.get("attachments") if isinstance(payload.get("attachments"), list) else None,
         )
         return jsonify({"status": "ok", "session": session})
+
+    @app.post("/api/local-agent/source-code-qa/attachments/save")
+    def source_code_qa_attachment_save():
+        payload = request.get_json(silent=True) or {}
+        try:
+            content = base64.b64decode(str(payload.get("content_base64") or "").encode("ascii"))
+            attachment = _build_source_code_qa_attachment_store(settings).save_bytes(
+                owner_email=str(payload.get("owner_email") or ""),
+                session_id=str(payload.get("session_id") or ""),
+                filename=str(payload.get("filename") or "attachment"),
+                mime_type=str(payload.get("mime_type") or ""),
+                content=content,
+            )
+            return jsonify({"status": "ok", "attachment": attachment})
+        except ToolError as error:
+            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
+
+    @app.post("/api/local-agent/source-code-qa/attachments/resolve")
+    def source_code_qa_attachments_resolve():
+        payload = request.get_json(silent=True) or {}
+        try:
+            attachments = _build_source_code_qa_attachment_store(settings).resolve_many(
+                owner_email=str(payload.get("owner_email") or ""),
+                session_id=str(payload.get("session_id") or ""),
+                attachment_ids=[str(item or "") for item in (payload.get("attachment_ids") or [])],
+            )
+            return jsonify({"status": "ok", "attachments": attachments})
+        except ToolError as error:
+            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
+
+    @app.post("/api/local-agent/source-code-qa/attachments/get")
+    def source_code_qa_attachment_get():
+        payload = request.get_json(silent=True) or {}
+        try:
+            metadata, content = _build_source_code_qa_attachment_store(settings).get_bytes(
+                owner_email=str(payload.get("owner_email") or ""),
+                session_id=str(payload.get("session_id") or ""),
+                attachment_id=str(payload.get("attachment_id") or ""),
+            )
+            return jsonify(
+                {
+                    "status": "ok",
+                    "attachment": metadata,
+                    "content_base64": base64.b64encode(content).decode("ascii"),
+                }
+            )
+        except ToolError as error:
+            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.NOT_FOUND
 
     @app.post("/api/local-agent/source-code-qa/model-availability/get")
     def source_code_qa_model_availability_get():
@@ -741,6 +793,7 @@ def _run_source_code_qa_query_job(app: Flask, job_id: str, payload: dict[str, An
                 answer_mode=str(payload.get("answer_mode") or "auto"),
                 llm_budget_mode=str(payload.get("llm_budget_mode") or "auto"),
                 conversation_context=payload.get("conversation_context") if isinstance(payload.get("conversation_context"), dict) else None,
+                attachments=payload.get("attachments") if isinstance(payload.get("attachments"), list) else None,
                 progress_callback=progress_callback,
             )
             _update_query_job(
@@ -804,6 +857,10 @@ def _data_root(settings: Settings) -> Path:
 
 def _build_source_code_qa_session_store(settings: Settings) -> SourceCodeQASessionStore:
     return SourceCodeQASessionStore(_data_root(settings) / "source_code_qa" / "sessions.json")
+
+
+def _build_source_code_qa_attachment_store(settings: Settings) -> SourceCodeQAAttachmentStore:
+    return SourceCodeQAAttachmentStore(_data_root(settings) / "source_code_qa" / "attachments")
 
 
 def _build_source_code_qa_model_availability_store(settings: Settings) -> SourceCodeQAModelAvailabilityStore:

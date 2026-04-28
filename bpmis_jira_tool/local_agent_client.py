@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import time
 from typing import Any, Callable
@@ -302,6 +303,48 @@ class LocalAgentClient:
         payload = self._request("POST", "/api/local-agent/source-code-qa/sessions/append", exchange)
         session = payload.get("session")
         return session if isinstance(session, dict) else None
+
+    def source_code_qa_attachment_save(
+        self,
+        *,
+        owner_email: str,
+        session_id: str,
+        filename: str,
+        mime_type: str,
+        content: bytes,
+    ) -> dict[str, Any]:
+        payload = self._request(
+            "POST",
+            "/api/local-agent/source-code-qa/attachments/save",
+            {
+                "owner_email": owner_email,
+                "session_id": session_id,
+                "filename": filename,
+                "mime_type": mime_type,
+                "content_base64": base64.b64encode(content).decode("ascii"),
+            },
+        )
+        attachment = payload.get("attachment")
+        return attachment if isinstance(attachment, dict) else {}
+
+    def source_code_qa_attachments_resolve(self, *, owner_email: str, session_id: str, attachment_ids: list[str]) -> list[dict[str, Any]]:
+        payload = self._request(
+            "POST",
+            "/api/local-agent/source-code-qa/attachments/resolve",
+            {"owner_email": owner_email, "session_id": session_id, "attachment_ids": attachment_ids},
+        )
+        attachments = payload.get("attachments")
+        return attachments if isinstance(attachments, list) else []
+
+    def source_code_qa_attachment_get(self, *, owner_email: str, session_id: str, attachment_id: str) -> tuple[dict[str, Any], bytes]:
+        payload = self._request(
+            "POST",
+            "/api/local-agent/source-code-qa/attachments/get",
+            {"owner_email": owner_email, "session_id": session_id, "attachment_id": attachment_id},
+        )
+        metadata = payload.get("attachment") if isinstance(payload.get("attachment"), dict) else {}
+        encoded = str(payload.get("content_base64") or "")
+        return metadata, base64.b64decode(encoded.encode("ascii")) if encoded else b""
 
     def source_code_qa_model_availability_get(self) -> dict[str, bool]:
         payload = self._request("POST", "/api/local-agent/source-code-qa/model-availability/get", {})
@@ -655,6 +698,42 @@ class RemoteSourceCodeQASessionStore:
 
     def append_exchange(self, session_id: str, **kwargs: Any) -> dict[str, Any] | None:
         return self.client.source_code_qa_session_append(session_id=session_id, **kwargs)
+
+
+class RemoteSourceCodeQAAttachmentStore:
+    def __init__(self, client: LocalAgentClient) -> None:
+        self.client = client
+
+    def save_bytes(
+        self,
+        *,
+        owner_email: str,
+        session_id: str,
+        filename: str,
+        content: bytes,
+        mime_type: str = "",
+    ) -> dict[str, Any]:
+        return self.client.source_code_qa_attachment_save(
+            owner_email=owner_email,
+            session_id=session_id,
+            filename=filename,
+            mime_type=mime_type,
+            content=content,
+        )
+
+    def resolve_many(self, *, owner_email: str, session_id: str, attachment_ids: list[str]) -> list[dict[str, Any]]:
+        return self.client.source_code_qa_attachments_resolve(
+            owner_email=owner_email,
+            session_id=session_id,
+            attachment_ids=attachment_ids,
+        )
+
+    def get_bytes(self, *, owner_email: str, session_id: str, attachment_id: str) -> tuple[dict[str, Any], bytes]:
+        return self.client.source_code_qa_attachment_get(
+            owner_email=owner_email,
+            session_id=session_id,
+            attachment_id=attachment_id,
+        )
 
 
 class RemoteSourceCodeQAModelAvailabilityStore:

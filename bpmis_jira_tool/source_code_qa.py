@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import base64
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 import functools
@@ -942,6 +943,15 @@ class CodexCliBridgeSourceCodeQALLMProvider(SourceCodeQALLMProvider):
         self.workspace_root.mkdir(parents=True, exist_ok=True)
         progress_callback = payload.get("_progress_callback") if callable(payload.get("_progress_callback")) else None
         prompt = self._prompt_from_gemini_payload(payload)
+        image_paths = [
+            str(path or "").strip()
+            for path in (payload.get("_codex_image_paths") or [])
+            if str(path or "").strip()
+        ]
+        for image_path in image_paths:
+            path = Path(image_path)
+            if not path.exists() or not path.is_file():
+                raise ToolError(f"Codex image attachment is missing or unreadable: {image_path}")
         started_at = time.time()
         attempt_started = time.time()
         model = str(primary_model or "codex-cli").strip() or "codex-cli"
@@ -952,6 +962,7 @@ class CodexCliBridgeSourceCodeQALLMProvider(SourceCodeQALLMProvider):
                 output_file=output_file.name,
                 model=model,
                 session_id=codex_cli_session_id,
+                image_paths=image_paths,
             )
             queue_started = time.time()
             queue_wait_ms = 0
@@ -1050,11 +1061,22 @@ class CodexCliBridgeSourceCodeQALLMProvider(SourceCodeQALLMProvider):
             ),
         )
 
-    def _build_codex_command(self, *, output_file: str, model: str, session_id: str = "") -> tuple[list[str], str]:
+    def _build_codex_command(
+        self,
+        *,
+        output_file: str,
+        model: str,
+        session_id: str = "",
+        image_paths: list[str] | None = None,
+    ) -> tuple[list[str], str]:
+        image_args: list[str] = []
+        for image_path in image_paths or []:
+            image_args.extend(["--image", str(image_path)])
         if self.session_mode == CODEX_SESSION_MODE_RESUME:
             command = [self.codex_binary, "exec"]
             if model not in {"codex-cli", "codex"}:
                 command.extend(["--model", model])
+            command.extend(image_args)
             if session_id:
                 command.extend(
                     [
@@ -1098,6 +1120,11 @@ class CodexCliBridgeSourceCodeQALLMProvider(SourceCodeQALLMProvider):
         ]
         if model not in {"codex-cli", "codex"}:
             command[2:2] = ["--model", model]
+        if image_args:
+            insert_at = 2
+            if model not in {"codex-cli", "codex"}:
+                insert_at = 4
+            command[insert_at:insert_at] = image_args
         return command, "ephemeral"
 
     def _run_codex_streaming(self, *, command: list[str], prompt: str, progress_callback: Any) -> Any:
@@ -1835,6 +1862,8 @@ class OpenAICompatibleSourceCodeQALLMProvider(SourceCodeQALLMProvider):
     ) -> LLMGenerateResult:
         if not self.ready():
             raise ToolError("LLM mode is not configured yet. Set SOURCE_CODE_QA_OPENAI_API_KEY or OPENAI_API_KEY on the server first.")
+        if self._has_inline_image_part(payload):
+            raise ToolError("Current Source Code Q&A provider does not support image attachments. Use Codex or Vertex for image-based questions.")
         messages = self._messages_from_gemini_payload(payload)
         generation_config = payload.get("generationConfig") or {}
         models = [primary_model]
@@ -1968,6 +1997,14 @@ class OpenAICompatibleSourceCodeQALLMProvider(SourceCodeQALLMProvider):
             "api_base_url": self.api_base_url,
             "runtime": self.runtime_config(),
         }
+
+    @staticmethod
+    def _has_inline_image_part(payload: dict[str, Any]) -> bool:
+        for content in payload.get("contents") or []:
+            for part in content.get("parts") or []:
+                if isinstance(part, dict) and (part.get("inlineData") or part.get("inline_data")):
+                    return True
+        return False
 
     @staticmethod
     def _messages_from_gemini_payload(payload: dict[str, Any]) -> list[dict[str, str]]:
@@ -3502,6 +3539,7 @@ class SourceCodeQAService:
         answer_mode: str = ANSWER_MODE,
         llm_budget_mode: str = "cheap",
         conversation_context: dict[str, Any] | None = None,
+        attachments: list[dict[str, Any]] | None = None,
         progress_callback: Any | None = None,
     ) -> dict[str, Any]:
         key = self.mapping_key(pm_team, country)
@@ -4131,6 +4169,7 @@ class SourceCodeQAService:
                 requested_answer_mode=normalized_answer_mode,
                 request_cache=request_cache,
                 progress_callback=progress_callback,
+                attachments=attachments or [],
             )
             payload.update(llm_payload)
             payload["evidence_outline"] = self._build_evidence_outline(payload.get("evidence_pack") or evidence_pack, top_matches)
@@ -14246,6 +14285,7 @@ class SourceCodeQAService:
         requested_answer_mode: str = ANSWER_MODE_GEMINI,
         request_cache: dict[str, Any] | None = None,
         progress_callback: Any | None = None,
+        attachments: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         if not self.llm_ready():
             raise ToolError(self.llm_unavailable_message())
@@ -14284,7 +14324,9 @@ class SourceCodeQAService:
                 followup_context=followup_context,
                 requested_answer_mode=requested_answer_mode,
                 progress_callback=progress_callback,
+                attachments=attachments or [],
             )
+        attachment_section = self._attachment_prompt_section(attachments or [])
         domain_context = self._llm_domain_context(
             pm_team=pm_team,
             country=country,
@@ -14320,7 +14362,7 @@ class SourceCodeQAService:
             snippet_char_budget=budget["snippet_char_budget"],
         )
         initial_prompt_tokens = self._estimate_llm_tokens(
-            self._llm_user_prompt(pm_team=pm_team, country=country, question=question, context=prompt_context)
+            self._llm_user_prompt(pm_team=pm_team, country=country, question=question, context=prompt_context, attachment_section=attachment_section)
         )
         token_pressure = self._llm_prompt_pressure_for_provider(initial_prompt_tokens)
         if token_pressure != "normal" and routed_budget_mode in {"balanced", "deep"}:
@@ -14382,7 +14424,7 @@ class SourceCodeQAService:
                 compact=True,
             )
             final_prompt_tokens = self._estimate_llm_tokens(
-                self._llm_user_prompt(pm_team=pm_team, country=country, question=question, context=prompt_context)
+                self._llm_user_prompt(pm_team=pm_team, country=country, question=question, context=prompt_context, attachment_section=attachment_section)
             )
         else:
             final_prompt_tokens = initial_prompt_tokens
@@ -14401,13 +14443,14 @@ class SourceCodeQAService:
         if routed_budget_mode == COMPACT_DEEP_BUDGET_MODE and token_pressure == "tight":
             answer_max_output_tokens = max(answer_max_output_tokens, 2_400)
         vertex_two_pass = self.llm_provider_name == LLM_PROVIDER_VERTEX_AI
+        cache_context = f"{prompt_context}\n\n{attachment_section}" if attachment_section else prompt_context
         cache_key = self._answer_cache_key(
             provider=self.llm_provider.name,
             model=selected_model,
             question=question,
             answer_mode=requested_answer_mode,
             llm_budget_mode=routed_budget_mode,
-            context=prompt_context,
+            context=cache_context,
         )
         cached = None if vertex_two_pass else self._load_cached_answer(cache_key)
         if cached is not None:
@@ -14473,16 +14516,16 @@ class SourceCodeQAService:
             draft_payload = {
                 "contents": [
                     {
-                        "parts": [
-                            {
-                                "text": self._vertex_draft_prompt(
-                                    pm_team=pm_team,
-                                    country=country,
-                                    question=question,
-                                    context=prompt_context,
-                                )
-                            }
-                        ]
+                        "parts": self._llm_payload_parts(
+                            self._vertex_draft_prompt(
+                                pm_team=pm_team,
+                                country=country,
+                                question=question,
+                                context=prompt_context,
+                                attachment_section=attachment_section,
+                            ),
+                            attachments or [],
+                        )
                     }
                 ],
                 "systemInstruction": {
@@ -14578,7 +14621,7 @@ class SourceCodeQAService:
                 question=question,
                 answer_mode=requested_answer_mode,
                 llm_budget_mode=routed_budget_mode,
-                context=prompt_context,
+                context=f"{prompt_context}\n\n{attachment_section}" if attachment_section else prompt_context,
             )
         final_prompt = self._llm_user_prompt(
             pm_team=pm_team,
@@ -14586,17 +14629,14 @@ class SourceCodeQAService:
             question=question,
             context=prompt_context,
             self_check=vertex_draft_check if vertex_two_pass else None,
+            attachment_section=attachment_section,
         )
         if vertex_two_pass:
             final_prompt = self._vertex_final_prompt(final_prompt=final_prompt, draft_answer=draft_answer)
         payload = {
             "contents": [
                 {
-                    "parts": [
-                        {
-                            "text": final_prompt
-                        }
-                    ]
+                    "parts": self._llm_payload_parts(final_prompt, attachments or [])
                 }
             ],
             "systemInstruction": {
@@ -14780,17 +14820,17 @@ class SourceCodeQAService:
                 }
                 retry_payload["contents"] = [
                     {
-                        "parts": [
-                            {
-                                "text": self._llm_user_prompt(
-                                    pm_team=pm_team,
-                                    country=country,
-                                    question=question,
-                                    context=retry_context,
-                                    self_check=answer_check,
-                                )
-                            }
-                        ]
+                        "parts": self._llm_payload_parts(
+                            self._llm_user_prompt(
+                                pm_team=pm_team,
+                                country=country,
+                                question=question,
+                                context=retry_context,
+                                self_check=answer_check,
+                                attachment_section=attachment_section,
+                            ),
+                            attachments or [],
+                        )
                     }
                 ]
                 retry_result = self.llm_provider.generate(
@@ -14906,6 +14946,7 @@ class SourceCodeQAService:
         followup_context: dict[str, Any] | None,
         requested_answer_mode: str,
         progress_callback: Any | None = None,
+        attachments: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         candidate_matches = self._select_llm_matches(
             matches,
@@ -14939,6 +14980,7 @@ class SourceCodeQAService:
             evidence_pack=evidence_pack,
             quality_gate=quality_gate,
             followup_context=followup_context,
+            attachments=attachments or [],
         )
         is_followup = bool(followup_context and (followup_context.get("used") or followup_context.get("question") or followup_context.get("recent_turns")))
         cache_key = self._answer_cache_key(
@@ -15010,6 +15052,7 @@ class SourceCodeQAService:
             prompt_context,
             progress_callback=progress_callback,
             codex_cli_session_id=codex_cli_session_id,
+            image_paths=self._attachment_image_paths(attachments or []),
         )
         result = self.llm_provider.generate(
             payload=payload,
@@ -15106,6 +15149,7 @@ class SourceCodeQAService:
         *,
         progress_callback: Any | None = None,
         codex_cli_session_id: str = "",
+        image_paths: list[str] | None = None,
     ) -> dict[str, Any]:
         payload = {
             "codex_prompt_mode": CODEX_INVESTIGATION_PROMPT_MODE,
@@ -15115,9 +15159,84 @@ class SourceCodeQAService:
         }
         if codex_cli_session_id:
             payload["codex_cli_session_id"] = codex_cli_session_id
+        if image_paths:
+            payload["_codex_image_paths"] = list(image_paths)
         if progress_callback:
             payload["_progress_callback"] = progress_callback
         return payload
+
+    @staticmethod
+    def _public_attachment_metadata(attachment: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "id": str(attachment.get("id") or ""),
+            "filename": str(attachment.get("filename") or ""),
+            "mime_type": str(attachment.get("mime_type") or ""),
+            "kind": str(attachment.get("kind") or ""),
+            "size": int(attachment.get("size") or 0),
+            "sha256": str(attachment.get("sha256") or ""),
+            "summary": str(attachment.get("summary") or "")[:400],
+            "text_char_count": int(attachment.get("text_char_count") or 0),
+        }
+
+    @classmethod
+    def _attachment_prompt_section(cls, attachments: list[dict[str, Any]]) -> str:
+        normalized = [item for item in attachments or [] if isinstance(item, dict)]
+        if not normalized:
+            return ""
+        lines = [
+            "User attachments:",
+            "- Treat attachments as user-provided context, not repository facts.",
+            "- Separate source-code evidence, attachment evidence, and missing evidence in the answer.",
+            "- Do not cite an attachment as code evidence; only code paths/snippets count as source-code evidence.",
+        ]
+        for index, item in enumerate(normalized[:5], start=1):
+            meta = cls._public_attachment_metadata(item)
+            lines.append(
+                f"- A{index}: filename={meta['filename']} kind={meta['kind']} "
+                f"mime={meta['mime_type']} size={meta['size']} sha256={meta['sha256'][:16]}"
+            )
+            text = str(item.get("text") or item.get("summary") or "").strip()
+            if text:
+                if len(text) > 6000:
+                    text = f"{text[:6000]}\n...[attachment text truncated]"
+                lines.append(f"  Extracted text/summary:\n{text}")
+            elif meta["kind"] == "image":
+                lines.append("  Image content is attached to the provider when supported; inspect it directly before using it.")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _attachment_image_paths(attachments: list[dict[str, Any]]) -> list[str]:
+        paths: list[str] = []
+        for item in attachments or []:
+            if str(item.get("kind") or "") != "image":
+                continue
+            path = str(item.get("path") or "").strip()
+            if path:
+                paths.append(path)
+        return paths[:3]
+
+    @staticmethod
+    def _llm_payload_parts(prompt: str, attachments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        parts: list[dict[str, Any]] = [{"text": prompt}]
+        for item in attachments or []:
+            if str(item.get("kind") or "") != "image":
+                continue
+            path = Path(str(item.get("path") or ""))
+            if not path.exists() or not path.is_file():
+                raise ToolError(f"Image attachment is missing or unreadable: {item.get('filename') or item.get('id') or path}")
+            try:
+                encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+            except OSError as error:
+                raise ToolError(f"Image attachment is unreadable: {item.get('filename') or path}") from error
+            parts.append(
+                {
+                    "inlineData": {
+                        "mimeType": str(item.get("mime_type") or "application/octet-stream"),
+                        "data": encoded,
+                    }
+                }
+            )
+        return parts
 
     @staticmethod
     def _codex_system_instruction() -> str:
@@ -15330,6 +15449,7 @@ class SourceCodeQAService:
         evidence_pack: dict[str, Any],
         quality_gate: dict[str, Any],
         followup_context: dict[str, Any] | None,
+        attachments: list[dict[str, Any]] | None = None,
         repair_issues: list[str] | None = None,
     ) -> str:
         candidate_path_layers = self._codex_candidate_path_layers(candidate_paths, followup_context)
@@ -15381,6 +15501,9 @@ class SourceCodeQAService:
                         f"    retrieval={item.get('retrieval')} trace_stage={item.get('trace_stage')} reason={item.get('reason')}",
                     ]
                 )
+        attachment_section = self._attachment_prompt_section(attachments or [])
+        if attachment_section:
+            lines.extend(["", attachment_section])
         if followup_context:
             lines.extend(["", "Follow-up context:"])
             for label, key_name in (
@@ -15919,6 +16042,7 @@ class SourceCodeQAService:
         question: str,
         context: str,
         self_check: dict[str, Any] | None = None,
+        attachment_section: str = "",
     ) -> str:
         retry_note = ""
         if self_check:
@@ -15933,6 +16057,7 @@ class SourceCodeQAService:
             f"Question: {question}\n\n"
             "Internal retrieval evidence for grounding only:\n"
             f"{context}\n\n"
+            f"{(attachment_section + chr(10) + chr(10)) if attachment_section else ''}"
             f"{retry_note}"
             "Answer requirements:\n"
             "- Return this JSON shape whenever possible: "
@@ -15949,6 +16074,7 @@ class SourceCodeQAService:
             "- Put absent repository/mapper/client/table hops, missing tests, and evidence-tier conflicts in not_found and missing_evidence.\n"
             "- Prefer agent trace and two-hop trace evidence when it clarifies downstream service, integration, repository, mapper, API, or table usage.\n"
             "- Treat raw code snippets as the source of truth when they are provided as primary evidence; use compressed facts as navigation hints and consistency checks.\n"
+            "- If user attachments are present, label their contribution as attachment evidence and do not present it as source-code evidence.\n"
             "- Follow the domain-specific evidence rules and answer blueprint when present.\n"
             "- Apply evidence priority: production code and mapper/client/SQL evidence beat config snapshots, tests, and docs/spec/generated files.\n"
             "- For data-source questions, a DTO/Input/Info class is not a final data source. Trace backward to the provider/builder/setter and then to repository/mapper/client/API/table when evidence exists.\n"
@@ -15973,6 +16099,7 @@ class SourceCodeQAService:
         country: str,
         question: str,
         context: str,
+        attachment_section: str = "",
     ) -> str:
         return (
             f"PM Team: {pm_team}\n"
@@ -15980,6 +16107,7 @@ class SourceCodeQAService:
             f"Question: {question}\n\n"
             "Internal retrieval evidence for grounding only:\n"
             f"{context}\n\n"
+            f"{(attachment_section + chr(10) + chr(10)) if attachment_section else ''}"
             "First-pass task for Vertex AI:\n"
             "- Write a concise prose draft answer only; do not return JSON in this pass.\n"
             "- Use raw code snippets as the source of truth and cite concrete claims with tags like [S1].\n"

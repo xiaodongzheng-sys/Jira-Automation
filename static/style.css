@@ -5503,6 +5503,63 @@ select:focus {
   overflow-wrap: anywhere;
 }
 
+.source-qa-message-attachments,
+.source-qa-attachment-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  min-width: 0;
+}
+
+.source-qa-attachment-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  max-width: 100%;
+  min-height: 30px;
+  padding: 4px 8px;
+  border: 1px solid #d0d5dd;
+  border-radius: 999px;
+  background: #ffffff;
+  color: #344054;
+  line-height: 1.25;
+}
+
+.source-qa-attachment-chip strong,
+.source-qa-attachment-chip small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.source-qa-attachment-chip strong {
+  max-width: 220px;
+  font-size: 0.82rem;
+  font-weight: 800;
+}
+
+.source-qa-attachment-chip small {
+  color: #667085;
+  font-size: 0.74rem;
+  font-weight: 650;
+}
+
+.source-qa-attachment-chip button {
+  display: inline-grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border: 0;
+  border-radius: 999px;
+  background: #98a2b3;
+  color: #ffffff;
+  cursor: pointer;
+  font-size: 0.72rem;
+  font-weight: 900;
+  line-height: 1;
+}
+
 .source-qa-composer {
   display: grid;
   gap: 12px;
@@ -5518,6 +5575,34 @@ select:focus {
   padding-right: 112px;
   padding-bottom: 72px;
   resize: none;
+}
+
+.source-qa-attachment-bar {
+  position: absolute;
+  left: 14px;
+  right: 104px;
+  bottom: 14px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  pointer-events: none;
+}
+
+.source-qa-attachment-bar > * {
+  pointer-events: auto;
+}
+
+.source-qa-attachment-button {
+  min-height: 36px;
+  padding: 8px 12px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.source-qa-attachment-list {
+  max-width: 100%;
+  overflow: hidden;
 }
 
 .source-qa-send-button {

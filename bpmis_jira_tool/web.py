@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from dataclasses import asdict, dataclass, field
 import difflib
 from functools import lru_cache
@@ -10,6 +11,7 @@ import io
 from http import HTTPStatus
 import json
 import logging
+import mimetypes
 import os
 from pathlib import Path
 import re
@@ -40,6 +42,7 @@ from bpmis_jira_tool.local_agent_client import (
     RemoteSeaTalkDashboardService,
     RemoteSeaTalkNameMappingStore,
     RemoteSeaTalkTodoStore,
+    RemoteSourceCodeQAAttachmentStore,
     RemoteSourceCodeQAModelAvailabilityStore,
     RemoteSourceCodeQASessionStore,
     RemoteSourceCodeQAService,
@@ -699,6 +702,10 @@ class SourceCodeQASessionStore:
             "answer": answer[:1200],
             "summary": str(context.get("summary") or "")[:500],
             "trace_id": str(context.get("trace_id") or "")[:80],
+            "attachments": [
+                item for item in (context.get("attachments") or [])[:5]
+                if isinstance(item, dict)
+            ],
             "llm_provider": str(context.get("llm_provider") or "")[:80],
             "llm_model": str(context.get("llm_model") or "")[:120],
             "matches_snapshot": [
@@ -758,6 +765,7 @@ class SourceCodeQASessionStore:
         question: str,
         result: dict[str, Any],
         context: dict[str, Any],
+        attachments: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any] | None:
         owner = str(owner_email or "").strip().lower()
         now = self._now()
@@ -797,6 +805,11 @@ class SourceCodeQASessionStore:
                         "role": "user",
                         "text": str(question or ""),
                         "created_at": now,
+                        "attachments": [
+                            SourceCodeQAAttachmentStore.public_metadata(item)
+                            for item in (attachments or [])
+                            if isinstance(item, dict)
+                        ],
                     },
                     {
                         "role": "assistant",
@@ -827,6 +840,292 @@ class SourceCodeQASessionStore:
         if include_messages:
             public_payload["messages"] = list(session_payload.get("messages") or [])
         return public_payload
+
+
+class SourceCodeQAAttachmentStore:
+    MAX_FILE_BYTES = 10 * 1024 * 1024
+    MAX_ATTACHMENTS = 5
+    MAX_IMAGES = 3
+    IMAGE_MIME_TYPES = {"image/png", "image/jpeg", "image/webp", "image/gif"}
+    TEXT_EXTENSIONS = {
+        ".txt",
+        ".md",
+        ".csv",
+        ".json",
+        ".xml",
+        ".yaml",
+        ".yml",
+        ".log",
+        ".java",
+        ".py",
+        ".js",
+        ".ts",
+        ".tsx",
+        ".sql",
+        ".properties",
+        ".kt",
+        ".go",
+        ".rb",
+        ".php",
+        ".html",
+        ".css",
+        ".sh",
+    }
+    DOCUMENT_EXTENSIONS = {".pdf", ".docx", ".xlsx"}
+    BLOCKED_EXTENSIONS = {
+        ".app",
+        ".bat",
+        ".bin",
+        ".cmd",
+        ".com",
+        ".dmg",
+        ".exe",
+        ".gz",
+        ".jar",
+        ".pkg",
+        ".rar",
+        ".tar",
+        ".tgz",
+        ".zip",
+        ".7z",
+    }
+
+    def __init__(self, root_dir: Path | None = None) -> None:
+        self.root_dir = root_dir
+        self._lock = threading.Lock()
+
+    @staticmethod
+    def _now() -> str:
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+    @staticmethod
+    def _owner_key(owner_email: str) -> str:
+        owner = str(owner_email or "").strip().lower() or "local"
+        return hashlib.sha256(owner.encode("utf-8")).hexdigest()[:24]
+
+    @staticmethod
+    def _safe_session_id(session_id: str) -> str:
+        normalized = str(session_id or "").strip()
+        if not normalized or not re.fullmatch(r"[A-Za-z0-9_-]{8,80}", normalized):
+            raise ToolError("A valid Source Code Q&A session is required before uploading attachments.")
+        return normalized
+
+    @staticmethod
+    def _safe_filename(filename: str) -> str:
+        name = Path(str(filename or "attachment")).name.strip().replace("\x00", "")
+        name = re.sub(r"[^A-Za-z0-9._ -]+", "_", name)[:180].strip(" .")
+        return name or "attachment"
+
+    def _session_dir(self, *, owner_email: str, session_id: str) -> Path:
+        if self.root_dir is None:
+            raise ToolError("Source Code Q&A attachments are not configured.")
+        return self.root_dir / self._owner_key(owner_email) / self._safe_session_id(session_id)
+
+    def _metadata_path(self, *, owner_email: str, session_id: str) -> Path:
+        return self._session_dir(owner_email=owner_email, session_id=session_id) / "metadata.json"
+
+    def _load_metadata_locked(self, *, owner_email: str, session_id: str) -> dict[str, dict[str, Any]]:
+        path = self._metadata_path(owner_email=owner_email, session_id=session_id)
+        if not path.exists():
+            return {}
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        attachments = payload.get("attachments") if isinstance(payload, dict) else {}
+        return {str(key): value for key, value in attachments.items() if isinstance(value, dict)} if isinstance(attachments, dict) else {}
+
+    def _persist_metadata_locked(self, *, owner_email: str, session_id: str, metadata: dict[str, dict[str, Any]]) -> None:
+        path = self._metadata_path(owner_email=owner_email, session_id=session_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        temp_path.write_text(
+            json.dumps({"updated_at": self._now(), "attachments": metadata}, ensure_ascii=False, sort_keys=True),
+            encoding="utf-8",
+        )
+        os.replace(temp_path, path)
+
+    def save_bytes(
+        self,
+        *,
+        owner_email: str,
+        session_id: str,
+        filename: str,
+        content: bytes,
+        mime_type: str = "",
+    ) -> dict[str, Any]:
+        if len(content or b"") <= 0:
+            raise ToolError("Attachment file is empty.")
+        if len(content) > self.MAX_FILE_BYTES:
+            raise ToolError("Attachment is too large. Maximum size is 10MB per file.")
+        safe_name = self._safe_filename(filename)
+        suffix = Path(safe_name).suffix.lower()
+        if suffix in self.BLOCKED_EXTENSIONS:
+            raise ToolError("Executable, archive, and unknown binary attachments are not supported.")
+        guessed_mime = str(mime_type or mimetypes.guess_type(safe_name)[0] or "").lower()
+        kind = self._attachment_kind(safe_name, guessed_mime, content)
+        digest = hashlib.sha256(content).hexdigest()
+        attachment_id = uuid.uuid4().hex
+        stored_name = f"{attachment_id}{suffix or '.bin'}"
+        session_dir = self._session_dir(owner_email=owner_email, session_id=session_id)
+        metadata = {
+            "id": attachment_id,
+            "filename": safe_name,
+            "stored_name": stored_name,
+            "mime_type": guessed_mime or "application/octet-stream",
+            "kind": kind,
+            "size": len(content),
+            "sha256": digest,
+            "created_at": self._now(),
+            "summary": "",
+            "text_char_count": 0,
+        }
+        if kind in {"text", "document"}:
+            extracted = self._extract_attachment_text(safe_name, guessed_mime, content)
+            metadata["text_char_count"] = len(extracted)
+            metadata["summary"] = extracted[:2000]
+        with self._lock:
+            existing = self._load_metadata_locked(owner_email=owner_email, session_id=session_id)
+            session_dir.mkdir(parents=True, exist_ok=True)
+            (session_dir / stored_name).write_bytes(content)
+            existing[attachment_id] = metadata
+            self._persist_metadata_locked(owner_email=owner_email, session_id=session_id, metadata=existing)
+        return self.public_metadata(metadata)
+
+    def resolve_many(self, *, owner_email: str, session_id: str, attachment_ids: list[str]) -> list[dict[str, Any]]:
+        requested_ids = [str(item or "").strip() for item in attachment_ids if str(item or "").strip()]
+        if len(requested_ids) > self.MAX_ATTACHMENTS:
+            raise ToolError(f"At most {self.MAX_ATTACHMENTS} Source Code Q&A attachments are supported per question.")
+        with self._lock:
+            metadata = self._load_metadata_locked(owner_email=owner_email, session_id=session_id)
+        resolved: list[dict[str, Any]] = []
+        image_count = 0
+        session_dir = self._session_dir(owner_email=owner_email, session_id=session_id)
+        for attachment_id in requested_ids:
+            item = metadata.get(attachment_id)
+            if not item:
+                raise ToolError("One or more Source Code Q&A attachments were not found for this session.")
+            path = session_dir / str(item.get("stored_name") or "")
+            if not path.exists() or not path.is_file():
+                raise ToolError(f"Attachment file is missing: {item.get('filename') or attachment_id}")
+            enriched = dict(item)
+            enriched["path"] = str(path)
+            if enriched.get("kind") == "image":
+                image_count += 1
+                if image_count > self.MAX_IMAGES:
+                    raise ToolError(f"At most {self.MAX_IMAGES} image attachments are supported per question.")
+            elif enriched.get("kind") in {"text", "document"}:
+                try:
+                    content = path.read_bytes()
+                except OSError as error:
+                    raise ToolError(f"Attachment file is unreadable: {item.get('filename') or attachment_id}") from error
+                enriched["text"] = self._extract_attachment_text(str(item.get("filename") or ""), str(item.get("mime_type") or ""), content)
+            resolved.append(enriched)
+        return resolved
+
+    def get_bytes(self, *, owner_email: str, session_id: str, attachment_id: str) -> tuple[dict[str, Any], bytes]:
+        resolved = self.resolve_many(owner_email=owner_email, session_id=session_id, attachment_ids=[attachment_id])
+        if not resolved:
+            raise ToolError("Source Code Q&A attachment was not found.")
+        item = resolved[0]
+        try:
+            content = Path(str(item.get("path") or "")).read_bytes()
+        except OSError as error:
+            raise ToolError("Source Code Q&A attachment file is unreadable.") from error
+        return self.public_metadata(item), content
+
+    @classmethod
+    def public_metadata(cls, metadata: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "id": str(metadata.get("id") or ""),
+            "filename": str(metadata.get("filename") or ""),
+            "mime_type": str(metadata.get("mime_type") or ""),
+            "kind": str(metadata.get("kind") or ""),
+            "size": int(metadata.get("size") or 0),
+            "sha256": str(metadata.get("sha256") or ""),
+            "created_at": str(metadata.get("created_at") or ""),
+            "summary": str(metadata.get("summary") or "")[:400],
+            "text_char_count": int(metadata.get("text_char_count") or 0),
+        }
+
+    def _attachment_kind(self, filename: str, mime_type: str, content: bytes) -> str:
+        suffix = Path(filename).suffix.lower()
+        mime = str(mime_type or "").lower()
+        if mime in self.IMAGE_MIME_TYPES:
+            return "image"
+        if suffix in self.TEXT_EXTENSIONS or mime.startswith("text/") or mime in {"application/json", "application/xml"}:
+            return "text"
+        if suffix in self.DOCUMENT_EXTENSIONS:
+            return "document"
+        if b"\x00" in content[:2048]:
+            raise ToolError("Unknown binary attachments are not supported.")
+        if suffix:
+            return "text"
+        raise ToolError("Unsupported attachment type.")
+
+    def _extract_attachment_text(self, filename: str, mime_type: str, content: bytes) -> str:
+        suffix = Path(filename).suffix.lower()
+        if suffix == ".pdf":
+            return self._extract_pdf_text(content)
+        if suffix == ".docx":
+            return self._extract_docx_text(content)
+        if suffix == ".xlsx":
+            return self._extract_xlsx_text(content)
+        for encoding in ("utf-8-sig", "utf-8", "latin-1"):
+            try:
+                text = content.decode(encoding)
+                break
+            except UnicodeDecodeError:
+                text = ""
+        if not text:
+            raise ToolError(f"Unable to parse text from attachment {filename or mime_type}.")
+        return re.sub(r"\r\n?", "\n", text).strip()[:16000]
+
+    @staticmethod
+    def _extract_pdf_text(content: bytes) -> str:
+        try:
+            from pypdf import PdfReader  # type: ignore
+        except ImportError as error:
+            raise ToolError("PDF attachments are supported only when pypdf is installed on the server.") from error
+        reader = PdfReader(io.BytesIO(content))
+        lines: list[str] = []
+        for page in reader.pages[:10]:
+            lines.append(str(page.extract_text() or ""))
+        text = "\n".join(lines).strip()
+        if not text:
+            raise ToolError("Unable to extract readable text from this PDF attachment.")
+        return text[:16000]
+
+    @staticmethod
+    def _extract_docx_text(content: bytes) -> str:
+        try:
+            from docx import Document  # type: ignore
+        except ImportError as error:
+            raise ToolError("DOCX attachments are supported only when python-docx is installed on the server.") from error
+        document = Document(io.BytesIO(content))
+        text = "\n".join(paragraph.text for paragraph in document.paragraphs if paragraph.text).strip()
+        if not text:
+            raise ToolError("Unable to extract readable text from this DOCX attachment.")
+        return text[:16000]
+
+    @staticmethod
+    def _extract_xlsx_text(content: bytes) -> str:
+        try:
+            from openpyxl import load_workbook
+        except ImportError as error:
+            raise ToolError("XLSX attachments are supported only when openpyxl is installed on the server.") from error
+        workbook = load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+        rows: list[str] = []
+        for worksheet in workbook.worksheets[:3]:
+            rows.append(f"[Sheet: {worksheet.title}]")
+            for row in worksheet.iter_rows(max_row=40, max_col=12, values_only=True):
+                values = ["" if value is None else str(value) for value in row]
+                if any(value.strip() for value in values):
+                    rows.append("\t".join(values).rstrip())
+        text = "\n".join(rows).strip()
+        if not text:
+            raise ToolError("Unable to extract readable text from this XLSX attachment.")
+        return text[:16000]
 
 
 class SourceCodeQAModelAvailabilityStore:
@@ -1090,6 +1389,7 @@ def create_app() -> Flask:
         encryption_key=settings.team_portal_config_encryption_key,
     )
     app.config["SOURCE_CODE_QA_SESSION_STORE"] = SourceCodeQASessionStore(data_root / "source_code_qa" / "sessions.json")
+    app.config["SOURCE_CODE_QA_ATTACHMENT_STORE"] = SourceCodeQAAttachmentStore(data_root / "source_code_qa" / "attachments")
     app.config["SOURCE_CODE_QA_MODEL_AVAILABILITY_STORE"] = SourceCodeQAModelAvailabilityStore(
         data_root / "source_code_qa" / "model_availability.json"
     )
@@ -1523,6 +1823,59 @@ def create_app() -> Flask:
             return jsonify({"status": "error", "message": "Source Code Q&A session was not found."}), HTTPStatus.NOT_FOUND
         return jsonify(archived)
 
+    @app.post("/api/source-code-qa/attachments")
+    def source_code_qa_attachments_api():
+        access_gate = _require_source_code_qa_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        owner_email = _current_google_email() or "local"
+        session_id = str(request.form.get("session_id") or "").strip()
+        if not session_id:
+            return jsonify({"status": "error", "message": "A Source Code Q&A session is required before uploading attachments."}), HTTPStatus.BAD_REQUEST
+        if _get_source_code_qa_session_store().get(session_id, owner_email=owner_email) is None:
+            return jsonify({"status": "error", "message": "Source Code Q&A session was not found."}), HTTPStatus.NOT_FOUND
+        uploaded = request.files.get("file")
+        if uploaded is None:
+            return jsonify({"status": "error", "message": "Upload a file field named file."}), HTTPStatus.BAD_REQUEST
+        try:
+            content = uploaded.read()
+            attachment = _get_source_code_qa_attachment_store().save_bytes(
+                owner_email=owner_email,
+                session_id=session_id,
+                filename=uploaded.filename or "attachment",
+                mime_type=uploaded.mimetype or "",
+                content=content,
+            )
+            return jsonify({"status": "ok", "attachment": attachment})
+        except ToolError as error:
+            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
+
+    @app.get("/api/source-code-qa/attachments/<attachment_id>")
+    def source_code_qa_attachment_api(attachment_id: str):
+        access_gate = _require_source_code_qa_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        owner_email = _current_google_email() or "local"
+        session_id = str(request.args.get("session_id") or "").strip()
+        if not session_id:
+            return jsonify({"status": "error", "message": "session_id is required."}), HTTPStatus.BAD_REQUEST
+        if _get_source_code_qa_session_store().get(session_id, owner_email=owner_email) is None:
+            return jsonify({"status": "error", "message": "Source Code Q&A session was not found."}), HTTPStatus.NOT_FOUND
+        try:
+            metadata, content = _get_source_code_qa_attachment_store().get_bytes(
+                owner_email=owner_email,
+                session_id=session_id,
+                attachment_id=attachment_id,
+            )
+        except ToolError as error:
+            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.NOT_FOUND
+        return send_file(
+            io.BytesIO(content),
+            mimetype=metadata.get("mime_type") or "application/octet-stream",
+            download_name=metadata.get("filename") or "attachment",
+            as_attachment=False,
+        )
+
     @app.post("/api/source-code-qa/query")
     def source_code_qa_query_api():
         access_gate = _require_source_code_qa_access(settings, api=True)
@@ -1554,6 +1907,7 @@ def create_app() -> Flask:
             conversation_context = payload.get("conversation_context") if isinstance(payload.get("conversation_context"), dict) else None
             if conversation_context is None and session_id:
                 conversation_context = session_store.get_context(session_id, owner_email=owner_email)
+            attachments = _resolve_source_code_qa_query_attachments(payload, owner_email=owner_email, session_id=session_id)
             pm_team = str(payload.get("pm_team") or "")
             country = str(payload.get("country") or "")
             auto_sync = _prepare_source_code_qa_auto_sync(service, pm_team=pm_team, country=country)
@@ -1565,6 +1919,7 @@ def create_app() -> Flask:
                     answer_mode=_source_code_qa_public_answer_mode(payload.get("answer_mode")),
                     llm_budget_mode="auto",
                     conversation_context=conversation_context,
+                    attachments=attachments,
                 )
 
             if service.llm_provider_name == "codex_cli_bridge" and session_id:
@@ -1573,6 +1928,7 @@ def create_app() -> Flask:
             else:
                 result = run_query()
             result["auto_sync"] = auto_sync
+            result["attachments"] = _source_code_qa_public_attachments(attachments)
             if session_id:
                 session_payload = session_store.append_exchange(
                     session_id,
@@ -1583,6 +1939,7 @@ def create_app() -> Flask:
                     question=str(payload.get("question") or ""),
                     result=result,
                     context=_build_source_code_qa_session_context(result, payload),
+                    attachments=attachments,
                 )
                 if session_payload is not None:
                     result["session"] = session_payload
@@ -3229,6 +3586,13 @@ def _get_source_code_qa_session_store():
     return current_app.config["SOURCE_CODE_QA_SESSION_STORE"]
 
 
+def _get_source_code_qa_attachment_store():
+    settings: Settings = current_app.config["SETTINGS"]
+    if _local_agent_source_code_qa_enabled(settings):
+        return RemoteSourceCodeQAAttachmentStore(_build_local_agent_client(settings))
+    return current_app.config["SOURCE_CODE_QA_ATTACHMENT_STORE"]
+
+
 def _get_source_code_qa_model_availability_store():
     settings: Settings = current_app.config["SETTINGS"]
     if _local_agent_source_code_qa_enabled(settings):
@@ -3571,6 +3935,47 @@ def _source_code_qa_public_answer_mode(answer_mode: str | None) -> str:
     return mode if mode in {"auto", "gemini_flash"} else "auto"
 
 
+def _source_code_qa_attachment_ids(payload: dict[str, Any]) -> list[str]:
+    raw_ids = payload.get("attachment_ids") if isinstance(payload, dict) else []
+    if raw_ids is None:
+        return []
+    if not isinstance(raw_ids, list):
+        raise ToolError("attachment_ids must be a list.")
+    attachment_ids = [str(item or "").strip() for item in raw_ids if str(item or "").strip()]
+    if len(attachment_ids) > SourceCodeQAAttachmentStore.MAX_ATTACHMENTS:
+        raise ToolError(f"At most {SourceCodeQAAttachmentStore.MAX_ATTACHMENTS} attachments are supported per Source Code Q&A question.")
+    return attachment_ids
+
+
+def _resolve_source_code_qa_query_attachments(
+    payload: dict[str, Any],
+    *,
+    owner_email: str,
+    session_id: str,
+) -> list[dict[str, Any]]:
+    attachment_ids = _source_code_qa_attachment_ids(payload)
+    if not attachment_ids:
+        return []
+    if not session_id:
+        raise ToolError("A Source Code Q&A session is required before sending attachments.")
+    session_payload = _get_source_code_qa_session_store().get(session_id, owner_email=owner_email)
+    if session_payload is None:
+        raise ToolError("Source Code Q&A session was not found for these attachments.")
+    return _get_source_code_qa_attachment_store().resolve_many(
+        owner_email=owner_email,
+        session_id=session_id,
+        attachment_ids=attachment_ids,
+    )
+
+
+def _source_code_qa_public_attachments(attachments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        SourceCodeQAAttachmentStore.public_metadata(item)
+        for item in attachments
+        if isinstance(item, dict)
+    ]
+
+
 def _compact_source_code_qa_session_payload(result: dict[str, Any]) -> dict[str, Any]:
     structured = result.get("structured_answer") if isinstance(result.get("structured_answer"), dict) else {}
     answer_claim_check = result.get("answer_claim_check") if isinstance(result.get("answer_claim_check"), dict) else {}
@@ -3613,6 +4018,7 @@ def _compact_source_code_qa_session_payload(result: dict[str, Any]) -> dict[str,
             "probable_inspected_files": (codex_trace.get("probable_inspected_files") or [])[-20:],
         },
         "codex_citation_validation": answer_claim_check.get("codex_citation_validation") or {},
+        "attachments": _source_code_qa_public_attachments(result.get("attachments") if isinstance(result.get("attachments"), list) else []),
         "matches": [
             {
                 "repo": match.get("repo"),
@@ -3660,6 +4066,7 @@ def _build_source_code_qa_session_context(result: dict[str, Any], request_payloa
         "summary": compact.get("summary") or "",
         "answer": compact.get("llm_answer") or "",
         "rendered_answer": compact.get("llm_answer") or "",
+        "attachments": compact.get("attachments") or [],
         "llm_provider": compact.get("llm_provider") or "",
         "llm_model": compact.get("llm_model") or "",
         "llm_route": compact.get("llm_route") or {},
@@ -4075,6 +4482,7 @@ def _run_source_code_qa_query_job(app: Flask, job_id: str, payload: dict[str, An
             conversation_context = payload.get("conversation_context") if isinstance(payload.get("conversation_context"), dict) else None
             if conversation_context is None and session_id:
                 conversation_context = session_store.get_context(session_id, owner_email=owner_email)
+            attachments = _resolve_source_code_qa_query_attachments(payload, owner_email=owner_email, session_id=session_id)
             auto_sync = _prepare_source_code_qa_auto_sync(
                 service,
                 pm_team=pm_team,
@@ -4089,6 +4497,7 @@ def _run_source_code_qa_query_job(app: Flask, job_id: str, payload: dict[str, An
                     answer_mode=_source_code_qa_public_answer_mode(payload.get("answer_mode")),
                     llm_budget_mode="auto",
                     conversation_context=conversation_context,
+                    attachments=attachments,
                     progress_callback=progress_callback,
                 )
 
@@ -4099,6 +4508,7 @@ def _run_source_code_qa_query_job(app: Flask, job_id: str, payload: dict[str, An
             else:
                 result = run_query()
             result["auto_sync"] = auto_sync
+            result["attachments"] = _source_code_qa_public_attachments(attachments)
             if session_id:
                 session_payload = session_store.append_exchange(
                     session_id,
@@ -4109,6 +4519,7 @@ def _run_source_code_qa_query_job(app: Flask, job_id: str, payload: dict[str, An
                     question=str(payload.get("question") or ""),
                     result=result,
                     context=_build_source_code_qa_session_context(result, payload),
+                    attachments=attachments,
                 )
                 if session_payload is not None:
                     result["session"] = session_payload

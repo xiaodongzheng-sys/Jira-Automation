@@ -150,6 +150,7 @@ Run these after Cloud Run and the Mac local-agent are both updated:
 - BPMIS Setup can save/load config through the local-agent when Cloud Run uses BPMIS proxy mode.
 - BPMIS Create Jira succeeds with Jira-resolvable NPT user emails in owner fields.
 - Source Code Q&A with Codex answers through the Mac local-agent and does not block on repo clone/pull/index work.
+- Source Code Q&A attachment smoke passes for one small text file; for image-capable releases, confirm Codex mode receives the image through the Mac local-agent path.
 - Source Code Q&A active repo config contains the expected GitLab repositories, not fixture/demo `git.example.com` URLs, and index health is `ready`.
 - SeaTalk Summary reads Mac desktop data through the local-agent.
 - For the Mac-hosted stack, `./scripts/run_team_stack.sh doctor` is clean.
