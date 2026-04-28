@@ -7495,6 +7495,37 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertEqual(validation["status"], "ok")
         self.assertEqual(validation["cited_path_count"], 1)
 
+    def test_codex_deep_investigation_triggers_on_missing_business_chain(self):
+        structured = {
+            "direct_answer": "可能是 merchantUid 被当成 shopeeUid 后查 UC。",
+            "confirmed_from_code": ["UserInfoSPIAdapter.queryMerchantInfo calls user-proxy [S1]"],
+            "inferred_from_code": ["merchantUid may be copied into shopeeUid"],
+            "not_found": ["No caller chain from report ingestion to queryMerchantInfo was found."],
+            "missing_evidence": [],
+            "claims": [{"text": "queryMerchantInfo uses shopeeUid", "citations": ["S1"]}],
+            "confidence": "medium",
+        }
+
+        needed = self.service._codex_deep_investigation_needed(
+            question="开发说 v2 上报拿 merchantUid 查 UC 填充 merchantInfo 是什么意思，为什么失败？",
+            answer=structured["direct_answer"],
+            structured_answer=structured,
+            quality_gate={"status": "sufficient", "confidence": "medium"},
+            answer_judge={"status": "ok", "issues": []},
+            codex_validation={"status": "ok", "issues": []},
+        )
+        terms = self.service._codex_deep_investigation_terms(
+            question="v2 report merchantUid queryMerchantInfo",
+            answer=structured["direct_answer"],
+            structured_answer=structured,
+            answer_judge={"issues": []},
+            codex_validation={"unsupported_claims": []},
+        )
+
+        self.assertTrue(needed)
+        self.assertIn("querymerchantinfo", terms)
+        self.assertIn("merchantuid", terms)
+
     def test_codex_answer_runs_citation_repair(self):
         service = SourceCodeQAService(
             data_root=Path(self.temp_dir.name),

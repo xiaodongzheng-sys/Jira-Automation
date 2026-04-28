@@ -9580,6 +9580,20 @@ class SourceCodeQAService:
                 " after written",
                 " read ",
                 " written ",
+                " v2 ",
+                " report ",
+                " failed ",
+                " failure ",
+                " root cause ",
+                " 调用链",
+                " 链路",
+                " 上游",
+                " 下游",
+                " 失败",
+                " 报错",
+                " 为什么",
+                " 什么意思",
+                " 区别",
             )
         )
 
@@ -14323,6 +14337,7 @@ class SourceCodeQAService:
                 selected_model=selected_model,
                 followup_context=followup_context,
                 requested_answer_mode=requested_answer_mode,
+                request_cache=request_cache,
                 progress_callback=progress_callback,
                 attachments=attachments or [],
             )
@@ -14945,6 +14960,7 @@ class SourceCodeQAService:
         selected_model: str,
         followup_context: dict[str, Any] | None,
         requested_answer_mode: str,
+        request_cache: dict[str, Any] | None = None,
         progress_callback: Any | None = None,
         attachments: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
@@ -14992,6 +15008,29 @@ class SourceCodeQAService:
             context=prompt_context,
         )
         cached = None if (is_followup and not self.codex_cache_followups) else self._load_cached_answer(cache_key)
+        if cached is not None:
+            cached_answer = str(cached["answer"])
+            cached_structured = self._parse_structured_answer(cached_answer)
+            cached_validation = self._validate_codex_citations(cached_answer, candidate_paths, candidate_paths)
+            cached_claim_check = self._merge_codex_validation(self._trusted_provider_check(), cached_validation)
+            cached_judge = self._run_answer_judge(question, cached_answer, evidence_pack, cached_claim_check)
+            cached_needs_refresh = self.codex_repair_enabled and self._codex_deep_investigation_needed(
+                question=question,
+                answer=cached_answer,
+                structured_answer=cached_structured,
+                quality_gate=cached.get("answer_quality") or quality_gate,
+                answer_judge=cached_judge,
+                codex_validation=cached_validation,
+            )
+            cached_needs_refresh = cached_needs_refresh or (
+                self.codex_repair_enabled
+                and (
+                    cached_validation.get("status") not in {"ok", "skipped"}
+                    or str(cached_judge.get("status") or "").lower() in {"repair", "warn", "insufficient_evidence"}
+                )
+            )
+            if cached_needs_refresh:
+                cached = None
         if cached is not None:
             cached_answer = str(cached["answer"])
             cached_structured = self._parse_structured_answer(cached_answer)
@@ -15071,10 +15110,76 @@ class SourceCodeQAService:
         claim_check = self._merge_codex_validation(self._trusted_provider_check(), codex_validation)
         answer_judge = self._run_answer_judge(question, answer, evidence_pack, claim_check)
         repair_attempted = False
+        deep_investigation_rounds = 0
+        deep_investigation_terms: list[str] = []
+        deep_investigation_added = 0
         repair_issues = list(codex_validation.get("issues") or [])
         repair_issues.extend(answer_judge.get("issues") or [])
-        if self.codex_repair_enabled and repair_issues:
+        deep_needed = self._codex_deep_investigation_needed(
+            question=question,
+            answer=answer,
+            structured_answer=structured_answer,
+            quality_gate=quality_gate,
+            answer_judge=answer_judge,
+            codex_validation=codex_validation,
+        )
+        if self.codex_repair_enabled and (repair_issues or deep_needed):
             repair_attempted = True
+            if deep_needed:
+                if progress_callback:
+                    try:
+                        progress_callback("codex_deep_investigation", "Expanding investigation from Codex gaps.", 0, 0)
+                    except Exception:
+                        pass
+                before_keys = {(item.get("repo"), item.get("path"), item.get("line_start"), item.get("line_end")) for item in candidate_matches}
+                deep_investigation_terms = self._codex_deep_investigation_terms(
+                    question=question,
+                    answer=answer,
+                    structured_answer=structured_answer,
+                    answer_judge=answer_judge,
+                    codex_validation=codex_validation,
+                )
+                expanded_matches = self._codex_deep_investigation_matches(
+                    entries=entries,
+                    key=key,
+                    question=question,
+                    matches=matches,
+                    selected_matches=candidate_matches,
+                    evidence_summary=evidence_summary,
+                    quality_gate=quality_gate,
+                    structured_answer=structured_answer,
+                    answer_judge=answer_judge,
+                    codex_validation=codex_validation,
+                    limit=max(int(budget["match_limit"]), self.codex_top_path_limit),
+                    request_cache=request_cache,
+                )
+                if expanded_matches:
+                    candidate_matches = self._select_llm_matches(expanded_matches, self.codex_top_path_limit, question=question)
+                    candidate_paths = self._codex_candidate_paths(entries=entries, key=key, matches=candidate_matches)
+                    candidate_paths = self._merge_codex_followup_candidate_paths(candidate_paths, followup_context)
+                    candidate_path_layers = self._codex_candidate_path_layers(candidate_paths, followup_context)
+                    llm_route = {
+                        **llm_route,
+                        "candidate_paths": candidate_paths,
+                        "candidate_path_layers": candidate_path_layers,
+                        "candidate_repo_count": len({item.get("repo") for item in candidate_paths}),
+                        "candidate_path_count": len(candidate_paths),
+                    }
+                    evidence_summary = self._compress_evidence_cached(question, candidate_matches, request_cache=request_cache)
+                    trace_paths = self._build_trace_paths(entries=entries, key=key, matches=candidate_matches, question=question, request_cache=request_cache)
+                    if trace_paths:
+                        evidence_summary["trace_paths"] = trace_paths
+                    quality_gate = self._quality_gate_cached(question, evidence_summary, request_cache=request_cache)
+                    evidence_pack = self._build_evidence_pack(
+                        question=question,
+                        evidence_summary=evidence_summary,
+                        matches=candidate_matches,
+                        trace_paths=trace_paths,
+                        quality_gate=quality_gate,
+                    )
+                    after_keys = {(item.get("repo"), item.get("path"), item.get("line_start"), item.get("line_end")) for item in candidate_matches}
+                    deep_investigation_added = len(after_keys - before_keys)
+                deep_investigation_rounds = 1
             repair_context = self._codex_investigation_brief(
                 pm_team=pm_team,
                 country=country,
@@ -15084,7 +15189,10 @@ class SourceCodeQAService:
                 quality_gate=quality_gate,
                 followup_context=followup_context,
                 attachments=attachments or [],
-                repair_issues=list(dict.fromkeys(str(issue) for issue in repair_issues if issue)),
+                repair_issues=list(dict.fromkeys([
+                    *[str(issue) for issue in repair_issues if issue],
+                    *(["Deep investigation: use the expanded candidate paths and explicitly resolve business ambiguity, caller/callee gaps, and missing source hops before finalizing."] if deep_needed else []),
+                ])),
             )
             repair_payload = self._codex_payload(
                 repair_context,
@@ -15134,6 +15242,9 @@ class SourceCodeQAService:
             "codex_citation_validation_status": codex_validation.get("status"),
             "codex_repair_attempted": repair_attempted,
             "codex_cited_path_count": codex_validation.get("cited_path_count", 0),
+            "codex_deep_investigation_rounds": deep_investigation_rounds,
+            "codex_deep_investigation_terms": deep_investigation_terms[:12],
+            "codex_deep_investigation_added": deep_investigation_added,
         }
         if not (is_followup and not self.codex_cache_followups):
             self._store_cached_answer(
@@ -15161,6 +15272,8 @@ class SourceCodeQAService:
             "probable_inspected_file_count": len(codex_cli_trace.get("probable_inspected_files") or []),
             "session_mode": self.codex_session_mode,
             "session_id": codex_cli_trace.get("session_id") or "",
+            "deep_investigation_rounds": deep_investigation_rounds,
+            "deep_investigation_added": deep_investigation_added,
         }
         return {
             "llm_answer": final["answer"],
@@ -15186,6 +15299,204 @@ class SourceCodeQAService:
             "codex_cli_summary": codex_cli_summary,
             "codex_cli_trace": codex_cli_trace,
         }
+
+    def _codex_deep_investigation_needed(
+        self,
+        *,
+        question: str,
+        answer: str,
+        structured_answer: dict[str, Any],
+        quality_gate: dict[str, Any],
+        answer_judge: dict[str, Any],
+        codex_validation: dict[str, Any],
+    ) -> bool:
+        if not self._is_deep_investigation_question(question):
+            return False
+        if codex_validation.get("status") not in {"ok", "skipped"}:
+            return True
+        if str(answer_judge.get("status") or "").lower() in {"repair", "warn", "insufficient_evidence"}:
+            return True
+        if quality_gate.get("status") == "needs_more_trace" or quality_gate.get("confidence") == "low":
+            return True
+        if structured_answer.get("not_found") or structured_answer.get("missing_evidence"):
+            return True
+        confidence = str(structured_answer.get("confidence") or "").lower()
+        lowered_answer = str(answer or "").lower()
+        uncertainty_markers = (
+            "cannot confirm",
+            "not found",
+            "missing evidence",
+            "likely",
+            "probably",
+            "可能",
+            "无法确认",
+            "没有找到",
+            "未找到",
+            "更像",
+        )
+        return confidence in {"", "low", "medium"} and any(marker in lowered_answer for marker in uncertainty_markers)
+
+    def _is_deep_investigation_question(self, question: str) -> bool:
+        intent = self._question_intent(question)
+        if any(
+            intent.get(key)
+            for key in (
+                "api",
+                "config",
+                "data_source",
+                "error",
+                "impact_analysis",
+                "message_flow",
+                "module_dependency",
+                "operational_boundary",
+                "rule_logic",
+                "test_coverage",
+            )
+        ):
+            return True
+        lowered = f" {str(question or '').lower()} "
+        return any(
+            marker in lowered
+            for marker in (
+                "why",
+                "root cause",
+                "caller",
+                "callee",
+                "call chain",
+                "upstream",
+                "downstream",
+                "report",
+                "failed",
+                "failure",
+                "difference",
+                "v2",
+                "为什么",
+                "什么原因",
+                "调用链",
+                "链路",
+                "上游",
+                "下游",
+                "失败",
+                "报错",
+                "区别",
+                "是什么意思",
+                "配置迁移",
+                "数据源",
+            )
+        )
+
+    def _codex_deep_investigation_terms(
+        self,
+        *,
+        question: str,
+        answer: str,
+        structured_answer: dict[str, Any],
+        answer_judge: dict[str, Any],
+        codex_validation: dict[str, Any],
+    ) -> list[str]:
+        texts = [
+            question,
+            answer,
+            str(structured_answer.get("direct_answer") or ""),
+            " ".join(str(item) for item in structured_answer.get("confirmed_from_code") or []),
+            " ".join(str(item) for item in structured_answer.get("inferred_from_code") or []),
+            " ".join(str(item) for item in structured_answer.get("not_found") or []),
+            " ".join(str(item) for item in structured_answer.get("missing_evidence") or []),
+            " ".join(str(item) for item in answer_judge.get("issues") or []),
+            " ".join(str(item) for item in answer_judge.get("repair_targets") or []),
+            " ".join(str(item) for item in codex_validation.get("unsupported_claims") or []),
+        ]
+        for claim in structured_answer.get("claims") or []:
+            if isinstance(claim, dict):
+                texts.append(str(claim.get("text") or ""))
+        terms: list[str] = []
+        for text in texts:
+            for token in re.findall(r"[A-Za-z][A-Za-z0-9_./:-]{2,}", str(text or "")):
+                cleaned = token.strip("._/-:").lower()
+                if len(cleaned) < 4 or cleaned in STOPWORDS or cleaned in LOW_VALUE_CALL_SYMBOLS:
+                    continue
+                if cleaned in {"answer", "evidence", "missing", "claim", "claims", "source", "sources", "code"}:
+                    continue
+                if cleaned not in terms:
+                    terms.append(cleaned)
+        terms.extend(
+            [
+                "caller",
+                "callee",
+                "impl",
+                "adapter",
+                "controller",
+                "service",
+                "client",
+                "mapper",
+                "repository",
+                "requestmapping",
+                "postmapping",
+                "configuration",
+            ]
+        )
+        deduped: list[str] = []
+        for term in terms:
+            if term not in deduped:
+                deduped.append(term)
+        return deduped[:40]
+
+    def _codex_deep_investigation_matches(
+        self,
+        *,
+        entries: list[RepositoryEntry],
+        key: str,
+        question: str,
+        matches: list[dict[str, Any]],
+        selected_matches: list[dict[str, Any]],
+        evidence_summary: dict[str, Any],
+        quality_gate: dict[str, Any],
+        structured_answer: dict[str, Any],
+        answer_judge: dict[str, Any],
+        codex_validation: dict[str, Any],
+        limit: int,
+        request_cache: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        terms = self._codex_deep_investigation_terms(
+            question=question,
+            answer=str(structured_answer.get("direct_answer") or ""),
+            structured_answer=structured_answer,
+            answer_judge=answer_judge,
+            codex_validation=codex_validation,
+        )
+        if not terms:
+            return selected_matches
+        agent_plan = {
+            "provider": "codex_deep_investigation",
+            "steps": [
+                {
+                    "name": "codex_answer_gap_followup",
+                    "purpose": "Use Codex missing evidence and uncertainty markers to trace callers, callees, APIs, configs, and source hops.",
+                    "terms": terms,
+                    "tools": ["find_references", "find_callers", "find_callees", "find_api_routes", "trace_flow", "search_code"],
+                }
+            ],
+        }
+        combined_matches: list[dict[str, Any]] = []
+        seen_match_keys: set[tuple[Any, Any, Any, Any]] = set()
+        for item in [*selected_matches, *matches]:
+            item_key = (item.get("repo"), item.get("path"), item.get("line_start"), item.get("line_end"))
+            if item_key in seen_match_keys:
+                continue
+            combined_matches.append(item)
+            seen_match_keys.add(item_key)
+        expanded = self._run_agent_plan(
+            entries=entries,
+            key=key,
+            question=question,
+            matches=combined_matches,
+            evidence_summary=evidence_summary,
+            quality_gate=quality_gate,
+            agent_plan=agent_plan,
+            limit=max(int(limit or 12), 18),
+            request_cache=request_cache,
+        )
+        return expanded or selected_matches
 
     def _codex_payload(
         self,
@@ -15521,6 +15832,8 @@ class SourceCodeQAService:
             "- Stage 3 certainty split: answer by separating confirmed_from_code, inferred_from_code, and not_found/missing_evidence. Do not promote a high-confidence inference into confirmed_from_code.",
             "- For rule/config questions, explicitly distinguish full rule/config definitions from status-only migration updates. If only status updates are found, say the full rule row/expression is missing.",
             "- For data-source questions, explicitly distinguish DTO/carrier fields from upstream source tables/APIs/repos. If the upstream hop is absent, list that hop in missing_evidence.",
+            "- For ambiguous business wording, map each possible meaning to concrete code surfaces before answering. Example: distinguish admin query endpoints from report ingestion endpoints, field aliases from true schema fields, and synchronous caller failures from async processing failures.",
+            "- If a developer phrase sounds like a business shorthand rather than an exact class/API name, say which source-backed interpretation is confirmed and which interpretation still needs logs, traceId, config export, or the caller repo.",
             "",
             "Candidate path layers:",
         ]
