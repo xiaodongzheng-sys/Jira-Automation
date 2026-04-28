@@ -74,6 +74,7 @@
   let activeOptions = null;
   let versionController = null;
   let expandedProjectId = '';
+  let draggedProjectId = '';
   const commentTimers = new Map();
 
   const setStatus = (message, tone = 'neutral') => {
@@ -187,6 +188,34 @@
 
   const projectById = (bpmisId) => projects.find((project) => String(project.bpmis_id || '') === String(bpmisId || ''));
 
+  const orderedProjectIdsFromDom = () => [...body.querySelectorAll('[data-project-card]')]
+    .map((card) => card.dataset.projectCard || '')
+    .filter(Boolean);
+
+  const persistProjectOrder = async () => {
+    const bpmisIds = orderedProjectIdsFromDom();
+    if (!bpmisIds.length) return;
+    try {
+      const response = await fetch(`${projectsUrl}/order`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ bpmis_ids: bpmisIds }),
+      });
+      const payload = await readJson(response, 'Could not save BPMIS project order.');
+      if (Array.isArray(payload.projects)) {
+        projects = payload.projects;
+      } else {
+        const order = new Map(bpmisIds.map((id, index) => [String(id), index]));
+        projects.sort((left, right) => (order.get(String(left.bpmis_id)) ?? 9999) - (order.get(String(right.bpmis_id)) ?? 9999));
+      }
+      setStatus('BPMIS project order saved.', 'success');
+    } catch (error) {
+      setStatus(error.message || 'Could not save BPMIS project order.', 'error');
+      renderProjects();
+    }
+  };
+
   const brdMarkup = (value) => {
     const links = String(value || '').split(/\n+/).map((item) => item.trim()).filter(Boolean);
     if (!links.length) return '-';
@@ -207,23 +236,37 @@
       const countValue = ticketCount(project);
       const taskButtonLabel = countValue ? `Expand ${countValue} Jira task${countValue === 1 ? '' : 's'}` : 'Expand Jira tasks';
       return `
-      <tr class="bpmis-project-row" data-project-row="${escapeHtml(project.bpmis_id)}">
-        <td>
+      <article class="bpmis-project-card" data-project-card="${escapeHtml(project.bpmis_id)}" draggable="true">
+        <div class="bpmis-project-card-main">
+          <button class="bpmis-project-drag-handle" type="button" aria-label="Drag BPMIS ${escapeHtml(project.bpmis_id || '')} to reorder" title="Drag to reorder" draggable="true">
+            <span></span><span></span><span></span><span></span>
+          </button>
           <button class="bpmis-task-toggle" type="button" data-toggle-tasks="${escapeHtml(project.bpmis_id)}" aria-expanded="false" aria-label="${escapeHtml(taskButtonLabel)}">+</button>
-        </td>
-        <td>${escapeHtml(project.bpmis_id || '-')}</td>
-        <td>${escapeHtml(project.project_name || '-')}</td>
-        <td>${brdMarkup(project.brd_link)}</td>
-        <td>${escapeHtml(project.market || '-')}</td>
-        <td>
+          <div class="bpmis-project-card-id">
+            <span>BPMIS ID</span>
+            <strong>${escapeHtml(project.bpmis_id || '-')}</strong>
+          </div>
+          <div class="bpmis-project-card-name">
+            <span>Project Name</span>
+            <strong>${escapeHtml(project.project_name || '-')}</strong>
+          </div>
+          <div class="bpmis-project-card-link">
+            <span>BRD Link</span>
+            <div>${brdMarkup(project.brd_link)}</div>
+          </div>
+          <div class="bpmis-project-card-market">
+            <span>Market</span>
+            <strong>${escapeHtml(project.market || '-')}</strong>
+          </div>
+          <div class="bpmis-project-card-comment">
+            <span>PM Comment</span>
           <textarea
             class="bpmis-project-comment"
             rows="2"
             data-project-comment="${escapeHtml(project.bpmis_id)}"
             aria-label="PM Comment for BPMIS ${escapeHtml(project.bpmis_id || '')}"
           >${escapeHtml(project.pm_comment || '')}</textarea>
-        </td>
-        <td>
+          </div>
           <div class="button-row bpmis-project-actions">
             <button class="button button-secondary bpmis-project-action-icon" type="button" data-create-jira="${escapeHtml(project.bpmis_id)}" aria-label="Create Jira for BPMIS ${escapeHtml(project.bpmis_id || '')}" title="Create Jira">
               <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -243,15 +286,11 @@
               </svg>
             </button>
           </div>
-        </td>
-      </tr>
-      <tr class="bpmis-task-row" data-task-row="${escapeHtml(project.bpmis_id)}" hidden>
-        <td colspan="7">
-          <div class="bpmis-task-panel" data-task-panel="${escapeHtml(project.bpmis_id)}">
-            <div class="bpmis-task-loading">Loading Jira tasks...</div>
-          </div>
-        </td>
-      </tr>
+        </div>
+        <div class="bpmis-task-panel" data-task-row="${escapeHtml(project.bpmis_id)}" data-task-panel="${escapeHtml(project.bpmis_id)}" hidden>
+          <div class="bpmis-task-loading">Loading Jira tasks...</div>
+        </div>
+      </article>
     `;
     }).join('');
     body.querySelectorAll('[data-project-comment]').forEach((textarea) => {
@@ -621,6 +660,20 @@
     }
   };
 
+  const moveProjectCard = (sourceId, targetCard) => {
+    const sourceCard = body.querySelector(`[data-project-card="${cssEscape(sourceId)}"]`);
+    if (!sourceCard || !targetCard || sourceCard === targetCard) return;
+    const cards = [...body.querySelectorAll('[data-project-card]')];
+    const sourceIndex = cards.indexOf(sourceCard);
+    const targetIndex = cards.indexOf(targetCard);
+    if (sourceIndex < 0 || targetIndex < 0) return;
+    if (sourceIndex < targetIndex) {
+      targetCard.after(sourceCard);
+    } else {
+      targetCard.before(sourceCard);
+    }
+  };
+
   const loadProjects = async () => {
     try {
       setStatus('Loading BPMIS projects...');
@@ -888,6 +941,36 @@
     } finally {
       deleteButton.disabled = false;
     }
+  });
+
+  body.addEventListener('dragstart', (event) => {
+    const card = event.target.closest('[data-project-card]');
+    if (!card) return;
+    const interactive = event.target.closest('textarea, input, select, a, button');
+    if (interactive && !interactive.classList.contains('bpmis-project-drag-handle')) {
+      event.preventDefault();
+      return;
+    }
+    draggedProjectId = card.dataset.projectCard || '';
+    card.classList.add('is-dragging');
+    event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setData('text/plain', draggedProjectId);
+  });
+
+  body.addEventListener('dragover', (event) => {
+    if (!draggedProjectId) return;
+    const card = event.target.closest('[data-project-card]');
+    if (!card || card.dataset.projectCard === draggedProjectId) return;
+    event.preventDefault();
+    moveProjectCard(draggedProjectId, card);
+  });
+
+  body.addEventListener('dragend', async () => {
+    const card = body.querySelector('.bpmis-project-card.is-dragging');
+    if (card) card.classList.remove('is-dragging');
+    if (!draggedProjectId) return;
+    draggedProjectId = '';
+    await persistProjectOrder();
   });
 
   body.addEventListener('input', (event) => {

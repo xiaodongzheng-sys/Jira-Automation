@@ -132,13 +132,15 @@ Fast paths now available:
 - `CLOUD_RUN_IMAGE=...` deploys a prebuilt Artifact Registry image and skips the source-build step.
 - `./scripts/build_cloud_run_image.sh` is an opt-in Cloud Build image path; it does not change the default source deploy.
 - `CLOUD_RUN_SKIP_SERVICE_ENABLE=1` and `CLOUD_RUN_SKIP_IAM_BINDINGS=1` can trim repeated full-bootstrap checks after the project is already configured.
-- Runtime tuning is opt-in through the deploy script: `CLOUD_RUN_MIN_INSTANCES`, `CLOUD_RUN_CPU_BOOST`, `CLOUD_RUN_CPU`, `CLOUD_RUN_MEMORY`, `CLOUD_RUN_CONCURRENCY`, and `CLOUD_RUN_TIMEOUT` are passed to `gcloud run deploy` only when set.
+- Runtime tuning is opt-in through the deploy scripts: `CLOUD_RUN_MIN_INSTANCES`, `CLOUD_RUN_CPU_BOOST`, `CLOUD_RUN_CPU`, `CLOUD_RUN_MEMORY`, `CLOUD_RUN_CONCURRENCY`, and `CLOUD_RUN_TIMEOUT` are passed to `gcloud run deploy` only when set.
+- Prebuilt image builds can also be tuned without changing defaults: `CLOUD_RUN_BUILD_MACHINE_TYPE`, `CLOUD_RUN_BUILD_TIMEOUT`, and `CLOUD_RUN_BUILD_DISK_SIZE` are passed to Cloud Build only when set.
 - Local-agent connection setup has its own timeout knob: `LOCAL_AGENT_CONNECT_TIMEOUT_SECONDS` defaults to `10`, while `LOCAL_AGENT_TIMEOUT_SECONDS` remains the full read timeout for long Source Code Q&A jobs.
 
 Recommended speed/stability profiles:
 
 - Routine code deploy with no runtime change: `CLOUD_RUN_SKIP_UNCHANGED=1 ./scripts/deploy_cloud_run.sh`.
 - Fast redeploy after a prebuilt image: `CLOUD_RUN_IMAGE=asia-southeast1-docker.pkg.dev/... ./scripts/deploy_cloud_run.sh`.
+- Faster prebuilt image builds when dependencies or Docker cache are cold: `CLOUD_RUN_BUILD_MACHINE_TYPE=e2-highcpu-8 ./scripts/build_cloud_run_image.sh`, then deploy the printed `CLOUD_RUN_IMAGE=...` command.
 - Lower cold-start latency for the shared portal: set `CLOUD_RUN_MIN_INSTANCES=1` and `CLOUD_RUN_CPU_BOOST=true`. This improves first-hit responsiveness, but it can increase Cloud Run cost.
 - Faster failure on a broken ngrok/local-agent tunnel: set `LOCAL_AGENT_CONNECT_TIMEOUT_SECONDS=3` or `5` while keeping `LOCAL_AGENT_TIMEOUT_SECONDS=300` for long-running Source Code Q&A responses.
 

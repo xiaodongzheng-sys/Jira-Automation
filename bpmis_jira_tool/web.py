@@ -2627,6 +2627,20 @@ def create_app() -> Flask:
         deleted = _get_bpmis_project_store().soft_delete_project(user_key=user_identity["config_key"], bpmis_id=bpmis_id)
         return jsonify({"status": "ok", "deleted": deleted, "scope": "portal_only"})
 
+    @app.patch("/api/bpmis-projects/order")
+    def reorder_bpmis_projects():
+        login_gate = _require_google_login(settings, api=True)
+        if login_gate is not None:
+            return login_gate
+        payload = request.get_json(silent=True) or {}
+        bpmis_ids = payload.get("bpmis_ids") if isinstance(payload.get("bpmis_ids"), list) else []
+        user_identity = _get_user_identity(settings)
+        projects = _get_bpmis_project_store().reorder_projects(
+            user_key=user_identity["config_key"],
+            bpmis_ids=[str(item or "") for item in bpmis_ids],
+        )
+        return jsonify({"status": "ok", "projects": projects, "scope": "portal_only"})
+
     @app.patch("/api/bpmis-projects/<bpmis_id>/comment")
     def update_bpmis_project_comment(bpmis_id: str):
         login_gate = _require_google_login(settings, api=True)

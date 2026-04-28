@@ -186,6 +186,11 @@ class LocalAgentClient:
         projects = payload.get("projects")
         return projects if isinstance(projects, list) else []
 
+    def bpmis_projects_reorder(self, *, user_key: str, bpmis_ids: list[str]) -> list[dict[str, Any]]:
+        payload = self._request("POST", "/api/local-agent/bpmis/projects/reorder", {"user_key": user_key, "bpmis_ids": bpmis_ids})
+        projects = payload.get("projects")
+        return projects if isinstance(projects, list) else []
+
     def bpmis_project_upsert(
         self,
         *,
@@ -577,6 +582,9 @@ class RemoteBPMISProjectStore:
 
     def list_projects(self, *, user_key: str) -> list[dict[str, Any]]:
         return self.client.bpmis_projects_list(user_key=user_key)
+
+    def reorder_projects(self, *, user_key: str, bpmis_ids: list[str]) -> list[dict[str, Any]]:
+        return self.client.bpmis_projects_reorder(user_key=user_key, bpmis_ids=bpmis_ids)
 
     def get_project(self, *, user_key: str, bpmis_id: str) -> dict[str, Any] | None:
         issue_id = str(bpmis_id or "").strip()

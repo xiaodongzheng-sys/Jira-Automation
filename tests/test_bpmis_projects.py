@@ -151,6 +151,23 @@ class BPMISProjectStoreTests(unittest.TestCase):
             self.assertEqual(restored_projects[0]["pm_comment"], "Follow up with Huixian.")
             self.assertEqual([first["id"], second["id"]], [ticket["id"] for ticket in restored_projects[0]["jira_tickets"]])
 
+    def test_store_persists_project_order(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = BPMISProjectStore(Path(temp_dir) / "team_portal.db")
+            for bpmis_id in ("225159", "225160", "225161"):
+                store.upsert_project(
+                    user_key="google:pm@npt.sg",
+                    bpmis_id=bpmis_id,
+                    project_name=f"Project {bpmis_id}",
+                    brd_link="",
+                    market="SG",
+                )
+
+            reordered = store.reorder_projects(user_key="google:pm@npt.sg", bpmis_ids=["225161", "225159", "225160"])
+
+            self.assertEqual(["225161", "225159", "225160"], [project["bpmis_id"] for project in reordered])
+            self.assertEqual(["225161", "225159", "225160"], [project["bpmis_id"] for project in store.list_projects(user_key="google:pm@npt.sg")])
+
     def test_portal_sync_restores_portal_removed_projects_returned_by_bpmis(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             store = BPMISProjectStore(Path(temp_dir) / "team_portal.db")

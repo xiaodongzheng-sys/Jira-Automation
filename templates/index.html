@@ -263,21 +263,8 @@
               <button class="button button-secondary" type="submit">Sync BPMIS Projects</button>
             </form>
           </div>
-          <div class="table-wrap premium-table-wrap" data-bpmis-project-table-wrap hidden>
-            <table class="bpmis-project-table">
-              <thead>
-                <tr>
-                  <th></th>
-                  <th>BPMIS ID</th>
-                  <th>Project Name</th>
-                  <th>BRD Link</th>
-                  <th>Market</th>
-                  <th>PM Comment</th>
-                  <th>Actions</th>
-                </tr>
-              </thead>
-              <tbody data-bpmis-project-body></tbody>
-            </table>
+          <div class="bpmis-project-card-list" data-bpmis-project-table-wrap hidden>
+            <div data-bpmis-project-body></div>
           </div>
           <div class="empty-state" data-bpmis-project-empty>
             <p>No BPMIS projects synced yet.</p>
@@ -461,7 +448,7 @@
 {% endblock %}
 
 {% block extra_scripts %}
-  <script src="{{ url_for('static', filename='bpmis_projects.js') }}?v=20260427-pm-comment"></script>
+  <script src="{{ url_for('static', filename='bpmis_projects.js') }}?v=20260428-bpmis-card-drag"></script>
   <script src="{{ url_for('static', filename='productization_upgrade_summary.js') }}?v=20260427-copy-wrap"></script>
   <script id="team-profile-data" type="application/json">{{ team_profiles | tojson }}</script>
   <script>

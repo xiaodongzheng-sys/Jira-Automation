@@ -687,7 +687,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertEqual(payload["llm_provider"], "codex_cli_bridge")
         self.assertEqual(payload["llm_policy"]["provider"]["provider"], "codex_cli_bridge")
         self.assertEqual(payload["llm_policy"]["router"]["version"], 7)
-        self.assertEqual(payload["llm_policy"]["versions"]["cache"], 12)
+        self.assertEqual(payload["llm_policy"]["versions"]["cache"], 13)
         self.assertEqual(payload["llm_policy"]["versions"]["runtime"], 2)
         self.assertEqual(payload["llm_policy"]["runtime"]["max_retries"], 2)
         self.assertEqual(payload["llm_policy"]["model_policy"]["answer"]["model"], os.getenv("SOURCE_CODE_QA_CODEX_MODEL", "codex-cli"))
@@ -5224,6 +5224,42 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertTrue(compressed["data_sources"])
         self.assertIn("cr_customer_profile", " ".join(compressed["data_sources"]))
         self.assertEqual(quality["status"], "sufficient")
+        self.assertIn("production:2", compressed["data_source_tiers"])
+
+    def test_test_only_data_source_requires_production_evidence(self):
+        matches = [
+            {
+                "repo": "Credit Risk",
+                "path": "src/test/java/repository/CustomerRepositoryTest.java",
+                "line_start": 10,
+                "line_end": 14,
+                "score": 100,
+                "trace_stage": "direct",
+                "reason": "test fixture matched",
+                "snippet": (
+                    "public void loadsProfile() {\n"
+                    "    jdbcTemplate.queryForObject(\"select * from cr_customer_profile\", mapper);\n"
+                    "}\n"
+                ),
+            }
+        ]
+
+        compressed = self.service._compress_evidence("What data source does Term Loan Pre Check 1 check?", matches)
+        quality = self.service._quality_gate("What data source does Term Loan Pre Check 1 check?", compressed)
+        pack = self.service._build_evidence_pack(
+            question="What data source does Term Loan Pre Check 1 check?",
+            evidence_summary=compressed,
+            matches=matches,
+            trace_paths=[],
+            quality_gate=quality,
+        )
+
+        self.assertIn("test:2", compressed["data_source_tiers"])
+        self.assertTrue(compressed["source_conflicts"])
+        self.assertEqual(quality["status"], "needs_more_trace")
+        self.assertIn("production repository/mapper/client/table evidence beyond test/docs/generated files", quality["missing"])
+        self.assertTrue(pack["source_conflicts"])
+        self.assertIn("Production source evidence was not found", " ".join(pack["missing_hops"]))
 
     def test_evidence_pack_structures_tables_and_missing_hops(self):
         matches = [
@@ -5399,6 +5435,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         plan = self.service._build_agent_plan("What data source does Term Loan Pre Check 1 check?", compressed, quality)
 
         step_names = [step["name"] for step in plan["steps"]]
+        self.assertIn("trace_entry_to_source_lineage", step_names)
         self.assertIn("trace_data_carriers", step_names)
         self.assertIn("trace_field_population", step_names)
         self.assertIn("trace_downstream_sources", step_names)
@@ -5887,18 +5924,27 @@ class SourceCodeQAServiceTests(unittest.TestCase):
 
     def test_structured_answer_parser_accepts_json_and_fallback_prose(self):
         parsed = self.service._parse_structured_answer(
-            '{"direct_answer":"Uses issue_table","claims":[{"text":"IssueRepository reads issue_table","citations":["S1"]}],"missing_evidence":[],"confidence":"high"}'
+            '{"direct_answer":"Uses issue_table","confirmed_from_code":["IssueRepository reads issue_table [S1]"],'
+            '"inferred_from_code":["IssueService calls the repository"],"not_found":["No caller evidence"],'
+            '"claims":[{"text":"IssueRepository reads issue_table","citations":["S1"]}],"missing_evidence":[],"confidence":"high"}'
         )
         fallback = self.service._parse_structured_answer("IssueRepository reads issue_table [S1].")
 
         self.assertEqual(parsed["format"], "json")
         self.assertEqual(parsed["claims"][0]["citations"], ["S1"])
+        self.assertEqual(parsed["confirmed_from_code"], ["IssueRepository reads issue_table [S1]"])
+        self.assertEqual(parsed["inferred_from_code"], ["IssueService calls the repository"])
+        self.assertEqual(parsed["not_found"], ["No caller evidence"])
         self.assertEqual(fallback["format"], "prose_fallback")
         self.assertEqual(fallback["claims"][0]["citations"], ["S1"])
+        self.assertEqual(fallback["confirmed_from_code"], [])
 
     def test_finalizer_preserves_structured_json_for_display(self):
         structured = {
             "direct_answer": "Issue creation reads issue_table.",
+            "confirmed_from_code": ["IssueRepository reads issue_table [S1]"],
+            "inferred_from_code": [],
+            "not_found": [],
             "claims": [{"text": "IssueRepository reads issue_table", "citations": ["S1"]}],
             "missing_evidence": ["No service caller evidence."],
             "confidence": "medium",
@@ -6048,7 +6094,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertEqual(telemetry["llm_model"], "gemini-2.5-flash")
         self.assertIn(telemetry["llm_thinking_budget"], {512, 2048})
         self.assertEqual(telemetry["llm_route"]["mode"], "manual")
-        self.assertEqual(telemetry["versions"]["cache"], 12)
+        self.assertEqual(telemetry["versions"]["cache"], 13)
         self.assertIn("llm_latency_ms", telemetry)
         self.assertIn("llm_attempt_log", telemetry)
         self.assertIn("answer_contract", telemetry)
@@ -6394,7 +6440,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         )
         cached = service._load_cached_answer(cache_key)
         self.assertIsNotNone(cached)
-        self.assertEqual(cached["versions"]["cache"], 12)
+        self.assertEqual(cached["versions"]["cache"], 13)
         cache_path = service.answer_cache_root / f"{cache_key}.json"
         stale_payload = json.loads(cache_path.read_text(encoding="utf-8"))
         stale_payload["versions"]["router"] = -1

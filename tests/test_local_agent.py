@@ -245,6 +245,27 @@ class LocalAgentServerTests(unittest.TestCase):
         self.assertEqual(payload["config"]["pm_team"], "AF")
         self.assertEqual(payload["config"]["sync_pm_email"], "teammate@npt.sg")
 
+    def test_signed_bpmis_project_reorder_uses_agent_store(self):
+        for bpmis_id in ("225159", "225160", "225161"):
+            self._post_signed(
+                "/api/local-agent/bpmis/projects/upsert",
+                {
+                    "user_key": "google:teammate@npt.sg",
+                    "bpmis_id": bpmis_id,
+                    "project_name": f"Project {bpmis_id}",
+                    "brd_link": "",
+                    "market": "SG",
+                },
+            )
+
+        response = self._post_signed(
+            "/api/local-agent/bpmis/projects/reorder",
+            {"user_key": "google:teammate@npt.sg", "bpmis_ids": ["225161", "225159", "225160"]},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(["225161", "225159", "225160"], [project["bpmis_id"] for project in response.get_json()["projects"]])
+
     def test_signed_bpmis_call_delegates_to_direct_client(self):
         class FakeBPMISClient:
             def __init__(self, settings, access_token=None):

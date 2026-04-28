@@ -41,10 +41,22 @@ if [[ "${CLOUD_RUN_BUILD_IMAGE_DRY_RUN:-0}" == "1" ]]; then
 fi
 
 cd "$ROOT_DIR"
+BUILD_ARGS=()
+if [[ -n "${CLOUD_RUN_BUILD_MACHINE_TYPE:-}" ]]; then
+  BUILD_ARGS+=(--machine-type "$CLOUD_RUN_BUILD_MACHINE_TYPE")
+fi
+if [[ -n "${CLOUD_RUN_BUILD_TIMEOUT:-}" ]]; then
+  BUILD_ARGS+=(--timeout "$CLOUD_RUN_BUILD_TIMEOUT")
+fi
+if [[ -n "${CLOUD_RUN_BUILD_DISK_SIZE:-}" ]]; then
+  BUILD_ARGS+=(--disk-size "$CLOUD_RUN_BUILD_DISK_SIZE")
+fi
+
 "$GCLOUD_BIN" builds submit \
   --project "$PROJECT_ID" \
   --config cloudbuild.yaml \
   --substitutions "_REGION=$REGION,_REPOSITORY=$REPOSITORY,_IMAGE_NAME=$IMAGE_NAME,_TAG=$TAG" \
+  ${BUILD_ARGS[@]+"${BUILD_ARGS[@]}"} \
   .
 
 FINISHED_AT="$(date +%s)"

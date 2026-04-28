@@ -69,6 +69,9 @@ class MockSourceCodeQALLMProvider:
         direct_answer = f"Based on the indexed evidence, {question} is answered by {path} [{citation}]."
         answer = {
             "direct_answer": direct_answer,
+            "confirmed_from_code": [direct_answer],
+            "inferred_from_code": [],
+            "not_found": [],
             "claims": [{"text": direct_answer, "citations": [citation]}],
             "missing_evidence": [],
             "confidence": "high",

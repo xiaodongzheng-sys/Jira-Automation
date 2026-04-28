@@ -24,6 +24,10 @@ PROJECT_ARGS=()
 if [[ -n "${GOOGLE_CLOUD_PROJECT:-}" ]]; then
   PROJECT_ARGS=(--project "$GOOGLE_CLOUD_PROJECT")
 fi
+ACCOUNT_ARGS=()
+if [[ -n "${CLOUD_RUN_DEPLOY_ACCOUNT:-}" ]]; then
+  ACCOUNT_ARGS=(--account "$CLOUD_RUN_DEPLOY_ACCOUNT")
+fi
 
 cloud_run_hash() {
   if [[ ! -x "$PYTHON_BIN" ]]; then
@@ -118,8 +122,39 @@ print(hashlib.sha256(os.environ.get("HASH_TEXT_PAYLOAD", "").encode("utf-8")).he
 PY
 }
 
+assert_local_agent_secret_matches_cloud() {
+  if [[ "${CLOUD_RUN_RESTART_LOCAL_AGENT_AFTER_DEPLOY:-1}" != "1" ]]; then
+    return 0
+  fi
+  if [[ "${CLOUD_RUN_SKIP_LOCAL_AGENT_SECRET_CHECK:-0}" == "1" ]]; then
+    echo "Skipping local-agent secret consistency check because CLOUD_RUN_SKIP_LOCAL_AGENT_SECRET_CHECK=1."
+    return 0
+  fi
+  if [[ -z "${LOCAL_AGENT_URL:-}" ]]; then
+    return 0
+  fi
+  local local_secret
+  local_secret="${LOCAL_AGENT_HMAC_SECRET:-$(read_env_value LOCAL_AGENT_HMAC_SECRET)}"
+  if [[ -z "$local_secret" ]]; then
+    echo "LOCAL_AGENT_HMAC_SECRET is required before restarting the Mac local-agent after deploy."
+    echo "Set it in .env, or set CLOUD_RUN_RESTART_LOCAL_AGENT_AFTER_DEPLOY=0 only for deploys that do not use local-agent routes."
+    exit 1
+  fi
+  local cloud_secret
+  if ! cloud_secret="$("$GCLOUD_BIN" secrets versions access latest --secret local-agent-hmac-secret ${PROJECT_ARGS[@]+"${PROJECT_ARGS[@]}"} ${ACCOUNT_ARGS[@]+"${ACCOUNT_ARGS[@]}"} 2>/dev/null)"; then
+    echo "Could not verify Secret Manager local-agent-hmac-secret before deploy."
+    echo "Fix gcloud secret access, or set CLOUD_RUN_SKIP_LOCAL_AGENT_SECRET_CHECK=1 if you have verified the Mac local-agent secret manually."
+    exit 1
+  fi
+  if [[ "$cloud_secret" != "$local_secret" ]]; then
+    echo "Local-agent HMAC secret mismatch: Cloud Run uses Secret Manager local-agent-hmac-secret, but the Mac local-agent would restart with a different local .env value."
+    echo "Sync LOCAL_AGENT_HMAC_SECRET in .env with Secret Manager before deploying, or run deploy_cloud_run_full.sh to intentionally update Cloud Run secrets."
+    exit 1
+  fi
+}
+
 DESCRIBE_STARTED_AT="$(date +%s)"
-SERVICE_DESCRIBE_JSON="$("$GCLOUD_BIN" run services describe "$SERVICE" ${PROJECT_ARGS[@]+"${PROJECT_ARGS[@]}"} --region "$REGION" --format=json 2>/dev/null || true)"
+SERVICE_DESCRIBE_JSON="$("$GCLOUD_BIN" run services describe "$SERVICE" ${PROJECT_ARGS[@]+"${PROJECT_ARGS[@]}"} ${ACCOUNT_ARGS[@]+"${ACCOUNT_ARGS[@]}"} --region "$REGION" --format=json 2>/dev/null || true)"
 DESCRIBE_VALUES="$(CLOUD_RUN_SERVICE_JSON="$SERVICE_DESCRIBE_JSON" "$PYTHON_BIN" - <<'PY'
 import json
 import os
@@ -169,6 +204,8 @@ if [[ -n "$LOCAL_AGENT_URL" ]]; then
   ENV_VARS+=("LOCAL_AGENT_BASE_URL=$LOCAL_AGENT_URL")
 fi
 
+assert_local_agent_secret_matches_cloud
+
 IFS='|'
 ENV_VARS_JOINED="${ENV_VARS[*]}"
 unset IFS
@@ -204,7 +241,7 @@ ENV_VARS_JOINED="${ENV_VARS[*]}"
 unset IFS
 
 if [[ "${CLOUD_RUN_SKIP_UNCHANGED:-0}" == "1" && "$DEPLOY_HASH" != "unknown" ]]; then
-  EXISTING_DEPLOY_HASH="$("$GCLOUD_BIN" run services describe "$SERVICE" ${PROJECT_ARGS[@]+"${PROJECT_ARGS[@]}"} --region "$REGION" --format='value(spec.template.spec.containers[0].env[?name="TEAM_PORTAL_DEPLOY_HASH"].value)' 2>/dev/null || true)"
+  EXISTING_DEPLOY_HASH="$("$GCLOUD_BIN" run services describe "$SERVICE" ${PROJECT_ARGS[@]+"${PROJECT_ARGS[@]}"} ${ACCOUNT_ARGS[@]+"${ACCOUNT_ARGS[@]}"} --region "$REGION" --format='value(spec.template.spec.containers[0].env[?name="TEAM_PORTAL_DEPLOY_HASH"].value)' 2>/dev/null || true)"
   if [[ "$EXISTING_DEPLOY_HASH" == "$DEPLOY_HASH" ]]; then
     echo "Cloud Run deploy skipped: source and deploy env hash are unchanged ($DEPLOY_HASH)."
     exit 0
@@ -240,6 +277,7 @@ fi
 DEPLOY_STARTED_AT="$(date +%s)"
 "$GCLOUD_BIN" run deploy "$SERVICE" \
   ${PROJECT_ARGS[@]+"${PROJECT_ARGS[@]}"} \
+  ${ACCOUNT_ARGS[@]+"${ACCOUNT_ARGS[@]}"} \
   --region "$REGION" \
   "${DEPLOY_SOURCE_ARGS[@]}" \
   ${AUTH_ARGS[@]+"${AUTH_ARGS[@]}"} \

@@ -1526,6 +1526,37 @@ class WebPortalFeatureTests(unittest.TestCase):
             self.assertEqual(list_response.get_json()["projects"], [])
             self.assertEqual(len(store.list_projects(user_key="anon:second")), 1)
 
+    def test_bpmis_projects_api_reorder_is_user_scoped(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
+            },
+            clear=False,
+        ):
+            app = create_app()
+            app.testing = True
+            store = app.config["BPMIS_PROJECT_STORE"]
+            for bpmis_id in ("225159", "225160", "225161"):
+                store.upsert_project(user_key="anon:first", bpmis_id=bpmis_id, project_name=f"First {bpmis_id}", brd_link="", market="SG")
+            store.upsert_project(user_key="anon:second", bpmis_id="225159", project_name="Second", brd_link="", market="SG")
+
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["anonymous_user_key"] = "first"
+
+                reorder_response = client.patch("/api/bpmis-projects/order", json={"bpmis_ids": ["225161", "225159", "225160"]})
+                list_response = client.get("/api/bpmis-projects")
+
+            self.assertEqual(reorder_response.status_code, 200)
+            self.assertEqual(reorder_response.get_json()["scope"], "portal_only")
+            self.assertEqual(["225161", "225159", "225160"], [project["bpmis_id"] for project in list_response.get_json()["projects"]])
+            self.assertEqual(len(store.list_projects(user_key="anon:second")), 1)
+
     def test_create_jira_api_returns_partial_results_and_saves_links(self):
         fake_client = _PortalFakeBPMISClient()
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(

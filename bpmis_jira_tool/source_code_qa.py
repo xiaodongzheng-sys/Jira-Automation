@@ -39,10 +39,10 @@ LLM_PROVIDER_OPENAI_COMPATIBLE = "openai_compatible"
 LLM_PROVIDER_CODEX_CLI_BRIDGE = "codex_cli_bridge"
 LLM_PROVIDER_VERTEX_AI = "vertex_ai"
 LLM_PROVIDER_ALLOWED_QUERY_CHOICES = {LLM_PROVIDER_GEMINI, LLM_PROVIDER_CODEX_CLI_BRIDGE, LLM_PROVIDER_VERTEX_AI}
-LLM_PROMPT_VERSION = 7
-LLM_RESPONSE_SCHEMA_VERSION = 3
+LLM_PROMPT_VERSION = 8
+LLM_RESPONSE_SCHEMA_VERSION = 4
 LLM_ROUTER_VERSION = 7
-LLM_CACHE_VERSION = 12
+LLM_CACHE_VERSION = 13
 LLM_RUNTIME_VERSION = 2
 PLANNER_TOOL_DSL_VERSION = 1
 GEMINI_MIN_THINKING_BUDGET = 512
@@ -160,6 +160,9 @@ ANSWER_SELF_CHECK_WEAK_PHRASES = (
     "appears to",
     "likely",
 )
+
+PRODUCTION_EVIDENCE_TIERS = {"production", "config"}
+WEAK_EVIDENCE_TIERS = {"test", "docs", "generated"}
 
 SKIP_DIRS = {
     ".git",
@@ -12075,6 +12078,30 @@ class SourceCodeQAService:
             steps.extend(
                 [
                     {
+                        "name": "trace_entry_to_source_lineage",
+                        "purpose": "For underwriting/precheck/data-lineage questions, trace entry point through service, processor, mapper, repository, client, API, and SQL layers before answering.",
+                        "terms": [
+                            *seed_terms,
+                            "underwriting",
+                            "precheck",
+                            "preCheck",
+                            "layer",
+                            "engine",
+                            "strategy",
+                            "processor",
+                            "handler",
+                            "DataSourceResult",
+                            "repository",
+                            "mapper",
+                            "dao",
+                            "client",
+                            "integration",
+                            "select",
+                            "from",
+                        ],
+                        "tools": ["find_definition", "find_callers", "find_callees", "trace_flow", "trace_entity"],
+                    },
+                    {
                         "name": "trace_data_carriers",
                         "purpose": "Find DTO/context/result objects that carry the requested data.",
                         "terms": [*seed_terms, "dto", "input", "context", "record", "result", "request", "response", "profile", "info"],
@@ -12296,14 +12323,14 @@ class SourceCodeQAService:
                 for tool in step.get("tools") or []
                 if str(tool).strip() in {tool_def["name"] for tool_def in self._planner_tool_registry()["tools"]}
             ]
-            deduped_steps.append({**step, "terms": terms[:16], "tools": list(dict.fromkeys(tools))[:5]})
+            deduped_steps.append({**step, "terms": terms[:20], "tools": list(dict.fromkeys(tools))[:5]})
             seen.add(name)
         return {
             "mode": "local_agentic_retrieval",
-            "recipe_version": 2,
+            "recipe_version": 3,
             "status": "planned" if deduped_steps else "not_needed",
             "intent": intent,
-            "steps": deduped_steps[:5],
+            "steps": deduped_steps[:6],
         }
 
     def _planner_seed_terms(self, question: str, evidence_summary: dict[str, Any]) -> list[str]:
@@ -13144,10 +13171,15 @@ class SourceCodeQAService:
             "impact_surfaces": [],
             "test_coverage": [],
             "operational_boundaries": [],
+            "source_tiers": [],
+            "data_source_tiers": [],
+            "source_conflicts": [],
             "source_count": len(selected),
         }
         adders = {key: self._limited_fact_adder(summary[key], 12) for key in summary if isinstance(summary.get(key), list)}
         intent = summary["intent"]
+        source_tier_counts: dict[str, int] = {}
+        data_source_tier_counts: dict[str, int] = {}
 
         for match in selected:
             label = self._evidence_label(match)
@@ -13156,6 +13188,8 @@ class SourceCodeQAService:
             snippet = str(match.get("snippet") or "")
             snippet_lower = snippet.lower()
             symbols = IDENTIFIER_PATTERN.findall(snippet)
+            source_tier = self._match_source_tier(match)
+            source_tier_counts[source_tier] = source_tier_counts.get(source_tier, 0) + 1
 
             if match.get("trace_stage") == "direct" or any(hint in path_lower for hint in ("controller", "consumer", "scene", "strategy", "service", "engine")):
                 adders["entry_points"](f"{label}: {self._compact_path(path)}")
@@ -13199,11 +13233,13 @@ class SourceCodeQAService:
             for line in self._interesting_lines(snippet, DATA_SOURCE_HINTS):
                 if self._is_concrete_source_line(line):
                     adders["data_sources"](f"{label}: {line}")
+                    data_source_tier_counts[source_tier] = data_source_tier_counts.get(source_tier, 0) + 1
             for line in self._interesting_lines(snippet, FIELD_POPULATION_HINTS):
                 adders["field_population"](f"{label}: {line}")
             if re.search(r"\bselect\b.+\bfrom\b", snippet_lower, flags=re.IGNORECASE):
                 for line in self._interesting_lines(snippet, ("select", " from ")):
                     adders["data_sources"](f"{label}: {line}")
+                    data_source_tier_counts[source_tier] = data_source_tier_counts.get(source_tier, 0) + 1
             for line in self._interesting_lines(snippet, API_HINTS + CONFIG_HINTS):
                 adders["api_or_config"](f"{label}: {line}")
             for line in self._interesting_lines(snippet, ERROR_HINTS + RULE_HINTS):
@@ -13220,6 +13256,22 @@ class SourceCodeQAService:
                         f"{label}: {finding['severity']} {finding['kind']}: {finding['reason']}"
                     )
 
+        for tier, count in sorted(source_tier_counts.items()):
+            adders["source_tiers"](f"{tier}:{count}")
+        for tier, count in sorted(data_source_tier_counts.items()):
+            adders["data_source_tiers"](f"{tier}:{count}")
+        if intent.get("data_source") and summary["data_sources"]:
+            confirmed_source_tiers = set(data_source_tier_counts)
+            if confirmed_source_tiers and not (confirmed_source_tiers & PRODUCTION_EVIDENCE_TIERS):
+                adders["source_conflicts"](
+                    "Concrete source evidence appears only in test/docs/generated files; production repository/mapper/client evidence is still required."
+                )
+            if source_tier_counts.get("test") and not (confirmed_source_tiers & PRODUCTION_EVIDENCE_TIERS):
+                adders["source_conflicts"](
+                    "Test evidence was found without matching production source evidence."
+                )
+        summary["source_tier_counts"] = source_tier_counts
+        summary["data_source_tier_counts"] = data_source_tier_counts
         return summary
 
     def _build_evidence_pack(
@@ -13248,6 +13300,8 @@ class SourceCodeQAService:
             "impact_surfaces": [],
             "test_coverage": [],
             "operational_boundaries": [],
+            "source_tiers": [],
+            "source_conflicts": [],
             "missing_hops": [],
             "citation_map": [],
             "confirmed_facts": [],
@@ -13350,6 +13404,12 @@ class SourceCodeQAService:
             confidence = "high" if any(term in lowered for term in ("transactional", "cache", "async", "retry", "circuit", "rate", "lock", "authorize")) else "medium"
             adders["operational_boundaries"](str(fact))
             add_item("operational_boundary", str(fact), confidence=confidence, hop="runtime_boundary")
+        for fact in evidence_summary.get("source_tiers") or []:
+            adders["source_tiers"](str(fact))
+        for fact in evidence_summary.get("source_conflicts") or []:
+            adders["source_conflicts"](str(fact))
+            adders["missing_hops"](str(fact))
+            add_item("source_conflict", str(fact), confidence="low", hop="evidence_conflict", supports_answer=False)
 
         for path in trace_paths[:8]:
             edges = path.get("edges") or []
@@ -13469,6 +13529,15 @@ class SourceCodeQAService:
         if pack["intent"].get("data_source") and not pack["tables"] and not pack["external_dependencies"]:
             adders["missing_hops"]("No confirmed table/API/client source found in indexed evidence.")
             add_item("missing_hop", "No confirmed table/API/client source found in indexed evidence.", confidence="low", hop="missing", supports_answer=False)
+        if pack["intent"].get("data_source") and evidence_summary.get("data_sources") and not self._has_production_source_tier(evidence_summary):
+            adders["missing_hops"]("Production source evidence was not found; current source hits are limited to weaker evidence tiers.")
+            add_item(
+                "missing_hop",
+                "Production source evidence was not found; current source hits are limited to weaker evidence tiers.",
+                confidence="low",
+                hop="missing",
+                supports_answer=False,
+            )
         pack["items"] = pack["items"][:40]
         self._classify_evidence_pack_items(pack)
         return pack
@@ -13536,6 +13605,24 @@ class SourceCodeQAService:
     @staticmethod
     def _evidence_label(match: dict[str, Any]) -> str:
         return f"{match.get('repo')}:{match.get('path')}:{match.get('line_start')}-{match.get('line_end')}"
+
+    @staticmethod
+    def _evidence_source_tier(path: str) -> str:
+        normalized = "/" + str(path or "").replace("\\", "/").lower().strip("/")
+        name = Path(str(path or "")).name.lower()
+        if any(marker in normalized for marker in ("/test/", "/tests/", "/src/test/", "/__tests__/", "/spec/")):
+            return "test"
+        if any(marker in normalized for marker in ("/docs/", "/doc/", "/readme", "/design/", "/wiki/")) or name.endswith((".md", ".adoc", ".rst")):
+            return "docs"
+        if any(marker in normalized for marker in ("/generated/", "/target/", "/build/", "/dist/", "/coverage/")):
+            return "generated"
+        if name.endswith((".properties", ".yml", ".yaml", ".toml", ".ini", ".conf")) or "/config/" in normalized:
+            return "config"
+        return "production"
+
+    @classmethod
+    def _match_source_tier(cls, match: dict[str, Any]) -> str:
+        return cls._evidence_source_tier(str(match.get("path") or ""))
 
     @staticmethod
     def _compact_path(path: str) -> str:
@@ -13685,6 +13772,9 @@ class SourceCodeQAService:
                 score += 1
             if evidence_summary.get("downstream_components"):
                 score += 1
+            if evidence_summary.get("data_sources") and not self._has_production_source_tier(evidence_summary):
+                missing.append("production repository/mapper/client/table evidence beyond test/docs/generated files")
+                score = max(0, score - 2)
 
         if intent.get("api"):
             checks.append("api")
@@ -13732,6 +13822,18 @@ class SourceCodeQAService:
     def _has_concrete_source_evidence(evidence_summary: dict[str, Any]) -> bool:
         combined = " ".join(str(value) for value in evidence_summary.get("data_sources") or []).lower()
         return any(hint in combined for hint in CONCRETE_SOURCE_HINTS)
+
+    @staticmethod
+    def _has_production_source_tier(evidence_summary: dict[str, Any]) -> bool:
+        tiers = set(evidence_summary.get("data_source_tier_counts") or {})
+        if not tiers:
+            for item in evidence_summary.get("data_source_tiers") or []:
+                tier = str(item).split(":", 1)[0].strip().lower()
+                if tier:
+                    tiers.add(tier)
+        if not tiers and evidence_summary.get("data_sources"):
+            return True
+        return bool(tiers & PRODUCTION_EVIDENCE_TIERS)
 
     def _quality_gate_trace_terms(
         self,
@@ -13968,6 +14070,7 @@ class SourceCodeQAService:
             "inferred_facts": evidence_pack.get("inferred_facts") or [],
             "missing_facts": evidence_pack.get("missing_facts") or [],
             "evidence_limits": evidence_pack.get("evidence_limits") or [],
+            "source_conflicts": evidence_pack.get("source_conflicts") or [],
         }
 
     def _select_result_matches(self, matches: list[dict[str, Any]], limit: int, *, question: str = "") -> list[dict[str, Any]]:
@@ -15023,7 +15126,8 @@ class SourceCodeQAService:
             "Use shell/file inspection to verify the answer from the synced repository workspace. "
             "Do not edit files, install dependencies, create commits, deploy, or run mutating commands. "
             "Prefer rg, sed, nl, and direct file reads. "
-            "Return concise JSON with direct_answer, claims, missing_evidence, and confidence. "
+            "Return concise JSON with direct_answer, confirmed_from_code, inferred_from_code, not_found, claims, missing_evidence, and confidence. "
+            "Put only verified production/config code facts in confirmed_from_code; put weaker deductions in inferred_from_code. "
             "Every concrete code claim must cite either an evidence id like S1 or a real file reference like path/to/File.java:10-20."
         )
 
@@ -15363,7 +15467,7 @@ class SourceCodeQAService:
             lines.extend(f"- {issue}" for issue in repair_issues[:8])
             lines.append("- Re-open the files as needed and return claims with valid citations.")
         lines.extend(["", "Evidence pack navigation hints only, not an answer-quality gate:"])
-        for key_name in ("entry_points", "call_chain", "read_write_points", "tables", "apis", "configs", "missing_hops"):
+        for key_name in ("entry_points", "call_chain", "read_write_points", "tables", "apis", "configs", "source_tiers", "source_conflicts", "missing_hops"):
             values = evidence_pack.get(key_name) or []
             if values:
                 lines.append(f"- {key_name}: {values[:6]}")
@@ -15375,8 +15479,10 @@ class SourceCodeQAService:
             [
                 "",
                 "Final answer contract:",
-                '- Return JSON: {"direct_answer":"...","claims":[{"text":"...","citations":["S1"]}],"missing_evidence":[],"confidence":"high|medium|low"}.',
+                '- Return JSON: {"direct_answer":"...","confirmed_from_code":["..."],"inferred_from_code":["..."],"not_found":["..."],"claims":[{"text":"...","citations":["S1"]}],"missing_evidence":[],"confidence":"high|medium|low"}.',
                 "- Use S ids from candidate paths when they support the claim, or direct file citations like src/Foo.java:10-20 after you verify the file exists.",
+                "- Put only file-verified production facts in confirmed_from_code; put carrier/call-chain deductions in inferred_from_code; put missing source hops in not_found.",
+                "- Production code, mapper, client, SQL, and config evidence beats tests, docs, specs, and generated files.",
                 "- If evidence is missing, state the missing link instead of guessing.",
             ]
         )
@@ -15581,6 +15687,9 @@ class SourceCodeQAService:
             "type": "OBJECT",
             "properties": {
                 "direct_answer": {"type": "STRING"},
+                "confirmed_from_code": string_array,
+                "inferred_from_code": string_array,
+                "not_found": string_array,
                 "claims": {
                     "type": "ARRAY",
                     "items": {
@@ -15597,7 +15706,7 @@ class SourceCodeQAService:
                 "confidence": {"type": "STRING", "enum": ["high", "medium", "low"]},
             },
             "required": ["direct_answer", "claims", "missing_evidence", "confidence"],
-            "propertyOrdering": ["direct_answer", "claims", "missing_evidence", "confidence"],
+            "propertyOrdering": ["direct_answer", "confirmed_from_code", "inferred_from_code", "not_found", "claims", "missing_evidence", "confidence"],
         }
 
     @staticmethod
@@ -15700,6 +15809,8 @@ class SourceCodeQAService:
                 ("Impact surfaces", "impact_surfaces"),
                 ("Test coverage", "test_coverage"),
                 ("Operational boundaries", "operational_boundaries"),
+                ("Source tiers", "source_tiers"),
+                ("Source conflicts", "source_conflicts"),
                 ("Missing hops", "missing_hops"),
             ):
                 values = evidence_pack.get(key) or []
@@ -15720,6 +15831,8 @@ class SourceCodeQAService:
             ("Impact surfaces", "impact_surfaces"),
             ("Test coverage", "test_coverage"),
             ("Operational boundaries", "operational_boundaries"),
+            ("Source tiers", "source_tiers"),
+            ("Source conflicts", "source_conflicts"),
         ):
             values = evidence_summary.get(key) or []
             if values:
@@ -15750,6 +15863,7 @@ class SourceCodeQAService:
                 "Do not let compressed facts override a raw snippet. "
                 "Reason through call flow, data flow, and configuration links when the evidence supports it. "
                 "Never upgrade DTO/carrier evidence into a final data source. "
+                "Separate confirmed_from_code, inferred_from_code, and not_found/missing evidence instead of blending certainty levels. "
                 "Avoid speculative language such as likely, suggests, or appears unless explicitly marking missing evidence. "
                 "Prioritize the user's actual question, give the direct answer first, and keep the final response concise. "
                 "Use short citation tags for concrete code-backed claims. "
@@ -15762,6 +15876,7 @@ class SourceCodeQAService:
             "Treat the compressed evidence facts as the primary signal, and snippets as secondary grounding. "
             "Follow the supplied domain guidance and answer blueprint, but never let domain hints override code evidence. "
             "Never upgrade DTO/carrier evidence into a final data source. "
+            "Separate confirmed_from_code, inferred_from_code, and not_found/missing evidence instead of blending certainty levels. "
             "Avoid speculative language such as likely, suggests, or appears unless explicitly marking missing evidence. "
             "Prioritize answering the user's actual question directly and accurately. "
             "Do not dump ranked references, but do cite concrete claims with provided citation ids. "
@@ -15794,10 +15909,14 @@ class SourceCodeQAService:
             f"{retry_note}"
             "Answer requirements:\n"
             "- Return this JSON shape whenever possible: "
-            "{\"direct_answer\":\"...\",\"claims\":[{\"text\":\"...\",\"citations\":[\"S1\"]}],"
+            "{\"direct_answer\":\"...\",\"confirmed_from_code\":[\"...\"],\"inferred_from_code\":[\"...\"],"
+            "\"not_found\":[\"...\"],\"claims\":[{\"text\":\"...\",\"citations\":[\"S1\"]}],"
             "\"missing_evidence\":[],\"confidence\":\"high|medium|low\"}. "
             "If a short prose answer is more appropriate, still keep citation tags on concrete claims.\n"
             "- Start with the direct answer.\n"
+            "- Put production-code, mapper, client, SQL, route, config, and directly opened file facts in confirmed_from_code.\n"
+            "- Put carrier DTOs, call-chain deductions, and relation hypotheses in inferred_from_code unless a raw snippet directly proves the claim.\n"
+            "- Put absent repository/mapper/client/table hops, missing tests, and evidence-tier conflicts in not_found and missing_evidence.\n"
             "- Prefer agent trace and two-hop trace evidence when it clarifies downstream service, integration, repository, mapper, API, or table usage.\n"
             "- Treat raw code snippets as the source of truth when they are provided as primary evidence; use compressed facts as navigation hints and consistency checks.\n"
             "- Follow the domain-specific evidence rules and answer blueprint when present.\n"
@@ -15892,9 +16011,14 @@ class SourceCodeQAService:
             "data_carriers": data_carriers,
             "field_population": field_population,
             "missing_links": missing_links[:8],
+            "confirmed_from_code": list(dict.fromkeys([*(structured_answer.get("confirmed_from_code") or []), *confirmed_sources]))[:8],
+            "inferred_from_code": list(dict.fromkeys([*(structured_answer.get("inferred_from_code") or []), *data_carriers, *field_population]))[:8],
+            "not_found": list(dict.fromkeys([*(structured_answer.get("not_found") or []), *missing_links]))[:8],
             "confidence": "low" if blocked else str(structured_answer.get("confidence") or quality_gate.get("confidence") or "medium").lower(),
             "claim_check": claim_check,
             "policies": quality_gate.get("policies") or [],
+            "source_tiers": evidence_summary.get("source_tiers") or [],
+            "source_conflicts": evidence_summary.get("source_conflicts") or [],
         }
         final_answer = str(answer or "").strip()
         unreliable_llm_output = self._unreliable_llm_output(
@@ -15924,6 +16048,9 @@ class SourceCodeQAService:
         if structured_answer.get("format") == "json" and structured_answer.get("direct_answer") and not blocked and not unreliable_llm_output:
             final_structured = {
                 **structured_answer,
+                "confirmed_from_code": contract["confirmed_from_code"] or structured_answer.get("confirmed_from_code") or [],
+                "inferred_from_code": contract["inferred_from_code"] or structured_answer.get("inferred_from_code") or [],
+                "not_found": contract["not_found"] or structured_answer.get("not_found") or [],
                 "missing_evidence": missing_links[:8] or structured_answer.get("missing_evidence") or [],
             }
         else:
@@ -16010,11 +16137,33 @@ class SourceCodeQAService:
                 for fact in evidence_summary.get("field_population") or []
             ][:8],
             "missing_links": missing_links[:8],
+            "confirmed_from_code": list(dict.fromkeys([
+                *(structured_answer.get("confirmed_from_code") or []),
+                *[
+                    self._append_fact_citation(fact, selected_matches)
+                    for fact in evidence_summary.get("data_sources") or []
+                    if self._is_concrete_source_line(str(fact))
+                ],
+            ]))[:8],
+            "inferred_from_code": list(dict.fromkeys([
+                *(structured_answer.get("inferred_from_code") or []),
+                *[
+                    self._append_fact_citation(fact, selected_matches)
+                    for fact in evidence_summary.get("data_carriers") or []
+                ][:4],
+                *[
+                    self._append_fact_citation(fact, selected_matches)
+                    for fact in evidence_summary.get("field_population") or []
+                ][:4],
+            ]))[:8],
+            "not_found": list(dict.fromkeys([*(structured_answer.get("not_found") or []), *missing_links]))[:8],
             "confidence": str(structured_answer.get("confidence") or quality_gate.get("confidence") or "medium").lower(),
             "claim_check": claim_check,
             "answer_judge": answer_judge or {},
             "finish_reason": finish_reason,
             "policies": quality_gate.get("policies") or [],
+            "source_tiers": evidence_summary.get("source_tiers") or [],
+            "source_conflicts": evidence_summary.get("source_conflicts") or [],
             "passthrough": True,
         }
         final_answer = str(answer or "").strip()
@@ -16116,6 +16265,19 @@ class SourceCodeQAService:
     @staticmethod
     def _render_structured_answer(structured_answer: dict[str, Any], contract: dict[str, Any]) -> str:
         lines = [str(structured_answer.get("direct_answer") or "").strip()]
+        confirmed = [str(item).strip() for item in contract.get("confirmed_from_code") or structured_answer.get("confirmed_from_code") or [] if str(item).strip()]
+        inferred = [str(item).strip() for item in contract.get("inferred_from_code") or structured_answer.get("inferred_from_code") or [] if str(item).strip()]
+        not_found = [str(item).strip() for item in contract.get("not_found") or structured_answer.get("not_found") or [] if str(item).strip()]
+        if confirmed:
+            lines.append("")
+            lines.append("Confirmed from code:")
+            for item in confirmed[:5]:
+                lines.append(f"- {item}")
+        if inferred:
+            lines.append("")
+            lines.append("Inferred:")
+            for item in inferred[:4]:
+                lines.append(f"- {item}")
         claims = [claim for claim in structured_answer.get("claims") or [] if isinstance(claim, dict) and str(claim.get("text") or "").strip()]
         if claims:
             lines.append("")
@@ -16129,10 +16291,10 @@ class SourceCodeQAService:
                         citation_tags.append(tag)
                 suffix = f" {' '.join(citation_tags)}" if citation_tags else ""
                 lines.append(f"- {text}{suffix}")
-        missing = contract.get("missing_links") or structured_answer.get("missing_evidence") or []
+        missing = not_found or contract.get("missing_links") or structured_answer.get("missing_evidence") or []
         if missing:
             lines.append("")
-            lines.append("Missing evidence:")
+            lines.append("Not found / missing evidence:")
             for item in missing[:4]:
                 lines.append(f"- {item}")
         return "\n".join(line for line in lines if line is not None).strip()
@@ -16159,6 +16321,9 @@ class SourceCodeQAService:
             ]
             return {
                 "direct_answer": text,
+                "confirmed_from_code": [],
+                "inferred_from_code": [],
+                "not_found": [],
                 "claims": claims[:8],
                 "missing_evidence": [],
                 "confidence": "medium" if claims else "low",
@@ -16175,6 +16340,9 @@ class SourceCodeQAService:
                 normalized_claims.append({"text": str(claim).strip(), "citations": []})
         return {
             "direct_answer": str(payload.get("direct_answer") or payload.get("answer") or text).strip(),
+            "confirmed_from_code": [str(item) for item in payload.get("confirmed_from_code") or []] if isinstance(payload.get("confirmed_from_code"), list) else [],
+            "inferred_from_code": [str(item) for item in payload.get("inferred_from_code") or []] if isinstance(payload.get("inferred_from_code"), list) else [],
+            "not_found": [str(item) for item in payload.get("not_found") or []] if isinstance(payload.get("not_found"), list) else [],
             "claims": normalized_claims,
             "missing_evidence": [str(item) for item in payload.get("missing_evidence") or []] if isinstance(payload.get("missing_evidence"), list) else [],
             "confidence": str(payload.get("confidence") or "medium").strip().lower(),

@@ -43,6 +43,17 @@ class BPMISProjectStore:
                 """,
                 (owner, issue_id),
             ).fetchone()
+            next_order = int(
+                connection.execute(
+                    """
+                    SELECT COALESCE(MAX(project_order), 0) + 1
+                    FROM bpmis_projects
+                    WHERE user_key = ?
+                    """,
+                    (owner,),
+                ).fetchone()[0]
+                or 1
+            )
             if row and (
                 str(row[0] or "") == normalized_project_name
                 and str(row[1] or "") == normalized_brd_link
@@ -53,9 +64,9 @@ class BPMISProjectStore:
             connection.execute(
                 """
                 INSERT INTO bpmis_projects (
-                    user_key, bpmis_id, project_name, brd_link, market, synced_at, created_at, updated_at
+                    user_key, bpmis_id, project_name, brd_link, market, project_order, synced_at, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                 ON CONFLICT(user_key, bpmis_id) DO UPDATE SET
                     project_name = excluded.project_name,
                     brd_link = excluded.brd_link,
@@ -70,6 +81,7 @@ class BPMISProjectStore:
                     normalized_project_name,
                     normalized_brd_link,
                     normalized_market,
+                    next_order,
                 ),
             )
             connection.commit()
@@ -83,10 +95,10 @@ class BPMISProjectStore:
             connection.row_factory = sqlite3.Row
             project_rows = connection.execute(
                 """
-                SELECT user_key, bpmis_id, project_name, brd_link, market, pm_comment, synced_at, created_at, updated_at
+                SELECT user_key, bpmis_id, project_name, brd_link, market, pm_comment, project_order, synced_at, created_at, updated_at
                 FROM bpmis_projects
                 WHERE user_key = ? AND deleted_at IS NULL
-                ORDER BY updated_at DESC, bpmis_id DESC
+                ORDER BY CASE WHEN project_order > 0 THEN project_order ELSE 999999 END ASC, updated_at DESC, bpmis_id DESC
                 """,
                 (owner,),
             ).fetchall()
@@ -114,6 +126,31 @@ class BPMISProjectStore:
             project["jira_tickets"] = tickets_by_project.get(str(project.get("bpmis_id") or ""), [])
             projects.append(project)
         return projects
+
+    def reorder_projects(self, *, user_key: str, bpmis_ids: list[str]) -> list[dict[str, Any]]:
+        owner = self._require_user_key(user_key)
+        ordered_ids = []
+        seen = set()
+        for raw_id in bpmis_ids:
+            issue_id = str(raw_id or "").strip()
+            if not issue_id or issue_id in seen:
+                continue
+            ordered_ids.append(issue_id)
+            seen.add(issue_id)
+        if not ordered_ids:
+            return self.list_projects(user_key=owner)
+        with sqlite3.connect(self.db_path) as connection:
+            for index, issue_id in enumerate(ordered_ids, start=1):
+                connection.execute(
+                    """
+                    UPDATE bpmis_projects
+                    SET project_order = ?, updated_at = updated_at
+                    WHERE user_key = ? AND bpmis_id = ? AND deleted_at IS NULL
+                    """,
+                    (index, owner, issue_id),
+                )
+            connection.commit()
+        return self.list_projects(user_key=owner)
 
     def get_project(self, *, user_key: str, bpmis_id: str) -> dict[str, Any] | None:
         owner = self._require_user_key(user_key)
@@ -432,6 +469,7 @@ class BPMISProjectStore:
                     brd_link TEXT NOT NULL DEFAULT '',
                     market TEXT NOT NULL DEFAULT '',
                     pm_comment TEXT NOT NULL DEFAULT '',
+                    project_order INTEGER NOT NULL DEFAULT 0,
                     deleted_at TEXT,
                     synced_at TEXT,
                     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
@@ -443,6 +481,8 @@ class BPMISProjectStore:
             columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(bpmis_projects)").fetchall()}
             if "pm_comment" not in columns:
                 connection.execute("ALTER TABLE bpmis_projects ADD COLUMN pm_comment TEXT NOT NULL DEFAULT ''")
+            if "project_order" not in columns:
+                connection.execute("ALTER TABLE bpmis_projects ADD COLUMN project_order INTEGER NOT NULL DEFAULT 0")
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS bpmis_project_jira_tickets (

@@ -464,6 +464,21 @@ def create_local_agent_app() -> Flask:
             return jsonify({"status": "error", "message": "user_key is required."}), HTTPStatus.BAD_REQUEST
         return jsonify({"status": "ok", "projects": _build_bpmis_project_store(settings).list_projects(user_key=user_key)})
 
+    @app.post("/api/local-agent/bpmis/projects/reorder")
+    def bpmis_projects_reorder():
+        if not settings.local_agent_bpmis_enabled:
+            raise ToolError("BPMIS local-agent proxy is disabled.")
+        payload = request.get_json(silent=True) or {}
+        user_key = str(payload.get("user_key") or "").strip()
+        if not user_key:
+            return jsonify({"status": "error", "message": "user_key is required."}), HTTPStatus.BAD_REQUEST
+        bpmis_ids = payload.get("bpmis_ids") if isinstance(payload.get("bpmis_ids"), list) else []
+        projects = _build_bpmis_project_store(settings).reorder_projects(
+            user_key=user_key,
+            bpmis_ids=[str(item or "") for item in bpmis_ids],
+        )
+        return jsonify({"status": "ok", "projects": projects, "scope": "portal_only"})
+
     @app.post("/api/local-agent/bpmis/projects/upsert")
     def bpmis_project_upsert():
         if not settings.local_agent_bpmis_enabled:

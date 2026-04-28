@@ -183,6 +183,26 @@ IFS='|'
 ENV_VARS_JOINED="${ENV_VARS[*]}"
 unset IFS
 
+RUNTIME_ARGS=()
+if [[ -n "${CLOUD_RUN_MIN_INSTANCES:-}" ]]; then
+  RUNTIME_ARGS+=(--min-instances="$CLOUD_RUN_MIN_INSTANCES")
+fi
+if [[ -n "${CLOUD_RUN_CPU:-}" ]]; then
+  RUNTIME_ARGS+=(--cpu="$CLOUD_RUN_CPU")
+fi
+if [[ -n "${CLOUD_RUN_MEMORY:-}" ]]; then
+  RUNTIME_ARGS+=(--memory="$CLOUD_RUN_MEMORY")
+fi
+if [[ -n "${CLOUD_RUN_CONCURRENCY:-}" ]]; then
+  RUNTIME_ARGS+=(--concurrency="$CLOUD_RUN_CONCURRENCY")
+fi
+if [[ -n "${CLOUD_RUN_CPU_BOOST:-}" ]]; then
+  RUNTIME_ARGS+=(--cpu-boost="$CLOUD_RUN_CPU_BOOST")
+fi
+if [[ -n "${CLOUD_RUN_TIMEOUT:-}" ]]; then
+  RUNTIME_ARGS+=(--timeout="$CLOUD_RUN_TIMEOUT")
+fi
+
 cd "$ROOT_DIR"
 DEPLOY_SOURCE_ARGS=(--source .)
 if [[ -n "$CLOUD_RUN_IMAGE" ]]; then
@@ -197,6 +217,7 @@ DEPLOY_STARTED_AT="$(date +%s)"
   "${DEPLOY_SOURCE_ARGS[@]}" \
   --allow-unauthenticated \
   --max-instances="${CLOUD_RUN_MAX_INSTANCES:-1}" \
+  ${RUNTIME_ARGS[@]+"${RUNTIME_ARGS[@]}"} \
   --set-env-vars "^|^$ENV_VARS_JOINED" \
   --set-secrets "/secrets/google/client_secret.json=google-oauth-client-secret-json:latest,FLASK_SECRET_KEY=team-portal-flask-secret:latest,TEAM_PORTAL_CONFIG_ENCRYPTION_KEY=team-portal-config-encryption-key:latest,LOCAL_AGENT_HMAC_SECRET=local-agent-hmac-secret:latest"
 DEPLOY_FINISHED_AT="$(date +%s)"
