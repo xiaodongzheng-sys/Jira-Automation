@@ -36,7 +36,14 @@ def _run_json_command(args: list[str]) -> tuple[dict[str, Any], str, str, int]:
     return payload, stdout, stderr, int(completed.returncode)
 
 
-def run_nightly_eval(*, output_dir: Path, cases: list[str], fixture: bool, include_useful_feedback: bool) -> dict[str, Any]:
+def run_nightly_eval(
+    *,
+    output_dir: Path,
+    cases: list[str],
+    fixture: bool,
+    include_useful_feedback: bool,
+    mock_llm: bool = False,
+) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     fixture_data_root = output_dir / "fixture_data"
@@ -49,6 +56,8 @@ def run_nightly_eval(*, output_dir: Path, cases: list[str], fixture: bool, inclu
     ]
     if fixture:
         eval_args.extend(["--fixture", "--data-root", str(fixture_data_root)])
+    if mock_llm:
+        eval_args.append("--mock-llm")
     for case_path in cases:
         eval_args.extend(["--cases", case_path])
     eval_payload, eval_stdout, eval_stderr, eval_returncode = _run_json_command(eval_args)
@@ -100,6 +109,7 @@ def run_nightly_eval(*, output_dir: Path, cases: list[str], fixture: bool, inclu
         else "fail",
         "timestamp": timestamp,
         "fixture": fixture,
+        "mock_llm": bool(mock_llm),
         "cases": cases,
         "eval": {
             "returncode": eval_returncode,
@@ -157,6 +167,7 @@ def main() -> int:
     parser.add_argument("--cases", action="append", default=None, help="JSONL eval case file. Can be passed multiple times.")
     parser.add_argument("--output-dir", default=None, help="Directory for eval reports. Defaults to TEAM_PORTAL_DATA_DIR/source_code_qa/eval_runs.")
     parser.add_argument("--no-fixture", action="store_true", help="Run against the currently synced repos instead of deterministic fixtures.")
+    parser.add_argument("--mock-llm", action="store_true", help="Run answer eval cases with the deterministic local LLM provider.")
     parser.add_argument("--include-useful-feedback", action="store_true", help="Include useful feedback as positive smoke-test candidates.")
     parser.add_argument("--json", action="store_true", help="Print the report JSON.")
     args = parser.parse_args()
@@ -171,6 +182,7 @@ def main() -> int:
         cases=case_paths,
         fixture=not args.no_fixture,
         include_useful_feedback=bool(args.include_useful_feedback),
+        mock_llm=bool(args.mock_llm),
     )
     if args.json:
         print(json.dumps(report, indent=2, ensure_ascii=False))

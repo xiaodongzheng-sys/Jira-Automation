@@ -60,7 +60,7 @@ Before publishing Source Code Q&A retrieval, prompt, or index changes, run the r
 PYTHONPATH=. ./.venv/bin/python scripts/run_source_code_qa_release_gate.py --include-useful-feedback
 ```
 
-The release gate wraps the nightly eval, enforces minimum coverage and zero-failure thresholds, and writes `TEAM_PORTAL_DATA_DIR/run/source_code_qa_release_gate.json` plus the shared eval status file consumed by the portal readiness panel.
+The release gate wraps the nightly eval, enforces minimum coverage and zero-failure thresholds, and writes `TEAM_PORTAL_DATA_DIR/run/source_code_qa_release_gate.json` plus the shared eval status file consumed by the portal readiness panel. By default it uses the deterministic local LLM provider for the main eval so release checks do not depend on the local Codex CLI login/path environment. Pass `--live-llm` only when you intentionally want to validate the configured live provider.
 
 Build the review queue directly when triaging misses:
 

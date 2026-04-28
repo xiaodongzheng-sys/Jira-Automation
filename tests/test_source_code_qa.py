@@ -2652,6 +2652,74 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertIn("--data-root", eval_call)
         self.assertEqual(Path(eval_call[eval_call.index("--data-root") + 1]), output_dir / "fixture_data")
 
+    def test_release_gate_uses_mock_llm_by_default(self):
+        from scripts.run_source_code_qa_release_gate import run_release_gate
+
+        captured = {}
+
+        def fake_run_nightly_eval(**kwargs):
+            captured.update(kwargs)
+            return {
+                "status": "pass",
+                "eval": {
+                    "status": "pass",
+                    "total": 1,
+                    "failed": 0,
+                    "team_buckets": {"AF": {"total": 1, "failed": 0}},
+                    "segment_buckets": {"AF:ALL": {"total": 1, "failed": 0}},
+                },
+                "llm_smoke": {"status": "pass", "failed": 0},
+                "review_queue": {"returncode": 0},
+            }
+
+        with patch("scripts.run_source_code_qa_release_gate.run_nightly_eval", side_effect=fake_run_nightly_eval):
+            gate = run_release_gate(
+                data_root=Path(self.temp_dir.name),
+                cases=["evals/source_code_qa/llm_smoke.jsonl"],
+                fixture=True,
+                include_useful_feedback=False,
+                thresholds={
+                    "min_eval_cases": 1,
+                    "min_eval_cases_per_team": 1,
+                    "min_eval_cases_per_segment": 1,
+                    "required_eval_teams": ["AF"],
+                    "required_eval_segments": ["AF:ALL"],
+                },
+            )
+
+        self.assertEqual(gate["status"], "pass")
+        self.assertTrue(captured["mock_llm"])
+
+    def test_nightly_eval_can_pass_mock_llm_to_main_eval(self):
+        from scripts.run_source_code_qa_nightly_eval import run_nightly_eval
+
+        calls = []
+
+        def fake_run(args):
+            calls.append(args)
+            if any(str(arg).endswith("source_code_qa_evals.py") for arg in args):
+                return {
+                    "status": "pass",
+                    "total": 1,
+                    "failed": 0,
+                    "team_buckets": {"AF": {"total": 1, "failed": 0}},
+                    "segment_buckets": {"AF:ALL": {"total": 1, "failed": 0}},
+                }, "{}", "", 0
+            return {"status": "ok", "review_items": 0}, "{}", "", 0
+
+        output_dir = Path(self.temp_dir.name) / "eval_runs"
+        with patch("scripts.run_source_code_qa_nightly_eval._run_json_command", side_effect=fake_run):
+            report = run_nightly_eval(
+                output_dir=output_dir,
+                cases=["evals/source_code_qa/golden.jsonl"],
+                fixture=True,
+                include_useful_feedback=False,
+                mock_llm=True,
+            )
+
+        self.assertTrue(report["mock_llm"])
+        self.assertIn("--mock-llm", calls[0])
+
     def test_fixture_eval_requires_isolated_data_root(self):
         data_root = Path(self.temp_dir.name)
 

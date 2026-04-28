@@ -16,7 +16,10 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from bpmis_jira_tool.config import Settings
-from scripts.run_source_code_qa_nightly_eval import DEFAULT_CASES, OPTIONAL_CASES, run_nightly_eval
+from scripts.run_source_code_qa_nightly_eval import run_nightly_eval
+
+
+RELEASE_GATE_CASES = ["evals/source_code_qa/release_gate.jsonl"]
 
 
 DEFAULT_THRESHOLDS = {
@@ -114,6 +117,7 @@ def run_release_gate(
     cases: list[str],
     fixture: bool,
     include_useful_feedback: bool,
+    mock_llm: bool = True,
     thresholds: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     output_dir = data_root / "source_code_qa" / "eval_runs"
@@ -122,6 +126,7 @@ def run_release_gate(
         cases=cases,
         fixture=fixture,
         include_useful_feedback=include_useful_feedback,
+        mock_llm=mock_llm,
     )
     gate = evaluate_release_gate(report, thresholds=thresholds)
     run_root = data_root / "run"
@@ -145,6 +150,11 @@ def main() -> int:
     parser.add_argument("--cases", action="append", default=None, help="JSONL eval case file. Can be passed multiple times.")
     parser.add_argument("--data-root", default=None, help="Defaults to TEAM_PORTAL_DATA_DIR.")
     parser.add_argument("--no-fixture", action="store_true", help="Run against synced repos instead of deterministic fixtures.")
+    parser.add_argument(
+        "--live-llm",
+        action="store_true",
+        help="Use the configured live LLM provider for the main eval. By default the release gate uses deterministic mock LLM to avoid Codex CLI environment drift.",
+    )
     parser.add_argument("--include-useful-feedback", action="store_true", help="Include useful feedback as positive smoke-test candidates.")
     parser.add_argument("--min-eval-cases", type=int, default=DEFAULT_THRESHOLDS["min_eval_cases"])
     parser.add_argument("--min-eval-cases-per-segment", type=int, default=DEFAULT_THRESHOLDS["min_eval_cases_per_segment"])
@@ -166,14 +176,13 @@ def main() -> int:
 
     settings = Settings.from_env()
     data_root = Path(args.data_root).expanduser().resolve() if args.data_root else settings.team_portal_data_dir
-    case_paths = list(args.cases or DEFAULT_CASES)
-    if args.cases is None:
-        case_paths.extend(path for path in OPTIONAL_CASES if (ROOT_DIR / path).exists())
+    case_paths = list(args.cases or RELEASE_GATE_CASES)
     gate = run_release_gate(
         data_root=data_root,
         cases=case_paths,
         fixture=not args.no_fixture,
         include_useful_feedback=bool(args.include_useful_feedback),
+        mock_llm=not bool(args.live_llm),
         thresholds={
             "min_eval_cases": int(args.min_eval_cases),
             "min_eval_cases_per_segment": int(args.min_eval_cases_per_segment),
