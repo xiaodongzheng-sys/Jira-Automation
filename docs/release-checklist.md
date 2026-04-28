@@ -153,6 +153,9 @@ Run these after Cloud Run and the Mac local-agent are both updated:
 - Source Code Q&A attachment smoke passes for one small text file; for image-capable releases, confirm Codex mode receives the image through the Mac local-agent path.
 - Source Code Q&A active repo config contains the expected GitLab repositories, not fixture/demo `git.example.com` URLs, and index health is `ready`.
 - SeaTalk Summary reads Mac desktop data through the local-agent.
+- For Mac-only SeaTalk/WeChat bridge releases, verify the WeChat notification watcher process is running and its state file updates after a new notification:
+  `pgrep -fl 'WeChatSeaTalkBridge/scripts/wechat_notification_to_seatalk.py'` and
+  `stat "$HOME/Library/Application Support/WeChatSeaTalkBridge/state/state.json"`.
 - For the Mac-hosted stack, `./scripts/run_team_stack.sh doctor` is clean.
 
 ## 6. Easy-To-Miss Release Surfaces
@@ -162,6 +165,7 @@ Run these after Cloud Run and the Mac local-agent are both updated:
 - Source Code Q&A index/retrieval changes often need both Cloud Run and Mac local-agent updates because Cloud Run owns the web request path while the Mac owns durable repos/indexes and Codex execution.
 - BPMIS proxy changes need the Cloud Run env (`BPMIS_CALL_MODE=local_agent`, local-agent URL/secret) and the Mac local-agent capability (`LOCAL_AGENT_BPMIS_ENABLED=true`) to agree.
 - SeaTalk changes need the Mac local-agent restarted because Cloud Run cannot read the Mac desktop data directly.
+- Mac-only SeaTalk/WeChat watcher changes need the host-side watcher relaunched or launchd-verified; Cloud Run deploys do not start local notification readers.
 - OAuth/base URL changes need Google Cloud Console callback URLs to match the released hostname.
 
 ## 7. Rollback Notes

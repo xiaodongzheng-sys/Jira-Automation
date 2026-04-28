@@ -25,6 +25,7 @@ SEATALK_DASHBOARD_CACHE_TTL_SECONDS = 300
 SEATALK_DEFAULT_APP_PATH = "/Applications/SeaTalk.app"
 SEATALK_DEFAULT_DATA_DIR = "~/Library/Application Support/SeaTalk"
 SEATALK_INSIGHTS_PROMPT_MODE = "seatalk_7_day_insights_v4"
+SEATALK_NAME_MAPPINGS_CANDIDATE_VERSION = "v2_daily_brief_sources"
 SEATALK_INSIGHTS_TIMEZONE = ZoneInfo("Asia/Singapore")
 SEATALK_INSIGHTS_HISTORY_MAX_CHARS = 520_000
 SEATALK_INSIGHTS_TODO_HISTORY_MAX_CHARS = 260_000
@@ -544,6 +545,9 @@ class SeaTalkDashboardService:
             mapping_token = self._name_overrides_cache_token()
             mapping_digest = hashlib.sha1(mapping_token.encode("utf-8")).hexdigest()[:12] if mapping_token else "nomap"
             safe_kind = f"{safe_kind}_{safe_mode}_{mapping_digest}"
+        elif safe_kind == "name_mappings":
+            safe_version = re.sub(r"[^a-z0-9_]+", "_", SEATALK_NAME_MAPPINGS_CANDIDATE_VERSION.lower()).strip("_")
+            safe_kind = f"{safe_kind}_{safe_version}"
         cache_date = now.astimezone(SEATALK_INSIGHTS_TIMEZONE).date().isoformat()
         return self.daily_cache_dir / f"{safe_kind}_last_{int(days)}_days_{cache_date}.json"
 

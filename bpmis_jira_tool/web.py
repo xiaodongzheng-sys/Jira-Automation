@@ -84,6 +84,13 @@ _source_code_qa_codex_session_locks: dict[str, threading.Lock] = {}
 _source_code_qa_codex_session_locks_guard = threading.Lock()
 
 
+def _bool_env_from_env(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
 @lru_cache(maxsize=1)
 def _current_release_revision() -> str:
     pinned_revision = str(os.environ.get("TEAM_PORTAL_RELEASE_REVISION") or "").strip()
@@ -1772,6 +1779,8 @@ def create_app() -> Flask:
         g.request_id = uuid.uuid4().hex[:12]
         if request.path.rstrip("/") == "/healthz":
             return jsonify({"status": "ok", "revision": _current_release_revision()}), HTTPStatus.OK
+        if request.path.rstrip("/") == "/seatalk/wechat-reply":
+            return None
         if request.path.startswith("/api/local-agent/"):
             return None
         if request.endpoint in {
@@ -1906,6 +1915,86 @@ def create_app() -> Flask:
     @app.get("/healthz")
     def healthz():
         return jsonify({"status": "ok", "revision": _current_release_revision()}), HTTPStatus.OK
+
+    @app.route("/seatalk/wechat-reply", methods=["GET", "POST"])
+    def seatalk_wechat_reply_callback():
+        if request.method == "GET":
+            challenge = request.args.get("seatalk_challenge", "")
+            if challenge:
+                return jsonify({"seatalk_challenge": challenge}), HTTPStatus.OK
+            return jsonify({"ok": True, "endpoint": "seatalk_wechat_reply"}), HTTPStatus.OK
+
+        payload = request.get_json(silent=True)
+        if isinstance(payload, dict):
+            try:
+                from scripts.seatalk_reply_to_wechat import extract_seatalk_challenge
+            except Exception:
+                extract_seatalk_challenge = None
+            if extract_seatalk_challenge is not None:
+                challenge = extract_seatalk_challenge(payload)
+                if challenge:
+                    return jsonify({"seatalk_challenge": challenge}), HTTPStatus.OK
+
+        callback_token = str(os.environ.get("WECHAT_REPLY_CALLBACK_TOKEN") or "").strip()
+        if not callback_token:
+            return jsonify({"ok": False, "error": "callback_token_not_configured"}), HTTPStatus.SERVICE_UNAVAILABLE
+        provided_token = request.args.get("token", "") or request.headers.get("X-WeChat-Reply-Token", "")
+        if provided_token != callback_token:
+            return jsonify({"ok": False, "error": "invalid_token"}), HTTPStatus.FORBIDDEN
+
+        try:
+            from scripts.seatalk_reply_to_wechat import (
+                DEFAULT_REPLY_MAP_PATH,
+                DEFAULT_REPLY_TTL_HOURS,
+                ReplyTargetStore,
+                WeChatDesktopSender,
+                _int_env,
+                parse_reply_payload,
+            )
+        except Exception as error:
+            current_app.logger.exception("SeaTalk WeChat reply dependencies could not be loaded.")
+            return jsonify({"ok": False, "error": "reply_dependencies_unavailable", "detail": str(error)}), HTTPStatus.INTERNAL_SERVER_ERROR
+
+        if not isinstance(payload, dict):
+            return jsonify({"ok": False, "error": "invalid_json"}), HTTPStatus.BAD_REQUEST
+        parsed_reply = parse_reply_payload(payload)
+        if parsed_reply is None:
+            return jsonify({"ok": True, "ignored": True, "reason": "not_reply_command"}), HTTPStatus.OK
+
+        allowed_senders = {
+            item.strip().lower()
+            for item in str(os.environ.get("WECHAT_REPLY_ALLOWED_SENDERS") or "").split(",")
+            if item.strip()
+        }
+        sender = parsed_reply.sender.lower()
+        if allowed_senders and sender not in allowed_senders:
+            return jsonify({"ok": False, "error": "sender_not_allowed", "sender": parsed_reply.sender}), HTTPStatus.FORBIDDEN
+
+        reply_map_path = Path(os.environ.get("WECHAT_REPLY_MAP_PATH") or DEFAULT_REPLY_MAP_PATH).expanduser()
+        if not reply_map_path.is_absolute():
+            reply_map_path = (PROJECT_ROOT / reply_map_path).resolve()
+        store = ReplyTargetStore(
+            reply_map_path,
+            ttl_seconds=_int_env("WECHAT_REPLY_TTL_HOURS", DEFAULT_REPLY_TTL_HOURS) * 60 * 60,
+        )
+        target = store.get(parsed_reply.reply_id)
+        if target is None:
+            return jsonify({"ok": False, "error": "reply_id_not_found", "reply_id": parsed_reply.reply_id}), HTTPStatus.NOT_FOUND
+
+        try:
+            WeChatDesktopSender(
+                dry_run=_bool_env_from_env("WECHAT_REPLY_DRY_RUN", False),
+                restore_front_app=_bool_env_from_env("WECHAT_REPLY_RESTORE_FRONT_APP", True),
+                hide_wechat_after_send=_bool_env_from_env("WECHAT_REPLY_HIDE_WECHAT_AFTER_SEND", False),
+            ).send(
+                target.conversation,
+                parsed_reply.message,
+            )
+        except Exception as error:
+            current_app.logger.exception("WeChat automated reply failed.")
+            return jsonify({"ok": False, "error": "wechat_send_failed", "detail": str(error)}), HTTPStatus.INTERNAL_SERVER_ERROR
+
+        return jsonify({"ok": True, "reply_id": parsed_reply.reply_id, "conversation": target.conversation}), HTTPStatus.OK
 
     @app.get("/access-denied")
     def access_denied():

@@ -187,6 +187,23 @@ class SeaTalkDashboardServiceTests(unittest.TestCase):
         self.assertIn("UNKNOWN_ID_DISPLAY_LIMIT", source)
         self.assertIn("daily_brief_source", source)
 
+    def test_name_mapping_daily_cache_key_has_candidate_version(self):
+        service = SeaTalkDashboardService(
+            owner_email="xiaodong.zheng@npt.sg",
+            seatalk_app_path=str(self.app_dir),
+            seatalk_data_dir=str(self.data_dir),
+            daily_cache_dir=Path(self.temp_dir.name) / "cache",
+        )
+
+        cache_path = service._daily_cache_path(
+            kind="name_mappings",
+            days=7,
+            now=datetime(2026, 4, 21, 21, 0).astimezone(),
+        )
+
+        self.assertIsNotNone(cache_path)
+        self.assertIn("name_mappings_v2_daily_brief_sources", cache_path.name)
+
     def test_build_name_mappings_parses_unknown_ids(self):
         calls: list[list[str]] = []
 
