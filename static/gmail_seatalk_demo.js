@@ -246,7 +246,7 @@
     if (!rows.length) {
       body.innerHTML = `
         <article class="seatalk-insight-item">
-          <p>No frequent unknown SeaTalk IDs were found in the last 7 days.</p>
+          <p>No frequent or recently surfaced SeaTalk source IDs were found.</p>
         </article>
       `;
       body.hidden = false;
@@ -261,7 +261,7 @@
         </div>
         <div class="seatalk-mapping-count">
           <strong>${formatNumber(row.count || 0)}</strong>
-          <span>recent mentions</span>
+          <span>mentions</span>
         </div>
         <div>
           <input

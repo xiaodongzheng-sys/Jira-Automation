@@ -18,6 +18,9 @@ const KNOWN_BOT_BUDDY_IDS = new Set([
   '1001647',
   '976217',
 ]);
+const UNKNOWN_ID_PRIMARY_LIMIT = 80;
+const UNKNOWN_ID_DISPLAY_LIMIT = 400;
+const DAILY_BRIEF_SOURCE_WINDOW_SECONDS = 24 * 60 * 60;
 
 function parseArgs(argv) {
   const args = {
@@ -392,20 +395,23 @@ function buildHistoryText(rows, selfUid, days, nowIso, db, overrides, sinceIso =
   return `${lines.join('\n')}\n`;
 }
 
-function collectUnknownIds(rows, selfUid, db, overrides) {
+function collectUnknownIds(rows, selfUid, db, overrides, periodEndEpoch) {
   const { uidNames, sidNames } = buildNameMaps(rows, db);
   const filteredRows = rows.filter((row) => !isBotConversationRow(row, sidNames));
   const unknowns = new Map();
+  const recentSourceStart = Number(periodEndEpoch || 0) - DAILY_BRIEF_SOURCE_WINDOW_SECONDS;
   const priorityRank = {
     direct_chat: 0,
     mentioned_me: 1,
     group_i_spoke_in: 2,
-    frequent: 3,
+    daily_brief_source: 3,
+    frequent: 4,
   };
   const priorityLabel = {
     direct_chat: 'Private chat',
     mentioned_me: '@mentioned me',
     group_i_spoke_in: 'I spoke in this group',
+    daily_brief_source: 'Recent Daily Brief source',
     frequent: 'Frequent unknown ID',
   };
   const remember = (id, type, row, text, reason) => {
@@ -417,6 +423,7 @@ function collectUnknownIds(rows, selfUid, db, overrides) {
       first_seen: row.ts ? formatTimestamp(row.ts) : '',
       priority_reason: priorityLabel.frequent,
       priority_rank: priorityRank.frequent,
+      daily_brief_source: false,
     };
     current.count += 1;
     const rank = priorityRank[reason] ?? priorityRank.frequent;
@@ -428,6 +435,7 @@ function collectUnknownIds(rows, selfUid, db, overrides) {
     if (!current.example || exampleScore(candidateExample) > exampleScore(current.example)) {
       current.example = candidateExample;
     }
+    if (reason === 'daily_brief_source') current.daily_brief_source = true;
     unknowns.set(id, current);
   };
 
@@ -436,27 +444,41 @@ function collectUnknownIds(rows, selfUid, db, overrides) {
     const text = extractText(row, parsed);
     const selfMentioned = mentionsSelf(text, selfUid);
     const isSelfSender = String(row.u) === String(selfUid);
+    const isRecentSource = Number(row.ts || 0) >= recentSourceStart;
     const conversation = conversationIdentity(row, sidNames, overrides);
     if (!conversation.resolved) {
       let reason = 'frequent';
       if (row.sid.startsWith('buddy-')) reason = 'direct_chat';
       if (row.sid.startsWith('group-') && selfMentioned) reason = 'mentioned_me';
       if (row.sid.startsWith('group-') && isSelfSender) reason = 'group_i_spoke_in';
+      if (reason === 'frequent' && isRecentSource) reason = 'daily_brief_source';
       remember(row.sid, row.sid.startsWith('group-') ? 'group' : 'buddy', row, text, reason);
+    } else if (isRecentSource && row.sid.startsWith('buddy-')) {
+      // Direct-chat IDs are often useful as Daily Brief evidence even when SeaTalk has a transient display name.
+      remember(row.sid, 'buddy', row, text, 'daily_brief_source');
     }
     const sender = senderIdentity(row, selfUid, uidNames, overrides);
     if (!sender.resolved && !isSelfSender) {
-      remember(`UID ${row.u}`, 'uid', row, text, selfMentioned ? 'mentioned_me' : 'frequent');
+      let reason = selfMentioned ? 'mentioned_me' : 'frequent';
+      if (reason === 'frequent' && isRecentSource) reason = 'daily_brief_source';
+      remember(`UID ${row.u}`, 'uid', row, text, reason);
     }
   }
 
-  return Array.from(unknowns.values())
-    .sort((left, right) => (
+  const sorted = Array.from(unknowns.values()).sort((left, right) => (
       (left.priority_rank - right.priority_rank)
       || (right.count - left.count)
       || left.id.localeCompare(right.id)
-    ))
-    .slice(0, 80);
+  ));
+  const primary = sorted.slice(0, UNKNOWN_ID_PRIMARY_LIMIT);
+  const selectedIds = new Set(primary.map((row) => row.id));
+  const recentSources = sorted.filter((row) => row.daily_brief_source && !selectedIds.has(row.id));
+  return [...primary, ...recentSources]
+    .slice(0, UNKNOWN_ID_DISPLAY_LIMIT)
+    .map((row) => {
+      const { priority_rank: _priorityRank, daily_brief_source: _dailyBriefSource, ...publicRow } = row;
+      return publicRow;
+    });
 }
 
 function isBotConversationRow(row, sidNames) {
@@ -490,7 +512,7 @@ function main() {
     `).all(ranges.periodStartEpoch, ranges.periodEndEpoch, ...excludedTypes);
     if (args.unknownIdsJson) {
       process.stdout.write(JSON.stringify({
-        unknown_ids: collectUnknownIds(rows, uid, db, overrides),
+        unknown_ids: collectUnknownIds(rows, uid, db, overrides, ranges.periodEndEpoch),
         generated_at: args.now,
         period_days: args.days,
       }));

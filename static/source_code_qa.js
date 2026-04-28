@@ -26,6 +26,7 @@
   const saveButton = document.querySelector('[data-source-save-config]');
   const syncButton = document.querySelector('[data-source-sync]');
   const questionInput = document.querySelector('[data-source-question]');
+  const chatComposer = document.querySelector('.source-qa-chat-composer');
   const queryButton = document.querySelector('[data-source-query]');
   const queryStatus = document.querySelector('[data-source-query-status]');
   const attachmentInput = document.querySelector('[data-source-attachment-input]');
@@ -261,20 +262,21 @@
   };
   const addAttachmentFiles = async (files) => {
     const selectedFiles = Array.from(files || []);
-    if (!selectedFiles.length) return;
+    if (!selectedFiles.length) return 0;
     if (pendingAttachments.length + selectedFiles.length > 5) {
       if (queryStatus) queryStatus.textContent = 'At most 5 attachments are supported per question.';
-      return;
+      return 0;
     }
     const existingImages = pendingAttachments.filter((item) => item.kind === 'image').length;
     const nextImages = selectedFiles.filter((file) => String(file.type || '').startsWith('image/')).length;
     if (existingImages + nextImages > 3) {
       if (queryStatus) queryStatus.textContent = 'At most 3 image attachments are supported per question.';
-      return;
+      return 0;
     }
     const session = await ensureActiveSession({ preserveLive: true, preservePending: true });
     if (!session?.id) throw new Error('Could not create a chat session for attachments.');
     if (attachmentUploadButton) attachmentUploadButton.disabled = true;
+    let uploadedCount = 0;
     try {
       for (const file of selectedFiles) {
         if (file.size > 10 * 1024 * 1024) {
@@ -283,12 +285,62 @@
         if (queryStatus) queryStatus.textContent = `Uploading ${file.name}...`;
         const uploaded = await uploadSourceAttachment(file, session.id);
         pendingAttachments.push(uploaded);
+        uploadedCount += 1;
         renderPendingAttachments();
       }
       if (queryStatus) queryStatus.textContent = 'Attachment uploaded.';
+      return uploadedCount;
     } finally {
       if (attachmentUploadButton) attachmentUploadButton.disabled = false;
       if (attachmentInput) attachmentInput.value = '';
+    }
+  };
+  const clipboardImageExtension = (mimeType) => {
+    const normalized = String(mimeType || '').toLowerCase();
+    if (normalized.includes('jpeg') || normalized.includes('jpg')) return 'jpg';
+    if (normalized.includes('webp')) return 'webp';
+    if (normalized.includes('gif')) return 'gif';
+    return 'png';
+  };
+  const nameClipboardImage = (file, index = 0) => {
+    if (file?.name) return file;
+    const extension = clipboardImageExtension(file?.type);
+    const filename = index === 0 ? `image.${extension}` : `image-${index + 1}.${extension}`;
+    try {
+      return new File([file], filename, {
+        type: file?.type || `image/${extension}`,
+        lastModified: file?.lastModified || Date.now(),
+      });
+    } catch (error) {
+      return file;
+    }
+  };
+  const imageFilesFromClipboard = (clipboardData) => {
+    if (!clipboardData) return [];
+    const pastedFiles = Array.from(clipboardData.files || [])
+      .filter((file) => String(file.type || '').startsWith('image/'));
+    if (pastedFiles.length) {
+      return pastedFiles.map((file, index) => nameClipboardImage(file, index));
+    }
+    return Array.from(clipboardData.items || [])
+      .filter((item) => item.kind === 'file' && String(item.type || '').startsWith('image/'))
+      .map((item) => item.getAsFile())
+      .filter(Boolean)
+      .map((file, index) => nameClipboardImage(file, index));
+  };
+  const handleAttachmentPaste = async (event) => {
+    const pastedImages = imageFilesFromClipboard(event.clipboardData);
+    if (!pastedImages.length) return;
+    event.preventDefault();
+    try {
+      const uploadedCount = await addAttachmentFiles(pastedImages);
+      if (uploadedCount > 0 && queryStatus) {
+        queryStatus.textContent = uploadedCount === 1
+          ? 'Pasted image uploaded.'
+          : `${uploadedCount} pasted images uploaded.`;
+      }
+    } catch (error) {
+      if (queryStatus) queryStatus.textContent = error.message || 'Pasted image upload failed.';
     }
   };
 
@@ -1816,6 +1868,7 @@
   });
   syncButton?.addEventListener('click', syncRepos);
   queryButton?.addEventListener('click', queryCode);
+  (chatComposer || questionInput)?.addEventListener('paste', handleAttachmentPaste);
   attachmentUploadButton?.addEventListener('click', () => attachmentInput?.click());
   attachmentInput?.addEventListener('change', async () => {
     try {

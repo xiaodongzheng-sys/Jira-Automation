@@ -3,7 +3,9 @@ from __future__ import annotations
 import base64
 import unittest
 from datetime import datetime, timedelta
+from unittest.mock import patch
 
+import httplib2
 from googleapiclient.errors import HttpError
 
 from bpmis_jira_tool.errors import ToolError
@@ -12,6 +14,7 @@ from bpmis_jira_tool.gmail_dashboard import (
     GMAIL_EXPORT_MAX_TOTAL_MESSAGES,
     GmailDashboardService,
     _build_export_query,
+    _build_thread_export_query,
     _clean_export_body_text,
     _extract_message_text_from_payload,
 )
@@ -44,19 +47,34 @@ class _FakeMessagesApi:
 
 
 class _FakeUsersApi:
-    def __init__(self, messages_api):
+    def __init__(self, messages_api, threads_api=None):
         self._messages_api = messages_api
+        self._threads_api = threads_api
 
     def messages(self):
         return self._messages_api
 
+    def threads(self):
+        return self._threads_api
+
 
 class _FakeGmailService:
-    def __init__(self, list_payloads, message_payloads):
-        self._users_api = _FakeUsersApi(_FakeMessagesApi(list_payloads, message_payloads))
+    def __init__(self, list_payloads, message_payloads, thread_payloads=None):
+        self._users_api = _FakeUsersApi(
+            _FakeMessagesApi(list_payloads, message_payloads),
+            _FakeThreadsApi(thread_payloads or {}),
+        )
 
     def users(self):
         return self._users_api
+
+
+class _FakeThreadsApi:
+    def __init__(self, thread_payloads):
+        self.thread_payloads = thread_payloads
+
+    def get(self, **kwargs):
+        return _Execute(self.thread_payloads[kwargs["id"]])
 
 
 class GmailDashboardServiceTests(unittest.TestCase):
@@ -228,6 +246,41 @@ class GmailDashboardServiceTests(unittest.TestCase):
             service.build_dashboard(now=datetime(2026, 4, 21, 16, 0).astimezone())
 
         self.assertIn("Gmail API is not enabled", str(context.exception))
+
+    def test_gmail_list_retries_transient_dns_failure(self):
+        class _FlakyMessagesApi:
+            def __init__(self):
+                self.calls = 0
+
+            def list(self, **_kwargs):
+                self.calls += 1
+                if self.calls == 1:
+                    return _Execute(error=httplib2.ServerNotFoundError("Unable to find the server at gmail.googleapis.com"))
+                return _Execute(payload={"messages": [{"id": "m1"}]})
+
+        class _FlakyUsersApi:
+            def __init__(self):
+                self.messages_api = _FlakyMessagesApi()
+
+            def messages(self):
+                return self.messages_api
+
+        class _FlakyService:
+            def __init__(self):
+                self.users_api = _FlakyUsersApi()
+
+            def users(self):
+                return self.users_api
+
+        gmail_service = _FlakyService()
+        service = GmailDashboardService(credentials=object(), gmail_service=gmail_service)
+
+        with patch("bpmis_jira_tool.gmail_dashboard.time_module.sleep") as sleep_mock:
+            message_ids = service._list_message_ids(query="after:1", max_messages=10)
+
+        self.assertEqual(message_ids, ["m1"])
+        self.assertEqual(gmail_service.users_api.messages_api.calls, 2)
+        sleep_mock.assert_called_once_with(1.0)
 
     def test_dashboard_uses_short_ttl_cache_for_same_user(self):
         now = datetime(2026, 4, 21, 16, 0).astimezone()
@@ -463,6 +516,88 @@ class GmailDashboardServiceTests(unittest.TestCase):
         self.assertIn("To: [no recipients listed]", content)
         self.assertIn("Subject: [no subject]", content)
         self.assertIn("[body unavailable]", content)
+
+    def test_export_thread_history_since_groups_window_messages_by_thread(self):
+        now = datetime(2026, 4, 21, 19, 0).astimezone()
+        since = now - timedelta(hours=24)
+        query = _build_thread_export_query(since, now)
+        in_window = datetime(2026, 4, 21, 9, 15, tzinfo=now.tzinfo)
+        older = datetime(2026, 4, 20, 8, 0, tzinfo=now.tzinfo)
+        list_payloads = {
+            (query, None): {
+                "messages": [{"id": "m1"}],
+            },
+        }
+        message_payloads = {
+            "m1": {
+                "id": "m1",
+                "threadId": "t1",
+                "internalDate": str(int(in_window.timestamp() * 1000)),
+                "labelIds": ["INBOX"],
+                "payload": {
+                    "headers": [
+                        {"name": "From", "value": "Alice Example <alice@example.com>"},
+                        {"name": "To", "value": "xiaodong.zheng@npt.sg"},
+                        {"name": "Subject", "value": "CR rollout"},
+                    ],
+                },
+            },
+        }
+        thread_payloads = {
+            "t1": {
+                "id": "t1",
+                "messages": [
+                    {
+                        "id": "older",
+                        "threadId": "t1",
+                        "internalDate": str(int(older.timestamp() * 1000)),
+                        "labelIds": ["INBOX"],
+                        "payload": {
+                            "headers": [
+                                {"name": "From", "value": "Bob Example <bob@example.com>"},
+                                {"name": "Subject", "value": "Old context subject"},
+                            ],
+                            "parts": [{"mimeType": "text/plain", "body": {"data": base64.urlsafe_b64encode(b"Old context").decode("utf-8")}}],
+                        },
+                    },
+                    {
+                        "id": "m1",
+                        "threadId": "t1",
+                        "internalDate": str(int(in_window.timestamp() * 1000)),
+                        "labelIds": ["INBOX"],
+                        "payload": {
+                            "headers": [
+                                {"name": "From", "value": "Alice Example <alice@example.com>"},
+                                {"name": "To", "value": "xiaodong.zheng@npt.sg"},
+                                {"name": "Subject", "value": "CR rollout"},
+                            ],
+                            "parts": [
+                                {
+                                    "mimeType": "text/plain",
+                                    "body": {"data": base64.urlsafe_b64encode(b"Please confirm rollout owner.").decode("utf-8")},
+                                }
+                            ],
+                        },
+                    },
+                ],
+            }
+        }
+        service = GmailDashboardService(
+            credentials=object(),
+            gmail_service=_FakeGmailService(list_payloads, message_payloads, thread_payloads),
+        )
+
+        content = service.export_thread_history_since(since=since, now=now)
+
+        self.assertIn("Thread ID: t1", content)
+        self.assertIn("Gmail Thread Link: https://mail.google.com/mail/u/0/#all/t1", content)
+        self.assertIn("Subject: CR rollout", content)
+        self.assertNotIn("Subject: Old context subject", content)
+        self.assertIn("Alice Example <alice@example.com>", content)
+        self.assertIn("Please confirm rollout owner.", content)
+        self.assertIn("Message 1 (context only)", content)
+        self.assertIn("Use: context only; do not summarize as a new item", content)
+        self.assertIn("Old context", content)
 
     def test_export_history_text_marks_truncated_bodies(self):
         now = datetime(2026, 4, 21, 16, 0).astimezone()

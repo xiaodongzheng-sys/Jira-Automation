@@ -182,6 +182,10 @@ class SeaTalkDashboardServiceTests(unittest.TestCase):
         self.assertIn("mappings.set(alias, name)", source)
         self.assertIn("slice(0, 520)", source)
         self.assertIn("exampleScore(candidateExample)", source)
+        self.assertIn("DAILY_BRIEF_SOURCE_WINDOW_SECONDS", source)
+        self.assertIn("Recent Daily Brief source", source)
+        self.assertIn("UNKNOWN_ID_DISPLAY_LIMIT", source)
+        self.assertIn("daily_brief_source", source)
 
     def test_build_name_mappings_parses_unknown_ids(self):
         calls: list[list[str]] = []

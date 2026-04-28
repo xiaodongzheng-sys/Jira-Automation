@@ -6,12 +6,15 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta
 from email.utils import getaddresses
+from urllib.parse import quote
 import html
 from threading import Lock
 from typing import Any
 import re
 import socket
+import time as time_module
 
+import httplib2
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
@@ -28,6 +31,9 @@ GMAIL_EXPORT_BATCH_SIZE = 50
 GMAIL_EXPORT_MAX_TOTAL_MESSAGES = 200
 GMAIL_EXPORT_MAX_BODY_CHARS = 4000
 GMAIL_EXPORT_FETCH_WORKERS = 1
+GMAIL_REQUEST_RETRY_DELAYS_SECONDS = (1.0, 3.0)
+GMAIL_RETRYABLE_HTTP_STATUSES = {429, 500, 502, 503, 504}
+GMAIL_TRANSIENT_ERRORS = (TimeoutError, socket.timeout, OSError, httplib2.HttpLib2Error)
 GMAIL_EXPORT_INTERNAL_DOMAINS = (
     "maribank.com.sg",
     "maribank.com.ph",
@@ -72,6 +78,7 @@ GMAIL_EXPORT_CALENDAR_SUBJECT_HINTS = (
 @dataclass
 class GmailMessageRecord:
     message_id: str
+    thread_id: str
     internal_date: datetime
     label_ids: set[str]
     headers: dict[str, str]
@@ -83,6 +90,10 @@ class GmailExportRecord:
     headers: dict[str, str]
     body_text: str
     body_truncated: bool = False
+    message_id: str = ""
+    thread_id: str = ""
+    label_ids: set[str] | None = None
+    context_only: bool = False
 
 
 @dataclass
@@ -149,6 +160,18 @@ def _first_contact_address(header_value: str) -> str:
 def _build_export_query(period_start: datetime) -> str:
     excluded_clause = " ".join(f"-from:{sender}" for sender in GMAIL_EXPORT_EXCLUDED_SENDERS)
     return f"after:{int(period_start.timestamp())} -from:me in:inbox {excluded_clause}".strip()
+
+
+def _build_thread_export_query(period_start: datetime, period_end: datetime) -> str:
+    excluded_clause = " ".join(f"-from:{sender}" for sender in GMAIL_EXPORT_EXCLUDED_SENDERS)
+    return f"after:{int(period_start.timestamp())} before:{int(period_end.timestamp())} -in:spam -in:trash {excluded_clause}".strip()
+
+
+def _gmail_thread_link(thread_id: str) -> str:
+    clean = str(thread_id or "").strip()
+    if not clean:
+        return "https://mail.google.com/mail/u/0/#all"
+    return f"https://mail.google.com/mail/u/0/#all/{quote(clean, safe='')}"
 
 
 def _decode_gmail_body_data(data: str | None) -> str:
@@ -487,6 +510,90 @@ class GmailDashboardService:
         self._store_cached_export_content(days=days, batch=batch, now=now, payload=payload)
         return payload
 
+    def export_thread_history_since(
+        self,
+        *,
+        since: datetime,
+        now: datetime,
+        max_threads: int = 40,
+    ) -> str:
+        local_since = since.astimezone(now.tzinfo)
+        local_now = now.astimezone(now.tzinfo)
+        query = _build_thread_export_query(local_since, local_now)
+        message_ids = self._list_message_ids(query=query, max_messages=GMAIL_EXPORT_MAX_TOTAL_MESSAGES)
+        if not message_ids:
+            return "\n".join(
+                [
+                    "Gmail thread history export",
+                    f"Generated at: {local_now.isoformat()}",
+                    f"Window: {local_since.isoformat()} to {local_now.isoformat()}",
+                    "Scope: threads with Gmail messages in the window",
+                    "",
+                    "No Gmail messages were found in this window.",
+                    "",
+                ]
+            )
+        metadata = self._fetch_message_metadata_many(message_ids)
+        ordered_thread_ids: list[str] = []
+        for record in metadata:
+            if record.thread_id and record.thread_id not in ordered_thread_ids:
+                ordered_thread_ids.append(record.thread_id)
+        if max_threads > 0:
+            ordered_thread_ids = ordered_thread_ids[:max_threads]
+        lines = [
+            "Gmail thread history export",
+            f"Generated at: {local_now.isoformat()}",
+            f"Window: {local_since.isoformat()} to {local_now.isoformat()}",
+            "Scope: full Gmail threads touched in the window; message bodies are limited to messages inside the window",
+            "Note: up to 2 messages before the window may be included as context only; they must not be treated as new updates.",
+            f"Threads included: {len(ordered_thread_ids)}",
+            f"Candidate messages in window: {len(message_ids)}",
+            f"Max body length per message: {GMAIL_EXPORT_MAX_BODY_CHARS} characters",
+            "",
+        ]
+        separator = "=" * 80
+        for index, thread_id in enumerate(ordered_thread_ids, start=1):
+            messages = self._fetch_thread_messages(thread_id=thread_id, since=local_since, now=local_now)
+            if not messages:
+                continue
+            subject_message = next((message for message in messages if not message.context_only), messages[0])
+            subject = subject_message.headers.get("subject") or "[no subject]"
+            participants = self._thread_participant_labels(messages)
+            lines.extend(
+                [
+                    f"{separator}",
+                    f"Thread {index}",
+                    f"Thread ID: {thread_id}",
+                    f"Gmail Thread Link: {_gmail_thread_link(thread_id)}",
+                    f"Subject: {subject}",
+                    f"Participants: {participants or '[unknown participants]'}",
+                    "",
+                ]
+            )
+            for message_index, message in enumerate(messages, start=1):
+                headers = message.headers
+                labels = ",".join(sorted(message.label_ids)) if message.label_ids else "[no labels]"
+                context_label = " (context only)" if message.context_only else ""
+                lines.extend(
+                    [
+                        f"Message {message_index}{context_label}",
+                        f"Date: {message.internal_date.isoformat()}",
+                        f"Labels: {labels}",
+                        f"From: {headers.get('from') or '[unknown sender]'}",
+                        f"To: {headers.get('to') or '[no recipients listed]'}",
+                        f"Cc: {headers.get('cc') or '[no cc listed]'}",
+                        f"Message-ID: {headers.get('message-id') or '[no message-id]'}",
+                        f"Use: {'context only; do not summarize as a new item' if message.context_only else 'in-window evidence'}",
+                        "",
+                        "Body:",
+                        message.body_text or "[body unavailable]",
+                    ]
+                )
+                if message.body_truncated:
+                    lines.extend(["", "[body truncated]"])
+                lines.append("")
+        return "\n".join(lines).strip() + "\n"
+
     def get_cached_export_history_text(
         self,
         *,
@@ -686,23 +793,43 @@ class GmailDashboardService:
     def _can_tolerate_metadata_failures(*, total: int, failures: int) -> bool:
         return failures / max(total, 1) <= GMAIL_METADATA_FAILURE_RATIO_THRESHOLD
 
+    def _execute_gmail_request(self, request_factory, *, transient_message: str) -> dict[str, Any]:
+        max_attempts = len(GMAIL_REQUEST_RETRY_DELAYS_SECONDS) + 1
+        for attempt in range(max_attempts):
+            try:
+                return request_factory().execute()
+            except HttpError as error:
+                if not self._is_retryable_gmail_http_error(error) or attempt == max_attempts - 1:
+                    raise self._build_gmail_error(error) from error
+                self._sleep_before_gmail_retry(attempt)
+            except GMAIL_TRANSIENT_ERRORS as error:
+                if attempt == max_attempts - 1:
+                    raise ToolError(transient_message) from error
+                self._sleep_before_gmail_retry(attempt)
+        raise ToolError(transient_message)
+
+    @staticmethod
+    def _sleep_before_gmail_retry(attempt: int) -> None:
+        delay = GMAIL_REQUEST_RETRY_DELAYS_SECONDS[min(attempt, len(GMAIL_REQUEST_RETRY_DELAYS_SECONDS) - 1)]
+        if delay > 0:
+            time_module.sleep(delay)
+
     def _fetch_message_metadata(self, message_id: str) -> GmailMessageRecord:
         users_api = self.service.users().messages()
-        try:
-            payload = users_api.get(
+        payload = self._execute_gmail_request(
+            lambda: users_api.get(
                 userId="me",
                 id=message_id,
                 format="metadata",
-                metadataHeaders=["From", "To", "Cc", "Bcc", "Subject"],
-                fields="id,internalDate,labelIds,payload/headers",
-            ).execute()
-        except HttpError as error:
-            raise self._build_gmail_error(error) from error
-        except (TimeoutError, socket.timeout, OSError) as error:
-            raise ToolError("Gmail data could not be loaded right now. Please try again shortly.") from error
+                metadataHeaders=["From", "To", "Cc", "Bcc", "Subject", "Message-ID"],
+                fields="id,threadId,internalDate,labelIds,payload/headers",
+            ),
+            transient_message="Gmail data could not be loaded right now. Please try again shortly.",
+        )
         headers = _normalize_header_map((payload.get("payload") or {}).get("headers"))
         return GmailMessageRecord(
             message_id=str(message_id),
+            thread_id=str(payload.get("threadId") or ""),
             internal_date=_safe_datetime_from_epoch_ms(payload.get("internalDate"), datetime.now().astimezone().tzinfo),
             label_ids=set(payload.get("labelIds") or []),
             headers=headers,
@@ -710,17 +837,15 @@ class GmailDashboardService:
 
     def _fetch_message_full(self, message_id: str) -> GmailExportRecord:
         users_api = self.service.users().messages()
-        try:
-            payload = users_api.get(
+        payload = self._execute_gmail_request(
+            lambda: users_api.get(
                 userId="me",
                 id=message_id,
                 format="full",
-                fields="id,internalDate,payload(mimeType,filename,headers,body/data,parts)",
-            ).execute()
-        except HttpError as error:
-            raise self._build_gmail_error(error) from error
-        except (TimeoutError, socket.timeout, OSError) as error:
-            raise ToolError("Gmail mail history could not be exported right now. Please try again shortly.") from error
+                fields="id,threadId,internalDate,labelIds,payload(mimeType,filename,headers,body/data,parts)",
+            ),
+            transient_message="Gmail mail history could not be exported right now. Please try again shortly.",
+        )
         message_payload = payload.get("payload") or {}
         headers = _normalize_header_map(message_payload.get("headers"))
         body_text = _clean_export_body_text(_extract_message_text_from_payload(message_payload))
@@ -732,25 +857,77 @@ class GmailDashboardService:
             headers=headers,
             body_text=body_text,
             body_truncated=body_truncated,
+            message_id=str(payload.get("id") or message_id),
+            thread_id=str(payload.get("threadId") or ""),
+            label_ids=set(payload.get("labelIds") or []),
         )
+
+    def _fetch_thread_messages(self, *, thread_id: str, since: datetime, now: datetime) -> list[GmailExportRecord]:
+        users_api = self.service.users().threads()
+        payload = self._execute_gmail_request(
+            lambda: users_api.get(
+                userId="me",
+                id=thread_id,
+                format="full",
+                fields="id,messages(id,threadId,internalDate,labelIds,payload(mimeType,filename,headers,body/data,parts))",
+            ),
+            transient_message="Gmail thread history could not be exported right now. Please try again shortly.",
+        )
+        prior_records: list[GmailExportRecord] = []
+        window_records: list[GmailExportRecord] = []
+        for message_payload in payload.get("messages") or []:
+            message_time = _safe_datetime_from_epoch_ms(message_payload.get("internalDate"), now.tzinfo).astimezone(now.tzinfo)
+            if message_time >= now:
+                continue
+            mime_payload = message_payload.get("payload") or {}
+            headers = _normalize_header_map(mime_payload.get("headers"))
+            if _is_export_noise(headers):
+                continue
+            body_text = _clean_export_body_text(_extract_message_text_from_payload(mime_payload))
+            body_truncated = len(body_text) > GMAIL_EXPORT_MAX_BODY_CHARS
+            if body_truncated:
+                body_text = f"{body_text[:GMAIL_EXPORT_MAX_BODY_CHARS].rstrip()}\n..."
+            record = GmailExportRecord(
+                internal_date=message_time,
+                headers=headers,
+                body_text=body_text,
+                body_truncated=body_truncated,
+                message_id=str(message_payload.get("id") or ""),
+                thread_id=str(message_payload.get("threadId") or thread_id),
+                label_ids=set(message_payload.get("labelIds") or []),
+            )
+            if message_time < since:
+                record.context_only = True
+                prior_records.append(record)
+            else:
+                window_records.append(record)
+        prior_records = sorted(prior_records, key=lambda item: item.internal_date)[-2:]
+        return prior_records + sorted(window_records, key=lambda item: item.internal_date)
+
+    @staticmethod
+    def _thread_participant_labels(messages: list[GmailExportRecord]) -> str:
+        labels: dict[str, str] = {}
+        for message in messages:
+            for header_name in ("from", "to", "cc"):
+                for name, address in _extract_contacts(message.headers.get(header_name, "")):
+                    labels.setdefault(address.lower(), _format_contact_label(name, address, message.headers.get(header_name, "")))
+        return ", ".join(labels[key] for key in sorted(labels))
 
     def _list_message_ids(self, *, query: str, max_messages: int | None) -> list[str]:
         users_api = self.service.users().messages()
         message_ids: list[str] = []
         page_token: str | None = None
         while True:
-            try:
-                payload = users_api.list(
+            payload = self._execute_gmail_request(
+                lambda: users_api.list(
                     userId="me",
                     q=query,
                     maxResults=500,
                     pageToken=page_token,
                     fields="messages/id,nextPageToken",
-                ).execute()
-            except HttpError as error:
-                raise self._build_gmail_error(error) from error
-            except (TimeoutError, socket.timeout, OSError) as error:
-                raise ToolError("Gmail data could not be loaded right now. Please try again shortly.") from error
+                ),
+                transient_message="Gmail data could not be loaded right now. Please try again shortly.",
+            )
             message_ids.extend(str(item.get("id") or "") for item in payload.get("messages") or [] if item.get("id"))
             if max_messages is not None and len(message_ids) >= max_messages:
                 return message_ids[:max_messages]
@@ -928,6 +1105,11 @@ class GmailDashboardService:
             )
         ]
         return rows
+
+    @staticmethod
+    def _is_retryable_gmail_http_error(error: HttpError) -> bool:
+        status = getattr(getattr(error, "resp", None), "status", None)
+        return status in GMAIL_RETRYABLE_HTTP_STATUSES
 
     @staticmethod
     def _build_gmail_error(error: HttpError) -> ToolError:

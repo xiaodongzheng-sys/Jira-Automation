@@ -118,6 +118,15 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertIn(b"Model Availability", owner_response.data)
         self.assertNotIn(b"Model Availability", teammate_response.data)
 
+    def test_frontend_pasted_images_use_attachment_upload_flow(self):
+        script = Path("static/source_code_qa.js").read_text(encoding="utf-8")
+
+        self.assertIn("const handleAttachmentPaste", script)
+        self.assertIn("imageFilesFromClipboard(event.clipboardData)", script)
+        self.assertIn("await addAttachmentFiles(pastedImages)", script)
+        self.assertIn("addEventListener('paste', handleAttachmentPaste)", script)
+        self.assertIn("image.${extension}", script)
+
     def test_source_code_qa_admin_allowlist_can_manage_repositories(self):
         with patch.dict(
             os.environ,
