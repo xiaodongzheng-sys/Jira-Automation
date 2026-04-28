@@ -1292,6 +1292,40 @@
     return paragraphs.map((part) => `<p>${escapeHtml(part)}</p>`).join('');
   };
 
+  const renderAnswerQualityBanner = (payload) => {
+    const quality = payload?.answer_quality || {};
+    const contract = payload?.answer_contract || {};
+    const judge = payload?.answer_judge || {};
+    const validation = payload?.answer_claim_check?.codex_citation_validation || {};
+    const issues = [
+      ...(quality.missing || []),
+      ...(contract.missing_links || []),
+      ...(judge.issues || []),
+      ...(validation.issues || []),
+    ].map((item) => String(item || '').trim()).filter(Boolean);
+    const status = String(quality.status || contract.status || '').toLowerCase();
+    const confidence = String(contract.confidence || quality.confidence || '').toLowerCase();
+    const judgeStatus = String(judge.status || '').toLowerCase();
+    const validationStatus = String(validation.status || '').toLowerCase();
+    const show = status === 'needs_more_trace'
+      || confidence === 'low'
+      || ['repair', 'warn', 'insufficient_evidence'].includes(judgeStatus)
+      || (validationStatus && !['ok', 'skipped'].includes(validationStatus))
+      || contract.status === 'blocked_missing_source'
+      || contract.status === 'unreliable_llm_answer';
+    if (!show) return '';
+    const label = confidence === 'low' || contract.status === 'unreliable_llm_answer'
+      ? 'Low confidence'
+      : 'Needs more evidence';
+    return `
+      <section class="source-qa-answer-quality">
+        <strong>${escapeHtml(label)}</strong>
+        <span>${escapeHtml(status || contract.status || judgeStatus || validationStatus || 'review needed')}</span>
+        ${issues.length ? `<ul>${issues.slice(0, 4).map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</ul>` : ''}
+      </section>
+    `;
+  };
+
   const renderLlmAnswer = (payload) => {
     if (!llmAnswer) return;
     const answer = String(payload?.llm_answer || '').trim();
@@ -1323,6 +1357,7 @@
           </div>
           <span>${escapeHtml(meta)}</span>
         </div>
+        ${renderAnswerQualityBanner(payload)}
         <div class="source-qa-answer-body">
           ${renderReadableAnswerBody(payload, answer)}
         </div>

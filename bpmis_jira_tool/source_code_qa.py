@@ -14995,10 +14995,9 @@ class SourceCodeQAService:
         if cached is not None:
             cached_answer = str(cached["answer"])
             cached_structured = self._parse_structured_answer(cached_answer)
-            cached_claim_check = self._trusted_provider_check()
-            cached_validation = self._skipped_codex_validation()
-            cached_claim_check = {**cached_claim_check, "codex_citation_validation": cached_validation}
-            cached_judge = self._trusted_provider_judge()
+            cached_validation = self._validate_codex_citations(cached_answer, candidate_paths, candidate_paths)
+            cached_claim_check = self._merge_codex_validation(self._trusted_provider_check(), cached_validation)
+            cached_judge = self._run_answer_judge(question, cached_answer, evidence_pack, cached_claim_check)
             cached_final = self._finalize_trusted_model_answer(
                 question=question,
                 answer=cached_answer,
@@ -15068,11 +15067,56 @@ class SourceCodeQAService:
         llm_attempt_log = [dict(item) for item in result.attempt_log]
         finish_reason = self._llm_finish_reason(result.payload)
         codex_cli_trace = result.payload.get("codex_cli_trace") if isinstance(result.payload.get("codex_cli_trace"), dict) else {}
-        claim_check = self._trusted_provider_check()
-        codex_validation = self._skipped_codex_validation()
-        claim_check = {**claim_check, "codex_citation_validation": codex_validation}
-        answer_judge = self._trusted_provider_judge()
+        codex_validation = self._validate_codex_citations(answer, candidate_paths, candidate_paths)
+        claim_check = self._merge_codex_validation(self._trusted_provider_check(), codex_validation)
+        answer_judge = self._run_answer_judge(question, answer, evidence_pack, claim_check)
         repair_attempted = False
+        repair_issues = list(codex_validation.get("issues") or [])
+        repair_issues.extend(answer_judge.get("issues") or [])
+        if self.codex_repair_enabled and repair_issues:
+            repair_attempted = True
+            repair_context = self._codex_investigation_brief(
+                pm_team=pm_team,
+                country=country,
+                question=question,
+                candidate_paths=candidate_paths,
+                evidence_pack=evidence_pack,
+                quality_gate=quality_gate,
+                followup_context=followup_context,
+                attachments=attachments or [],
+                repair_issues=list(dict.fromkeys(str(issue) for issue in repair_issues if issue)),
+            )
+            repair_payload = self._codex_payload(
+                repair_context,
+                progress_callback=progress_callback,
+                codex_cli_session_id=codex_cli_session_id,
+                image_paths=self._attachment_image_paths(attachments or []),
+            )
+            repair_result = self.llm_provider.generate(
+                payload=repair_payload,
+                primary_model=selected_model,
+                fallback_model=self._llm_fallback_model(),
+            )
+            repair_answer = self.llm_provider.extract_text(repair_result.payload)
+            repair_structured = self._parse_structured_answer(repair_answer)
+            repair_validation = self._validate_codex_citations(repair_answer, candidate_paths, candidate_paths)
+            repair_claim_check = self._merge_codex_validation(self._trusted_provider_check(), repair_validation)
+            repair_judge = self._run_answer_judge(question, repair_answer, evidence_pack, repair_claim_check)
+            answer = repair_answer
+            structured_answer = repair_structured
+            codex_validation = repair_validation
+            claim_check = repair_claim_check
+            answer_judge = repair_judge
+            repair_usage = self._normalize_llm_usage(repair_result.usage or repair_result.payload.get("usageMetadata") or {})
+            usage = self._merge_llm_usage(usage, repair_usage)
+            effective_model = repair_result.model
+            attempts += repair_result.attempts
+            llm_latency_ms += int(repair_result.latency_ms or 0)
+            llm_attempt_log.extend(dict(item) for item in repair_result.attempt_log)
+            finish_reason = self._llm_finish_reason(repair_result.payload)
+            repair_trace = repair_result.payload.get("codex_cli_trace") if isinstance(repair_result.payload.get("codex_cli_trace"), dict) else {}
+            if repair_trace:
+                codex_cli_trace = repair_trace
         final = self._finalize_trusted_model_answer(
             question=question,
             answer=answer,
@@ -15623,7 +15667,10 @@ class SourceCodeQAService:
     def _merge_codex_validation(self, claim_check: dict[str, Any], validation: dict[str, Any]) -> dict[str, Any]:
         merged = dict(claim_check or {})
         merged["codex_citation_validation"] = validation
-        if validation.get("status") != "ok":
+        if validation.get("status") == "ok" and str(merged.get("status") or "") == "skipped":
+            merged["status"] = "ok"
+            merged["reason"] = "codex_citation_validation"
+        elif validation.get("status") != "ok":
             issues = [*(merged.get("issues") or []), *(validation.get("issues") or [])]
             merged["issues"] = list(dict.fromkeys(str(issue) for issue in issues if issue))
             merged["status"] = "needs_citation"

@@ -7495,7 +7495,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertEqual(validation["status"], "ok")
         self.assertEqual(validation["cited_path_count"], 1)
 
-    def test_codex_answer_passthrough_skips_citation_repair(self):
+    def test_codex_answer_runs_citation_repair(self):
         service = SourceCodeQAService(
             data_root=Path(self.temp_dir.name),
             team_profiles=TEAM_PROFILE_DEFAULTS,
@@ -7564,12 +7564,12 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             )
 
         exec_calls = [item for item in calls if "exec" in item[0]]
-        self.assertEqual(len(exec_calls), 1)
+        self.assertEqual(len(exec_calls), 2)
         self.assertEqual(payload["llm_route"]["prompt_mode"], "codex_investigation_brief_v3")
         self.assertIn("candidate_path_layers", payload["llm_route"])
-        self.assertFalse(payload["llm_route"]["codex_repair_attempted"])
-        self.assertEqual(payload["answer_claim_check"]["status"], "skipped")
-        self.assertEqual(payload["codex_cli_summary"]["citation_validation_status"], "skipped")
+        self.assertTrue(payload["llm_route"]["codex_repair_attempted"])
+        self.assertEqual(payload["answer_claim_check"]["status"], "ok")
+        self.assertEqual(payload["codex_cli_summary"]["citation_validation_status"], "ok")
         self.assertEqual(payload["answer_contract"]["status"], "model_answer")
         self.assertIn("IssueRepository reads issue_table", payload["llm_answer"])
 

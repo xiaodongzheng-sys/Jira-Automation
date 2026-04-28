@@ -5898,6 +5898,37 @@ select:focus {
   margin: 0;
 }
 
+.source-qa-answer-quality {
+  display: grid;
+  gap: 6px;
+  padding: 12px 14px;
+  border: 1px solid #facc15;
+  border-radius: 8px;
+  background: #fffbeb;
+  color: #713f12;
+}
+
+.source-qa-answer-quality strong {
+  color: #713f12;
+}
+
+.source-qa-answer-quality span {
+  color: #854d0e;
+  font-size: 0.9rem;
+  font-weight: 650;
+}
+
+.source-qa-answer-quality ul {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.source-qa-answer-quality li {
+  margin: 4px 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
 .source-qa-answer-section {
   min-width: 0;
   padding: 14px;
