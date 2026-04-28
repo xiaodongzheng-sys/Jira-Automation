@@ -7,6 +7,7 @@ import sqlite3
 import tempfile
 import time
 import unittest
+import zipfile
 from unittest.mock import patch
 from types import SimpleNamespace
 
@@ -567,6 +568,57 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertIn("UAT/non-Live", section)
         self.assertIn("never use them as confirmed Live/production configuration facts", section)
         self.assertNotIn("production DB/Apollo/config snapshots", section)
+
+    def test_runtime_evidence_apollo_zip_extracts_nested_text_configs(self):
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w") as archive:
+            archive.writestr("sg/application.properties", "apollo.sg.rule.enabled=true")
+            archive.writestr("sg/nested/rules.yaml", "challenge: C0204v2")
+            archive.writestr("sg/ignore.bin", b"\x00\x01binary")
+        zip_buffer.seek(0)
+
+        with self.app.test_client() as client:
+            self._login(client, "xiaodong.zheng@npt.sg")
+            upload = client.post(
+                "/api/source-code-qa/runtime-evidence",
+                data={
+                    "pm_team": "AF",
+                    "country": "SG",
+                    "source_type": "apollo",
+                    "file": (zip_buffer, "apollo-config.zip"),
+                },
+                content_type="multipart/form-data",
+            )
+
+        self.assertEqual(upload.status_code, 200)
+        evidence = upload.get_json()["evidence"]
+        self.assertEqual(evidence["filename"], "apollo-config.zip")
+        self.assertEqual(evidence["kind"], "archive")
+        self.assertIn("sg/application.properties", evidence["summary"])
+        self.assertIn("apollo.sg.rule.enabled=true", evidence["summary"])
+        self.assertIn("sg/nested/rules.yaml", evidence["summary"])
+
+    def test_regular_source_code_qa_attachment_still_rejects_zip(self):
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w") as archive:
+            archive.writestr("notes.txt", "hello")
+        zip_buffer.seek(0)
+
+        with self.app.test_client() as client:
+            self._login(client, "teammate@npt.sg")
+            created = client.post("/api/source-code-qa/sessions", json={"pm_team": "AF", "country": "All", "llm_provider": "codex_cli_bridge"})
+            session_id = created.get_json()["session"]["id"]
+            upload = client.post(
+                "/api/source-code-qa/attachments",
+                data={
+                    "session_id": session_id,
+                    "file": (zip_buffer, "notes.zip"),
+                },
+                content_type="multipart/form-data",
+            )
+
+        self.assertEqual(upload.status_code, 400)
+        self.assertIn("archive", upload.get_json()["message"].lower())
 
     def test_query_empty_config_is_controlled(self):
         with self.app.test_client() as client:

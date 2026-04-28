@@ -21,6 +21,7 @@ import threading
 import time
 from typing import Any
 import uuid
+import zipfile
 
 from flask import Flask, current_app, flash, g, has_app_context, jsonify, redirect, render_template, request, send_file, session, url_for
 from dotenv import load_dotenv
@@ -1135,6 +1136,16 @@ class SourceCodeQARuntimeEvidenceStore(SourceCodeQAAttachmentStore):
     ALLOWED_SOURCE_TYPES = {"apollo", "db", "other"}
     MAX_FILES_PER_SCOPE = 20
     MAX_QUERY_FILES_PER_SCOPE = 8
+    MAX_ZIP_MEMBERS = 80
+    MAX_ZIP_UNCOMPRESSED_BYTES = 2 * 1024 * 1024
+    MAX_ZIP_TEXT_CHARS = 48000
+    ZIP_TEXT_EXTENSIONS = SourceCodeQAAttachmentStore.TEXT_EXTENSIONS | {
+        ".conf",
+        ".cfg",
+        ".ini",
+        ".toml",
+        ".env",
+    }
 
     @classmethod
     def _safe_scope(cls, *, pm_team: str, country: str) -> tuple[str, str]:
@@ -1202,10 +1213,10 @@ class SourceCodeQARuntimeEvidenceStore(SourceCodeQAAttachmentStore):
         safe_source_type = self._safe_source_type(source_type)
         safe_name = self._safe_filename(filename)
         suffix = Path(safe_name).suffix.lower()
-        if suffix in self.BLOCKED_EXTENSIONS:
+        if suffix in self.BLOCKED_EXTENSIONS and suffix != ".zip":
             raise ToolError("Executable, archive, and unknown binary runtime evidence files are not supported.")
         guessed_mime = str(mime_type or mimetypes.guess_type(safe_name)[0] or "").lower()
-        kind = self._attachment_kind(safe_name, guessed_mime, content)
+        kind = "archive" if suffix == ".zip" else self._attachment_kind(safe_name, guessed_mime, content)
         if kind == "image":
             raise ToolError("Runtime evidence must be a parseable text, spreadsheet, PDF, or document file, not an image.")
         extracted = self._extract_attachment_text(safe_name, guessed_mime, content)
@@ -1247,6 +1258,67 @@ class SourceCodeQARuntimeEvidenceStore(SourceCodeQAAttachmentStore):
                     existing.pop(stale_id, None)
             self._persist_metadata_locked(pm_team=safe_team, country=safe_country, metadata=existing)
         return self.public_metadata(metadata)
+
+    def _extract_attachment_text(self, filename: str, mime_type: str, content: bytes) -> str:
+        if Path(filename).suffix.lower() == ".zip":
+            return self._extract_zip_text(content)
+        return super()._extract_attachment_text(filename, mime_type, content)
+
+    def _extract_zip_text(self, content: bytes) -> str:
+        try:
+            archive = zipfile.ZipFile(io.BytesIO(content))
+        except zipfile.BadZipFile as error:
+            raise ToolError("Unable to read this ZIP runtime evidence file.") from error
+        lines: list[str] = []
+        total_uncompressed = 0
+        readable_members = 0
+        skipped_members = 0
+        with archive:
+            members = [member for member in archive.infolist() if not member.is_dir()]
+            if len(members) > self.MAX_ZIP_MEMBERS:
+                raise ToolError(f"ZIP runtime evidence contains too many files. Maximum is {self.MAX_ZIP_MEMBERS}.")
+            for member in members:
+                member_name = str(member.filename or "").replace("\\", "/")
+                clean_parts = [part for part in member_name.split("/") if part and part not in {".", ".."}]
+                if not clean_parts or clean_parts[0] == "__MACOSX" or len(clean_parts) != len([part for part in member_name.split("/") if part]):
+                    skipped_members += 1
+                    continue
+                member_basename = clean_parts[-1].lower()
+                suffix = Path(member_basename).suffix.lower() or (member_basename if member_basename.startswith(".") else "")
+                if suffix in self.BLOCKED_EXTENSIONS or suffix not in self.ZIP_TEXT_EXTENSIONS:
+                    skipped_members += 1
+                    continue
+                total_uncompressed += int(member.file_size or 0)
+                if total_uncompressed > self.MAX_ZIP_UNCOMPRESSED_BYTES:
+                    raise ToolError("ZIP runtime evidence is too large after extraction. Keep text config files under 2MB total.")
+                try:
+                    raw = archive.read(member)
+                except (OSError, RuntimeError, zipfile.BadZipFile) as error:
+                    raise ToolError(f"Unable to read {member_name} inside this ZIP runtime evidence file.") from error
+                if b"\x00" in raw[:2048]:
+                    skipped_members += 1
+                    continue
+                text = ""
+                for encoding in ("utf-8-sig", "utf-8", "latin-1"):
+                    try:
+                        text = raw.decode(encoding)
+                        break
+                    except UnicodeDecodeError:
+                        text = ""
+                text = re.sub(r"\r\n?", "\n", text).strip()
+                if not text:
+                    skipped_members += 1
+                    continue
+                readable_members += 1
+                lines.append(f"[ZIP file: {'/'.join(clean_parts)}]\n{text[:12000]}")
+                if sum(len(line) for line in lines) >= self.MAX_ZIP_TEXT_CHARS:
+                    lines.append("...[zip text truncated]")
+                    break
+        if not readable_members:
+            raise ToolError("ZIP runtime evidence did not contain readable config/text files.")
+        if skipped_members:
+            lines.append(f"[ZIP skipped files: {skipped_members}]")
+        return "\n\n".join(lines).strip()[: self.MAX_ZIP_TEXT_CHARS]
 
     @classmethod
     def public_metadata(cls, metadata: dict[str, Any]) -> dict[str, Any]:
