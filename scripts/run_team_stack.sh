@@ -289,7 +289,9 @@ PY
   echo
   echo "== Source Code QA Ops Summary =="
   if [[ -x "$PYTHON_BIN" && -f "$ROOT_DIR/scripts/source_code_qa_ops_summary.py" ]]; then
-    TEAM_PORTAL_DATA_DIR="$data_dir" "$PYTHON_BIN" "$ROOT_DIR/scripts/source_code_qa_ops_summary.py" || true
+    if ! PYTHONPATH="$ROOT_DIR" TEAM_PORTAL_DATA_DIR="$data_dir" "$PYTHON_BIN" "$ROOT_DIR/scripts/source_code_qa_ops_summary.py" --strict; then
+      ok=1
+    fi
   else
     echo "ops summary unavailable"
   fi

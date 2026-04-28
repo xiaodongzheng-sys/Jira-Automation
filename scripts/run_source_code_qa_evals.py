@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 import re
 import sys
@@ -144,6 +145,19 @@ def _coverage_key(case: dict[str, Any]) -> str:
 def _write_text(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
+
+
+def _guard_fixture_data_root(*, data_root: Path, main_data_root: Path, data_root_explicit: bool) -> None:
+    if os.getenv("SOURCE_CODE_QA_ALLOW_FIXTURE_MAIN_DATA") == "1":
+        return
+    resolved_data_root = data_root.expanduser().resolve()
+    resolved_main_root = main_data_root.expanduser().resolve()
+    if not data_root_explicit or resolved_data_root == resolved_main_root:
+        raise SystemExit(
+            "Refusing to run --fixture against the main Source Code Q&A data root. "
+            "Pass --data-root pointing to an isolated eval directory, or set "
+            "SOURCE_CODE_QA_ALLOW_FIXTURE_MAIN_DATA=1 if you intentionally want to overwrite live mappings."
+        )
 
 
 def _build_fixture_repositories(service: SourceCodeQAService) -> None:
@@ -1205,6 +1219,12 @@ def main() -> int:
     for path in case_paths:
         cases.extend(_load_cases(path))
     compare_profiles = [item.strip() for item in str(args.compare_profiles or "").split(",") if item.strip()]
+    if args.fixture and not compare_profiles:
+        _guard_fixture_data_root(
+            data_root=base_data_root,
+            main_data_root=settings.team_portal_data_dir,
+            data_root_explicit=bool(args.data_root),
+        )
     if compare_profiles:
         comparison: dict[str, Any] = {}
         for profile in compare_profiles:

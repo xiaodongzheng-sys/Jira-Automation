@@ -22,7 +22,7 @@ from bpmis_jira_tool.source_code_qa import (
 from bpmis_jira_tool.user_config import TEAM_PROFILE_DEFAULTS
 from bpmis_jira_tool.web import JobStore, SourceCodeQASessionStore, create_app
 from scripts.promote_source_code_qa_eval_candidates import promote_candidates
-from scripts.run_source_code_qa_evals import _build_fixture_repositories, _evaluate_case
+from scripts.run_source_code_qa_evals import _build_fixture_repositories, _evaluate_case, _guard_fixture_data_root
 from scripts.source_code_qa_feedback_to_eval import build_eval_candidates
 
 
@@ -2411,6 +2411,32 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertIn("review_queue=0", summary)
         self.assertIn("latest_eval_state=passed", summary)
 
+    def test_ops_summary_flags_fixture_repo_config_in_strict_mode(self):
+        from scripts.source_code_qa_ops_summary import build_summary
+
+        data_root = Path(self.temp_dir.name)
+        source_root = data_root / "source_code_qa"
+        source_root.mkdir(parents=True)
+        (source_root / "config.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "mappings": {
+                        "CRMS:SG": [
+                            {"display_name": "Credit Risk SG", "url": "https://git.example.com/team/credit-risk-sg.git"}
+                        ]
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        summary = "\n".join(build_summary(data_root, limit=20, strict=True))
+
+        self.assertIn("active_config_demo_repos=1", summary)
+        self.assertIn("ops_summary_status=fail", summary)
+        self.assertIn("fixture/demo repositories", summary)
+
     def test_domain_profiles_include_domain_knowledge_pack_terms(self):
         crms_profile = self.service._domain_profile("CRMS", "SG")
         af_profile = self.service._domain_profile("AF", "All")
@@ -2625,6 +2651,17 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         eval_call = calls[0]
         self.assertIn("--data-root", eval_call)
         self.assertEqual(Path(eval_call[eval_call.index("--data-root") + 1]), output_dir / "fixture_data")
+
+    def test_fixture_eval_requires_isolated_data_root(self):
+        data_root = Path(self.temp_dir.name)
+
+        with self.assertRaises(SystemExit):
+            _guard_fixture_data_root(data_root=data_root, main_data_root=data_root, data_root_explicit=False)
+
+        with self.assertRaises(SystemExit):
+            _guard_fixture_data_root(data_root=data_root, main_data_root=data_root, data_root_explicit=True)
+
+        _guard_fixture_data_root(data_root=data_root / "fixture_data", main_data_root=data_root, data_root_explicit=True)
 
     def test_review_queue_collects_feedback_and_telemetry_risks(self):
         from scripts.source_code_qa_review_queue import build_review_queue

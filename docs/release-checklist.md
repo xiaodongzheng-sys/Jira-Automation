@@ -25,6 +25,12 @@ git status --short
 ./.venv/bin/python scripts/run_source_code_qa_release_gate.py
 ```
 
+- Source Code Q&A fixture evals must use an isolated data root. Never run fixture evals against the main `TEAM_PORTAL_DATA_DIR`, because that can overwrite live repo mappings with `git.example.com` demo repositories:
+
+```bash
+./.venv/bin/python scripts/run_source_code_qa_evals.py --fixture --data-root /tmp/source-code-qa-fixture-data
+```
+
 - Review deploy-impacting environment changes before building or deploying. Pay special attention to:
 
 ```text
@@ -123,6 +129,7 @@ Run these after Cloud Run and the Mac local-agent are both updated:
 - BPMIS Setup can save/load config through the local-agent when Cloud Run uses BPMIS proxy mode.
 - BPMIS Create Jira succeeds with Jira-resolvable NPT user emails in owner fields.
 - Source Code Q&A with Codex answers through the Mac local-agent and does not block on repo clone/pull/index work.
+- Source Code Q&A active repo config contains the expected GitLab repositories, not fixture/demo `git.example.com` URLs, and index health is `ready`.
 - SeaTalk Summary reads Mac desktop data through the local-agent.
 - For the Mac-hosted stack, `./scripts/run_team_stack.sh doctor` is clean.
 

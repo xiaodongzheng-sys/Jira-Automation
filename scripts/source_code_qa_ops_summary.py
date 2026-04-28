@@ -7,10 +7,17 @@ import argparse
 import json
 import os
 import statistics
+import sys
 import time
 from collections import Counter
 from pathlib import Path
 from typing import Any
+
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+DEMO_REPO_MARKERS = ("git.example.com",)
 
 
 def _resolve_data_root(raw: str | None) -> Path:
@@ -62,15 +69,83 @@ def _p95(values: list[int]) -> int:
     return int(statistics.quantiles(values, n=20, method="inclusive")[18])
 
 
-def build_summary(data_root: Path, *, limit: int = 200) -> list[str]:
+def _source_config_summary(source_root: Path) -> tuple[list[str], list[str]]:
+    config = _read_json(source_root / "config.json")
+    mappings = config.get("mappings") if isinstance(config.get("mappings"), dict) else {}
+    repo_count = 0
+    demo_repos: list[str] = []
+    keys = sorted(str(key) for key in mappings)
+    for key, repos in mappings.items():
+        if not isinstance(repos, list):
+            continue
+        for repo in repos:
+            if not isinstance(repo, dict):
+                continue
+            repo_count += 1
+            url = str(repo.get("url") or "")
+            if any(marker in url for marker in DEMO_REPO_MARKERS):
+                demo_repos.append(f"{key}:{repo.get('display_name') or url}")
+
+    lines = [f"active_config_repos={repo_count} keys={','.join(keys) if keys else 'none'}"]
+    issues: list[str] = []
+    if demo_repos:
+        preview = ", ".join(demo_repos[:5])
+        suffix = f", ...(+{len(demo_repos) - 5})" if len(demo_repos) > 5 else ""
+        lines.append(f"active_config_demo_repos={len(demo_repos)} {preview}{suffix}")
+        issues.append("active config contains fixture/demo repositories")
+    else:
+        lines.append("active_config_demo_repos=0")
+    return lines, issues
+
+
+def _index_health_summary(data_root: Path) -> tuple[list[str], list[str]]:
+    try:
+        from bpmis_jira_tool.source_code_qa import SourceCodeQAService
+        from bpmis_jira_tool.user_config import TEAM_PROFILE_DEFAULTS
+
+        service = SourceCodeQAService(data_root=data_root, team_profiles=TEAM_PROFILE_DEFAULTS)
+        health = service.index_health_payload()
+    except Exception as error:  # pragma: no cover - defensive ops diagnostics
+        return [f"index_health=unavailable error={type(error).__name__}: {error}"], ["index health unavailable"]
+
+    totals = health.get("totals") or {}
+    repo_count = int(totals.get("repos") or 0)
+    ready = int(totals.get("ready") or 0)
+    stale_or_missing = int(totals.get("stale_or_missing") or 0)
+    status = str(health.get("status") or "unknown")
+    lines = [f"index_health={status} ready={ready}/{repo_count} stale_or_missing={stale_or_missing}"]
+    issues: list[str] = []
+    if repo_count and status != "ready":
+        stale: list[str] = []
+        for key, payload in (health.get("keys") or {}).items():
+            for repo in payload.get("repos") or []:
+                index = repo.get("index") or {}
+                if index.get("state") != "ready":
+                    stale.append(f"{key}:{repo.get('display_name') or repo.get('url')}")
+        if stale:
+            preview = ", ".join(stale[:5])
+            suffix = f", ...(+{len(stale) - 5})" if len(stale) > 5 else ""
+            lines.append(f"stale_index_repos={len(stale)} {preview}{suffix}")
+        issues.append("configured repositories do not all have ready indexes")
+    return lines, issues
+
+
+def build_summary(data_root: Path, *, limit: int = 200, strict: bool = False) -> list[str]:
     source_root = data_root / "source_code_qa"
     telemetry_rows = _read_tail_jsonl(source_root / "telemetry.jsonl", limit)
     feedback_rows = _read_tail_jsonl(source_root / "feedback.jsonl", limit)
     review_rows = _read_tail_jsonl(source_root / "review_queue.jsonl", limit)
     eval_status = _read_json(data_root / "run" / "source_code_qa_eval_status.json")
+    issues: list[str] = []
 
     lines: list[str] = []
     lines.append(f"data_root={data_root}")
+    config_lines, config_issues = _source_config_summary(source_root)
+    lines.extend(config_lines)
+    issues.extend(config_issues)
+    health_lines, health_issues = _index_health_summary(data_root)
+    lines.extend(health_lines)
+    issues.extend(health_issues)
 
     if telemetry_rows:
         status_counts = Counter(str(row.get("status") or "unknown") for row in telemetry_rows)
@@ -115,6 +190,10 @@ def build_summary(data_root: Path, *, limit: int = 200) -> list[str]:
         lines.append(f"latest_eval_state={state}")
     if eval_status.get("failed_cases"):
         lines.append(f"latest_eval_failed_cases={eval_status.get('failed_cases')}")
+    if strict:
+        lines.append(f"ops_summary_status={'fail' if issues else 'pass'}")
+        if issues:
+            lines.append("ops_summary_issues=" + "; ".join(issues))
     return lines
 
 
@@ -122,12 +201,14 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-root", default=os.environ.get("TEAM_PORTAL_DATA_DIR"))
     parser.add_argument("--limit", type=int, default=200)
+    parser.add_argument("--strict", action="store_true", help="Exit non-zero when active config or index health is unsafe.")
     args = parser.parse_args()
 
     data_root = _resolve_data_root(args.data_root)
-    for line in build_summary(data_root, limit=max(1, args.limit)):
+    lines = build_summary(data_root, limit=max(1, args.limit), strict=bool(args.strict))
+    for line in lines:
         print(line)
-    return 0
+    return 1 if args.strict and any(line.startswith("ops_summary_status=fail") for line in lines) else 0
 
 
 if __name__ == "__main__":
