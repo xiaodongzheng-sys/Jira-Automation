@@ -1136,9 +1136,9 @@ class SourceCodeQARuntimeEvidenceStore(SourceCodeQAAttachmentStore):
     ALLOWED_SOURCE_TYPES = {"apollo", "db", "other"}
     MAX_FILES_PER_SCOPE = 20
     MAX_QUERY_FILES_PER_SCOPE = 8
-    MAX_ZIP_MEMBERS = 80
-    MAX_ZIP_UNCOMPRESSED_BYTES = 2 * 1024 * 1024
-    MAX_ZIP_TEXT_CHARS = 48000
+    MAX_ZIP_MEMBERS = 500
+    MAX_ZIP_UNCOMPRESSED_BYTES = 8 * 1024 * 1024
+    MAX_ZIP_TEXT_CHARS = 120000
     ZIP_TEXT_EXTENSIONS = SourceCodeQAAttachmentStore.TEXT_EXTENSIONS | {
         ".conf",
         ".cfg",
@@ -1290,7 +1290,8 @@ class SourceCodeQARuntimeEvidenceStore(SourceCodeQAAttachmentStore):
                     continue
                 total_uncompressed += int(member.file_size or 0)
                 if total_uncompressed > self.MAX_ZIP_UNCOMPRESSED_BYTES:
-                    raise ToolError("ZIP runtime evidence is too large after extraction. Keep text config files under 2MB total.")
+                    max_mb = self.MAX_ZIP_UNCOMPRESSED_BYTES // (1024 * 1024)
+                    raise ToolError(f"ZIP runtime evidence is too large after extraction. Keep text config files under {max_mb}MB total.")
                 try:
                     raw = archive.read(member)
                 except (OSError, RuntimeError, zipfile.BadZipFile) as error:

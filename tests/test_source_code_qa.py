@@ -598,6 +598,31 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertIn("apollo.sg.rule.enabled=true", evidence["summary"])
         self.assertIn("sg/nested/rules.yaml", evidence["summary"])
 
+    def test_runtime_evidence_apollo_zip_allows_larger_config_trees(self):
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w") as archive:
+            for index in range(120):
+                archive.writestr(f"apollo/apps/app-{index}/application.properties", f"feature.{index}=true")
+        zip_buffer.seek(0)
+
+        with self.app.test_client() as client:
+            self._login(client, "xiaodong.zheng@npt.sg")
+            upload = client.post(
+                "/api/source-code-qa/runtime-evidence",
+                data={
+                    "pm_team": "AF",
+                    "country": "PH",
+                    "source_type": "apollo",
+                    "file": (zip_buffer, "apollo-large.zip"),
+                },
+                content_type="multipart/form-data",
+            )
+
+        self.assertEqual(upload.status_code, 200)
+        evidence = upload.get_json()["evidence"]
+        self.assertEqual(evidence["kind"], "archive")
+        self.assertIn("apollo/apps/app-0/application.properties", evidence["summary"])
+
     def test_regular_source_code_qa_attachment_still_rejects_zip(self):
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, "w") as archive:
