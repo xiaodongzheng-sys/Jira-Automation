@@ -984,7 +984,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertEqual(payload["llm_provider"], "codex_cli_bridge")
         self.assertEqual(payload["llm_policy"]["provider"]["provider"], "codex_cli_bridge")
         self.assertEqual(payload["llm_policy"]["router"]["version"], 7)
-        self.assertEqual(payload["llm_policy"]["versions"]["cache"], 14)
+        self.assertEqual(payload["llm_policy"]["versions"]["cache"], 15)
         self.assertEqual(payload["llm_policy"]["versions"]["runtime"], 2)
         self.assertEqual(payload["llm_policy"]["runtime"]["max_retries"], 2)
         self.assertEqual(payload["llm_policy"]["model_policy"]["answer"]["model"], os.getenv("SOURCE_CODE_QA_CODEX_MODEL", "codex-cli"))
@@ -1329,6 +1329,8 @@ class SourceCodeQAServiceTests(unittest.TestCase):
 
         self.assertIn("User attachments", section)
         self.assertIn("not repository facts", section)
+        self.assertIn("extract visible facts exactly", section)
+        self.assertIn("missing_production_evidence", section)
         self.assertEqual(parts[0], {"text": "Question prompt"})
         self.assertEqual(parts[1]["inlineData"]["mimeType"], "image/png")
         self.assertTrue(parts[1]["inlineData"]["data"])
@@ -6370,6 +6372,44 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertEqual(fallback["claims"][0]["citations"], ["S1"])
         self.assertEqual(fallback["confirmed_from_code"], [])
 
+    def test_structured_answer_renderer_uses_investigation_sections_for_screenshots(self):
+        structured = self.service._parse_structured_answer(
+            json.dumps(
+                {
+                    "direct_answer": "Likely aggregate-status mismatch; not confirmed RCA without production row/log evidence.",
+                    "attachment_facts": ["Screenshot shows User ID 1106805455 and Trace ID 17534058."],
+                    "screenshot_evidence": ["LC failed while Facial Recognition Result showed Passed."],
+                    "source_code_evidence": ["admin/FvResultMapper.java maps facial_verify_status 0 to Passed [S1]."],
+                    "confirmed_from_code": ["Admin display reads stored facial_verify_status [S1]."],
+                    "inferred_from_code": ["Component failure and aggregate status may be written independently."],
+                    "not_found": ["No production DB row for Trace ID 17534058 was provided."],
+                    "missing_production_evidence": ["Need FV DB row/logs for Trace ID 17534058."],
+                    "next_checks": ["Query FV record by Trace ID 17534058 and compare component fields with facial_verify_status."],
+                    "claims": [{"text": "Admin display reads stored facial_verify_status", "citations": ["S1"]}],
+                    "missing_evidence": [],
+                    "confidence": "medium",
+                }
+            )
+        )
+
+        rendered = self.service._render_structured_answer(
+            structured,
+            {
+                "confirmed_from_code": structured["confirmed_from_code"],
+                "inferred_from_code": structured["inferred_from_code"],
+                "not_found": structured["not_found"],
+                "missing_links": [],
+                "confidence": "medium",
+            },
+        )
+
+        self.assertIn("Conclusion", rendered)
+        self.assertIn("Screenshot Evidence", rendered)
+        self.assertIn("Source-code Evidence", rendered)
+        self.assertIn("Missing Production Evidence", rendered)
+        self.assertIn("Next Checks", rendered)
+        self.assertIn("Trace ID 17534058", rendered)
+
     def test_finalizer_preserves_structured_json_for_display(self):
         structured = {
             "direct_answer": "Issue creation reads issue_table.",
@@ -6556,7 +6596,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertEqual(telemetry["llm_model"], "gemini-2.5-flash")
         self.assertIn(telemetry["llm_thinking_budget"], {512, 2048})
         self.assertEqual(telemetry["llm_route"]["mode"], "manual")
-        self.assertEqual(telemetry["versions"]["cache"], 14)
+        self.assertEqual(telemetry["versions"]["cache"], 15)
         self.assertIn("llm_latency_ms", telemetry)
         self.assertIn("llm_attempt_log", telemetry)
         self.assertIn("answer_contract", telemetry)
@@ -6902,7 +6942,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         )
         cached = service._load_cached_answer(cache_key)
         self.assertIsNotNone(cached)
-        self.assertEqual(cached["versions"]["cache"], 14)
+        self.assertEqual(cached["versions"]["cache"], 15)
         cache_path = service.answer_cache_root / f"{cache_key}.json"
         stale_payload = json.loads(cache_path.read_text(encoding="utf-8"))
         stale_payload["versions"]["router"] = -1
@@ -7591,9 +7631,12 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             },
         )
 
-        self.assertIn("Prompt mode: codex_investigation_brief_v3", brief)
+        self.assertIn("Prompt mode: codex_investigation_brief_v4", brief)
         self.assertIn("Three-stage investigation required:", brief)
         self.assertIn("Stage 2 gap verification", brief)
+        self.assertIn("screenshot-driven incident questions", brief)
+        self.assertIn("missing_production_evidence", brief)
+        self.assertIn("source_code_evidence must name concrete files/functions/classes/fields/tables or APIs", brief)
         self.assertIn("full rule/config definitions from status-only migration updates", brief)
         self.assertIn("Candidate path layers:", brief)
         self.assertIn("current_high_confidence_paths", brief)
@@ -7820,7 +7863,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
 
         exec_calls = [item for item in calls if "exec" in item[0]]
         self.assertEqual(len(exec_calls), 2)
-        self.assertEqual(payload["llm_route"]["prompt_mode"], "codex_investigation_brief_v3")
+        self.assertEqual(payload["llm_route"]["prompt_mode"], "codex_investigation_brief_v4")
         self.assertIn("candidate_path_layers", payload["llm_route"])
         self.assertTrue(payload["llm_route"]["codex_repair_attempted"])
         self.assertEqual(payload["answer_claim_check"]["status"], "ok")

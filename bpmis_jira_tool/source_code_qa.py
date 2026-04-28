@@ -40,10 +40,10 @@ LLM_PROVIDER_OPENAI_COMPATIBLE = "openai_compatible"
 LLM_PROVIDER_CODEX_CLI_BRIDGE = "codex_cli_bridge"
 LLM_PROVIDER_VERTEX_AI = "vertex_ai"
 LLM_PROVIDER_ALLOWED_QUERY_CHOICES = {LLM_PROVIDER_GEMINI, LLM_PROVIDER_CODEX_CLI_BRIDGE, LLM_PROVIDER_VERTEX_AI}
-LLM_PROMPT_VERSION = 9
+LLM_PROMPT_VERSION = 10
 LLM_RESPONSE_SCHEMA_VERSION = 5
 LLM_ROUTER_VERSION = 7
-LLM_CACHE_VERSION = 14
+LLM_CACHE_VERSION = 15
 LLM_RUNTIME_VERSION = 2
 PLANNER_TOOL_DSL_VERSION = 1
 GEMINI_MIN_THINKING_BUDGET = 512
@@ -70,7 +70,7 @@ DEFAULT_LLM_MAX_BACKOFF_SECONDS = 8.0
 DEFAULT_CODEX_CLI_MODEL = "codex-cli"
 DEFAULT_CODEX_TIMEOUT_SECONDS = 240
 DEFAULT_CODEX_TOP_PATH_LIMIT = 30
-CODEX_INVESTIGATION_PROMPT_MODE = "codex_investigation_brief_v3"
+CODEX_INVESTIGATION_PROMPT_MODE = "codex_investigation_brief_v4"
 CODEX_SESSION_MODE_EPHEMERAL = "ephemeral"
 CODEX_SESSION_MODE_RESUME = "resume"
 DEFAULT_INDEX_LOCK_STALE_SECONDS = 15 * 60
@@ -15550,6 +15550,9 @@ class SourceCodeQAService:
             "- Treat attachments as user-provided context, not repository facts.",
             "- Separate source-code evidence, attachment evidence, and missing evidence in the answer.",
             "- Do not cite an attachment as code evidence; only code paths/snippets count as source-code evidence.",
+            "- For screenshots/images, first extract visible facts exactly before source investigation: IDs, trace IDs, timestamps, statuses, field names, expected vs actual behavior, and business impact.",
+            "- Use extracted screenshot facts as search terms and investigation constraints; do not let them override source-code evidence.",
+            "- If a screenshot describes a production incident, final RCA requires DB/log/runtime evidence for the visible IDs. Put that gap in missing_production_evidence when not provided.",
         ]
         for index, item in enumerate(normalized[:5], start=1):
             meta = cls._public_attachment_metadata(item)
@@ -15666,8 +15669,9 @@ class SourceCodeQAService:
             "Do not edit files, install dependencies, create commits, deploy, or run mutating commands. "
             "Prefer rg, sed, nl, and direct file reads. "
             "Always follow the three-stage investigation contract: first discover candidate evidence, then verify gaps/absence with targeted searches, then answer with explicit certainty levels. "
-            "Return concise JSON with direct_answer, investigation_steps, confirmed_from_code, inferred_from_code, not_found, claims, missing_evidence, and confidence. "
+            "Return concise JSON with direct_answer, investigation_steps, attachment_facts, screenshot_evidence, source_code_evidence, confirmed_from_code, inferred_from_code, not_found, missing_production_evidence, next_checks, claims, missing_evidence, and confidence. "
             "Put only verified production/config code facts in confirmed_from_code; put weaker deductions in inferred_from_code. "
+            "For screenshot-driven questions, extract visible screenshot facts first, then tie them to code paths/functions/fields; never present screenshot content as repository fact. "
             "When source evidence is incomplete, put the exact missing repository/table/config/log/export in not_found and missing_evidence instead of filling the gap from naming or prior assumptions. "
             "Every concrete code claim must cite either an evidence id like S1 or a real file reference like path/to/File.java:10-20."
         )
@@ -15900,6 +15904,8 @@ class SourceCodeQAService:
             "- For data-source questions, explicitly distinguish DTO/carrier fields from upstream source tables/APIs/repos. If the upstream hop is absent, list that hop in missing_evidence.",
             "- For ambiguous business wording, map each possible meaning to concrete code surfaces before answering. Example: distinguish admin query endpoints from report ingestion endpoints, field aliases from true schema fields, and synchronous caller failures from async processing failures.",
             "- If a developer phrase sounds like a business shorthand rather than an exact class/API name, say which source-backed interpretation is confirmed and which interpretation still needs logs, traceId, config export, or the caller repo.",
+            "- For screenshot-driven incident questions, first write down visible IDs/statuses/timestamps/expected-vs-actual facts from the screenshot, then use those exact terms to steer source searches.",
+            "- Do not call a screenshot-based hypothesis an RCA unless DB/log/runtime evidence for the visible case IDs is present.",
             "",
             "Candidate path layers:",
         ]
@@ -16034,9 +16040,13 @@ class SourceCodeQAService:
             [
                 "",
                 "Final answer contract:",
-                '- Return JSON: {"direct_answer":"...","investigation_steps":{"candidate_evidence":["..."],"gap_verification":["..."],"certainty_split":["..."]},"confirmed_from_code":["..."],"inferred_from_code":["..."],"not_found":["..."],"claims":[{"text":"...","citations":["S1"]}],"missing_evidence":[],"confidence":"high|medium|low"}.',
+                '- Return JSON: {"direct_answer":"...","investigation_steps":{"candidate_evidence":["..."],"gap_verification":["..."],"certainty_split":["..."]},"attachment_facts":["..."],"screenshot_evidence":["..."],"source_code_evidence":["file/function/field evidence..."],"confirmed_from_code":["..."],"inferred_from_code":["..."],"not_found":["..."],"missing_production_evidence":["..."],"next_checks":["..."],"claims":[{"text":"...","citations":["S1"]}],"missing_evidence":[],"confidence":"high|medium|low"}.',
                 "- Use S ids from candidate paths when they support the claim, or direct file citations like src/Foo.java:10-20 after you verify the file exists.",
-                "- Put only file-verified production facts in confirmed_from_code; put carrier/call-chain deductions in inferred_from_code; put missing source hops in not_found.",
+                "- source_code_evidence must name concrete files/functions/classes/fields/tables or APIs when available; do not use generic phrases like 'the admin code'.",
+                "- Put only file-verified production facts in confirmed_from_code/source_code_evidence; put carrier/call-chain deductions in inferred_from_code; put missing source hops in not_found.",
+                "- For screenshots, put visible screenshot facts in screenshot_evidence or attachment_facts, not in source_code_evidence.",
+                "- Put missing DB rows, trace logs, production config exports, and one-case runtime checks in missing_production_evidence.",
+                "- Put concrete verification actions in next_checks, such as querying by trace_id/FID/user_id, comparing component vs aggregate fields, or checking the writer service timestamp.",
                 "- Production code, mapper, client, SQL, and config evidence beats tests, docs, specs, and generated files.",
                 "- If evidence is missing, state the missing link instead of guessing.",
             ]
@@ -16489,15 +16499,23 @@ class SourceCodeQAService:
             "- Return this JSON shape whenever possible: "
             "{\"direct_answer\":\"...\",\"investigation_steps\":{\"candidate_evidence\":[\"...\"],"
             "\"gap_verification\":[\"...\"],\"certainty_split\":[\"...\"]},"
+            "\"attachment_facts\":[\"...\"],\"screenshot_evidence\":[\"...\"],"
+            "\"source_code_evidence\":[\"file/function/field evidence...\"],"
             "\"confirmed_from_code\":[\"...\"],\"inferred_from_code\":[\"...\"],"
-            "\"not_found\":[\"...\"],\"claims\":[{\"text\":\"...\",\"citations\":[\"S1\"]}],"
+            "\"not_found\":[\"...\"],\"missing_production_evidence\":[\"...\"],"
+            "\"next_checks\":[\"...\"],\"claims\":[{\"text\":\"...\",\"citations\":[\"S1\"]}],"
             "\"missing_evidence\":[],\"confidence\":\"high|medium|low\"}. "
             "If a short prose answer is more appropriate, still keep citation tags on concrete claims.\n"
             "- Start with the direct answer.\n"
             "- Use investigation_steps to show the three-stage investigation at a compact level: candidate evidence checked, gap verification performed, and certainty split used.\n"
+            "- For image/screenshot attachments, first extract visible facts exactly into attachment_facts/screenshot_evidence: IDs, trace IDs, timestamps, status values, field names, expected-vs-actual behavior, and business impact.\n"
+            "- For screenshot-driven incident questions, answer with these visible sections: Conclusion, Screenshot Evidence, Source-code Evidence, Missing Production Evidence, Next Checks. Keep them concise.\n"
+            "- source_code_evidence must include concrete file/function/class/field/table/API names when available. If you cannot name them, say the source-code evidence is incomplete.\n"
             "- Put production-code, mapper, client, SQL, route, config, and directly opened file facts in confirmed_from_code.\n"
             "- Put carrier DTOs, call-chain deductions, and relation hypotheses in inferred_from_code unless a raw snippet directly proves the claim.\n"
             "- Put absent repository/mapper/client/table hops, missing tests, and evidence-tier conflicts in not_found and missing_evidence.\n"
+            "- Put missing DB rows, trace logs, production config exports, and case-specific runtime checks in missing_production_evidence.\n"
+            "- Put concrete follow-up actions in next_checks, not vague advice.\n"
             "- Prefer agent trace and two-hop trace evidence when it clarifies downstream service, integration, repository, mapper, API, or table usage.\n"
             "- Treat raw code snippets as the source of truth when they are provided as primary evidence; use compressed facts as navigation hints and consistency checks.\n"
             "- If user attachments are present, label their contribution as attachment evidence and do not present it as source-code evidence.\n"
@@ -16868,6 +16886,59 @@ class SourceCodeQAService:
 
     @staticmethod
     def _render_structured_answer(structured_answer: dict[str, Any], contract: dict[str, Any]) -> str:
+        screenshot_evidence = [
+            str(item).strip()
+            for item in [
+                *(structured_answer.get("screenshot_evidence") or []),
+                *(structured_answer.get("attachment_facts") or []),
+            ]
+            if str(item).strip()
+        ]
+        source_code_evidence = [
+            str(item).strip()
+            for item in [
+                *(structured_answer.get("source_code_evidence") or []),
+                *(contract.get("confirmed_from_code") or structured_answer.get("confirmed_from_code") or []),
+            ]
+            if str(item).strip()
+        ]
+        missing_production = [
+            str(item).strip()
+            for item in [
+                *(structured_answer.get("missing_production_evidence") or []),
+                *(structured_answer.get("missing_evidence") or []),
+            ]
+            if str(item).strip()
+        ]
+        next_checks = [str(item).strip() for item in structured_answer.get("next_checks") or [] if str(item).strip()]
+        if screenshot_evidence or source_code_evidence or missing_production or next_checks:
+            lines = ["Conclusion", str(structured_answer.get("direct_answer") or "").strip()]
+            sections = [
+                ("Screenshot Evidence", screenshot_evidence),
+                ("Source-code Evidence", list(dict.fromkeys(source_code_evidence))[:6]),
+            ]
+            inferred = [str(item).strip() for item in contract.get("inferred_from_code") or structured_answer.get("inferred_from_code") or [] if str(item).strip()]
+            if inferred:
+                sections.append(("Inferred / Hypothesis", inferred[:4]))
+            not_found = [str(item).strip() for item in contract.get("not_found") or structured_answer.get("not_found") or [] if str(item).strip()]
+            missing_combined = list(dict.fromkeys([*missing_production, *not_found, *(contract.get("missing_links") or [])]))[:6]
+            sections.extend(
+                [
+                    ("Missing Production Evidence", missing_combined),
+                    ("Next Checks", next_checks[:6]),
+                ]
+            )
+            confidence = str(structured_answer.get("confidence") or contract.get("confidence") or "").strip()
+            for title, items in sections:
+                if not items:
+                    continue
+                lines.extend(["", title])
+                for item in items:
+                    lines.append(f"- {item}")
+            if confidence:
+                lines.extend(["", "Confidence", f"- {confidence}"])
+            return "\n".join(line for line in lines if line is not None).strip()
+
         lines = [str(structured_answer.get("direct_answer") or "").strip()]
         confirmed = [str(item).strip() for item in contract.get("confirmed_from_code") or structured_answer.get("confirmed_from_code") or [] if str(item).strip()]
         inferred = [str(item).strip() for item in contract.get("inferred_from_code") or structured_answer.get("inferred_from_code") or [] if str(item).strip()]
@@ -16926,9 +16997,14 @@ class SourceCodeQAService:
             return {
                 "direct_answer": text,
                 "investigation_steps": {},
+                "attachment_facts": [],
+                "screenshot_evidence": [],
+                "source_code_evidence": [],
                 "confirmed_from_code": [],
                 "inferred_from_code": [],
                 "not_found": [],
+                "missing_production_evidence": [],
+                "next_checks": [],
                 "claims": claims[:8],
                 "missing_evidence": [],
                 "confidence": "medium" if claims else "low",
@@ -16949,14 +17025,22 @@ class SourceCodeQAService:
             for key in ("candidate_evidence", "gap_verification", "certainty_split")
             if isinstance(raw_investigation_steps.get(key), list)
         }
+        def list_field(name: str) -> list[str]:
+            raw = payload.get(name)
+            return [str(item) for item in raw if str(item).strip()] if isinstance(raw, list) else []
         return {
             "direct_answer": str(payload.get("direct_answer") or payload.get("answer") or text).strip(),
             "investigation_steps": investigation_steps,
-            "confirmed_from_code": [str(item) for item in payload.get("confirmed_from_code") or []] if isinstance(payload.get("confirmed_from_code"), list) else [],
-            "inferred_from_code": [str(item) for item in payload.get("inferred_from_code") or []] if isinstance(payload.get("inferred_from_code"), list) else [],
-            "not_found": [str(item) for item in payload.get("not_found") or []] if isinstance(payload.get("not_found"), list) else [],
+            "attachment_facts": list_field("attachment_facts"),
+            "screenshot_evidence": list_field("screenshot_evidence"),
+            "source_code_evidence": list_field("source_code_evidence"),
+            "confirmed_from_code": list_field("confirmed_from_code"),
+            "inferred_from_code": list_field("inferred_from_code"),
+            "not_found": list_field("not_found"),
+            "missing_production_evidence": list_field("missing_production_evidence"),
+            "next_checks": list_field("next_checks"),
             "claims": normalized_claims,
-            "missing_evidence": [str(item) for item in payload.get("missing_evidence") or []] if isinstance(payload.get("missing_evidence"), list) else [],
+            "missing_evidence": list_field("missing_evidence"),
             "confidence": str(payload.get("confidence") or "medium").strip().lower(),
             "format": "json",
         }
