@@ -5525,6 +5525,37 @@ select:focus {
   line-height: 1.25;
 }
 
+.source-qa-attachment-chip.is-previewable {
+  cursor: zoom-in;
+}
+
+.source-qa-attachment-chip.is-previewable:hover {
+  border-color: #84adff;
+  background: #f8fbff;
+}
+
+.source-qa-attachment-chip.is-uploading {
+  border-color: #b7d4ff;
+  background: #f4f8ff;
+  color: #175cd3;
+}
+
+.source-qa-attachment-chip.is-uploading::before {
+  width: 12px;
+  height: 12px;
+  border: 2px solid #bfdbfe;
+  border-top-color: #1677ff;
+  border-radius: 999px;
+  content: "";
+  animation: sourceQaAttachmentSpin 0.8s linear infinite;
+}
+
+@keyframes sourceQaAttachmentSpin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .source-qa-attachment-chip strong,
 .source-qa-attachment-chip small {
   min-width: 0;
@@ -5613,6 +5644,72 @@ select:focus {
   min-height: 42px;
   padding: 10px 16px;
   box-shadow: 0 12px 26px rgba(22, 119, 255, 0.22);
+}
+
+.source-qa-attachment-preview[hidden] {
+  display: none;
+}
+
+.source-qa-attachment-preview {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+
+.source-qa-attachment-preview-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(16, 24, 40, 0.62);
+}
+
+.source-qa-attachment-preview-panel {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  gap: 10px;
+  max-width: min(980px, 92vw);
+  max-height: 88vh;
+  padding: 12px;
+  border-radius: 12px;
+  background: #ffffff;
+  box-shadow: 0 24px 80px rgba(16, 24, 40, 0.32);
+}
+
+.source-qa-attachment-preview-panel img {
+  display: block;
+  max-width: 100%;
+  max-height: 74vh;
+  border-radius: 8px;
+  object-fit: contain;
+}
+
+.source-qa-attachment-preview-panel p {
+  margin: 0;
+  color: #475467;
+  font-size: 0.84rem;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.source-qa-attachment-preview-close {
+  position: absolute;
+  top: -12px;
+  right: -12px;
+  display: inline-grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid #d0d5dd;
+  border-radius: 999px;
+  background: #ffffff;
+  color: #344054;
+  cursor: pointer;
+  font-size: 0.9rem;
+  font-weight: 900;
+  box-shadow: 0 8px 22px rgba(16, 24, 40, 0.18);
 }
 
 .source-qa-send-button.is-stopping {

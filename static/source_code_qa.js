@@ -83,6 +83,9 @@
   let liveAssistantMessage = null;
   let pendingUserMessage = null;
   let pendingAttachments = [];
+  let activeAttachmentUploads = 0;
+  let nextAttachmentUploadToken = 0;
+  let attachmentPreview = null;
   let activeQueryControl = null;
   const preferenceKey = 'source-code-qa:last-query-config:v1';
 
@@ -214,16 +217,38 @@
     if (size >= 1024) return `${Math.round(size / 1024)} KB`;
     return `${size} B`;
   };
+  const isImageAttachment = (item) => item?.kind === 'image' || String(item?.mime_type || '').startsWith('image/');
+  const attachmentPreviewUrl = (item) => {
+    if (!attachmentUrl || !item?.id || !activeSessionId) return '';
+    return `${attachmentUrl.replace(/\/$/, '')}/${encodeURIComponent(item.id)}?session_id=${encodeURIComponent(activeSessionId)}`;
+  };
+  const renderAttachmentChip = (item, options = {}) => {
+    const filename = item.filename || 'attachment';
+    const kind = item.uploading ? 'image' : (item.kind || item.mime_type || 'file');
+    const isPreviewable = isImageAttachment(item) && !item.uploading && item.id && activeSessionId;
+    const stateClass = [
+      item.uploading ? 'is-uploading' : '',
+      isPreviewable ? 'is-previewable' : '',
+    ].filter(Boolean).join(' ');
+    const previewAttrs = isPreviewable
+      ? ` role="button" tabindex="0" data-source-preview-attachment="${escapeHtml(item.id)}" title="Preview ${escapeHtml(filename)}"`
+      : '';
+    const removeButton = options.removable
+      ? `<button type="button" aria-label="Remove ${escapeHtml(filename)}" data-source-remove-attachment="${escapeHtml(item.id || item.temp_id || '')}">x</button>`
+      : '';
+    return `
+      <span class="source-qa-attachment-chip ${stateClass}"${previewAttrs}>
+        <strong>${escapeHtml(filename)}</strong>
+        <small>${item.uploading ? 'Uploading...' : `${escapeHtml(kind)} · ${escapeHtml(formatAttachmentSize(item.size))}`}</small>
+        ${removeButton}
+      </span>
+    `;
+  };
   const renderAttachmentChips = (items = []) => {
     if (!items.length) return '';
     return `
       <div class="source-qa-message-attachments">
-        ${items.map((item) => `
-          <span class="source-qa-attachment-chip">
-            <strong>${escapeHtml(item.filename || 'attachment')}</strong>
-            <small>${escapeHtml(item.kind || item.mime_type || 'file')} · ${escapeHtml(formatAttachmentSize(item.size))}</small>
-          </span>
-        `).join('')}
+        ${items.map((item) => renderAttachmentChip(item)).join('')}
       </div>
     `;
   };
@@ -235,18 +260,87 @@
       return;
     }
     attachmentsList.hidden = false;
-    attachmentsList.innerHTML = pendingAttachments.map((item) => `
-      <span class="source-qa-attachment-chip">
-        <strong>${escapeHtml(item.filename || 'attachment')}</strong>
-        <small>${escapeHtml(item.kind || item.mime_type || 'file')} · ${escapeHtml(formatAttachmentSize(item.size))}</small>
-        <button type="button" aria-label="Remove ${escapeHtml(item.filename || 'attachment')}" data-source-remove-attachment="${escapeHtml(item.id || '')}">x</button>
-      </span>
-    `).join('');
+    attachmentsList.innerHTML = pendingAttachments.map((item) => renderAttachmentChip(item, { removable: true })).join('');
   };
   const clearPendingAttachments = () => {
     pendingAttachments = [];
     if (attachmentInput) attachmentInput.value = '';
     renderPendingAttachments();
+  };
+  const updateAttachmentUploadState = () => {
+    const uploading = activeAttachmentUploads > 0;
+    if (attachmentUploadButton) attachmentUploadButton.disabled = uploading;
+    if (queryButton && !activeQueryControl) queryButton.disabled = uploading;
+  };
+  const ensureAttachmentPreview = () => {
+    if (attachmentPreview) return attachmentPreview;
+    const container = document.createElement('div');
+    container.className = 'source-qa-attachment-preview';
+    container.hidden = true;
+    container.innerHTML = `
+      <div class="source-qa-attachment-preview-backdrop" data-source-preview-close></div>
+      <div class="source-qa-attachment-preview-panel" role="dialog" aria-modal="true" aria-label="Image preview">
+        <button type="button" class="source-qa-attachment-preview-close" data-source-preview-close aria-label="Close preview">x</button>
+        <img alt="">
+        <p></p>
+      </div>
+    `;
+    document.body.appendChild(container);
+    container.addEventListener('click', (event) => {
+      if (event.target.closest('[data-source-preview-close]')) {
+        container.hidden = true;
+        const image = container.querySelector('img');
+        if (image) image.removeAttribute('src');
+      }
+    });
+    document.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape' && !container.hidden) {
+        container.hidden = true;
+        const image = container.querySelector('img');
+        if (image) image.removeAttribute('src');
+      }
+    });
+    attachmentPreview = container;
+    return container;
+  };
+  const findAttachmentById = (attachmentId) => {
+    const wanted = String(attachmentId || '');
+    if (!wanted) return null;
+    const pending = pendingAttachments.find((item) => item.id === wanted);
+    if (pending) return pending;
+    const messages = Array.isArray(activeSession?.messages) ? activeSession.messages : [];
+    for (const message of messages) {
+      const items = Array.isArray(message.attachments)
+        ? message.attachments
+        : (Array.isArray(message.payload?.attachments) ? message.payload.attachments : []);
+      const found = items.find((item) => item.id === wanted);
+      if (found) return found;
+    }
+    if (pendingUserMessage?.attachments) {
+      return pendingUserMessage.attachments.find((item) => item.id === wanted) || null;
+    }
+    return null;
+  };
+  const openAttachmentPreview = (attachmentId) => {
+    const item = findAttachmentById(attachmentId);
+    const url = attachmentPreviewUrl(item);
+    if (!item || !url || !isImageAttachment(item)) return;
+    const preview = ensureAttachmentPreview();
+    const image = preview.querySelector('img');
+    const caption = preview.querySelector('p');
+    if (image) {
+      image.alt = item.filename || 'Attachment preview';
+      image.src = url;
+    }
+    if (caption) caption.textContent = item.filename || 'Attachment preview';
+    preview.hidden = false;
+  };
+  const handleAttachmentPreviewEvent = (event) => {
+    const target = event.target.closest('[data-source-preview-attachment]');
+    if (!target) return;
+    if (event.type === 'keydown' && !['Enter', ' '].includes(event.key)) return;
+    event.preventDefault();
+    openAttachmentPreview(target.dataset.sourcePreviewAttachment || '');
   };
   const uploadSourceAttachment = async (file, sessionId) => {
     if (!attachmentUrl) throw new Error('Attachment API is not configured.');
@@ -275,24 +369,45 @@
     }
     const session = await ensureActiveSession({ preserveLive: true, preservePending: true });
     if (!session?.id) throw new Error('Could not create a chat session for attachments.');
-    if (attachmentUploadButton) attachmentUploadButton.disabled = true;
     let uploadedCount = 0;
     try {
       for (const file of selectedFiles) {
         if (file.size > 10 * 1024 * 1024) {
           throw new Error(`${file.name} is larger than 10MB.`);
         }
-        if (queryStatus) queryStatus.textContent = `Uploading ${file.name}...`;
-        const uploaded = await uploadSourceAttachment(file, session.id);
-        pendingAttachments.push(uploaded);
-        uploadedCount += 1;
+        const tempId = `uploading-${Date.now()}-${nextAttachmentUploadToken += 1}`;
+        pendingAttachments.push({
+          id: tempId,
+          temp_id: tempId,
+          filename: file.name || 'image.png',
+          mime_type: file.type || 'image/png',
+          kind: String(file.type || '').startsWith('image/') ? 'image' : 'file',
+          size: file.size,
+          uploading: true,
+        });
+        activeAttachmentUploads += 1;
+        updateAttachmentUploadState();
         renderPendingAttachments();
+        if (queryStatus) queryStatus.textContent = `Uploading ${file.name}...`;
+        try {
+          const uploaded = await uploadSourceAttachment(file, session.id);
+          pendingAttachments = pendingAttachments.map((item) => (item.id === tempId ? uploaded : item));
+          uploadedCount += 1;
+          renderPendingAttachments();
+        } catch (error) {
+          pendingAttachments = pendingAttachments.filter((item) => item.id !== tempId);
+          renderPendingAttachments();
+          throw error;
+        } finally {
+          activeAttachmentUploads = Math.max(0, activeAttachmentUploads - 1);
+          updateAttachmentUploadState();
+        }
       }
       if (queryStatus) queryStatus.textContent = 'Attachment uploaded.';
       return uploadedCount;
     } finally {
-      if (attachmentUploadButton) attachmentUploadButton.disabled = false;
       if (attachmentInput) attachmentInput.value = '';
+      updateAttachmentUploadState();
     }
   };
   const clipboardImageExtension = (mimeType) => {
@@ -725,6 +840,7 @@
     queryButton.textContent = running ? 'Stop' : 'Send';
     queryButton.classList.toggle('is-stopping', running);
     queryButton.setAttribute('aria-label', running ? 'Stop current Codex run' : 'Send question');
+    queryButton.disabled = !running && activeAttachmentUploads > 0;
   };
 
   const stopActiveQuery = () => {
@@ -1692,6 +1808,12 @@
       if (queryStatus) queryStatus.textContent = 'Question is empty.';
       return;
     }
+    if (activeAttachmentUploads > 0 || pendingAttachments.some((item) => item.uploading)) {
+      stopQueryProgress();
+      if (queryStatus) queryStatus.textContent = 'Please wait for image upload to finish.';
+      updateQueryButtonState(false);
+      return;
+    }
     const queryControl = { stopped: false };
     activeQueryControl = queryControl;
     updateQueryButtonState(true);
@@ -1880,11 +2002,18 @@
   });
   attachmentsList?.addEventListener('click', (event) => {
     const button = event.target.closest('[data-source-remove-attachment]');
-    if (!button) return;
-    const attachmentId = button.dataset.sourceRemoveAttachment || '';
-    pendingAttachments = pendingAttachments.filter((item) => item.id !== attachmentId);
-    renderPendingAttachments();
+    if (button) {
+      const attachmentId = button.dataset.sourceRemoveAttachment || '';
+      pendingAttachments = pendingAttachments.filter((item) => item.id !== attachmentId);
+      renderPendingAttachments();
+      updateAttachmentUploadState();
+      return;
+    }
+    handleAttachmentPreviewEvent(event);
   });
+  attachmentsList?.addEventListener('keydown', handleAttachmentPreviewEvent);
+  sessionMessages?.addEventListener('click', handleAttachmentPreviewEvent);
+  sessionMessages?.addEventListener('keydown', handleAttachmentPreviewEvent);
   viewTabs.forEach((tab) => {
     tab.addEventListener('click', () => setSourceView(tab.dataset.sourceViewTab));
   });

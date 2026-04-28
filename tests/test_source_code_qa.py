@@ -126,6 +126,9 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertIn("await addAttachmentFiles(pastedImages)", script)
         self.assertIn("addEventListener('paste', handleAttachmentPaste)", script)
         self.assertIn("image.${extension}", script)
+        self.assertIn("Uploading...", script)
+        self.assertIn("data-source-preview-attachment", script)
+        self.assertIn("Please wait for image upload to finish.", script)
 
     def test_source_code_qa_admin_allowlist_can_manage_repositories(self):
         with patch.dict(
