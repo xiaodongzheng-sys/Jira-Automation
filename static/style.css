@@ -5644,6 +5644,62 @@ select:focus {
   margin: 0;
 }
 
+.source-qa-runtime-grid {
+  margin-bottom: 14px;
+}
+
+.source-qa-runtime-list {
+  display: grid;
+  gap: 10px;
+}
+
+.source-qa-runtime-item {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  align-items: center;
+  padding: 12px 14px;
+  border: 1px solid #e4e7ec;
+  border-radius: 8px;
+  background: #ffffff;
+  min-width: 0;
+}
+
+.source-qa-runtime-item strong,
+.source-qa-runtime-item small,
+.source-qa-runtime-meta span {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.source-qa-runtime-item strong {
+  color: #101828;
+  font-size: 0.92rem;
+  font-weight: 850;
+}
+
+.source-qa-runtime-item small,
+.source-qa-runtime-meta span {
+  color: #667085;
+  font-size: 0.78rem;
+  font-weight: 650;
+}
+
+.source-qa-runtime-meta {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 10px;
+  align-items: center;
+}
+
+.source-qa-runtime-meta .button {
+  min-height: 34px;
+  padding: 7px 12px;
+}
+
 .source-qa-admin,
 .source-qa-workspace {
   margin-bottom: 24px;

@@ -485,6 +485,70 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertEqual(payload["attachments"][0]["id"], uploaded["id"])
         self.assertEqual(payload["session"]["messages"][-2]["attachments"][0]["filename"], "context.md")
 
+    def test_runtime_evidence_upload_is_scoped_and_passed_to_query(self):
+        captured = {}
+
+        def fake_query(**kwargs):
+            captured.update(kwargs)
+            return {
+                "status": "ok",
+                "answer_mode": "auto",
+                "summary": "answer summary",
+                "llm_answer": "direct answer",
+                "llm_provider": "codex_cli_bridge",
+                "llm_model": "codex-cli",
+                "trace_id": "trace-runtime",
+                "matches": [],
+            }
+
+        with self.app.test_client() as client:
+            self._login(client, "xiaodong.zheng@npt.sg")
+            sg_upload = client.post(
+                "/api/source-code-qa/runtime-evidence",
+                data={
+                    "pm_team": "AF",
+                    "country": "SG",
+                    "source_type": "apollo",
+                    "file": (io.BytesIO(b"apollo.sg.rule.enabled=true"), "apollo.properties"),
+                },
+                content_type="multipart/form-data",
+            )
+            ph_upload = client.post(
+                "/api/source-code-qa/runtime-evidence",
+                data={
+                    "pm_team": "AF",
+                    "country": "PH",
+                    "source_type": "db",
+                    "file": (io.BytesIO(b"rule_id,status\nC0204v2,online"), "rules.csv"),
+                },
+                content_type="multipart/form-data",
+            )
+            listed = client.get("/api/source-code-qa/runtime-evidence?pm_team=AF&country=SG")
+            self._login(client, "teammate@npt.sg")
+            with patch("bpmis_jira_tool.source_code_qa.SourceCodeQAService.ensure_synced_today", return_value={"attempted": False, "status": "fresh"}), patch(
+                "bpmis_jira_tool.source_code_qa.SourceCodeQAService.query",
+                side_effect=fake_query,
+            ):
+                response = client.post(
+                    "/api/source-code-qa/query",
+                    json={
+                        "pm_team": "AF",
+                        "country": "All",
+                        "question": "compare runtime config",
+                        "llm_provider": "codex_cli_bridge",
+                    },
+                )
+
+        self.assertEqual(sg_upload.status_code, 200)
+        self.assertEqual(ph_upload.status_code, 200)
+        self.assertEqual(listed.status_code, 200)
+        self.assertEqual(listed.get_json()["evidence"][0]["country"], "SG")
+        self.assertEqual(response.status_code, 200)
+        countries = {item["country"] for item in captured["runtime_evidence"]}
+        self.assertEqual(countries, {"SG", "PH"})
+        self.assertTrue(any("apollo.sg.rule.enabled" in item.get("text", "") for item in captured["runtime_evidence"]))
+        self.assertEqual(response.get_json()["runtime_evidence"][0]["pm_team"], "AF")
+
     def test_query_empty_config_is_controlled(self):
         with self.app.test_client() as client:
             self._login(client, "teammate@npt.sg")
@@ -720,6 +784,9 @@ class SourceCodeQARouteTests(unittest.TestCase):
                 if progress_callback:
                     progress_callback("codex_stream", "Reading repo files.", 0, 0)
                 return {"status": "ok", "answer_mode": "auto", "summary": "agent answer", "matches": []}
+
+            def source_code_qa_runtime_evidence_resolve(self, *, pm_team, country):
+                return []
 
         with patch.dict(
             os.environ,

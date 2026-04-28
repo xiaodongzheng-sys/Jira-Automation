@@ -28,6 +28,7 @@ from bpmis_jira_tool.web import (
     SeaTalkTodoStore,
     SourceCodeQAAttachmentStore,
     SourceCodeQAModelAvailabilityStore,
+    SourceCodeQARuntimeEvidenceStore,
     SourceCodeQASessionStore,
     _generate_productization_detailed_features_with_local_codex,
 )
@@ -159,6 +160,7 @@ def create_local_agent_app() -> Flask:
             llm_budget_mode=str(payload.get("llm_budget_mode") or "auto"),
             conversation_context=payload.get("conversation_context") if isinstance(payload.get("conversation_context"), dict) else None,
             attachments=payload.get("attachments") if isinstance(payload.get("attachments"), list) else None,
+            runtime_evidence=payload.get("runtime_evidence") if isinstance(payload.get("runtime_evidence"), list) else None,
         )
         return jsonify({"status": "ok", **result})
 
@@ -324,6 +326,61 @@ def create_local_agent_app() -> Flask:
             payload.get("availability") if isinstance(payload.get("availability"), dict) else {}
         )
         return jsonify({"status": "ok", "availability": availability})
+
+    @app.post("/api/local-agent/source-code-qa/runtime-evidence/list")
+    def source_code_qa_runtime_evidence_list():
+        payload = request.get_json(silent=True) or {}
+        try:
+            evidence = _build_source_code_qa_runtime_evidence_store(settings).list(
+                pm_team=str(payload.get("pm_team") or ""),
+                country=str(payload.get("country") or ""),
+            )
+            return jsonify({"status": "ok", "evidence": evidence})
+        except ToolError as error:
+            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
+
+    @app.post("/api/local-agent/source-code-qa/runtime-evidence/save")
+    def source_code_qa_runtime_evidence_save():
+        payload = request.get_json(silent=True) or {}
+        try:
+            content = base64.b64decode(str(payload.get("content_base64") or "").encode("ascii"))
+            evidence = _build_source_code_qa_runtime_evidence_store(settings).save_bytes(
+                pm_team=str(payload.get("pm_team") or ""),
+                country=str(payload.get("country") or ""),
+                source_type=str(payload.get("source_type") or ""),
+                uploaded_by=str(payload.get("uploaded_by") or ""),
+                filename=str(payload.get("filename") or "runtime-evidence"),
+                mime_type=str(payload.get("mime_type") or ""),
+                content=content,
+            )
+            return jsonify({"status": "ok", "evidence": evidence})
+        except ToolError as error:
+            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
+
+    @app.post("/api/local-agent/source-code-qa/runtime-evidence/resolve")
+    def source_code_qa_runtime_evidence_resolve():
+        payload = request.get_json(silent=True) or {}
+        try:
+            evidence = _build_source_code_qa_runtime_evidence_store(settings).resolve_scope(
+                pm_team=str(payload.get("pm_team") or ""),
+                country=str(payload.get("country") or ""),
+            )
+            return jsonify({"status": "ok", "evidence": evidence})
+        except ToolError as error:
+            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
+
+    @app.post("/api/local-agent/source-code-qa/runtime-evidence/delete")
+    def source_code_qa_runtime_evidence_delete():
+        payload = request.get_json(silent=True) or {}
+        try:
+            deleted = _build_source_code_qa_runtime_evidence_store(settings).delete(
+                pm_team=str(payload.get("pm_team") or ""),
+                country=str(payload.get("country") or ""),
+                evidence_id=str(payload.get("evidence_id") or ""),
+            )
+            return jsonify({"status": "ok", "deleted": deleted})
+        except ToolError as error:
+            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
 
     @app.post("/api/local-agent/seatalk/overview")
     def seatalk_overview():
@@ -794,6 +851,7 @@ def _run_source_code_qa_query_job(app: Flask, job_id: str, payload: dict[str, An
                 llm_budget_mode=str(payload.get("llm_budget_mode") or "auto"),
                 conversation_context=payload.get("conversation_context") if isinstance(payload.get("conversation_context"), dict) else None,
                 attachments=payload.get("attachments") if isinstance(payload.get("attachments"), list) else None,
+                runtime_evidence=payload.get("runtime_evidence") if isinstance(payload.get("runtime_evidence"), list) else None,
                 progress_callback=progress_callback,
             )
             _update_query_job(
@@ -861,6 +919,10 @@ def _build_source_code_qa_session_store(settings: Settings) -> SourceCodeQASessi
 
 def _build_source_code_qa_attachment_store(settings: Settings) -> SourceCodeQAAttachmentStore:
     return SourceCodeQAAttachmentStore(_data_root(settings) / "source_code_qa" / "attachments")
+
+
+def _build_source_code_qa_runtime_evidence_store(settings: Settings) -> SourceCodeQARuntimeEvidenceStore:
+    return SourceCodeQARuntimeEvidenceStore(_data_root(settings) / "source_code_qa" / "runtime_evidence")
 
 
 def _build_source_code_qa_model_availability_store(settings: Settings) -> SourceCodeQAModelAvailabilityStore:

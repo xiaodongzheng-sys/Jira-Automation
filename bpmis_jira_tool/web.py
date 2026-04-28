@@ -44,6 +44,7 @@ from bpmis_jira_tool.local_agent_client import (
     RemoteSeaTalkTodoStore,
     RemoteSourceCodeQAAttachmentStore,
     RemoteSourceCodeQAModelAvailabilityStore,
+    RemoteSourceCodeQARuntimeEvidenceStore,
     RemoteSourceCodeQASessionStore,
     RemoteSourceCodeQAService,
     _LOCAL_AGENT_SESSION,
@@ -1128,6 +1129,191 @@ class SourceCodeQAAttachmentStore:
         return text[:16000]
 
 
+class SourceCodeQARuntimeEvidenceStore(SourceCodeQAAttachmentStore):
+    ALLOWED_PM_TEAMS = {"AF", "CRMS", "GRC"}
+    ALLOWED_COUNTRIES = {"ID", "SG", "PH"}
+    ALLOWED_SOURCE_TYPES = {"apollo", "db", "other"}
+    MAX_FILES_PER_SCOPE = 20
+    MAX_QUERY_FILES_PER_SCOPE = 8
+
+    @classmethod
+    def _safe_scope(cls, *, pm_team: str, country: str) -> tuple[str, str]:
+        normalized_team = str(pm_team or "").strip().upper()
+        normalized_country = str(country or "").strip().upper()
+        if normalized_team not in cls.ALLOWED_PM_TEAMS:
+            raise ToolError("Runtime evidence PM Team must be one of AF, CRMS, or GRC.")
+        if normalized_country not in cls.ALLOWED_COUNTRIES:
+            raise ToolError("Runtime evidence country must be one of ID, SG, or PH.")
+        return normalized_team, normalized_country
+
+    @classmethod
+    def _safe_source_type(cls, source_type: str) -> str:
+        normalized = str(source_type or "").strip().lower() or "other"
+        if normalized not in cls.ALLOWED_SOURCE_TYPES:
+            raise ToolError("Runtime evidence source type must be apollo, db, or other.")
+        return normalized
+
+    def _scope_dir(self, *, pm_team: str, country: str) -> Path:
+        if self.root_dir is None:
+            raise ToolError("Source Code Q&A runtime evidence is not configured.")
+        safe_team, safe_country = self._safe_scope(pm_team=pm_team, country=country)
+        return self.root_dir / safe_team / safe_country
+
+    def _metadata_path(self, *, pm_team: str, country: str) -> Path:
+        return self._scope_dir(pm_team=pm_team, country=country) / "metadata.json"
+
+    def _load_metadata_locked(self, *, pm_team: str, country: str) -> dict[str, dict[str, Any]]:
+        path = self._metadata_path(pm_team=pm_team, country=country)
+        if not path.exists():
+            return {}
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        items = payload.get("evidence") if isinstance(payload, dict) else {}
+        return {str(key): value for key, value in items.items() if isinstance(value, dict)} if isinstance(items, dict) else {}
+
+    def _persist_metadata_locked(self, *, pm_team: str, country: str, metadata: dict[str, dict[str, Any]]) -> None:
+        path = self._metadata_path(pm_team=pm_team, country=country)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        temp_path.write_text(
+            json.dumps({"updated_at": self._now(), "evidence": metadata}, ensure_ascii=False, sort_keys=True),
+            encoding="utf-8",
+        )
+        os.replace(temp_path, path)
+
+    def save_bytes(
+        self,
+        *,
+        pm_team: str,
+        country: str,
+        source_type: str,
+        uploaded_by: str,
+        filename: str,
+        content: bytes,
+        mime_type: str = "",
+    ) -> dict[str, Any]:
+        if len(content or b"") <= 0:
+            raise ToolError("Runtime evidence file is empty.")
+        if len(content) > self.MAX_FILE_BYTES:
+            raise ToolError("Runtime evidence is too large. Maximum size is 10MB per file.")
+        safe_team, safe_country = self._safe_scope(pm_team=pm_team, country=country)
+        safe_source_type = self._safe_source_type(source_type)
+        safe_name = self._safe_filename(filename)
+        suffix = Path(safe_name).suffix.lower()
+        if suffix in self.BLOCKED_EXTENSIONS:
+            raise ToolError("Executable, archive, and unknown binary runtime evidence files are not supported.")
+        guessed_mime = str(mime_type or mimetypes.guess_type(safe_name)[0] or "").lower()
+        kind = self._attachment_kind(safe_name, guessed_mime, content)
+        if kind == "image":
+            raise ToolError("Runtime evidence must be a parseable text, spreadsheet, PDF, or document file, not an image.")
+        extracted = self._extract_attachment_text(safe_name, guessed_mime, content)
+        digest = hashlib.sha256(content).hexdigest()
+        evidence_id = uuid.uuid4().hex
+        stored_name = f"{evidence_id}{suffix or '.txt'}"
+        scope_dir = self._scope_dir(pm_team=safe_team, country=safe_country)
+        metadata = {
+            "id": evidence_id,
+            "filename": safe_name,
+            "stored_name": stored_name,
+            "mime_type": guessed_mime or "application/octet-stream",
+            "kind": kind,
+            "source_type": safe_source_type,
+            "pm_team": safe_team,
+            "country": safe_country,
+            "size": len(content),
+            "sha256": digest,
+            "uploaded_by": str(uploaded_by or "").strip().lower(),
+            "created_at": self._now(),
+            "summary": extracted[:2000],
+            "text_char_count": len(extracted),
+        }
+        with self._lock:
+            existing = self._load_metadata_locked(pm_team=safe_team, country=safe_country)
+            scope_dir.mkdir(parents=True, exist_ok=True)
+            (scope_dir / stored_name).write_bytes(content)
+            existing[evidence_id] = metadata
+            if len(existing) > self.MAX_FILES_PER_SCOPE:
+                ordered = sorted(existing.values(), key=lambda item: str(item.get("created_at") or ""))
+                for stale in ordered[: len(existing) - self.MAX_FILES_PER_SCOPE]:
+                    stale_id = str(stale.get("id") or "")
+                    stale_name = str(stale.get("stored_name") or "")
+                    if stale_name:
+                        try:
+                            (scope_dir / stale_name).unlink(missing_ok=True)
+                        except OSError:
+                            pass
+                    existing.pop(stale_id, None)
+            self._persist_metadata_locked(pm_team=safe_team, country=safe_country, metadata=existing)
+        return self.public_metadata(metadata)
+
+    @classmethod
+    def public_metadata(cls, metadata: dict[str, Any]) -> dict[str, Any]:
+        payload = SourceCodeQAAttachmentStore.public_metadata(metadata)
+        payload.update(
+            {
+                "source_type": str(metadata.get("source_type") or ""),
+                "pm_team": str(metadata.get("pm_team") or ""),
+                "country": str(metadata.get("country") or ""),
+                "uploaded_by": str(metadata.get("uploaded_by") or ""),
+            }
+        )
+        return payload
+
+    def list(self, *, pm_team: str, country: str) -> list[dict[str, Any]]:
+        safe_team, safe_country = self._safe_scope(pm_team=pm_team, country=country)
+        with self._lock:
+            metadata = self._load_metadata_locked(pm_team=safe_team, country=safe_country)
+        return [
+            self.public_metadata(item)
+            for item in sorted(metadata.values(), key=lambda value: str(value.get("created_at") or ""), reverse=True)
+        ]
+
+    def resolve_scope(self, *, pm_team: str, country: str) -> list[dict[str, Any]]:
+        normalized_country = str(country or "").strip().upper()
+        countries = sorted(self.ALLOWED_COUNTRIES) if normalized_country in {"", ALL_COUNTRY.upper()} else [normalized_country]
+        resolved: list[dict[str, Any]] = []
+        for scoped_country in countries:
+            safe_team, safe_country = self._safe_scope(pm_team=pm_team, country=scoped_country)
+            with self._lock:
+                metadata = self._load_metadata_locked(pm_team=safe_team, country=safe_country)
+            scope_dir = self._scope_dir(pm_team=safe_team, country=safe_country)
+            for item in sorted(metadata.values(), key=lambda value: str(value.get("created_at") or ""), reverse=True)[: self.MAX_QUERY_FILES_PER_SCOPE]:
+                path = scope_dir / str(item.get("stored_name") or "")
+                if not path.exists() or not path.is_file():
+                    continue
+                enriched = dict(item)
+                enriched["path"] = str(path)
+                try:
+                    content = path.read_bytes()
+                except OSError:
+                    continue
+                enriched["text"] = self._extract_attachment_text(str(item.get("filename") or ""), str(item.get("mime_type") or ""), content)
+                resolved.append(enriched)
+        return resolved[: self.MAX_QUERY_FILES_PER_SCOPE * max(1, len(countries))]
+
+    def delete(self, *, pm_team: str, country: str, evidence_id: str) -> bool:
+        safe_team, safe_country = self._safe_scope(pm_team=pm_team, country=country)
+        normalized_id = str(evidence_id or "").strip()
+        if not re.fullmatch(r"[a-fA-F0-9]{32}", normalized_id):
+            raise ToolError("Runtime evidence id is invalid.")
+        scope_dir = self._scope_dir(pm_team=safe_team, country=safe_country)
+        with self._lock:
+            metadata = self._load_metadata_locked(pm_team=safe_team, country=safe_country)
+            item = metadata.pop(normalized_id, None)
+            if item is None:
+                return False
+            stored_name = str(item.get("stored_name") or "")
+            if stored_name:
+                try:
+                    (scope_dir / stored_name).unlink(missing_ok=True)
+                except OSError:
+                    pass
+            self._persist_metadata_locked(pm_team=safe_team, country=safe_country, metadata=metadata)
+        return True
+
+
 class SourceCodeQAModelAvailabilityStore:
     DEFAULT_AVAILABILITY = {
         "codex_cli_bridge": True,
@@ -1390,6 +1576,9 @@ def create_app() -> Flask:
     )
     app.config["SOURCE_CODE_QA_SESSION_STORE"] = SourceCodeQASessionStore(data_root / "source_code_qa" / "sessions.json")
     app.config["SOURCE_CODE_QA_ATTACHMENT_STORE"] = SourceCodeQAAttachmentStore(data_root / "source_code_qa" / "attachments")
+    app.config["SOURCE_CODE_QA_RUNTIME_EVIDENCE_STORE"] = SourceCodeQARuntimeEvidenceStore(
+        data_root / "source_code_qa" / "runtime_evidence"
+    )
     app.config["SOURCE_CODE_QA_MODEL_AVAILABILITY_STORE"] = SourceCodeQAModelAvailabilityStore(
         data_root / "source_code_qa" / "model_availability.json"
     )
@@ -1876,6 +2065,62 @@ def create_app() -> Flask:
             as_attachment=False,
         )
 
+    @app.route("/api/source-code-qa/runtime-evidence", methods=["GET", "POST"])
+    def source_code_qa_runtime_evidence_api():
+        access_gate = _require_source_code_qa_manage_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        store = _get_source_code_qa_runtime_evidence_store()
+        if request.method == "GET":
+            try:
+                evidence = store.list(
+                    pm_team=str(request.args.get("pm_team") or ""),
+                    country=str(request.args.get("country") or ""),
+                )
+                return jsonify({"status": "ok", "evidence": evidence})
+            except ToolError as error:
+                return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
+
+        uploaded = request.files.get("file")
+        if uploaded is None:
+            return jsonify({"status": "error", "message": "Upload a file field named file."}), HTTPStatus.BAD_REQUEST
+        try:
+            evidence = store.save_bytes(
+                pm_team=str(request.form.get("pm_team") or ""),
+                country=str(request.form.get("country") or ""),
+                source_type=str(request.form.get("source_type") or "other"),
+                uploaded_by=_current_google_email() or "local",
+                filename=uploaded.filename or "runtime-evidence",
+                mime_type=uploaded.mimetype or "",
+                content=uploaded.read(),
+            )
+            return jsonify({"status": "ok", "evidence": evidence, "items": store.list(pm_team=evidence["pm_team"], country=evidence["country"])})
+        except ToolError as error:
+            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
+
+    @app.delete("/api/source-code-qa/runtime-evidence/<evidence_id>")
+    def source_code_qa_runtime_evidence_delete_api(evidence_id: str):
+        access_gate = _require_source_code_qa_manage_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        try:
+            pm_team = str(request.args.get("pm_team") or "")
+            country = str(request.args.get("country") or "")
+            deleted = _get_source_code_qa_runtime_evidence_store().delete(
+                pm_team=pm_team,
+                country=country,
+                evidence_id=evidence_id,
+            )
+            return jsonify(
+                {
+                    "status": "ok",
+                    "deleted": deleted,
+                    "evidence": _get_source_code_qa_runtime_evidence_store().list(pm_team=pm_team, country=country),
+                }
+            )
+        except ToolError as error:
+            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
+
     @app.post("/api/source-code-qa/query")
     def source_code_qa_query_api():
         access_gate = _require_source_code_qa_access(settings, api=True)
@@ -1910,6 +2155,7 @@ def create_app() -> Flask:
             attachments = _resolve_source_code_qa_query_attachments(payload, owner_email=owner_email, session_id=session_id)
             pm_team = str(payload.get("pm_team") or "")
             country = str(payload.get("country") or "")
+            runtime_evidence = _resolve_source_code_qa_runtime_evidence(pm_team=pm_team, country=country)
             auto_sync = _prepare_source_code_qa_auto_sync(service, pm_team=pm_team, country=country)
             def run_query() -> dict[str, Any]:
                 return service.query(
@@ -1920,6 +2166,7 @@ def create_app() -> Flask:
                     llm_budget_mode="auto",
                     conversation_context=conversation_context,
                     attachments=attachments,
+                    runtime_evidence=runtime_evidence,
                 )
 
             if service.llm_provider_name == "codex_cli_bridge" and session_id:
@@ -1929,6 +2176,7 @@ def create_app() -> Flask:
                 result = run_query()
             result["auto_sync"] = auto_sync
             result["attachments"] = _source_code_qa_public_attachments(attachments)
+            result["runtime_evidence"] = _source_code_qa_public_runtime_evidence(runtime_evidence)
             if session_id:
                 session_payload = session_store.append_exchange(
                     session_id,
@@ -3593,6 +3841,13 @@ def _get_source_code_qa_attachment_store():
     return current_app.config["SOURCE_CODE_QA_ATTACHMENT_STORE"]
 
 
+def _get_source_code_qa_runtime_evidence_store():
+    settings: Settings = current_app.config["SETTINGS"]
+    if _local_agent_source_code_qa_enabled(settings):
+        return RemoteSourceCodeQARuntimeEvidenceStore(_build_local_agent_client(settings))
+    return current_app.config["SOURCE_CODE_QA_RUNTIME_EVIDENCE_STORE"]
+
+
 def _get_source_code_qa_model_availability_store():
     settings: Settings = current_app.config["SETTINGS"]
     if _local_agent_source_code_qa_enabled(settings):
@@ -3976,6 +4231,24 @@ def _source_code_qa_public_attachments(attachments: list[dict[str, Any]]) -> lis
     ]
 
 
+def _resolve_source_code_qa_runtime_evidence(*, pm_team: str, country: str) -> list[dict[str, Any]]:
+    try:
+        return _get_source_code_qa_runtime_evidence_store().resolve_scope(pm_team=pm_team, country=country)
+    except ToolError:
+        raise
+    except Exception as error:  # noqa: BLE001 - runtime evidence must not break code Q&A.
+        current_app.logger.warning("Source Code Q&A runtime evidence could not be loaded: %s", error)
+        return []
+
+
+def _source_code_qa_public_runtime_evidence(evidence: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        SourceCodeQARuntimeEvidenceStore.public_metadata(item)
+        for item in evidence
+        if isinstance(item, dict)
+    ]
+
+
 def _compact_source_code_qa_session_payload(result: dict[str, Any]) -> dict[str, Any]:
     structured = result.get("structured_answer") if isinstance(result.get("structured_answer"), dict) else {}
     answer_claim_check = result.get("answer_claim_check") if isinstance(result.get("answer_claim_check"), dict) else {}
@@ -4019,6 +4292,9 @@ def _compact_source_code_qa_session_payload(result: dict[str, Any]) -> dict[str,
         },
         "codex_citation_validation": answer_claim_check.get("codex_citation_validation") or {},
         "attachments": _source_code_qa_public_attachments(result.get("attachments") if isinstance(result.get("attachments"), list) else []),
+        "runtime_evidence": _source_code_qa_public_runtime_evidence(
+            result.get("runtime_evidence") if isinstance(result.get("runtime_evidence"), list) else []
+        ),
         "matches": [
             {
                 "repo": match.get("repo"),
@@ -4483,6 +4759,7 @@ def _run_source_code_qa_query_job(app: Flask, job_id: str, payload: dict[str, An
             if conversation_context is None and session_id:
                 conversation_context = session_store.get_context(session_id, owner_email=owner_email)
             attachments = _resolve_source_code_qa_query_attachments(payload, owner_email=owner_email, session_id=session_id)
+            runtime_evidence = _resolve_source_code_qa_runtime_evidence(pm_team=pm_team, country=country)
             auto_sync = _prepare_source_code_qa_auto_sync(
                 service,
                 pm_team=pm_team,
@@ -4498,6 +4775,7 @@ def _run_source_code_qa_query_job(app: Flask, job_id: str, payload: dict[str, An
                     llm_budget_mode="auto",
                     conversation_context=conversation_context,
                     attachments=attachments,
+                    runtime_evidence=runtime_evidence,
                     progress_callback=progress_callback,
                 )
 
@@ -4509,6 +4787,7 @@ def _run_source_code_qa_query_job(app: Flask, job_id: str, payload: dict[str, An
                 result = run_query()
             result["auto_sync"] = auto_sync
             result["attachments"] = _source_code_qa_public_attachments(attachments)
+            result["runtime_evidence"] = _source_code_qa_public_runtime_evidence(runtime_evidence)
             if session_id:
                 session_payload = session_store.append_exchange(
                     session_id,

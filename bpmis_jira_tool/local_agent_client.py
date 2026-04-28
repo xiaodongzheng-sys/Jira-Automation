@@ -356,6 +356,59 @@ class LocalAgentClient:
         saved = payload.get("availability")
         return saved if isinstance(saved, dict) else {}
 
+    def source_code_qa_runtime_evidence_list(self, *, pm_team: str, country: str) -> list[dict[str, Any]]:
+        payload = self._request(
+            "POST",
+            "/api/local-agent/source-code-qa/runtime-evidence/list",
+            {"pm_team": pm_team, "country": country},
+        )
+        evidence = payload.get("evidence")
+        return evidence if isinstance(evidence, list) else []
+
+    def source_code_qa_runtime_evidence_save(
+        self,
+        *,
+        pm_team: str,
+        country: str,
+        source_type: str,
+        uploaded_by: str,
+        filename: str,
+        mime_type: str,
+        content: bytes,
+    ) -> dict[str, Any]:
+        payload = self._request(
+            "POST",
+            "/api/local-agent/source-code-qa/runtime-evidence/save",
+            {
+                "pm_team": pm_team,
+                "country": country,
+                "source_type": source_type,
+                "uploaded_by": uploaded_by,
+                "filename": filename,
+                "mime_type": mime_type,
+                "content_base64": base64.b64encode(content).decode("ascii"),
+            },
+        )
+        evidence = payload.get("evidence")
+        return evidence if isinstance(evidence, dict) else {}
+
+    def source_code_qa_runtime_evidence_resolve(self, *, pm_team: str, country: str) -> list[dict[str, Any]]:
+        payload = self._request(
+            "POST",
+            "/api/local-agent/source-code-qa/runtime-evidence/resolve",
+            {"pm_team": pm_team, "country": country},
+        )
+        evidence = payload.get("evidence")
+        return evidence if isinstance(evidence, list) else []
+
+    def source_code_qa_runtime_evidence_delete(self, *, pm_team: str, country: str, evidence_id: str) -> bool:
+        payload = self._request(
+            "POST",
+            "/api/local-agent/source-code-qa/runtime-evidence/delete",
+            {"pm_team": pm_team, "country": country, "evidence_id": evidence_id},
+        )
+        return bool(payload.get("deleted"))
+
     def seatalk_todos_completed_ids(self, *, owner_email: str) -> list[str]:
         payload = self._request("POST", "/api/local-agent/seatalk/todos/completed-ids", {"owner_email": owner_email})
         ids = payload.get("completed_ids")
@@ -745,6 +798,45 @@ class RemoteSourceCodeQAModelAvailabilityStore:
 
     def save(self, availability: dict[str, Any]) -> dict[str, bool]:
         return self.client.source_code_qa_model_availability_save(availability)
+
+
+class RemoteSourceCodeQARuntimeEvidenceStore:
+    def __init__(self, client: LocalAgentClient) -> None:
+        self.client = client
+
+    def list(self, *, pm_team: str, country: str) -> list[dict[str, Any]]:
+        return self.client.source_code_qa_runtime_evidence_list(pm_team=pm_team, country=country)
+
+    def save_bytes(
+        self,
+        *,
+        pm_team: str,
+        country: str,
+        source_type: str,
+        uploaded_by: str,
+        filename: str,
+        content: bytes,
+        mime_type: str = "",
+    ) -> dict[str, Any]:
+        return self.client.source_code_qa_runtime_evidence_save(
+            pm_team=pm_team,
+            country=country,
+            source_type=source_type,
+            uploaded_by=uploaded_by,
+            filename=filename,
+            mime_type=mime_type,
+            content=content,
+        )
+
+    def resolve_scope(self, *, pm_team: str, country: str) -> list[dict[str, Any]]:
+        return self.client.source_code_qa_runtime_evidence_resolve(pm_team=pm_team, country=country)
+
+    def delete(self, *, pm_team: str, country: str, evidence_id: str) -> bool:
+        return self.client.source_code_qa_runtime_evidence_delete(
+            pm_team=pm_team,
+            country=country,
+            evidence_id=evidence_id,
+        )
 
 
 class RemoteSeaTalkTodoStore:

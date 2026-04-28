@@ -3540,6 +3540,7 @@ class SourceCodeQAService:
         llm_budget_mode: str = "cheap",
         conversation_context: dict[str, Any] | None = None,
         attachments: list[dict[str, Any]] | None = None,
+        runtime_evidence: list[dict[str, Any]] | None = None,
         progress_callback: Any | None = None,
     ) -> dict[str, Any]:
         key = self.mapping_key(pm_team, country)
@@ -4170,6 +4171,7 @@ class SourceCodeQAService:
                 request_cache=request_cache,
                 progress_callback=progress_callback,
                 attachments=attachments or [],
+                runtime_evidence=runtime_evidence or [],
             )
             payload.update(llm_payload)
             payload["evidence_outline"] = self._build_evidence_outline(payload.get("evidence_pack") or evidence_pack, top_matches)
@@ -14300,6 +14302,7 @@ class SourceCodeQAService:
         request_cache: dict[str, Any] | None = None,
         progress_callback: Any | None = None,
         attachments: list[dict[str, Any]] | None = None,
+        runtime_evidence: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         if not self.llm_ready():
             raise ToolError(self.llm_unavailable_message())
@@ -14340,8 +14343,9 @@ class SourceCodeQAService:
                 request_cache=request_cache,
                 progress_callback=progress_callback,
                 attachments=attachments or [],
+                runtime_evidence=runtime_evidence or [],
             )
-        attachment_section = self._attachment_prompt_section(attachments or [])
+        attachment_section = self._context_attachment_section(attachments or [], runtime_evidence or [])
         domain_context = self._llm_domain_context(
             pm_team=pm_team,
             country=country,
@@ -14963,6 +14967,7 @@ class SourceCodeQAService:
         request_cache: dict[str, Any] | None = None,
         progress_callback: Any | None = None,
         attachments: list[dict[str, Any]] | None = None,
+        runtime_evidence: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         candidate_matches = self._select_llm_matches(
             matches,
@@ -14997,6 +15002,7 @@ class SourceCodeQAService:
             quality_gate=quality_gate,
             followup_context=followup_context,
             attachments=attachments or [],
+            runtime_evidence=runtime_evidence or [],
         )
         is_followup = bool(followup_context and (followup_context.get("used") or followup_context.get("question") or followup_context.get("recent_turns")))
         cache_key = self._answer_cache_key(
@@ -15189,6 +15195,7 @@ class SourceCodeQAService:
                 quality_gate=quality_gate,
                 followup_context=followup_context,
                 attachments=attachments or [],
+                runtime_evidence=runtime_evidence or [],
                 repair_issues=list(dict.fromkeys([
                     *[str(issue) for issue in repair_issues if issue],
                     *(["Deep investigation: use the expanded candidate paths and explicitly resolve business ambiguity, caller/callee gaps, and missing source hops before finalizing."] if deep_needed else []),
@@ -15560,6 +15567,63 @@ class SourceCodeQAService:
         return "\n".join(lines)
 
     @staticmethod
+    def _public_runtime_evidence_metadata(item: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "id": str(item.get("id") or ""),
+            "filename": str(item.get("filename") or ""),
+            "mime_type": str(item.get("mime_type") or ""),
+            "kind": str(item.get("kind") or ""),
+            "source_type": str(item.get("source_type") or ""),
+            "pm_team": str(item.get("pm_team") or ""),
+            "country": str(item.get("country") or ""),
+            "size": int(item.get("size") or 0),
+            "sha256": str(item.get("sha256") or ""),
+            "created_at": str(item.get("created_at") or ""),
+            "uploaded_by": str(item.get("uploaded_by") or ""),
+            "summary": str(item.get("summary") or "")[:400],
+            "text_char_count": int(item.get("text_char_count") or 0),
+        }
+
+    @classmethod
+    def _runtime_evidence_prompt_section(cls, runtime_evidence: list[dict[str, Any]]) -> str:
+        normalized = [item for item in runtime_evidence or [] if isinstance(item, dict)]
+        if not normalized:
+            return ""
+        lines = [
+            "Uploaded runtime evidence:",
+            "- Treat these files as user-uploaded production DB/Apollo/config snapshots, not repository source code.",
+            "- Separate source-code evidence, runtime evidence, attachment evidence, and missing evidence in the answer.",
+            "- Runtime evidence can be stale or partial; use its pm_team/country/source_type labels and do not generalize it across countries unless the file proves that.",
+            "- If runtime evidence conflicts with source code, describe the conflict instead of silently choosing one.",
+        ]
+        for index, item in enumerate(normalized[:24], start=1):
+            meta = cls._public_runtime_evidence_metadata(item)
+            lines.append(
+                f"- R{index}: pm_team={meta['pm_team']} country={meta['country']} "
+                f"source_type={meta['source_type']} filename={meta['filename']} "
+                f"kind={meta['kind']} mime={meta['mime_type']} size={meta['size']} "
+                f"sha256={meta['sha256'][:16]} uploaded_at={meta['created_at']}"
+            )
+            text = str(item.get("text") or item.get("summary") or "").strip()
+            if text:
+                if len(text) > 6000:
+                    text = f"{text[:6000]}\n...[runtime evidence text truncated]"
+                lines.append(f"  Extracted text/summary:\n{text}")
+        return "\n".join(lines)
+
+    @classmethod
+    def _context_attachment_section(cls, attachments: list[dict[str, Any]], runtime_evidence: list[dict[str, Any]]) -> str:
+        sections = [
+            section
+            for section in (
+                cls._attachment_prompt_section(attachments),
+                cls._runtime_evidence_prompt_section(runtime_evidence),
+            )
+            if section
+        ]
+        return "\n\n".join(sections)
+
+    @staticmethod
     def _attachment_image_paths(attachments: list[dict[str, Any]]) -> list[str]:
         paths: list[str] = []
         for item in attachments or []:
@@ -15805,6 +15869,7 @@ class SourceCodeQAService:
         quality_gate: dict[str, Any],
         followup_context: dict[str, Any] | None,
         attachments: list[dict[str, Any]] | None = None,
+        runtime_evidence: list[dict[str, Any]] | None = None,
         repair_issues: list[str] | None = None,
     ) -> str:
         candidate_path_layers = self._codex_candidate_path_layers(candidate_paths, followup_context)
@@ -15858,7 +15923,7 @@ class SourceCodeQAService:
                         f"    retrieval={item.get('retrieval')} trace_stage={item.get('trace_stage')} reason={item.get('reason')}",
                     ]
                 )
-        attachment_section = self._attachment_prompt_section(attachments or [])
+        attachment_section = self._context_attachment_section(attachments or [], runtime_evidence or [])
         if attachment_section:
             lines.extend(["", attachment_section])
         if followup_context:
@@ -16435,6 +16500,7 @@ class SourceCodeQAService:
             "- Prefer agent trace and two-hop trace evidence when it clarifies downstream service, integration, repository, mapper, API, or table usage.\n"
             "- Treat raw code snippets as the source of truth when they are provided as primary evidence; use compressed facts as navigation hints and consistency checks.\n"
             "- If user attachments are present, label their contribution as attachment evidence and do not present it as source-code evidence.\n"
+            "- If uploaded runtime evidence is present, label DB/Apollo/config facts as runtime evidence, keep country scope explicit, and do not present them as source-code evidence.\n"
             "- Follow the domain-specific evidence rules and answer blueprint when present.\n"
             "- Apply evidence priority: production code and mapper/client/SQL evidence beat config snapshots, tests, and docs/spec/generated files.\n"
             "- For data-source questions, a DTO/Input/Info class is not a final data source. Trace backward to the provider/builder/setter and then to repository/mapper/client/API/table when evidence exists.\n"

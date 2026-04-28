@@ -7,6 +7,7 @@
   const syncUrl = root.dataset.syncUrl;
   const queryUrl = root.dataset.queryUrl;
   const attachmentUrl = root.dataset.attachmentUrl;
+  const runtimeEvidenceUrl = root.dataset.runtimeEvidenceUrl;
   const jobsUrlTemplate = root.dataset.jobsUrl || '/api/jobs/__JOB_ID__';
   const feedbackUrl = root.dataset.feedbackUrl;
   const sessionsUrl = root.dataset.sessionsUrl;
@@ -47,6 +48,13 @@
   const modelAvailability = document.querySelector('[data-source-model-availability]');
   const modelAvailabilityStatus = document.querySelector('[data-source-model-availability-status]');
   const saveModelAvailabilityButton = document.querySelector('[data-source-save-model-availability]');
+  const runtimeEvidencePmTeam = document.querySelector('[data-source-runtime-pm-team]');
+  const runtimeEvidenceCountry = document.querySelector('[data-source-runtime-country]');
+  const runtimeEvidenceSourceType = document.querySelector('[data-source-runtime-source-type]');
+  const runtimeEvidenceInput = document.querySelector('[data-source-runtime-evidence-input]');
+  const runtimeEvidenceUploadButton = document.querySelector('[data-source-runtime-evidence-upload]');
+  const runtimeEvidenceList = document.querySelector('[data-source-runtime-evidence-list]');
+  const runtimeEvidenceStatus = document.querySelector('[data-source-runtime-evidence-status]');
   const newSessionButton = document.querySelector('[data-source-new-session]');
   const viewTabs = Array.from(document.querySelectorAll('[data-source-view-tab]'));
   const viewPanels = Array.from(document.querySelectorAll('[data-source-view-panel]'));
@@ -91,6 +99,7 @@
     });
     if (nextView === 'admin') {
       renderSelectedConfig();
+      loadRuntimeEvidence();
     }
   };
 
@@ -885,6 +894,94 @@
       if (modelAvailabilityStatus) modelAvailabilityStatus.textContent = 'Model availability saved.';
     } catch (error) {
       if (modelAvailabilityStatus) modelAvailabilityStatus.textContent = error.message || 'Save failed.';
+    }
+  };
+
+  const runtimeEvidenceScope = () => ({
+    pm_team: runtimeEvidencePmTeam?.value || 'AF',
+    country: runtimeEvidenceCountry?.value || 'SG',
+  });
+
+  const runtimeEvidenceTypeLabel = (sourceType) => ({
+    apollo: 'Apollo',
+    db: 'DB',
+    other: 'Other',
+  }[sourceType] || sourceType || 'Runtime');
+
+  const renderRuntimeEvidence = (items = []) => {
+    if (!runtimeEvidenceList) return;
+    if (!items.length) {
+      runtimeEvidenceList.innerHTML = '<div class="source-qa-empty">No runtime evidence loaded for this scope.</div>';
+      return;
+    }
+    runtimeEvidenceList.innerHTML = items.map((item) => `
+      <div class="source-qa-runtime-item">
+        <div>
+          <strong>${escapeHtml(item.filename || 'runtime evidence')}</strong>
+          <small>${escapeHtml(runtimeEvidenceTypeLabel(item.source_type))} · ${escapeHtml(item.pm_team || '')}:${escapeHtml(item.country || '')} · ${escapeHtml(formatAttachmentSize(item.size))}</small>
+        </div>
+        <div class="source-qa-runtime-meta">
+          <span>${escapeHtml((item.created_at || '').replace('T', ' ').replace('Z', ''))}</span>
+          <button class="button button-secondary" type="button" data-source-runtime-delete="${escapeHtml(item.id || '')}">Delete</button>
+        </div>
+      </div>
+    `).join('');
+    runtimeEvidenceList.querySelectorAll('[data-source-runtime-delete]').forEach((button) => {
+      button.addEventListener('click', () => deleteRuntimeEvidence(button.dataset.sourceRuntimeDelete || ''));
+    });
+  };
+
+  const loadRuntimeEvidence = async () => {
+    if (!canManage || !runtimeEvidenceUrl || !runtimeEvidenceList) return;
+    const scope = runtimeEvidenceScope();
+    if (runtimeEvidenceStatus) runtimeEvidenceStatus.textContent = `Loading runtime evidence for ${scope.pm_team}:${scope.country}...`;
+    try {
+      const url = new URL(runtimeEvidenceUrl, window.location.origin);
+      url.searchParams.set('pm_team', scope.pm_team);
+      url.searchParams.set('country', scope.country);
+      const payload = await apiFetchJson(url.toString(), {}, { attempts: 3 });
+      renderRuntimeEvidence(payload.evidence || []);
+      if (runtimeEvidenceStatus) runtimeEvidenceStatus.textContent = `Loaded ${(payload.evidence || []).length} runtime evidence file(s) for ${scope.pm_team}:${scope.country}.`;
+    } catch (error) {
+      renderRuntimeEvidence([]);
+      if (runtimeEvidenceStatus) runtimeEvidenceStatus.textContent = error.message || 'Runtime evidence could not be loaded.';
+    }
+  };
+
+  const uploadRuntimeEvidence = async (file) => {
+    if (!canManage || !runtimeEvidenceUrl || !file) return;
+    const scope = runtimeEvidenceScope();
+    const formData = new FormData();
+    formData.append('pm_team', scope.pm_team);
+    formData.append('country', scope.country);
+    formData.append('source_type', runtimeEvidenceSourceType?.value || 'other');
+    formData.append('file', file);
+    if (runtimeEvidenceStatus) runtimeEvidenceStatus.textContent = `Uploading ${file.name || 'runtime evidence'}...`;
+    try {
+      const payload = await apiFetchJson(runtimeEvidenceUrl, {
+        method: 'POST',
+        body: formData,
+      }, { attempts: 3 });
+      renderRuntimeEvidence(payload.items || (payload.evidence ? [payload.evidence] : []));
+      if (runtimeEvidenceStatus) runtimeEvidenceStatus.textContent = `Uploaded ${payload.evidence?.filename || file.name || 'runtime evidence'} for ${scope.pm_team}:${scope.country}.`;
+    } catch (error) {
+      if (runtimeEvidenceStatus) runtimeEvidenceStatus.textContent = error.message || 'Upload failed.';
+    }
+  };
+
+  const deleteRuntimeEvidence = async (evidenceId) => {
+    if (!canManage || !runtimeEvidenceUrl || !evidenceId) return;
+    const scope = runtimeEvidenceScope();
+    const url = new URL(`${runtimeEvidenceUrl}/${encodeURIComponent(evidenceId)}`, window.location.origin);
+    url.searchParams.set('pm_team', scope.pm_team);
+    url.searchParams.set('country', scope.country);
+    if (runtimeEvidenceStatus) runtimeEvidenceStatus.textContent = 'Deleting runtime evidence...';
+    try {
+      const payload = await apiFetchJson(url.toString(), { method: 'DELETE' }, { attempts: 3 });
+      renderRuntimeEvidence(payload.evidence || []);
+      if (runtimeEvidenceStatus) runtimeEvidenceStatus.textContent = payload.deleted ? 'Runtime evidence deleted.' : 'Runtime evidence was already removed.';
+    } catch (error) {
+      if (runtimeEvidenceStatus) runtimeEvidenceStatus.textContent = error.message || 'Delete failed.';
     }
   };
 
@@ -1706,6 +1803,14 @@
   });
   saveButton?.addEventListener('click', saveConfig);
   saveModelAvailabilityButton?.addEventListener('click', saveModelAvailability);
+  runtimeEvidencePmTeam?.addEventListener('change', loadRuntimeEvidence);
+  runtimeEvidenceCountry?.addEventListener('change', loadRuntimeEvidence);
+  runtimeEvidenceUploadButton?.addEventListener('click', () => runtimeEvidenceInput?.click());
+  runtimeEvidenceInput?.addEventListener('change', async () => {
+    const file = runtimeEvidenceInput.files?.[0];
+    if (runtimeEvidenceInput) runtimeEvidenceInput.value = '';
+    if (file) await uploadRuntimeEvidence(file);
+  });
   syncButton?.addEventListener('click', syncRepos);
   queryButton?.addEventListener('click', queryCode);
   attachmentUploadButton?.addEventListener('click', () => attachmentInput?.click());
@@ -1730,6 +1835,7 @@
   window.addEventListener('portal:tab-activated', (event) => {
     if (event.detail?.tabName === 'admin') {
       renderSelectedConfig();
+      loadRuntimeEvidence();
     }
   });
   document.querySelectorAll('[data-source-feedback-rating]').forEach((button) => {

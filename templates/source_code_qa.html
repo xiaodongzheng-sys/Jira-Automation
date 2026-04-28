@@ -9,6 +9,7 @@
     data-sync-url="{{ url_for('source_code_qa_sync_api') }}"
     data-query-url="{{ url_for('source_code_qa_query_api') }}"
     data-attachment-url="{{ url_for('source_code_qa_attachments_api') }}"
+    data-runtime-evidence-url="{{ url_for('source_code_qa_runtime_evidence_api') }}"
     data-jobs-url="{{ url_for('get_job', job_id='__JOB_ID__') }}"
     data-feedback-url="{{ url_for('source_code_qa_feedback_api') }}"
     data-sessions-url="{{ url_for('source_code_qa_sessions_api') }}"
@@ -189,6 +190,55 @@
           </div>
           <div class="source-qa-status" data-source-model-availability-status>
             Model availability controls only the Source Code Q&amp;A selector. Backend credentials and quota are still checked at answer time.
+          </div>
+        </section>
+
+        <section class="panel panel-wide source-qa-admin">
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow">Runtime Evidence</p>
+              <h2>DB / Apollo Uploads</h2>
+              <p class="card-help">Upload production DB exports or Apollo config snapshots by system and country. Answers use them as runtime evidence, separate from source-code evidence.</p>
+            </div>
+            <button class="button button-secondary" type="button" data-source-runtime-evidence-upload>Upload Evidence</button>
+          </div>
+          <div class="field-grid source-qa-runtime-grid">
+            <label class="field-group">
+              <span>System</span>
+              <select data-source-runtime-pm-team>
+                <option value="AF">Anti-fraud (AF)</option>
+                <option value="CRMS">Credit Risk (CRMS)</option>
+                <option value="GRC">GRC (GRC)</option>
+              </select>
+            </label>
+            <label class="field-group">
+              <span>Country</span>
+              <select data-source-runtime-country>
+                <option value="ID">ID</option>
+                <option value="SG">SG</option>
+                <option value="PH">PH</option>
+              </select>
+            </label>
+            <label class="field-group">
+              <span>Source Type</span>
+              <select data-source-runtime-source-type>
+                <option value="apollo">Apollo config</option>
+                <option value="db">DB data</option>
+                <option value="other">Other runtime evidence</option>
+              </select>
+            </label>
+          </div>
+          <input
+            type="file"
+            data-source-runtime-evidence-input
+            hidden
+            accept=".txt,.md,.csv,.json,.xml,.yaml,.yml,.log,.sql,.properties,.pdf,.docx,.xlsx"
+          >
+          <div class="source-qa-runtime-list" data-source-runtime-evidence-list>
+            <div class="source-qa-empty">No runtime evidence loaded for this scope.</div>
+          </div>
+          <div class="source-qa-status" data-source-runtime-evidence-status>
+            Runtime evidence is scoped by system and country. AF/GRC code can stay shared while Apollo snapshots stay country-specific.
           </div>
         </section>
 
