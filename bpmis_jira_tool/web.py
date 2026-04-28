@@ -1833,11 +1833,13 @@ def create_app() -> Flask:
                 "can_access_source_code_qa": False,
                 "can_manage_source_code_qa": False,
             }
+        user_identity = _get_user_identity(settings)
+        can_access_team_dashboard = _can_access_team_dashboard(user_identity)
         site_tabs = [
             {
                 "label": "BPMIS Automation Tool",
                 "href": url_for("index"),
-                "active": current_endpoint == "index",
+                "active": current_endpoint == "index" and request.args.get("workspace") != "team-dashboard",
             }
         ]
         if _can_access_source_code_qa(settings):
@@ -1865,6 +1867,14 @@ def create_app() -> Flask:
             )
         if prd_tab:
             site_tabs.append(prd_tab)
+        if can_access_team_dashboard:
+            site_tabs.append(
+                {
+                    "label": "Team Dashboard",
+                    "href": url_for("index", workspace="team-dashboard"),
+                    "active": current_endpoint == "index" and request.args.get("workspace") == "team-dashboard",
+                }
+            )
         return {
             "site_tabs": site_tabs,
             "site_requires_google_login": _site_requires_google_login(settings),
@@ -1961,6 +1971,15 @@ def create_app() -> Flask:
         _apply_sync_email_policy(config_data, user_identity)
         input_headers: list[str] = []
         has_saved_config = bool(config_key and raw_config_data)
+        default_workspace_tab = session.pop("default_workspace_tab", "run" if has_saved_config else "setup")
+        requested_workspace_tab = str(request.args.get("workspace") or "").strip()
+        allowed_workspace_tabs = {"setup", "run", "productization-upgrade-summary"}
+        if _can_access_team_dashboard(user_identity):
+            allowed_workspace_tabs.add("team-dashboard")
+        if _is_team_profile_admin(user_identity):
+            allowed_workspace_tabs.add("team-default-admin")
+        if requested_workspace_tab in allowed_workspace_tabs:
+            default_workspace_tab = requested_workspace_tab
 
         if (
             "google_credentials" in session
@@ -2010,7 +2029,7 @@ def create_app() -> Flask:
             team_profile_admin_enabled=_is_team_profile_admin(user_identity),
             team_dashboard_enabled=_can_access_team_dashboard(user_identity),
             team_dashboard_config=_get_team_dashboard_config_store().load(),
-            default_workspace_tab=session.pop("default_workspace_tab", "run" if has_saved_config else "setup"),
+            default_workspace_tab=default_workspace_tab,
             input_headers=input_headers,
             google_authorized=True,
         )

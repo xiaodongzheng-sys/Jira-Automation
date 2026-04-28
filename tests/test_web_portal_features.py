@@ -788,9 +788,40 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertIn(b">Team Default Admin<", admin_response.data)
         self.assertIn(b"Save Anti-fraud Defaults", admin_response.data)
         self.assertIn(b">Team Dashboard<", admin_response.data)
+        self.assertIn(b'href="/?workspace=team-dashboard"', admin_response.data)
+        self.assertIn(b'data-default-tab="setup"', admin_response.data)
         self.assertIn(b"Team Admin", admin_response.data)
         self.assertNotIn(b">Team Default Admin<", user_response.data)
         self.assertNotIn(b">Team Dashboard<", user_response.data)
+
+    def test_team_dashboard_primary_nav_visible_on_source_code_qa_for_admin_user(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_ALLOWED_EMAILS": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
+            },
+            clear=True,
+        ):
+            app = create_app()
+            app.testing = True
+
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong"}
+                    session["google_credentials"] = {"token": "x"}
+                source_response = client.get("/source-code-qa")
+                dashboard_response = client.get("/?workspace=team-dashboard")
+
+        self.assertEqual(source_response.status_code, 200)
+        self.assertIn(b'href="/?workspace=team-dashboard"', source_response.data)
+        self.assertIn(b">Team Dashboard<", source_response.data)
+        self.assertEqual(dashboard_response.status_code, 200)
+        self.assertIn(b'data-default-tab="team-dashboard"', dashboard_response.data)
 
     def test_team_dashboard_config_defaults_and_save_are_admin_only(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
