@@ -687,7 +687,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertEqual(payload["llm_provider"], "codex_cli_bridge")
         self.assertEqual(payload["llm_policy"]["provider"]["provider"], "codex_cli_bridge")
         self.assertEqual(payload["llm_policy"]["router"]["version"], 7)
-        self.assertEqual(payload["llm_policy"]["versions"]["cache"], 13)
+        self.assertEqual(payload["llm_policy"]["versions"]["cache"], 14)
         self.assertEqual(payload["llm_policy"]["versions"]["runtime"], 2)
         self.assertEqual(payload["llm_policy"]["runtime"]["max_retries"], 2)
         self.assertEqual(payload["llm_policy"]["model_policy"]["answer"]["model"], os.getenv("SOURCE_CODE_QA_CODEX_MODEL", "codex-cli"))
@@ -5962,6 +5962,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
     def test_structured_answer_parser_accepts_json_and_fallback_prose(self):
         parsed = self.service._parse_structured_answer(
             '{"direct_answer":"Uses issue_table","confirmed_from_code":["IssueRepository reads issue_table [S1]"],'
+            '"investigation_steps":{"candidate_evidence":["Opened IssueRepository"],"gap_verification":["Checked mapper"],"certainty_split":["Confirmed table only"]},'
             '"inferred_from_code":["IssueService calls the repository"],"not_found":["No caller evidence"],'
             '"claims":[{"text":"IssueRepository reads issue_table","citations":["S1"]}],"missing_evidence":[],"confidence":"high"}'
         )
@@ -5970,6 +5971,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertEqual(parsed["format"], "json")
         self.assertEqual(parsed["claims"][0]["citations"], ["S1"])
         self.assertEqual(parsed["confirmed_from_code"], ["IssueRepository reads issue_table [S1]"])
+        self.assertEqual(parsed["investigation_steps"]["gap_verification"], ["Checked mapper"])
         self.assertEqual(parsed["inferred_from_code"], ["IssueService calls the repository"])
         self.assertEqual(parsed["not_found"], ["No caller evidence"])
         self.assertEqual(fallback["format"], "prose_fallback")
@@ -6013,6 +6015,37 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertEqual(final["structured_answer"]["direct_answer"], "Issue creation reads issue_table.")
         self.assertEqual(final["structured_answer"]["claims"][0]["text"], "IssueRepository reads issue_table")
         self.assertNotIn("Missing evidence:", final["structured_answer"]["direct_answer"])
+
+    def test_trusted_model_finalizer_keeps_explicit_missing_evidence(self):
+        structured = {
+            "direct_answer": "Only the status migration is confirmed; the full rule expression is not present.",
+            "investigation_steps": {
+                "candidate_evidence": ["Opened migration SQL"],
+                "gap_verification": ["Searched for rule_config_tab inserts"],
+                "certainty_split": ["Confirmed status update; full expression missing"],
+            },
+            "confirmed_from_code": ["Migration updates C0204v2 status [S1]"],
+            "inferred_from_code": ["Rule likely maps to the v2 challenge rule family"],
+            "not_found": ["No full rule_config_tab row or feature_expr for C0204v2 was found"],
+            "claims": [{"text": "Migration updates C0204v2 status", "citations": ["S1"]}],
+            "missing_evidence": ["Live rule_config_tab row is required to confirm feature_expr"],
+            "confidence": "medium",
+            "format": "json",
+        }
+
+        final = self.service._finalize_trusted_model_answer(
+            question="why are C0204v2 and C0205v2 both needed",
+            answer=json.dumps(structured),
+            structured_answer=structured,
+            evidence_summary={"intent": self.service._question_intent("why are C0204v2 and C0205v2 both needed")},
+            quality_gate={"status": "sufficient", "confidence": "medium", "missing": []},
+            claim_check={"status": "skipped", "issues": []},
+            selected_matches=[{"repo": "AF", "path": "dml.sql", "line_start": 1, "line_end": 2, "snippet": "update rule_config_tab"}],
+        )
+
+        self.assertIn("No full rule_config_tab row", final["answer"])
+        self.assertIn("Live rule_config_tab row is required to confirm feature_expr", final["answer_contract"]["missing_links"])
+        self.assertEqual(final["answer_contract"]["investigation_steps"]["gap_verification"], ["Searched for rule_config_tab inserts"])
 
     def test_eval_runner_checks_trace_paths_and_structured_claims(self):
         self.service.save_mapping(
@@ -6131,7 +6164,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertEqual(telemetry["llm_model"], "gemini-2.5-flash")
         self.assertIn(telemetry["llm_thinking_budget"], {512, 2048})
         self.assertEqual(telemetry["llm_route"]["mode"], "manual")
-        self.assertEqual(telemetry["versions"]["cache"], 13)
+        self.assertEqual(telemetry["versions"]["cache"], 14)
         self.assertIn("llm_latency_ms", telemetry)
         self.assertIn("llm_attempt_log", telemetry)
         self.assertIn("answer_contract", telemetry)
@@ -6477,7 +6510,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         )
         cached = service._load_cached_answer(cache_key)
         self.assertIsNotNone(cached)
-        self.assertEqual(cached["versions"]["cache"], 13)
+        self.assertEqual(cached["versions"]["cache"], 14)
         cache_path = service.answer_cache_root / f"{cache_key}.json"
         stale_payload = json.loads(cache_path.read_text(encoding="utf-8"))
         stale_payload["versions"]["router"] = -1
@@ -7161,7 +7194,10 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             },
         )
 
-        self.assertIn("Prompt mode: codex_investigation_brief_v2", brief)
+        self.assertIn("Prompt mode: codex_investigation_brief_v3", brief)
+        self.assertIn("Three-stage investigation required:", brief)
+        self.assertIn("Stage 2 gap verification", brief)
+        self.assertIn("full rule/config definitions from status-only migration updates", brief)
         self.assertIn("Candidate path layers:", brief)
         self.assertIn("current_high_confidence_paths", brief)
         self.assertIn(str(repo_path), brief)
@@ -7356,7 +7392,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
 
         exec_calls = [item for item in calls if "exec" in item[0]]
         self.assertEqual(len(exec_calls), 1)
-        self.assertEqual(payload["llm_route"]["prompt_mode"], "codex_investigation_brief_v2")
+        self.assertEqual(payload["llm_route"]["prompt_mode"], "codex_investigation_brief_v3")
         self.assertIn("candidate_path_layers", payload["llm_route"])
         self.assertFalse(payload["llm_route"]["codex_repair_attempted"])
         self.assertEqual(payload["answer_claim_check"]["status"], "skipped")

@@ -39,10 +39,10 @@ LLM_PROVIDER_OPENAI_COMPATIBLE = "openai_compatible"
 LLM_PROVIDER_CODEX_CLI_BRIDGE = "codex_cli_bridge"
 LLM_PROVIDER_VERTEX_AI = "vertex_ai"
 LLM_PROVIDER_ALLOWED_QUERY_CHOICES = {LLM_PROVIDER_GEMINI, LLM_PROVIDER_CODEX_CLI_BRIDGE, LLM_PROVIDER_VERTEX_AI}
-LLM_PROMPT_VERSION = 8
-LLM_RESPONSE_SCHEMA_VERSION = 4
+LLM_PROMPT_VERSION = 9
+LLM_RESPONSE_SCHEMA_VERSION = 5
 LLM_ROUTER_VERSION = 7
-LLM_CACHE_VERSION = 13
+LLM_CACHE_VERSION = 14
 LLM_RUNTIME_VERSION = 2
 PLANNER_TOOL_DSL_VERSION = 1
 GEMINI_MIN_THINKING_BUDGET = 512
@@ -69,7 +69,7 @@ DEFAULT_LLM_MAX_BACKOFF_SECONDS = 8.0
 DEFAULT_CODEX_CLI_MODEL = "codex-cli"
 DEFAULT_CODEX_TIMEOUT_SECONDS = 240
 DEFAULT_CODEX_TOP_PATH_LIMIT = 30
-CODEX_INVESTIGATION_PROMPT_MODE = "codex_investigation_brief_v2"
+CODEX_INVESTIGATION_PROMPT_MODE = "codex_investigation_brief_v3"
 CODEX_SESSION_MODE_EPHEMERAL = "ephemeral"
 CODEX_SESSION_MODE_RESUME = "resume"
 DEFAULT_INDEX_LOCK_STALE_SECONDS = 15 * 60
@@ -15126,8 +15126,10 @@ class SourceCodeQAService:
             "Use shell/file inspection to verify the answer from the synced repository workspace. "
             "Do not edit files, install dependencies, create commits, deploy, or run mutating commands. "
             "Prefer rg, sed, nl, and direct file reads. "
-            "Return concise JSON with direct_answer, confirmed_from_code, inferred_from_code, not_found, claims, missing_evidence, and confidence. "
+            "Always follow the three-stage investigation contract: first discover candidate evidence, then verify gaps/absence with targeted searches, then answer with explicit certainty levels. "
+            "Return concise JSON with direct_answer, investigation_steps, confirmed_from_code, inferred_from_code, not_found, claims, missing_evidence, and confidence. "
             "Put only verified production/config code facts in confirmed_from_code; put weaker deductions in inferred_from_code. "
+            "When source evidence is incomplete, put the exact missing repository/table/config/log/export in not_found and missing_evidence instead of filling the gap from naming or prior assumptions. "
             "Every concrete code claim must cite either an evidence id like S1 or a real file reference like path/to/File.java:10-20."
         )
 
@@ -15349,6 +15351,13 @@ class SourceCodeQAService:
             "- First confirm the cwd/repo root, then read at least one candidate file or run one repository search before answering unless there are no candidate paths.",
             "- Prioritize confirmed_previous_paths, then current_high_confidence_paths, then current_supporting_paths; use maybe_relevant_paths only to redirect a search.",
             "",
+            "Three-stage investigation required:",
+            "- Stage 1 candidate evidence: identify the most relevant files/configs/SQL/tests/routes from candidate paths and direct searches. Record this in investigation_steps.candidate_evidence.",
+            "- Stage 2 gap verification: run targeted searches for expected missing links before answering. Search for full definitions, INSERT rows, rollback scripts, mapper/client/repository/table/API hops, enums, value mappings, and relevant tests when the question implies them. Record this in investigation_steps.gap_verification.",
+            "- Stage 3 certainty split: answer by separating confirmed_from_code, inferred_from_code, and not_found/missing_evidence. Do not promote a high-confidence inference into confirmed_from_code.",
+            "- For rule/config questions, explicitly distinguish full rule/config definitions from status-only migration updates. If only status updates are found, say the full rule row/expression is missing.",
+            "- For data-source questions, explicitly distinguish DTO/carrier fields from upstream source tables/APIs/repos. If the upstream hop is absent, list that hop in missing_evidence.",
+            "",
             "Candidate path layers:",
         ]
         for layer_name, layer_items in candidate_path_layers.items():
@@ -15479,7 +15488,7 @@ class SourceCodeQAService:
             [
                 "",
                 "Final answer contract:",
-                '- Return JSON: {"direct_answer":"...","confirmed_from_code":["..."],"inferred_from_code":["..."],"not_found":["..."],"claims":[{"text":"...","citations":["S1"]}],"missing_evidence":[],"confidence":"high|medium|low"}.',
+                '- Return JSON: {"direct_answer":"...","investigation_steps":{"candidate_evidence":["..."],"gap_verification":["..."],"certainty_split":["..."]},"confirmed_from_code":["..."],"inferred_from_code":["..."],"not_found":["..."],"claims":[{"text":"...","citations":["S1"]}],"missing_evidence":[],"confidence":"high|medium|low"}.',
                 "- Use S ids from candidate paths when they support the claim, or direct file citations like src/Foo.java:10-20 after you verify the file exists.",
                 "- Put only file-verified production facts in confirmed_from_code; put carrier/call-chain deductions in inferred_from_code; put missing source hops in not_found.",
                 "- Production code, mapper, client, SQL, and config evidence beats tests, docs, specs, and generated files.",
@@ -15687,6 +15696,15 @@ class SourceCodeQAService:
             "type": "OBJECT",
             "properties": {
                 "direct_answer": {"type": "STRING"},
+                "investigation_steps": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "candidate_evidence": string_array,
+                        "gap_verification": string_array,
+                        "certainty_split": string_array,
+                    },
+                    "propertyOrdering": ["candidate_evidence", "gap_verification", "certainty_split"],
+                },
                 "confirmed_from_code": string_array,
                 "inferred_from_code": string_array,
                 "not_found": string_array,
@@ -15706,7 +15724,16 @@ class SourceCodeQAService:
                 "confidence": {"type": "STRING", "enum": ["high", "medium", "low"]},
             },
             "required": ["direct_answer", "claims", "missing_evidence", "confidence"],
-            "propertyOrdering": ["direct_answer", "confirmed_from_code", "inferred_from_code", "not_found", "claims", "missing_evidence", "confidence"],
+            "propertyOrdering": [
+                "direct_answer",
+                "investigation_steps",
+                "confirmed_from_code",
+                "inferred_from_code",
+                "not_found",
+                "claims",
+                "missing_evidence",
+                "confidence",
+            ],
         }
 
     @staticmethod
@@ -15909,11 +15936,14 @@ class SourceCodeQAService:
             f"{retry_note}"
             "Answer requirements:\n"
             "- Return this JSON shape whenever possible: "
-            "{\"direct_answer\":\"...\",\"confirmed_from_code\":[\"...\"],\"inferred_from_code\":[\"...\"],"
+            "{\"direct_answer\":\"...\",\"investigation_steps\":{\"candidate_evidence\":[\"...\"],"
+            "\"gap_verification\":[\"...\"],\"certainty_split\":[\"...\"]},"
+            "\"confirmed_from_code\":[\"...\"],\"inferred_from_code\":[\"...\"],"
             "\"not_found\":[\"...\"],\"claims\":[{\"text\":\"...\",\"citations\":[\"S1\"]}],"
             "\"missing_evidence\":[],\"confidence\":\"high|medium|low\"}. "
             "If a short prose answer is more appropriate, still keep citation tags on concrete claims.\n"
             "- Start with the direct answer.\n"
+            "- Use investigation_steps to show the three-stage investigation at a compact level: candidate evidence checked, gap verification performed, and certainty split used.\n"
             "- Put production-code, mapper, client, SQL, route, config, and directly opened file facts in confirmed_from_code.\n"
             "- Put carrier DTOs, call-chain deductions, and relation hypotheses in inferred_from_code unless a raw snippet directly proves the claim.\n"
             "- Put absent repository/mapper/client/table hops, missing tests, and evidence-tier conflicts in not_found and missing_evidence.\n"
@@ -16000,7 +16030,15 @@ class SourceCodeQAService:
             self._append_fact_citation(fact, selected_matches)
             for fact in evidence_summary.get("field_population") or []
         ][:8]
-        missing_links = list(dict.fromkeys([*(quality_gate.get("missing") or []), *(structured_answer.get("missing_evidence") or [])]))
+        missing_links = list(
+            dict.fromkeys(
+                [
+                    *(quality_gate.get("missing") or []),
+                    *(structured_answer.get("not_found") or []),
+                    *(structured_answer.get("missing_evidence") or []),
+                ]
+            )
+        )
         blocked = bool(intent.get("data_source") and not confirmed_sources)
         weak_answer = any(phrase in str(answer or "").lower() for phrase in ANSWER_SELF_CHECK_WEAK_PHRASES)
         uncited_claims = claim_check.get("status") not in {None, "ok"}
@@ -16011,6 +16049,7 @@ class SourceCodeQAService:
             "data_carriers": data_carriers,
             "field_population": field_population,
             "missing_links": missing_links[:8],
+            "investigation_steps": structured_answer.get("investigation_steps") or {},
             "confirmed_from_code": list(dict.fromkeys([*(structured_answer.get("confirmed_from_code") or []), *confirmed_sources]))[:8],
             "inferred_from_code": list(dict.fromkeys([*(structured_answer.get("inferred_from_code") or []), *data_carriers, *field_population]))[:8],
             "not_found": list(dict.fromkeys([*(structured_answer.get("not_found") or []), *missing_links]))[:8],
@@ -16119,7 +16158,15 @@ class SourceCodeQAService:
         finish_reason: str | None = None,
     ) -> dict[str, Any]:
         intent = evidence_summary.get("intent") or self._question_intent(question)
-        missing_links = list(structured_answer.get("missing_evidence") or [])
+        missing_links = list(
+            dict.fromkeys(
+                [
+                    *(quality_gate.get("missing") or []),
+                    *(structured_answer.get("not_found") or []),
+                    *(structured_answer.get("missing_evidence") or []),
+                ]
+            )
+        )
         contract = {
             "intent": intent,
             "status": "model_answer",
@@ -16137,6 +16184,7 @@ class SourceCodeQAService:
                 for fact in evidence_summary.get("field_population") or []
             ][:8],
             "missing_links": missing_links[:8],
+            "investigation_steps": structured_answer.get("investigation_steps") or {},
             "confirmed_from_code": list(dict.fromkeys([
                 *(structured_answer.get("confirmed_from_code") or []),
                 *[
@@ -16321,6 +16369,7 @@ class SourceCodeQAService:
             ]
             return {
                 "direct_answer": text,
+                "investigation_steps": {},
                 "confirmed_from_code": [],
                 "inferred_from_code": [],
                 "not_found": [],
@@ -16338,8 +16387,15 @@ class SourceCodeQAService:
                 normalized_claims.append({"text": text_value, "citations": [f"S{item}" if item.isdigit() else item for item in citations if item]})
             else:
                 normalized_claims.append({"text": str(claim).strip(), "citations": []})
+        raw_investigation_steps = payload.get("investigation_steps") if isinstance(payload.get("investigation_steps"), dict) else {}
+        investigation_steps = {
+            key: [str(item) for item in raw_investigation_steps.get(key) or []]
+            for key in ("candidate_evidence", "gap_verification", "certainty_split")
+            if isinstance(raw_investigation_steps.get(key), list)
+        }
         return {
             "direct_answer": str(payload.get("direct_answer") or payload.get("answer") or text).strip(),
+            "investigation_steps": investigation_steps,
             "confirmed_from_code": [str(item) for item in payload.get("confirmed_from_code") or []] if isinstance(payload.get("confirmed_from_code"), list) else [],
             "inferred_from_code": [str(item) for item in payload.get("inferred_from_code") or []] if isinstance(payload.get("inferred_from_code"), list) else [],
             "not_found": [str(item) for item in payload.get("not_found") or []] if isinstance(payload.get("not_found"), list) else [],
