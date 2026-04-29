@@ -41,6 +41,7 @@
     GRC: 'Ops Risk',
   };
   const jiraPageSize = 10;
+  const taskCacheKey = 'team-dashboard:jira-tasks:v1';
 
   let initialConfig = (() => {
     try {
@@ -57,6 +58,61 @@
     if (!node) return;
     node.textContent = message || '';
     node.dataset.tone = tone;
+  };
+
+  const normalizeEmailList = (items) => (Array.isArray(items) ? items : [])
+    .map((item) => String(item || '').trim().toLowerCase())
+    .filter(Boolean)
+    .sort();
+
+  const emailSignature = (items) => normalizeEmailList(items).join('|');
+
+  const readTaskCache = () => {
+    try {
+      const payload = JSON.parse(window.localStorage.getItem(taskCacheKey) || '{}');
+      return payload && typeof payload === 'object' ? payload : {};
+    } catch (error) {
+      return {};
+    }
+  };
+
+  const writeTaskCache = (payload) => {
+    try {
+      window.localStorage.setItem(taskCacheKey, JSON.stringify(payload || {}));
+    } catch (error) {
+      // Browser storage can be disabled or full; Jira loading should still work.
+    }
+  };
+
+  const clearTaskCache = () => {
+    try {
+      window.localStorage.removeItem(taskCacheKey);
+    } catch (error) {
+      writeTaskCache({});
+    }
+  };
+
+  const cachedTeamFor = (teamKey, memberEmails) => {
+    const cache = readTaskCache();
+    const team = cache?.teams?.[teamKey];
+    if (!team || team.email_signature !== emailSignature(memberEmails)) return null;
+    return team;
+  };
+
+  const saveCachedTeam = (team) => {
+    if (!team?.team_key || !team.loaded || team.error) return;
+    const cache = readTaskCache();
+    const teams = cache.teams && typeof cache.teams === 'object' ? cache.teams : {};
+    teams[team.team_key] = {
+      ...team,
+      loading: false,
+      loaded: true,
+      error: '',
+      progress_text: '',
+      email_signature: emailSignature(team.member_emails || []),
+      cached_at: new Date().toISOString(),
+    };
+    writeTaskCache({ version: 1, updated_at: new Date().toISOString(), teams });
   };
 
   const setupTabs = () => {
@@ -333,16 +389,28 @@
       credentials: 'same-origin',
     });
     const payload = await readJson(response, 'Could not load Team Dashboard config.');
-    return Object.entries(payload.config?.teams || {}).map(([teamKey, team]) => ({
-      team_key: teamKey,
-      label: team.label || teamKey,
-      member_emails: Array.isArray(team.member_emails) ? team.member_emails : [],
-      under_prd: [],
-      pending_live: [],
-      progress_text: '',
-      loading: false,
-      loaded: false,
-    }));
+    return Object.entries(payload.config?.teams || {}).map(([teamKey, team]) => {
+      const memberEmails = Array.isArray(team.member_emails) ? team.member_emails : [];
+      const baseTeam = {
+        team_key: teamKey,
+        label: team.label || teamKey,
+        member_emails: memberEmails,
+        under_prd: [],
+        pending_live: [],
+        progress_text: '',
+        loading: false,
+        loaded: false,
+      };
+      const cached = cachedTeamFor(teamKey, memberEmails);
+      if (!cached) return baseTeam;
+      return {
+        ...baseTeam,
+        under_prd: Array.isArray(cached.under_prd) ? cached.under_prd : [],
+        pending_live: Array.isArray(cached.pending_live) ? cached.pending_live : [],
+        loaded: true,
+        cached_at: cached.cached_at || '',
+      };
+    });
   };
 
   const teamTaskUrl = (teamKey) => {
@@ -366,7 +434,12 @@
       taskTeams = await configuredTeams();
       renderTeams(taskTeams);
       updateTaskSummary(taskTeams);
-      setStatus(taskStatus, '', 'neutral');
+      const restored = taskTeams.filter((team) => team.loaded).length;
+      setStatus(
+        taskStatus,
+        restored ? `Restored last loaded Jira tasks for ${restored} team${restored === 1 ? '' : 's'}. Click Reload Jira to refresh.` : '',
+        'neutral',
+      );
     } catch (error) {
       setStatus(taskStatus, error.message || 'Could not load Team Dashboard config.', 'error');
       renderTeams([]);
@@ -406,6 +479,7 @@
         error: loadedTeam.error || '',
         progress_text: hadTeamError ? 'Failed' : 'Done',
       };
+      saveCachedTeam(taskTeams[index]);
       setStatus(
         taskStatus,
         hadTeamError ? `${currentTeam.label || currentTeam.team_key} updated with an error.` : `${currentTeam.label || currentTeam.team_key} Jira tasks loaded.`,
@@ -454,6 +528,7 @@
         if (textarea) textarea.value = (team.member_emails || []).join('\n');
       });
       initialConfig = payload.config || initialConfig;
+      clearTaskCache();
       setStatus(adminStatus, 'Team emails saved.', 'success');
     } catch (error) {
       setStatus(adminStatus, error.message || 'Could not save team emails.', 'error');
