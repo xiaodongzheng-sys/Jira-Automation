@@ -439,7 +439,13 @@ class BPMISDirectApiClient(BPMISClient):
                             "joinType": "and",
                             "subQueries": [
                                 {"typeId": [self.TASK_TYPE_ID]},
-                                {"reporter": user_ids},
+                                {
+                                    "joinType": "or",
+                                    "subQueries": [
+                                        {"reporter": user_ids},
+                                        {"jiraRegionalPmPicId": user_ids},
+                                    ],
+                                },
                             ],
                             "page": page,
                             "pageSize": page_size,
@@ -1439,26 +1445,15 @@ class BPMISDirectApiClient(BPMISClient):
     @staticmethod
     def _issue_creator_field_names() -> tuple[str, ...]:
         return (
-            "creator.email",
-            "creator.emailAddress",
-            "creator.mail",
-            "creator",
-            "creatorEmail",
             "reporter",
             "reporter.email",
             "reporter.emailAddress",
+            "reporter.mail",
+            "reporterEmail",
             "jiraRegionalPmPicId",
             "jiraRegionalPmPicId.email",
             "jiraRegionalPmPicId.emailAddress",
-            "regionalPmPicId",
-            "regionalPmPicId.email",
-            "regionalPmPicId.emailAddress",
-            "createdBy",
-            "createdBy.email",
-            "createdBy.emailAddress",
-            "creatorId",
-            "createdById",
-            "createUserId",
+            "jiraRegionalPmPicId.mail",
         )
 
     def _issue_requires_user_enrichment(self, row: dict[str, Any], email: str) -> bool:

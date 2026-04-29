@@ -64,14 +64,14 @@ class BPMISClientTests(unittest.TestCase):
                                     "id": 1,
                                     "jiraKey": "AF-1",
                                     "summary": "First task",
-                                    "creatorId": 101,
+                                    "reporter": {"id": 101},
                                     "parentIds": [{"id": 900}],
                                 },
                                 {
                                     "id": 2,
                                     "jiraKey": "AF-2",
                                     "summary": "Second task",
-                                    "creatorId": 202,
+                                    "jiraRegionalPmPicId": [{"id": 202}],
                                     "parentIds": [{"id": 900}],
                                 },
                             ]
@@ -1326,7 +1326,16 @@ class BPMISClientTests(unittest.TestCase):
                 search = json.loads((params or {}).get("search") or "{}")
                 calls.append(search)
                 self.assertEqual(search["subQueries"][0], {"typeId": [BPMISDirectApiClient.TASK_TYPE_ID]})
-                self.assertEqual(search["subQueries"][1], {"reporter": [101, 202]})
+                self.assertEqual(
+                    search["subQueries"][1],
+                    {
+                        "joinType": "or",
+                        "subQueries": [
+                            {"reporter": [101, 202]},
+                            {"jiraRegionalPmPicId": [101, 202]},
+                        ],
+                    },
+                )
                 if search["page"] == 1:
                     filler_rows = [
                         {
@@ -1363,14 +1372,15 @@ class BPMISClientTests(unittest.TestCase):
                 return {
                     "data": {
                         "rows": [
-                            {
-                                "id": 993,
-                                "jiraKey": "AF-993",
-                                "summary": "Pending task",
-                                "reporter": {"id": 202},
-                                "status": {"label": "Testing"},
-                                "fixVersionId": [{"fullName": "Planning_26Q3"}],
-                                "jiraPrdLink": [{"url": "https://docs/prd-2"}],
+                                {
+                                    "id": 993,
+                                    "jiraKey": "AF-993",
+                                    "summary": "Pending task",
+                                    "reporter": {"id": 999},
+                                    "jiraRegionalPmPicId": [{"id": 202}],
+                                    "status": {"label": "Testing"},
+                                    "fixVersionId": [{"fullName": "Planning_26Q3"}],
+                                    "jiraPrdLink": [{"url": "https://docs/prd-2"}],
                                 "parentIds": [{"id": 225160}],
                             }
                         ]
@@ -1430,7 +1440,7 @@ class BPMISClientTests(unittest.TestCase):
                                 "id": 1000 + index,
                                 "jiraKey": f"AF-{index}",
                                 "summary": f"Task {index}",
-                                "creator": {"id": 101},
+                                "jiraRegionalPmPicId": [{"id": 101}],
                                 "status": {"label": "Testing"},
                             }
                             for index in range(200)
