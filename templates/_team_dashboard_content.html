@@ -4,6 +4,10 @@
   data-save-url="{{ url_for('save_team_dashboard_members') }}"
   data-tasks-url="{{ url_for('team_dashboard_tasks') }}"
   data-key-project-url="{{ url_for('save_team_dashboard_key_project') }}"
+  data-monthly-report-template-url="{{ url_for('team_dashboard_monthly_report_template') }}"
+  data-monthly-report-template-save-url="{{ url_for('save_team_dashboard_monthly_report_template') }}"
+  data-monthly-report-draft-url="{{ url_for('team_dashboard_monthly_report_draft') }}"
+  data-monthly-report-send-url="{{ url_for('team_dashboard_monthly_report_send') }}"
   data-can-manage-key-projects="{{ 'true' if can_manage_team_dashboard else 'false' }}"
 >
   <div class="panel-head">
@@ -15,6 +19,7 @@
 
   <div class="workspace-tabs team-dashboard-tabs" role="tablist" aria-label="Team Dashboard sections">
     <button class="workspace-tab is-active" type="button" role="tab" aria-selected="true" data-team-dashboard-tab="tasks">Task List</button>
+    <button class="workspace-tab" type="button" role="tab" aria-selected="false" data-team-dashboard-tab="monthly-report">Monthly Report</button>
     {% if can_manage_team_dashboard %}
       <button class="workspace-tab" type="button" role="tab" aria-selected="false" data-team-dashboard-tab="admin">Team Admin</button>
     {% endif %}
@@ -29,6 +34,35 @@
     </div>
     <p class="productization-inline-status" data-team-dashboard-task-status></p>
     <div class="team-dashboard-team-list" data-team-dashboard-task-list></div>
+  </section>
+
+  <section data-team-dashboard-panel="monthly-report" hidden>
+    <div class="productization-section-head">
+      <div>
+        <h3>Monthly Report</h3>
+        <span data-team-dashboard-monthly-report-summary>Generate a draft from Key Projects, Jira, PRD, and the previous 30 days of SeaTalk history.</span>
+      </div>
+      <div class="button-row">
+        <button class="button button-primary" type="button" data-monthly-report-generate>Generate Monthly Report Draft</button>
+        <button class="button button-secondary" type="button" data-monthly-report-send disabled>Send Email</button>
+      </div>
+    </div>
+    <p class="productization-inline-status" data-monthly-report-status></p>
+    <div class="team-dashboard-monthly-report-grid">
+      <div class="field-group team-dashboard-monthly-report-editor">
+        <label for="team_dashboard_monthly_report_draft">Monthly Report Draft</label>
+        <textarea id="team_dashboard_monthly_report_draft" rows="22" spellcheck="true" data-monthly-report-draft></textarea>
+      </div>
+      <div class="team-dashboard-monthly-report-preview">
+        <div class="field-label-row">
+          <h4>Preview</h4>
+          <span data-monthly-report-recipient>xiaodong.zheng@npt.sg</span>
+        </div>
+        <div class="team-dashboard-review-markdown team-dashboard-monthly-report-preview-body" data-monthly-report-preview>
+          <p>Generate a draft to preview the email body.</p>
+        </div>
+      </div>
+    </div>
   </section>
 
   {% if can_manage_team_dashboard %}
@@ -59,6 +93,30 @@
           <button class="button" type="submit">Save Team Emails</button>
         </div>
         <p class="productization-inline-status" data-team-dashboard-admin-status></p>
+      </form>
+
+      <form method="post" action="{{ url_for('save_team_dashboard_monthly_report_template') }}" class="stack team-dashboard-monthly-report-template-form" data-monthly-report-template-form>
+        <div class="config-card config-card-wide">
+          <div class="field-label-row">
+            <h3>Monthly Report Template</h3>
+            <span class="field-badge">Team Admin</span>
+          </div>
+          <p class="card-help">The generator follows this template when drafting the Monthly Report.</p>
+          <div class="field-group">
+            <label for="team_dashboard_monthly_report_template">Template</label>
+            <textarea
+              id="team_dashboard_monthly_report_template"
+              rows="16"
+              spellcheck="true"
+              name="monthly_report_template"
+              data-monthly-report-template
+            >{{ team_dashboard_config.monthly_report_template }}</textarea>
+          </div>
+        </div>
+        <div class="button-row">
+          <button class="button" type="submit">Save Monthly Report Template</button>
+        </div>
+        <p class="productization-inline-status" data-monthly-report-template-status></p>
       </form>
     </section>
   {% endif %}

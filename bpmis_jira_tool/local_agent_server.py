@@ -21,6 +21,14 @@ from bpmis_jira_tool.config import Settings
 from bpmis_jira_tool.errors import ToolError
 from bpmis_jira_tool.local_agent_protocol import NONCE_HEADER, SIGNATURE_HEADER, TIMESTAMP_HEADER, verify_signature
 from bpmis_jira_tool.models import ProjectMatch
+from bpmis_jira_tool.monthly_report import (
+    DEFAULT_MONTHLY_REPORT_RECIPIENT,
+    MonthlyReportService,
+    monthly_report_subject,
+    normalize_monthly_report_template,
+    send_monthly_report_email,
+)
+from bpmis_jira_tool.gmail_sender import StoredGoogleCredentials
 from bpmis_jira_tool.seatalk_dashboard import SeaTalkDashboardService
 from bpmis_jira_tool.source_code_qa import SourceCodeQAService
 from bpmis_jira_tool.user_config import TEAM_PROFILE_DEFAULTS, WebConfigStore
@@ -240,6 +248,28 @@ def create_local_agent_app() -> Flask:
             )
         )
         return jsonify(result)
+
+    @app.post("/api/local-agent/team-dashboard/monthly-report/draft")
+    def team_dashboard_monthly_report_draft():
+        payload = request.get_json(silent=True) or {}
+        service = _build_monthly_report_service(settings)
+        result = service.generate_draft(
+            template=normalize_monthly_report_template(payload.get("template")),
+            team_payloads=[item for item in (payload.get("team_payloads") or []) if isinstance(item, dict)],
+        )
+        return jsonify(result)
+
+    @app.post("/api/local-agent/team-dashboard/monthly-report/send")
+    def team_dashboard_monthly_report_send():
+        payload = request.get_json(silent=True) or {}
+        result = send_monthly_report_email(
+            credential_store=_build_google_credential_store(settings),
+            owner_email=str(settings.gmail_seatalk_demo_owner_email or settings.seatalk_owner_email or "").strip().lower(),
+            recipient=str(payload.get("recipient") or DEFAULT_MONTHLY_REPORT_RECIPIENT).strip(),
+            subject=str(payload.get("subject") or "").strip() or monthly_report_subject(),
+            draft_markdown=str(payload.get("draft_markdown") or "").strip(),
+        )
+        return jsonify({"status": "ok", **asdict(result)})
 
     @app.post("/api/local-agent/source-code-qa/sessions/list")
     def source_code_qa_sessions_list():
@@ -1088,6 +1118,30 @@ def _build_prd_review_service(settings: Settings) -> PRDReviewService:
         confluence=confluence,
         settings=settings,
         workspace_root=Path(__file__).resolve().parent.parent,
+    )
+
+
+def _build_monthly_report_service(settings: Settings) -> MonthlyReportService:
+    store = BriefingStore(_data_root(settings) / "prd_briefing")
+    confluence = ConfluenceConnector(
+        base_url=settings.confluence_base_url,
+        email=settings.confluence_email,
+        api_token=settings.confluence_api_token,
+        bearer_token=settings.confluence_bearer_token,
+        store=store,
+    )
+    return MonthlyReportService(
+        settings=settings,
+        workspace_root=Path(__file__).resolve().parent.parent,
+        seatalk_service=_build_seatalk_service(settings),
+        confluence=confluence,
+    )
+
+
+def _build_google_credential_store(settings: Settings) -> StoredGoogleCredentials:
+    return StoredGoogleCredentials(
+        _data_root(settings) / "google" / "credentials.json",
+        encryption_key=settings.team_portal_config_encryption_key,
     )
 
 

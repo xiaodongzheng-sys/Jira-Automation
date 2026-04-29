@@ -13,6 +13,7 @@ import bpmis_jira_tool.web as web_module
 from bpmis_jira_tool.config import Settings
 from bpmis_jira_tool.errors import ToolError
 from bpmis_jira_tool.models import CreatedTicket
+from bpmis_jira_tool.monthly_report import MonthlyReportSendResult
 from bpmis_jira_tool.user_config import WebConfigStore
 from bpmis_jira_tool.web import (
     _build_team_profiles_for_display,
@@ -189,6 +190,43 @@ class _FakePRDReviewLocalAgentClient:
                 "result_markdown": "### Cached Summary",
                 "updated_at": "2026-04-28T00:00:00Z",
             },
+        }
+
+
+class _FakeMonthlyReportService:
+    def generate_draft(self, *, template, team_payloads):
+        return {
+            "status": "ok",
+            "draft_markdown": "## Monthly Report\n- Draft",
+            "generated_at": "2026-04-29T10:00:00+08:00",
+            "evidence_summary": {
+                "key_project_count": 1,
+                "jira_ticket_count": 1,
+            },
+        }
+
+
+class _FakeMonthlyReportLocalAgentClient(_FakePRDReviewLocalAgentClient):
+    def __init__(self):
+        self.draft_payload = None
+        self.send_payload = None
+
+    def team_dashboard_monthly_report_draft(self, payload):
+        self.draft_payload = payload
+        return {
+            "status": "ok",
+            "draft_markdown": "## Remote Monthly Report",
+            "generated_at": "2026-04-29T10:00:00+08:00",
+            "evidence_summary": {"key_project_count": 1, "jira_ticket_count": 1},
+        }
+
+    def team_dashboard_monthly_report_send(self, payload):
+        self.send_payload = payload
+        return {
+            "status": "sent",
+            "recipient": payload.get("recipient"),
+            "subject": payload.get("subject"),
+            "message_id": "remote-message",
         }
 
 
@@ -1009,6 +1047,7 @@ class WebPortalFeatureTests(unittest.TestCase):
             ["huixian.nah@npt.sg", "liye.ng@npt.sg", "mingming.yeo@npt.sg", "sophia.wangzj@npt.sg"],
         )
         self.assertEqual(config_payload["config"]["teams"]["GRC"]["member_emails"], ["sabrina.chan@npt.sg"])
+        self.assertIn("Monthly Report", config_payload["config"]["monthly_report_template"])
         self.assertEqual(save_response.status_code, 200)
         self.assertEqual(sophia_config_response.status_code, 200)
         self.assertEqual(sophia_save_response.status_code, 403)
@@ -1052,6 +1091,46 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertEqual(payload["config"]["teams"]["AF"]["member_emails"], list(web_module.TEAM_DASHBOARD_DEFAULT_MEMBER_EMAILS_BY_TEAM["AF"]))
         self.assertEqual(payload["config"]["teams"]["CRMS"]["member_emails"], list(web_module.TEAM_DASHBOARD_DEFAULT_MEMBER_EMAILS_BY_TEAM["CRMS"]))
         self.assertEqual(payload["config"]["teams"]["GRC"]["member_emails"], list(web_module.TEAM_DASHBOARD_DEFAULT_MEMBER_EMAILS_BY_TEAM["GRC"]))
+        self.assertIn("Monthly Report", payload["config"]["monthly_report_template"])
+
+    def test_team_dashboard_monthly_report_template_save_is_admin_only(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_ALLOWED_EMAILS": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
+            },
+            clear=True,
+        ):
+            app = create_app()
+            app.testing = True
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["google_profile"] = {"email": "sophia.wangzj@npt.sg", "name": "Sophia"}
+                    session["google_credentials"] = {"token": "x"}
+                readonly_response = client.post(
+                    "/admin/team-dashboard/monthly-report-template",
+                    json={"template": "# Changed"},
+                )
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong"}
+                    session["google_credentials"] = {"token": "x"}
+                save_response = client.post(
+                    "/admin/team-dashboard/monthly-report-template",
+                    json={"template": "# Custom Monthly Report\n- Focus"},
+                )
+                template_response = client.get("/api/team-dashboard/monthly-report/template")
+
+        self.assertEqual(readonly_response.status_code, 403)
+        self.assertEqual(save_response.status_code, 200)
+        self.assertEqual(save_response.get_json()["template"], "# Custom Monthly Report\n- Focus")
+        self.assertEqual(template_response.status_code, 200)
+        self.assertEqual(template_response.get_json()["template"], "# Custom Monthly Report\n- Focus")
 
     def test_team_dashboard_key_project_defaults_and_manual_overrides_survive_reload(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
@@ -2989,6 +3068,100 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertEqual(payload["status"], "ok")
         self.assertEqual(payload["review"]["jira_id"], "AF-1")
         self.assertIn("### Review", payload["review"]["result_markdown"])
+
+    @patch("bpmis_jira_tool.web._load_all_team_dashboard_task_payloads", return_value=[{"team_key": "AF"}])
+    @patch("bpmis_jira_tool.web._build_monthly_report_service", return_value=_FakeMonthlyReportService())
+    def test_team_dashboard_monthly_report_draft_returns_portal_result(self, _mock_service, _mock_payloads):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+            },
+            clear=False,
+        ):
+            app = create_app()
+            app.testing = True
+            app.config["TEAM_DASHBOARD_CONFIG_STORE"].save({"monthly_report_template": "# Template"})
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong Zheng"}
+                    session["google_credentials"] = {"token": "x"}
+                response = client.post("/api/team-dashboard/monthly-report/draft", json={})
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["status"], "ok")
+        self.assertIn("Monthly Report", payload["draft_markdown"])
+        self.assertEqual(payload["evidence_summary"]["key_project_count"], 1)
+
+    @patch("bpmis_jira_tool.web.send_monthly_report_email")
+    def test_team_dashboard_monthly_report_send_sends_edited_draft(self, mock_send):
+        mock_send.return_value = MonthlyReportSendResult(
+            status="sent",
+            recipient="xiaodong.zheng@npt.sg",
+            subject="Monthly Report - 2026-04",
+            message_id="msg-1",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+            },
+            clear=False,
+        ):
+            app = create_app()
+            app.testing = True
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong Zheng"}
+                    session["google_credentials"] = {"token": "x"}
+                response = client.post(
+                    "/api/team-dashboard/monthly-report/send",
+                    json={
+                        "draft_markdown": "edited draft",
+                        "subject": "Monthly Report - 2026-04",
+                        "recipient": "xiaodong.zheng@npt.sg",
+                    },
+                )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["message_id"], "msg-1")
+        self.assertEqual(mock_send.call_args.kwargs["draft_markdown"], "edited draft")
+
+    @patch("bpmis_jira_tool.web._local_agent_seatalk_enabled", return_value=True)
+    @patch("bpmis_jira_tool.web._load_all_team_dashboard_task_payloads", return_value=[{"team_key": "AF"}])
+    def test_team_dashboard_monthly_report_draft_can_route_to_local_agent(self, _mock_payloads, _mock_enabled):
+        fake_client = _FakeMonthlyReportLocalAgentClient()
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+            },
+            clear=False,
+        ), patch("bpmis_jira_tool.web._build_local_agent_client", return_value=fake_client):
+            app = create_app()
+            app.testing = True
+            app.config["TEAM_DASHBOARD_CONFIG_STORE"].save({"monthly_report_template": "# Template"})
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong Zheng"}
+                    session["google_credentials"] = {"token": "x"}
+                response = client.post("/api/team-dashboard/monthly-report/draft", json={})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["draft_markdown"], "## Remote Monthly Report")
+        self.assertEqual(fake_client.draft_payload["template"], "# Template")
+        self.assertEqual(fake_client.draft_payload["team_payloads"], [{"team_key": "AF"}])
 
     @patch("bpmis_jira_tool.web._build_prd_review_service", return_value=_FakePRDReviewService())
     def test_team_dashboard_prd_summary_returns_portal_result(self, _mock_service):

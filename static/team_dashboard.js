@@ -35,6 +35,15 @@
   const taskList = root.querySelector('[data-team-dashboard-task-list]');
   const adminForm = root.querySelector('[data-team-dashboard-admin-form]');
   const adminStatus = root.querySelector('[data-team-dashboard-admin-status]');
+  const monthlyReportStatus = root.querySelector('[data-monthly-report-status]');
+  const monthlyReportGenerateButton = root.querySelector('[data-monthly-report-generate]');
+  const monthlyReportSendButton = root.querySelector('[data-monthly-report-send]');
+  const monthlyReportDraft = root.querySelector('[data-monthly-report-draft]');
+  const monthlyReportPreview = root.querySelector('[data-monthly-report-preview]');
+  const monthlyReportRecipient = root.querySelector('[data-monthly-report-recipient]');
+  const monthlyReportTemplateForm = root.querySelector('[data-monthly-report-template-form]');
+  const monthlyReportTemplate = root.querySelector('[data-monthly-report-template]');
+  const monthlyReportTemplateStatus = root.querySelector('[data-monthly-report-template-status]');
   const canManageKeyProjects = root.dataset.canManageKeyProjects === 'true';
   const teamLabels = {
     AF: 'Anti-fraud',
@@ -55,6 +64,8 @@
   let taskTeams = [];
   let activeTaskTeamKey = 'AF';
   let keyProjectOnly = false;
+  let monthlyReportSubject = 'Monthly Report';
+  let monthlyReportLoaded = false;
   const pmFilterState = {};
   const expandedPanels = {};
   const jiraPageState = {};
@@ -158,6 +169,9 @@
       panels.forEach((panel) => {
         panel.hidden = panel.dataset.teamDashboardPanel !== name;
       });
+      if (name === 'monthly-report') {
+        loadMonthlyReportTemplate();
+      }
     };
     triggers.forEach((trigger) => {
       trigger.addEventListener('click', () => activate(trigger.dataset.teamDashboardTab || 'tasks'));
@@ -707,9 +721,123 @@
     }
   };
 
+  const updateMonthlyReportPreview = () => {
+    if (!monthlyReportDraft || !monthlyReportPreview) return;
+    const value = monthlyReportDraft.value || '';
+    monthlyReportPreview.innerHTML = value.trim()
+      ? renderMarkdown(value)
+      : '<p>Generate a draft to preview the email body.</p>';
+    if (monthlyReportSendButton) {
+      monthlyReportSendButton.disabled = !value.trim();
+    }
+  };
+
+  const loadMonthlyReportTemplate = async () => {
+    if (monthlyReportLoaded) return;
+    monthlyReportLoaded = true;
+    try {
+      const response = await fetch(root.dataset.monthlyReportTemplateUrl || '/api/team-dashboard/monthly-report/template', {
+        headers: { Accept: 'application/json' },
+        credentials: 'same-origin',
+      });
+      const payload = await readJson(response, 'Could not load Monthly Report template.');
+      monthlyReportSubject = payload.subject || monthlyReportSubject;
+      if (monthlyReportTemplate && !monthlyReportTemplate.value.trim()) {
+        monthlyReportTemplate.value = payload.template || '';
+      }
+      if (monthlyReportRecipient) {
+        monthlyReportRecipient.textContent = payload.recipient || 'xiaodong.zheng@npt.sg';
+      }
+    } catch (error) {
+      setStatus(monthlyReportStatus, error.message || 'Could not load Monthly Report template.', 'error');
+    }
+  };
+
+  const generateMonthlyReport = async () => {
+    if (!monthlyReportGenerateButton || !monthlyReportDraft) return;
+    monthlyReportGenerateButton.disabled = true;
+    monthlyReportGenerateButton.textContent = 'Generating...';
+    setStatus(monthlyReportStatus, 'Generating Monthly Report draft from SeaTalk, Key Projects, Jira, and PRD content...', 'neutral');
+    try {
+      const response = await fetch(root.dataset.monthlyReportDraftUrl || '/api/team-dashboard/monthly-report/draft', {
+        method: 'POST',
+        headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({}),
+      });
+      const payload = await readJson(response, 'Could not generate Monthly Report draft.');
+      monthlyReportDraft.value = payload.draft_markdown || '';
+      updateMonthlyReportPreview();
+      const evidence = payload.evidence_summary || {};
+      const projectCount = Number(evidence.key_project_count || 0);
+      const ticketCount = Number(evidence.jira_ticket_count || 0);
+      setStatus(monthlyReportStatus, `Draft generated from ${projectCount} Key Project${projectCount === 1 ? '' : 's'} and ${ticketCount} Jira ticket${ticketCount === 1 ? '' : 's'}.`, 'success');
+    } catch (error) {
+      setStatus(monthlyReportStatus, error.message || 'Could not generate Monthly Report draft.', 'error');
+    } finally {
+      monthlyReportGenerateButton.disabled = false;
+      monthlyReportGenerateButton.textContent = 'Generate Monthly Report Draft';
+    }
+  };
+
+  const sendMonthlyReport = async () => {
+    if (!monthlyReportSendButton || !monthlyReportDraft) return;
+    const draft = monthlyReportDraft.value.trim();
+    if (!draft) {
+      setStatus(monthlyReportStatus, 'Monthly Report draft is empty.', 'error');
+      return;
+    }
+    monthlyReportSendButton.disabled = true;
+    monthlyReportSendButton.textContent = 'Sending...';
+    setStatus(monthlyReportStatus, 'Sending Monthly Report email...', 'neutral');
+    try {
+      const response = await fetch(root.dataset.monthlyReportSendUrl || '/api/team-dashboard/monthly-report/send', {
+        method: 'POST',
+        headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({
+          draft_markdown: draft,
+          subject: monthlyReportSubject,
+          recipient: monthlyReportRecipient?.textContent || 'xiaodong.zheng@npt.sg',
+        }),
+      });
+      const payload = await readJson(response, 'Could not send Monthly Report email.');
+      setStatus(monthlyReportStatus, `Monthly Report sent to ${payload.recipient || 'xiaodong.zheng@npt.sg'}.`, 'success');
+    } catch (error) {
+      setStatus(monthlyReportStatus, error.message || 'Could not send Monthly Report email.', 'error');
+    } finally {
+      monthlyReportSendButton.textContent = 'Send Email';
+      monthlyReportSendButton.disabled = !monthlyReportDraft.value.trim();
+    }
+  };
+
+  const saveMonthlyReportTemplate = async (event) => {
+    event.preventDefault();
+    if (!monthlyReportTemplate) return;
+    setStatus(monthlyReportTemplateStatus, 'Saving Monthly Report template...', 'neutral');
+    try {
+      const response = await fetch(root.dataset.monthlyReportTemplateSaveUrl || '/admin/team-dashboard/monthly-report-template', {
+        method: 'POST',
+        headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ template: monthlyReportTemplate.value || '' }),
+      });
+      const payload = await readJson(response, 'Could not save Monthly Report template.');
+      monthlyReportTemplate.value = payload.template || monthlyReportTemplate.value;
+      monthlyReportLoaded = false;
+      setStatus(monthlyReportTemplateStatus, 'Monthly Report template saved.', 'success');
+    } catch (error) {
+      setStatus(monthlyReportTemplateStatus, error.message || 'Could not save Monthly Report template.', 'error');
+    }
+  };
+
   setupTabs();
   loadConfiguredTeams();
   adminForm?.addEventListener('submit', saveMembers);
+  monthlyReportDraft?.addEventListener('input', updateMonthlyReportPreview);
+  monthlyReportGenerateButton?.addEventListener('click', generateMonthlyReport);
+  monthlyReportSendButton?.addEventListener('click', sendMonthlyReport);
+  monthlyReportTemplateForm?.addEventListener('submit', saveMonthlyReportTemplate);
   taskList?.addEventListener('click', (event) => {
     const trackButton = event.target.closest('[data-team-dashboard-track]');
     if (trackButton) {

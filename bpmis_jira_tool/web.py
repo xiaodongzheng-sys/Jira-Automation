@@ -54,6 +54,14 @@ from bpmis_jira_tool.local_agent_client import (
 )
 from bpmis_jira_tool.gmail_dashboard import GMAIL_READONLY_SCOPE, GmailDashboardService
 from bpmis_jira_tool.gmail_sender import StoredGoogleCredentials
+from bpmis_jira_tool.monthly_report import (
+    DEFAULT_MONTHLY_REPORT_RECIPIENT,
+    DEFAULT_MONTHLY_REPORT_TEMPLATE,
+    MonthlyReportService,
+    monthly_report_subject,
+    normalize_monthly_report_template,
+    send_monthly_report_email,
+)
 from bpmis_jira_tool.seatalk_dashboard import SeaTalkDashboardService
 from bpmis_jira_tool.google_sheets import GoogleSheetsService
 from bpmis_jira_tool.bpmis_projects import BPMISProjectStore, PortalJiraCreationService, PortalProjectSyncService
@@ -354,6 +362,7 @@ class TeamDashboardConfigStore:
                 for team_key, label in TEAM_DASHBOARD_TEAMS.items()
             },
             "key_project_overrides": {},
+            "monthly_report_template": DEFAULT_MONTHLY_REPORT_TEMPLATE,
         }
 
     def normalize_config(self, config: dict[str, Any]) -> dict[str, Any]:
@@ -361,6 +370,7 @@ class TeamDashboardConfigStore:
         raw_teams = raw_teams if isinstance(raw_teams, dict) else {}
         raw_key_project_overrides = config.get("key_project_overrides") if isinstance(config, dict) else {}
         raw_key_project_overrides = raw_key_project_overrides if isinstance(raw_key_project_overrides, dict) else {}
+        raw_monthly_report_template = config.get("monthly_report_template") if isinstance(config, dict) else ""
         default = self.default_config()
         normalized_teams: dict[str, dict[str, Any]] = {}
         for team_key, label in TEAM_DASHBOARD_TEAMS.items():
@@ -385,7 +395,11 @@ class TeamDashboardConfigStore:
                 "updated_by": str(raw_override.get("updated_by") or "").strip().lower(),
                 "updated_at": str(raw_override.get("updated_at") or "").strip(),
             }
-        return {"teams": normalized_teams, "key_project_overrides": normalized_key_project_overrides}
+        return {
+            "teams": normalized_teams,
+            "key_project_overrides": normalized_key_project_overrides,
+            "monthly_report_template": normalize_monthly_report_template(raw_monthly_report_template),
+        }
 
     def _ensure_db(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2273,7 +2287,9 @@ def create_app() -> Flask:
         access_gate = _require_source_code_qa_manage_access(settings, api=True)
         if access_gate is not None:
             return access_gate
-        payload = request.get_json(silent=True) or {}
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            payload = {}
         try:
             result = _build_source_code_qa_service().save_mapping(
                 pm_team=str(payload.get("pm_team") or ""),
@@ -3458,6 +3474,7 @@ def create_app() -> Flask:
         existing_config = store.load()
         if isinstance(existing_config.get("key_project_overrides"), dict):
             payload["key_project_overrides"] = existing_config["key_project_overrides"]
+        payload["monthly_report_template"] = existing_config.get("monthly_report_template") or DEFAULT_MONTHLY_REPORT_TEMPLATE
         saved = store.save(payload)
         _log_portal_event(
             "team_dashboard_members_save_success",
@@ -3474,6 +3491,46 @@ def create_app() -> Flask:
             ),
         )
         return jsonify({"status": "ok", "config": saved})
+
+    @app.get("/api/team-dashboard/monthly-report/template")
+    def team_dashboard_monthly_report_template():
+        access_gate = _require_team_dashboard_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        config = _get_team_dashboard_config_store().load()
+        return jsonify(
+            {
+                "status": "ok",
+                "template": normalize_monthly_report_template(config.get("monthly_report_template")),
+                "subject": monthly_report_subject(),
+                "recipient": DEFAULT_MONTHLY_REPORT_RECIPIENT,
+            }
+        )
+
+    @app.post("/admin/team-dashboard/monthly-report-template")
+    def save_team_dashboard_monthly_report_template():
+        access_gate = _require_team_dashboard_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        user_identity = _get_user_identity(settings)
+        if not _can_manage_team_dashboard(user_identity):
+            return jsonify({"status": "error", "message": "Team Dashboard admin access is restricted."}), HTTPStatus.FORBIDDEN
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            payload = {"template": request.form.get("monthly_report_template", "")}
+        store = _get_team_dashboard_config_store()
+        config = store.load()
+        config["monthly_report_template"] = normalize_monthly_report_template(payload.get("template"))
+        saved = store.save(config)
+        _log_portal_event(
+            "team_dashboard_monthly_report_template_save_success",
+            **_build_request_log_context(
+                settings,
+                user_identity=user_identity,
+                extra={"template_chars": len(str(saved.get("monthly_report_template") or ""))},
+            ),
+        )
+        return jsonify({"status": "ok", "template": saved.get("monthly_report_template") or DEFAULT_MONTHLY_REPORT_TEMPLATE})
 
     @app.get("/api/team-dashboard/tasks")
     def team_dashboard_tasks():
@@ -3624,6 +3681,120 @@ def create_app() -> Flask:
                 "key_project_source": effective.get("key_project_source"),
             }
         )
+
+    @app.post("/api/team-dashboard/monthly-report/draft")
+    def team_dashboard_monthly_report_draft():
+        access_gate = _require_team_dashboard_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        user_identity = _get_user_identity(settings)
+        try:
+            config = _get_team_dashboard_config_store().load()
+            team_payloads = _load_all_team_dashboard_task_payloads(settings, config)
+            request_payload = {
+                "template": normalize_monthly_report_template(config.get("monthly_report_template")),
+                "team_payloads": team_payloads,
+            }
+            if _local_agent_seatalk_enabled(settings):
+                data = _build_local_agent_client(settings).team_dashboard_monthly_report_draft(request_payload)
+            else:
+                data = _build_monthly_report_service(settings).generate_draft(**request_payload)
+            _log_portal_event(
+                "team_dashboard_monthly_report_draft_success",
+                **_build_request_log_context(
+                    settings,
+                    user_identity=user_identity,
+                    extra=data.get("evidence_summary") if isinstance(data.get("evidence_summary"), dict) else {},
+                ),
+            )
+            return jsonify(data)
+        except ToolError as error:
+            error_details = _classify_portal_error(error)
+            _log_portal_event(
+                "team_dashboard_monthly_report_draft_tool_error",
+                level=logging.WARNING,
+                **_build_request_log_context(settings, user_identity=user_identity, extra=error_details),
+            )
+            return jsonify({"status": "error", "message": str(error), **error_details}), HTTPStatus.BAD_REQUEST
+        except Exception as error:  # noqa: BLE001
+            _log_portal_event(
+                "team_dashboard_monthly_report_draft_unexpected_error",
+                level=logging.ERROR,
+                **_build_request_log_context(settings, user_identity=user_identity, extra=_classify_portal_error(error)),
+            )
+            current_app.logger.exception("Team Dashboard Monthly Report draft failed.")
+            return (
+                jsonify(
+                    {
+                        "status": "error",
+                        "message": "Monthly Report draft generation failed unexpectedly. Please retry or share the request ID.",
+                        **_classify_portal_error(error),
+                    }
+                ),
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+
+    @app.post("/api/team-dashboard/monthly-report/send")
+    def team_dashboard_monthly_report_send():
+        access_gate = _require_team_dashboard_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        payload = request.get_json(silent=True) or {}
+        draft_markdown = str(payload.get("draft_markdown") or "").strip()
+        subject = str(payload.get("subject") or "").strip() or monthly_report_subject()
+        recipient = str(payload.get("recipient") or "").strip() or DEFAULT_MONTHLY_REPORT_RECIPIENT
+        user_identity = _get_user_identity(settings)
+        try:
+            send_payload = {
+                "draft_markdown": draft_markdown,
+                "subject": subject,
+                "recipient": recipient,
+            }
+            if _local_agent_seatalk_enabled(settings):
+                data = _build_local_agent_client(settings).team_dashboard_monthly_report_send(send_payload)
+            else:
+                result = send_monthly_report_email(
+                    credential_store=current_app.config["GOOGLE_CREDENTIAL_STORE"],
+                    owner_email=str(settings.gmail_seatalk_demo_owner_email or settings.seatalk_owner_email or "").strip().lower(),
+                    recipient=recipient,
+                    subject=subject,
+                    draft_markdown=draft_markdown,
+                )
+                data = asdict(result)
+            _log_portal_event(
+                "team_dashboard_monthly_report_send_success",
+                **_build_request_log_context(
+                    settings,
+                    user_identity=user_identity,
+                    extra={"recipient": recipient, "subject": subject, "message_id": str(data.get("message_id") or "")},
+                ),
+            )
+            return jsonify({"status": "ok", **data})
+        except ToolError as error:
+            error_details = _classify_portal_error(error)
+            _log_portal_event(
+                "team_dashboard_monthly_report_send_tool_error",
+                level=logging.WARNING,
+                **_build_request_log_context(settings, user_identity=user_identity, extra=error_details),
+            )
+            return jsonify({"status": "error", "message": str(error), **error_details}), HTTPStatus.BAD_REQUEST
+        except Exception as error:  # noqa: BLE001
+            _log_portal_event(
+                "team_dashboard_monthly_report_send_unexpected_error",
+                level=logging.ERROR,
+                **_build_request_log_context(settings, user_identity=user_identity, extra=_classify_portal_error(error)),
+            )
+            current_app.logger.exception("Team Dashboard Monthly Report send failed.")
+            return (
+                jsonify(
+                    {
+                        "status": "error",
+                        "message": "Monthly Report email failed unexpectedly. Please retry or share the request ID.",
+                        **_classify_portal_error(error),
+                    }
+                ),
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
 
     @app.post("/api/team-dashboard/prd-review")
     def team_dashboard_prd_review():
@@ -4521,6 +4692,23 @@ def _build_prd_review_service(settings: Settings) -> PRDReviewService:
         confluence=confluence,
         settings=settings,
         workspace_root=PROJECT_ROOT,
+    )
+
+
+def _build_monthly_report_service(settings: Settings) -> MonthlyReportService:
+    store: BriefingStore = current_app.config["PRD_BRIEFING_STORE"]
+    confluence = ConfluenceConnector(
+        base_url=settings.confluence_base_url,
+        email=settings.confluence_email,
+        api_token=settings.confluence_api_token,
+        bearer_token=settings.confluence_bearer_token,
+        store=store,
+    )
+    return MonthlyReportService(
+        settings=settings,
+        workspace_root=PROJECT_ROOT,
+        seatalk_service=_build_seatalk_dashboard_service(settings),
+        confluence=confluence,
     )
 
 
@@ -5786,6 +5974,33 @@ def _team_dashboard_fetch_stats(bpmis_client: Any) -> dict[str, int]:
     }
 
 
+def _load_all_team_dashboard_task_payloads(settings: Settings, config: dict[str, Any]) -> list[dict[str, Any]]:
+    key_project_overrides = config.get("key_project_overrides") if isinstance(config.get("key_project_overrides"), dict) else {}
+    bpmis_client = _build_bpmis_client_for_current_user(settings)
+    team_payloads: list[dict[str, Any]] = []
+    for team_key, label in TEAM_DASHBOARD_TEAMS.items():
+        team_config = (config.get("teams") or {}).get(team_key) or {}
+        emails = _normalize_team_dashboard_emails(team_config.get("member_emails") or [])
+        tasks = bpmis_client.list_jira_tasks_created_by_emails(
+            emails,
+            max_pages=_team_dashboard_jira_max_pages(),
+            enrich_missing_parent=False,
+            release_after=_team_dashboard_monthly_report_jira_release_after(),
+        )
+        biz_projects = _team_dashboard_biz_projects_for_emails(bpmis_client, emails)
+        team_payload = _build_team_dashboard_task_group(
+            team_key,
+            label,
+            emails,
+            tasks,
+            biz_projects,
+            key_project_overrides=key_project_overrides,
+        )
+        _backfill_team_dashboard_empty_project_jira_tasks(bpmis_client, team_payload)
+        team_payloads.append(team_payload)
+    return team_payloads
+
+
 def _backfill_team_dashboard_empty_project_jira_tasks(bpmis_client: Any, team_payload: dict[str, Any]) -> None:
     for section_key in ("under_prd", "pending_live"):
         projects = team_payload.get(section_key)
@@ -5881,6 +6096,13 @@ def _team_dashboard_jira_release_after() -> str:
     return time.strftime("%Y-%m-%d", time.localtime())
 
 
+def _team_dashboard_monthly_report_jira_release_after() -> str:
+    configured = str(os.getenv("TEAM_DASHBOARD_MONTHLY_REPORT_JIRA_RELEASE_AFTER") or "").strip()
+    if configured:
+        return configured
+    return time.strftime("%Y-%m-%d", time.localtime(time.time() - 60 * 60 * 24 * 45))
+
+
 def _normalize_team_dashboard_task(task: dict[str, Any]) -> dict[str, Any]:
     jira_id = str(task.get("jira_id") or task.get("ticket_key") or "").strip()
     issue_id = str(task.get("issue_id") or "").strip()
@@ -5901,6 +6123,7 @@ def _normalize_team_dashboard_task(task: dict[str, Any]) -> dict[str, Any]:
         "created_at": str(task.get("created_at") or task.get("created") or "").strip(),
         "release_date": str(task.get("release_date") or task.get("release") or "").strip(),
         "version": str(task.get("version") or task.get("fix_version_name") or "").strip(),
+        "description": str(task.get("description") or task.get("desc") or task.get("jiraDescription") or "").strip(),
         "prd_links": prd_links,
         "parent_project": _normalize_team_dashboard_project(task.get("parent_project") if isinstance(task.get("parent_project"), dict) else {}),
     }

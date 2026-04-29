@@ -6745,6 +6745,42 @@ select:focus {
   padding-left: 20px;
 }
 
+.team-dashboard-monthly-report-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(320px, 0.8fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.team-dashboard-monthly-report-editor textarea,
+.team-dashboard-monthly-report-template-form textarea {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  line-height: 1.5;
+}
+
+.team-dashboard-monthly-report-preview {
+  min-height: 28rem;
+  padding: 16px;
+  border: 1px solid #dbe5f1;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.team-dashboard-monthly-report-preview-body {
+  max-height: 42rem;
+  overflow: auto;
+}
+
+.team-dashboard-monthly-report-template-form {
+  margin-top: 20px;
+}
+
+@media (max-width: 980px) {
+  .team-dashboard-monthly-report-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 .team-dashboard-review-loading {
   color: #667085;
 }

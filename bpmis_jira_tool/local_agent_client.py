@@ -147,6 +147,14 @@ class LocalAgentClient:
         result = self._request("POST", "/api/local-agent/prd-summary", payload)
         return result if isinstance(result, dict) else {}
 
+    def team_dashboard_monthly_report_draft(self, payload: dict[str, Any]) -> dict[str, Any]:
+        result = self._request("POST", "/api/local-agent/team-dashboard/monthly-report/draft", payload)
+        return result if isinstance(result, dict) else {}
+
+    def team_dashboard_monthly_report_send(self, payload: dict[str, Any]) -> dict[str, Any]:
+        result = self._request("POST", "/api/local-agent/team-dashboard/monthly-report/send", payload)
+        return result if isinstance(result, dict) else {}
+
     def seatalk_overview(self) -> dict[str, Any]:
         return self._request("POST", "/api/local-agent/seatalk/overview", {})
 
