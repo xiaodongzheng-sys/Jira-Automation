@@ -109,7 +109,15 @@ class BPMISDirectApiClient(BPMISClient):
     TASK_TYPE_ID = 4
     SUPPORTED_COUNTRIES_ALL_VALUE = 49007
     JIRA_BROWSE_BASE_URL = "https://jira.shopee.io/browse/"
-    SYNC_BIZ_PROJECT_STATUS_IDS = [22, 4, 23, 10, 11, 12]
+    SYNC_BIZ_PROJECT_STATUS_IDS = [4, 23, 10, 11, 12]
+    TEAM_DASHBOARD_BIZ_PROJECT_STATUS_NAMES = {
+        "pending review",
+        "confirmed",
+        "developing",
+        "testing",
+        "uat",
+    }
+    TEAM_DASHBOARD_BIZ_PROJECT_STATUS_ID_VALUES = {str(status_id) for status_id in SYNC_BIZ_PROJECT_STATUS_IDS}
     TASK_TYPE_PREFIX = {
         "feature": "[Feature]",
         "tech": "[Tech]",
@@ -261,15 +269,24 @@ class BPMISDirectApiClient(BPMISClient):
             issue_id = str(row.get("id") or "").strip()
             if not issue_id or issue_id in deduped:
                 continue
-            summary = str(row.get("summary") or "").strip()
-            market = self._extract_market_label(row.get("marketId"))
+            if not self._is_team_dashboard_biz_project_status_allowed(row):
+                continue
+            project = self._normalize_team_dashboard_parent_project(row, fallback_id=issue_id)
+            if self._team_dashboard_project_requires_enrichment(project):
+                detail = self._get_parent_issue_detail(issue_id)
+                if detail:
+                    row = self._merge_issue_payloads(row, detail)
+                    if not self._is_team_dashboard_biz_project_status_allowed(row):
+                        continue
+                    project = self._normalize_team_dashboard_parent_project(row, fallback_id=issue_id)
             deduped[issue_id] = {
                 "issue_id": issue_id,
-                "bpmis_id": issue_id,
-                "project_name": summary,
-                "market": market,
-                "priority": self._issue_first_text(row, "bizPriorityId", "bizPriority", "priority", "priorityId"),
-                "regional_pm_pic": self._issue_first_person(row, "regionalPmPicId", "jiraRegionalPmPicId", "regionalPmPic", "pmPic"),
+                "bpmis_id": str(project.get("bpmis_id") or issue_id),
+                "project_name": str(project.get("project_name") or ""),
+                "market": str(project.get("market") or ""),
+                "priority": str(project.get("priority") or ""),
+                "regional_pm_pic": str(project.get("regional_pm_pic") or ""),
+                "status": self._team_dashboard_biz_project_status_label(row),
             }
         return list(deduped.values())
 
@@ -1687,8 +1704,38 @@ class BPMISDirectApiClient(BPMISClient):
             "project_name": self._issue_first_text(row, "summary", "title", "projectName", "name"),
             "market": self._issue_first_text(row, "marketId", "market", "country"),
             "priority": self._issue_first_text(row, "bizPriorityId", "bizPriority", "priority", "priorityId"),
-            "regional_pm_pic": self._issue_first_person(row, "regionalPmPicId", "jiraRegionalPmPicId", "regionalPmPic", "pmPic"),
+            "regional_pm_pic": self._issue_first_person(
+                row,
+                "regionalPmPicId",
+                "jiraRegionalPmPicId",
+                "regionalPmPic",
+                "pmPic",
+                "involvedPM",
+                "involvedPm",
+                "involvedPMId",
+            ),
         }
+
+    def _team_dashboard_project_requires_enrichment(self, project: dict[str, Any]) -> bool:
+        return not (
+            str(project.get("project_name") or "").strip()
+            and str(project.get("market") or "").strip()
+            and str(project.get("priority") or "").strip()
+            and str(project.get("regional_pm_pic") or "").strip()
+        )
+
+    def _team_dashboard_biz_project_status_label(self, row: dict[str, Any]) -> str:
+        return self._issue_first_text(row, "statusId", "status", "statusName", "issueStatus")
+
+    def _is_team_dashboard_biz_project_status_allowed(self, row: dict[str, Any]) -> bool:
+        status = self._team_dashboard_biz_project_status_label(row)
+        if not status:
+            return True
+        normalized_status = status.strip().lower()
+        return (
+            normalized_status in self.TEAM_DASHBOARD_BIZ_PROJECT_STATUS_NAMES
+            or normalized_status in self.TEAM_DASHBOARD_BIZ_PROJECT_STATUS_ID_VALUES
+        )
 
     def _issue_first_text(self, row: dict[str, Any], *keys: str) -> str:
         for key in keys:

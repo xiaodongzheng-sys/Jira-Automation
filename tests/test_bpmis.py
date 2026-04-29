@@ -510,12 +510,50 @@ class BPMISClientTests(unittest.TestCase):
                 if path == "/api/v1/users/listByEmail":
                     return {"data": [{"id": 123}]}
                 if path == "/api/v1/issues/list":
+                    search_payload = json.loads(params["search"])
+                    subqueries = search_payload.get("subQueries") or []
+                    if subqueries and subqueries[0].get("id") == [200]:
+                        return {
+                            "data": {
+                                "rows": [
+                                    {
+                                        "id": 200,
+                                        "summary": "Enriched Biz Project",
+                                        "marketId": "PH",
+                                        "bizPriorityId": "P1",
+                                        "regionalPmPicId": [{"name": "PM Lead", "email": "pm@npt.sg"}],
+                                        "statusId": "Confirmed",
+                                    }
+                                ]
+                            }
+                        }
+                    if subqueries and subqueries[0].get("typeId") == [BPMISDirectApiClient.BIZ_PROJECT_TYPE_ID]:
+                        return {
+                            "data": {
+                                "rows": [
+                                    {
+                                        "id": 100,
+                                        "summary": "Draft Project",
+                                        "marketId": "SG",
+                                        "bizPriorityId": "P2",
+                                        "regionalPmPicId": [{"email": "pm@npt.sg"}],
+                                        "statusId": "Draft",
+                                    },
+                                    {
+                                        "id": 200,
+                                        "summary": "Enriched Biz Project",
+                                        "marketId": "PH",
+                                        "statusId": "Confirmed",
+                                    },
+                                ]
+                            }
+                        }
                     return {"data": {"rows": []}}
                 raise AssertionError(path)
 
             client._api_request = fake_api_request  # type: ignore[method-assign]
 
-            client.list_biz_projects_for_pm_email("pm@npt.sg")
+            projects = client.list_biz_projects_for_pm_email("pm@npt.sg")
 
             self.assertEqual(calls[1][0], "/api/v1/issues/list")
             search_payload = json.loads(calls[1][1]["search"])
@@ -524,7 +562,7 @@ class BPMISClientTests(unittest.TestCase):
                 search_payload["subQueries"],
                 [
                     {"typeId": [BPMISDirectApiClient.BIZ_PROJECT_TYPE_ID]},
-                    {"statusId": [22, 4, 23, 10, 11, 12]},
+                    {"statusId": [4, 23, 10, 11, 12]},
                     {
                         "joinType": "or",
                         "subQueries": [
@@ -532,6 +570,20 @@ class BPMISClientTests(unittest.TestCase):
                             {"involvedPM": [123]},
                         ],
                     },
+                ],
+            )
+            self.assertEqual(
+                projects,
+                [
+                    {
+                        "issue_id": "200",
+                        "bpmis_id": "200",
+                        "project_name": "Enriched Biz Project",
+                        "market": "PH",
+                        "priority": "P1",
+                        "regional_pm_pic": "PM Lead",
+                        "status": "Confirmed",
+                    }
                 ],
             )
 
