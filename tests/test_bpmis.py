@@ -92,6 +92,50 @@ class BPMISClientTests(unittest.TestCase):
         self.assertEqual([path for path, _params in calls].count("/api/v1/users/listByEmail"), 1)
         self.assertEqual([path for path, _params in calls].count("/api/v1/issues/detail"), 1)
 
+    def test_api_request_logs_timing_and_payload_summary(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            client = BPMISDirectApiClient(self._settings(temp_dir))
+
+            class FakeSession:
+                headers = {}
+
+                def request(self, **kwargs):
+                    return BPMISClientTests._FakeResponse(
+                        200,
+                        {
+                            "code": 0,
+                            "data": {
+                                "rows": [{"id": 1}, {"id": 2}],
+                                "total": 2,
+                            },
+                        },
+                    )
+
+            client.session = FakeSession()  # type: ignore[assignment]
+
+            with self.assertLogs("bpmis_jira_tool.bpmis", level="INFO") as captured:
+                payload = client._api_request(
+                    "/api/v1/issues/list",
+                    params={
+                        "search": json.dumps(
+                            {
+                                "joinType": "and",
+                                "subQueries": [{"creator": [101]}],
+                                "page": 1,
+                                "pageSize": 200,
+                                "mapping": True,
+                            }
+                        )
+                    },
+                )
+
+        self.assertEqual(payload["data"]["total"], 2)
+        log_text = "\n".join(captured.output)
+        self.assertIn('"event": "bpmis_api_request_done"', log_text)
+        self.assertIn('"path": "/api/v1/issues/list"', log_text)
+        self.assertIn('"row_count": 2', log_text)
+        self.assertIn('"subquery_keys": [["creator"]]', log_text)
+
     def test_build_create_payload_supports_multiple_components_from_comma_separated_value(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             settings = Settings(

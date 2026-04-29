@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import os
 import re
+import time
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
@@ -16,6 +18,8 @@ from bpmis_jira_tool.models import CreatedTicket, ProjectMatch
 
 
 ISSUE_KEY_PATTERN = re.compile(r"\b([A-Z][A-Z0-9]+-\d+)\b")
+BPMIS_LOGGER = logging.getLogger(__name__)
+BPMIS_SLOW_REQUEST_SECONDS = 5.0
 
 
 class BPMISClient(ABC):
@@ -130,6 +134,7 @@ class BPMISDirectApiClient(BPMISClient):
         self._group_options_cache: dict[str, list[dict[str, Any]]] = {}
         self._bpmis_user_ids_by_email_cache: dict[str, list[int]] = {}
         self._issue_detail_cache: dict[str, dict[str, Any]] = {}
+        self.event_logger = BPMIS_LOGGER
         self.request_stats: dict[str, int] = {
             "api_call_count": 0,
             "issue_detail_lookup_count": 0,
@@ -1659,6 +1664,23 @@ class BPMISDirectApiClient(BPMISClient):
     ) -> dict[str, Any]:
         url = f"{self.settings.bpmis_base_url.rstrip('/')}/{path.lstrip('/')}"
         self.request_stats["api_call_count"] += 1
+        started_at = time.monotonic()
+        log_context = {
+            "event": "bpmis_api_request",
+            "path": path,
+            "method": method,
+            "request_index": self.request_stats["api_call_count"],
+            "params": self._summarize_api_params(params),
+            "has_body": body is not None,
+        }
+        self.event_logger.warning(
+            "bpmis_event %s",
+            json.dumps(
+                {**log_context, "event": "bpmis_api_request_start"},
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
+        )
         try:
             response = self.session.request(
                 method=method,
@@ -1668,19 +1690,136 @@ class BPMISDirectApiClient(BPMISClient):
                 timeout=60,
             )
         except requests.RequestException as error:
+            elapsed_seconds = round(time.monotonic() - started_at, 3)
+            self.event_logger.warning(
+                "bpmis_event %s",
+                json.dumps(
+                    {
+                        **log_context,
+                        "event": "bpmis_api_request_error",
+                        "elapsed_seconds": elapsed_seconds,
+                        "error_type": type(error).__name__,
+                        "error_message": str(error),
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+            )
             raise BPMISError(f"BPMIS API request failed for '{path}': {error}") from error
 
         if response.status_code >= 400:
+            self._log_bpmis_api_result(
+                log_context,
+                started_at=started_at,
+                status_code=response.status_code,
+                payload=None,
+                level=logging.WARNING,
+            )
             raise BPMISError(f"BPMIS API request failed for '{path}' with status {response.status_code}.")
 
         try:
             payload = response.json()
         except ValueError as error:
+            self._log_bpmis_api_result(
+                log_context,
+                started_at=started_at,
+                status_code=response.status_code,
+                payload=None,
+                level=logging.WARNING,
+                extra={"json_error": type(error).__name__},
+            )
             raise BPMISError(f"BPMIS API returned non-JSON data for '{path}'.") from error
 
         if payload.get("code") not in {0, None}:
+            self._log_bpmis_api_result(
+                log_context,
+                started_at=started_at,
+                status_code=response.status_code,
+                payload=payload,
+                level=logging.WARNING,
+            )
             raise BPMISError(payload.get("message") or f"BPMIS API error for '{path}'.")
+        self._log_bpmis_api_result(log_context, started_at=started_at, status_code=response.status_code, payload=payload)
         return payload
+
+    def _log_bpmis_api_result(
+        self,
+        log_context: dict[str, Any],
+        *,
+        started_at: float,
+        status_code: int,
+        payload: dict[str, Any] | None,
+        level: int | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        elapsed_seconds = round(time.monotonic() - started_at, 3)
+        inferred_level = level if level is not None else (
+            logging.WARNING if elapsed_seconds >= BPMIS_SLOW_REQUEST_SECONDS else logging.INFO
+        )
+        self.event_logger.log(
+            inferred_level,
+            "bpmis_event %s",
+            json.dumps(
+                {
+                    **log_context,
+                    "event": "bpmis_api_request_done",
+                    "elapsed_seconds": elapsed_seconds,
+                    "status_code": status_code,
+                    **self._summarize_api_payload(payload),
+                    **(extra or {}),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
+        )
+
+    @staticmethod
+    def _summarize_api_params(params: dict[str, Any] | None) -> dict[str, Any]:
+        if not isinstance(params, dict) or not params:
+            return {}
+        summary: dict[str, Any] = {"keys": sorted(str(key) for key in params)}
+        search = params.get("search")
+        if isinstance(search, str):
+            try:
+                parsed = json.loads(search)
+            except json.JSONDecodeError:
+                summary["search_type"] = "raw"
+            else:
+                summary["search_type"] = type(parsed).__name__
+                if isinstance(parsed, dict):
+                    for key in ("page", "pageSize", "mapping", "joinType"):
+                        if key in parsed:
+                            summary[key] = parsed.get(key)
+                    sub_queries = parsed.get("subQueries")
+                    if isinstance(sub_queries, list):
+                        summary["subquery_count"] = len(sub_queries)
+                        summary["subquery_keys"] = [
+                            sorted(str(sub_key) for sub_key in item)
+                            for item in sub_queries
+                            if isinstance(item, dict)
+                        ]
+                elif isinstance(parsed, list):
+                    summary["search_item_count"] = len(parsed)
+        return summary
+
+    @staticmethod
+    def _summarize_api_payload(payload: dict[str, Any] | None) -> dict[str, Any]:
+        if not isinstance(payload, dict):
+            return {"payload_type": type(payload).__name__}
+        data = payload.get("data")
+        summary: dict[str, Any] = {
+            "payload_code": payload.get("code"),
+            "data_type": type(data).__name__,
+        }
+        if isinstance(data, dict):
+            rows = data.get("rows")
+            if isinstance(rows, list):
+                summary["row_count"] = len(rows)
+            if "total" in data:
+                summary["total"] = data.get("total")
+        elif isinstance(data, list):
+            summary["data_count"] = len(data)
+        return summary
 
     def _prefix_summary(self, task_type_label: str, market_value: str, system_value: str, summary: str) -> str:
         task_prefix = self.TASK_TYPE_PREFIX.get(task_type_label.strip().lower())

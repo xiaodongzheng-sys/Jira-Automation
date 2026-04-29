@@ -315,22 +315,30 @@ class LocalAgentServerTests(unittest.TestCase):
         class FakeBPMISClient:
             def __init__(self, settings, access_token=None):
                 self.access_token = access_token
+                self.request_stats = {"api_call_count": 1}
 
             def list_biz_projects_for_pm_email(self, email):
                 return [{"issue_id": "123", "project_name": email, "market": "SG"}]
 
         with patch("bpmis_jira_tool.local_agent_server.BPMISDirectApiClient", FakeBPMISClient):
-            response = self._post_signed(
-                "/api/local-agent/bpmis/call",
-                {
-                    "operation": "list_biz_projects_for_pm_email",
-                    "access_token": "user-token",
-                    "args": ["pm@npt.sg"],
-                },
-            )
+            with self.assertLogs(self.app.logger.name, level="INFO") as captured:
+                response = self._post_signed(
+                    "/api/local-agent/bpmis/call",
+                    {
+                        "operation": "list_biz_projects_for_pm_email",
+                        "access_token": "user-token",
+                        "args": ["pm@npt.sg"],
+                    },
+                )
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()["result"][0]["issue_id"], "123")
+        log_text = "\n".join(captured.output)
+        self.assertIn('"event": "local_agent_bpmis_call_start"', log_text)
+        self.assertIn('"event": "local_agent_bpmis_call_done"', log_text)
+        self.assertIn('"operation": "list_biz_projects_for_pm_email"', log_text)
+        self.assertIn('"has_access_token": true', log_text)
+        self.assertNotIn("user-token", log_text)
 
     def test_signed_bpmis_call_rehydrates_dataclass_arguments(self):
         class FakeBPMISClient:

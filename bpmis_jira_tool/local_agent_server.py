@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import os
 import tempfile
 import threading
@@ -35,6 +36,9 @@ from bpmis_jira_tool.web import (
 from prd_briefing.confluence import ConfluenceConnector
 from prd_briefing.reviewer import PRDReviewRequest, PRDReviewService
 from prd_briefing.storage import BriefingStore
+
+
+BPMIS_PROXY_SLOW_OPERATION_SECONDS = 5.0
 
 
 BPMIS_PROXY_OPERATIONS = {
@@ -521,8 +525,60 @@ def create_local_agent_app() -> Flask:
             raise ToolError("Unsupported BPMIS local-agent operation.")
         args = payload.get("args") if isinstance(payload.get("args"), list) else []
         kwargs = payload.get("kwargs") if isinstance(payload.get("kwargs"), dict) else {}
+        started_at = time.monotonic()
+        log_context = {
+            "event": "local_agent_bpmis_call",
+            "operation": operation,
+            "arg_summary": _summarize_bpmis_proxy_args(operation, args),
+            "kwarg_keys": sorted(str(key) for key in kwargs),
+            "has_access_token": bool(str(payload.get("access_token") or "").strip()),
+        }
+        current_app.logger.warning(
+            "local_agent_event %s",
+            json.dumps(
+                {**log_context, "event": "local_agent_bpmis_call_start"},
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
+        )
         client = BPMISDirectApiClient(settings, access_token=str(payload.get("access_token") or "").strip() or None)
-        result = getattr(client, operation)(*_deserialize_bpmis_args(operation, args), **kwargs)
+        client.event_logger = current_app.logger
+        try:
+            result = getattr(client, operation)(*_deserialize_bpmis_args(operation, args), **kwargs)
+        except Exception as error:
+            current_app.logger.warning(
+                "local_agent_event %s",
+                json.dumps(
+                    {
+                        **log_context,
+                        "event": "local_agent_bpmis_call_error",
+                        "elapsed_seconds": round(time.monotonic() - started_at, 3),
+                        "error_type": type(error).__name__,
+                        "error_message": str(error),
+                        "request_stats": getattr(client, "request_stats", {}),
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+            )
+            raise
+        elapsed_seconds = round(time.monotonic() - started_at, 3)
+        log_level = logging.WARNING if elapsed_seconds >= BPMIS_PROXY_SLOW_OPERATION_SECONDS else logging.INFO
+        current_app.logger.log(
+            log_level,
+            "local_agent_event %s",
+            json.dumps(
+                {
+                    **log_context,
+                    "event": "local_agent_bpmis_call_done",
+                    "elapsed_seconds": elapsed_seconds,
+                    "result_summary": _summarize_bpmis_proxy_result(result),
+                    "request_stats": getattr(client, "request_stats", {}),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
+        )
         return jsonify({"status": "ok", "result": _serialize_bpmis_result(result)})
 
     @app.post("/api/local-agent/bpmis/config/load")
@@ -810,6 +866,38 @@ def _deserialize_bpmis_args(operation: str, args: list[Any]) -> list[Any]:
         ),
         *args[1:],
     ]
+
+
+def _summarize_bpmis_proxy_args(operation: str, args: list[Any]) -> dict[str, Any]:
+    summary: dict[str, Any] = {"arg_count": len(args)}
+    if operation == "list_jira_tasks_created_by_emails" and args and isinstance(args[0], list):
+        summary["email_count"] = len(args[0])
+    elif operation == "list_jira_tasks_for_project_created_by_email":
+        if args:
+            summary["project_issue_id_present"] = bool(str(args[0] or "").strip())
+        if len(args) > 1:
+            summary["email_present"] = bool(str(args[1] or "").strip())
+    elif operation == "list_biz_projects_for_pm_email" and args:
+        summary["email_present"] = bool(str(args[0] or "").strip())
+    elif operation in {"get_issue_detail", "get_jira_ticket_detail", "list_issues_for_version"} and args:
+        summary["lookup_id_present"] = bool(str(args[0] or "").strip())
+    elif operation == "create_jira_ticket":
+        summary["field_count"] = len(args[1]) if len(args) > 1 and isinstance(args[1], dict) else 0
+    return summary
+
+
+def _summarize_bpmis_proxy_result(result: Any) -> dict[str, Any]:
+    if isinstance(result, list):
+        return {"result_type": "list", "result_count": len(result)}
+    if isinstance(result, dict):
+        summary: dict[str, Any] = {"result_type": "dict", "result_key_count": len(result)}
+        rows = result.get("rows")
+        if isinstance(rows, list):
+            summary["row_count"] = len(rows)
+        return summary
+    if is_dataclass(result):
+        return {"result_type": type(result).__name__}
+    return {"result_type": type(result).__name__}
 
 
 def _serialize_bpmis_result(result: Any) -> Any:
