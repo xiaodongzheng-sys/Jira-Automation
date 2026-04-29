@@ -105,7 +105,8 @@ class ConfluenceConnector:
 
     def _resolve_parsed_page(self, value: str, parsed: Any) -> ResolvedPageRef:
         base_url = f"{parsed.scheme}://{parsed.netloc}"
-        query_page_id = parse_qs(parsed.query).get("pageId", [None])[0]
+        query = parse_qs(parsed.query)
+        query_page_id = query.get("pageId", [None])[0]
         page_id = query_page_id
         if not page_id:
             match = re.search(r"/pages/(\d+)", parsed.path)
@@ -113,6 +114,15 @@ class ConfluenceConnector:
                 page_id = match.group(1)
         if page_id:
             return ResolvedPageRef(base_url=base_url, page_id=page_id, source_url=value)
+        query_space_key = query.get("spaceKey", [None])[0]
+        query_title = query.get("title", [None])[0]
+        if query_space_key and query_title:
+            return ResolvedPageRef(
+                base_url=base_url,
+                source_url=value,
+                space_key=query_space_key,
+                title_hint=self._normalize_display_title(query_title),
+            )
         display_match = re.search(r"^/display/([^/]+)/(.+)$", parsed.path)
         if display_match:
             return ResolvedPageRef(

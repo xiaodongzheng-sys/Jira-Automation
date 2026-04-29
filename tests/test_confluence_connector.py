@@ -30,6 +30,16 @@ class ConfluenceConnectorTests(unittest.TestCase):
         self.assertEqual(resolved.title_hint, "8.1 Part 1 of PRD")
         self.assertIsNone(resolved.page_id)
 
+    def test_resolve_viewpage_url_extracts_space_and_title_query(self):
+        resolved = self.connector._resolve_page(
+            "https://confluence.shopee.io/pages/viewpage.action?spaceKey=SPDB&title=8.1+Part+1+of+PRD"
+        )
+
+        self.assertEqual(resolved.base_url, "https://confluence.shopee.io")
+        self.assertEqual(resolved.space_key, "SPDB")
+        self.assertEqual(resolved.title_hint, "8.1 Part 1 of PRD")
+        self.assertIsNone(resolved.page_id)
+
     @patch("prd_briefing.confluence.requests.get")
     def test_resolve_short_link_follows_redirect_to_display_url(self, mock_get):
         response = Mock()
