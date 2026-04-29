@@ -120,21 +120,30 @@
     writeTaskCache({ version: 1, updated_at: new Date().toISOString(), teams });
   };
 
-  const updateCachedProject = (project) => {
-    const bpmisId = String(project?.bpmis_id || '').trim();
-    if (!bpmisId) return;
+  const buildKeyProjectPatch = (isKeyProject, source, override = null) => ({
+    is_key_project: Boolean(isKeyProject),
+    key_project_source: source || (isKeyProject ? 'manual_on' : 'manual_off'),
+    key_project_override: override && typeof override === 'object' ? override : {},
+  });
+
+  const updateCachedProjectKeyState = (bpmisId, isKeyProject, source, override = null) => {
+    const normalizedBpmisId = String(bpmisId || '').trim();
+    if (!normalizedBpmisId) return;
+    const patch = buildKeyProjectPatch(isKeyProject, source, override);
+    let changed = false;
     const cache = readTaskCache();
     const teams = cache.teams && typeof cache.teams === 'object' ? cache.teams : {};
     Object.values(teams).forEach((team) => {
       ['under_prd', 'pending_live'].forEach((sectionKey) => {
         (Array.isArray(team?.[sectionKey]) ? team[sectionKey] : []).forEach((cachedProject) => {
-          if (String(cachedProject?.bpmis_id || '').trim() === bpmisId) {
-            Object.assign(cachedProject, project);
+          if (String(cachedProject?.bpmis_id || '').trim() === normalizedBpmisId) {
+            Object.assign(cachedProject, patch);
+            changed = true;
           }
         });
       });
     });
-    writeTaskCache({ ...cache, teams, updated_at: new Date().toISOString() });
+    if (changed) writeTaskCache({ ...cache, teams, updated_at: new Date().toISOString() });
   };
 
   const setupTabs = () => {
@@ -267,15 +276,14 @@
   const updateProjectKeyState = (bpmisId, isKeyProject, source, override = null) => {
     const normalizedBpmisId = String(bpmisId || '').trim();
     if (!normalizedBpmisId) return null;
+    const patch = buildKeyProjectPatch(isKeyProject, source, override);
     let updatedProject = null;
     taskTeams = taskTeams.map((team) => {
       const updateSection = (projects) => (Array.isArray(projects) ? projects : []).map((project) => {
         if (String(project?.bpmis_id || '').trim() !== normalizedBpmisId) return project;
         updatedProject = {
           ...project,
-          is_key_project: Boolean(isKeyProject),
-          key_project_source: source || (isKeyProject ? 'manual_on' : 'manual_off'),
-          key_project_override: override || project.key_project_override || {},
+          ...patch,
         };
         return updatedProject;
       });
@@ -285,7 +293,7 @@
         pending_live: updateSection(team.pending_live),
       };
     });
-    if (updatedProject) updateCachedProject(updatedProject);
+    if (updatedProject) updateCachedProjectKeyState(normalizedBpmisId, isKeyProject, source, override);
     return updatedProject;
   };
 
