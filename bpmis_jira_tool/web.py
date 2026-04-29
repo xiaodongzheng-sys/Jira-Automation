@@ -121,6 +121,8 @@ TEAM_DASHBOARD_TEAMS = {
 }
 TEAM_DASHBOARD_UNDER_PRD_STATUSES = {"waiting", "prd in progress", "prd reviewed"}
 TEAM_DASHBOARD_EXCLUDED_PENDING_STATUSES = {"icebox", "closed", "done"}
+TEAM_DASHBOARD_UNDER_PRD_BIZ_PROJECT_STATUSES = {"pending review", "confirmed"}
+TEAM_DASHBOARD_PENDING_LIVE_BIZ_PROJECT_STATUSES = {"developing", "testing", "uat"}
 _gmail_export_active_users: set[str] = set()
 _gmail_export_active_users_lock = threading.Lock()
 _source_code_qa_codex_session_locks: dict[str, threading.Lock] = {}
@@ -5625,9 +5627,15 @@ def _build_team_dashboard_task_group(
             under_prd.append(normalized_task)
         elif status_key not in TEAM_DASHBOARD_EXCLUDED_PENDING_STATUSES:
             pending_live.append(normalized_task)
+    under_prd_biz_projects, pending_live_biz_projects = _split_team_dashboard_biz_projects_by_status(biz_projects or [])
     under_prd_projects = _group_team_dashboard_tasks_by_project(under_prd)
-    under_prd_projects = _merge_team_dashboard_biz_projects(under_prd_projects, biz_projects or [])
+    under_prd_projects = _merge_team_dashboard_biz_projects(under_prd_projects, under_prd_biz_projects)
     pending_live_projects = _group_team_dashboard_tasks_by_project(pending_live, sort_by_release=True)
+    pending_live_projects = _merge_team_dashboard_biz_projects(
+        pending_live_projects,
+        pending_live_biz_projects,
+        sort_by_release=True,
+    )
     return {
         "team_key": team_key,
         "label": label,
@@ -5741,10 +5749,26 @@ def _normalize_team_dashboard_project(project: dict[str, Any]) -> dict[str, str]
         "market": str(project.get("market") or "").strip(),
         "priority": str(project.get("priority") or "").strip(),
         "regional_pm_pic": str(project.get("regional_pm_pic") or "").strip(),
+        "status": str(project.get("status") or project.get("biz_project_status") or "").strip(),
     }
     if matched_pm_emails:
         normalized["matched_pm_emails"] = matched_pm_emails
     return normalized
+
+
+def _split_team_dashboard_biz_projects_by_status(
+    biz_projects: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    under_prd: list[dict[str, Any]] = []
+    pending_live: list[dict[str, Any]] = []
+    for raw_project in biz_projects:
+        project = _normalize_team_dashboard_project(raw_project if isinstance(raw_project, dict) else {})
+        status_key = str(project.get("status") or "").strip().casefold()
+        if status_key in TEAM_DASHBOARD_UNDER_PRD_BIZ_PROJECT_STATUSES:
+            under_prd.append(project)
+        elif status_key in TEAM_DASHBOARD_PENDING_LIVE_BIZ_PROJECT_STATUSES:
+            pending_live.append(project)
+    return under_prd, pending_live
 
 
 def _group_team_dashboard_tasks_by_project(
@@ -5792,6 +5816,8 @@ def _group_team_dashboard_tasks_by_project(
 def _merge_team_dashboard_biz_projects(
     projects: list[dict[str, Any]],
     biz_projects: list[dict[str, Any]],
+    *,
+    sort_by_release: bool = False,
 ) -> list[dict[str, Any]]:
     by_id: dict[str, dict[str, Any]] = {
         str(project.get("bpmis_id") or "").strip(): project
@@ -5806,7 +5832,7 @@ def _merge_team_dashboard_biz_projects(
             continue
         existing = by_id.get(bpmis_id)
         if existing:
-            for key in ("project_name", "market", "priority", "regional_pm_pic"):
+            for key in ("project_name", "market", "priority", "regional_pm_pic", "status"):
                 if project.get(key) and not existing.get(key):
                     existing[key] = project[key]
             _merge_team_dashboard_project_pm_emails(existing, project.get("matched_pm_emails") or [])
@@ -5816,11 +5842,17 @@ def _merge_team_dashboard_biz_projects(
                 "jira_tickets": [],
                 "task_count": 0,
                 "release_date": "-",
+                "release_date_sort": "",
             }
         )
         merged.append(project)
         by_id[bpmis_id] = project
-    merged.sort(key=_team_dashboard_project_name_sort_key)
+    if sort_by_release:
+        merged.sort(key=_team_dashboard_project_release_sort_key)
+    else:
+        merged.sort(key=_team_dashboard_project_name_sort_key)
+    for project in merged:
+        project.pop("release_date_sort", None)
     return merged
 
 
@@ -5868,6 +5900,10 @@ def _team_dashboard_project_name_sort_key(project: dict[str, Any]) -> tuple[str,
 
 def _team_dashboard_project_release_sort_key(project: dict[str, Any]) -> tuple[int, str, str, str]:
     release_sort = str(project.get("release_date_sort") or "").strip()
+    if not release_sort:
+        parsed, _text = _parse_team_dashboard_release_date(project.get("release_date"))
+        if parsed:
+            release_sort = time.strftime("%Y-%m-%d", parsed)
     return (
         0 if release_sort else 1,
         release_sort,

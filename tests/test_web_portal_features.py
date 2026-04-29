@@ -1131,6 +1131,7 @@ class WebPortalFeatureTests(unittest.TestCase):
                                 "market": "SG",
                                 "priority": "P1",
                                 "regional_pm_pic": "regional@npt.sg",
+                                "status": "Confirmed",
                             },
                             {
                                 "issue_id": "300000",
@@ -1138,6 +1139,23 @@ class WebPortalFeatureTests(unittest.TestCase):
                                 "market": "PH",
                                 "priority": "P0",
                                 "regional_pm_pic": "af@npt.sg",
+                                "status": "Pending Review",
+                            },
+                            {
+                                "issue_id": "300100",
+                                "project_name": "Developing Biz Only Project",
+                                "market": "ID",
+                                "priority": "P1",
+                                "regional_pm_pic": "af@npt.sg",
+                                "status": "Developing",
+                            },
+                            {
+                                "issue_id": "300200",
+                                "project_name": "Draft Biz Project",
+                                "market": "SG",
+                                "priority": "P2",
+                                "regional_pm_pic": "af@npt.sg",
+                                "status": "Draft",
                             },
                         ]
                     if email == "cr@npt.sg":
@@ -1148,6 +1166,7 @@ class WebPortalFeatureTests(unittest.TestCase):
                                 "market": "ID",
                                 "priority": "P2",
                                 "regional_pm_pic": "credit@npt.sg",
+                                "status": "Confirmed",
                             }
                         ]
                     return []
@@ -1262,9 +1281,14 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertEqual(af_under_prd["300000"]["project_name"], "Biz Only Project")
         self.assertEqual(af_under_prd["300000"]["jira_tickets"], [])
         self.assertEqual(af_under_prd["300000"]["matched_pm_emails"], ["af@npt.sg"])
+        self.assertNotIn("300200", af_under_prd)
+        af_pending_live = {project["bpmis_id"]: project for project in teams["AF"]["pending_live"]}
         self.assertEqual([project["bpmis_id"] for project in teams["AF"]["pending_live"][:2]], ["225300", "225159"])
         self.assertEqual([project["release_date"] for project in teams["AF"]["pending_live"][:2]], ["01-05-2026", "20-05-2026"])
-        self.assertEqual([item["jira_id"] for item in teams["AF"]["pending_live"][1]["jira_tickets"]], ["AF-2"])
+        self.assertEqual([item["jira_id"] for item in af_pending_live["225159"]["jira_tickets"]], ["AF-2"])
+        self.assertEqual(af_pending_live["300100"]["project_name"], "Developing Biz Only Project")
+        self.assertEqual(af_pending_live["300100"]["jira_tickets"], [])
+        self.assertNotIn("300200", af_pending_live)
         self.assertEqual(af_under_prd["225159"]["jira_tickets"][0]["jira_link"], "https://jira.shopee.io/browse/AF-1")
         self.assertEqual(teams["CRMS"]["under_prd"][0]["bpmis_id"], "225200")
         self.assertEqual([item["jira_id"] for item in teams["CRMS"]["under_prd"][0]["jira_tickets"]], ["CR-1"])
