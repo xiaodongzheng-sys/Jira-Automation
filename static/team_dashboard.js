@@ -41,7 +41,7 @@
     GRC: 'Ops Risk',
   };
   const jiraPageSize = 10;
-  const taskCacheKey = 'team-dashboard:jira-tasks:v1';
+  const taskCacheKey = 'team-dashboard:jira-tasks:v2';
 
   let initialConfig = (() => {
     try {
