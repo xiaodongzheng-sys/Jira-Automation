@@ -1109,7 +1109,7 @@ class WebPortalFeatureTests(unittest.TestCase):
             app.config["TEAM_DASHBOARD_CONFIG_STORE"].save(
                 {
                     "teams": {
-                        "AF": {"member_emails": ["af@npt.sg"]},
+                        "AF": {"member_emails": ["af@npt.sg", "xiaodong.zheng@npt.sg"]},
                         "CRMS": {"member_emails": ["cr@npt.sg"]},
                         "GRC": {"member_emails": ["ops@npt.sg"]},
                     }
@@ -1158,6 +1158,17 @@ class WebPortalFeatureTests(unittest.TestCase):
                                 "status": "Draft",
                             },
                         ]
+                    if email == "xiaodong.zheng@npt.sg":
+                        return [
+                            {
+                                "issue_id": "300300",
+                                "project_name": "Xiaodong Biz Only Project",
+                                "market": "SG",
+                                "priority": "P1",
+                                "regional_pm_pic": "xiaodong.zheng@npt.sg",
+                                "status": "Confirmed",
+                            }
+                        ]
                     if email == "cr@npt.sg":
                         return [
                             {
@@ -1173,7 +1184,7 @@ class WebPortalFeatureTests(unittest.TestCase):
 
                 def list_jira_tasks_created_by_emails(self, emails, **kwargs):
                     self.calls.append({"emails": list(emails), "kwargs": kwargs})
-                    if emails == ["af@npt.sg"]:
+                    if emails == ["af@npt.sg", "xiaodong.zheng@npt.sg"]:
                         return [
                             {
                                 "jira_id": "AF-1",
@@ -1281,6 +1292,9 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertEqual(af_under_prd["300000"]["project_name"], "Biz Only Project")
         self.assertEqual(af_under_prd["300000"]["jira_tickets"], [])
         self.assertEqual(af_under_prd["300000"]["matched_pm_emails"], ["af@npt.sg"])
+        self.assertEqual(af_under_prd["300300"]["project_name"], "Xiaodong Biz Only Project")
+        self.assertEqual(af_under_prd["300300"]["jira_tickets"], [])
+        self.assertEqual(af_under_prd["300300"]["matched_pm_emails"], ["xiaodong.zheng@npt.sg"])
         self.assertNotIn("300200", af_under_prd)
         af_pending_live = {project["bpmis_id"]: project for project in teams["AF"]["pending_live"]}
         self.assertEqual([project["bpmis_id"] for project in teams["AF"]["pending_live"][:2]], ["225300", "225159"])
@@ -1304,12 +1318,13 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertEqual(unknown_response.status_code, 400)
         self.assertIn(
             {
-                "emails": ["af@npt.sg"],
+                "emails": ["af@npt.sg", "xiaodong.zheng@npt.sg"],
                 "kwargs": {"max_pages": 5, "enrich_missing_parent": False, "release_after": "2026-04-29"},
             },
             fake_client.calls,
         )
         self.assertIn("af@npt.sg", fake_client.project_calls)
+        self.assertIn("xiaodong.zheng@npt.sg", fake_client.project_calls)
         self.assertIn("cr@npt.sg", fake_client.project_calls)
 
     def test_team_dashboard_tasks_can_load_one_team_at_a_time(self):

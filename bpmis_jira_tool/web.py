@@ -3533,7 +3533,7 @@ def create_app() -> Flask:
                         "fetch_stats": _team_dashboard_fetch_stats(bpmis_client),
                     }
                 )
-        return jsonify(
+        response = jsonify(
             {
                 "status": "partial" if has_error else "ok",
                 "teams": team_payloads,
@@ -3542,6 +3542,10 @@ def create_app() -> Flask:
                 "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             }
         )
+        response.headers["Cache-Control"] = "no-store, private, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+        return response
 
     @app.post("/api/team-dashboard/prd-review")
     def team_dashboard_prd_review():

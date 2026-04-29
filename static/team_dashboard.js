@@ -42,7 +42,7 @@
   };
   const teamOrder = ['AF', 'CRMS', 'GRC'];
   const jiraPageSize = 10;
-  const taskCacheKey = 'team-dashboard:jira-tasks:v4';
+  const taskCacheKey = 'team-dashboard:jira-tasks:v5';
 
   let initialConfig = (() => {
     try {
@@ -503,6 +503,7 @@
   const teamTaskUrl = (teamKey) => {
     const url = new URL(root.dataset.tasksUrl || '/api/team-dashboard/tasks', window.location.origin);
     url.searchParams.set('team', teamKey);
+    url.searchParams.set('_reload', String(Date.now()));
     return url.toString();
   };
 
@@ -550,6 +551,7 @@
       const response = await fetch(teamTaskUrl(teamKey), {
         headers: { Accept: 'application/json' },
         credentials: 'same-origin',
+        cache: 'no-store',
       });
       const payload = await readJson(response, `Could not load ${currentTeam.label || currentTeam.team_key} tasks.`);
       const loadedTeam = payload.team || (Array.isArray(payload.teams) ? payload.teams[0] : null) || {};
