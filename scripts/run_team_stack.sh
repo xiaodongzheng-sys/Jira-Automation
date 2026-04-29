@@ -44,6 +44,15 @@ logs() {
   "$ROOT_DIR/scripts/run_ngrok_tunnel.sh" logs || true
 }
 
+launchd_domain_label() {
+  local launchd_label="${TEAM_STACK_LAUNCHD_LABEL:-io.npt.jira-creation-stack}"
+  printf 'gui/%s/%s\n' "$(id -u)" "$launchd_label"
+}
+
+launchd_stack_installed() {
+  command -v launchctl >/dev/null 2>&1 && launchctl print "$(launchd_domain_label)" >/dev/null 2>&1
+}
+
 doctor() {
   local env_file="$ENV_FILE"
   local data_dir="${TEAM_PORTAL_DATA_DIR:-}"
@@ -318,6 +327,14 @@ status() {
 
 restart() {
   local guard_env="$1"
+  if launchd_stack_installed; then
+    local domain_label
+    domain_label="$(launchd_domain_label)"
+    echo "launchd job installed; restarting team stack with launchctl kickstart -k $domain_label"
+    launchctl kickstart -k "$domain_label"
+    sleep 3
+    return 0
+  fi
   stop
   start "$guard_env"
 }

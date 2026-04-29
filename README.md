@@ -23,9 +23,10 @@ Current local assumptions:
 Current shared-team assumptions:
 
 - one host Mac runs the portal
-- teammates open one shared URL and sign in with `@npt.sg` Google accounts
+- teammates open the fixed ngrok URL as the primary shared portal and sign in with `@npt.sg` Google accounts
 - each teammate stores their own spreadsheet config and BPMIS token in the portal
 - BPMIS tokens saved through the shared portal are encrypted at rest with `TEAM_PORTAL_CONFIG_ENCRYPTION_KEY`
+- Cloud Run can remain as a backup surface, but routine deploy/release/live requests target the Mac-hosted ngrok portal. Deploy Cloud Run only when the request explicitly says to deploy or validate Cloud Run.
 
 ## Upload-Style Python Script
 

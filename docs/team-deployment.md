@@ -7,6 +7,8 @@ This guide describes the supported **shared-team** setup:
 - teammates sign in with `@npt.sg` Google accounts
 - each teammate stores their own config and BPMIS token inside the portal
 
+This Mac-hosted ngrok URL is the primary teammate entrypoint and the default release target. Cloud Run can remain available as a backup surface, but routine deploy/release/live requests should update and verify only the fixed ngrok portal. Deploy or validate Cloud Run only when the request explicitly says Cloud Run.
+
 ## Host Configuration
 
 Configure these values in `.env` on the host Mac:
@@ -99,6 +101,8 @@ To stop or restart:
 ./scripts/run_team_stack.sh restart
 ```
 
+When the launchd job is installed, `restart` uses `launchctl kickstart -k` so launchd remains the single owner of the guard process and the fixed ngrok endpoint does not get claimed by competing restarts.
+
 If you need to manage the pieces manually for debugging:
 
 ```bash
@@ -107,6 +111,14 @@ If you need to manage the pieces manually for debugging:
 ```
 
 The stack guard now runs as a lightweight supervisor. It keeps the Flask portal and ngrok as child processes, restarts them with backoff when they crash, probes `/healthz` for the portal, and validates the ngrok inspector API before it reports the stack as healthy.
+
+For the primary-entry setup, the host `.env` should point `TEAM_PORTAL_BASE_URL` at the same fixed ngrok hostname that teammates open. Google OAuth callback configuration must use that hostname too:
+
+```text
+https://<fixed-portal-ngrok-host>/auth/google/callback
+```
+
+Cloud Run-specific local-agent settings can stay in `.env` for explicit fallback deployments, but they are not part of the normal Mac portal request path or default release validation.
 
 ## Enable Auto-Start on the Host Mac
 
@@ -179,6 +191,13 @@ Host-side checks:
 - inspect `.team-portal/run/team_stack_status.json` for the latest guard view of portal and ngrok health
 - run `./scripts/run_team_stack.sh doctor` for a one-shot end-to-end stack diagnosis
 - `doctor` now also checks whether the repo path is launchd-friendly and whether the `launchd` job is installed
+
+Primary-entry acceptance checks:
+
+- Source Code Q&A answers from the fixed ngrok portal URL.
+- BPMIS setup and run flows work from the fixed ngrok portal URL.
+- SeaTalk features read Mac desktop data from the fixed ngrok portal URL.
+- Cloud Run URL is checked only for explicit Cloud Run deployments or validation requests.
 
 Teammate acceptance check:
 
