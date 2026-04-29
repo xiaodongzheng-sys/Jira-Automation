@@ -108,6 +108,7 @@ class MonthlyReportTests(unittest.TestCase):
         self.assertEqual(seatalk.calls[0]["days"], 32)
         self.assertEqual(confluence.urls, [("https://confluence/prd", "monthly-report")])
         prompt = mock_generate.call_args.kwargs["prompt"]
+        self.assertIn("Markdown tables", prompt)
         self.assertIn("Key Fraud Project", prompt)
         self.assertIn("AF-1", prompt)
         self.assertNotIn("AF-2", prompt)
@@ -121,6 +122,18 @@ class MonthlyReportTests(unittest.TestCase):
         html = monthly_report_markdown_to_html("# Report\n- **Done** `AF-1`")
         self.assertIn("<strong>Done</strong>", html)
         self.assertIn("<code>AF-1</code>", html)
+        table_html = monthly_report_markdown_to_html(
+            "## Updates\n"
+            "| Region | Priority | Project | Current Status | Target Tech Live Date |\n"
+            "| --- | --- | --- | --- | --- |\n"
+            "| SG | SP | Multi-Currency Account | Dev | July 2026 |\n"
+            "| PH | P0 | Incoming Transaction Hold | Dev | Support Reject: May 2026 |\n"
+        )
+        self.assertIn("<table", table_html)
+        self.assertIn("<th", table_html)
+        self.assertIn("<td", table_html)
+        self.assertIn("Multi-Currency Account", table_html)
+        self.assertIn("Support Reject: May 2026", table_html)
 
 
 if __name__ == "__main__":

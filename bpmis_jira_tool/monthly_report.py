@@ -248,6 +248,7 @@ def build_monthly_report_prompt(
         "- Return only the final Markdown draft.\n"
         "- Keep it suitable to send by email after light PM editing.\n"
         "- Follow the template headings unless the evidence clearly requires a small additional subsection.\n"
+        "- If the configured template contains Markdown tables, preserve those table structures and fill rows from evidence; use TBD for missing cells instead of converting the table to bullets.\n"
         "- Include Jira IDs in parentheses when referencing concrete delivery items.\n\n"
         f"# Generated At\n{generated_at.isoformat()}\n\n"
         f"# Monthly Report Template\n{normalize_monthly_report_template(template)}\n\n"
@@ -346,34 +347,59 @@ def monthly_report_subject(now: datetime | None = None) -> str:
 def monthly_report_markdown_to_html(markdown_text: str) -> str:
     lines = []
     in_list = False
-    for raw_line in str(markdown_text or "").splitlines():
+    table: dict[str, list[list[str]] | list[str]] | None = None
+
+    def close_list() -> None:
+        nonlocal in_list
+        if in_list:
+            lines.append("</ul>")
+            in_list = False
+
+    def close_table() -> None:
+        nonlocal table
+        if table is not None:
+            lines.append(_render_markdown_table_html(table["headers"], table["rows"]))
+            table = None
+
+    raw_lines = str(markdown_text or "").splitlines()
+    for index, raw_line in enumerate(raw_lines):
         line = raw_line.strip()
         if not line:
-            if in_list:
-                lines.append("</ul>")
-                in_list = False
+            close_list()
+            close_table()
             continue
+        next_line = raw_lines[index + 1].strip() if index + 1 < len(raw_lines) else ""
+        if table is None and "|" in line and _is_markdown_table_separator(next_line):
+            close_list()
+            table = {"headers": _split_markdown_table_row(line), "rows": []}
+            continue
+        if table is not None:
+            if _is_markdown_table_separator(line):
+                continue
+            if "|" in line:
+                table["rows"].append(_split_markdown_table_row(line))
+                continue
+            close_table()
         heading = re.match(r"^(#{1,4})\s+(.+)$", line)
         if heading:
-            if in_list:
-                lines.append("</ul>")
-                in_list = False
+            close_list()
+            close_table()
             level = min(4, len(heading.group(1)) + 1)
             lines.append(f"<h{level}>{_inline_markdown(heading.group(2))}</h{level}>")
             continue
         item = re.match(r"^(?:[-*]|\d+[.)])\s+(.+)$", line)
         if item:
+            close_table()
             if not in_list:
                 lines.append("<ul>")
                 in_list = True
             lines.append(f"<li>{_inline_markdown(item.group(1))}</li>")
             continue
-        if in_list:
-            lines.append("</ul>")
-            in_list = False
+        close_list()
+        close_table()
         lines.append(f"<p>{_inline_markdown(line)}</p>")
-    if in_list:
-        lines.append("</ul>")
+    close_list()
+    close_table()
     return "<html><body>" + "\n".join(lines) + "</body></html>"
 
 
@@ -382,6 +408,41 @@ def _inline_markdown(value: str) -> str:
     text = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", text)
     text = re.sub(r"`(.+?)`", r"<code>\1</code>", text)
     return text
+
+
+def _split_markdown_table_row(line: str) -> list[str]:
+    text = str(line or "").strip()
+    if text.startswith("|"):
+        text = text[1:]
+    if text.endswith("|"):
+        text = text[:-1]
+    return [cell.strip() for cell in text.split("|")]
+
+
+def _is_markdown_table_separator(line: str) -> bool:
+    cells = _split_markdown_table_row(line)
+    return len(cells) > 1 and all(re.fullmatch(r":?-{3,}:?", cell.replace(" ", "")) for cell in cells)
+
+
+def _render_markdown_table_html(headers: list[str], rows: list[list[str]]) -> str:
+    column_count = max([len(headers), *(len(row) for row in rows), 1])
+    table_style = "border-collapse:collapse;width:100%;margin:12px 0;"
+    cell_style = "border:1px solid #111827;padding:6px 8px;text-align:left;vertical-align:top;"
+
+    def render_cells(cells: list[str], tag: str) -> str:
+        style = cell_style + ("font-weight:700;background:#f8fafc;" if tag == "th" else "")
+        return "".join(
+            f'<{tag} style="{style}">{_inline_markdown(cells[index] if index < len(cells) else "")}</{tag}>'
+            for index in range(column_count)
+        )
+
+    body = "".join(f"<tr>{render_cells(row, 'td')}</tr>" for row in rows)
+    return (
+        f'<table style="{table_style}">'
+        f"<thead><tr>{render_cells(headers, 'th')}</tr></thead>"
+        f"<tbody>{body}</tbody>"
+        "</table>"
+    )
 
 
 def _compact_ticket(ticket: dict[str, Any]) -> dict[str, Any]:

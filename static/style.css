@@ -6745,6 +6745,32 @@ select:focus {
   padding-left: 20px;
 }
 
+.team-dashboard-markdown-table-wrap {
+  width: 100%;
+  margin: 12px 0;
+  overflow: auto;
+}
+
+.team-dashboard-markdown-table {
+  width: 100%;
+  min-width: 560px;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.team-dashboard-markdown-table th,
+.team-dashboard-markdown-table td {
+  padding: 7px 9px;
+  border: 1px solid #111827;
+  text-align: left;
+  vertical-align: top;
+}
+
+.team-dashboard-markdown-table th {
+  background: #f8fafc;
+  font-weight: 700;
+}
+
 .team-dashboard-monthly-report-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(320px, 0.8fr);

@@ -186,6 +186,7 @@
   const renderMarkdown = (value) => {
     const html = [];
     let inList = false;
+    let table = null;
     const closeList = () => {
       if (inList) {
         html.push('</ul>');
@@ -195,11 +196,54 @@
     const inline = (text) => escapeHtml(text)
       .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
       .replace(/`(.+?)`/g, '<code>$1</code>');
-    String(value || '').split(/\r?\n/).forEach((line) => {
+    const splitTableRow = (line) => {
+      let text = String(line || '').trim();
+      if (text.startsWith('|')) text = text.slice(1);
+      if (text.endsWith('|')) text = text.slice(0, -1);
+      return text.split('|').map((cell) => cell.trim());
+    };
+    const isTableSeparator = (line) => {
+      const cells = splitTableRow(line);
+      return cells.length > 1 && cells.every((cell) => /^:?-{3,}:?$/.test(cell.replace(/\s+/g, '')));
+    };
+    const renderTable = () => {
+      if (!table) return;
+      const columnCount = Math.max(table.headers.length, ...table.rows.map((row) => row.length), 1);
+      const renderCells = (cells, tag) => Array.from({ length: columnCount }, (_, index) => (
+        `<${tag}>${inline(cells[index] || '')}</${tag}>`
+      )).join('');
+      html.push(
+        '<div class="team-dashboard-markdown-table-wrap"><table class="team-dashboard-markdown-table">'
+        + `<thead><tr>${renderCells(table.headers, 'th')}</tr></thead>`
+        + `<tbody>${table.rows.map((row) => `<tr>${renderCells(row, 'td')}</tr>`).join('')}</tbody>`
+        + '</table></div>',
+      );
+      table = null;
+    };
+    const closeBlocks = () => {
+      closeList();
+      renderTable();
+    };
+    const lines = String(value || '').split(/\r?\n/);
+    lines.forEach((line, index) => {
       const trimmed = line.trim();
       if (!trimmed) {
-        closeList();
+        closeBlocks();
         return;
+      }
+      const nextLine = lines[index + 1]?.trim() || '';
+      if (!table && trimmed.includes('|') && isTableSeparator(nextLine)) {
+        closeList();
+        table = { headers: splitTableRow(trimmed), rows: [] };
+        return;
+      }
+      if (table) {
+        if (isTableSeparator(trimmed)) return;
+        if (trimmed.includes('|') && !isTableSeparator(trimmed)) {
+          table.rows.push(splitTableRow(trimmed));
+          return;
+        }
+        renderTable();
       }
       const heading = trimmed.match(/^(#{2,4})\s+(.+)$/);
       if (heading) {
@@ -219,7 +263,7 @@
       closeList();
       html.push(`<p>${inline(trimmed)}</p>`);
     });
-    closeList();
+    closeBlocks();
     return html.join('');
   };
 
