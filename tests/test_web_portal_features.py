@@ -984,6 +984,8 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertEqual(legacy_response.headers["Location"], "/team-dashboard")
         self.assertEqual(dashboard_response.status_code, 200)
         self.assertIn(b"Team Admin", dashboard_response.data)
+        self.assertIn(b"Monthly Report", dashboard_response.data)
+        self.assertIn(b'data-team-dashboard-tab="monthly-report"', dashboard_response.data)
         self.assertIn(b"data-team-dashboard", dashboard_response.data)
         self.assertIn(b"team-dashboard-track-tabs", dashboard_response.data)
         self.assertNotIn(b"data-team-dashboard-update", dashboard_response.data)
@@ -992,6 +994,9 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertNotIn(b'data-tab-trigger="team-dashboard"', dashboard_response.data)
         self.assertEqual(sophia_dashboard_response.status_code, 200)
         self.assertIn(b"Task List", sophia_dashboard_response.data)
+        self.assertNotIn(b"Monthly Report", sophia_dashboard_response.data)
+        self.assertNotIn(b'data-team-dashboard-tab="monthly-report"', sophia_dashboard_response.data)
+        self.assertNotIn(b"data-monthly-report-draft-url", sophia_dashboard_response.data)
         self.assertNotIn(b"Team Admin", sophia_dashboard_response.data)
         self.assertNotIn(b"data-team-dashboard-admin-form", sophia_dashboard_response.data)
 
@@ -1132,6 +1137,7 @@ class WebPortalFeatureTests(unittest.TestCase):
                     "/admin/team-dashboard/monthly-report-template",
                     json={"template": "# Changed"},
                 )
+                readonly_template_response = client.get("/api/team-dashboard/monthly-report/template")
             with app.test_client() as client:
                 with client.session_transaction() as session:
                     session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong"}
@@ -1143,10 +1149,41 @@ class WebPortalFeatureTests(unittest.TestCase):
                 template_response = client.get("/api/team-dashboard/monthly-report/template")
 
         self.assertEqual(readonly_response.status_code, 403)
+        self.assertEqual(readonly_template_response.status_code, 403)
         self.assertEqual(save_response.status_code, 200)
         self.assertEqual(save_response.get_json()["template"], "# Custom Monthly Report\n- Focus")
         self.assertEqual(template_response.status_code, 200)
         self.assertEqual(template_response.get_json()["template"], "# Custom Monthly Report\n- Focus")
+
+    def test_team_dashboard_monthly_report_actions_are_xiaodong_only(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_ALLOWED_EMAILS": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
+            },
+            clear=True,
+        ):
+            app = create_app()
+            app.testing = True
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["google_profile"] = {"email": "sophia.wangzj@npt.sg", "name": "Sophia"}
+                    session["google_credentials"] = {"token": "x"}
+                draft_response = client.post("/api/team-dashboard/monthly-report/draft", json={})
+                send_response = client.post(
+                    "/api/team-dashboard/monthly-report/send",
+                    json={"draft_markdown": "draft", "subject": "Monthly Report - 2026-04"},
+                )
+
+        self.assertEqual(draft_response.status_code, 403)
+        self.assertEqual(send_response.status_code, 403)
+        self.assertIn("xiaodong.zheng@npt.sg", draft_response.get_json()["message"])
+        self.assertIn("xiaodong.zheng@npt.sg", send_response.get_json()["message"])
 
     def test_team_dashboard_key_project_defaults_and_manual_overrides_survive_reload(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(

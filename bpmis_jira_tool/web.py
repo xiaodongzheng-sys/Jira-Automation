@@ -2133,6 +2133,9 @@ def create_app() -> Flask:
             user_identity=_get_user_identity(settings),
             team_dashboard_config=_get_team_dashboard_config_store().load(),
             can_manage_team_dashboard=_can_manage_team_dashboard(_get_user_identity(settings)),
+            can_view_team_dashboard_monthly_report=_can_access_team_dashboard_monthly_report(
+                _get_user_identity(settings)
+            ),
         )
 
     @app.get("/healthz")
@@ -3431,7 +3434,7 @@ def create_app() -> Flask:
 
     @app.get("/api/team-dashboard/monthly-report/template")
     def team_dashboard_monthly_report_template():
-        access_gate = _require_team_dashboard_access(settings, api=True)
+        access_gate = _require_team_dashboard_monthly_report_access(settings, api=True)
         if access_gate is not None:
             return access_gate
         config = _get_team_dashboard_config_store().load()
@@ -3446,7 +3449,7 @@ def create_app() -> Flask:
 
     @app.post("/admin/team-dashboard/monthly-report-template")
     def save_team_dashboard_monthly_report_template():
-        access_gate = _require_team_dashboard_access(settings, api=True)
+        access_gate = _require_team_dashboard_monthly_report_access(settings, api=True)
         if access_gate is not None:
             return access_gate
         user_identity = _get_user_identity(settings)
@@ -3621,7 +3624,7 @@ def create_app() -> Flask:
 
     @app.post("/api/team-dashboard/monthly-report/draft")
     def team_dashboard_monthly_report_draft():
-        access_gate = _require_team_dashboard_access(settings, api=True)
+        access_gate = _require_team_dashboard_monthly_report_access(settings, api=True)
         if access_gate is not None:
             return access_gate
         user_identity = _get_user_identity(settings)
@@ -3678,7 +3681,7 @@ def create_app() -> Flask:
 
     @app.post("/api/team-dashboard/monthly-report/send")
     def team_dashboard_monthly_report_send():
-        access_gate = _require_team_dashboard_access(settings, api=True)
+        access_gate = _require_team_dashboard_monthly_report_access(settings, api=True)
         if access_gate is not None:
             return access_gate
         payload = request.get_json(silent=True) or {}
@@ -5355,6 +5358,20 @@ def _require_team_dashboard_access(settings: Settings, *, api: bool = False):
     return None
 
 
+def _require_team_dashboard_monthly_report_access(settings: Settings, *, api: bool = False):
+    access_gate = _require_team_dashboard_access(settings, api=api)
+    if access_gate is not None:
+        return access_gate
+    user_identity = _get_user_identity(settings)
+    if _can_access_team_dashboard_monthly_report(user_identity):
+        return None
+    message = "Monthly Report is restricted to xiaodong.zheng@npt.sg."
+    if api:
+        return jsonify({"status": "error", "message": message}), HTTPStatus.FORBIDDEN
+    flash(message, "error")
+    return redirect(url_for("access_denied"))
+
+
 def _validate_config_security(settings: Settings, config_data: dict[str, Any]) -> None:
     portal_token = str(config_data.get("bpmis_api_access_token", "") or "").strip()
     if _shared_portal_enabled(settings) and portal_token and not settings.team_portal_config_encryption_key:
@@ -5387,6 +5404,10 @@ def _can_access_team_dashboard(user_identity: dict[str, str | None]) -> bool:
 
 def _can_manage_team_dashboard(user_identity: dict[str, str | None]) -> bool:
     return str(user_identity.get("email") or "").strip().lower() == TEAM_PROFILE_ADMIN_EMAIL
+
+
+def _can_access_team_dashboard_monthly_report(user_identity: dict[str, str | None]) -> bool:
+    return str(user_identity.get("email") or "").strip().lower() == "xiaodong.zheng@npt.sg"
 
 
 def _can_edit_sync_email(user_identity: dict[str, str | None]) -> bool:
