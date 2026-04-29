@@ -885,6 +885,8 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertEqual(dashboard_response.status_code, 200)
         self.assertIn(b"Team Admin", dashboard_response.data)
         self.assertIn(b"data-team-dashboard", dashboard_response.data)
+        self.assertIn(b"team-dashboard-per-team-load", dashboard_response.data)
+        self.assertNotIn(b"data-team-dashboard-update", dashboard_response.data)
         self.assertNotIn(b"Manage My Projects", dashboard_response.data)
         self.assertNotIn(b'data-default-tab="team-dashboard"', dashboard_response.data)
         self.assertNotIn(b'data-tab-trigger="team-dashboard"', dashboard_response.data)
