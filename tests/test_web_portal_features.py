@@ -936,7 +936,11 @@ class WebPortalFeatureTests(unittest.TestCase):
             )
 
             class FakeTeamDashboardClient:
+                def __init__(self):
+                    self.calls = []
+
                 def list_jira_tasks_created_by_emails(self, emails):
+                    self.calls.append(list(emails))
                     if emails == ["af@npt.sg"]:
                         return [
                             {
@@ -1001,12 +1005,15 @@ class WebPortalFeatureTests(unittest.TestCase):
                         ]
                     return []
 
-            with patch("bpmis_jira_tool.web._build_bpmis_client_for_current_user", return_value=FakeTeamDashboardClient()):
+            fake_client = FakeTeamDashboardClient()
+            with patch("bpmis_jira_tool.web._build_bpmis_client_for_current_user", return_value=fake_client):
                 with app.test_client() as client:
                     with client.session_transaction() as session:
                         session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong"}
                         session["google_credentials"] = {"token": "x"}
                     response = client.get("/api/team-dashboard/tasks")
+                    af_response = client.get("/api/team-dashboard/tasks?team=AF")
+                    unknown_response = client.get("/api/team-dashboard/tasks?team=NOPE")
 
         self.assertEqual(response.status_code, 200)
         payload = response.get_json()
@@ -1024,6 +1031,13 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertEqual([item["jira_id"] for item in teams["CRMS"]["under_prd"][0]["jira_tickets"]], ["CR-1"])
         self.assertEqual(teams["CRMS"]["pending_live"], [])
         self.assertEqual(teams["GRC"]["under_prd"], [])
+        self.assertEqual(af_response.status_code, 200)
+        af_payload = af_response.get_json()
+        self.assertEqual([team["team_key"] for team in af_payload["teams"]], ["AF"])
+        self.assertEqual(af_payload["team"]["team_key"], "AF")
+        self.assertEqual([item["jira_id"] for item in af_payload["team"]["pending_live"][0]["jira_tickets"]], ["AF-2"])
+        self.assertEqual(unknown_response.status_code, 400)
+        self.assertIn(["af@npt.sg"], fake_client.calls)
 
     def test_team_default_admin_save_persists_route_override(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(

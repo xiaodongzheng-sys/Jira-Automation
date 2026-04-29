@@ -3404,9 +3404,20 @@ def create_app() -> Flask:
             return access_gate
         config = _get_team_dashboard_config_store().load()
         bpmis_client = _build_bpmis_client_for_current_user(settings)
+        requested_team_key = str(request.args.get("team") or "").strip().upper()
+        if requested_team_key and requested_team_key not in TEAM_DASHBOARD_TEAMS:
+            return (
+                jsonify({"status": "error", "message": f"Unknown team: {requested_team_key}."}),
+                HTTPStatus.BAD_REQUEST,
+            )
+        team_items = (
+            [(requested_team_key, TEAM_DASHBOARD_TEAMS[requested_team_key])]
+            if requested_team_key
+            else list(TEAM_DASHBOARD_TEAMS.items())
+        )
         team_payloads: list[dict[str, Any]] = []
         has_error = False
-        for team_key, label in TEAM_DASHBOARD_TEAMS.items():
+        for team_key, label in team_items:
             team_config = (config.get("teams") or {}).get(team_key) or {}
             emails = _normalize_team_dashboard_emails(team_config.get("member_emails") or [])
             try:
@@ -3438,6 +3449,7 @@ def create_app() -> Flask:
             {
                 "status": "partial" if has_error else "ok",
                 "teams": team_payloads,
+                "team": team_payloads[0] if requested_team_key and team_payloads else None,
                 "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             }
         )

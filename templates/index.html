@@ -407,6 +407,7 @@
               <button class="button button-secondary" type="button" data-team-dashboard-update>Update</button>
             </div>
             <p class="productization-inline-status" data-team-dashboard-task-status></p>
+            <div class="team-dashboard-progress" data-team-dashboard-progress hidden></div>
             <div class="team-dashboard-team-list" data-team-dashboard-task-list></div>
           </section>
 
@@ -516,7 +517,7 @@
   <script src="{{ url_for('static', filename='bpmis_projects.js') }}?v=20260428-bpmis-card-drag"></script>
   <script src="{{ url_for('static', filename='productization_upgrade_summary.js') }}?v=20260427-copy-wrap"></script>
   {% if team_dashboard_enabled %}
-    <script src="{{ url_for('static', filename='team_dashboard.js') }}?v=20260428-team-dashboard"></script>
+    <script src="{{ url_for('static', filename='team_dashboard.js') }}?v=20260429-team-dashboard-progress"></script>
   {% endif %}
   <script id="team-profile-data" type="application/json">{{ team_profiles | tojson }}</script>
   <script>

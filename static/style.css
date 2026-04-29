@@ -6416,11 +6416,91 @@ select:focus {
   gap: 24px;
 }
 
+.team-dashboard-progress {
+  display: grid;
+  gap: 10px;
+  margin: 12px 0 4px;
+}
+
+.team-dashboard-progress[hidden] {
+  display: none;
+}
+
+.team-dashboard-progress-bar {
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #e8eef8;
+}
+
+.team-dashboard-progress-bar span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: #2f6df6;
+  transition: width 180ms ease;
+}
+
+.team-dashboard-progress-items {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.team-dashboard-progress-item {
+  min-height: 58px;
+  padding: 10px 12px;
+  border: 1px solid #e0e7f2;
+  border-radius: 8px;
+  background: #f8fbff;
+}
+
+.team-dashboard-progress-item strong,
+.team-dashboard-progress-item span {
+  display: block;
+}
+
+.team-dashboard-progress-item strong {
+  color: #14213d;
+  font-size: 13px;
+}
+
+.team-dashboard-progress-item span {
+  margin-top: 3px;
+  color: #667085;
+  font-size: 12px;
+}
+
+.team-dashboard-progress-item[data-state="loading"] {
+  border-color: #9bbcff;
+  background: #f0f6ff;
+}
+
+.team-dashboard-progress-item[data-state="done"] {
+  border-color: #b9e4ca;
+  background: #f1fbf5;
+}
+
+.team-dashboard-progress-item[data-state="error"] {
+  border-color: #f4b8b8;
+  background: #fff5f5;
+}
+
+.team-dashboard-progress > p {
+  margin: 0;
+  color: #667085;
+  font-size: 13px;
+}
+
 .team-dashboard-team {
   display: grid;
   gap: 18px;
   padding-top: 18px;
   border-top: 1px solid #e6ebf2;
+}
+
+.team-dashboard-team.is-loading {
+  opacity: 0.82;
 }
 
 .team-dashboard-team-head,
@@ -6573,6 +6653,10 @@ select:focus {
   .workspace-tab {
     min-width: auto;
     flex: 1 1 140px;
+  }
+
+  .team-dashboard-progress-items {
+    grid-template-columns: 1fr;
   }
 
   .productization-compare-grid {

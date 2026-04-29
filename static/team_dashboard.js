@@ -24,6 +24,7 @@
 
   const taskStatus = root.querySelector('[data-team-dashboard-task-status]');
   const taskSummary = root.querySelector('[data-team-dashboard-task-summary]');
+  const taskProgress = root.querySelector('[data-team-dashboard-progress]');
   const taskList = root.querySelector('[data-team-dashboard-task-list]');
   const updateButton = root.querySelector('[data-team-dashboard-update]');
   const adminForm = root.querySelector('[data-team-dashboard-admin-form]');
@@ -159,6 +160,30 @@
     `;
   };
 
+  const renderTeamProgress = (teams, completed, failed) => {
+    if (!taskProgress) return;
+    const teamItems = Array.isArray(teams) ? teams : [];
+    taskProgress.hidden = !teamItems.length;
+    if (!teamItems.length) {
+      taskProgress.innerHTML = '';
+      return;
+    }
+    taskProgress.innerHTML = `
+      <div class="team-dashboard-progress-bar" aria-hidden="true">
+        <span style="width: ${escapeHtml(String(Math.round((completed / teamItems.length) * 100)))}%"></span>
+      </div>
+      <div class="team-dashboard-progress-items">
+        ${teamItems.map((team) => `
+          <div class="team-dashboard-progress-item" data-state="${escapeHtml(team.state || 'queued')}">
+            <strong>${escapeHtml(team.label || team.team_key || 'Team')}</strong>
+            <span>${escapeHtml(team.progress_text || 'Queued')}</span>
+          </div>
+        `).join('')}
+      </div>
+      <p>${escapeHtml(`Progress: ${completed}/${teamItems.length} teams loaded${failed ? `, ${failed} failed` : ''}.`)}</p>
+    `;
+  };
+
   const renderTeams = (teams) => {
     if (!taskList) return;
     if (!teams.length) {
@@ -169,10 +194,11 @@
       const underPrd = Array.isArray(team.under_prd) ? team.under_prd : [];
       const pendingLive = Array.isArray(team.pending_live) ? team.pending_live : [];
       const error = team.error ? `<p class="productization-inline-status" data-tone="error">${escapeHtml(team.error)}</p>` : '';
+      const loading = team.loading ? `<p class="productization-inline-status" data-tone="neutral">${escapeHtml(team.progress_text || 'Loading team Jira tasks...')}</p>` : '';
       const totalTasks = itemCount(underPrd) + itemCount(pendingLive);
       const teamKey = team.team_key || 'team';
       return `
-        <section class="team-dashboard-team">
+        <section class="team-dashboard-team${team.loading ? ' is-loading' : ''}">
           <div class="team-dashboard-team-head">
             <div>
               <h3>${escapeHtml(team.label || team.team_key || 'Team')}</h3>
@@ -181,29 +207,108 @@
             <strong>${totalTasks}</strong>
           </div>
           ${error}
-          ${renderSection('Under PRD', underPrd, `${teamKey}-under-prd`)}
-          ${renderSection('Pending Live', pendingLive, `${teamKey}-pending-live`)}
+          ${loading}
+          ${team.loading ? '' : renderSection('Under PRD', underPrd, `${teamKey}-under-prd`)}
+          ${team.loading ? '' : renderSection('Pending Live', pendingLive, `${teamKey}-pending-live`)}
         </section>
       `;
     }).join('');
   };
 
+  const configuredTeams = async () => {
+    const response = await fetch(root.dataset.configUrl || '/api/team-dashboard/config', {
+      headers: { Accept: 'application/json' },
+      credentials: 'same-origin',
+    });
+    const payload = await readJson(response, 'Could not load Team Dashboard config.');
+    return Object.entries(payload.config?.teams || {}).map(([teamKey, team]) => ({
+      team_key: teamKey,
+      label: team.label || teamKey,
+      member_emails: Array.isArray(team.member_emails) ? team.member_emails : [],
+      under_prd: [],
+      pending_live: [],
+      state: 'queued',
+      progress_text: 'Queued',
+      loading: true,
+    }));
+  };
+
+  const teamTaskUrl = (teamKey) => {
+    const url = new URL(root.dataset.tasksUrl || '/api/team-dashboard/tasks', window.location.origin);
+    url.searchParams.set('team', teamKey);
+    return url.toString();
+  };
+
+  const updateTaskSummary = (teams, completed, failed, final = false) => {
+    const teamItems = Array.isArray(teams) ? teams : [];
+    const total = teamItems.reduce((count, team) => count + itemCount(team.under_prd || []) + itemCount(team.pending_live || []), 0);
+    if (taskSummary) {
+      taskSummary.textContent = final
+        ? `Loaded ${total} Jira tasks from ${completed - failed}/${teamItems.length} teams${failed ? `; ${failed} failed` : ''}.`
+        : `Loaded ${completed}/${teamItems.length} teams; ${total} Jira tasks so far.`;
+    }
+  };
+
   const loadTasks = async () => {
     if (!updateButton) return;
     updateButton.disabled = true;
-    setStatus(taskStatus, 'Loading latest Jira tasks...', 'neutral');
+    setStatus(taskStatus, 'Loading team Jira tasks...', 'neutral');
     try {
-      const response = await fetch(root.dataset.tasksUrl || '/api/team-dashboard/tasks', {
-        headers: { Accept: 'application/json' },
-      });
-      const payload = await readJson(response, 'Could not load Team Dashboard tasks.');
-      const teams = Array.isArray(payload.teams) ? payload.teams : [];
+      const teams = await configuredTeams();
+      let completed = 0;
+      let failed = 0;
+      renderTeamProgress(teams, completed, failed);
       renderTeams(teams);
-      const total = teams.reduce((count, team) => count + itemCount(team.under_prd || []) + itemCount(team.pending_live || []), 0);
-      if (taskSummary) taskSummary.textContent = `Loaded ${total} Jira tasks from ${teams.length} teams.`;
-      setStatus(taskStatus, payload.status === 'partial' ? 'Loaded with partial team errors.' : `Updated at ${payload.updated_at || 'now'}.`, payload.status === 'partial' ? 'error' : 'success');
+      updateTaskSummary(teams, completed, failed);
+
+      await Promise.all(teams.map(async (team, index) => {
+        teams[index] = { ...team, state: 'loading', progress_text: 'Loading...', loading: true };
+        renderTeamProgress(teams, completed, failed);
+        renderTeams(teams);
+        try {
+          const response = await fetch(teamTaskUrl(team.team_key), {
+            headers: { Accept: 'application/json' },
+            credentials: 'same-origin',
+          });
+          const payload = await readJson(response, `Could not load ${team.label || team.team_key} tasks.`);
+          const loadedTeam = payload.team || (Array.isArray(payload.teams) ? payload.teams[0] : null) || {};
+          const hadTeamError = Boolean(loadedTeam.error || payload.status === 'partial');
+          if (hadTeamError) failed += 1;
+          teams[index] = {
+            ...loadedTeam,
+            team_key: loadedTeam.team_key || team.team_key,
+            label: loadedTeam.label || team.label,
+            member_emails: loadedTeam.member_emails || team.member_emails || [],
+            state: hadTeamError ? 'error' : 'done',
+            progress_text: hadTeamError ? 'Failed' : 'Done',
+            loading: false,
+          };
+        } catch (error) {
+          failed += 1;
+          teams[index] = {
+            ...team,
+            state: 'error',
+            progress_text: 'Failed',
+            loading: false,
+            error: error.message || `Could not load ${team.label || team.team_key} tasks.`,
+          };
+        } finally {
+          completed += 1;
+          renderTeamProgress(teams, completed, failed);
+          renderTeams(teams);
+          updateTaskSummary(teams, completed, failed);
+        }
+      }));
+
+      updateTaskSummary(teams, completed, failed, true);
+      setStatus(
+        taskStatus,
+        failed ? `Updated with ${failed} team error${failed === 1 ? '' : 's'}.` : 'All teams updated.',
+        failed ? 'error' : 'success',
+      );
     } catch (error) {
       setStatus(taskStatus, error.message || 'Could not load Team Dashboard tasks.', 'error');
+      if (taskProgress) taskProgress.hidden = true;
     } finally {
       updateButton.disabled = false;
     }
