@@ -352,12 +352,15 @@ class TeamDashboardConfigStore:
                     "member_emails": list(TEAM_DASHBOARD_DEFAULT_MEMBER_EMAILS_BY_TEAM.get(team_key, ())),
                 }
                 for team_key, label in TEAM_DASHBOARD_TEAMS.items()
-            }
+            },
+            "key_project_overrides": {},
         }
 
     def normalize_config(self, config: dict[str, Any]) -> dict[str, Any]:
         raw_teams = config.get("teams") if isinstance(config, dict) else {}
         raw_teams = raw_teams if isinstance(raw_teams, dict) else {}
+        raw_key_project_overrides = config.get("key_project_overrides") if isinstance(config, dict) else {}
+        raw_key_project_overrides = raw_key_project_overrides if isinstance(raw_key_project_overrides, dict) else {}
         default = self.default_config()
         normalized_teams: dict[str, dict[str, Any]] = {}
         for team_key, label in TEAM_DASHBOARD_TEAMS.items():
@@ -372,7 +375,17 @@ class TeamDashboardConfigStore:
                 "label": label,
                 "member_emails": normalized_emails,
             }
-        return {"teams": normalized_teams}
+        normalized_key_project_overrides: dict[str, dict[str, Any]] = {}
+        for raw_bpmis_id, raw_override in raw_key_project_overrides.items():
+            bpmis_id = str(raw_bpmis_id or "").strip()
+            if not bpmis_id or not isinstance(raw_override, dict) or "is_key_project" not in raw_override:
+                continue
+            normalized_key_project_overrides[bpmis_id] = {
+                "is_key_project": bool(raw_override.get("is_key_project")),
+                "updated_by": str(raw_override.get("updated_by") or "").strip().lower(),
+                "updated_at": str(raw_override.get("updated_at") or "").strip(),
+            }
+        return {"teams": normalized_teams, "key_project_overrides": normalized_key_project_overrides}
 
     def _ensure_db(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -3441,7 +3454,11 @@ def create_app() -> Flask:
                     for team_key in TEAM_DASHBOARD_TEAMS
                 }
             }
-        saved = _get_team_dashboard_config_store().save(payload)
+        store = _get_team_dashboard_config_store()
+        existing_config = store.load()
+        if isinstance(existing_config.get("key_project_overrides"), dict):
+            payload["key_project_overrides"] = existing_config["key_project_overrides"]
+        saved = store.save(payload)
         _log_portal_event(
             "team_dashboard_members_save_success",
             **_build_request_log_context(
@@ -3464,6 +3481,7 @@ def create_app() -> Flask:
         if access_gate is not None:
             return access_gate
         config = _get_team_dashboard_config_store().load()
+        key_project_overrides = config.get("key_project_overrides") if isinstance(config.get("key_project_overrides"), dict) else {}
         bpmis_client = _build_bpmis_client_for_current_user(settings)
         requested_team_key = str(request.args.get("team") or request.args.get("team_key") or "").strip().upper()
         if requested_team_key and requested_team_key not in TEAM_DASHBOARD_TEAMS:
@@ -3490,7 +3508,16 @@ def create_app() -> Flask:
                     release_after=_team_dashboard_jira_release_after(),
                 )
                 biz_projects = _team_dashboard_biz_projects_for_emails(bpmis_client, emails)
-                team_payload = _build_team_dashboard_task_group(team_key, label, emails, tasks, biz_projects)
+                team_payload = _build_team_dashboard_task_group(
+                    team_key,
+                    label,
+                    emails,
+                    tasks,
+                    biz_projects,
+                    key_project_overrides=key_project_overrides,
+                )
+                _backfill_team_dashboard_empty_project_jira_tasks(bpmis_client, team_payload)
+                _remove_team_dashboard_zero_jira_pending_live_projects(team_payload)
                 team_payload["elapsed_seconds"] = round(time.monotonic() - started_at, 2)
                 team_payload["fetch_stats"] = _team_dashboard_fetch_stats(bpmis_client)
                 _log_portal_event(
@@ -3546,6 +3573,57 @@ def create_app() -> Flask:
         response.headers["Pragma"] = "no-cache"
         response.headers["Expires"] = "0"
         return response
+
+    @app.post("/api/team-dashboard/key-projects")
+    def save_team_dashboard_key_project():
+        access_gate = _require_team_dashboard_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        user_identity = _get_user_identity(settings)
+        if not _can_manage_team_dashboard(user_identity):
+            return jsonify({"status": "error", "message": "Team Dashboard admin access is restricted."}), HTTPStatus.FORBIDDEN
+        payload = request.get_json(silent=True) or {}
+        bpmis_id = str(payload.get("bpmis_id") or "").strip()
+        if not bpmis_id:
+            return jsonify({"status": "error", "message": "BPMIS ID is required."}), HTTPStatus.BAD_REQUEST
+        if "is_key_project" not in payload:
+            return jsonify({"status": "error", "message": "Key Project value is required."}), HTTPStatus.BAD_REQUEST
+        is_key_project = bool(payload.get("is_key_project"))
+        store = _get_team_dashboard_config_store()
+        config = store.load()
+        overrides = config.get("key_project_overrides") if isinstance(config.get("key_project_overrides"), dict) else {}
+        overrides[bpmis_id] = {
+            "is_key_project": is_key_project,
+            "updated_by": str(user_identity.get("email") or "").strip().lower(),
+            "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        config["key_project_overrides"] = overrides
+        saved = store.save(config)
+        effective = _apply_team_dashboard_key_project_state(
+            {"bpmis_id": bpmis_id, "priority": str(payload.get("priority") or "").strip()},
+            saved.get("key_project_overrides") if isinstance(saved.get("key_project_overrides"), dict) else {},
+        )
+        _log_portal_event(
+            "team_dashboard_key_project_save_success",
+            **_build_request_log_context(
+                settings,
+                user_identity=user_identity,
+                extra={
+                    "bpmis_id": bpmis_id,
+                    "is_key_project": is_key_project,
+                    "key_project_source": effective.get("key_project_source"),
+                },
+            ),
+        )
+        return jsonify(
+            {
+                "status": "ok",
+                "bpmis_id": bpmis_id,
+                "override": (saved.get("key_project_overrides") or {}).get(bpmis_id) or {},
+                "is_key_project": effective.get("is_key_project"),
+                "key_project_source": effective.get("key_project_source"),
+            }
+        )
 
     @app.post("/api/team-dashboard/prd-review")
     def team_dashboard_prd_review():
@@ -5615,6 +5693,8 @@ def _build_team_dashboard_task_group(
     member_emails: list[str],
     tasks: list[dict[str, Any]],
     biz_projects: list[dict[str, Any]] | None = None,
+    *,
+    key_project_overrides: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     under_prd: list[dict[str, Any]] = []
     pending_live: list[dict[str, Any]] = []
@@ -5640,6 +5720,8 @@ def _build_team_dashboard_task_group(
         pending_live_biz_projects,
         sort_by_release=True,
     )
+    _apply_team_dashboard_key_project_states(under_prd_projects, key_project_overrides or {})
+    _apply_team_dashboard_key_project_states(pending_live_projects, key_project_overrides or {})
     return {
         "team_key": team_key,
         "label": label,
@@ -5702,6 +5784,83 @@ def _team_dashboard_fetch_stats(bpmis_client: Any) -> dict[str, int]:
             "user_lookup_count",
         )
     }
+
+
+def _backfill_team_dashboard_empty_project_jira_tasks(bpmis_client: Any, team_payload: dict[str, Any]) -> None:
+    for section_key in ("under_prd", "pending_live"):
+        projects = team_payload.get(section_key)
+        if not isinstance(projects, list):
+            continue
+        for project in projects:
+            if not isinstance(project, dict) or project.get("jira_tickets"):
+                continue
+            bpmis_id = str(project.get("bpmis_id") or "").strip()
+            if not bpmis_id:
+                continue
+            tickets = _team_dashboard_project_fallback_jira_tasks(bpmis_client, project)
+            if not tickets:
+                continue
+            project["jira_tickets"] = tickets
+            project["task_count"] = len(tickets)
+            _apply_team_dashboard_project_release_date(project)
+
+
+def _remove_team_dashboard_zero_jira_pending_live_projects(team_payload: dict[str, Any]) -> None:
+    pending_live = team_payload.get("pending_live")
+    if not isinstance(pending_live, list):
+        return
+    team_payload["pending_live"] = [
+        project
+        for project in pending_live
+        if isinstance(project, dict) and len(project.get("jira_tickets") or []) > 0
+    ]
+
+
+def _team_dashboard_project_fallback_jira_tasks(bpmis_client: Any, project: dict[str, Any]) -> list[dict[str, Any]]:
+    bpmis_id = str(project.get("bpmis_id") or "").strip()
+    if not bpmis_id or not hasattr(bpmis_client, "list_jira_tasks_for_project_created_by_email"):
+        return []
+    emails = _normalize_team_dashboard_emails(project.get("matched_pm_emails") or [])
+    if not emails:
+        regional_pm = str(project.get("regional_pm_pic") or "").strip()
+        if "@" in regional_pm:
+            emails = _normalize_team_dashboard_emails([regional_pm])
+    if not emails:
+        return []
+    tickets: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    parent_project = {
+        "bpmis_id": bpmis_id,
+        "project_name": str(project.get("project_name") or "").strip(),
+        "market": str(project.get("market") or "").strip(),
+        "priority": str(project.get("priority") or "").strip(),
+        "regional_pm_pic": str(project.get("regional_pm_pic") or "").strip(),
+        "status": str(project.get("status") or "").strip(),
+    }
+    for email in emails:
+        try:
+            rows = bpmis_client.list_jira_tasks_for_project_created_by_email(bpmis_id, email)
+        except Exception as error:  # noqa: BLE001 - keep the project card renderable when fallback lookup fails.
+            current_app.logger.warning("Team Dashboard Jira fallback lookup failed for %s/%s: %s", bpmis_id, email, error)
+            continue
+        for row in rows or []:
+            if not isinstance(row, dict):
+                continue
+            normalized = _normalize_team_dashboard_task(
+                {
+                    **row,
+                    "pm_email": row.get("pm_email") or email,
+                    "parent_project": row.get("parent_project") if isinstance(row.get("parent_project"), dict) else parent_project,
+                }
+            )
+            dedupe_key = normalized.get("jira_id") or normalized.get("issue_id")
+            if dedupe_key and dedupe_key in seen:
+                continue
+            if dedupe_key:
+                seen.add(dedupe_key)
+            tickets.append(normalized)
+    tickets.sort(key=_team_dashboard_sort_key)
+    return tickets
 
 
 def _team_dashboard_jira_max_pages() -> int:
@@ -5867,6 +6026,32 @@ def _merge_team_dashboard_project_pm_emails(project: dict[str, Any], emails: lis
             existing.append(email)
     if existing:
         project["matched_pm_emails"] = existing
+
+
+def _apply_team_dashboard_key_project_states(projects: list[dict[str, Any]], overrides: dict[str, Any]) -> None:
+    for project in projects:
+        _apply_team_dashboard_key_project_state(project, overrides)
+
+
+def _apply_team_dashboard_key_project_state(project: dict[str, Any], overrides: dict[str, Any]) -> dict[str, Any]:
+    bpmis_id = str(project.get("bpmis_id") or "").strip()
+    override = overrides.get(bpmis_id) if bpmis_id and isinstance(overrides, dict) else None
+    if isinstance(override, dict) and "is_key_project" in override:
+        is_key_project = bool(override.get("is_key_project"))
+        project["is_key_project"] = is_key_project
+        project["key_project_source"] = "manual_on" if is_key_project else "manual_off"
+        project["key_project_override"] = {
+            "is_key_project": is_key_project,
+            "updated_by": str(override.get("updated_by") or "").strip().lower(),
+            "updated_at": str(override.get("updated_at") or "").strip(),
+        }
+        return project
+    priority = str(project.get("priority") or "").strip().casefold()
+    is_priority_default = priority in {"sp", "p0"}
+    project["is_key_project"] = is_priority_default
+    project["key_project_source"] = "priority_default" if is_priority_default else "none"
+    project.pop("key_project_override", None)
+    return project
 
 
 def _apply_team_dashboard_project_release_date(project: dict[str, Any]) -> None:

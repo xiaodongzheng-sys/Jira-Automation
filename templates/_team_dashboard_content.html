@@ -3,6 +3,8 @@
   data-config-url="{{ url_for('team_dashboard_config') }}"
   data-save-url="{{ url_for('save_team_dashboard_members') }}"
   data-tasks-url="{{ url_for('team_dashboard_tasks') }}"
+  data-key-project-url="{{ url_for('save_team_dashboard_key_project') }}"
+  data-can-manage-key-projects="{{ 'true' if can_manage_team_dashboard else 'false' }}"
 >
   <div class="panel-head">
     <div>

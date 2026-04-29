@@ -1053,6 +1053,173 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertEqual(payload["config"]["teams"]["CRMS"]["member_emails"], list(web_module.TEAM_DASHBOARD_DEFAULT_MEMBER_EMAILS_BY_TEAM["CRMS"]))
         self.assertEqual(payload["config"]["teams"]["GRC"]["member_emails"], list(web_module.TEAM_DASHBOARD_DEFAULT_MEMBER_EMAILS_BY_TEAM["GRC"]))
 
+    def test_team_dashboard_key_project_defaults_and_manual_overrides_survive_reload(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_ALLOWED_EMAILS": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_DASHBOARD_JIRA_RELEASE_AFTER": "2026-04-29",
+            },
+            clear=True,
+        ):
+            app = create_app()
+            app.testing = True
+            app.config["TEAM_DASHBOARD_CONFIG_STORE"].save(
+                {
+                    "teams": {
+                        "AF": {"member_emails": ["af@npt.sg"]},
+                        "CRMS": {"member_emails": []},
+                        "GRC": {"member_emails": []},
+                    }
+                }
+            )
+
+            class FakeTeamDashboardClient:
+                def list_biz_projects_for_pm_email(self, email):
+                    if email != "af@npt.sg":
+                        return []
+                    return [
+                        {
+                            "issue_id": "SP-100",
+                            "project_name": "SP Default Project",
+                            "market": "SG",
+                            "priority": "SP",
+                            "regional_pm_pic": "af@npt.sg",
+                            "status": "Confirmed",
+                        },
+                        {
+                            "issue_id": "P0-100",
+                            "project_name": "P0 Default Project",
+                            "market": "SG",
+                            "priority": "P0",
+                            "regional_pm_pic": "af@npt.sg",
+                            "status": "Confirmed",
+                        },
+                        {
+                            "issue_id": "P1-100",
+                            "project_name": "Manual Key Project",
+                            "market": "SG",
+                            "priority": "P1",
+                            "regional_pm_pic": "af@npt.sg",
+                            "status": "Confirmed",
+                        },
+                    ]
+
+                def list_jira_tasks_created_by_emails(self, emails, **kwargs):
+                    return []
+
+            with patch("bpmis_jira_tool.web._build_bpmis_client_for_current_user", return_value=FakeTeamDashboardClient()):
+                with app.test_client() as client:
+                    with client.session_transaction() as session:
+                        session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong"}
+                        session["google_credentials"] = {"token": "x"}
+                    initial_response = client.get("/api/team-dashboard/tasks?team=AF")
+                    manual_off_response = client.post(
+                        "/api/team-dashboard/key-projects",
+                        json={"bpmis_id": "SP-100", "is_key_project": False, "priority": "SP"},
+                    )
+                    manual_on_response = client.post(
+                        "/api/team-dashboard/key-projects",
+                        json={"bpmis_id": "P1-100", "is_key_project": True, "priority": "P1"},
+                    )
+                    reload_response = client.get("/api/team-dashboard/tasks?team=AF")
+
+        self.assertEqual(initial_response.status_code, 200)
+        initial_projects = {
+            project["bpmis_id"]: project
+            for project in initial_response.get_json()["team"]["under_prd"]
+        }
+        self.assertTrue(initial_projects["SP-100"]["is_key_project"])
+        self.assertEqual(initial_projects["SP-100"]["key_project_source"], "priority_default")
+        self.assertTrue(initial_projects["P0-100"]["is_key_project"])
+        self.assertEqual(initial_projects["P0-100"]["key_project_source"], "priority_default")
+        self.assertFalse(initial_projects["P1-100"]["is_key_project"])
+        self.assertEqual(initial_projects["P1-100"]["key_project_source"], "none")
+        self.assertEqual(manual_off_response.status_code, 200)
+        self.assertFalse(manual_off_response.get_json()["override"]["is_key_project"])
+        self.assertEqual(manual_off_response.get_json()["key_project_source"], "manual_off")
+        self.assertEqual(manual_on_response.status_code, 200)
+        self.assertTrue(manual_on_response.get_json()["override"]["is_key_project"])
+        self.assertEqual(manual_on_response.get_json()["key_project_source"], "manual_on")
+        reloaded_projects = {
+            project["bpmis_id"]: project
+            for project in reload_response.get_json()["team"]["under_prd"]
+        }
+        self.assertFalse(reloaded_projects["SP-100"]["is_key_project"])
+        self.assertEqual(reloaded_projects["SP-100"]["key_project_source"], "manual_off")
+        self.assertTrue(reloaded_projects["P1-100"]["is_key_project"])
+        self.assertEqual(reloaded_projects["P1-100"]["key_project_source"], "manual_on")
+
+    def test_team_dashboard_key_project_write_is_admin_only_but_visible_to_readonly_users(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_ALLOWED_EMAILS": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_DASHBOARD_JIRA_RELEASE_AFTER": "2026-04-29",
+            },
+            clear=True,
+        ):
+            app = create_app()
+            app.testing = True
+            app.config["TEAM_DASHBOARD_CONFIG_STORE"].save(
+                {
+                    "teams": {
+                        "AF": {"member_emails": ["af@npt.sg"]},
+                        "CRMS": {"member_emails": []},
+                        "GRC": {"member_emails": []},
+                    },
+                    "key_project_overrides": {
+                        "P1-100": {
+                            "is_key_project": True,
+                            "updated_by": "xiaodong.zheng@npt.sg",
+                            "updated_at": "2026-04-29T00:00:00Z",
+                        }
+                    },
+                }
+            )
+
+            class FakeTeamDashboardClient:
+                def list_biz_projects_for_pm_email(self, email):
+                    if email != "af@npt.sg":
+                        return []
+                    return [
+                        {
+                            "issue_id": "P1-100",
+                            "project_name": "Visible Manual Project",
+                            "market": "SG",
+                            "priority": "P1",
+                            "regional_pm_pic": "af@npt.sg",
+                            "status": "Confirmed",
+                        }
+                    ]
+
+                def list_jira_tasks_created_by_emails(self, emails, **kwargs):
+                    return []
+
+            with patch("bpmis_jira_tool.web._build_bpmis_client_for_current_user", return_value=FakeTeamDashboardClient()):
+                with app.test_client() as client:
+                    with client.session_transaction() as session:
+                        session["google_profile"] = {"email": "sophia.wangzj@npt.sg", "name": "Sophia"}
+                        session["google_credentials"] = {"token": "x"}
+                    write_response = client.post(
+                        "/api/team-dashboard/key-projects",
+                        json={"bpmis_id": "P1-100", "is_key_project": False},
+                    )
+                    tasks_response = client.get("/api/team-dashboard/tasks?team=AF")
+
+        self.assertEqual(write_response.status_code, 403)
+        self.assertEqual(tasks_response.status_code, 200)
+        project = tasks_response.get_json()["team"]["under_prd"][0]
+        self.assertEqual(project["bpmis_id"], "P1-100")
+        self.assertTrue(project["is_key_project"])
+        self.assertEqual(project["key_project_source"], "manual_on")
+
     def test_team_dashboard_config_uses_remote_local_agent_store_when_enabled(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
@@ -1300,8 +1467,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertEqual([project["bpmis_id"] for project in teams["AF"]["pending_live"][:2]], ["225300", "225159"])
         self.assertEqual([project["release_date"] for project in teams["AF"]["pending_live"][:2]], ["01-05-2026", "20-05-2026"])
         self.assertEqual([item["jira_id"] for item in af_pending_live["225159"]["jira_tickets"]], ["AF-2"])
-        self.assertEqual(af_pending_live["300100"]["project_name"], "Developing Biz Only Project")
-        self.assertEqual(af_pending_live["300100"]["jira_tickets"], [])
+        self.assertNotIn("300100", af_pending_live)
         self.assertNotIn("300200", af_pending_live)
         self.assertEqual(af_under_prd["225159"]["jira_tickets"][0]["jira_link"], "https://jira.shopee.io/browse/AF-1")
         self.assertEqual(teams["CRMS"]["under_prd"][0]["bpmis_id"], "225200")
@@ -1392,6 +1558,78 @@ class WebPortalFeatureTests(unittest.TestCase):
                 }
             ],
         )
+
+    def test_team_dashboard_backfills_empty_project_jira_tasks_by_parent_id(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_ALLOWED_EMAILS": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_DASHBOARD_JIRA_RELEASE_AFTER": "2026-04-29",
+            },
+            clear=True,
+        ):
+            app = create_app()
+            app.testing = True
+            app.config["TEAM_DASHBOARD_CONFIG_STORE"].save(
+                {
+                    "teams": {
+                        "AF": {"member_emails": ["zoey.luxy@npt.sg"]},
+                        "CRMS": {"member_emails": []},
+                        "GRC": {"member_emails": []},
+                    }
+                }
+            )
+
+            class FakeTeamDashboardClient:
+                def __init__(self):
+                    self.project_task_calls = []
+
+                def list_biz_projects_for_pm_email(self, email):
+                    if email != "zoey.luxy@npt.sg":
+                        return []
+                    return [
+                        {
+                            "issue_id": "214164",
+                            "project_name": "AF System - Project CENTUM",
+                            "market": "SG",
+                            "priority": "P0",
+                            "regional_pm_pic": "zoey.luxy@npt.sg",
+                            "status": "Confirmed",
+                        }
+                    ]
+
+                def list_jira_tasks_created_by_emails(self, emails, **kwargs):
+                    return []
+
+                def list_jira_tasks_for_project_created_by_email(self, project_issue_id, email):
+                    self.project_task_calls.append((project_issue_id, email))
+                    return [
+                        {
+                            "ticket_key": "SPDBP-92169",
+                            "ticket_link": "https://jira.shopee.io/browse/SPDBP-92169",
+                            "jira_title": "[Feature] AF Function Enhancement",
+                            "status": "Done",
+                            "fix_version_name": "AF_v1.0.77_20260410",
+                        }
+                    ]
+
+            fake_client = FakeTeamDashboardClient()
+            with patch("bpmis_jira_tool.web._build_bpmis_client_for_current_user", return_value=fake_client):
+                with app.test_client() as client:
+                    with client.session_transaction() as session:
+                        session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong"}
+                        session["google_credentials"] = {"token": "x"}
+                    response = client.get("/api/team-dashboard/tasks?team_key=AF")
+
+        self.assertEqual(response.status_code, 200)
+        project = response.get_json()["team"]["under_prd"][0]
+        self.assertEqual(project["bpmis_id"], "214164")
+        self.assertEqual([ticket["jira_id"] for ticket in project["jira_tickets"]], ["SPDBP-92169"])
+        self.assertEqual(project["jira_tickets"][0]["jira_status"], "Done")
+        self.assertEqual(fake_client.project_task_calls, [("214164", "zoey.luxy@npt.sg")])
 
     def test_team_dashboard_rejects_unknown_single_team(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(

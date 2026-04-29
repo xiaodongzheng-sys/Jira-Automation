@@ -35,6 +35,7 @@
   const taskList = root.querySelector('[data-team-dashboard-task-list]');
   const adminForm = root.querySelector('[data-team-dashboard-admin-form]');
   const adminStatus = root.querySelector('[data-team-dashboard-admin-status]');
+  const canManageKeyProjects = root.dataset.canManageKeyProjects === 'true';
   const teamLabels = {
     AF: 'Anti-fraud',
     CRMS: 'Credit Risk',
@@ -42,7 +43,7 @@
   };
   const teamOrder = ['AF', 'CRMS', 'GRC'];
   const jiraPageSize = 10;
-  const taskCacheKey = 'team-dashboard:jira-tasks:v5';
+  const taskCacheKey = 'team-dashboard:jira-tasks:v6';
 
   let initialConfig = (() => {
     try {
@@ -53,6 +54,7 @@
   })();
   let taskTeams = [];
   let activeTaskTeamKey = 'AF';
+  let keyProjectOnly = false;
   const pmFilterState = {};
   const expandedPanels = {};
   const jiraPageState = {};
@@ -116,6 +118,23 @@
       cached_at: new Date().toISOString(),
     };
     writeTaskCache({ version: 1, updated_at: new Date().toISOString(), teams });
+  };
+
+  const updateCachedProject = (project) => {
+    const bpmisId = String(project?.bpmis_id || '').trim();
+    if (!bpmisId) return;
+    const cache = readTaskCache();
+    const teams = cache.teams && typeof cache.teams === 'object' ? cache.teams : {};
+    Object.values(teams).forEach((team) => {
+      ['under_prd', 'pending_live'].forEach((sectionKey) => {
+        (Array.isArray(team?.[sectionKey]) ? team[sectionKey] : []).forEach((cachedProject) => {
+          if (String(cachedProject?.bpmis_id || '').trim() === bpmisId) {
+            Object.assign(cachedProject, project);
+          }
+        });
+      });
+    });
+    writeTaskCache({ ...cache, teams, updated_at: new Date().toISOString() });
   };
 
   const setupTabs = () => {
@@ -239,6 +258,37 @@
       }));
   };
 
+  const filterProjectsByKeyProject = (projects) => {
+    const items = Array.isArray(projects) ? projects : [];
+    if (!keyProjectOnly) return items;
+    return items.filter((project) => Boolean(project.is_key_project));
+  };
+
+  const updateProjectKeyState = (bpmisId, isKeyProject, source, override = null) => {
+    const normalizedBpmisId = String(bpmisId || '').trim();
+    if (!normalizedBpmisId) return null;
+    let updatedProject = null;
+    taskTeams = taskTeams.map((team) => {
+      const updateSection = (projects) => (Array.isArray(projects) ? projects : []).map((project) => {
+        if (String(project?.bpmis_id || '').trim() !== normalizedBpmisId) return project;
+        updatedProject = {
+          ...project,
+          is_key_project: Boolean(isKeyProject),
+          key_project_source: source || (isKeyProject ? 'manual_on' : 'manual_off'),
+          key_project_override: override || project.key_project_override || {},
+        };
+        return updatedProject;
+      });
+      return {
+        ...team,
+        under_prd: updateSection(team.under_prd),
+        pending_live: updateSection(team.pending_live),
+      };
+    });
+    if (updatedProject) updateCachedProject(updatedProject);
+    return updatedProject;
+  };
+
   const pmFilterOptions = (team) => {
     const emails = new Set(normalizeEmailList(team.member_emails || []));
     [...(team.under_prd || []), ...(team.pending_live || [])].forEach((project) => {
@@ -305,6 +355,14 @@
     const visibleTickets = tickets.slice(firstIndex, firstIndex + jiraPageSize);
     const bpmisId = project.bpmis_id || '-';
     const expanded = Boolean(expandedPanels[panelId]);
+    const isKeyProject = Boolean(project.is_key_project);
+    const starLabel = isKeyProject ? 'Remove Key Project' : 'Mark as Key Project';
+    const sourceLabel = {
+      manual_on: 'Manual Key Project',
+      manual_off: 'Manually excluded',
+      priority_default: 'Default from SP/P0 priority',
+      none: 'Not Key Project',
+    }[project.key_project_source] || 'Not Key Project';
     return `
       <article class="bpmis-project-card team-dashboard-project-card">
         <div class="bpmis-project-card-main">
@@ -336,6 +394,19 @@
           <div class="team-dashboard-project-count">
             <span>Jira</span>
             <strong>${tickets.length}</strong>
+          </div>
+          <div class="team-dashboard-key-project">
+            <span>Key</span>
+            <button
+              class="team-dashboard-key-star${isKeyProject ? ' is-key' : ''}"
+              type="button"
+              data-team-dashboard-key-project="${escapeHtml(bpmisId)}"
+              data-key-project-next="${isKeyProject ? 'false' : 'true'}"
+              data-key-project-priority="${escapeHtml(project.priority || '')}"
+              aria-label="${escapeHtml(starLabel)}"
+              title="${escapeHtml(`${starLabel} - ${sourceLabel}`)}"
+              ${canManageKeyProjects && bpmisId !== '-' ? '' : 'disabled'}
+            >${isKeyProject ? '★' : '☆'}</button>
           </div>
         </div>
         <div class="bpmis-task-panel" data-team-dashboard-panel-id="${escapeHtml(panelId)}" ${expanded ? '' : 'hidden'}>
@@ -420,8 +491,8 @@
     const notLoaded = !team.loaded && !team.loading && !team.error;
     const teamKey = team.team_key || 'team';
     const selectedPm = String(pmFilterState[teamKey] || '').trim().toLowerCase();
-    const filteredUnderPrd = filterProjectsByPm(underPrd, selectedPm);
-    const filteredPendingLive = filterProjectsByPm(pendingLive, selectedPm);
+    const filteredUnderPrd = filterProjectsByKeyProject(filterProjectsByPm(underPrd, selectedPm));
+    const filteredPendingLive = filterProjectsByKeyProject(filterProjectsByPm(pendingLive, selectedPm));
     const actionLabel = team.loaded || team.error ? 'Reload Jira' : 'Load Jira';
     return `
       <section class="team-dashboard-team${team.loading ? ' is-loading' : ''}" data-team-dashboard-track-panel="${escapeHtml(teamKey)}">
@@ -431,6 +502,10 @@
             <span>${escapeHtml((team.member_emails || []).join(', ') || 'No configured members')}</span>
           </div>
           <div class="team-dashboard-team-actions">
+            <label class="team-dashboard-key-filter">
+              <input type="checkbox" data-team-dashboard-key-filter ${keyProjectOnly ? 'checked' : ''}>
+              <span>Key Project</span>
+            </label>
             ${renderPmFilter(team, selectedPm)}
             <button
               class="button button-secondary"
@@ -650,6 +725,41 @@
       return;
     }
 
+    const keyButton = event.target.closest('[data-team-dashboard-key-project]');
+    if (keyButton) {
+      if (!canManageKeyProjects || keyButton.disabled) return;
+      const bpmisId = keyButton.dataset.teamDashboardKeyProject || '';
+      const nextValue = keyButton.dataset.keyProjectNext === 'true';
+      const priority = keyButton.dataset.keyProjectPriority || '';
+      keyButton.disabled = true;
+      setStatus(taskStatus, nextValue ? 'Marking Key Project...' : 'Removing Key Project...', 'neutral');
+      fetch(root.dataset.keyProjectUrl || '/api/team-dashboard/key-projects', {
+        method: 'POST',
+        headers: {
+          Accept: 'application/json',
+          'Content-Type': 'application/json',
+        },
+        credentials: 'same-origin',
+        body: JSON.stringify({ bpmis_id: bpmisId, is_key_project: nextValue, priority }),
+      })
+        .then((response) => readJson(response, 'Could not save Key Project.'))
+        .then((payload) => {
+          updateProjectKeyState(
+            payload.bpmis_id || bpmisId,
+            payload.is_key_project,
+            payload.key_project_source,
+            payload.override || {},
+          );
+          renderTeams(taskTeams);
+          setStatus(taskStatus, nextValue ? 'Key Project marked.' : 'Key Project removed.', 'success');
+        })
+        .catch((error) => {
+          keyButton.disabled = false;
+          setStatus(taskStatus, error.message || 'Could not save Key Project.', 'error');
+        });
+      return;
+    }
+
     const button = event.target.closest('[data-team-dashboard-toggle]');
     if (!button) return;
     const panelId = button.dataset.teamDashboardToggle || '';
@@ -730,6 +840,13 @@
   });
 
   taskList?.addEventListener('change', (event) => {
+    const keyFilter = event.target.closest('[data-team-dashboard-key-filter]');
+    if (keyFilter) {
+      keyProjectOnly = Boolean(keyFilter.checked);
+      renderTeams(taskTeams);
+      return;
+    }
+
     const filter = event.target.closest('[data-team-dashboard-pm-filter]');
     if (!filter) return;
     const teamKey = filter.dataset.teamDashboardPmFilter || '';

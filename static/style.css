@@ -482,6 +482,7 @@
   .bpmis-project-card-link,
   .bpmis-project-card-market,
   .bpmis-project-card-comment,
+  .team-dashboard-key-project,
   .bpmis-project-actions {
     grid-column: 1 / -1;
   }
@@ -6582,16 +6583,37 @@ select:focus {
   font: inherit;
 }
 
+.team-dashboard-key-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 34px;
+  padding: 6px 10px;
+  border: 1px solid #d7e1ef;
+  border-radius: 8px;
+  background: #fff;
+  color: #14213d;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.team-dashboard-key-filter input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+}
+
 .team-dashboard-project-list {
   display: grid;
   gap: 12px;
 }
 
 .team-dashboard-project-card .bpmis-project-card-main {
-  grid-template-columns: auto minmax(110px, 0.7fr) minmax(100px, 0.6fr) minmax(180px, 1.4fr) minmax(90px, 0.6fr) minmax(90px, 0.6fr) minmax(150px, 1fr) minmax(70px, 0.4fr);
+  grid-template-columns: auto minmax(110px, 0.7fr) minmax(100px, 0.6fr) minmax(180px, 1.4fr) minmax(90px, 0.6fr) minmax(90px, 0.6fr) minmax(150px, 1fr) minmax(70px, 0.4fr) 54px;
 }
 
-.team-dashboard-project-count span {
+.team-dashboard-project-count span,
+.team-dashboard-key-project span {
   display: block;
   color: #667085;
   font-size: 12px;
@@ -6599,10 +6621,37 @@ select:focus {
   text-transform: uppercase;
 }
 
-.team-dashboard-project-count strong {
+.team-dashboard-project-count strong,
+.team-dashboard-key-project strong {
   display: block;
   margin-top: 5px;
   color: #14213d;
+}
+
+.team-dashboard-key-star {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  margin-top: 2px;
+  border: 1px solid #d7e1ef;
+  border-radius: 8px;
+  background: #fff;
+  color: #98a2b3;
+  font-size: 22px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.team-dashboard-key-star.is-key {
+  border-color: #f6c55c;
+  background: #fff8e6;
+  color: #b7791f;
+}
+
+.team-dashboard-key-star:disabled {
+  cursor: default;
+  opacity: 0.78;
 }
 
 .team-dashboard-table {
