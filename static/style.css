@@ -6752,19 +6752,74 @@ select:focus {
 }
 
 .team-dashboard-table {
-  min-width: 1060px;
+  min-width: 1040px;
+  font-size: 13px;
+}
+
+.team-dashboard-table th {
+  padding-top: 10px;
+  padding-bottom: 10px;
+  font-size: 12px;
+  line-height: 1.15;
 }
 
 .team-dashboard-table td {
-  vertical-align: top;
-  padding-top: 10px;
-  padding-bottom: 10px;
+  vertical-align: middle;
+  padding-top: 8px;
+  padding-bottom: 8px;
+  line-height: 1.28;
+}
+
+.team-dashboard-table th:nth-child(1),
+.team-dashboard-table td:nth-child(1) {
+  width: 130px;
+}
+
+.team-dashboard-table th:nth-child(2),
+.team-dashboard-table td:nth-child(2) {
+  width: 260px;
+}
+
+.team-dashboard-table th:nth-child(3),
+.team-dashboard-table td:nth-child(3) {
+  width: 150px;
+}
+
+.team-dashboard-table th:nth-child(4),
+.team-dashboard-table td:nth-child(4) {
+  width: 120px;
+}
+
+.team-dashboard-table th:nth-child(5),
+.team-dashboard-table td:nth-child(5) {
+  width: 105px;
+}
+
+.team-dashboard-table th:nth-child(6),
+.team-dashboard-table td:nth-child(6) {
+  width: 150px;
+}
+
+.team-dashboard-table th:nth-child(7),
+.team-dashboard-table td:nth-child(7) {
+  width: 72px;
+}
+
+.team-dashboard-table th:nth-child(8),
+.team-dashboard-table td:nth-child(8) {
+  width: 130px;
 }
 
 .team-dashboard-prd-link {
+  display: inline-block;
+  margin-right: 8px;
+  white-space: nowrap;
+}
+
+.team-dashboard-prd-actions {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   flex-wrap: wrap;
 }
 
@@ -6793,8 +6848,8 @@ select:focus {
 .team-dashboard-review-button,
 .team-dashboard-review-toggle,
 .team-dashboard-review-refresh {
-  min-height: 30px;
-  padding: 6px 10px;
+  min-height: 28px;
+  padding: 5px 9px;
   font-size: 12px;
 }
 

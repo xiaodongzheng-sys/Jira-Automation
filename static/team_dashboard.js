@@ -326,10 +326,25 @@
     if (!items.length) return '-';
     return items.map((item, index) => {
       const url = String(item.url || '').trim();
-      const label = String(item.label || url || `PRD ${index + 1}`).trim();
+      const label = items.length > 1 ? `Link ${index + 1}` : 'Link';
+      const title = String(item.label || url || `PRD ${index + 1}`).trim();
       return `
-        <div class="team-dashboard-prd-link">
-          ${renderLink(url, label)}
+        <span class="team-dashboard-prd-link">
+          ${url
+            ? `<a href="${escapeHtml(url)}" target="_blank" rel="noreferrer" title="${escapeHtml(title)}">${escapeHtml(label)}</a>`
+            : escapeHtml(label)}
+        </span>
+      `;
+    }).join('');
+  };
+
+  const renderPrdActions = (links, jiraItem) => {
+    const items = Array.isArray(links) ? links : [];
+    if (!items.length) return '-';
+    return items.map((item, index) => {
+      const url = String(item.url || '').trim();
+      return `
+        <div class="team-dashboard-prd-actions">
           <button
             class="button button-secondary team-dashboard-review-button"
             type="button"
@@ -339,7 +354,7 @@
             data-prd-url="${escapeHtml(url)}"
             data-prd-index="${index}"
             ${url ? '' : 'disabled'}
-          >AI Summary</button>
+          >Summary</button>
           <button
             class="button button-secondary team-dashboard-review-button"
             type="button"
@@ -349,10 +364,10 @@
             data-prd-url="${escapeHtml(url)}"
             data-prd-index="${index}"
             ${url ? '' : 'disabled'}
-          >AI Review</button>
+          >Review</button>
         </div>
       `;
-    }).join('<br>');
+    }).join('');
   };
 
   const itemCount = (projects) => (Array.isArray(projects) ? projects : [])
@@ -473,6 +488,7 @@
         <td>${escapeHtml(item.version || '-')}</td>
         <td>${renderPrdLinks(item.prd_links, item)}</td>
         <td>
+          ${renderPrdActions(item.prd_links, item)}
           <button class="button button-secondary team-dashboard-review-toggle" type="button" data-prd-review-toggle="${escapeHtml(reviewPanelId)}" hidden>View Review</button>
         </td>
       </tr>
