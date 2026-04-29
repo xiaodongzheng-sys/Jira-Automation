@@ -4,6 +4,8 @@ import argparse
 import html
 import json
 import os
+import signal
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -23,6 +25,7 @@ from bpmis_jira_tool.seatalk_dashboard import (
 
 DEFAULT_RECIPIENT = "xiaodong.zheng@npt.sg"
 DEFAULT_HOURS = 24
+GMAIL_EXPORT_TIMEOUT_SECONDS = 90
 MAX_MY_TODOS = 8
 MAX_PROJECT_UPDATES = 10
 MAX_OTHER_UPDATES = 8
@@ -239,6 +242,44 @@ def export_rolling_gmail_threads(
     local_now = now.astimezone(SEATALK_INSIGHTS_TIMEZONE)
     since = local_now - timedelta(hours=max(1, int(hours)))
     return service.export_thread_history_since(since=since, now=local_now)
+
+
+def _gmail_export_timeout_seconds() -> int:
+    raw_value = str(os.getenv("DAILY_EMAIL_GMAIL_EXPORT_TIMEOUT_SECONDS") or "").strip()
+    if not raw_value:
+        return GMAIL_EXPORT_TIMEOUT_SECONDS
+    try:
+        value = int(raw_value)
+    except ValueError:
+        return GMAIL_EXPORT_TIMEOUT_SECONDS
+    return max(15, min(value, 300))
+
+
+def _export_rolling_gmail_threads_with_timeout(
+    service: GmailDashboardService,
+    *,
+    now: datetime,
+    hours: int = DEFAULT_HOURS,
+) -> str:
+    timeout_seconds = _gmail_export_timeout_seconds()
+    if threading.current_thread() is not threading.main_thread() or not hasattr(signal, "setitimer"):
+        return export_rolling_gmail_threads(service, now=now, hours=hours)
+
+    def _raise_timeout(signum: int, frame: Any) -> None:
+        raise TimeoutError(f"Gmail thread export exceeded {timeout_seconds} seconds.")
+
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    previous_timer = signal.setitimer(signal.ITIMER_REAL, timeout_seconds)
+    signal.signal(signal.SIGALRM, _raise_timeout)
+    try:
+        return export_rolling_gmail_threads(service, now=now, hours=hours)
+    except TimeoutError as error:
+        raise ConfigError("Gmail data could not be loaded within the daily brief timeout. Please try again shortly.") from error
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        if previous_timer[0] > 0:
+            signal.setitimer(signal.ITIMER_REAL, previous_timer[0], previous_timer[1])
 
 
 def ensure_gmail_daily_scopes(credentials_payload: dict[str, Any]) -> None:
@@ -461,7 +502,7 @@ def send_daily_email(
     credentials = credentials_from_payload(credentials_payload)
     service = build_seatalk_service(settings, data_root=data_root)
     gmail_brief_service = GmailDashboardService(credentials=credentials, gmail_service=gmail_service, cache_key=owner_email)
-    gmail_history_text = export_rolling_gmail_threads(gmail_brief_service, now=local_now, hours=hours)
+    gmail_history_text = _export_rolling_gmail_threads_with_timeout(gmail_brief_service, now=local_now, hours=hours)
     briefing = build_daily_briefing(service, now=local_now, hours=hours, gmail_history_text=gmail_history_text)
     subject, text_body, html_body = render_email(briefing=briefing, now=local_now)
     if dry_run:

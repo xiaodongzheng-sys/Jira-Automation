@@ -791,6 +791,32 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
             briefing.assert_not_called()
             self.assertEqual(result.status, "skipped")
 
+    def test_send_daily_email_reports_gmail_export_timeout(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            encryption_key = Fernet.generate_key().decode("utf-8")
+            settings = _settings(temp_dir, encryption_key=encryption_key)
+            store = StoredGoogleCredentials(
+                Path(temp_dir) / "google" / "credentials.json",
+                encryption_key=encryption_key,
+            )
+            store.save(
+                owner_email="xiaodong.zheng@npt.sg",
+                credentials_payload={
+                    "token": "access-token",
+                    "scopes": [GMAIL_SEND_SCOPE, GMAIL_READONLY_SCOPE],
+                },
+            )
+
+            with patch("bpmis_jira_tool.seatalk_daily_email.build_seatalk_service", return_value=FakeSeaTalkService()):
+                with patch("bpmis_jira_tool.seatalk_daily_email.export_rolling_gmail_threads", side_effect=TimeoutError):
+                    with self.assertRaisesRegex(ConfigError, "daily brief timeout"):
+                        send_daily_email(
+                            settings=settings,
+                            now=datetime(2026, 4, 27, 19, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE),
+                            dry_run=True,
+                            gmail_service=object(),
+                        )
+
 
 if __name__ == "__main__":
     unittest.main()

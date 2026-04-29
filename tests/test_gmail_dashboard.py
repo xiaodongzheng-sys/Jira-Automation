@@ -539,24 +539,10 @@ class GmailDashboardServiceTests(unittest.TestCase):
         older = datetime(2026, 4, 20, 8, 0, tzinfo=now.tzinfo)
         list_payloads = {
             (query, None): {
-                "messages": [{"id": "m1"}],
+                "messages": [{"id": "m1", "threadId": "t1"}],
             },
         }
-        message_payloads = {
-            "m1": {
-                "id": "m1",
-                "threadId": "t1",
-                "internalDate": str(int(in_window.timestamp() * 1000)),
-                "labelIds": ["INBOX"],
-                "payload": {
-                    "headers": [
-                        {"name": "From", "value": "Alice Example <alice@example.com>"},
-                        {"name": "To", "value": "xiaodong.zheng@npt.sg"},
-                        {"name": "Subject", "value": "CR rollout"},
-                    ],
-                },
-            },
-        }
+        message_payloads = {}
         thread_payloads = {
             "t1": {
                 "id": "t1",

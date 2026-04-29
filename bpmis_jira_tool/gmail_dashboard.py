@@ -539,8 +539,8 @@ class GmailDashboardService:
         local_since = since.astimezone(now.tzinfo)
         local_now = now.astimezone(now.tzinfo)
         query = _build_thread_export_query(local_since, local_now)
-        message_ids = self._list_message_ids(query=query, max_messages=GMAIL_EXPORT_MAX_TOTAL_MESSAGES)
-        if not message_ids:
+        message_refs = self._list_message_refs(query=query, max_messages=GMAIL_EXPORT_MAX_TOTAL_MESSAGES)
+        if not message_refs:
             return "\n".join(
                 [
                     "Gmail thread history export",
@@ -552,11 +552,18 @@ class GmailDashboardService:
                     "",
                 ]
             )
-        metadata = self._fetch_message_metadata_many(message_ids)
         ordered_thread_ids: list[str] = []
-        for record in metadata:
-            if record.thread_id and record.thread_id not in ordered_thread_ids:
-                ordered_thread_ids.append(record.thread_id)
+        fallback_message_ids: list[str] = []
+        for message_ref in message_refs:
+            thread_id = str(message_ref.get("threadId") or "").strip()
+            if thread_id and thread_id not in ordered_thread_ids:
+                ordered_thread_ids.append(thread_id)
+            elif message_ref.get("id"):
+                fallback_message_ids.append(str(message_ref["id"]))
+        if fallback_message_ids:
+            for record in self._fetch_message_metadata_many(fallback_message_ids):
+                if record.thread_id and record.thread_id not in ordered_thread_ids:
+                    ordered_thread_ids.append(record.thread_id)
         if max_threads > 0:
             ordered_thread_ids = ordered_thread_ids[:max_threads]
         lines = [
@@ -566,7 +573,7 @@ class GmailDashboardService:
             "Scope: full Gmail threads touched in the window; message bodies are limited to messages inside the window",
             "Note: up to 2 messages before the window may be included as context only; they must not be treated as new updates.",
             f"Threads included: {len(ordered_thread_ids)}",
-            f"Candidate messages in window: {len(message_ids)}",
+            f"Candidate messages in window: {len(message_refs)}",
             f"Max body length per message: {GMAIL_EXPORT_MAX_BODY_CHARS} characters",
             "",
         ]
@@ -933,8 +940,11 @@ class GmailDashboardService:
         return ", ".join(labels[key] for key in sorted(labels))
 
     def _list_message_ids(self, *, query: str, max_messages: int | None) -> list[str]:
+        return [item["id"] for item in self._list_message_refs(query=query, max_messages=max_messages) if item.get("id")]
+
+    def _list_message_refs(self, *, query: str, max_messages: int | None) -> list[dict[str, str]]:
         users_api = self.service.users().messages()
-        message_ids: list[str] = []
+        message_refs: list[dict[str, str]] = []
         page_token: str | None = None
         while True:
             payload = self._execute_gmail_request(
@@ -943,17 +953,21 @@ class GmailDashboardService:
                     q=query,
                     maxResults=500,
                     pageToken=page_token,
-                    fields="messages/id,nextPageToken",
+                    fields="messages/id,messages/threadId,nextPageToken",
                 ),
                 transient_message="Gmail data could not be loaded right now. Please try again shortly.",
             )
-            message_ids.extend(str(item.get("id") or "") for item in payload.get("messages") or [] if item.get("id"))
-            if max_messages is not None and len(message_ids) >= max_messages:
-                return message_ids[:max_messages]
+            for item in payload.get("messages") or []:
+                message_id = str(item.get("id") or "").strip()
+                if not message_id:
+                    continue
+                message_refs.append({"id": message_id, "threadId": str(item.get("threadId") or "").strip()})
+            if max_messages is not None and len(message_refs) >= max_messages:
+                return message_refs[:max_messages]
             page_token = payload.get("nextPageToken")
             if not page_token:
                 break
-        return message_ids
+        return message_refs
 
     def _list_export_candidate_ids(
         self,
