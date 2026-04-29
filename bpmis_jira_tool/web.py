@@ -82,7 +82,7 @@ TEAM_PROFILE_ADMIN_EMAIL = "xiaodong.zheng@npt.sg"
 SYNC_EMAIL_EDIT_ALLOWLIST = {"xiaodong.zheng@npt.sg", "xiaodong.zheng1991@gmail.com"}
 SOURCE_CODE_QA_BUILTIN_ADMIN_EMAILS = {"xiaodong.zheng@npt.sg"}
 GMAIL_SEATALK_BUILTIN_OWNER_EMAILS = {"xiaodong.zheng@npt.sg"}
-TEAM_DASHBOARD_ADMIN_EMAIL = "xiaodong.zheng@npt.sg"
+TEAM_DASHBOARD_ACCESS_EMAILS = {"xiaodong.zheng@npt.sg", "sophia.wangzj@npt.sg"}
 TEAM_DASHBOARD_LEGACY_DEFAULT_MEMBER_EMAILS = (
     "huixian.nah@npt.sg",
     "jireh.tanyx@npt.sg",
@@ -2086,6 +2086,7 @@ def create_app() -> Flask:
             page_title="Team Dashboard",
             user_identity=_get_user_identity(settings),
             team_dashboard_config=_get_team_dashboard_config_store().load(),
+            can_manage_team_dashboard=_can_manage_team_dashboard(_get_user_identity(settings)),
         )
 
     @app.get("/healthz")
@@ -3428,6 +3429,8 @@ def create_app() -> Flask:
         access_gate = _require_team_dashboard_access(settings, api=True)
         if access_gate is not None:
             return access_gate
+        if not _can_manage_team_dashboard(_get_user_identity(settings)):
+            return jsonify({"status": "error", "message": "Team Dashboard admin access is restricted."}), HTTPStatus.FORBIDDEN
         payload = request.get_json(silent=True)
         if not isinstance(payload, dict):
             payload = {
@@ -3484,7 +3487,8 @@ def create_app() -> Flask:
                     enrich_missing_parent=False,
                     release_after=_team_dashboard_jira_release_after(),
                 )
-                team_payload = _build_team_dashboard_task_group(team_key, label, emails, tasks)
+                biz_projects = _team_dashboard_biz_projects_for_emails(bpmis_client, emails)
+                team_payload = _build_team_dashboard_task_group(team_key, label, emails, tasks, biz_projects)
                 team_payload["elapsed_seconds"] = round(time.monotonic() - started_at, 2)
                 team_payload["fetch_stats"] = _team_dashboard_fetch_stats(bpmis_client)
                 _log_portal_event(
@@ -3496,6 +3500,7 @@ def create_app() -> Flask:
                             "team_key": team_key,
                             "email_count": len(emails),
                             "raw_task_count": len(tasks or []),
+                            "raw_biz_project_count": len(biz_projects or []),
                             "elapsed_seconds": team_payload["elapsed_seconds"],
                             "fetch_stats": team_payload["fetch_stats"],
                         },
@@ -5126,7 +5131,8 @@ def _require_team_dashboard_access(settings: Settings, *, api: bool = False):
     if login_gate is not None:
         return login_gate
     user_identity = _get_user_identity(settings)
-    message = f"Team Dashboard is restricted to {TEAM_DASHBOARD_ADMIN_EMAIL}."
+    allowed = ", ".join(sorted(TEAM_DASHBOARD_ACCESS_EMAILS))
+    message = f"Team Dashboard is restricted to {allowed}."
     if not _can_access_team_dashboard(user_identity):
         if api:
             return jsonify({"status": "error", "message": message}), HTTPStatus.FORBIDDEN
@@ -5162,7 +5168,11 @@ def _is_team_profile_admin(user_identity: dict[str, str | None]) -> bool:
 
 
 def _can_access_team_dashboard(user_identity: dict[str, str | None]) -> bool:
-    return str(user_identity.get("email") or "").strip().lower() == TEAM_DASHBOARD_ADMIN_EMAIL
+    return str(user_identity.get("email") or "").strip().lower() in TEAM_DASHBOARD_ACCESS_EMAILS
+
+
+def _can_manage_team_dashboard(user_identity: dict[str, str | None]) -> bool:
+    return str(user_identity.get("email") or "").strip().lower() == TEAM_PROFILE_ADMIN_EMAIL
 
 
 def _can_edit_sync_email(user_identity: dict[str, str | None]) -> bool:
@@ -5598,6 +5608,7 @@ def _build_team_dashboard_task_group(
     label: str,
     member_emails: list[str],
     tasks: list[dict[str, Any]],
+    biz_projects: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     under_prd: list[dict[str, Any]] = []
     pending_live: list[dict[str, Any]] = []
@@ -5615,7 +5626,8 @@ def _build_team_dashboard_task_group(
         elif status_key not in TEAM_DASHBOARD_EXCLUDED_PENDING_STATUSES:
             pending_live.append(normalized_task)
     under_prd_projects = _group_team_dashboard_tasks_by_project(under_prd)
-    pending_live_projects = _group_team_dashboard_tasks_by_project(pending_live)
+    under_prd_projects = _merge_team_dashboard_biz_projects(under_prd_projects, biz_projects or [])
+    pending_live_projects = _group_team_dashboard_tasks_by_project(pending_live, sort_by_release=True)
     return {
         "team_key": team_key,
         "label": label,
@@ -5624,6 +5636,38 @@ def _build_team_dashboard_task_group(
         "pending_live": pending_live_projects,
         "error": "",
     }
+
+
+def _team_dashboard_biz_projects_for_emails(bpmis_client: Any, emails: list[str]) -> list[dict[str, Any]]:
+    projects: dict[str, dict[str, Any]] = {}
+    for email in emails:
+        normalized_email = str(email or "").strip().lower()
+        if not normalized_email:
+            continue
+        try:
+            rows = bpmis_client.list_biz_projects_for_pm_email(normalized_email)
+        except Exception as error:  # noqa: BLE001 - Jira data should still render when project coverage fails.
+            current_app.logger.warning("Team Dashboard Biz Project lookup failed for %s: %s", normalized_email, error)
+            continue
+        for row in rows or []:
+            project = _normalize_team_dashboard_project(row if isinstance(row, dict) else {})
+            bpmis_id = project.get("bpmis_id")
+            if not bpmis_id:
+                continue
+            existing = projects.setdefault(
+                bpmis_id,
+                {
+                    **project,
+                    "matched_pm_emails": [],
+                },
+            )
+            for key, value in project.items():
+                if value and not existing.get(key):
+                    existing[key] = value
+            matched = existing.setdefault("matched_pm_emails", [])
+            if normalized_email not in matched:
+                matched.append(normalized_email)
+    return list(projects.values())
 
 
 def _team_dashboard_fetch_stats(bpmis_client: Any) -> dict[str, int]:
@@ -5690,16 +5734,24 @@ def _normalize_team_dashboard_task(task: dict[str, Any]) -> dict[str, Any]:
 
 def _normalize_team_dashboard_project(project: dict[str, Any]) -> dict[str, str]:
     bpmis_id = str(project.get("bpmis_id") or project.get("issue_id") or "").strip()
-    return {
+    matched_pm_emails = _normalize_team_dashboard_emails(project.get("matched_pm_emails") or [])
+    normalized: dict[str, Any] = {
         "bpmis_id": bpmis_id,
         "project_name": str(project.get("project_name") or "").strip(),
         "market": str(project.get("market") or "").strip(),
         "priority": str(project.get("priority") or "").strip(),
         "regional_pm_pic": str(project.get("regional_pm_pic") or "").strip(),
     }
+    if matched_pm_emails:
+        normalized["matched_pm_emails"] = matched_pm_emails
+    return normalized
 
 
-def _group_team_dashboard_tasks_by_project(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _group_team_dashboard_tasks_by_project(
+    tasks: list[dict[str, Any]],
+    *,
+    sort_by_release: bool = False,
+) -> list[dict[str, Any]]:
     grouped: dict[str, dict[str, Any]] = {}
     for task in tasks:
         project = task.get("parent_project") if isinstance(task.get("parent_project"), dict) else {}
@@ -5718,6 +5770,8 @@ def _group_team_dashboard_tasks_by_project(tasks: list[dict[str, Any]]) -> list[
                 **project,
                 "jira_tickets": [],
                 "task_count": 0,
+                "release_date": "-",
+                "release_date_sort": "",
             }
         grouped[key]["jira_tickets"].append(task)
         grouped[key]["task_count"] = len(grouped[key]["jira_tickets"])
@@ -5725,13 +5779,101 @@ def _group_team_dashboard_tasks_by_project(tasks: list[dict[str, Any]]) -> list[
     projects = list(grouped.values())
     for project in projects:
         project["jira_tickets"].sort(key=_team_dashboard_sort_key)
-    projects.sort(
-        key=lambda project: (
-            str(project.get("project_name") or "").casefold(),
-            str(project.get("bpmis_id") or "").casefold(),
-        )
-    )
+        _apply_team_dashboard_project_release_date(project)
+    if sort_by_release:
+        projects.sort(key=_team_dashboard_project_release_sort_key)
+    else:
+        projects.sort(key=_team_dashboard_project_name_sort_key)
+    for project in projects:
+        project.pop("release_date_sort", None)
     return projects
+
+
+def _merge_team_dashboard_biz_projects(
+    projects: list[dict[str, Any]],
+    biz_projects: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    by_id: dict[str, dict[str, Any]] = {
+        str(project.get("bpmis_id") or "").strip(): project
+        for project in projects
+        if str(project.get("bpmis_id") or "").strip()
+    }
+    merged = list(projects)
+    for raw_project in biz_projects:
+        project = _normalize_team_dashboard_project(raw_project if isinstance(raw_project, dict) else {})
+        bpmis_id = project.get("bpmis_id")
+        if not bpmis_id:
+            continue
+        existing = by_id.get(bpmis_id)
+        if existing:
+            for key in ("project_name", "market", "priority", "regional_pm_pic"):
+                if project.get(key) and not existing.get(key):
+                    existing[key] = project[key]
+            _merge_team_dashboard_project_pm_emails(existing, project.get("matched_pm_emails") or [])
+            continue
+        project.update(
+            {
+                "jira_tickets": [],
+                "task_count": 0,
+                "release_date": "-",
+            }
+        )
+        merged.append(project)
+        by_id[bpmis_id] = project
+    merged.sort(key=_team_dashboard_project_name_sort_key)
+    return merged
+
+
+def _merge_team_dashboard_project_pm_emails(project: dict[str, Any], emails: list[str]) -> None:
+    existing = _normalize_team_dashboard_emails(project.get("matched_pm_emails") or [])
+    for email in _normalize_team_dashboard_emails(emails):
+        if email not in existing:
+            existing.append(email)
+    if existing:
+        project["matched_pm_emails"] = existing
+
+
+def _apply_team_dashboard_project_release_date(project: dict[str, Any]) -> None:
+    latest = None
+    for task in project.get("jira_tickets") or []:
+        parsed, _text = _parse_team_dashboard_release_date(task.get("release_date"))
+        if parsed and (latest is None or parsed > latest):
+            latest = parsed
+    if latest:
+        project["release_date"] = time.strftime("%d-%m-%Y", latest)
+        project["release_date_sort"] = time.strftime("%Y-%m-%d", latest)
+    else:
+        project["release_date"] = "-"
+        project["release_date_sort"] = ""
+
+
+def _parse_team_dashboard_release_date(value: Any) -> tuple[time.struct_time | None, str]:
+    text = str(value or "").strip()
+    if not text:
+        return None, ""
+    for pattern in ("%Y-%m-%d", "%Y/%m/%d", "%d-%m-%Y", "%d/%m/%Y"):
+        try:
+            return time.strptime(text[:10], pattern), text
+        except ValueError:
+            continue
+    return None, text
+
+
+def _team_dashboard_project_name_sort_key(project: dict[str, Any]) -> tuple[str, str]:
+    return (
+        str(project.get("project_name") or "").casefold(),
+        str(project.get("bpmis_id") or "").casefold(),
+    )
+
+
+def _team_dashboard_project_release_sort_key(project: dict[str, Any]) -> tuple[int, str, str, str]:
+    release_sort = str(project.get("release_date_sort") or "").strip()
+    return (
+        0 if release_sort else 1,
+        release_sort,
+        str(project.get("project_name") or "").casefold(),
+        str(project.get("bpmis_id") or "").casefold(),
+    )
 
 
 def _team_dashboard_link_items(value: Any) -> list[dict[str, str]]:

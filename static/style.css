@@ -6411,6 +6411,10 @@ select:focus {
   margin-bottom: 2px;
 }
 
+.team-dashboard-track-tabs {
+  margin-bottom: 0;
+}
+
 .team-dashboard-team-list {
   display: grid;
   gap: 24px;
@@ -6535,20 +6539,6 @@ select:focus {
   min-width: 220px;
 }
 
-.team-dashboard-team-head .team-dashboard-team-actions span {
-  min-height: 32px;
-  border-radius: 8px;
-  display: grid;
-  place-items: center;
-  padding: 6px 10px;
-  margin-top: 0;
-  background: #edf6ff;
-  color: #0b5cab;
-  font-size: 13px;
-  font-weight: 700;
-  line-height: 1.25;
-}
-
 .team-dashboard-team-actions .button {
   min-height: 34px;
   padding: 7px 12px;
@@ -6569,13 +6559,36 @@ select:focus {
   gap: 10px;
 }
 
+.team-dashboard-pm-filter {
+  display: grid;
+  gap: 5px;
+  min-width: 220px;
+}
+
+.team-dashboard-pm-filter span {
+  color: #46556c;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.team-dashboard-pm-filter select {
+  min-height: 34px;
+  border: 1px solid #cfe0fb;
+  border-radius: 8px;
+  padding: 6px 10px;
+  background: #fff;
+  color: #14213d;
+  font: inherit;
+}
+
 .team-dashboard-project-list {
   display: grid;
   gap: 12px;
 }
 
 .team-dashboard-project-card .bpmis-project-card-main {
-  grid-template-columns: auto minmax(110px, 0.8fr) minmax(180px, 1.4fr) minmax(90px, 0.7fr) minmax(90px, 0.7fr) minmax(150px, 1fr) minmax(70px, 0.4fr);
+  grid-template-columns: auto minmax(110px, 0.7fr) minmax(100px, 0.6fr) minmax(180px, 1.4fr) minmax(90px, 0.6fr) minmax(90px, 0.6fr) minmax(150px, 1fr) minmax(70px, 0.4fr);
 }
 
 .team-dashboard-project-count span {

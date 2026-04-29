@@ -40,8 +40,9 @@
     CRMS: 'Credit Risk',
     GRC: 'Ops Risk',
   };
+  const teamOrder = ['AF', 'CRMS', 'GRC'];
   const jiraPageSize = 10;
-  const taskCacheKey = 'team-dashboard:jira-tasks:v2';
+  const taskCacheKey = 'team-dashboard:jira-tasks:v3';
 
   let initialConfig = (() => {
     try {
@@ -51,6 +52,8 @@
     }
   })();
   let taskTeams = [];
+  let activeTaskTeamKey = 'AF';
+  const pmFilterState = {};
   const expandedPanels = {};
   const jiraPageState = {};
 
@@ -215,6 +218,39 @@
   const itemCount = (projects) => (Array.isArray(projects) ? projects : [])
     .reduce((countValue, project) => countValue + (project.jira_tickets || []).length, 0);
 
+  const projectMatchesPm = (project, selectedPm) => {
+    if (!selectedPm) return true;
+    const normalizedPm = String(selectedPm || '').trim().toLowerCase();
+    const matchedProjectPms = normalizeEmailList(project.matched_pm_emails || []);
+    if (matchedProjectPms.includes(normalizedPm)) return true;
+    return (project.jira_tickets || []).some((ticket) => String(ticket.pm_email || '').trim().toLowerCase() === normalizedPm);
+  };
+
+  const filterProjectsByPm = (projects, selectedPm) => {
+    const normalizedPm = String(selectedPm || '').trim().toLowerCase();
+    if (!normalizedPm) return Array.isArray(projects) ? projects : [];
+    return (Array.isArray(projects) ? projects : [])
+      .filter((project) => projectMatchesPm(project, normalizedPm))
+      .map((project) => ({
+        ...project,
+        jira_tickets: (project.jira_tickets || []).filter(
+          (ticket) => String(ticket.pm_email || '').trim().toLowerCase() === normalizedPm,
+        ),
+      }));
+  };
+
+  const pmFilterOptions = (team) => {
+    const emails = new Set(normalizeEmailList(team.member_emails || []));
+    [...(team.under_prd || []), ...(team.pending_live || [])].forEach((project) => {
+      normalizeEmailList(project.matched_pm_emails || []).forEach((email) => emails.add(email));
+      (project.jira_tickets || []).forEach((ticket) => {
+        const email = String(ticket.pm_email || '').trim().toLowerCase();
+        if (email) emails.add(email);
+      });
+    });
+    return [...emails].sort();
+  };
+
   const renderJiraRows = (items) => {
     if (!items.length) {
       return '<tr><td colspan="8" class="team-dashboard-empty-cell">No matching Jira tasks.</td></tr>';
@@ -276,6 +312,10 @@
           <div class="bpmis-project-card-id">
             <span>BPMIS ID</span>
             <strong>${escapeHtml(bpmisId)}</strong>
+          </div>
+          <div class="bpmis-project-card-market">
+            <span>Live Date</span>
+            <strong>${escapeHtml(project.release_date || '-')}</strong>
           </div>
           <div class="bpmis-project-card-name">
             <span>Project Name</span>
@@ -341,46 +381,93 @@
     `;
   };
 
+  const renderTeamTabs = (teams) => `
+    <div class="workspace-tabs team-dashboard-track-tabs" role="tablist" aria-label="Task List tracks">
+      ${teams.map((team) => {
+        const teamKey = team.team_key || '';
+        const active = teamKey === activeTaskTeamKey;
+        return `
+          <button
+            class="workspace-tab${active ? ' is-active' : ''}"
+            type="button"
+            role="tab"
+            aria-selected="${active ? 'true' : 'false'}"
+            data-team-dashboard-track="${escapeHtml(teamKey)}"
+          >${escapeHtml(team.label || teamLabels[teamKey] || teamKey)}</button>
+        `;
+      }).join('')}
+    </div>
+  `;
+
+  const renderPmFilter = (team, selectedPm) => {
+    const options = pmFilterOptions(team);
+    return `
+      <label class="team-dashboard-pm-filter">
+        <span>PM email</span>
+        <select data-team-dashboard-pm-filter="${escapeHtml(team.team_key || '')}">
+          <option value="">All PMs</option>
+          ${options.map((email) => `<option value="${escapeHtml(email)}" ${email === selectedPm ? 'selected' : ''}>${escapeHtml(email)}</option>`).join('')}
+        </select>
+      </label>
+    `;
+  };
+
+  const renderTeam = (team) => {
+    const underPrd = Array.isArray(team.under_prd) ? team.under_prd : [];
+    const pendingLive = Array.isArray(team.pending_live) ? team.pending_live : [];
+    const error = team.error ? `<p class="productization-inline-status" data-tone="error">${escapeHtml(team.error)}</p>` : '';
+    const loading = team.loading ? `<p class="productization-inline-status" data-tone="neutral">${escapeHtml(team.progress_text || 'Loading team Jira tasks...')}</p>` : '';
+    const notLoaded = !team.loaded && !team.loading && !team.error;
+    const teamKey = team.team_key || 'team';
+    const selectedPm = String(pmFilterState[teamKey] || '').trim().toLowerCase();
+    const filteredUnderPrd = filterProjectsByPm(underPrd, selectedPm);
+    const filteredPendingLive = filterProjectsByPm(pendingLive, selectedPm);
+    const actionLabel = team.loaded || team.error ? 'Reload Jira' : 'Load Jira';
+    return `
+      <section class="team-dashboard-team${team.loading ? ' is-loading' : ''}" data-team-dashboard-track-panel="${escapeHtml(teamKey)}">
+        <div class="team-dashboard-team-head">
+          <div>
+            <h3>${escapeHtml(team.label || team.team_key || 'Team')}</h3>
+            <span>${escapeHtml((team.member_emails || []).join(', ') || 'No configured members')}</span>
+          </div>
+          <div class="team-dashboard-team-actions">
+            ${renderPmFilter(team, selectedPm)}
+            <button
+              class="button button-secondary"
+              type="button"
+              data-team-dashboard-load-team="${escapeHtml(teamKey)}"
+              ${team.loading ? 'disabled' : ''}
+            >${escapeHtml(actionLabel)}</button>
+          </div>
+        </div>
+        ${error}
+        ${loading}
+        ${notLoaded ? '<p class="productization-inline-status" data-tone="neutral">Not loaded. Click Load Jira to fetch only this team.</p>' : ''}
+        ${team.loading || notLoaded ? '' : renderSection('Under PRD', filteredUnderPrd, `${teamKey}-under-prd-${selectedPm || 'all'}`)}
+        ${team.loading || notLoaded ? '' : renderSection('Pending Live', filteredPendingLive, `${teamKey}-pending-live-${selectedPm || 'all'}`)}
+      </section>
+    `;
+  };
+
   const renderTeams = (teams) => {
     if (!taskList) return;
     if (!teams.length) {
       taskList.innerHTML = '<div class="empty-state"><p>No configured teams.</p></div>';
       return;
     }
-    taskList.innerHTML = teams.map((team) => {
-      const underPrd = Array.isArray(team.under_prd) ? team.under_prd : [];
-      const pendingLive = Array.isArray(team.pending_live) ? team.pending_live : [];
-      const error = team.error ? `<p class="productization-inline-status" data-tone="error">${escapeHtml(team.error)}</p>` : '';
-      const loading = team.loading ? `<p class="productization-inline-status" data-tone="neutral">${escapeHtml(team.progress_text || 'Loading team Jira tasks...')}</p>` : '';
-      const notLoaded = !team.loaded && !team.loading && !team.error;
-      const totalTasks = itemCount(underPrd) + itemCount(pendingLive);
-      const teamKey = team.team_key || 'team';
-      const actionLabel = team.loaded || team.error ? 'Reload Jira' : 'Load Jira';
-      return `
-        <section class="team-dashboard-team${team.loading ? ' is-loading' : ''}">
-          <div class="team-dashboard-team-head">
-            <div>
-              <h3>${escapeHtml(team.label || team.team_key || 'Team')}</h3>
-              <span>${escapeHtml((team.member_emails || []).join(', ') || 'No configured members')}</span>
-            </div>
-            <div class="button-row">
-              <strong>${totalTasks}</strong>
-              <button
-                class="button button-secondary"
-                type="button"
-                data-team-dashboard-load-team="${escapeHtml(teamKey)}"
-                ${team.loading ? 'disabled' : ''}
-              >${escapeHtml(actionLabel)}</button>
-            </div>
-          </div>
-          ${error}
-          ${loading}
-          ${notLoaded ? '<p class="productization-inline-status" data-tone="neutral">Not loaded. Click Load Jira to fetch only this team.</p>' : ''}
-          ${team.loading || notLoaded ? '' : renderSection('Under PRD', underPrd, `${teamKey}-under-prd`)}
-          ${team.loading || notLoaded ? '' : renderSection('Pending Live', pendingLive, `${teamKey}-pending-live`)}
-        </section>
-      `;
-    }).join('');
+    if (!teams.some((team) => team.team_key === activeTaskTeamKey)) {
+      activeTaskTeamKey = teams[0].team_key || '';
+    }
+    const orderIndex = (teamKey) => {
+      const index = teamOrder.indexOf(teamKey);
+      return index >= 0 ? index : teamOrder.length;
+    };
+    const orderedTeams = [...teams].sort((left, right) => orderIndex(left.team_key) - orderIndex(right.team_key));
+    const activeTeam = orderedTeams.find((team) => team.team_key === activeTaskTeamKey) || orderedTeams[0];
+    taskList.innerHTML = `
+      ${renderTeamTabs(orderedTeams)}
+      ${activeTeam ? renderTeam(activeTeam) : '<div class="empty-state"><p>No configured teams.</p></div>'}
+    `;
   };
 
   const configuredTeams = async () => {
@@ -539,6 +626,13 @@
   loadConfiguredTeams();
   adminForm?.addEventListener('submit', saveMembers);
   taskList?.addEventListener('click', (event) => {
+    const trackButton = event.target.closest('[data-team-dashboard-track]');
+    if (trackButton) {
+      activeTaskTeamKey = trackButton.dataset.teamDashboardTrack || activeTaskTeamKey;
+      renderTeams(taskTeams);
+      return;
+    }
+
     const loadButton = event.target.closest('[data-team-dashboard-load-team]');
     if (loadButton) {
       loadTeamTasks(loadButton.dataset.teamDashboardLoadTeam || '');
@@ -631,5 +725,13 @@
     } finally {
       button.disabled = false;
     }
+  });
+
+  taskList?.addEventListener('change', (event) => {
+    const filter = event.target.closest('[data-team-dashboard-pm-filter]');
+    if (!filter) return;
+    const teamKey = filter.dataset.teamDashboardPmFilter || '';
+    pmFilterState[teamKey] = String(filter.value || '').trim().toLowerCase();
+    renderTeams(taskTeams);
   });
 })();

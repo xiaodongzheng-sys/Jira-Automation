@@ -13,7 +13,9 @@
 
   <div class="workspace-tabs team-dashboard-tabs" role="tablist" aria-label="Team Dashboard sections">
     <button class="workspace-tab is-active" type="button" role="tab" aria-selected="true" data-team-dashboard-tab="tasks">Task List</button>
-    <button class="workspace-tab" type="button" role="tab" aria-selected="false" data-team-dashboard-tab="admin">Team Admin</button>
+    {% if can_manage_team_dashboard %}
+      <button class="workspace-tab" type="button" role="tab" aria-selected="false" data-team-dashboard-tab="admin">Team Admin</button>
+    {% endif %}
   </div>
 
   <section data-team-dashboard-panel="tasks">
@@ -27,33 +29,35 @@
     <div class="team-dashboard-team-list" data-team-dashboard-task-list></div>
   </section>
 
-  <section data-team-dashboard-panel="admin" hidden>
-    <form method="post" action="{{ url_for('save_team_dashboard_members') }}" class="stack" data-team-dashboard-admin-form>
-      <div class="config-grid setup-grid">
-        {% for team_key, team in team_dashboard_config.teams.items() %}
-          <div class="config-card config-card-wide">
-            <div class="field-label-row">
-              <h3>{{ team.label }}</h3>
-              <span class="field-badge">Team Admin</span>
+  {% if can_manage_team_dashboard %}
+    <section data-team-dashboard-panel="admin" hidden>
+      <form method="post" action="{{ url_for('save_team_dashboard_members') }}" class="stack" data-team-dashboard-admin-form>
+        <div class="config-grid setup-grid">
+          {% for team_key, team in team_dashboard_config.teams.items() %}
+            <div class="config-card config-card-wide">
+              <div class="field-label-row">
+                <h3>{{ team.label }}</h3>
+                <span class="field-badge">Team Admin</span>
+              </div>
+              <p class="card-help">One email per line. Task List matches Jira tasks whose reporter is in this list.</p>
+              <div class="field-group">
+                <label for="team_dashboard_members_{{ team_key }}">{{ team.label }} Member Emails</label>
+                <textarea
+                  id="team_dashboard_members_{{ team_key }}"
+                  rows="9"
+                  spellcheck="false"
+                  name="team_dashboard_members_{{ team_key }}"
+                  data-team-dashboard-members="{{ team_key }}"
+                >{{ team.member_emails | join('\n') }}</textarea>
+              </div>
             </div>
-            <p class="card-help">One email per line. Task List matches Jira tasks whose reporter is in this list.</p>
-            <div class="field-group">
-              <label for="team_dashboard_members_{{ team_key }}">{{ team.label }} Member Emails</label>
-              <textarea
-                id="team_dashboard_members_{{ team_key }}"
-                rows="9"
-                spellcheck="false"
-                name="team_dashboard_members_{{ team_key }}"
-                data-team-dashboard-members="{{ team_key }}"
-              >{{ team.member_emails | join('\n') }}</textarea>
-            </div>
-          </div>
-        {% endfor %}
-      </div>
-      <div class="button-row">
-        <button class="button" type="submit">Save Team Emails</button>
-      </div>
-      <p class="productization-inline-status" data-team-dashboard-admin-status></p>
-    </form>
-  </section>
+          {% endfor %}
+        </div>
+        <div class="button-row">
+          <button class="button" type="submit">Save Team Emails</button>
+        </div>
+        <p class="productization-inline-status" data-team-dashboard-admin-status></p>
+      </form>
+    </section>
+  {% endif %}
 </section>

@@ -265,8 +265,11 @@ class BPMISDirectApiClient(BPMISClient):
             market = self._extract_market_label(row.get("marketId"))
             deduped[issue_id] = {
                 "issue_id": issue_id,
+                "bpmis_id": issue_id,
                 "project_name": summary,
                 "market": market,
+                "priority": self._issue_first_text(row, "bizPriorityId", "bizPriority", "priority", "priorityId"),
+                "regional_pm_pic": self._issue_first_person(row, "regionalPmPicId", "jiraRegionalPmPicId", "regionalPmPic", "pmPic"),
             }
         return list(deduped.values())
 

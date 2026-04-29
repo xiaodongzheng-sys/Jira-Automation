@@ -874,6 +874,12 @@ class WebPortalFeatureTests(unittest.TestCase):
                     session["google_credentials"] = {"token": "x"}
                 user_response = client.get("/")
 
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["google_profile"] = {"email": "sophia.wangzj@npt.sg", "name": "Sophia"}
+                    session["google_credentials"] = {"token": "x"}
+                sophia_response = client.get("/")
+
         self.assertEqual(admin_response.status_code, 200)
         self.assertIn(b">Team Default Admin<", admin_response.data)
         self.assertIn(b"Save Anti-fraud Defaults", admin_response.data)
@@ -884,6 +890,8 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertNotIn(b"data-team-dashboard", admin_response.data)
         self.assertNotIn(b">Team Default Admin<", user_response.data)
         self.assertNotIn(b">Team Dashboard<", user_response.data)
+        self.assertIn(b">Team Dashboard<", sophia_response.data)
+        self.assertIn(b'href="/team-dashboard"', sophia_response.data)
 
     def test_team_dashboard_is_standalone_page_for_admin_user(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
@@ -909,6 +917,12 @@ class WebPortalFeatureTests(unittest.TestCase):
                 legacy_response = client.get("/?workspace=team-dashboard")
                 dashboard_response = client.get("/team-dashboard")
 
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["google_profile"] = {"email": "sophia.wangzj@npt.sg", "name": "Sophia"}
+                    session["google_credentials"] = {"token": "x"}
+                sophia_dashboard_response = client.get("/team-dashboard")
+
         self.assertEqual(source_response.status_code, 200)
         self.assertIn(b'href="/team-dashboard"', source_response.data)
         self.assertIn(b">Team Dashboard<", source_response.data)
@@ -917,11 +931,15 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertEqual(dashboard_response.status_code, 200)
         self.assertIn(b"Team Admin", dashboard_response.data)
         self.assertIn(b"data-team-dashboard", dashboard_response.data)
-        self.assertIn(b"team-dashboard-jira-pagination", dashboard_response.data)
+        self.assertIn(b"team-dashboard-track-tabs", dashboard_response.data)
         self.assertNotIn(b"data-team-dashboard-update", dashboard_response.data)
         self.assertNotIn(b"Manage My Projects", dashboard_response.data)
         self.assertNotIn(b'data-default-tab="team-dashboard"', dashboard_response.data)
         self.assertNotIn(b'data-tab-trigger="team-dashboard"', dashboard_response.data)
+        self.assertEqual(sophia_dashboard_response.status_code, 200)
+        self.assertIn(b"Task List", sophia_dashboard_response.data)
+        self.assertNotIn(b"Team Admin", sophia_dashboard_response.data)
+        self.assertNotIn(b"data-team-dashboard-admin-form", sophia_dashboard_response.data)
 
     def test_team_dashboard_config_defaults_and_save_are_admin_only(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
@@ -961,6 +979,16 @@ class WebPortalFeatureTests(unittest.TestCase):
                     },
                 )
 
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["google_profile"] = {"email": "sophia.wangzj@npt.sg", "name": "Sophia"}
+                    session["google_credentials"] = {"token": "x"}
+                sophia_config_response = client.get("/api/team-dashboard/config")
+                sophia_save_response = client.post(
+                    "/admin/team-dashboard/members",
+                    json={"teams": {"AF": {"member_emails": ["sophia.wangzj@npt.sg"]}}},
+                )
+
         self.assertEqual(forbidden_response.status_code, 403)
         self.assertEqual(config_response.status_code, 200)
         config_payload = config_response.get_json()
@@ -982,6 +1010,8 @@ class WebPortalFeatureTests(unittest.TestCase):
         )
         self.assertEqual(config_payload["config"]["teams"]["GRC"]["member_emails"], ["sabrina.chan@npt.sg"])
         self.assertEqual(save_response.status_code, 200)
+        self.assertEqual(sophia_config_response.status_code, 200)
+        self.assertEqual(sophia_save_response.status_code, 403)
         saved_payload = save_response.get_json()
         self.assertEqual(saved_payload["config"]["teams"]["AF"]["member_emails"], ["pm1@npt.sg", "pm2@npt.sg"])
         self.assertEqual(saved_payload["config"]["teams"]["GRC"]["member_emails"], ["ops@npt.sg", "ops2@npt.sg"])
@@ -1089,6 +1119,38 @@ class WebPortalFeatureTests(unittest.TestCase):
             class FakeTeamDashboardClient:
                 def __init__(self):
                     self.calls = []
+                    self.project_calls = []
+
+                def list_biz_projects_for_pm_email(self, email):
+                    self.project_calls.append(email)
+                    if email == "af@npt.sg":
+                        return [
+                            {
+                                "issue_id": "225159",
+                                "project_name": "Fraud Project",
+                                "market": "SG",
+                                "priority": "P1",
+                                "regional_pm_pic": "regional@npt.sg",
+                            },
+                            {
+                                "issue_id": "300000",
+                                "project_name": "Biz Only Project",
+                                "market": "PH",
+                                "priority": "P0",
+                                "regional_pm_pic": "af@npt.sg",
+                            },
+                        ]
+                    if email == "cr@npt.sg":
+                        return [
+                            {
+                                "issue_id": "225200",
+                                "project_name": "Credit Project",
+                                "market": "ID",
+                                "priority": "P2",
+                                "regional_pm_pic": "credit@npt.sg",
+                            }
+                        ]
+                    return []
 
                 def list_jira_tasks_created_by_emails(self, emails, **kwargs):
                     self.calls.append({"emails": list(emails), "kwargs": kwargs})
@@ -1115,11 +1177,26 @@ class WebPortalFeatureTests(unittest.TestCase):
                                 "jira_title": "Pending item",
                                 "pm_email": "af@npt.sg",
                                 "jira_status": "Testing",
+                                "release_date": "2026-05-20",
                                 "version": "Planning_26Q3",
                                 "prd_links": [],
                                 "parent_project": {
                                     "bpmis_id": "225159",
                                     "project_name": "Fraud Project",
+                                    "market": "SG",
+                                    "priority": "P1",
+                                    "regional_pm_pic": "regional@npt.sg",
+                                },
+                            },
+                            {
+                                "jira_id": "AF-4",
+                                "jira_title": "Earlier pending item",
+                                "pm_email": "af@npt.sg",
+                                "jira_status": "Testing",
+                                "release_date": "2026-05-01",
+                                "parent_project": {
+                                    "bpmis_id": "225300",
+                                    "project_name": "Earlier Live Project",
                                     "market": "SG",
                                     "priority": "P1",
                                     "regional_pm_pic": "regional@npt.sg",
@@ -1176,14 +1253,19 @@ class WebPortalFeatureTests(unittest.TestCase):
         payload = response.get_json()
         self.assertEqual(payload["status"], "ok")
         teams = {team["team_key"]: team for team in payload["teams"]}
-        self.assertEqual(teams["AF"]["under_prd"][0]["bpmis_id"], "225159")
-        self.assertEqual(teams["AF"]["under_prd"][0]["project_name"], "Fraud Project")
-        self.assertEqual(teams["AF"]["under_prd"][0]["market"], "SG")
-        self.assertEqual(teams["AF"]["under_prd"][0]["priority"], "P1")
-        self.assertEqual(teams["AF"]["under_prd"][0]["regional_pm_pic"], "regional@npt.sg")
-        self.assertEqual([item["jira_id"] for item in teams["AF"]["under_prd"][0]["jira_tickets"]], ["AF-1"])
-        self.assertEqual([item["jira_id"] for item in teams["AF"]["pending_live"][0]["jira_tickets"]], ["AF-2"])
-        self.assertEqual(teams["AF"]["under_prd"][0]["jira_tickets"][0]["jira_link"], "https://jira.shopee.io/browse/AF-1")
+        af_under_prd = {project["bpmis_id"]: project for project in teams["AF"]["under_prd"]}
+        self.assertEqual(af_under_prd["225159"]["project_name"], "Fraud Project")
+        self.assertEqual(af_under_prd["225159"]["market"], "SG")
+        self.assertEqual(af_under_prd["225159"]["priority"], "P1")
+        self.assertEqual(af_under_prd["225159"]["regional_pm_pic"], "regional@npt.sg")
+        self.assertEqual([item["jira_id"] for item in af_under_prd["225159"]["jira_tickets"]], ["AF-1"])
+        self.assertEqual(af_under_prd["300000"]["project_name"], "Biz Only Project")
+        self.assertEqual(af_under_prd["300000"]["jira_tickets"], [])
+        self.assertEqual(af_under_prd["300000"]["matched_pm_emails"], ["af@npt.sg"])
+        self.assertEqual([project["bpmis_id"] for project in teams["AF"]["pending_live"][:2]], ["225300", "225159"])
+        self.assertEqual([project["release_date"] for project in teams["AF"]["pending_live"][:2]], ["01-05-2026", "20-05-2026"])
+        self.assertEqual([item["jira_id"] for item in teams["AF"]["pending_live"][1]["jira_tickets"]], ["AF-2"])
+        self.assertEqual(af_under_prd["225159"]["jira_tickets"][0]["jira_link"], "https://jira.shopee.io/browse/AF-1")
         self.assertEqual(teams["CRMS"]["under_prd"][0]["bpmis_id"], "225200")
         self.assertEqual([item["jira_id"] for item in teams["CRMS"]["under_prd"][0]["jira_tickets"]], ["CR-1"])
         self.assertEqual(teams["CRMS"]["pending_live"][0]["bpmis_id"], "")
@@ -1194,7 +1276,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         af_payload = af_response.get_json()
         self.assertEqual([team["team_key"] for team in af_payload["teams"]], ["AF"])
         self.assertEqual(af_payload["team"]["team_key"], "AF")
-        self.assertEqual([item["jira_id"] for item in af_payload["team"]["pending_live"][0]["jira_tickets"]], ["AF-2"])
+        self.assertEqual([item["jira_id"] for item in af_payload["team"]["pending_live"][0]["jira_tickets"]], ["AF-4"])
         self.assertEqual(unknown_response.status_code, 400)
         self.assertIn(
             {
@@ -1203,6 +1285,8 @@ class WebPortalFeatureTests(unittest.TestCase):
             },
             fake_client.calls,
         )
+        self.assertIn("af@npt.sg", fake_client.project_calls)
+        self.assertIn("cr@npt.sg", fake_client.project_calls)
 
     def test_team_dashboard_tasks_can_load_one_team_at_a_time(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
@@ -1231,6 +1315,9 @@ class WebPortalFeatureTests(unittest.TestCase):
             class FakeTeamDashboardClient:
                 def __init__(self):
                     self.calls = []
+
+                def list_biz_projects_for_pm_email(self, email):
+                    return []
 
                 def list_jira_tasks_created_by_emails(self, emails, **kwargs):
                     self.calls.append({"emails": list(emails), "kwargs": kwargs})

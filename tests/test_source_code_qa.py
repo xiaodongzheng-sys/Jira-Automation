@@ -579,6 +579,9 @@ class SourceCodeQARouteTests(unittest.TestCase):
 
         self.assertIn("UAT/non-Live", section)
         self.assertIn("never use them as confirmed Live/production configuration facts", section)
+        self.assertIn("app/env/namespace", section)
+        self.assertIn("Do not say an Apollo export is missing when it is present in uploaded runtime evidence", section)
+        self.assertIn("choose the matching app namespace", section)
         self.assertNotIn("production DB/Apollo/config snapshots", section)
 
     def test_runtime_evidence_apollo_zip_extracts_nested_text_configs(self):
@@ -7631,9 +7634,12 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             },
         )
 
-        self.assertIn("Prompt mode: codex_investigation_brief_v4", brief)
+        self.assertIn("Prompt mode: codex_investigation_brief_v5", brief)
         self.assertIn("Three-stage investigation required:", brief)
         self.assertIn("Stage 2 gap verification", brief)
+        self.assertIn("search the uploaded evidence text/summary by app/env/namespace", brief)
+        self.assertIn("AMR/FV/authentication flows should inspect authentication-center Apollo keys", brief)
+        self.assertIn("uploaded runtime config key/value", brief)
         self.assertIn("screenshot-driven incident questions", brief)
         self.assertIn("missing_production_evidence", brief)
         self.assertIn("source_code_evidence must name concrete files/functions/classes/fields/tables or APIs", brief)

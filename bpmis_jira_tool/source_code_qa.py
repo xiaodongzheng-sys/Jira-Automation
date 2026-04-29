@@ -40,10 +40,10 @@ LLM_PROVIDER_OPENAI_COMPATIBLE = "openai_compatible"
 LLM_PROVIDER_CODEX_CLI_BRIDGE = "codex_cli_bridge"
 LLM_PROVIDER_VERTEX_AI = "vertex_ai"
 LLM_PROVIDER_ALLOWED_QUERY_CHOICES = {LLM_PROVIDER_GEMINI, LLM_PROVIDER_CODEX_CLI_BRIDGE, LLM_PROVIDER_VERTEX_AI}
-LLM_PROMPT_VERSION = 10
+LLM_PROMPT_VERSION = 11
 LLM_RESPONSE_SCHEMA_VERSION = 5
 LLM_ROUTER_VERSION = 7
-LLM_CACHE_VERSION = 15
+LLM_CACHE_VERSION = 16
 LLM_RUNTIME_VERSION = 2
 PLANNER_TOOL_DSL_VERSION = 1
 GEMINI_MIN_THINKING_BUDGET = 512
@@ -70,7 +70,7 @@ DEFAULT_LLM_MAX_BACKOFF_SECONDS = 8.0
 DEFAULT_CODEX_CLI_MODEL = "codex-cli"
 DEFAULT_CODEX_TIMEOUT_SECONDS = 240
 DEFAULT_CODEX_TOP_PATH_LIMIT = 30
-CODEX_INVESTIGATION_PROMPT_MODE = "codex_investigation_brief_v4"
+CODEX_INVESTIGATION_PROMPT_MODE = "codex_investigation_brief_v5"
 CODEX_SESSION_MODE_EPHEMERAL = "ephemeral"
 CODEX_SESSION_MODE_RESUME = "resume"
 DEFAULT_INDEX_LOCK_STALE_SECONDS = 15 * 60
@@ -15599,6 +15599,10 @@ class SourceCodeQAService:
             "- Separate source-code evidence, runtime evidence, attachment evidence, and missing evidence in the answer.",
             "- Runtime evidence can be stale or partial; use its pm_team/country/source_type labels and do not generalize it across countries unless the file proves that.",
             "- If runtime evidence conflicts with source code, describe the conflict instead of silently choosing one.",
+            "- For Apollo/config archives, first identify the app/env/namespace path that matches the user's component or business flow, for example authentication-center/UAT1/... before anti-fraud-admin/UAT1/... for authentication or AMR/FV flows.",
+            "- Treat uploaded config key/value rows as runtime_evidence facts; use repository code only to prove which classes consume those keys and what behavior follows.",
+            "- Do not say an Apollo export is missing when it is present in uploaded runtime evidence. If it is absent from the repo, say 'not in source repo, but present/absent in uploaded runtime evidence' explicitly.",
+            "- When a question asks for 'current config' and an uploaded Apollo file is in scope, answer from the uploaded config first, then add the caveat that live/current runtime still needs Apollo release history, pod env, or startup logs.",
         ]
         for index, item in enumerate(normalized[:24], start=1):
             meta = cls._public_runtime_evidence_metadata(item)
@@ -15613,6 +15617,11 @@ class SourceCodeQAService:
                 if len(text) > 6000:
                     text = f"{text[:6000]}\n...[runtime evidence text truncated]"
                 lines.append(f"  Extracted text/summary:\n{text}")
+                if meta["source_type"].lower() == "apollo":
+                    lines.append(
+                        "  Apollo handling: preserve path context such as app/env/namespace from each ZIP member; "
+                        "choose the matching app namespace before using similarly named keys from another app."
+                    )
         return "\n".join(lines)
 
     @classmethod
@@ -15901,6 +15910,9 @@ class SourceCodeQAService:
             "- Stage 2 gap verification: run targeted searches for expected missing links before answering. Search for full definitions, INSERT rows, rollback scripts, mapper/client/repository/table/API hops, enums, value mappings, and relevant tests when the question implies them. Record this in investigation_steps.gap_verification.",
             "- Stage 3 certainty split: answer by separating confirmed_from_code, inferred_from_code, and not_found/missing_evidence. Do not promote a high-confidence inference into confirmed_from_code.",
             "- For rule/config questions, explicitly distinguish full rule/config definitions from status-only migration updates. If only status updates are found, say the full rule row/expression is missing.",
+            "- For Apollo/config questions with uploaded runtime evidence, search the uploaded evidence text/summary by app/env/namespace and key name before treating the config as missing. Record whether the key is present in runtime evidence, source repo code, both, or neither.",
+            "- For component-specific config questions, choose the component that owns the runtime behavior. Example: AMR/FV/authentication flows should inspect authentication-center Apollo keys before anti-fraud-admin or anti-fraud-service keys.",
+            "- For config-driven behavior, separate two claims: (1) uploaded runtime config key/value, and (2) repository code path that consumes the key. Do not use one evidence tier as proof of the other.",
             "- For data-source questions, explicitly distinguish DTO/carrier fields from upstream source tables/APIs/repos. If the upstream hop is absent, list that hop in missing_evidence.",
             "- For ambiguous business wording, map each possible meaning to concrete code surfaces before answering. Example: distinguish admin query endpoints from report ingestion endpoints, field aliases from true schema fields, and synchronous caller failures from async processing failures.",
             "- If a developer phrase sounds like a business shorthand rather than an exact class/API name, say which source-backed interpretation is confirmed and which interpretation still needs logs, traceId, config export, or the caller repo.",
@@ -16044,6 +16056,9 @@ class SourceCodeQAService:
                 "- Use S ids from candidate paths when they support the claim, or direct file citations like src/Foo.java:10-20 after you verify the file exists.",
                 "- source_code_evidence must name concrete files/functions/classes/fields/tables or APIs when available; do not use generic phrases like 'the admin code'.",
                 "- Put only file-verified production facts in confirmed_from_code/source_code_evidence; put carrier/call-chain deductions in inferred_from_code; put missing source hops in not_found.",
+                "- Put uploaded Apollo/config values in attachment_facts or a runtime-evidence sentence in direct_answer, not in source_code_evidence.",
+                "- If an uploaded Apollo/config export contains the requested app/env/namespace, do not write that the export is missing. If only the source repo lacks that export, say exactly that.",
+                "- For auth/AMR/FV sampling questions, prefer authentication-center config keys and consumer classes over anti-fraud-admin keys unless the user specifically asks about admin behavior.",
                 "- For screenshots, put visible screenshot facts in screenshot_evidence or attachment_facts, not in source_code_evidence.",
                 "- Put missing DB rows, trace logs, production config exports, and one-case runtime checks in missing_production_evidence.",
                 "- Put concrete verification actions in next_checks, such as querying by trace_id/FID/user_id, comparing component vs aggregate fields, or checking the writer service timestamp.",
