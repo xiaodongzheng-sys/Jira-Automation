@@ -79,7 +79,7 @@ class BPMISClientTests(unittest.TestCase):
                     }
                 if path == "/api/v1/issues/detail":
                     self.assertEqual(params["id"], "900")
-                    return {"data": {"id": 900, "summary": "Parent Project", "market": "SG"}}
+                    return {"data": {"id": 900, "typeId": "Biz Project", "summary": "Parent Project", "market": "SG"}}
                 self.fail(f"unexpected API call: {path}")
 
             client._api_request = fake_api_request  # type: ignore[method-assign]
@@ -1316,6 +1316,7 @@ class BPMISClientTests(unittest.TestCase):
                         "data": {
                             "id": issue_id,
                             "summary": f"Parent Project {issue_id}",
+                            "typeId": "Biz Project",
                             "marketId": {"label": "SG"},
                             "bizPriorityId": {"label": "P1"},
                             "regionalPmPicId": [{"emailAddress": "rpm@npt.sg"}],
@@ -1521,6 +1522,192 @@ class BPMISClientTests(unittest.TestCase):
             self.assertEqual(tasks[1]["release_date"], "")
             self.assertEqual(client.request_stats["issue_release_before_cutoff_count"], 1)
             self.assertEqual(client.request_stats["issue_release_missing_included_count"], 1)
+
+    def test_team_dashboard_parent_project_uses_inline_parent_when_detail_missing(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings = Settings(
+                flask_secret_key="secret",
+                google_oauth_client_secret_file=Path(temp_dir) / "client.json",
+                google_oauth_redirect_uri=None,
+                team_portal_host="127.0.0.1",
+                team_portal_port=5000,
+                team_portal_base_url=None,
+                team_allowed_emails=(),
+                team_allowed_email_domains=(),
+                team_portal_data_dir=Path(temp_dir),
+                spreadsheet_id="sheet",
+                common_tab_name="Common",
+                input_tab_name="Input",
+                bpmis_base_url="https://example.com",
+                bpmis_api_access_token="token",
+            )
+            client = BPMISDirectApiClient(settings)
+            client._get_issue_detail_via_list = lambda issue_id: {}  # type: ignore[method-assign]
+            client.get_issue_detail = lambda issue_id: {}  # type: ignore[method-assign]
+
+            parent = client._parent_project_for_task(
+                {
+                    "parentIds": [
+                        {
+                            "id": 123589,
+                            "typeId": "Biz Project",
+                            "summary": "Inline BPMIS Project",
+                            "marketId": "PH",
+                            "bizPriorityId": "P1",
+                            "regionalPmPicId": [{"email": "rpm@npt.sg"}],
+                        }
+                    ]
+                },
+                {},
+            )
+
+            self.assertEqual(parent["bpmis_id"], "123589")
+            self.assertEqual(parent["project_name"], "Inline BPMIS Project")
+            self.assertEqual(parent["market"], "PH")
+            self.assertEqual(parent["priority"], "P1")
+            self.assertEqual(parent["regional_pm_pic"], "rpm@npt.sg")
+
+    def test_team_dashboard_parent_project_skips_non_biz_parent_layers(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings = Settings(
+                flask_secret_key="secret",
+                google_oauth_client_secret_file=Path(temp_dir) / "client.json",
+                google_oauth_redirect_uri=None,
+                team_portal_host="127.0.0.1",
+                team_portal_port=5000,
+                team_portal_base_url=None,
+                team_allowed_emails=(),
+                team_allowed_email_domains=(),
+                team_portal_data_dir=Path(temp_dir),
+                spreadsheet_id="sheet",
+                common_tab_name="Common",
+                input_tab_name="Input",
+                bpmis_base_url="https://example.com",
+                bpmis_api_access_token="token",
+            )
+            client = BPMISDirectApiClient(settings)
+            client._get_issue_detail_via_list = lambda issue_id: {}  # type: ignore[method-assign]
+            details = {
+                "155621": {
+                    "id": 155621,
+                    "typeId": "TRD",
+                    "summary": "Intermediate TRD",
+                    "parentIds": [{"id": 155119}],
+                },
+                "155119": {
+                    "id": 155119,
+                    "typeId": "Biz Project",
+                    "summary": "Actual Biz Project",
+                    "marketId": "Regional",
+                    "bizPriorityId": "P2",
+                    "regionalPmPicId": [{"email": "rpm@npt.sg"}],
+                },
+            }
+            client.get_issue_detail = lambda issue_id: details.get(str(issue_id), {})  # type: ignore[method-assign]
+
+            parent = client._parent_project_for_task(
+                {
+                    "parentIds": [
+                        {
+                            "id": 155621,
+                            "typeId": "TRD",
+                            "summary": "Intermediate TRD",
+                            "parentIds": [155119],
+                        }
+                    ]
+                },
+                {},
+            )
+
+            self.assertEqual(parent["bpmis_id"], "155119")
+            self.assertEqual(parent["project_name"], "Actual Biz Project")
+            self.assertEqual(parent["market"], "Regional")
+            self.assertEqual(parent["priority"], "P2")
+            self.assertEqual(parent["regional_pm_pic"], "rpm@npt.sg")
+
+    def test_team_dashboard_parent_project_returns_empty_when_parent_is_not_biz_project(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings = Settings(
+                flask_secret_key="secret",
+                google_oauth_client_secret_file=Path(temp_dir) / "client.json",
+                google_oauth_redirect_uri=None,
+                team_portal_host="127.0.0.1",
+                team_portal_port=5000,
+                team_portal_base_url=None,
+                team_allowed_emails=(),
+                team_allowed_email_domains=(),
+                team_portal_data_dir=Path(temp_dir),
+                spreadsheet_id="sheet",
+                common_tab_name="Common",
+                input_tab_name="Input",
+                bpmis_base_url="https://example.com",
+                bpmis_api_access_token="token",
+            )
+            client = BPMISDirectApiClient(settings)
+            client._get_issue_detail_via_list = lambda issue_id: {}  # type: ignore[method-assign]
+            client.get_issue_detail = lambda issue_id: {  # type: ignore[method-assign]
+                "id": issue_id,
+                "typeId": "Tech Project",
+                "summary": "Not a Biz Project",
+            }
+
+            parent = client._parent_project_for_task({"parentIds": [{"id": 155119, "typeId": "Tech Project"}]}, {})
+
+            self.assertEqual(parent["bpmis_id"], "")
+            self.assertEqual(parent["project_name"], "")
+
+    def test_team_dashboard_parent_project_prefers_mapped_detail_labels(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings = Settings(
+                flask_secret_key="secret",
+                google_oauth_client_secret_file=Path(temp_dir) / "client.json",
+                google_oauth_redirect_uri=None,
+                team_portal_host="127.0.0.1",
+                team_portal_port=5000,
+                team_portal_base_url=None,
+                team_allowed_emails=(),
+                team_allowed_email_domains=(),
+                team_portal_data_dir=Path(temp_dir),
+                spreadsheet_id="sheet",
+                common_tab_name="Common",
+                input_tab_name="Input",
+                bpmis_base_url="https://example.com",
+                bpmis_api_access_token="token",
+            )
+            client = BPMISDirectApiClient(settings)
+            detail_payload = {
+                "typeId": "Biz Project",
+                "summary": "Mapped Biz Project",
+                "marketId": "Regional",
+                "bizPriorityId": "P1",
+                "regionalPmPicId": [{"email": "rpm@npt.sg"}],
+            }
+            client._get_issue_detail_via_list = lambda issue_id: {"id": issue_id, **detail_payload}  # type: ignore[method-assign]
+            client.get_issue_detail = lambda issue_id: {  # type: ignore[method-assign]
+                "id": issue_id,
+                **detail_payload,
+            }
+
+            parent = client._parent_project_for_task(
+                {
+                    "parentIds": [
+                        {
+                            "id": 211471,
+                            "typeId": 1,
+                            "summary": "Raw Biz Project",
+                            "marketId": 4,
+                            "bizPriorityId": 1,
+                            "regionalPmPicId": [87],
+                        }
+                    ]
+                },
+                {},
+            )
+
+            self.assertEqual(parent["project_name"], "Mapped Biz Project")
+            self.assertEqual(parent["market"], "Regional")
+            self.assertEqual(parent["priority"], "P1")
+            self.assertEqual(parent["regional_pm_pic"], "rpm@npt.sg")
 
 
 if __name__ == "__main__":

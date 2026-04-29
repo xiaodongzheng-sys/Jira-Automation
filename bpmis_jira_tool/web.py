@@ -5642,8 +5642,16 @@ def _group_team_dashboard_tasks_by_project(tasks: list[dict[str, Any]]) -> list[
     for task in tasks:
         project = task.get("parent_project") if isinstance(task.get("parent_project"), dict) else {}
         project = _normalize_team_dashboard_project(project)
-        key = project.get("bpmis_id") or f"unknown:{task.get('jira_id') or task.get('issue_id') or len(grouped)}"
+        key = project.get("bpmis_id") or "unknown"
         if key not in grouped:
+            if key == "unknown":
+                project = {
+                    "bpmis_id": "",
+                    "project_name": "BPMIS unavailable",
+                    "market": "",
+                    "priority": "",
+                    "regional_pm_pic": "",
+                }
             grouped[key] = {
                 **project,
                 "jira_tickets": [],

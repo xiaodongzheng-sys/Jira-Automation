@@ -308,6 +308,7 @@ class WebPortalFeatureTests(unittest.TestCase):
                 "TEAM_ALLOWED_EMAIL_DOMAINS": "",
                 "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
                 "TEAM_DASHBOARD_JIRA_RELEASE_AFTER": "2026-04-29",
+                "TEAM_DASHBOARD_JIRA_RELEASE_AFTER": "2026-04-29",
             },
             clear=True,
         ):
@@ -1122,6 +1123,12 @@ class WebPortalFeatureTests(unittest.TestCase):
                                 "pm_email": "cr@npt.sg",
                                 "jira_status": "IceBox",
                             },
+                            {
+                                "jira_id": "CR-3",
+                                "jira_title": "Unlinked item",
+                                "pm_email": "cr@npt.sg",
+                                "jira_status": "Testing",
+                            },
                         ]
                     return []
 
@@ -1149,7 +1156,9 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertEqual(teams["AF"]["under_prd"][0]["jira_tickets"][0]["jira_link"], "https://jira.shopee.io/browse/AF-1")
         self.assertEqual(teams["CRMS"]["under_prd"][0]["bpmis_id"], "225200")
         self.assertEqual([item["jira_id"] for item in teams["CRMS"]["under_prd"][0]["jira_tickets"]], ["CR-1"])
-        self.assertEqual(teams["CRMS"]["pending_live"], [])
+        self.assertEqual(teams["CRMS"]["pending_live"][0]["bpmis_id"], "")
+        self.assertEqual(teams["CRMS"]["pending_live"][0]["project_name"], "BPMIS unavailable")
+        self.assertEqual([item["jira_id"] for item in teams["CRMS"]["pending_live"][0]["jira_tickets"]], ["CR-3"])
         self.assertEqual(teams["GRC"]["under_prd"], [])
         self.assertEqual(af_response.status_code, 200)
         af_payload = af_response.get_json()

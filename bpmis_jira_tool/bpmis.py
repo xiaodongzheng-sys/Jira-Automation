@@ -619,8 +619,48 @@ class BPMISDirectApiClient(BPMISClient):
             if detail:
                 self._issue_detail_cache[normalized_issue_id] = dict(detail)
                 return detail
+        detail = self._get_issue_detail_via_list(normalized_issue_id)
+        if detail:
+            self._issue_detail_cache[normalized_issue_id] = dict(detail)
+            return detail
         self._issue_detail_cache[normalized_issue_id] = {}
         return {}
+
+    def _get_issue_detail_via_list(self, issue_id: str) -> dict[str, Any]:
+        try:
+            response = self._api_request(
+                "/api/v1/issues/list",
+                params={
+                    "search": json.dumps(
+                        {
+                            "joinType": "and",
+                            "subQueries": [{"id": [int(issue_id)]}],
+                            "page": 1,
+                            "pageSize": 1,
+                            "mapping": True,
+                        }
+                    )
+                },
+            )
+        except (BPMISError, ValueError):
+            return {}
+        rows = ((response.get("data") or {}).get("rows") or []) if isinstance(response, dict) else []
+        for row in rows:
+            if isinstance(row, dict) and self._extract_issue_identifier(row) == str(issue_id):
+                return row
+        return {}
+
+    def _get_parent_issue_detail(self, issue_id: str) -> dict[str, Any]:
+        normalized_issue_id = str(issue_id or "").strip()
+        if not normalized_issue_id:
+            return {}
+        if normalized_issue_id in self._issue_detail_cache:
+            return dict(self._issue_detail_cache[normalized_issue_id])
+        detail = self._get_issue_detail_via_list(normalized_issue_id)
+        if detail:
+            self._issue_detail_cache[normalized_issue_id] = dict(detail)
+            return detail
+        return self.get_issue_detail(normalized_issue_id)
 
     def get_jira_ticket_detail(self, ticket_key: str) -> dict[str, Any]:
         normalized_ticket_key = self._extract_issue_key(str(ticket_key or "")) or str(ticket_key or "").strip()
@@ -932,6 +972,25 @@ class BPMISDirectApiClient(BPMISClient):
             if text:
                 parent_ids.append(text)
         return parent_ids
+
+    def _extract_parent_issue_payload(self, row: dict[str, Any], parent_id: str) -> dict[str, Any]:
+        parent_values = self._find_first_value(row, "parentIds")
+        if parent_values is None:
+            parent_values = self._find_first_value(row, "parentIssueId")
+        if parent_values is None:
+            parent_values = self._find_first_value(row, "parentId")
+        if parent_values is None:
+            return {}
+        if not isinstance(parent_values, list):
+            parent_values = [parent_values]
+        normalized_parent_id = str(parent_id or "").strip()
+        for parent_ref in parent_values:
+            if not isinstance(parent_ref, dict):
+                continue
+            candidate_id = str(parent_ref.get("id") or parent_ref.get("issueId") or parent_ref.get("value") or "").strip()
+            if candidate_id and candidate_id == normalized_parent_id:
+                return parent_ref
+        return {}
 
     def _issue_is_linked_to_parent(self, ticket_key: str, project_issue_id: str | int) -> bool:
         normalized_project_id = str(project_issue_id or "").strip()
@@ -1312,8 +1371,53 @@ class BPMISDirectApiClient(BPMISClient):
         if not parent_id:
             return self._normalize_team_dashboard_parent_project({})
         if parent_id not in cache:
-            cache[parent_id] = self._normalize_team_dashboard_parent_project(self.get_issue_detail(parent_id), fallback_id=parent_id)
+            cache[parent_id] = self._resolve_biz_project_parent(row, parent_id, cache)
         return cache[parent_id]
+
+    def _resolve_biz_project_parent(
+        self,
+        row: dict[str, Any],
+        parent_id: str,
+        cache: dict[str, dict[str, Any]],
+        *,
+        max_depth: int = 5,
+    ) -> dict[str, Any]:
+        current_id = str(parent_id or "").strip()
+        current_payload = self._extract_parent_issue_payload(row, current_id)
+        visited: set[str] = set()
+        for _depth in range(max_depth):
+            if not current_id or current_id in visited:
+                break
+            visited.add(current_id)
+            detail = self._get_parent_issue_detail(current_id)
+            payload = self._merge_issue_payloads(detail, current_payload) if detail else current_payload
+            if self._is_biz_project_issue(payload):
+                return self._normalize_team_dashboard_parent_project(payload, fallback_id=current_id)
+            next_ids = self._extract_parent_issue_ids(payload)
+            next_id = next_ids[0] if next_ids else ""
+            if not next_id or next_id == current_id:
+                break
+            if next_id in cache and cache[next_id].get("bpmis_id"):
+                return cache[next_id]
+            current_id = next_id
+            current_payload = self._extract_parent_issue_payload(payload, current_id)
+        return self._normalize_team_dashboard_parent_project({})
+
+    def _is_biz_project_issue(self, row: dict[str, Any]) -> bool:
+        value = self._find_first_value(row, "typeId")
+        if value is None:
+            return False
+        if isinstance(value, dict):
+            candidates = [value.get("id"), value.get("value"), value.get("label"), value.get("name"), value.get("fullName")]
+        else:
+            candidates = [value]
+        for candidate in candidates:
+            text = str(candidate or "").strip()
+            if not text:
+                continue
+            if text == str(self.BIZ_PROJECT_TYPE_ID) or text.casefold() == "biz project":
+                return True
+        return False
 
     def _creator_email_for_row(
         self,
@@ -1585,12 +1689,19 @@ class BPMISDirectApiClient(BPMISClient):
             "project_name": self._issue_first_text(row, "summary", "title", "projectName", "name"),
             "market": self._issue_first_text(row, "marketId", "market", "country"),
             "priority": self._issue_first_text(row, "bizPriorityId", "bizPriority", "priority", "priorityId"),
-            "regional_pm_pic": self._issue_first_text(row, "regionalPmPicId", "jiraRegionalPmPicId", "regionalPmPic", "pmPic"),
+            "regional_pm_pic": self._issue_first_person(row, "regionalPmPicId", "jiraRegionalPmPicId", "regionalPmPic", "pmPic"),
         }
 
     def _issue_first_text(self, row: dict[str, Any], *keys: str) -> str:
         for key in keys:
             text = self._stringify_value(self._find_first_value(row, key))
+            if text:
+                return text
+        return ""
+
+    def _issue_first_person(self, row: dict[str, Any], *keys: str) -> str:
+        for key in keys:
+            text = self._stringify_person(self._find_first_value(row, key))
             if text:
                 return text
         return ""
@@ -1631,7 +1742,7 @@ class BPMISDirectApiClient(BPMISClient):
         if isinstance(value, str):
             return value.strip()
         if isinstance(value, dict):
-            for key in ("fullName", "label", "name", "displayName", "emailAddress", "value"):
+            for key in ("fullName", "label", "name", "displayName", "emailAddress", "email", "value"):
                 text = str(value.get(key) or "").strip()
                 if text:
                     return text
@@ -1648,7 +1759,7 @@ class BPMISDirectApiClient(BPMISClient):
             people = [item for item in people if item]
             return ", ".join(people)
         if isinstance(value, dict):
-            for key in ("displayName", "name", "emailAddress", "label", "username", "value"):
+            for key in ("displayName", "name", "emailAddress", "email", "label", "username", "value"):
                 text = str(value.get(key) or "").strip()
                 if text:
                     return text
