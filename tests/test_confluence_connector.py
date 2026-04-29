@@ -96,6 +96,97 @@ class ConfluenceConnectorTests(unittest.TestCase):
         request_url = mock_get.call_args.kwargs.get("url") or mock_get.call_args.args[0]
         self.assertTrue(request_url.endswith("/rest/api/content"))
 
+    @patch("prd_briefing.confluence.requests.get")
+    def test_ingest_display_url_follows_confluence_renamed_page_suggestion(self, mock_get):
+        empty_search = Mock()
+        empty_search.json.return_value = {"results": []}
+        empty_search.raise_for_status.return_value = None
+        login_html = Mock()
+        login_html.json.side_effect = ValueError("not json")
+        login_html.raise_for_status.return_value = None
+        renamed_hint = Mock()
+        renamed_hint.text = """
+        <html><body>
+          <p>The page you were looking for may have been renamed to the following:</p>
+          <a href="/display/SPDB/%5BID%5D%5BDWH%5D+Group+Employee+Tag+Data">[ID][DWH] Group Employee Tag Data</a>
+        </body></html>
+        """
+        renamed_hint.raise_for_status.return_value = None
+        renamed_payload = Mock()
+        renamed_payload.json.return_value = {
+            "results": [
+                {
+                    "id": "67890",
+                    "title": "[ID][DWH] Group Employee Tag Data",
+                    "version": {"when": "2026-04-29T12:00:00Z"},
+                    "body": {"export_view": {"value": "<h1>Overview</h1><p>Renamed PRD</p>"}},
+                }
+            ]
+        }
+        renamed_payload.raise_for_status.return_value = None
+        mock_get.side_effect = [empty_search, login_html, renamed_hint, renamed_payload]
+
+        page = self.connector.ingest_page(
+            "https://confluence.shopee.io/display/SPDB/%5BID%5D%5BDWH%5D+Group+Employee+Tag+Table",
+            "session-1",
+        )
+
+        self.assertEqual(page.page_id, "67890")
+        self.assertEqual(page.title, "[ID][DWH] Group Employee Tag Data")
+        self.assertEqual(page.sections[0].content, "Renamed PRD")
+        request_urls = [
+            call.kwargs.get("url") or call.args[0]
+            for call in mock_get.call_args_list
+        ]
+        self.assertIn("/display/SPDB/%5BID%5D%5BDWH%5D+Group+Employee+Tag+Table", request_urls[2])
+        self.assertIn("/rest/api/content", request_urls[3])
+
+    @patch("prd_briefing.confluence.requests.get")
+    def test_ingest_display_url_searches_similar_title_when_renamed_hint_is_unavailable(self, mock_get):
+        empty_search = Mock()
+        empty_search.json.return_value = {"results": []}
+        empty_search.raise_for_status.return_value = None
+        login_html = Mock()
+        login_html.json.side_effect = ValueError("not json")
+        login_html.raise_for_status.return_value = None
+        no_hint = Mock()
+        no_hint.text = "<html><body><p>Page Not Found</p></body></html>"
+        no_hint.raise_for_status.return_value = None
+        cql_result = Mock()
+        cql_result.json.return_value = {
+            "results": [
+                {
+                    "url": "/display/SPDB/%5BID%5D%5BDWH%5D+Group+Employee+Tag+Data",
+                    "content": {"id": "67890", "title": "[ID][DWH] Group Employee Tag Data"},
+                }
+            ]
+        }
+        cql_result.raise_for_status.return_value = None
+        renamed_payload = Mock()
+        renamed_payload.json.return_value = {
+            "id": "67890",
+            "title": "[ID][DWH] Group Employee Tag Data",
+            "version": {"when": "2026-04-29T12:00:00Z"},
+            "body": {"export_view": {"value": "<h1>Overview</h1><p>Renamed PRD</p>"}},
+        }
+        renamed_payload.raise_for_status.return_value = None
+        mock_get.side_effect = [empty_search, login_html, no_hint, cql_result, renamed_payload]
+
+        page = self.connector.ingest_page(
+            "https://confluence.shopee.io/display/SPDB/%5BID%5D%5BDWH%5D+Group+Employee+Tag+Table",
+            "session-1",
+        )
+
+        self.assertEqual(page.page_id, "67890")
+        self.assertEqual(page.title, "[ID][DWH] Group Employee Tag Data")
+        self.assertEqual(page.sections[0].content, "Renamed PRD")
+        request_urls = [
+            call.kwargs.get("url") or call.args[0]
+            for call in mock_get.call_args_list
+        ]
+        self.assertTrue(request_urls[3].endswith("/rest/api/search"))
+        self.assertTrue(request_urls[4].endswith("/rest/api/content/67890"))
+
     def test_parse_sections_skips_toc_heading_and_keeps_real_sections(self):
         html = """
         <h1><div class='toc-macro'><ul><li><a href='#x'>1. Project Management</a></li><li><a href='#y'>2. Introduction</a></li></ul></div></h1>

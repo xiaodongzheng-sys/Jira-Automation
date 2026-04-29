@@ -165,9 +165,93 @@ class ConfluenceConnector:
                         return results[0]
                 except Exception as error:  # noqa: BLE001
                     last_error = error
+            renamed = self._resolve_renamed_display_page(resolved)
+            if renamed:
+                resolved.source_url = renamed.source_url
+                return self._fetch_page_payload(renamed)
+            similar = self._search_similar_display_page(resolved)
+            if similar:
+                resolved.source_url = similar.source_url
+                return self._fetch_page_payload(similar)
             raise RuntimeError(f"Could not resolve Confluence display URL to a page. Last error: {last_error}")
 
         raise ValueError("Confluence page reference was missing both page ID and display title.")
+
+    def _resolve_renamed_display_page(self, resolved: ResolvedPageRef) -> ResolvedPageRef | None:
+        try:
+            response = self._request(resolved.source_url, accept="text/html")
+        except Exception:  # noqa: BLE001 - old display URLs may still be inaccessible through API auth.
+            return None
+        soup = BeautifulSoup(response.text or "", "html.parser")
+        for anchor in soup.find_all("a", href=True):
+            text = self._clean_text(anchor.get_text(" ", strip=True))
+            href = str(anchor.get("href") or "").strip()
+            if not text or not href:
+                continue
+            if resolved.title_hint and text.casefold() == resolved.title_hint.casefold():
+                continue
+            candidate_url = urljoin(resolved.base_url, href)
+            try:
+                candidate = self._resolve_parsed_page(candidate_url, urlparse(candidate_url))
+            except ValueError:
+                continue
+            if candidate.page_id or candidate.space_key:
+                return candidate
+        return None
+
+    def _search_similar_display_page(self, resolved: ResolvedPageRef) -> ResolvedPageRef | None:
+        if not resolved.space_key or not resolved.title_hint:
+            return None
+        for phrase in self._title_search_phrases(resolved.title_hint):
+            cql = f'space = "{self._escape_cql_value(resolved.space_key)}" and type = page and title ~ "{self._escape_cql_value(phrase)}"'
+            for rest_base in self._rest_api_candidates(resolved.base_url):
+                try:
+                    response = self._request(
+                        f"{rest_base}/search",
+                        params={"cql": cql, "limit": 5, "expand": "content.version"},
+                    )
+                    payload = response.json()
+                except Exception:  # noqa: BLE001 - try the next phrase/candidate.
+                    continue
+                for item in payload.get("results") or []:
+                    content = item.get("content") if isinstance(item, dict) else None
+                    if not isinstance(content, dict):
+                        continue
+                    page_id = str(content.get("id") or "").strip()
+                    title = str(content.get("title") or "").strip()
+                    if not page_id and not title:
+                        continue
+                    return ResolvedPageRef(
+                        base_url=resolved.base_url,
+                        source_url=urljoin(resolved.base_url, str(item.get("url") or item.get("link") or resolved.source_url)),
+                        page_id=page_id or None,
+                        space_key=resolved.space_key if not page_id else None,
+                        title_hint=title if not page_id else None,
+                    )
+        return None
+
+    @staticmethod
+    def _title_search_phrases(title: str) -> list[str]:
+        cleaned = re.sub(r"\[[^\]]+\]", " ", title)
+        words = re.findall(r"[A-Za-z0-9]+", cleaned)
+        meaningful = [
+            word
+            for word in words
+            if len(word) > 1 and word.casefold() not in {"prd", "table", "page", "doc", "document", "requirement"}
+        ]
+        phrases = []
+        if cleaned.strip():
+            phrases.append(cleaned.strip())
+        if len(meaningful) >= 3:
+            phrases.append(" ".join(meaningful[:4]))
+        if len(meaningful) >= 4:
+            phrases.append(" ".join(meaningful[1:5]))
+        phrases.append(title)
+        return list(dict.fromkeys(phrase for phrase in phrases if phrase))
+
+    @staticmethod
+    def _escape_cql_value(value: str) -> str:
+        return value.replace("\\", "\\\\").replace('"', '\\"')
 
     def _rest_api_candidates(self, base_url: str) -> list[str]:
         candidates = []
