@@ -161,7 +161,7 @@
         <td>${escapeHtml(item.jira_title || '-')}</td>
         <td>${escapeHtml(item.pm_email || '-')}</td>
         <td>${escapeHtml(item.jira_status || '-')}</td>
-        <td>${escapeHtml(item.created_at || '-')}</td>
+        <td>${escapeHtml(item.release_date || '-')}</td>
         <td>${escapeHtml(item.version || '-')}</td>
         <td>${renderPrdLinks(item.prd_links, item)}</td>
         <td>
@@ -240,9 +240,9 @@
                 <tr>
                   <th>Jira ID</th>
                   <th>Jira Title</th>
-                  <th>PM Email</th>
+                  <th>Reporter Email</th>
                   <th>Jira Status</th>
-                  <th>Created</th>
+                  <th>Release</th>
                   <th>Version</th>
                   <th>PRD Link</th>
                   <th>AI</th>

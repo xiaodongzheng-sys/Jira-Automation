@@ -307,6 +307,7 @@ class WebPortalFeatureTests(unittest.TestCase):
                 "TEAM_ALLOWED_EMAILS": "",
                 "TEAM_ALLOWED_EMAIL_DOMAINS": "",
                 "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
+                "TEAM_DASHBOARD_JIRA_RELEASE_AFTER": "2026-04-29",
             },
             clear=True,
         ):
@@ -1159,7 +1160,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertIn(
             {
                 "emails": ["af@npt.sg"],
-                "kwargs": {"max_pages": 5, "enrich_missing_parent": False, "created_after": "2026-03-01"},
+                "kwargs": {"max_pages": 5, "enrich_missing_parent": False, "release_after": "2026-04-29"},
             },
             fake_client.calls,
         )
@@ -1172,6 +1173,7 @@ class WebPortalFeatureTests(unittest.TestCase):
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_ALLOWED_EMAILS": "",
                 "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_DASHBOARD_JIRA_RELEASE_AFTER": "2026-04-29",
             },
             clear=True,
         ):
@@ -1221,7 +1223,7 @@ class WebPortalFeatureTests(unittest.TestCase):
             [
                 {
                     "emails": ["af@npt.sg"],
-                    "kwargs": {"max_pages": 5, "enrich_missing_parent": False, "created_after": "2026-03-01"},
+                    "kwargs": {"max_pages": 5, "enrich_missing_parent": False, "release_after": "2026-04-29"},
                 }
             ],
         )

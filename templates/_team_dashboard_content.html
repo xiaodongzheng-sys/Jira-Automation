@@ -7,7 +7,7 @@
   <div class="panel-head">
     <div>
       <h2>Team Dashboard</h2>
-      <p class="step-copy">Review team Jira tasks by creator and keep team member email lists up to date.</p>
+      <p class="step-copy">Review team Jira tasks by reporter and keep team member email lists up to date.</p>
     </div>
   </div>
 
@@ -36,7 +36,7 @@
               <h3>{{ team.label }}</h3>
               <span class="field-badge">Team Admin</span>
             </div>
-            <p class="card-help">One email per line. Task List matches Jira tasks whose creator is in this list.</p>
+            <p class="card-help">One email per line. Task List matches Jira tasks whose reporter is in this list.</p>
             <div class="field-group">
               <label for="team_dashboard_members_{{ team_key }}">{{ team.label }} Member Emails</label>
               <textarea

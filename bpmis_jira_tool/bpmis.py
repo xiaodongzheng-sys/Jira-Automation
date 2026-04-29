@@ -58,6 +58,7 @@ class BPMISClient(ABC):
         max_pages: int | None = None,
         enrich_missing_parent: bool = True,
         created_after: str | date | datetime | None = None,
+        release_after: str | date | datetime | None = None,
     ) -> list[dict[str, Any]]:
         raise NotImplementedError
 
@@ -148,6 +149,8 @@ class BPMISDirectApiClient(BPMISClient):
             "issue_detail_lookup_count": 0,
             "issue_detail_enrichment_skipped_count": 0,
             "issue_created_before_cutoff_count": 0,
+            "issue_release_before_cutoff_count": 0,
+            "issue_release_missing_included_count": 0,
             "issue_list_created_cutoff_hit": 0,
             "issue_list_page_cap_hit": 0,
             "issue_list_page_count": 0,
@@ -408,6 +411,7 @@ class BPMISDirectApiClient(BPMISClient):
         max_pages: int | None = None,
         enrich_missing_parent: bool = True,
         created_after: str | date | datetime | None = None,
+        release_after: str | date | datetime | None = None,
     ) -> list[dict[str, Any]]:
         normalized_emails = self._normalize_email_list(emails)
         if not normalized_emails:
@@ -422,6 +426,7 @@ class BPMISDirectApiClient(BPMISClient):
         page = 1
         page_size = 200
         created_cutoff = self._parse_issue_datetime(created_after) if created_after else None
+        release_cutoff = self._parse_issue_datetime(release_after) if release_after else None
         while True:
             if max_pages is not None and page > max(0, int(max_pages)):
                 self.request_stats["issue_list_page_cap_hit"] += 1
@@ -434,7 +439,7 @@ class BPMISDirectApiClient(BPMISClient):
                             "joinType": "and",
                             "subQueries": [
                                 {"typeId": [self.TASK_TYPE_ID]},
-                                {"creator": user_ids},
+                                {"reporter": user_ids},
                             ],
                             "page": page,
                             "pageSize": page_size,
@@ -478,6 +483,14 @@ class BPMISDirectApiClient(BPMISClient):
             if created_cutoff and not self._issue_created_on_or_after(row, created_cutoff):
                 self.request_stats["issue_created_before_cutoff_count"] += 1
                 continue
+            if release_cutoff:
+                release_text = self._extract_issue_release_date_text(row)
+                release_at = self._parse_issue_datetime(release_text)
+                if not release_text or not release_at:
+                    self.request_stats["issue_release_missing_included_count"] += 1
+                elif release_at < release_cutoff:
+                    self.request_stats["issue_release_before_cutoff_count"] += 1
+                    continue
             if enrich_missing_parent and issue_id and not self._extract_parent_issue_ids(row):
                 detail = self.get_issue_detail(issue_id)
                 if detail:
@@ -1327,6 +1340,15 @@ class BPMISDirectApiClient(BPMISClient):
             "creator.mail",
             "creator",
             "creatorEmail",
+            "reporter",
+            "reporter.email",
+            "reporter.emailAddress",
+            "jiraRegionalPmPicId",
+            "jiraRegionalPmPicId.email",
+            "jiraRegionalPmPicId.emailAddress",
+            "regionalPmPicId",
+            "regionalPmPicId.email",
+            "regionalPmPicId.emailAddress",
             "createdBy",
             "createdBy.email",
             "createdBy.emailAddress",
@@ -1430,6 +1452,7 @@ class BPMISDirectApiClient(BPMISClient):
             "pm_email": pm_email,
             "jira_status": self._extract_jira_status_label(row),
             "created_at": self._extract_issue_created_at_text(row),
+            "release_date": self._extract_issue_release_date_text(row),
             "version": self._issue_first_text(row, "fixVersionId", "fixVersion", "fixVersions", "version", "versions"),
             "prd_links": prd_links,
             "parent_project": parent_project or self._normalize_team_dashboard_parent_project({}),
@@ -1439,6 +1462,10 @@ class BPMISDirectApiClient(BPMISClient):
     def _issue_created_on_or_after(self, row: dict[str, Any], cutoff: datetime) -> bool:
         created_at = self._parse_issue_datetime(self._extract_issue_created_at_text(row))
         return bool(created_at and created_at >= cutoff)
+
+    def _issue_release_on_or_after(self, row: dict[str, Any], cutoff: datetime) -> bool:
+        release_at = self._parse_issue_datetime(self._extract_issue_release_date_text(row))
+        return bool(release_at and release_at >= cutoff)
 
     def _all_rows_before_created_cutoff(self, rows: list[dict[str, Any]], cutoff: datetime) -> bool:
         parsed_dates = [
@@ -1460,12 +1487,57 @@ class BPMISDirectApiClient(BPMISClient):
             "createDate",
             "gmtCreate",
             "gmtCreated",
+            "jiraCreated",
             "issueCreatedAt",
             "jiraCreatedAt",
         ):
             text = self._stringify_value(self._find_first_value(row, key))
             if text:
                 return text
+        return ""
+
+    def _extract_issue_release_date_text(self, row: dict[str, Any]) -> str:
+        for key in ("releaseDate", "release_date", "release", "goliveDate", "goLiveDate", "golive"):
+            text = self._stringify_value(self._find_first_value(row, key))
+            if text:
+                return text
+        for key in ("fixVersionId", "fixVersion", "fixVersions", "version", "versions"):
+            text = self._extract_release_date_from_version_value(self._find_first_value(row, key))
+            if text:
+                return text
+        return ""
+
+    def _extract_release_date_from_version_value(self, value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, list):
+            for item in value:
+                text = self._extract_release_date_from_version_value(item)
+                if text:
+                    return text
+            return ""
+        if not isinstance(value, dict):
+            return ""
+        for key in ("release", "releaseDate", "release_date", "goliveDate", "goLiveDate", "golive"):
+            text = self._stringify_value(value.get(key))
+            if text:
+                return text
+        timeline = value.get("timeline")
+        if isinstance(timeline, dict):
+            for key in ("release", "golive", "goLive", "releaseDate", "goliveDate"):
+                text = self._stringify_value(timeline.get(key))
+                if text:
+                    return text
+        if isinstance(timeline, list):
+            for item in timeline:
+                if not isinstance(item, dict):
+                    continue
+                label = str(item.get("label") or item.get("name") or "").strip().casefold()
+                if label not in {"release", "golive", "go live", "go-live"}:
+                    continue
+                text = self._stringify_value(item.get("value"))
+                if text:
+                    return text
         return ""
 
     def _parse_issue_datetime(self, value: Any) -> datetime | None:

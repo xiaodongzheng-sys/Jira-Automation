@@ -1325,7 +1325,7 @@ class BPMISClientTests(unittest.TestCase):
                 search = json.loads((params or {}).get("search") or "{}")
                 calls.append(search)
                 self.assertEqual(search["subQueries"][0], {"typeId": [BPMISDirectApiClient.TASK_TYPE_ID]})
-                self.assertEqual(search["subQueries"][1], {"creator": [101, 202]})
+                self.assertEqual(search["subQueries"][1], {"reporter": [101, 202]})
                 if search["page"] == 1:
                     filler_rows = [
                         {
@@ -1343,7 +1343,7 @@ class BPMISClientTests(unittest.TestCase):
                                     "id": 991,
                                     "jiraKey": "AF-991",
                                     "summary": "PRD task",
-                                    "creator": {"emailAddress": "pm1@npt.sg"},
+                                    "reporter": {"emailAddress": "pm1@npt.sg"},
                                     "status": {"label": "PRD Reviewed"},
                                     "fixVersions": [{"name": "Planning_26Q2"}],
                                     "jiraPrdLink": "https://docs/prd-1",
@@ -1366,7 +1366,7 @@ class BPMISClientTests(unittest.TestCase):
                                 "id": 993,
                                 "jiraKey": "AF-993",
                                 "summary": "Pending task",
-                                "creator": {"id": 202},
+                                "reporter": {"id": 202},
                                 "status": {"label": "Testing"},
                                 "fixVersionId": [{"fullName": "Planning_26Q3"}],
                                 "jiraPrdLink": [{"url": "https://docs/prd-2"}],
@@ -1453,7 +1453,7 @@ class BPMISClientTests(unittest.TestCase):
             self.assertEqual(client.request_stats["issue_detail_lookup_count"], 0)
             self.assertEqual(client.request_stats["issue_detail_enrichment_skipped_count"], 200)
 
-    def test_team_dashboard_jira_lookup_filters_created_after_cutoff(self):
+    def test_team_dashboard_jira_lookup_filters_release_after_cutoff(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             settings = Settings(
                 flask_secret_key="secret",
@@ -1484,16 +1484,24 @@ class BPMISClientTests(unittest.TestCase):
                                 "id": 991,
                                 "jiraKey": "AF-991",
                                 "summary": "March task",
-                                "creator": {"id": 101},
-                                "createdAt": "2026-03-01T00:00:00+08:00",
+                                "reporter": {"id": 101},
+                                "fixVersionId": [{"fullName": "Planning_26Q2", "timeline": {"release": "2026-03-01"}}],
                                 "status": {"label": "Testing"},
                             },
                             {
                                 "id": 992,
                                 "jiraKey": "AF-992",
+                                "summary": "No release date task",
+                                "reporter": {"id": 101},
+                                "fixVersionId": [{"fullName": "Planning_TBD"}],
+                                "status": {"label": "Testing"},
+                            },
+                            {
+                                "id": 993,
+                                "jiraKey": "AF-993",
                                 "summary": "February task",
-                                "creator": {"id": 101},
-                                "createdAt": "2026-02-28T23:59:59+08:00",
+                                "reporter": {"id": 101},
+                                "fixVersionId": [{"fullName": "Planning_26Q1", "timeline": [{"label": "Golive", "value": "2026-02-28"}]}],
                                 "status": {"label": "Testing"},
                             },
                         ]
@@ -1504,13 +1512,15 @@ class BPMISClientTests(unittest.TestCase):
 
             tasks = client.list_jira_tasks_created_by_emails(
                 ["pm@npt.sg"],
-                created_after="2026-03-01",
+                release_after="2026-03-01",
                 enrich_missing_parent=False,
             )
 
-            self.assertEqual([task["jira_id"] for task in tasks], ["AF-991"])
-            self.assertEqual(tasks[0]["created_at"], "2026-03-01T00:00:00+08:00")
-            self.assertEqual(client.request_stats["issue_created_before_cutoff_count"], 1)
+            self.assertEqual([task["jira_id"] for task in tasks], ["AF-991", "AF-992"])
+            self.assertEqual(tasks[0]["release_date"], "2026-03-01")
+            self.assertEqual(tasks[1]["release_date"], "")
+            self.assertEqual(client.request_stats["issue_release_before_cutoff_count"], 1)
+            self.assertEqual(client.request_stats["issue_release_missing_included_count"], 1)
 
 
 if __name__ == "__main__":

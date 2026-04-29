@@ -3482,7 +3482,7 @@ def create_app() -> Flask:
                     emails,
                     max_pages=_team_dashboard_jira_max_pages(),
                     enrich_missing_parent=False,
-                    created_after=_team_dashboard_jira_created_after(),
+                    release_after=_team_dashboard_jira_release_after(),
                 )
                 team_payload = _build_team_dashboard_task_group(team_key, label, emails, tasks)
                 team_payload["elapsed_seconds"] = round(time.monotonic() - started_at, 2)
@@ -5573,6 +5573,8 @@ def _team_dashboard_fetch_stats(bpmis_client: Any) -> dict[str, int]:
         for key in (
             "api_call_count",
             "issue_created_before_cutoff_count",
+            "issue_release_before_cutoff_count",
+            "issue_release_missing_included_count",
             "issue_detail_lookup_count",
             "issue_detail_enrichment_skipped_count",
             "issue_list_created_cutoff_hit",
@@ -5592,11 +5594,11 @@ def _team_dashboard_jira_max_pages() -> int:
         return 5
 
 
-def _team_dashboard_jira_created_after() -> str:
-    configured = str(os.getenv("TEAM_DASHBOARD_JIRA_CREATED_AFTER") or "").strip()
+def _team_dashboard_jira_release_after() -> str:
+    configured = str(os.getenv("TEAM_DASHBOARD_JIRA_RELEASE_AFTER") or "").strip()
     if configured:
         return configured
-    return f"{time.localtime().tm_year}-03-01"
+    return time.strftime("%Y-%m-%d", time.localtime())
 
 
 def _normalize_team_dashboard_task(task: dict[str, Any]) -> dict[str, Any]:
@@ -5617,6 +5619,7 @@ def _normalize_team_dashboard_task(task: dict[str, Any]) -> dict[str, Any]:
         "pm_email": str(task.get("pm_email") or "").strip().lower(),
         "jira_status": str(task.get("jira_status") or task.get("status") or "").strip(),
         "created_at": str(task.get("created_at") or task.get("created") or "").strip(),
+        "release_date": str(task.get("release_date") or task.get("release") or "").strip(),
         "version": str(task.get("version") or task.get("fix_version_name") or "").strip(),
         "prd_links": prd_links,
         "parent_project": _normalize_team_dashboard_project(task.get("parent_project") if isinstance(task.get("parent_project"), dict) else {}),
