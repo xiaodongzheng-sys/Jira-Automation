@@ -3482,6 +3482,7 @@ def create_app() -> Flask:
                     emails,
                     max_pages=_team_dashboard_jira_max_pages(),
                     enrich_missing_parent=False,
+                    created_after=_team_dashboard_jira_created_after(),
                 )
                 team_payload = _build_team_dashboard_task_group(team_key, label, emails, tasks)
                 team_payload["elapsed_seconds"] = round(time.monotonic() - started_at, 2)
@@ -5571,8 +5572,10 @@ def _team_dashboard_fetch_stats(bpmis_client: Any) -> dict[str, int]:
         key: int(stats.get(key) or 0)
         for key in (
             "api_call_count",
+            "issue_created_before_cutoff_count",
             "issue_detail_lookup_count",
             "issue_detail_enrichment_skipped_count",
+            "issue_list_created_cutoff_hit",
             "issue_list_page_cap_hit",
             "issue_list_page_count",
             "issue_rows_scanned",
@@ -5587,6 +5590,13 @@ def _team_dashboard_jira_max_pages() -> int:
         return max(1, int(raw_value))
     except ValueError:
         return 5
+
+
+def _team_dashboard_jira_created_after() -> str:
+    configured = str(os.getenv("TEAM_DASHBOARD_JIRA_CREATED_AFTER") or "").strip()
+    if configured:
+        return configured
+    return f"{time.localtime().tm_year}-03-01"
 
 
 def _normalize_team_dashboard_task(task: dict[str, Any]) -> dict[str, Any]:
@@ -5606,6 +5616,7 @@ def _normalize_team_dashboard_task(task: dict[str, Any]) -> dict[str, Any]:
         "jira_title": str(task.get("jira_title") or "").strip(),
         "pm_email": str(task.get("pm_email") or "").strip().lower(),
         "jira_status": str(task.get("jira_status") or task.get("status") or "").strip(),
+        "created_at": str(task.get("created_at") or task.get("created") or "").strip(),
         "version": str(task.get("version") or task.get("fix_version_name") or "").strip(),
         "prd_links": prd_links,
         "parent_project": _normalize_team_dashboard_project(task.get("parent_project") if isinstance(task.get("parent_project"), dict) else {}),

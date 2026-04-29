@@ -661,10 +661,13 @@ class RemoteBPMISClient:
         *,
         max_pages: int | None = None,
         enrich_missing_parent: bool = True,
+        created_after: str | None = None,
     ) -> list[dict[str, Any]]:
         kwargs: dict[str, Any] = {"enrich_missing_parent": enrich_missing_parent}
         if max_pages is not None:
             kwargs["max_pages"] = max_pages
+        if created_after:
+            kwargs["created_after"] = created_after
         return self._call("list_jira_tasks_created_by_emails", emails, **kwargs) or []
 
     def get_single_brd_doc_link_for_project(self, project_issue_id: str) -> str:

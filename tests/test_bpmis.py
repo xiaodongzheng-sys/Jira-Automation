@@ -1453,6 +1453,65 @@ class BPMISClientTests(unittest.TestCase):
             self.assertEqual(client.request_stats["issue_detail_lookup_count"], 0)
             self.assertEqual(client.request_stats["issue_detail_enrichment_skipped_count"], 200)
 
+    def test_team_dashboard_jira_lookup_filters_created_after_cutoff(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings = Settings(
+                flask_secret_key="secret",
+                google_oauth_client_secret_file=Path(temp_dir) / "client.json",
+                google_oauth_redirect_uri=None,
+                team_portal_host="127.0.0.1",
+                team_portal_port=5000,
+                team_portal_base_url=None,
+                team_allowed_emails=(),
+                team_allowed_email_domains=(),
+                team_portal_data_dir=Path(temp_dir),
+                spreadsheet_id="sheet",
+                common_tab_name="Common",
+                input_tab_name="Input",
+                bpmis_base_url="https://example.com",
+                bpmis_api_access_token="token",
+            )
+
+            client = BPMISDirectApiClient(settings)
+            client._resolve_bpmis_user_ids_by_emails = lambda emails: {email: [101] for email in emails}  # type: ignore[method-assign]
+
+            def fake_api_request(path, method="GET", params=None, body=None):
+                self.assertEqual(path, "/api/v1/issues/list")
+                return {
+                    "data": {
+                        "rows": [
+                            {
+                                "id": 991,
+                                "jiraKey": "AF-991",
+                                "summary": "March task",
+                                "creator": {"id": 101},
+                                "createdAt": "2026-03-01T00:00:00+08:00",
+                                "status": {"label": "Testing"},
+                            },
+                            {
+                                "id": 992,
+                                "jiraKey": "AF-992",
+                                "summary": "February task",
+                                "creator": {"id": 101},
+                                "createdAt": "2026-02-28T23:59:59+08:00",
+                                "status": {"label": "Testing"},
+                            },
+                        ]
+                    }
+                }
+
+            client._api_request = fake_api_request  # type: ignore[method-assign]
+
+            tasks = client.list_jira_tasks_created_by_emails(
+                ["pm@npt.sg"],
+                created_after="2026-03-01",
+                enrich_missing_parent=False,
+            )
+
+            self.assertEqual([task["jira_id"] for task in tasks], ["AF-991"])
+            self.assertEqual(tasks[0]["created_at"], "2026-03-01T00:00:00+08:00")
+            self.assertEqual(client.request_stats["issue_created_before_cutoff_count"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

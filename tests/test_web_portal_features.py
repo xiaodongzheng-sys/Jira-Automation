@@ -885,7 +885,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertEqual(dashboard_response.status_code, 200)
         self.assertIn(b"Team Admin", dashboard_response.data)
         self.assertIn(b"data-team-dashboard", dashboard_response.data)
-        self.assertIn(b"team-dashboard-per-team-load", dashboard_response.data)
+        self.assertIn(b"team-dashboard-jira-pagination", dashboard_response.data)
         self.assertNotIn(b"data-team-dashboard-update", dashboard_response.data)
         self.assertNotIn(b"Manage My Projects", dashboard_response.data)
         self.assertNotIn(b'data-default-tab="team-dashboard"', dashboard_response.data)
@@ -1157,7 +1157,10 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertEqual([item["jira_id"] for item in af_payload["team"]["pending_live"][0]["jira_tickets"]], ["AF-2"])
         self.assertEqual(unknown_response.status_code, 400)
         self.assertIn(
-            {"emails": ["af@npt.sg"], "kwargs": {"max_pages": 5, "enrich_missing_parent": False}},
+            {
+                "emails": ["af@npt.sg"],
+                "kwargs": {"max_pages": 5, "enrich_missing_parent": False, "created_after": "2026-03-01"},
+            },
             fake_client.calls,
         )
 
@@ -1215,7 +1218,12 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertEqual([team["team_key"] for team in payload["teams"]], ["AF"])
         self.assertEqual(
             fake_client.calls,
-            [{"emails": ["af@npt.sg"], "kwargs": {"max_pages": 5, "enrich_missing_parent": False}}],
+            [
+                {
+                    "emails": ["af@npt.sg"],
+                    "kwargs": {"max_pages": 5, "enrich_missing_parent": False, "created_after": "2026-03-01"},
+                }
+            ],
         )
 
     def test_team_dashboard_rejects_unknown_single_team(self):

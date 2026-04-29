@@ -6593,7 +6593,7 @@ select:focus {
 }
 
 .team-dashboard-table {
-  min-width: 980px;
+  min-width: 1060px;
 }
 
 .team-dashboard-table td {
@@ -6605,6 +6605,28 @@ select:focus {
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+.team-dashboard-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 0;
+  color: #667085;
+  font-size: 13px;
+}
+
+.team-dashboard-pagination-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.team-dashboard-pagination-actions .button {
+  min-height: 30px;
+  padding: 6px 10px;
+  font-size: 12px;
 }
 
 .team-dashboard-review-button,

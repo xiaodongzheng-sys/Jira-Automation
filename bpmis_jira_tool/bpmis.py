@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from datetime import date, datetime, timezone
 import json
 import logging
 import os
@@ -56,6 +57,7 @@ class BPMISClient(ABC):
         *,
         max_pages: int | None = None,
         enrich_missing_parent: bool = True,
+        created_after: str | date | datetime | None = None,
     ) -> list[dict[str, Any]]:
         raise NotImplementedError
 
@@ -145,6 +147,8 @@ class BPMISDirectApiClient(BPMISClient):
             "api_call_count": 0,
             "issue_detail_lookup_count": 0,
             "issue_detail_enrichment_skipped_count": 0,
+            "issue_created_before_cutoff_count": 0,
+            "issue_list_created_cutoff_hit": 0,
             "issue_list_page_cap_hit": 0,
             "issue_list_page_count": 0,
             "issue_rows_scanned": 0,
@@ -403,6 +407,7 @@ class BPMISDirectApiClient(BPMISClient):
         *,
         max_pages: int | None = None,
         enrich_missing_parent: bool = True,
+        created_after: str | date | datetime | None = None,
     ) -> list[dict[str, Any]]:
         normalized_emails = self._normalize_email_list(emails)
         if not normalized_emails:
@@ -416,6 +421,7 @@ class BPMISDirectApiClient(BPMISClient):
         rows: list[dict[str, Any]] = []
         page = 1
         page_size = 200
+        created_cutoff = self._parse_issue_datetime(created_after) if created_after else None
         while True:
             if max_pages is not None and page > max(0, int(max_pages)):
                 self.request_stats["issue_list_page_cap_hit"] += 1
@@ -443,6 +449,9 @@ class BPMISDirectApiClient(BPMISClient):
             rows.extend(page_rows)
             if len(page_rows) < page_size:
                 break
+            if created_cutoff and page_rows and self._all_rows_before_created_cutoff(page_rows, created_cutoff):
+                self.request_stats["issue_list_created_cutoff_hit"] += 1
+                break
             page += 1
 
         tasks: list[dict[str, Any]] = []
@@ -465,6 +474,9 @@ class BPMISDirectApiClient(BPMISClient):
                     row = self._merge_issue_payloads(row, detail)
                     matched_email = self._creator_email_for_row(row, normalized_emails, user_id_texts_by_email)
             if not matched_email:
+                continue
+            if created_cutoff and not self._issue_created_on_or_after(row, created_cutoff):
+                self.request_stats["issue_created_before_cutoff_count"] += 1
                 continue
             if enrich_missing_parent and issue_id and not self._extract_parent_issue_ids(row):
                 detail = self.get_issue_detail(issue_id)
@@ -1417,11 +1429,82 @@ class BPMISDirectApiClient(BPMISClient):
             "jira_title": self._issue_first_text(row, "summary", "title", "jiraSummary"),
             "pm_email": pm_email,
             "jira_status": self._extract_jira_status_label(row),
+            "created_at": self._extract_issue_created_at_text(row),
             "version": self._issue_first_text(row, "fixVersionId", "fixVersion", "fixVersions", "version", "versions"),
             "prd_links": prd_links,
             "parent_project": parent_project or self._normalize_team_dashboard_parent_project({}),
             "raw_response": row,
         }
+
+    def _issue_created_on_or_after(self, row: dict[str, Any], cutoff: datetime) -> bool:
+        created_at = self._parse_issue_datetime(self._extract_issue_created_at_text(row))
+        return bool(created_at and created_at >= cutoff)
+
+    def _all_rows_before_created_cutoff(self, rows: list[dict[str, Any]], cutoff: datetime) -> bool:
+        parsed_dates = [
+            parsed
+            for row in rows
+            if (parsed := self._parse_issue_datetime(self._extract_issue_created_at_text(row))) is not None
+        ]
+        return bool(parsed_dates) and len(parsed_dates) == len(rows) and all(parsed < cutoff for parsed in parsed_dates)
+
+    def _extract_issue_created_at_text(self, row: dict[str, Any]) -> str:
+        for key in (
+            "created",
+            "createdAt",
+            "created_at",
+            "createTime",
+            "create_time",
+            "createdTime",
+            "createdDate",
+            "createDate",
+            "gmtCreate",
+            "gmtCreated",
+            "issueCreatedAt",
+            "jiraCreatedAt",
+        ):
+            text = self._stringify_value(self._find_first_value(row, key))
+            if text:
+                return text
+        return ""
+
+    def _parse_issue_datetime(self, value: Any) -> datetime | None:
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            parsed = value
+        elif isinstance(value, date):
+            parsed = datetime.combine(value, datetime.min.time())
+        elif isinstance(value, (int, float)):
+            timestamp = float(value)
+            if timestamp > 10_000_000_000:
+                timestamp /= 1000
+            try:
+                parsed = datetime.fromtimestamp(timestamp, tz=timezone.utc)
+            except (OverflowError, OSError, ValueError):
+                return None
+        else:
+            text = str(value or "").strip()
+            if not text:
+                return None
+            if text.isdigit():
+                return self._parse_issue_datetime(int(text))
+            normalized = text.replace("Z", "+00:00")
+            try:
+                parsed = datetime.fromisoformat(normalized)
+            except ValueError:
+                parsed = None
+                for pattern in ("%Y-%m-%d %H:%M:%S", "%Y/%m/%d %H:%M:%S", "%Y-%m-%d", "%Y/%m/%d"):
+                    try:
+                        parsed = datetime.strptime(text[:19] if "%H" in pattern else text[:10], pattern)
+                        break
+                    except ValueError:
+                        continue
+                if parsed is None:
+                    return None
+        if parsed.tzinfo is not None:
+            parsed = parsed.replace(tzinfo=None)
+        return parsed
 
     def _normalize_team_dashboard_parent_project(self, row: dict[str, Any], *, fallback_id: str = "") -> dict[str, Any]:
         bpmis_id = self._extract_issue_identifier(row) or str(fallback_id or "").strip()

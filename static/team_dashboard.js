@@ -40,6 +40,7 @@
     CRMS: 'Credit Risk',
     GRC: 'Ops Risk',
   };
+  const jiraPageSize = 10;
 
   let initialConfig = (() => {
     try {
@@ -49,6 +50,8 @@
     }
   })();
   let taskTeams = [];
+  const expandedPanels = {};
+  const jiraPageState = {};
 
   const setStatus = (node, message, tone = 'neutral') => {
     if (!node) return;
@@ -148,7 +151,7 @@
 
   const renderJiraRows = (items) => {
     if (!items.length) {
-      return '<tr><td colspan="7" class="team-dashboard-empty-cell">No matching Jira tasks.</td></tr>';
+      return '<tr><td colspan="8" class="team-dashboard-empty-cell">No matching Jira tasks.</td></tr>';
     }
     return items.map((item, index) => {
       const reviewPanelId = `prd-review-${String(item.jira_id || index).replace(/[^a-zA-Z0-9_-]/g, '-')}-${index}`;
@@ -158,6 +161,7 @@
         <td>${escapeHtml(item.jira_title || '-')}</td>
         <td>${escapeHtml(item.pm_email || '-')}</td>
         <td>${escapeHtml(item.jira_status || '-')}</td>
+        <td>${escapeHtml(item.created_at || '-')}</td>
         <td>${escapeHtml(item.version || '-')}</td>
         <td>${renderPrdLinks(item.prd_links, item)}</td>
         <td>
@@ -165,7 +169,7 @@
         </td>
       </tr>
       <tr class="team-dashboard-review-row" data-prd-review-row="${escapeHtml(reviewPanelId)}" hidden>
-        <td colspan="7">
+        <td colspan="8">
           <div class="team-dashboard-review-panel" data-prd-review-panel="${escapeHtml(reviewPanelId)}"></div>
         </td>
       </tr>
@@ -173,14 +177,36 @@
     }).join('');
   };
 
+  const renderPagination = (pageKey, page, totalPages, totalItems) => {
+    if (totalPages <= 1) {
+      return '';
+    }
+    return `
+      <div class="team-dashboard-pagination">
+        <span>Page ${page} / ${totalPages} · ${totalItems} Jira tasks</span>
+        <div class="team-dashboard-pagination-actions">
+          <button class="button button-secondary" type="button" data-team-dashboard-page="${escapeHtml(pageKey)}" data-page-delta="-1" ${page <= 1 ? 'disabled' : ''}>Prev</button>
+          <button class="button button-secondary" type="button" data-team-dashboard-page="${escapeHtml(pageKey)}" data-page-delta="1" ${page >= totalPages ? 'disabled' : ''}>Next</button>
+        </div>
+      </div>
+    `;
+  };
+
   const renderProject = (project, sectionKey, index) => {
     const tickets = Array.isArray(project.jira_tickets) ? project.jira_tickets : [];
     const panelId = `team-dashboard-${sectionKey}-${index}`;
+    const pageKey = `${sectionKey}-${project.bpmis_id || index}`;
+    const totalPages = Math.max(1, Math.ceil(tickets.length / jiraPageSize));
+    const page = Math.min(Math.max(Number(jiraPageState[pageKey] || 1), 1), totalPages);
+    jiraPageState[pageKey] = page;
+    const firstIndex = (page - 1) * jiraPageSize;
+    const visibleTickets = tickets.slice(firstIndex, firstIndex + jiraPageSize);
     const bpmisId = project.bpmis_id || '-';
+    const expanded = Boolean(expandedPanels[panelId]);
     return `
       <article class="bpmis-project-card team-dashboard-project-card">
         <div class="bpmis-project-card-main">
-          <button class="bpmis-task-toggle" type="button" data-team-dashboard-toggle="${escapeHtml(panelId)}" aria-expanded="false" aria-label="Expand Jira tasks for BPMIS ${escapeHtml(bpmisId)}">+</button>
+          <button class="bpmis-task-toggle" type="button" data-team-dashboard-toggle="${escapeHtml(panelId)}" aria-expanded="${expanded ? 'true' : 'false'}" aria-label="Expand Jira tasks for BPMIS ${escapeHtml(bpmisId)}">${expanded ? '-' : '+'}</button>
           <div class="bpmis-project-card-id">
             <span>BPMIS ID</span>
             <strong>${escapeHtml(bpmisId)}</strong>
@@ -206,7 +232,8 @@
             <strong>${tickets.length}</strong>
           </div>
         </div>
-        <div class="bpmis-task-panel" data-team-dashboard-panel-id="${escapeHtml(panelId)}" hidden>
+        <div class="bpmis-task-panel" data-team-dashboard-panel-id="${escapeHtml(panelId)}" ${expanded ? '' : 'hidden'}>
+          ${renderPagination(pageKey, page, totalPages, tickets.length)}
           <div class="table-wrap premium-table-wrap">
             <table class="productization-table team-dashboard-table">
               <thead>
@@ -215,14 +242,16 @@
                   <th>Jira Title</th>
                   <th>PM Email</th>
                   <th>Jira Status</th>
+                  <th>Created</th>
                   <th>Version</th>
                   <th>PRD Link</th>
                   <th>AI</th>
                 </tr>
               </thead>
-              <tbody>${renderJiraRows(tickets)}</tbody>
+              <tbody>${renderJiraRows(visibleTickets)}</tbody>
             </table>
           </div>
+          ${renderPagination(pageKey, page, totalPages, tickets.length)}
         </div>
       </article>
     `;
@@ -431,6 +460,15 @@
       return;
     }
 
+    const pageButton = event.target.closest('[data-team-dashboard-page]');
+    if (pageButton) {
+      const pageKey = pageButton.dataset.teamDashboardPage || '';
+      const delta = Number(pageButton.dataset.pageDelta || 0);
+      jiraPageState[pageKey] = Math.max(1, Number(jiraPageState[pageKey] || 1) + delta);
+      renderTeams(taskTeams);
+      return;
+    }
+
     const button = event.target.closest('[data-team-dashboard-toggle]');
     if (!button) return;
     const panelId = button.dataset.teamDashboardToggle || '';
@@ -438,6 +476,7 @@
     if (!panel) return;
     const nextHidden = !panel.hidden ? true : false;
     panel.hidden = nextHidden;
+    expandedPanels[panelId] = !nextHidden;
     button.textContent = nextHidden ? '+' : '-';
     button.setAttribute('aria-expanded', nextHidden ? 'false' : 'true');
   });
