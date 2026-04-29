@@ -194,11 +194,19 @@ class _FakePRDReviewLocalAgentClient:
 
 
 class _FakeMonthlyReportService:
-    def generate_draft(self, *, template, team_payloads):
+    def generate_draft(self, *, template, team_payloads, progress_callback=None):
+        if progress_callback:
+            progress_callback("summarizing_seatalk", "Summarizing SeaTalk batch 1/1.", 1, 1, estimated_prompt_tokens=1200, token_risk="normal")
         return {
             "status": "ok",
             "draft_markdown": "## Monthly Report\n- Draft",
             "generated_at": "2026-04-29T10:00:00+08:00",
+            "generation_summary": {
+                "total_batches": 1,
+                "max_batch_estimated_tokens": 1200,
+                "final_estimated_tokens": 800,
+                "elapsed_seconds": 1.0,
+            },
             "evidence_summary": {
                 "key_project_count": 1,
                 "jira_ticket_count": 1,
@@ -211,12 +219,20 @@ class _FakeMonthlyReportLocalAgentClient(_FakePRDReviewLocalAgentClient):
         self.draft_payload = None
         self.send_payload = None
 
-    def team_dashboard_monthly_report_draft(self, payload):
+    def team_dashboard_monthly_report_draft(self, payload, *, progress_callback=None):
         self.draft_payload = payload
+        if progress_callback:
+            progress_callback("summarizing_seatalk", "Summarizing remote SeaTalk batch 1/1.", 1, 1, estimated_prompt_tokens=1400, token_risk="normal")
         return {
             "status": "ok",
             "draft_markdown": "## Remote Monthly Report",
             "generated_at": "2026-04-29T10:00:00+08:00",
+            "generation_summary": {
+                "total_batches": 1,
+                "max_batch_estimated_tokens": 1400,
+                "final_estimated_tokens": 900,
+                "elapsed_seconds": 1.0,
+            },
             "evidence_summary": {"key_project_count": 1, "jira_ticket_count": 1},
         }
 
@@ -3090,12 +3106,22 @@ class WebPortalFeatureTests(unittest.TestCase):
                     session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong Zheng"}
                     session["google_credentials"] = {"token": "x"}
                 response = client.post("/api/team-dashboard/monthly-report/draft", json={})
-
-        self.assertEqual(response.status_code, 200)
-        payload = response.get_json()
-        self.assertEqual(payload["status"], "ok")
-        self.assertIn("Monthly Report", payload["draft_markdown"])
-        self.assertEqual(payload["evidence_summary"]["key_project_count"], 1)
+                self.assertEqual(response.status_code, 200)
+                payload = response.get_json()
+                self.assertEqual(payload["status"], "queued")
+                self.assertTrue(payload["job_id"])
+                job_payload = {}
+                for _ in range(20):
+                    job_payload = client.get(f"/api/jobs/{payload['job_id']}").get_json()
+                    if job_payload.get("state") == "completed":
+                        break
+                    time.sleep(0.05)
+        self.assertEqual(job_payload["state"], "completed")
+        self.assertEqual(job_payload["progress"]["stage"], "completed")
+        result = job_payload["results"][0]
+        self.assertIn("Monthly Report", result["draft_markdown"])
+        self.assertEqual(result["evidence_summary"]["key_project_count"], 1)
+        self.assertEqual(result["generation_summary"]["total_batches"], 1)
 
     @patch("bpmis_jira_tool.web.send_monthly_report_email")
     def test_team_dashboard_monthly_report_send_sends_edited_draft(self, mock_send):
@@ -3157,9 +3183,17 @@ class WebPortalFeatureTests(unittest.TestCase):
                     session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong Zheng"}
                     session["google_credentials"] = {"token": "x"}
                 response = client.post("/api/team-dashboard/monthly-report/draft", json={})
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.get_json()["draft_markdown"], "## Remote Monthly Report")
+                self.assertEqual(response.status_code, 200)
+                payload = response.get_json()
+                self.assertEqual(payload["status"], "queued")
+                job_payload = {}
+                for _ in range(20):
+                    job_payload = client.get(f"/api/jobs/{payload['job_id']}").get_json()
+                    if job_payload.get("state") == "completed":
+                        break
+                    time.sleep(0.05)
+        self.assertEqual(job_payload["state"], "completed")
+        self.assertEqual(job_payload["results"][0]["draft_markdown"], "## Remote Monthly Report")
         self.assertEqual(fake_client.draft_payload["template"], "# Template")
         self.assertEqual(fake_client.draft_payload["team_payloads"], [{"team_key": "AF"}])
 

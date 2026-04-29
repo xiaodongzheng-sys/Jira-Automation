@@ -174,9 +174,6 @@ Run these after the Mac-hosted portal is updated:
 - Source Code Q&A attachment smoke passes for one small text file; for image-capable releases, confirm Codex mode receives the image through the fixed ngrok portal path.
 - Source Code Q&A active repo config contains the expected GitLab repositories, not fixture/demo `git.example.com` URLs, and index health is `ready`.
 - SeaTalk Summary reads Mac desktop data from the Mac host.
-- For Mac-only SeaTalk/WeChat bridge releases, verify the WeChat notification watcher process is running and its state file updates after a new notification:
-  `pgrep -fl 'WeChatSeaTalkBridge/scripts/wechat_notification_to_seatalk.py'` and
-  `stat "$HOME/Library/Application Support/WeChatSeaTalkBridge/state/state.json"`.
 - `./scripts/run_team_stack.sh doctor` is clean.
 
 Only when the user explicitly requested Cloud Run deployment or validation, also verify:
@@ -191,7 +188,6 @@ Only when the user explicitly requested Cloud Run deployment or validation, also
 - Local-agent code changes still need the Mac local-agent restarted when Cloud Run backup mode or local-agent-only features are in use.
 - BPMIS proxy changes need the fixed ngrok portal path checked by default; check Cloud Run env only when the user explicitly requested Cloud Run.
 - SeaTalk changes need the Mac-hosted portal or relevant Mac watcher restarted because Cloud Run cannot read the Mac desktop data directly.
-- Mac-only SeaTalk/WeChat watcher changes need the host-side watcher relaunched or launchd-verified.
 - `scripts/deploy_cloud_run.sh` and `scripts/deploy_cloud_run_full.sh` matter only for explicit Cloud Run releases.
 - OAuth/base URL changes need Google Cloud Console callback URLs to match the released hostname.
 

@@ -1,6 +1,7 @@
 (() => {
   const root = document.querySelector('[data-team-dashboard]');
   if (!root) return;
+  const jobsUrlTemplate = root.dataset.jobsUrl || '/api/jobs/__JOB_ID__';
 
   const escapeHtml = (value) => String(value ?? '')
     .replaceAll('&', '&amp;')
@@ -41,6 +42,9 @@
   const monthlyReportDraft = root.querySelector('[data-monthly-report-draft]');
   const monthlyReportPreview = root.querySelector('[data-monthly-report-preview]');
   const monthlyReportRecipient = root.querySelector('[data-monthly-report-recipient]');
+  const monthlyReportProgress = root.querySelector('[data-monthly-report-progress]');
+  const monthlyReportProgressFill = root.querySelector('[data-monthly-report-progress-fill]');
+  const monthlyReportProgressMessage = root.querySelector('[data-monthly-report-progress-message]');
   const monthlyReportTemplateForm = root.querySelector('[data-monthly-report-template-form]');
   const monthlyReportTemplate = root.querySelector('[data-monthly-report-template]');
   const monthlyReportTemplateStatus = root.querySelector('[data-monthly-report-template-status]');
@@ -66,6 +70,9 @@
   let keyProjectOnly = false;
   let monthlyReportSubject = 'Monthly Report';
   let monthlyReportLoaded = false;
+  let monthlyReportProgressTimer = null;
+  let monthlyReportProgressStartedAt = 0;
+  let monthlyReportLastProgress = null;
   const pmFilterState = {};
   const expandedPanels = {};
   const jiraPageState = {};
@@ -74,6 +81,30 @@
     if (!node) return;
     node.textContent = message || '';
     node.dataset.tone = tone;
+  };
+
+  const formatDuration = (seconds) => {
+    const total = Math.max(0, Math.round(Number(seconds) || 0));
+    const minutes = Math.floor(total / 60);
+    const remaining = total % 60;
+    return minutes ? `${minutes}m ${String(remaining).padStart(2, '0')}s` : `${remaining}s`;
+  };
+
+  const formatTokenCount = (value) => {
+    const count = Math.max(0, Math.round(Number(value) || 0));
+    if (count >= 1000) return `${Math.round(count / 100) / 10}k`;
+    return String(count);
+  };
+
+  const sleep = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms));
+
+  const readJobStatus = async (jobId) => {
+    const url = jobsUrlTemplate.replace('__JOB_ID__', encodeURIComponent(jobId));
+    const response = await fetch(url, {
+      headers: { Accept: 'application/json' },
+      credentials: 'same-origin',
+    });
+    return readJson(response, 'Could not load job status.');
   };
 
   const normalizeEmailList = (items) => (Array.isArray(items) ? items : [])
@@ -776,6 +807,116 @@
     }
   };
 
+  const setMonthlyReportProgressStep = (activeStep, percent, message) => {
+    if (!monthlyReportProgress) return;
+    monthlyReportProgress.hidden = false;
+    if (monthlyReportProgressFill) {
+      monthlyReportProgressFill.style.width = `${Math.max(0, Math.min(100, percent))}%`;
+    }
+    monthlyReportProgress.querySelectorAll('[data-monthly-report-progress-step]').forEach((node) => {
+      const step = node.dataset.monthlyReportProgressStep || '';
+      if (step === activeStep) {
+        node.dataset.state = 'loading';
+      } else if (
+        (activeStep === 'compact' && step === 'prepare')
+        || (activeStep === 'draft' && ['prepare', 'compact'].includes(step))
+        || activeStep === 'done'
+      ) {
+        node.dataset.state = 'done';
+      } else if (activeStep === 'error') {
+        node.dataset.state = step === 'draft' ? 'error' : node.dataset.state || '';
+      } else {
+        node.dataset.state = '';
+      }
+    });
+    if (monthlyReportProgressMessage) {
+      monthlyReportProgressMessage.textContent = message || '';
+    }
+  };
+
+  const monthlyReportProgressText = (progress) => {
+    const elapsedSeconds = monthlyReportProgressStartedAt ? Math.floor((Date.now() - monthlyReportProgressStartedAt) / 1000) : 0;
+    const message = progress?.message || 'Preparing Monthly Report generation.';
+    const batchText = progress?.total ? ` (${Number(progress.current || 0)}/${Number(progress.total || 0)})` : '';
+    const tokenText = progress?.estimated_prompt_tokens
+      ? ` Approx. input: ${formatTokenCount(progress.estimated_prompt_tokens)} tokens${progress.token_risk ? `, risk: ${progress.token_risk}` : ''}.`
+      : '';
+    return `${message}${batchText} Elapsed ${formatDuration(elapsedSeconds)}.${tokenText}`;
+  };
+
+  const renderMonthlyReportProgress = (progress) => {
+    monthlyReportLastProgress = progress || monthlyReportLastProgress || {};
+    const stage = String(monthlyReportLastProgress.stage || 'preparing_sources');
+    const total = Number(monthlyReportLastProgress.total || 0);
+    const current = Number(monthlyReportLastProgress.current || 0);
+    const percent = total ? Math.max(8, Math.min(94, Math.round((current / total) * 86))) : 8;
+    let activeStep = 'prepare';
+    if (stage.includes('summarizing') || stage.includes('merging') || stage.includes('compressing')) {
+      activeStep = 'compact';
+    }
+    if (stage.includes('final') || stage.includes('draft') || stage.includes('codex')) {
+      activeStep = 'draft';
+    }
+    setMonthlyReportProgressStep(activeStep, percent, monthlyReportProgressText(monthlyReportLastProgress));
+  };
+
+  const startMonthlyReportProgress = () => {
+    monthlyReportProgressStartedAt = Date.now();
+    monthlyReportLastProgress = {
+      stage: 'preparing_sources',
+      message: 'Preparing Monthly Report sources.',
+      current: 0,
+      total: 0,
+      estimated_prompt_tokens: 0,
+      token_risk: '',
+    };
+    window.clearInterval(monthlyReportProgressTimer);
+    renderMonthlyReportProgress(monthlyReportLastProgress);
+    monthlyReportProgressTimer = window.setInterval(() => renderMonthlyReportProgress(monthlyReportLastProgress), 1000);
+  };
+
+  const stopMonthlyReportProgress = (state, message) => {
+    window.clearInterval(monthlyReportProgressTimer);
+    monthlyReportProgressTimer = null;
+    if (state === 'done') {
+      setMonthlyReportProgressStep('done', 100, message);
+    } else if (state === 'error') {
+      setMonthlyReportProgressStep('error', 100, message);
+    }
+  };
+
+  const monthlyReportGenerationMessage = (payload, projectCount, ticketCount) => {
+    const summary = payload.generation_summary || {};
+    const seconds = Number(summary.elapsed_seconds || 0);
+    const tokens = Number(summary.estimated_prompt_tokens || 0);
+    const risk = String(summary.token_risk || 'normal');
+    const base = `Draft generated in ${formatDuration(seconds)} from ${projectCount} Key Project${projectCount === 1 ? '' : 's'} and ${ticketCount} Jira ticket${ticketCount === 1 ? '' : 's'}.`;
+    if (!tokens) return base;
+    const tokenText = `Approx. input size: ${formatTokenCount(tokens)} tokens.`;
+    if (risk === 'high') {
+      return `${base} ${tokenText} Token risk was high, but generation completed after compaction.`;
+    }
+    if (risk === 'warning') {
+      return `${base} ${tokenText} Context was large, so generation may be slower than usual.`;
+    }
+    return `${base} ${tokenText} Token risk normal.`;
+  };
+
+  const pollMonthlyReportJob = async (jobId) => {
+    while (jobId) {
+      const payload = await readJobStatus(jobId);
+      renderMonthlyReportProgress(payload.progress || payload);
+      if (payload.state === 'completed') {
+        return (payload.results || [])[0] || {};
+      }
+      if (payload.state === 'failed') {
+        throw new Error(payload.error || payload.message || 'Monthly Report draft generation failed.');
+      }
+      await sleep(1000);
+    }
+    return {};
+  };
+
   const loadMonthlyReportTemplate = async () => {
     if (monthlyReportLoaded) return;
     monthlyReportLoaded = true;
@@ -801,7 +942,8 @@
     if (!monthlyReportGenerateButton || !monthlyReportDraft) return;
     monthlyReportGenerateButton.disabled = true;
     monthlyReportGenerateButton.textContent = 'Generating...';
-    setStatus(monthlyReportStatus, 'Generating Monthly Report draft from SeaTalk, Key Projects, Jira, and PRD content...', 'neutral');
+    setStatus(monthlyReportStatus, 'Generating Monthly Report draft. Keep this page open; Send Email stays disabled until the draft is ready.', 'neutral');
+    startMonthlyReportProgress();
     try {
       const response = await fetch(root.dataset.monthlyReportDraftUrl || '/api/team-dashboard/monthly-report/draft', {
         method: 'POST',
@@ -809,15 +951,22 @@
         credentials: 'same-origin',
         body: JSON.stringify({}),
       });
-      const payload = await readJson(response, 'Could not generate Monthly Report draft.');
+      const initialPayload = await readJson(response, 'Could not generate Monthly Report draft.');
+      const payload = initialPayload.status === 'queued' && initialPayload.job_id
+        ? await pollMonthlyReportJob(initialPayload.job_id)
+        : initialPayload;
       monthlyReportDraft.value = payload.draft_markdown || '';
       updateMonthlyReportPreview();
       const evidence = payload.evidence_summary || {};
       const projectCount = Number(evidence.key_project_count || 0);
       const ticketCount = Number(evidence.jira_ticket_count || 0);
-      setStatus(monthlyReportStatus, `Draft generated from ${projectCount} Key Project${projectCount === 1 ? '' : 's'} and ${ticketCount} Jira ticket${ticketCount === 1 ? '' : 's'}.`, 'success');
+      const successMessage = monthlyReportGenerationMessage(payload, projectCount, ticketCount);
+      setStatus(monthlyReportStatus, successMessage, 'success');
+      stopMonthlyReportProgress('done', successMessage);
     } catch (error) {
-      setStatus(monthlyReportStatus, error.message || 'Could not generate Monthly Report draft.', 'error');
+      const message = error.message || 'Could not generate Monthly Report draft.';
+      setStatus(monthlyReportStatus, message, 'error');
+      stopMonthlyReportProgress('error', message);
     } finally {
       monthlyReportGenerateButton.disabled = false;
       monthlyReportGenerateButton.textContent = 'Generate Monthly Report Draft';

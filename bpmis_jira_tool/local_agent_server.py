@@ -259,6 +259,35 @@ def create_local_agent_app() -> Flask:
         )
         return jsonify(result)
 
+    @app.post("/api/local-agent/team-dashboard/monthly-report/draft-async")
+    def team_dashboard_monthly_report_draft_async():
+        payload = request.get_json(silent=True) or {}
+        job_id = uuid.uuid4().hex
+        _update_query_job(
+            job_id,
+            state="queued",
+            stage="queued",
+            message="Queued Monthly Report draft generation on Mac local-agent.",
+            current=0,
+            total=0,
+            estimated_prompt_tokens=0,
+            token_risk="",
+        )
+        thread = threading.Thread(
+            target=_run_monthly_report_draft_job,
+            args=(app, job_id, payload),
+            daemon=True,
+        )
+        thread.start()
+        return jsonify({"status": "ok", "job_id": job_id})
+
+    @app.get("/api/local-agent/team-dashboard/monthly-report/jobs/<job_id>")
+    def team_dashboard_monthly_report_job_status(job_id: str):
+        snapshot = _snapshot_query_job(job_id)
+        if snapshot is None:
+            return jsonify({"status": "error", "message": "Monthly Report local-agent job was not found."}), HTTPStatus.NOT_FOUND
+        return jsonify({"status": "ok", **snapshot})
+
     @app.post("/api/local-agent/team-dashboard/monthly-report/send")
     def team_dashboard_monthly_report_send():
         payload = request.get_json(silent=True) or {}
@@ -1050,6 +1079,68 @@ def _run_source_code_qa_query_job(app: Flask, job_id: str, payload: dict[str, An
                 stage="failed",
                 message=f"Mac local-agent Source Code Q&A job failed unexpectedly: {error}",
                 error=f"Mac local-agent Source Code Q&A job failed unexpectedly: {error}",
+                current=0,
+                total=0,
+            )
+
+
+def _run_monthly_report_draft_job(app: Flask, job_id: str, payload: dict[str, Any]) -> None:
+    with app.app_context():
+        def progress_callback(
+            stage: str,
+            message: str,
+            current: int,
+            total: int,
+            *,
+            estimated_prompt_tokens: int = 0,
+            token_risk: str = "",
+        ) -> None:
+            _update_query_job(
+                job_id,
+                state="running",
+                stage=stage,
+                message=message,
+                current=current,
+                total=total,
+                estimated_prompt_tokens=estimated_prompt_tokens,
+                token_risk=token_risk,
+            )
+
+        try:
+            progress_callback("preparing_sources", "Preparing Monthly Report sources on Mac local-agent.", 0, 0)
+            service = _build_monthly_report_service(current_app.config["SETTINGS"])
+            result = service.generate_draft(
+                template=normalize_monthly_report_template(payload.get("template")),
+                team_payloads=[item for item in (payload.get("team_payloads") or []) if isinstance(item, dict)],
+                progress_callback=progress_callback,
+            )
+            _update_query_job(
+                job_id,
+                state="completed",
+                stage="completed",
+                message="Monthly Report draft completed on Mac local-agent.",
+                current=1,
+                total=1,
+                result=result,
+            )
+        except ToolError as error:
+            _update_query_job(
+                job_id,
+                state="failed",
+                stage="failed",
+                message=str(error),
+                error=str(error),
+                current=0,
+                total=0,
+            )
+        except Exception as error:  # noqa: BLE001 - keep async status JSON-readable for Cloud Run.
+            current_app.logger.exception("Monthly Report local-agent async job failed unexpectedly.")
+            _update_query_job(
+                job_id,
+                state="failed",
+                stage="failed",
+                message=f"Mac local-agent Monthly Report job failed unexpectedly: {error}",
+                error=f"Mac local-agent Monthly Report job failed unexpectedly: {error}",
                 current=0,
                 total=0,
             )

@@ -172,6 +172,8 @@ class JobState:
     stage: str = "queued"
     current: int = 0
     total: int = 0
+    estimated_prompt_tokens: int = 0
+    token_risk: str = ""
     results: list[dict[str, Any]] = field(default_factory=list)
     notice: dict[str, Any] | None = None
     error: str | None = None
@@ -259,6 +261,8 @@ class JobStore:
         message: str | None = None,
         current: int | None = None,
         total: int | None = None,
+        estimated_prompt_tokens: int | None = None,
+        token_risk: str | None = None,
     ) -> None:
         with self._lock:
             if job_id not in self._jobs:
@@ -274,6 +278,10 @@ class JobStore:
                 job.current = current
             if total is not None:
                 job.total = total
+            if estimated_prompt_tokens is not None:
+                job.estimated_prompt_tokens = estimated_prompt_tokens
+            if token_risk is not None:
+                job.token_risk = token_risk
             job.updated_at = time.time()
             self._persist_locked()
 
@@ -312,7 +320,18 @@ class JobStore:
 
     def snapshot(self, job_id: str) -> dict[str, Any] | None:
         job = self.get(job_id)
-        return asdict(job) if job else None
+        if not job:
+            return None
+        payload = asdict(job)
+        payload["progress"] = {
+            "stage": job.stage,
+            "current": job.current,
+            "total": job.total,
+            "message": job.message,
+            "estimated_prompt_tokens": job.estimated_prompt_tokens,
+            "token_risk": job.token_risk,
+        }
+        return payload
 
 
 class TeamDashboardConfigStore:
@@ -1946,8 +1965,6 @@ def create_app() -> Flask:
         g.request_id = uuid.uuid4().hex[:12]
         if request.path.rstrip("/") == "/healthz":
             return jsonify({"status": "ok", "revision": _current_release_revision()}), HTTPStatus.OK
-        if request.path.rstrip("/") == "/seatalk/wechat-reply":
-            return None
         if request.path.startswith("/api/local-agent/"):
             return None
         if request.endpoint in {
@@ -2121,86 +2138,6 @@ def create_app() -> Flask:
     @app.get("/healthz")
     def healthz():
         return jsonify({"status": "ok", "revision": _current_release_revision()}), HTTPStatus.OK
-
-    @app.route("/seatalk/wechat-reply", methods=["GET", "POST"])
-    def seatalk_wechat_reply_callback():
-        if request.method == "GET":
-            challenge = request.args.get("seatalk_challenge", "")
-            if challenge:
-                return jsonify({"seatalk_challenge": challenge}), HTTPStatus.OK
-            return jsonify({"ok": True, "endpoint": "seatalk_wechat_reply"}), HTTPStatus.OK
-
-        payload = request.get_json(silent=True)
-        if isinstance(payload, dict):
-            try:
-                from scripts.seatalk_reply_to_wechat import extract_seatalk_challenge
-            except Exception:
-                extract_seatalk_challenge = None
-            if extract_seatalk_challenge is not None:
-                challenge = extract_seatalk_challenge(payload)
-                if challenge:
-                    return jsonify({"seatalk_challenge": challenge}), HTTPStatus.OK
-
-        callback_token = str(os.environ.get("WECHAT_REPLY_CALLBACK_TOKEN") or "").strip()
-        if not callback_token:
-            return jsonify({"ok": False, "error": "callback_token_not_configured"}), HTTPStatus.SERVICE_UNAVAILABLE
-        provided_token = request.args.get("token", "") or request.headers.get("X-WeChat-Reply-Token", "")
-        if provided_token != callback_token:
-            return jsonify({"ok": False, "error": "invalid_token"}), HTTPStatus.FORBIDDEN
-
-        try:
-            from scripts.seatalk_reply_to_wechat import (
-                DEFAULT_REPLY_MAP_PATH,
-                DEFAULT_REPLY_TTL_HOURS,
-                ReplyTargetStore,
-                WeChatDesktopSender,
-                _int_env,
-                parse_reply_payload,
-            )
-        except Exception as error:
-            current_app.logger.exception("SeaTalk WeChat reply dependencies could not be loaded.")
-            return jsonify({"ok": False, "error": "reply_dependencies_unavailable", "detail": str(error)}), HTTPStatus.INTERNAL_SERVER_ERROR
-
-        if not isinstance(payload, dict):
-            return jsonify({"ok": False, "error": "invalid_json"}), HTTPStatus.BAD_REQUEST
-        parsed_reply = parse_reply_payload(payload)
-        if parsed_reply is None:
-            return jsonify({"ok": True, "ignored": True, "reason": "not_reply_command"}), HTTPStatus.OK
-
-        allowed_senders = {
-            item.strip().lower()
-            for item in str(os.environ.get("WECHAT_REPLY_ALLOWED_SENDERS") or "").split(",")
-            if item.strip()
-        }
-        sender = parsed_reply.sender.lower()
-        if allowed_senders and sender not in allowed_senders:
-            return jsonify({"ok": False, "error": "sender_not_allowed", "sender": parsed_reply.sender}), HTTPStatus.FORBIDDEN
-
-        reply_map_path = Path(os.environ.get("WECHAT_REPLY_MAP_PATH") or DEFAULT_REPLY_MAP_PATH).expanduser()
-        if not reply_map_path.is_absolute():
-            reply_map_path = (PROJECT_ROOT / reply_map_path).resolve()
-        store = ReplyTargetStore(
-            reply_map_path,
-            ttl_seconds=_int_env("WECHAT_REPLY_TTL_HOURS", DEFAULT_REPLY_TTL_HOURS) * 60 * 60,
-        )
-        target = store.get(parsed_reply.reply_id)
-        if target is None:
-            return jsonify({"ok": False, "error": "reply_id_not_found", "reply_id": parsed_reply.reply_id}), HTTPStatus.NOT_FOUND
-
-        try:
-            WeChatDesktopSender(
-                dry_run=_bool_env_from_env("WECHAT_REPLY_DRY_RUN", False),
-                restore_front_app=_bool_env_from_env("WECHAT_REPLY_RESTORE_FRONT_APP", True),
-                hide_wechat_after_send=_bool_env_from_env("WECHAT_REPLY_HIDE_WECHAT_AFTER_SEND", False),
-            ).send(
-                target.conversation,
-                parsed_reply.message,
-            )
-        except Exception as error:
-            current_app.logger.exception("WeChat automated reply failed.")
-            return jsonify({"ok": False, "error": "wechat_send_failed", "detail": str(error)}), HTTPStatus.INTERNAL_SERVER_ERROR
-
-        return jsonify({"ok": True, "reply_id": parsed_reply.reply_id, "conversation": target.conversation}), HTTPStatus.OK
 
     @app.get("/access-denied")
     def access_denied():
@@ -3695,19 +3632,24 @@ def create_app() -> Flask:
                 "template": normalize_monthly_report_template(config.get("monthly_report_template")),
                 "team_payloads": team_payloads,
             }
-            if _local_agent_seatalk_enabled(settings):
-                data = _build_local_agent_client(settings).team_dashboard_monthly_report_draft(request_payload)
-            else:
-                data = _build_monthly_report_service(settings).generate_draft(**request_payload)
+            job_store: JobStore = current_app.config["JOB_STORE"]
+            job = job_store.create("team-dashboard-monthly-report-draft", title="Generate Monthly Report Draft")
+            app_obj = current_app._get_current_object()
+            thread = threading.Thread(
+                target=_run_team_dashboard_monthly_report_draft_job,
+                args=(app_obj, job.job_id, settings, request_payload, user_identity),
+                daemon=True,
+            )
+            thread.start()
             _log_portal_event(
-                "team_dashboard_monthly_report_draft_success",
+                "team_dashboard_monthly_report_draft_queued",
                 **_build_request_log_context(
                     settings,
                     user_identity=user_identity,
-                    extra=data.get("evidence_summary") if isinstance(data.get("evidence_summary"), dict) else {},
+                    extra={"job_id": job.job_id},
                 ),
             )
-            return jsonify(data)
+            return jsonify({"status": "queued", "job_id": job.job_id})
         except ToolError as error:
             error_details = _classify_portal_error(error)
             _log_portal_event(
@@ -5748,6 +5690,91 @@ def _run_source_code_qa_query_job(app: Flask, job_id: str, payload: dict[str, An
             job_store.fail(job_id, str(error))
         except Exception as error:  # pragma: no cover - defensive guard for background worker failures.
             app.logger.exception("Source code QA query job failed unexpectedly.")
+            job_store.fail(job_id, f"Unexpected error: {error}")
+
+
+def _run_team_dashboard_monthly_report_draft_job(
+    app: Flask,
+    job_id: str,
+    settings: Settings,
+    request_payload: dict[str, Any],
+    user_identity: dict[str, str | None],
+) -> None:
+    with app.app_context():
+        job_store: JobStore = app.config["JOB_STORE"]
+
+        def progress_callback(
+            stage: str,
+            message: str,
+            current: int,
+            total: int,
+            *,
+            estimated_prompt_tokens: int = 0,
+            token_risk: str = "",
+        ) -> None:
+            job_store.update(
+                job_id,
+                state="running",
+                stage=stage,
+                message=message,
+                current=current,
+                total=total,
+                estimated_prompt_tokens=estimated_prompt_tokens,
+                token_risk=token_risk,
+            )
+
+        try:
+            progress_callback("preparing_sources", "Preparing Monthly Report sources.", 0, 0)
+            if _local_agent_seatalk_enabled(settings):
+                data = _build_local_agent_client(settings).team_dashboard_monthly_report_draft(
+                    request_payload,
+                    progress_callback=progress_callback,
+                )
+            else:
+                data = _build_monthly_report_service(settings).generate_draft(
+                    **request_payload,
+                    progress_callback=progress_callback,
+                )
+            evidence = data.get("evidence_summary") if isinstance(data.get("evidence_summary"), dict) else {}
+            generation = data.get("generation_summary") if isinstance(data.get("generation_summary"), dict) else {}
+            _log_portal_event(
+                "team_dashboard_monthly_report_draft_success",
+                user=_safe_email_identity(user_identity),
+                job_id=job_id,
+                **evidence,
+                **{f"generation_{key}": value for key, value in generation.items() if key in {"total_batches", "max_batch_estimated_tokens", "final_estimated_tokens", "elapsed_seconds"}},
+            )
+            job_store.complete(
+                job_id,
+                results=[data],
+                notice={
+                    "title": "Monthly Report",
+                    "tone": "success",
+                    "summary": "Monthly Report draft generated.",
+                    "details": [
+                        f"Total batches: {generation.get('total_batches', 0)}",
+                        f"Final estimated tokens: {generation.get('final_estimated_tokens', generation.get('estimated_prompt_tokens', 0))}",
+                    ],
+                },
+            )
+        except ToolError as error:
+            _log_portal_event(
+                "team_dashboard_monthly_report_draft_tool_error",
+                level=logging.WARNING,
+                user=_safe_email_identity(user_identity),
+                job_id=job_id,
+                **_classify_portal_error(error),
+            )
+            job_store.fail(job_id, str(error))
+        except Exception as error:  # pragma: no cover - defensive guard for background worker failures.
+            _log_portal_event(
+                "team_dashboard_monthly_report_draft_unexpected_error",
+                level=logging.ERROR,
+                user=_safe_email_identity(user_identity),
+                job_id=job_id,
+                **_classify_portal_error(error),
+            )
+            app.logger.exception("Team Dashboard Monthly Report draft job failed unexpectedly.")
             job_store.fail(job_id, f"Unexpected error: {error}")
 
 

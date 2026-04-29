@@ -48,6 +48,26 @@
       </div>
     </div>
     <p class="productization-inline-status" data-monthly-report-status></p>
+    <div class="team-dashboard-progress team-dashboard-monthly-report-progress" data-monthly-report-progress hidden>
+      <div class="team-dashboard-progress-bar" aria-hidden="true">
+        <span data-monthly-report-progress-fill style="width: 0%"></span>
+      </div>
+      <div class="team-dashboard-progress-items">
+        <div class="team-dashboard-progress-item" data-monthly-report-progress-step="prepare">
+          <strong>Prepare</strong>
+          <span>Key Projects, Jira, and PRD context</span>
+        </div>
+        <div class="team-dashboard-progress-item" data-monthly-report-progress-step="compact">
+          <strong>Compact</strong>
+          <span>30 days of SeaTalk history</span>
+        </div>
+        <div class="team-dashboard-progress-item" data-monthly-report-progress-step="draft">
+          <strong>Draft</strong>
+          <span>Generate with Codex</span>
+        </div>
+      </div>
+      <p data-monthly-report-progress-message></p>
+    </div>
     <div class="team-dashboard-monthly-report-grid">
       <div class="field-group team-dashboard-monthly-report-editor">
         <label for="team_dashboard_monthly_report_draft">Monthly Report Draft</label>

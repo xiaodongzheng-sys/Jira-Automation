@@ -147,9 +147,41 @@ class LocalAgentClient:
         result = self._request("POST", "/api/local-agent/prd-summary", payload)
         return result if isinstance(result, dict) else {}
 
-    def team_dashboard_monthly_report_draft(self, payload: dict[str, Any]) -> dict[str, Any]:
-        result = self._request("POST", "/api/local-agent/team-dashboard/monthly-report/draft", payload)
-        return result if isinstance(result, dict) else {}
+    def team_dashboard_monthly_report_draft(self, payload: dict[str, Any], *, progress_callback: Callable[..., None] | None = None) -> dict[str, Any]:
+        if progress_callback is None:
+            result = self._request("POST", "/api/local-agent/team-dashboard/monthly-report/draft", payload)
+            return result if isinstance(result, dict) else {}
+        initial = self._request("POST", "/api/local-agent/team-dashboard/monthly-report/draft-async", payload)
+        job_id = str(initial.get("job_id") or "").strip()
+        if not job_id:
+            raise ToolError("Mac local-agent did not return a Monthly Report job id.")
+        last_progress: tuple[str, str, int, int, int, str] | None = None
+        while True:
+            status = self._request("GET", f"/api/local-agent/team-dashboard/monthly-report/jobs/{job_id}", signed=True)
+            stage = str(status.get("stage") or "")
+            message = str(status.get("message") or "")
+            current = int(status.get("current") or 0)
+            total = int(status.get("total") or 0)
+            estimated_prompt_tokens = int(status.get("estimated_prompt_tokens") or 0)
+            token_risk = str(status.get("token_risk") or "")
+            progress = (stage, message, current, total, estimated_prompt_tokens, token_risk)
+            if message and progress != last_progress:
+                progress_callback(
+                    stage,
+                    message,
+                    current,
+                    total,
+                    estimated_prompt_tokens=estimated_prompt_tokens,
+                    token_risk=token_risk,
+                )
+                last_progress = progress
+            state = str(status.get("state") or "")
+            if state == "completed":
+                result = status.get("result")
+                return result if isinstance(result, dict) else {}
+            if state == "failed":
+                raise ToolError(str(status.get("error") or message or "Mac local-agent Monthly Report job failed."))
+            time.sleep(0.7)
 
     def team_dashboard_monthly_report_send(self, payload: dict[str, Any]) -> dict[str, Any]:
         result = self._request("POST", "/api/local-agent/team-dashboard/monthly-report/send", payload)
