@@ -31,6 +31,37 @@ class ConfluenceConnectorTests(unittest.TestCase):
         self.assertIsNone(resolved.page_id)
 
     @patch("prd_briefing.confluence.requests.get")
+    def test_resolve_short_link_follows_redirect_to_display_url(self, mock_get):
+        response = Mock()
+        response.status_code = 200
+        response.url = "https://confluence.shopee.io/display/SPDB/8.1+Part+1+of+PRD"
+        response.raise_for_status.return_value = None
+        mock_get.return_value = response
+
+        resolved = self.connector._resolve_page("https://confluence.shopee.io/x/tUdvuw")
+
+        self.assertEqual(resolved.base_url, "https://confluence.shopee.io")
+        self.assertEqual(resolved.space_key, "SPDB")
+        self.assertEqual(resolved.title_hint, "8.1 Part 1 of PRD")
+        self.assertIsNone(resolved.page_id)
+        self.assertEqual(mock_get.call_args.kwargs["headers"]["Accept"], "text/html")
+        self.assertTrue(mock_get.call_args.kwargs["allow_redirects"])
+
+    @patch("prd_briefing.confluence.requests.get")
+    def test_resolve_short_link_follows_redirect_to_page_id_url(self, mock_get):
+        response = Mock()
+        response.status_code = 200
+        response.url = "https://confluence.shopee.io/pages/viewpage.action?pageId=12345"
+        response.raise_for_status.return_value = None
+        mock_get.return_value = response
+
+        resolved = self.connector._resolve_page("https://confluence.shopee.io/x/tUdvuw")
+
+        self.assertEqual(resolved.base_url, "https://confluence.shopee.io")
+        self.assertEqual(resolved.page_id, "12345")
+        self.assertIsNone(resolved.space_key)
+
+    @patch("prd_briefing.confluence.requests.get")
     def test_ingest_display_url_uses_rest_api_search(self, mock_get):
         payload = {
             "results": [

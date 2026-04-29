@@ -92,6 +92,18 @@ class ConfluenceConnector:
                 source_url=f"{self.base_url}/pages/viewpage.action?pageId={value}",
             )
         parsed = urlparse(value)
+        if re.match(r"^/x/[^/]+/?$", parsed.path):
+            return self._resolve_short_link(value)
+        return self._resolve_parsed_page(value, parsed)
+
+    def _resolve_short_link(self, page_ref: str) -> ResolvedPageRef:
+        response = self._request(page_ref, accept="text/html", allow_redirects=True)
+        resolved_url = str(getattr(response, "url", "") or "").strip()
+        if not resolved_url or resolved_url == page_ref:
+            raise ValueError("Could not resolve Confluence short link to a page URL.")
+        return self._resolve_parsed_page(resolved_url, urlparse(resolved_url))
+
+    def _resolve_parsed_page(self, value: str, parsed: Any) -> ResolvedPageRef:
         base_url = f"{parsed.scheme}://{parsed.netloc}"
         query_page_id = parse_qs(parsed.query).get("pageId", [None])[0]
         page_id = query_page_id
