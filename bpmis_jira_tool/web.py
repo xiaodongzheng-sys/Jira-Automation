@@ -5853,6 +5853,9 @@ def _team_dashboard_project_fallback_jira_tasks(bpmis_client: Any, project: dict
                     "parent_project": row.get("parent_project") if isinstance(row.get("parent_project"), dict) else parent_project,
                 }
             )
+            status_key = str(normalized.get("jira_status") or "").strip().casefold()
+            if status_key in TEAM_DASHBOARD_EXCLUDED_PENDING_STATUSES:
+                continue
             dedupe_key = normalized.get("jira_id") or normalized.get("issue_id")
             if dedupe_key and dedupe_key in seen:
                 continue

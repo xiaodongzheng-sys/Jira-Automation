@@ -1611,7 +1611,7 @@ class WebPortalFeatureTests(unittest.TestCase):
                             "ticket_key": "SPDBP-92169",
                             "ticket_link": "https://jira.shopee.io/browse/SPDBP-92169",
                             "jira_title": "[Feature] AF Function Enhancement",
-                            "status": "Done",
+                            "status": "Waiting",
                             "fix_version_name": "AF_v1.0.77_20260410",
                         }
                     ]
@@ -1628,7 +1628,77 @@ class WebPortalFeatureTests(unittest.TestCase):
         project = response.get_json()["team"]["under_prd"][0]
         self.assertEqual(project["bpmis_id"], "214164")
         self.assertEqual([ticket["jira_id"] for ticket in project["jira_tickets"]], ["SPDBP-92169"])
-        self.assertEqual(project["jira_tickets"][0]["jira_status"], "Done")
+        self.assertEqual(project["jira_tickets"][0]["jira_status"], "Waiting")
+        self.assertEqual(fake_client.project_task_calls, [("214164", "zoey.luxy@npt.sg")])
+
+    def test_team_dashboard_pending_live_fallback_excludes_done_jira_tasks(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_ALLOWED_EMAILS": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_DASHBOARD_JIRA_RELEASE_AFTER": "2026-04-29",
+            },
+            clear=True,
+        ):
+            app = create_app()
+            app.testing = True
+            app.config["TEAM_DASHBOARD_CONFIG_STORE"].save(
+                {
+                    "teams": {
+                        "AF": {"member_emails": ["zoey.luxy@npt.sg"]},
+                        "CRMS": {"member_emails": []},
+                        "GRC": {"member_emails": []},
+                    }
+                }
+            )
+
+            class FakeTeamDashboardClient:
+                def __init__(self):
+                    self.project_task_calls = []
+
+                def list_biz_projects_for_pm_email(self, email):
+                    if email != "zoey.luxy@npt.sg":
+                        return []
+                    return [
+                        {
+                            "issue_id": "214164",
+                            "project_name": "AF System - Project CENTUM",
+                            "market": "SG",
+                            "priority": "P0",
+                            "regional_pm_pic": "zoey.luxy@npt.sg",
+                            "status": "Developing",
+                        }
+                    ]
+
+                def list_jira_tasks_created_by_emails(self, emails, **kwargs):
+                    return []
+
+                def list_jira_tasks_for_project_created_by_email(self, project_issue_id, email):
+                    self.project_task_calls.append((project_issue_id, email))
+                    return [
+                        {
+                            "ticket_key": "SPDBP-92169",
+                            "ticket_link": "https://jira.shopee.io/browse/SPDBP-92169",
+                            "jira_title": "[Feature] AF Function Enhancement",
+                            "status": "Done",
+                            "fix_version_name": "AF_v1.0.77_20260410",
+                        }
+                    ]
+
+            fake_client = FakeTeamDashboardClient()
+            with patch("bpmis_jira_tool.web._build_bpmis_client_for_current_user", return_value=fake_client):
+                with app.test_client() as client:
+                    with client.session_transaction() as session:
+                        session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong"}
+                        session["google_credentials"] = {"token": "x"}
+                    response = client.get("/api/team-dashboard/tasks?team_key=AF")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["team"]["pending_live"], [])
         self.assertEqual(fake_client.project_task_calls, [("214164", "zoey.luxy@npt.sg")])
 
     def test_team_dashboard_rejects_unknown_single_team(self):
