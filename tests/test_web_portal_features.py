@@ -825,14 +825,14 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertIn(b">Team Default Admin<", admin_response.data)
         self.assertIn(b"Save Anti-fraud Defaults", admin_response.data)
         self.assertIn(b">Team Dashboard<", admin_response.data)
-        self.assertIn(b'href="/?workspace=team-dashboard"', admin_response.data)
+        self.assertIn(b'href="/team-dashboard"', admin_response.data)
         self.assertIn(b'data-default-tab="setup"', admin_response.data)
         self.assertNotIn(b'data-tab-trigger="team-dashboard"', admin_response.data)
-        self.assertIn(b"Team Admin", admin_response.data)
+        self.assertNotIn(b"data-team-dashboard", admin_response.data)
         self.assertNotIn(b">Team Default Admin<", user_response.data)
         self.assertNotIn(b">Team Dashboard<", user_response.data)
 
-    def test_team_dashboard_primary_nav_visible_on_source_code_qa_for_admin_user(self):
+    def test_team_dashboard_is_standalone_page_for_admin_user(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
@@ -853,13 +853,19 @@ class WebPortalFeatureTests(unittest.TestCase):
                     session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong"}
                     session["google_credentials"] = {"token": "x"}
                 source_response = client.get("/source-code-qa")
-                dashboard_response = client.get("/?workspace=team-dashboard")
+                legacy_response = client.get("/?workspace=team-dashboard")
+                dashboard_response = client.get("/team-dashboard")
 
         self.assertEqual(source_response.status_code, 200)
-        self.assertIn(b'href="/?workspace=team-dashboard"', source_response.data)
+        self.assertIn(b'href="/team-dashboard"', source_response.data)
         self.assertIn(b">Team Dashboard<", source_response.data)
+        self.assertEqual(legacy_response.status_code, 302)
+        self.assertEqual(legacy_response.headers["Location"], "/team-dashboard")
         self.assertEqual(dashboard_response.status_code, 200)
-        self.assertIn(b'data-default-tab="team-dashboard"', dashboard_response.data)
+        self.assertIn(b"Team Admin", dashboard_response.data)
+        self.assertIn(b"data-team-dashboard", dashboard_response.data)
+        self.assertNotIn(b"Manage My Projects", dashboard_response.data)
+        self.assertNotIn(b'data-default-tab="team-dashboard"', dashboard_response.data)
         self.assertNotIn(b'data-tab-trigger="team-dashboard"', dashboard_response.data)
 
     def test_team_dashboard_config_defaults_and_save_are_admin_only(self):

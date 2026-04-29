@@ -1839,7 +1839,7 @@ def create_app() -> Flask:
             {
                 "label": "BPMIS Automation Tool",
                 "href": url_for("index"),
-                "active": current_endpoint == "index" and request.args.get("workspace") != "team-dashboard",
+                "active": current_endpoint == "index",
             }
         ]
         if _can_access_source_code_qa(settings):
@@ -1871,8 +1871,8 @@ def create_app() -> Flask:
             site_tabs.append(
                 {
                     "label": "Team Dashboard",
-                    "href": url_for("index", workspace="team-dashboard"),
-                    "active": current_endpoint == "index" and request.args.get("workspace") == "team-dashboard",
+                    "href": url_for("team_dashboard_page"),
+                    "active": current_endpoint == "team_dashboard_page",
                 }
             )
         return {
@@ -1960,6 +1960,9 @@ def create_app() -> Flask:
         if _site_requires_google_login(settings) and not _google_session_is_connected():
             return render_template("login_gate.html", page_title="Sign In")
 
+        if str(request.args.get("workspace") or "").strip() == "team-dashboard":
+            return redirect(url_for("team_dashboard_page"))
+
         results = _results_for_display(session.pop("last_results", []))
         run_notice = session.pop("run_notice", None)
         user_identity = _get_user_identity(settings)
@@ -1974,8 +1977,6 @@ def create_app() -> Flask:
         default_workspace_tab = session.pop("default_workspace_tab", "run" if has_saved_config else "setup")
         requested_workspace_tab = str(request.args.get("workspace") or "").strip()
         allowed_workspace_tabs = {"setup", "run", "productization-upgrade-summary"}
-        if _can_access_team_dashboard(user_identity):
-            allowed_workspace_tabs.add("team-dashboard")
         if _is_team_profile_admin(user_identity):
             allowed_workspace_tabs.add("team-default-admin")
         if requested_workspace_tab in allowed_workspace_tabs:
@@ -2027,11 +2028,21 @@ def create_app() -> Flask:
             ),
             team_profile_admin_configs=effective_team_profiles,
             team_profile_admin_enabled=_is_team_profile_admin(user_identity),
-            team_dashboard_enabled=_can_access_team_dashboard(user_identity),
-            team_dashboard_config=_get_team_dashboard_config_store().load(),
             default_workspace_tab=default_workspace_tab,
             input_headers=input_headers,
             google_authorized=True,
+        )
+
+    @app.get("/team-dashboard")
+    def team_dashboard_page():
+        access_gate = _require_team_dashboard_access(settings)
+        if access_gate is not None:
+            return access_gate
+        return render_template(
+            "team_dashboard.html",
+            page_title="Team Dashboard",
+            user_identity=_get_user_identity(settings),
+            team_dashboard_config=_get_team_dashboard_config_store().load(),
         )
 
     @app.get("/healthz")

@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+
+{% block body %}
+  <section class="workspace-shell team-dashboard-page">
+    {% include "_team_dashboard_content.html" %}
+  </section>
+{% endblock %}
+
+{% block extra_scripts %}
+  <script src="{{ url_for('static', filename='team_dashboard.js') }}?v=20260429-team-dashboard-page"></script>
+{% endblock %}
