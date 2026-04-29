@@ -188,6 +188,8 @@ exit 0
             deploy_calls = [line for line in calls.splitlines() if line.startswith("run deploy")]
             self.assertEqual(len(deploy_calls), 1, msg=calls)
             self.assertIn("--source .", deploy_calls[0])
+            self.assertIn("TEAM_PORTAL_DATA_DIR=/workspace/team-portal-runtime", deploy_calls[0])
+            self.assertNotIn("/tmp/team-portal", deploy_calls[0])
             self.assertNotIn("--image", deploy_calls[0])
 
     def test_cloud_run_deploy_skips_iam_binding_when_invoker_iam_is_disabled(self):
@@ -451,9 +453,17 @@ exit 0
             update_calls = [line for line in calls.splitlines() if line.startswith("run services update")]
             self.assertEqual(len(deploy_calls), 1, msg=calls)
             self.assertEqual(update_calls, [], msg=calls)
+            self.assertIn("TEAM_PORTAL_DATA_DIR=/workspace/team-portal-runtime", deploy_calls[0])
+            self.assertNotIn("/tmp/team-portal", deploy_calls[0])
             self.assertIn("TEAM_PORTAL_BASE_URL=https://team-portal-example.run.app", deploy_calls[0])
             self.assertIn("base URL update skipped", completed.stdout)
             self.assertNotIn("unexpected update", completed.stderr)
+
+    def test_cloud_run_scripts_do_not_default_to_tmp_team_portal(self):
+        for relative_path in ("scripts/deploy_cloud_run.sh", "scripts/deploy_cloud_run_full.sh"):
+            script = (PROJECT_ROOT / relative_path).read_text(encoding="utf-8")
+            self.assertNotIn("/tmp/team-portal", script)
+            self.assertIn("/workspace/team-portal-runtime", script)
 
     def test_cloud_run_image_build_script_is_dry_run_safe(self):
         build_script = PROJECT_ROOT / "scripts/build_cloud_run_image.sh"

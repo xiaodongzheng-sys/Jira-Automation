@@ -3,7 +3,7 @@
 Use this checklist for every portal release. The project now has two runtime surfaces that must stay in sync:
 
 - Cloud Run serves the team portal.
-- The Mac local-agent owns Mac-only capabilities, including Source Code Q&A repos/indexes, Codex CLI access, SeaTalk desktop data, and VPN-only BPMIS calls.
+- The Mac local-agent owns Mac-only capabilities and durable portal state, including Source Code Q&A repos/indexes, Codex CLI access, Source Code Q&A sessions/attachments/runtime evidence, BPMIS setup/project rows, SeaTalk desktop data, and VPN-only BPMIS calls.
 
 ## 1. Pre-Release
 
@@ -48,6 +48,7 @@ git status --short
 ```text
 TEAM_PORTAL_BASE_URL
 TEAM_PORTAL_DATA_DIR
+LOCAL_AGENT_TEAM_PORTAL_DATA_DIR
 LOCAL_AGENT_BASE_URL
 LOCAL_AGENT_PUBLIC_URL
 LOCAL_AGENT_HMAC_SECRET
@@ -87,7 +88,7 @@ CLOUD_RUN_IMAGE=asia-southeast1-docker.pkg.dev/PROJECT/REPO/team-portal:TAG \
 - Keep the Cloud Run defaults unless there is a specific reason to override them:
 
 ```text
-TEAM_PORTAL_DATA_DIR=/tmp/team-portal
+TEAM_PORTAL_DATA_DIR=/workspace/team-portal-runtime
 SOURCE_CODE_QA_QUERY_SYNC_MODE=background
 BPMIS_CALL_MODE=local_agent
 LOCAL_AGENT_MODE=sync
@@ -95,6 +96,8 @@ LOCAL_AGENT_SOURCE_CODE_QA_ENABLED=true
 LOCAL_AGENT_SEATALK_ENABLED=true
 LOCAL_AGENT_BPMIS_ENABLED=true
 ```
+
+- Do not use `/tmp/team-portal` for new code, deploy scripts, or runtime defaults. Durable portal state must live in the Mac local-agent data directory (`LOCAL_AGENT_TEAM_PORTAL_DATA_DIR`), and Cloud Run should reach it through local-agent APIs instead of treating its container filesystem as the system of record.
 
 - Do not point Cloud Run at a localhost local-agent URL. Cloud Run needs the public Mac local-agent URL, normally from `LOCAL_AGENT_PUBLIC_URL` or `CLOUD_RUN_LOCAL_AGENT_BASE_URL`. If those are not set and `LOCAL_AGENT_BASE_URL` is localhost, the deploy scripts fall back to non-localhost `TEAM_PORTAL_BASE_URL` because the Mac portal exposes `/api/local-agent/*` as a proxy.
 
@@ -123,7 +126,7 @@ curl https://your-fixed-agent-domain.ngrok.app/healthz
 ./scripts/run_local_agent_tunnel.sh status
 ```
 
-- Confirm `LOCAL_AGENT_TEAM_PORTAL_DATA_DIR` points at the durable Mac data directory that contains Source Code Q&A repos and indexes. Do not rely on Cloud Run `/tmp/team-portal` for repo/index state.
+- Confirm `LOCAL_AGENT_TEAM_PORTAL_DATA_DIR` points at the durable Mac data directory that contains `team_portal.db`, Source Code Q&A repos/indexes, sessions, attachments, runtime evidence, and BPMIS project/config rows. Do not rely on Cloud Run container storage for these records.
 
 ## 4. Mac-Hosted Portal Release
 

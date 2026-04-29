@@ -139,6 +139,10 @@ class LocalAgentClient:
         generated = payload.get("items")
         return generated if isinstance(generated, list) else []
 
+    def prd_review(self, payload: dict[str, Any]) -> dict[str, Any]:
+        result = self._request("POST", "/api/local-agent/prd-review", payload)
+        return result if isinstance(result, dict) else {}
+
     def seatalk_overview(self) -> dict[str, Any]:
         return self._request("POST", "/api/local-agent/seatalk/overview", {})
 

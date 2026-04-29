@@ -70,6 +70,8 @@ from bpmis_jira_tool.user_config import (
     WebConfigStore,
 )
 from prd_briefing import create_prd_briefing_blueprint
+from prd_briefing.confluence import ConfluenceConnector
+from prd_briefing.reviewer import PRDReviewRequest, PRDReviewService
 from prd_briefing.storage import BriefingStore
 
 
@@ -1731,6 +1733,8 @@ def _classify_http_status(status_code: int) -> dict[str, str]:
         return {"error_category": "authorization", "error_code": "forbidden"}
     if status_code == HTTPStatus.NOT_FOUND:
         return {"error_category": "routing", "error_code": "not_found"}
+    if status_code == HTTPStatus.SERVICE_UNAVAILABLE:
+        return {"error_category": "upstream_unavailable", "error_code": "service_unavailable"}
     if status_code >= HTTPStatus.INTERNAL_SERVER_ERROR:
         return {"error_category": "unexpected_internal", "error_code": "server_error"}
     return {"error_category": "http_error", "error_code": f"http_{status_code}"}
@@ -1961,7 +1965,12 @@ def create_app() -> Flask:
             status_details = _classify_http_status(response.status_code)
             _log_portal_event(
                 "http_response_error",
-                level=logging.WARNING if response.status_code < HTTPStatus.INTERNAL_SERVER_ERROR else logging.ERROR,
+                level=(
+                    logging.WARNING
+                    if response.status_code < HTTPStatus.INTERNAL_SERVER_ERROR
+                    or status_details.get("error_category") == "upstream_unavailable"
+                    else logging.ERROR
+                ),
                 **_build_request_log_context(
                     settings,
                     extra={
@@ -1990,8 +1999,19 @@ def create_app() -> Flask:
         run_notice = session.pop("run_notice", None)
         user_identity = _get_user_identity(settings)
         config_key = user_identity.get("config_key")
-        raw_config_data = _load_user_config_for_identity(settings, user_identity) if config_key else None
-        effective_team_profiles = _load_effective_team_profiles(config_store)
+        raw_config_data = None
+        effective_team_profiles = {team_key: dict(profile) for team_key, profile in TEAM_PROFILE_DEFAULTS.items()}
+        try:
+            raw_config_data = _load_user_config_for_identity(settings, user_identity) if config_key else None
+            effective_team_profiles = _load_effective_team_profiles(config_store)
+        except ToolError as error:
+            if not _is_local_agent_unavailable_error(error):
+                raise
+            current_app.logger.warning(
+                "Mac local-agent is unavailable while rendering index; falling back to empty setup/default profiles.",
+                exc_info=True,
+            )
+            flash("Mac local-agent is not reachable right now. The portal is open, but local-agent backed data and actions are temporarily unavailable.", "warning")
         config_data = raw_config_data or config_store._normalize({})
         config_data = _hydrate_setup_defaults(config_data, user_identity, team_profiles=effective_team_profiles)
         _apply_sync_email_policy(config_data, user_identity)
@@ -2214,7 +2234,8 @@ def create_app() -> Flask:
                 }
             )
         except ToolError as error:
-            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
+            status_code = HTTPStatus.SERVICE_UNAVAILABLE if _is_local_agent_unavailable_error(error) else HTTPStatus.BAD_REQUEST
+            return jsonify({"status": "error", "message": str(error), "error_category": _tool_error_category(error)}), status_code
         except Exception as error:  # noqa: BLE001 - keep API clients on JSON even for unexpected failures.
             request_id = getattr(g, "request_id", "")
             current_app.logger.exception("Source Code Q&A config failed unexpectedly")
@@ -2245,7 +2266,8 @@ def create_app() -> Flask:
             )
             return jsonify({"status": "ok", **result})
         except ToolError as error:
-            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
+            status_code = HTTPStatus.SERVICE_UNAVAILABLE if _is_local_agent_unavailable_error(error) else HTTPStatus.BAD_REQUEST
+            return jsonify({"status": "error", "message": str(error), "error_category": _tool_error_category(error)}), status_code
 
     @app.post("/api/source-code-qa/model-availability")
     def source_code_qa_model_availability_api():
@@ -3438,7 +3460,7 @@ def create_app() -> Flask:
             return access_gate
         config = _get_team_dashboard_config_store().load()
         bpmis_client = _build_bpmis_client_for_current_user(settings)
-        requested_team_key = str(request.args.get("team") or "").strip().upper()
+        requested_team_key = str(request.args.get("team") or request.args.get("team_key") or "").strip().upper()
         if requested_team_key and requested_team_key not in TEAM_DASHBOARD_TEAMS:
             return (
                 jsonify({"status": "error", "message": f"Unknown team: {requested_team_key}."}),
@@ -3454,9 +3476,27 @@ def create_app() -> Flask:
         for team_key, label in team_items:
             team_config = (config.get("teams") or {}).get(team_key) or {}
             emails = _normalize_team_dashboard_emails(team_config.get("member_emails") or [])
+            started_at = time.monotonic()
             try:
                 tasks = bpmis_client.list_jira_tasks_created_by_emails(emails)
-                team_payloads.append(_build_team_dashboard_task_group(team_key, label, emails, tasks))
+                team_payload = _build_team_dashboard_task_group(team_key, label, emails, tasks)
+                team_payload["elapsed_seconds"] = round(time.monotonic() - started_at, 2)
+                team_payload["fetch_stats"] = _team_dashboard_fetch_stats(bpmis_client)
+                _log_portal_event(
+                    "team_dashboard_tasks_team_loaded",
+                    **_build_request_log_context(
+                        settings,
+                        user_identity=_get_user_identity(settings),
+                        extra={
+                            "team_key": team_key,
+                            "email_count": len(emails),
+                            "raw_task_count": len(tasks or []),
+                            "elapsed_seconds": team_payload["elapsed_seconds"],
+                            "fetch_stats": team_payload["fetch_stats"],
+                        },
+                    ),
+                )
+                team_payloads.append(team_payload)
             except Exception as error:  # noqa: BLE001 - keep other team groups renderable.
                 has_error = True
                 error_details = _classify_portal_error(error)
@@ -3477,6 +3517,8 @@ def create_app() -> Flask:
                         "under_prd": [],
                         "pending_live": [],
                         "error": str(error),
+                        "elapsed_seconds": round(time.monotonic() - started_at, 2),
+                        "fetch_stats": _team_dashboard_fetch_stats(bpmis_client),
                     }
                 )
         return jsonify(
@@ -3484,9 +3526,72 @@ def create_app() -> Flask:
                 "status": "partial" if has_error else "ok",
                 "teams": team_payloads,
                 "team": team_payloads[0] if requested_team_key and team_payloads else None,
+                "team_key": requested_team_key,
                 "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             }
         )
+
+    @app.post("/api/team-dashboard/prd-review")
+    def team_dashboard_prd_review():
+        access_gate = _require_team_dashboard_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        payload = request.get_json(silent=True) or {}
+        user_identity = _get_user_identity(settings)
+        review_payload = {
+            "owner_key": str(user_identity.get("config_key") or ""),
+            "jira_id": str(payload.get("jira_id") or ""),
+            "jira_link": str(payload.get("jira_link") or ""),
+            "prd_url": str(payload.get("prd_url") or ""),
+            "force_refresh": bool(payload.get("force_refresh")),
+        }
+        try:
+            if _local_agent_source_code_qa_enabled(settings):
+                data = _build_local_agent_client(settings).prd_review(review_payload)
+            else:
+                data = _build_prd_review_service(settings).review(PRDReviewRequest(**review_payload))
+            _log_portal_event(
+                "team_dashboard_prd_review_success",
+                **_build_request_log_context(
+                    settings,
+                    user_identity=user_identity,
+                    extra={
+                        "jira_id": review_payload["jira_id"],
+                        "prd_url_hash": hashlib.sha256(review_payload["prd_url"].encode("utf-8")).hexdigest()[:12],
+                        "cached": bool(data.get("cached")),
+                    },
+                ),
+            )
+            return jsonify(data)
+        except ToolError as error:
+            error_details = _classify_portal_error(error)
+            _log_portal_event(
+                "team_dashboard_prd_review_tool_error",
+                level=logging.WARNING,
+                **_build_request_log_context(
+                    settings,
+                    user_identity=user_identity,
+                    extra={**error_details, "jira_id": review_payload["jira_id"]},
+                ),
+            )
+            return jsonify({"status": "error", "message": str(error), **error_details}), HTTPStatus.BAD_REQUEST
+        except Exception as error:  # noqa: BLE001
+            _log_portal_event(
+                "team_dashboard_prd_review_unexpected_error",
+                level=logging.ERROR,
+                **_build_request_log_context(settings, user_identity=user_identity, extra={"jira_id": review_payload["jira_id"]}),
+            )
+            current_app.logger.exception("Team Dashboard PRD review failed.")
+            return (
+                jsonify(
+                    {
+                        "status": "error",
+                        "message": "PRD review failed unexpectedly. Please retry or share the request ID.",
+                        **_classify_portal_error(error),
+                    }
+                ),
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
 
     @app.get("/download/default-sheet-template.csv")
     def download_default_sheet_template():
@@ -4246,6 +4351,23 @@ def _get_team_dashboard_config_store() -> TeamDashboardConfigStore:
     return current_app.config["TEAM_DASHBOARD_CONFIG_STORE"]
 
 
+def _build_prd_review_service(settings: Settings) -> PRDReviewService:
+    store: BriefingStore = current_app.config["PRD_BRIEFING_STORE"]
+    confluence = ConfluenceConnector(
+        base_url=settings.confluence_base_url,
+        email=settings.confluence_email,
+        api_token=settings.confluence_api_token,
+        bearer_token=settings.confluence_bearer_token,
+        store=store,
+    )
+    return PRDReviewService(
+        store=store,
+        confluence=confluence,
+        settings=settings,
+        workspace_root=PROJECT_ROOT,
+    )
+
+
 def _get_source_code_qa_session_store():
     settings: Settings = current_app.config["SETTINGS"]
     if _local_agent_source_code_qa_enabled(settings):
@@ -4293,6 +4415,28 @@ def _remote_bpmis_config_enabled(settings: Settings) -> bool:
         and settings.local_agent_hmac_secret
         and settings.local_agent_bpmis_enabled
     )
+
+
+def _is_local_agent_unavailable_error(error: ToolError) -> bool:
+    message = str(error or "").strip().lower()
+    if "local-agent" not in message and "local agent" not in message:
+        return False
+    unavailable_markers = (
+        "unavailable",
+        "offline",
+        "connection refused",
+        "connecttimeout",
+        "read timed out",
+        "timed out",
+        "max retries exceeded",
+        "err_ngrok_3200",
+        "endpoint",
+    )
+    return any(marker in message for marker in unavailable_markers)
+
+
+def _tool_error_category(error: ToolError) -> str:
+    return "local_agent_unavailable" if _is_local_agent_unavailable_error(error) else "tool_error"
 
 
 def _load_user_config_for_identity(settings: Settings, user_identity: dict[str, str | None]) -> dict[str, Any] | None:
@@ -5412,6 +5556,16 @@ def _build_team_dashboard_task_group(
         "under_prd": under_prd_projects,
         "pending_live": pending_live_projects,
         "error": "",
+    }
+
+
+def _team_dashboard_fetch_stats(bpmis_client: Any) -> dict[str, int]:
+    stats = getattr(bpmis_client, "request_stats", None)
+    if not isinstance(stats, dict):
+        return {}
+    return {
+        key: int(stats.get(key) or 0)
+        for key in ("api_call_count", "issue_detail_lookup_count", "user_lookup_count")
     }
 
 

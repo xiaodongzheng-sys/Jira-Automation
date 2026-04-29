@@ -128,6 +128,13 @@ class BPMISDirectApiClient(BPMISClient):
         )
         self._field_defs_cache: dict[str, Any] | None = None
         self._group_options_cache: dict[str, list[dict[str, Any]]] = {}
+        self._bpmis_user_ids_by_email_cache: dict[str, list[int]] = {}
+        self._issue_detail_cache: dict[str, dict[str, Any]] = {}
+        self.request_stats: dict[str, int] = {
+            "api_call_count": 0,
+            "issue_detail_lookup_count": 0,
+            "user_lookup_count": 0,
+        }
 
     def ping(self) -> None:
         self._get_issue_fields()
@@ -380,9 +387,7 @@ class BPMISDirectApiClient(BPMISClient):
         if not normalized_emails:
             return []
 
-        user_ids_by_email: dict[str, list[int]] = {}
-        for email in normalized_emails:
-            user_ids_by_email[email] = self._resolve_bpmis_user_ids_by_email(email)
+        user_ids_by_email = self._resolve_bpmis_user_ids_by_emails(normalized_emails)
         user_ids = sorted({user_id for ids in user_ids_by_email.values() for user_id in ids})
         if not user_ids:
             return []
@@ -543,7 +548,10 @@ class BPMISDirectApiClient(BPMISClient):
         normalized_issue_id = str(issue_id).strip()
         if not normalized_issue_id:
             return {}
+        if normalized_issue_id in self._issue_detail_cache:
+            return dict(self._issue_detail_cache[normalized_issue_id])
 
+        self.request_stats["issue_detail_lookup_count"] += 1
         attempts = [
             ("GET", "/api/v1/issues/detail", {"id": normalized_issue_id}, None),
             ("GET", "/api/v1/issues/detail", {"issueId": normalized_issue_id}, None),
@@ -556,7 +564,9 @@ class BPMISDirectApiClient(BPMISClient):
             payload = self._safe_api_request(path, method=method, params=params, body=body)
             detail = self._extract_issue_detail_payload(payload)
             if detail:
+                self._issue_detail_cache[normalized_issue_id] = dict(detail)
                 return detail
+        self._issue_detail_cache[normalized_issue_id] = {}
         return {}
 
     def get_jira_ticket_detail(self, ticket_key: str) -> dict[str, Any]:
@@ -1648,6 +1658,7 @@ class BPMISDirectApiClient(BPMISClient):
         body: Any | None = None,
     ) -> dict[str, Any]:
         url = f"{self.settings.bpmis_base_url.rstrip('/')}/{path.lstrip('/')}"
+        self.request_stats["api_call_count"] += 1
         try:
             response = self.session.request(
                 method=method,
@@ -1720,12 +1731,48 @@ class BPMISDirectApiClient(BPMISClient):
         return f"{self.JIRA_BROWSE_BASE_URL}{issue_key}"
 
     def _resolve_bpmis_user_ids_by_email(self, email: str) -> list[int]:
-        response = self._api_request(
-            "/api/v1/users/listByEmail",
-            params={"search": json.dumps([email])},
-        )
-        users = response.get("data") or []
-        return [int(user["id"]) for user in users if user.get("id") is not None]
+        return self._resolve_bpmis_user_ids_by_emails([email]).get(str(email or "").strip().lower(), [])
+
+    def _resolve_bpmis_user_ids_by_emails(self, emails: list[str]) -> dict[str, list[int]]:
+        normalized_emails = self._normalize_email_list(emails)
+        resolved: dict[str, list[int]] = {}
+        missing = [email for email in normalized_emails if email not in self._bpmis_user_ids_by_email_cache]
+        if missing:
+            self.request_stats["user_lookup_count"] += 1
+            response = self._api_request(
+                "/api/v1/users/listByEmail",
+                params={"search": json.dumps(missing)},
+            )
+            users = response.get("data") or []
+            grouped: dict[str, list[int]] = {email: [] for email in missing}
+            if isinstance(users, list):
+                for user in users:
+                    if not isinstance(user, dict) or user.get("id") is None:
+                        continue
+                    user_id = int(user["id"])
+                    matched_emails = self._emails_for_bpmis_user(user, missing)
+                    if not matched_emails and len(missing) == 1:
+                        matched_emails = missing
+                    for matched_email in matched_emails:
+                        if user_id not in grouped[matched_email]:
+                            grouped[matched_email].append(user_id)
+            for email in missing:
+                self._bpmis_user_ids_by_email_cache[email] = grouped.get(email) or []
+        for email in normalized_emails:
+            resolved[email] = list(self._bpmis_user_ids_by_email_cache.get(email) or [])
+        return resolved
+
+    def _emails_for_bpmis_user(self, user: dict[str, Any], candidate_emails: list[str]) -> list[str]:
+        matched: list[str] = []
+        for key in ("email", "emailAddress", "mail", "username", "name", "displayName", "label", "value"):
+            value = user.get(key)
+            if value is None:
+                continue
+            text = str(value).strip().lower()
+            for email in candidate_emails:
+                if email and (text == email or email in text):
+                    matched.append(email)
+        return list(dict.fromkeys(matched))
 
     @staticmethod
     def _normalize_email_list(emails: list[str]) -> list[str]:

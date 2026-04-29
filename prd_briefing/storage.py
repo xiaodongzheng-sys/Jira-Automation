@@ -127,6 +127,26 @@ class BriefingStore:
 
                 create unique index if not exists idx_briefing_script_cache_lookup
                     on briefing_script_cache(owner_key, audience, model_id, prompt_version, section_hash);
+
+                create table if not exists prd_review_results (
+                    id integer primary key autoincrement,
+                    owner_key text not null,
+                    jira_id text not null,
+                    jira_link text not null default '',
+                    prd_url text not null,
+                    prd_updated_at text not null,
+                    prompt_version text not null,
+                    status text not null,
+                    result_markdown text not null default '',
+                    error text not null default '',
+                    model_id text not null default '',
+                    trace_json text not null default '{}',
+                    created_at text not null,
+                    updated_at text not null
+                );
+
+                create unique index if not exists idx_prd_review_results_lookup
+                    on prd_review_results(owner_key, jira_id, prd_url, prd_updated_at, prompt_version);
                 """
             )
             chunk_columns = {
@@ -419,6 +439,101 @@ class BriefingStore:
                 (owner_key, audience, model_id, prompt_version, section_hash, script, utc_now()),
             )
 
+    def get_prd_review_result(
+        self,
+        *,
+        owner_key: str,
+        jira_id: str,
+        prd_url: str,
+        prd_updated_at: str,
+        prompt_version: str,
+    ) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                select * from prd_review_results
+                where owner_key = ? and jira_id = ? and prd_url = ?
+                    and prd_updated_at = ? and prompt_version = ?
+                limit 1
+                """,
+                (owner_key, jira_id, prd_url, prd_updated_at, prompt_version),
+            ).fetchone()
+        return self._row_to_prd_review(row) if row else None
+
+    def save_prd_review_result(
+        self,
+        *,
+        owner_key: str,
+        jira_id: str,
+        jira_link: str,
+        prd_url: str,
+        prd_updated_at: str,
+        prompt_version: str,
+        status: str,
+        result_markdown: str = "",
+        error: str = "",
+        model_id: str = "",
+        trace: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        now = utc_now()
+        trace_json = json.dumps(trace or {}, ensure_ascii=False, sort_keys=True)
+        with self.connect() as conn:
+            conn.execute(
+                """
+                insert into prd_review_results (
+                    owner_key, jira_id, jira_link, prd_url, prd_updated_at,
+                    prompt_version, status, result_markdown, error, model_id,
+                    trace_json, created_at, updated_at
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                on conflict(owner_key, jira_id, prd_url, prd_updated_at, prompt_version)
+                do update set
+                    jira_link = excluded.jira_link,
+                    status = excluded.status,
+                    result_markdown = excluded.result_markdown,
+                    error = excluded.error,
+                    model_id = excluded.model_id,
+                    trace_json = excluded.trace_json,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    owner_key,
+                    jira_id,
+                    jira_link,
+                    prd_url,
+                    prd_updated_at,
+                    prompt_version,
+                    status,
+                    result_markdown,
+                    error,
+                    model_id,
+                    trace_json,
+                    now,
+                    now,
+                ),
+            )
+        result = self.get_prd_review_result(
+            owner_key=owner_key,
+            jira_id=jira_id,
+            prd_url=prd_url,
+            prd_updated_at=prd_updated_at,
+            prompt_version=prompt_version,
+        )
+        return result or {
+            "owner_key": owner_key,
+            "jira_id": jira_id,
+            "jira_link": jira_link,
+            "prd_url": prd_url,
+            "prd_updated_at": prd_updated_at,
+            "prompt_version": prompt_version,
+            "status": status,
+            "result_markdown": result_markdown,
+            "error": error,
+            "model_id": model_id,
+            "trace": trace or {},
+            "created_at": now,
+            "updated_at": now,
+        }
+
     def save_asset(self, session_id: str, filename: str, content: bytes) -> str:
         asset_dir = self.asset_root / session_id
         asset_dir.mkdir(parents=True, exist_ok=True)
@@ -441,6 +556,28 @@ class BriefingStore:
             updated_at=str(row["updated_at"]),
             embedding=json.loads(row["embedding_json"]) if row["embedding_json"] else None,
         )
+
+    def _row_to_prd_review(self, row: sqlite3.Row) -> dict[str, Any]:
+        try:
+            trace = json.loads(row["trace_json"] or "{}")
+        except json.JSONDecodeError:
+            trace = {}
+        return {
+            "id": int(row["id"]),
+            "owner_key": str(row["owner_key"]),
+            "jira_id": str(row["jira_id"]),
+            "jira_link": str(row["jira_link"] or ""),
+            "prd_url": str(row["prd_url"]),
+            "prd_updated_at": str(row["prd_updated_at"]),
+            "prompt_version": str(row["prompt_version"]),
+            "status": str(row["status"]),
+            "result_markdown": str(row["result_markdown"] or ""),
+            "error": str(row["error"] or ""),
+            "model_id": str(row["model_id"] or ""),
+            "trace": trace if isinstance(trace, dict) else {},
+            "created_at": str(row["created_at"]),
+            "updated_at": str(row["updated_at"]),
+        }
 
 def citation_from_chunk(chunk: ChunkRecord) -> Citation:
     return Citation(

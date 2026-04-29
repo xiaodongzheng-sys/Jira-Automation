@@ -115,7 +115,7 @@ The Flask portal saves each user's BPMIS Automation Tool Setup in the portal dat
 
 For local/team-host deployment, set `TEAM_PORTAL_DATA_DIR` to a stable host path such as `/absolute/path/to/team-portal-data` or the repo-local `.team-portal` directory. If this value changes, the same signed-in user will appear to have no saved Setup because the portal is reading a different database.
 
-For Cloud Run, do not rely on `/tmp/team-portal` for durable Setup. Cloud Run `/tmp` is instance-local ephemeral storage, so saved Setup can disappear after redeploys, cold starts, instance replacement, or traffic moving to a new instance. Use a durable storage design before treating Cloud Run as the system of record for BPMIS Setup, for example a mounted Cloud Storage/Fuse path or a managed database-backed config store.
+For Cloud Run, do not rely on container-local storage for durable Setup. Saved Setup must go through the Mac local-agent and its stable `LOCAL_AGENT_TEAM_PORTAL_DATA_DIR` database; otherwise records can disappear after redeploys, cold starts, instance replacement, or traffic moving to a new instance.
 
 `TEAM_PORTAL_CONFIG_ENCRYPTION_KEY` is separate from the storage location. It encrypts/decrypts `bpmis_api_access_token` inside the saved config JSON. If the database is lost, both Setup and the encrypted token are lost. If the database remains but the encryption key changes, non-token Setup fields remain present, but the saved BPMIS token cannot be decrypted.
 

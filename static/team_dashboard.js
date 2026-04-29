@@ -22,6 +22,14 @@
     return payload;
   };
 
+  const externalHref = (value) => {
+    const text = String(value || '').trim();
+    if (!text) return '';
+    if (/^(https?:|mailto:|tel:)/i.test(text)) return text;
+    if (text.startsWith('//')) return `https:${text}`;
+    return `https://${text}`;
+  };
+
   const taskStatus = root.querySelector('[data-team-dashboard-task-status]');
   const taskSummary = root.querySelector('[data-team-dashboard-task-summary]');
   const taskProgress = root.querySelector('[data-team-dashboard-progress]');
@@ -29,6 +37,19 @@
   const updateButton = root.querySelector('[data-team-dashboard-update]');
   const adminForm = root.querySelector('[data-team-dashboard-admin-form]');
   const adminStatus = root.querySelector('[data-team-dashboard-admin-status]');
+  const teamLabels = {
+    AF: 'Anti-fraud',
+    CRMS: 'Credit Risk',
+    GRC: 'Ops Risk',
+  };
+
+  let initialConfig = (() => {
+    try {
+      return JSON.parse(root.dataset.initialConfig || '{}');
+    } catch (error) {
+      return {};
+    }
+  })();
 
   const setStatus = (node, message, tone = 'neutral') => {
     if (!node) return;
@@ -59,13 +80,67 @@
     return `<a href="${escapeHtml(url)}" target="_blank" rel="noreferrer">${escapeHtml(label || url)}</a>`;
   };
 
-  const renderPrdLinks = (links) => {
+  const renderMarkdown = (value) => {
+    const html = [];
+    let inList = false;
+    const closeList = () => {
+      if (inList) {
+        html.push('</ul>');
+        inList = false;
+      }
+    };
+    const inline = (text) => escapeHtml(text)
+      .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+      .replace(/`(.+?)`/g, '<code>$1</code>');
+    String(value || '').split(/\r?\n/).forEach((line) => {
+      const trimmed = line.trim();
+      if (!trimmed) {
+        closeList();
+        return;
+      }
+      const heading = trimmed.match(/^(#{2,4})\s+(.+)$/);
+      if (heading) {
+        closeList();
+        html.push(`<h4>${inline(heading[2])}</h4>`);
+        return;
+      }
+      const listItem = trimmed.match(/^(\d+[.)]|[-*])\s+(.+)$/);
+      if (listItem) {
+        if (!inList) {
+          html.push('<ul>');
+          inList = true;
+        }
+        html.push(`<li>${inline(listItem[2])}</li>`);
+        return;
+      }
+      closeList();
+      html.push(`<p>${inline(trimmed)}</p>`);
+    });
+    closeList();
+    return html.join('');
+  };
+
+  const renderPrdLinks = (links, jiraItem) => {
     const items = Array.isArray(links) ? links : [];
     if (!items.length) return '-';
     return items.map((item, index) => {
       const url = String(item.url || '').trim();
       const label = String(item.label || url || `PRD ${index + 1}`).trim();
-      return renderLink(url, label);
+      return `
+        <div class="team-dashboard-prd-link">
+          ${renderLink(url, label)}
+          <button
+            class="button button-secondary team-dashboard-review-button"
+            type="button"
+            data-prd-review
+            data-jira-id="${escapeHtml(jiraItem?.jira_id || '')}"
+            data-jira-link="${escapeHtml(jiraItem?.jira_link || '')}"
+            data-prd-url="${escapeHtml(url)}"
+            data-prd-index="${index}"
+            ${url ? '' : 'disabled'}
+          >AI Review</button>
+        </div>
+      `;
     }).join('<br>');
   };
 
@@ -74,18 +149,29 @@
 
   const renderJiraRows = (items) => {
     if (!items.length) {
-      return '<tr><td colspan="6" class="team-dashboard-empty-cell">No matching Jira tasks.</td></tr>';
+      return '<tr><td colspan="7" class="team-dashboard-empty-cell">No matching Jira tasks.</td></tr>';
     }
-    return items.map((item) => `
+    return items.map((item, index) => {
+      const reviewPanelId = `prd-review-${String(item.jira_id || index).replace(/[^a-zA-Z0-9_-]/g, '-')}-${index}`;
+      return `
       <tr>
         <td>${renderLink(item.jira_link || '', item.jira_id || '-')}</td>
         <td>${escapeHtml(item.jira_title || '-')}</td>
         <td>${escapeHtml(item.pm_email || '-')}</td>
         <td>${escapeHtml(item.jira_status || '-')}</td>
         <td>${escapeHtml(item.version || '-')}</td>
-        <td>${renderPrdLinks(item.prd_links)}</td>
+        <td>${renderPrdLinks(item.prd_links, item)}</td>
+        <td>
+          <button class="button button-secondary team-dashboard-review-toggle" type="button" data-prd-review-toggle="${escapeHtml(reviewPanelId)}" hidden>View Review</button>
+        </td>
       </tr>
-    `).join('');
+      <tr class="team-dashboard-review-row" data-prd-review-row="${escapeHtml(reviewPanelId)}" hidden>
+        <td colspan="7">
+          <div class="team-dashboard-review-panel" data-prd-review-panel="${escapeHtml(reviewPanelId)}"></div>
+        </td>
+      </tr>
+    `;
+    }).join('');
   };
 
   const renderProject = (project, sectionKey, index) => {
@@ -132,6 +218,7 @@
                   <th>Jira Status</th>
                   <th>Version</th>
                   <th>PRD Link</th>
+                  <th>AI</th>
                 </tr>
               </thead>
               <tbody>${renderJiraRows(tickets)}</tbody>
@@ -342,6 +429,7 @@
         const textarea = root.querySelector(`[data-team-dashboard-members="${CSS.escape(teamKey)}"]`);
         if (textarea) textarea.value = (team.member_emails || []).join('\n');
       });
+      initialConfig = payload.config || initialConfig;
       setStatus(adminStatus, 'Team emails saved.', 'success');
     } catch (error) {
       setStatus(adminStatus, error.message || 'Could not save team emails.', 'error');
@@ -361,5 +449,70 @@
     panel.hidden = nextHidden;
     button.textContent = nextHidden ? '+' : '-';
     button.setAttribute('aria-expanded', nextHidden ? 'false' : 'true');
+  });
+
+  taskList?.addEventListener('click', async (event) => {
+    const toggle = event.target.closest('[data-prd-review-toggle]');
+    if (toggle) {
+      const row = taskList.querySelector(`[data-prd-review-row="${CSS.escape(toggle.dataset.prdReviewToggle || '')}"]`);
+      if (!row) return;
+      row.hidden = !row.hidden;
+      toggle.textContent = row.hidden ? 'View Review' : 'Hide Review';
+      return;
+    }
+
+    const reviewButton = event.target.closest('[data-prd-review]');
+    const button = reviewButton;
+    if (!button) return;
+    const jiraId = button.dataset.jiraId || '';
+    const jiraLink = button.dataset.jiraLink || '';
+    const prdUrl = externalHref(button.dataset.prdUrl || '');
+    if (!jiraId || !prdUrl) return;
+    const row = button.closest('tr');
+    const panelRow = row?.nextElementSibling?.matches('[data-prd-review-row]') ? row.nextElementSibling : null;
+    const panel = panelRow?.querySelector('[data-prd-review-panel]');
+    const toggleButton = row?.querySelector('[data-prd-review-toggle]');
+    if (!panel || !panelRow) return;
+
+    const forceRefresh = button.dataset.forceRefresh === 'true';
+    button.dataset.forceRefresh = 'false';
+    button.disabled = true;
+    button.textContent = 'Reviewing...';
+    panelRow.hidden = false;
+    panel.innerHTML = '<div class="team-dashboard-review-loading">Reviewing PRD...</div>';
+    try {
+      const response = await fetch('/api/team-dashboard/prd-review', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ jira_id: jiraId, jira_link: jiraLink, prd_url: prdUrl, force_refresh: forceRefresh }),
+      });
+      const payload = await readJson(response, 'Could not review PRD.');
+      const result = payload.review || {};
+      panel.innerHTML = `
+        <div class="team-dashboard-review-meta">
+          <strong>${escapeHtml(payload.cached ? 'Cached PRD Review' : 'PRD Review')}</strong>
+          <span>${escapeHtml(result.updated_at || '')}</span>
+        </div>
+        <div class="team-dashboard-review-markdown">${renderMarkdown(result.result_markdown || '')}</div>
+        <div class="team-dashboard-review-actions">
+          <button class="button button-secondary team-dashboard-review-refresh" type="button" data-prd-refresh>Regenerate</button>
+        </div>
+      `;
+      button.textContent = 'View Review';
+      if (toggleButton) {
+        toggleButton.hidden = false;
+        toggleButton.textContent = 'Hide Review';
+      }
+      panel.querySelector('[data-prd-refresh]')?.addEventListener('click', () => {
+        button.dataset.forceRefresh = 'true';
+        button.click();
+      });
+    } catch (error) {
+      panel.innerHTML = `<p class="productization-inline-status" data-tone="error">${escapeHtml(error.message || 'Could not review PRD.')}</p>`;
+      button.textContent = 'Retry';
+    } finally {
+      button.disabled = false;
+    }
   });
 })();

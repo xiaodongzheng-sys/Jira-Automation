@@ -1119,6 +1119,82 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertEqual(unknown_response.status_code, 400)
         self.assertIn(["af@npt.sg"], fake_client.calls)
 
+    def test_team_dashboard_tasks_can_load_one_team_at_a_time(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_ALLOWED_EMAILS": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+            },
+            clear=True,
+        ):
+            app = create_app()
+            app.testing = True
+            app.config["TEAM_DASHBOARD_CONFIG_STORE"].save(
+                {
+                    "teams": {
+                        "AF": {"member_emails": ["af@npt.sg"]},
+                        "CRMS": {"member_emails": ["cr@npt.sg"]},
+                        "GRC": {"member_emails": ["ops@npt.sg"]},
+                    }
+                }
+            )
+
+            class FakeTeamDashboardClient:
+                def __init__(self):
+                    self.calls = []
+
+                def list_jira_tasks_created_by_emails(self, emails):
+                    self.calls.append(list(emails))
+                    return [
+                        {
+                            "jira_id": "AF-1",
+                            "jira_title": "PRD item",
+                            "pm_email": "af@npt.sg",
+                            "jira_status": "Waiting",
+                            "parent_project": {"bpmis_id": "225159", "project_name": "Fraud Project"},
+                        }
+                    ]
+
+            fake_client = FakeTeamDashboardClient()
+            with patch("bpmis_jira_tool.web._build_bpmis_client_for_current_user", return_value=fake_client):
+                with app.test_client() as client:
+                    with client.session_transaction() as session:
+                        session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong"}
+                        session["google_credentials"] = {"token": "x"}
+                    response = client.get("/api/team-dashboard/tasks?team_key=AF")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["team_key"], "AF")
+        self.assertEqual([team["team_key"] for team in payload["teams"]], ["AF"])
+        self.assertEqual(fake_client.calls, [["af@npt.sg"]])
+
+    def test_team_dashboard_rejects_unknown_single_team(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_ALLOWED_EMAILS": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+            },
+            clear=True,
+        ):
+            app = create_app()
+            app.testing = True
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong"}
+                    session["google_credentials"] = {"token": "x"}
+                response = client.get("/api/team-dashboard/tasks?team_key=UNKNOWN")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()["status"], "error")
+
     def test_team_default_admin_save_persists_route_override(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,

@@ -45,8 +45,8 @@ curl http://127.0.0.1:7007/healthz
 
 The local-agent reads the same Mac-local state as the current portal:
 
-- Codex CLI login and synced repos under `TEAM_PORTAL_DATA_DIR/source_code_qa`
-- Set `LOCAL_AGENT_TEAM_PORTAL_DATA_DIR` to the stable Mac data directory that already contains `source_code_qa/repos` and `source_code_qa/indexes`. Do not let Source Code Q&A use the Cloud Run `/tmp/team-portal` directory as its repo/index store.
+- Codex CLI login and synced repos under `LOCAL_AGENT_TEAM_PORTAL_DATA_DIR/source_code_qa`
+- Set `LOCAL_AGENT_TEAM_PORTAL_DATA_DIR` to the stable Mac data directory that already contains `team_portal.db`, `source_code_qa/repos`, `source_code_qa/indexes`, Source Code Q&A sessions/attachments/runtime evidence, and BPMIS project/config rows. Do not let new code or deploy scripts use Cloud Run `/tmp/team-portal` as a state store.
 - SeaTalk app and data from `SEATALK_LOCAL_APP_PATH` / `SEATALK_LOCAL_DATA_DIR`
 - Source Code Q&A GitLab token from `SOURCE_CODE_QA_GITLAB_TOKEN`
 

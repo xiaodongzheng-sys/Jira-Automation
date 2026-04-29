@@ -32,6 +32,9 @@ from bpmis_jira_tool.web import (
     SourceCodeQASessionStore,
     _generate_productization_detailed_features_with_local_codex,
 )
+from prd_briefing.confluence import ConfluenceConnector
+from prd_briefing.reviewer import PRDReviewRequest, PRDReviewService
+from prd_briefing.storage import BriefingStore
 
 
 BPMIS_PROXY_OPERATIONS = {
@@ -203,6 +206,21 @@ def create_local_agent_app() -> Flask:
             settings=settings,
         )
         return jsonify({"status": "ok", "items": generated})
+
+    @app.post("/api/local-agent/prd-review")
+    def prd_review():
+        payload = request.get_json(silent=True) or {}
+        service = _build_prd_review_service(settings)
+        result = service.review(
+            PRDReviewRequest(
+                owner_key=str(payload.get("owner_key") or ""),
+                jira_id=str(payload.get("jira_id") or ""),
+                jira_link=str(payload.get("jira_link") or ""),
+                prd_url=str(payload.get("prd_url") or ""),
+                force_refresh=bool(payload.get("force_refresh")),
+            )
+        )
+        return jsonify(result)
 
     @app.post("/api/local-agent/source-code-qa/sessions/list")
     def source_code_qa_sessions_list():
@@ -951,6 +969,23 @@ def _build_source_code_qa_runtime_evidence_store(settings: Settings) -> SourceCo
 
 def _build_source_code_qa_model_availability_store(settings: Settings) -> SourceCodeQAModelAvailabilityStore:
     return SourceCodeQAModelAvailabilityStore(_data_root(settings) / "source_code_qa" / "model_availability.json")
+
+
+def _build_prd_review_service(settings: Settings) -> PRDReviewService:
+    store = BriefingStore(_data_root(settings) / "prd_briefing")
+    confluence = ConfluenceConnector(
+        base_url=settings.confluence_base_url,
+        email=settings.confluence_email,
+        api_token=settings.confluence_api_token,
+        bearer_token=settings.confluence_bearer_token,
+        store=store,
+    )
+    return PRDReviewService(
+        store=store,
+        confluence=confluence,
+        settings=settings,
+        workspace_root=Path(__file__).resolve().parent.parent,
+    )
 
 
 def _build_seatalk_todo_store(settings: Settings) -> SeaTalkTodoStore:

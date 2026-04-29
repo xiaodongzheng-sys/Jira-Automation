@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+from bpmis_jira_tool.errors import ToolError
 from bpmis_jira_tool.web import _current_release_revision, create_app
 
 
@@ -19,6 +20,20 @@ class _FakeProxyResponse:
     status_code = 200
     content = b'{"status":"ok","result":[]}'
     headers = {"Content-Type": "application/json", "Content-Length": "27"}
+
+
+class _UnavailableLocalAgentClient:
+    def bpmis_config_load(self, *, user_key):
+        raise ToolError("Mac local-agent is unavailable: connection refused")
+
+    def bpmis_team_profiles_load(self):
+        raise ToolError("Mac local-agent is unavailable: connection refused")
+
+    def source_code_qa_config(self, *, llm_provider=None):
+        raise ToolError("Mac local-agent is unavailable: connection refused")
+
+    def source_code_qa_model_availability_get(self):
+        raise ToolError("Mac local-agent is unavailable: connection refused")
 
 
 class TeamPortalAccessTests(unittest.TestCase):
@@ -127,6 +142,64 @@ class TeamPortalAccessTests(unittest.TestCase):
                 self.assertEqual(response.headers.get("Cache-Control"), "no-store, private, max-age=0")
                 self.assertEqual(response.headers.get("Pragma"), "no-cache")
                 self.assertEqual(response.headers.get("Expires"), "0")
+
+    def test_cloud_run_index_degrades_when_local_agent_is_offline(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_ALLOWED_EMAILS": "allowed@npt.sg",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "LOCAL_AGENT_MODE": "sync",
+                "LOCAL_AGENT_BASE_URL": "https://agent.example",
+                "LOCAL_AGENT_HMAC_SECRET": "shared-secret",
+                "LOCAL_AGENT_BPMIS_ENABLED": "true",
+            },
+            clear=False,
+        ), patch("bpmis_jira_tool.web._build_local_agent_client", return_value=_UnavailableLocalAgentClient()):
+            app = create_app()
+            app.testing = True
+
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["google_profile"] = {"email": "allowed@npt.sg", "name": "Allowed User"}
+                    session["google_credentials"] = {"token": "x"}
+
+                response = client.get("/")
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn(b"Allowed User", response.data)
+            self.assertIn(b"local-agent backed data and actions are temporarily unavailable", response.data)
+
+    def test_source_code_qa_config_reports_local_agent_unavailable_without_500(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "LOCAL_AGENT_MODE": "sync",
+                "LOCAL_AGENT_BASE_URL": "https://agent.example",
+                "LOCAL_AGENT_HMAC_SECRET": "shared-secret",
+                "LOCAL_AGENT_SOURCE_CODE_QA_ENABLED": "true",
+            },
+            clear=False,
+        ), patch("bpmis_jira_tool.web._build_local_agent_client", return_value=_UnavailableLocalAgentClient()):
+            app = create_app()
+            app.testing = True
+
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
+                    session["google_credentials"] = {"token": "x"}
+
+                response = client.get("/api/source-code-qa/config")
+
+            self.assertEqual(response.status_code, 503)
+            payload = response.get_json()
+            self.assertEqual(payload["status"], "error")
+            self.assertEqual(payload["error_category"], "local_agent_unavailable")
 
     def test_google_logout_clears_google_session(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(

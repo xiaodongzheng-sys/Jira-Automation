@@ -5,6 +5,7 @@ from pathlib import Path
 import json
 
 from prd_briefing.confluence import IngestedConfluencePage, ParsedSection
+from prd_briefing.reviewer import PRD_REVIEW_PROMPT_VERSION, build_prd_review_prompt
 from prd_briefing.service import (
     PRDBriefingService,
     build_pm_briefing_blocks,
@@ -161,6 +162,54 @@ class PRDBriefingServiceTests(unittest.TestCase):
         self.assertIn("可优先查看", answer["answer_text"])
         self.assertEqual(answer["groundedness"], "grounded")
         self.assertGreaterEqual(len(answer["citations"]), 1)
+
+    def test_prd_review_prompt_contains_review_dimensions_and_prd_sections(self):
+        page = self.service.confluence.page
+
+        prompt = build_prd_review_prompt(
+            jira_id="AF-123",
+            jira_link="https://jira/browse/AF-123",
+            prd_url=page.source_url,
+            page=page,
+        )
+
+        self.assertIn("业务目标一致性", prompt)
+        self.assertIn("异常场景补漏", prompt)
+        self.assertIn("AF-123", prompt)
+        self.assertIn("This PRD introduces approval workflow", prompt)
+
+    def test_prd_review_result_cache_uses_prd_updated_at_and_prompt_version(self):
+        saved = self.store.save_prd_review_result(
+            owner_key="anon:test",
+            jira_id="AF-123",
+            jira_link="https://jira/browse/AF-123",
+            prd_url="https://example/prd",
+            prd_updated_at="2026-04-28T00:00:00Z",
+            prompt_version=PRD_REVIEW_PROMPT_VERSION,
+            status="completed",
+            result_markdown="### Review",
+            model_id="codex-cli",
+            trace={"session_id": "s1"},
+        )
+
+        cached = self.store.get_prd_review_result(
+            owner_key="anon:test",
+            jira_id="AF-123",
+            prd_url="https://example/prd",
+            prd_updated_at="2026-04-28T00:00:00Z",
+            prompt_version=PRD_REVIEW_PROMPT_VERSION,
+        )
+        stale = self.store.get_prd_review_result(
+            owner_key="anon:test",
+            jira_id="AF-123",
+            prd_url="https://example/prd",
+            prd_updated_at="2026-04-29T00:00:00Z",
+            prompt_version=PRD_REVIEW_PROMPT_VERSION,
+        )
+
+        self.assertEqual(saved["result_markdown"], "### Review")
+        self.assertEqual(cached["trace"]["session_id"], "s1")
+        self.assertIsNone(stale)
 
     def test_unsupported_question_is_declined(self):
         payload = self.service.create_session(

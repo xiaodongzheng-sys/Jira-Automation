@@ -593,7 +593,7 @@ class LocalAgentBPMISClientSelectionTests(unittest.TestCase):
             team_portal_base_url=None,
             team_allowed_emails=(),
             team_allowed_email_domains=(),
-            team_portal_data_dir="/tmp/team-portal",
+            team_portal_data_dir="/workspace/team-portal-runtime",
             spreadsheet_id="sheet",
             common_tab_name="Common",
             input_tab_name="Sheet1",

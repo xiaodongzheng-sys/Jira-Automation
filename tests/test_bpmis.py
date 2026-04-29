@@ -23,6 +23,75 @@ class BPMISClientTests(unittest.TestCase):
                 raise ValueError("no json")
             return self._payload
 
+    def _settings(self, temp_dir: str) -> Settings:
+        return Settings(
+            flask_secret_key="secret",
+            google_oauth_client_secret_file=Path(temp_dir) / "client.json",
+            google_oauth_redirect_uri=None,
+            team_portal_host="127.0.0.1",
+            team_portal_port=5000,
+            team_portal_base_url=None,
+            team_allowed_emails=(),
+            team_allowed_email_domains=(),
+            team_portal_data_dir=Path(temp_dir),
+            spreadsheet_id="sheet",
+            common_tab_name="Common",
+            input_tab_name="Input",
+            bpmis_base_url="https://example.com",
+            bpmis_api_access_token="token",
+        )
+
+    def test_team_dashboard_task_lookup_batches_users_and_caches_parent_detail(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            client = BPMISDirectApiClient(self._settings(temp_dir))
+            calls: list[tuple[str, dict[str, object] | None]] = []
+
+            def fake_api_request(path, method="GET", params=None, body=None):
+                calls.append((path, params))
+                if path == "/api/v1/users/listByEmail":
+                    self.assertEqual(json.loads(params["search"]), ["af@npt.sg", "pm@npt.sg"])
+                    return {
+                        "data": [
+                            {"id": 101, "email": "af@npt.sg"},
+                            {"id": 202, "email": "pm@npt.sg"},
+                        ]
+                    }
+                if path == "/api/v1/issues/list":
+                    return {
+                        "data": {
+                            "rows": [
+                                {
+                                    "id": 1,
+                                    "jiraKey": "AF-1",
+                                    "summary": "First task",
+                                    "creatorId": 101,
+                                    "parentIds": [{"id": 900}],
+                                },
+                                {
+                                    "id": 2,
+                                    "jiraKey": "AF-2",
+                                    "summary": "Second task",
+                                    "creatorId": 202,
+                                    "parentIds": [{"id": 900}],
+                                },
+                            ]
+                        }
+                    }
+                if path == "/api/v1/issues/detail":
+                    self.assertEqual(params["id"], "900")
+                    return {"data": {"id": 900, "summary": "Parent Project", "market": "SG"}}
+                self.fail(f"unexpected API call: {path}")
+
+            client._api_request = fake_api_request  # type: ignore[method-assign]
+
+            tasks = client.list_jira_tasks_created_by_emails(["af@npt.sg", "pm@npt.sg"])
+
+        self.assertEqual([task["jira_id"] for task in tasks], ["AF-1", "AF-2"])
+        self.assertEqual([task["pm_email"] for task in tasks], ["af@npt.sg", "pm@npt.sg"])
+        self.assertEqual(tasks[0]["parent_project"]["project_name"], "Parent Project")
+        self.assertEqual([path for path, _params in calls].count("/api/v1/users/listByEmail"), 1)
+        self.assertEqual([path for path, _params in calls].count("/api/v1/issues/detail"), 1)
+
     def test_build_create_payload_supports_multiple_components_from_comma_separated_value(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             settings = Settings(
@@ -1187,10 +1256,13 @@ class BPMISClientTests(unittest.TestCase):
             )
 
             client = BPMISDirectApiClient(settings)
-            client._resolve_bpmis_user_ids_by_email = lambda email: {  # type: ignore[method-assign]
-                "pm1@npt.sg": [101],
-                "pm2@npt.sg": [202],
-            }.get(email, [])
+            client._resolve_bpmis_user_ids_by_emails = lambda emails: {  # type: ignore[method-assign]
+                email: {
+                    "pm1@npt.sg": [101],
+                    "pm2@npt.sg": [202],
+                }.get(email, [])
+                for email in emails
+            }
             calls = []
 
             def fake_api_request(path, method="GET", params=None, body=None):
