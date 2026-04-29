@@ -1394,6 +1394,65 @@ class BPMISClientTests(unittest.TestCase):
             self.assertEqual(tasks[1]["version"], "Planning_26Q3")
             self.assertEqual(tasks[1]["parent_project"]["bpmis_id"], "225160")
 
+    def test_team_dashboard_jira_lookup_can_cap_pages_and_skip_missing_parent_detail(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings = Settings(
+                flask_secret_key="secret",
+                google_oauth_client_secret_file=Path(temp_dir) / "client.json",
+                google_oauth_redirect_uri=None,
+                team_portal_host="127.0.0.1",
+                team_portal_port=5000,
+                team_portal_base_url=None,
+                team_allowed_emails=(),
+                team_allowed_email_domains=(),
+                team_portal_data_dir=Path(temp_dir),
+                spreadsheet_id="sheet",
+                common_tab_name="Common",
+                input_tab_name="Input",
+                bpmis_base_url="https://example.com",
+                bpmis_api_access_token="token",
+            )
+
+            client = BPMISDirectApiClient(settings)
+            client._resolve_bpmis_user_ids_by_emails = lambda emails: {email: [101] for email in emails}  # type: ignore[method-assign]
+            calls = []
+
+            def fake_api_request(path, method="GET", params=None, body=None):
+                calls.append((path, params))
+                self.assertEqual(path, "/api/v1/issues/list")
+                search = json.loads((params or {}).get("search") or "{}")
+                self.assertEqual(search["page"], 1)
+                return {
+                    "data": {
+                        "rows": [
+                            {
+                                "id": 1000 + index,
+                                "jiraKey": f"AF-{index}",
+                                "summary": f"Task {index}",
+                                "creator": {"id": 101},
+                                "status": {"label": "Testing"},
+                            }
+                            for index in range(200)
+                        ]
+                    }
+                }
+
+            client._api_request = fake_api_request  # type: ignore[method-assign]
+
+            tasks = client.list_jira_tasks_created_by_emails(
+                ["pm@npt.sg"],
+                max_pages=1,
+                enrich_missing_parent=False,
+            )
+
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(len(tasks), 200)
+            self.assertEqual(client.request_stats["issue_list_page_count"], 1)
+            self.assertEqual(client.request_stats["issue_list_page_cap_hit"], 1)
+            self.assertEqual(client.request_stats["issue_rows_scanned"], 200)
+            self.assertEqual(client.request_stats["issue_detail_lookup_count"], 0)
+            self.assertEqual(client.request_stats["issue_detail_enrichment_skipped_count"], 200)
+
 
 if __name__ == "__main__":
     unittest.main()

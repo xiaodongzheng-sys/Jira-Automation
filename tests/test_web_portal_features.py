@@ -1058,8 +1058,8 @@ class WebPortalFeatureTests(unittest.TestCase):
                 def __init__(self):
                     self.calls = []
 
-                def list_jira_tasks_created_by_emails(self, emails):
-                    self.calls.append(list(emails))
+                def list_jira_tasks_created_by_emails(self, emails, **kwargs):
+                    self.calls.append({"emails": list(emails), "kwargs": kwargs})
                     if emails == ["af@npt.sg"]:
                         return [
                             {
@@ -1156,7 +1156,10 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertEqual(af_payload["team"]["team_key"], "AF")
         self.assertEqual([item["jira_id"] for item in af_payload["team"]["pending_live"][0]["jira_tickets"]], ["AF-2"])
         self.assertEqual(unknown_response.status_code, 400)
-        self.assertIn(["af@npt.sg"], fake_client.calls)
+        self.assertIn(
+            {"emails": ["af@npt.sg"], "kwargs": {"max_pages": 5, "enrich_missing_parent": False}},
+            fake_client.calls,
+        )
 
     def test_team_dashboard_tasks_can_load_one_team_at_a_time(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
@@ -1185,8 +1188,8 @@ class WebPortalFeatureTests(unittest.TestCase):
                 def __init__(self):
                     self.calls = []
 
-                def list_jira_tasks_created_by_emails(self, emails):
-                    self.calls.append(list(emails))
+                def list_jira_tasks_created_by_emails(self, emails, **kwargs):
+                    self.calls.append({"emails": list(emails), "kwargs": kwargs})
                     return [
                         {
                             "jira_id": "AF-1",
@@ -1210,7 +1213,10 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertEqual(payload["status"], "ok")
         self.assertEqual(payload["team_key"], "AF")
         self.assertEqual([team["team_key"] for team in payload["teams"]], ["AF"])
-        self.assertEqual(fake_client.calls, [["af@npt.sg"]])
+        self.assertEqual(
+            fake_client.calls,
+            [{"emails": ["af@npt.sg"], "kwargs": {"max_pages": 5, "enrich_missing_parent": False}}],
+        )
 
     def test_team_dashboard_rejects_unknown_single_team(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(

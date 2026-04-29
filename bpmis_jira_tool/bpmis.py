@@ -50,7 +50,13 @@ class BPMISClient(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def list_jira_tasks_created_by_emails(self, emails: list[str]) -> list[dict[str, Any]]:
+    def list_jira_tasks_created_by_emails(
+        self,
+        emails: list[str],
+        *,
+        max_pages: int | None = None,
+        enrich_missing_parent: bool = True,
+    ) -> list[dict[str, Any]]:
         raise NotImplementedError
 
     @abstractmethod
@@ -138,6 +144,10 @@ class BPMISDirectApiClient(BPMISClient):
         self.request_stats: dict[str, int] = {
             "api_call_count": 0,
             "issue_detail_lookup_count": 0,
+            "issue_detail_enrichment_skipped_count": 0,
+            "issue_list_page_cap_hit": 0,
+            "issue_list_page_count": 0,
+            "issue_rows_scanned": 0,
             "user_lookup_count": 0,
         }
 
@@ -387,7 +397,13 @@ class BPMISDirectApiClient(BPMISClient):
             tasks.append(self._normalize_project_jira_task(row))
         return tasks
 
-    def list_jira_tasks_created_by_emails(self, emails: list[str]) -> list[dict[str, Any]]:
+    def list_jira_tasks_created_by_emails(
+        self,
+        emails: list[str],
+        *,
+        max_pages: int | None = None,
+        enrich_missing_parent: bool = True,
+    ) -> list[dict[str, Any]]:
         normalized_emails = self._normalize_email_list(emails)
         if not normalized_emails:
             return []
@@ -401,6 +417,9 @@ class BPMISDirectApiClient(BPMISClient):
         page = 1
         page_size = 200
         while True:
+            if max_pages is not None and page > max(0, int(max_pages)):
+                self.request_stats["issue_list_page_cap_hit"] += 1
+                break
             response = self._api_request(
                 "/api/v1/issues/list",
                 params={
@@ -418,7 +437,9 @@ class BPMISDirectApiClient(BPMISClient):
                     )
                 },
             )
+            self.request_stats["issue_list_page_count"] += 1
             page_rows = (response.get("data") or {}).get("rows") or []
+            self.request_stats["issue_rows_scanned"] += len(page_rows)
             rows.extend(page_rows)
             if len(page_rows) < page_size:
                 break
@@ -438,17 +459,19 @@ class BPMISDirectApiClient(BPMISClient):
                 seen_issue_ids.add(dedupe_key)
 
             matched_email = self._creator_email_for_row(row, normalized_emails, user_id_texts_by_email)
-            if not matched_email and issue_id and not self._issue_has_creator_value(row):
+            if enrich_missing_parent and not matched_email and issue_id and not self._issue_has_creator_value(row):
                 detail = self.get_issue_detail(issue_id)
                 if detail:
                     row = self._merge_issue_payloads(row, detail)
                     matched_email = self._creator_email_for_row(row, normalized_emails, user_id_texts_by_email)
             if not matched_email:
                 continue
-            if issue_id and not self._extract_parent_issue_ids(row):
+            if enrich_missing_parent and issue_id and not self._extract_parent_issue_ids(row):
                 detail = self.get_issue_detail(issue_id)
                 if detail:
                     row = self._merge_issue_payloads(row, detail)
+            elif issue_id and not self._extract_parent_issue_ids(row):
+                self.request_stats["issue_detail_enrichment_skipped_count"] += 1
             parent_project = self._parent_project_for_task(row, parent_project_cache)
             tasks.append(self._normalize_team_dashboard_jira_task(row, pm_email=matched_email, parent_project=parent_project))
         return tasks

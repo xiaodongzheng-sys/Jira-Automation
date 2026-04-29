@@ -3478,7 +3478,11 @@ def create_app() -> Flask:
             emails = _normalize_team_dashboard_emails(team_config.get("member_emails") or [])
             started_at = time.monotonic()
             try:
-                tasks = bpmis_client.list_jira_tasks_created_by_emails(emails)
+                tasks = bpmis_client.list_jira_tasks_created_by_emails(
+                    emails,
+                    max_pages=_team_dashboard_jira_max_pages(),
+                    enrich_missing_parent=False,
+                )
                 team_payload = _build_team_dashboard_task_group(team_key, label, emails, tasks)
                 team_payload["elapsed_seconds"] = round(time.monotonic() - started_at, 2)
                 team_payload["fetch_stats"] = _team_dashboard_fetch_stats(bpmis_client)
@@ -5565,8 +5569,24 @@ def _team_dashboard_fetch_stats(bpmis_client: Any) -> dict[str, int]:
         return {}
     return {
         key: int(stats.get(key) or 0)
-        for key in ("api_call_count", "issue_detail_lookup_count", "user_lookup_count")
+        for key in (
+            "api_call_count",
+            "issue_detail_lookup_count",
+            "issue_detail_enrichment_skipped_count",
+            "issue_list_page_cap_hit",
+            "issue_list_page_count",
+            "issue_rows_scanned",
+            "user_lookup_count",
+        )
     }
+
+
+def _team_dashboard_jira_max_pages() -> int:
+    raw_value = str(os.getenv("TEAM_DASHBOARD_JIRA_MAX_PAGES") or "5").strip()
+    try:
+        return max(1, int(raw_value))
+    except ValueError:
+        return 5
 
 
 def _normalize_team_dashboard_task(task: dict[str, Any]) -> dict[str, Any]:
