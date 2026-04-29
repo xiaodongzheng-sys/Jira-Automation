@@ -613,6 +613,85 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         self.assertEqual(len(payload["team_member_reminders"]), MAX_TEAM_MEMBER_REMINDERS)
         self.assertEqual(len(payload["my_todos"]), MAX_MY_TODOS)
 
+    def test_build_daily_briefing_adds_pm_action_layers_and_quality_metadata(self):
+        class ActionLayerService(FakeSeaTalkService):
+            def _run_codex_insights_prompt(self, *, prompt, system_prompt):
+                self.last_prompt = prompt
+                return None, {
+                    "project_updates": [
+                        {
+                            "domain": "Ops Risk",
+                            "title": "GRC audit history",
+                            "summary": "PH GRC audit-history access is still pending confirmation and tomorrow clarify whether generate report needs separate audit log.",
+                            "status": "done",
+                            "evidence": "GRC evaluation group",
+                            "source_type": "seatalk",
+                        }
+                    ],
+                    "other_updates": [
+                        {
+                            "domain": "General",
+                            "title": "P2M surveillance risk",
+                            "summary": "Launching before the 21 May AF surveillance fix may leave P2M without real-time fraud surveillance and require MAS/ITC endorsement.",
+                            "status": "in_progress",
+                            "evidence": "CrossTeam P2M x MSA/MCC",
+                            "source_type": "gmail",
+                            "signal_type": "risk_compliance",
+                        }
+                    ],
+                    "team_member_reminders": [
+                        {
+                            "domain": "Ops Risk",
+                            "person": "Sabrina Chan",
+                            "reminder": "Follow up tomorrow on the GRC audit-history access and generate-report audit-log expectation.",
+                            "evidence": "GRC evaluation group",
+                            "source_type": "seatalk",
+                        }
+                    ],
+                    "my_todos": [
+                        {
+                            "task": "Review the SeaBank Direct Debit PRD and answer the two open questions.",
+                            "domain": "Anti-fraud",
+                            "priority": "high",
+                            "due": "TBD",
+                            "evidence": "Rene Chong direct chat",
+                            "source_type": "seatalk",
+                        },
+                        {
+                            "task": "Ensure PH follows up tomorrow on GRC audit-history access and audit-log expectations.",
+                            "domain": "Ops Risk",
+                            "priority": "high",
+                            "due": "2026-04-30",
+                            "evidence": "GRC evaluation group",
+                            "source_type": "seatalk",
+                        },
+                    ],
+                    "team_todos": [],
+                }
+
+        now = datetime(2026, 4, 29, 19, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE)
+        service = ActionLayerService("SeaTalk Chat History Export\n[2026-04-29 18:30:00] Bob: please review\n")
+        payload = build_daily_briefing(
+            service,
+            now=now,
+            gmail_history_text="Gmail thread history export\nMessage 1\nBody:\nMAS launch risk\n",
+        )
+
+        self.assertIn("action_type", service.last_prompt)
+        self.assertEqual([item["action_type"] for item in payload["direct_action_todos"]], ["direct_action"])
+        self.assertEqual([item["action_type"] for item in payload["watch_delegate_todos"]], ["watch_delegate"])
+        self.assertEqual(payload["project_updates"][0]["status"], "in_progress")
+        self.assertEqual(payload["other_updates"][0]["status"], "blocked")
+        self.assertEqual(payload["other_updates"][0]["risk_level"], "high")
+        self.assertEqual(payload["other_updates"][0]["signal_type"], "risk_compliance")
+        self.assertTrue(payload["top_focus"])
+        self.assertLessEqual(len(payload["top_focus"]), 3)
+        self.assertEqual(payload["quality_metadata"]["source_coverage"], "SeaTalk + Gmail")
+        self.assertEqual(payload["quality_metadata"]["high_confidence_todo_count"], 1)
+        self.assertGreaterEqual(payload["quality_metadata"]["deduped_topic_count"], 1)
+        self.assertIn("GRC evaluation group", payload["watch_delegate_todos"][0]["evidence"])
+        self.assertIn("GRC evaluation group", payload["team_member_reminders"][0]["evidence"])
+
     def test_render_email_handles_empty_partial_and_full_sections(self):
         now = datetime(2026, 4, 27, 19, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE)
         subject, text_body, html_body = render_email(briefing={"my_todos": [], "project_updates": []}, now=now)
@@ -638,8 +717,13 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         self.assertIn("Deck was refreshed. [Status: Done]", html_body)
         self.assertIn("Other Update", text_body)
         self.assertIn("A policy dependency may affect downstream rollout planning. [Status: In Progress]", html_body)
-        self.assertIn("Team Member Reminder", text_body)
+        self.assertIn("Suggested Team Follow-up", text_body)
         self.assertIn("Ker Yin: Please check whether the pending GRC confirmation still needs owner follow-up.", html_body)
+        self.assertIn("Today Focus", text_body)
+        self.assertIn("Xiaodong Action Required", text_body)
+        self.assertIn("Watch / Delegate", text_body)
+        self.assertNotIn("Generation Quality", text_body)
+        self.assertNotIn("Generation Quality", html_body)
 
     def test_gmail_raw_message_contains_expected_headers_and_body(self):
         raw = build_gmail_raw_message(

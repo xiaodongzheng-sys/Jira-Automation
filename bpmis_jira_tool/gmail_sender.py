@@ -8,9 +8,9 @@ from typing import Any
 
 from cryptography.fernet import Fernet, InvalidToken
 from google.oauth2.credentials import Credentials
-from googleapiclient.discovery import build
 
 from bpmis_jira_tool.errors import ConfigError, ToolError
+from bpmis_jira_tool.gmail_dashboard import build_gmail_api_service
 
 
 GMAIL_SEND_SCOPE = "https://www.googleapis.com/auth/gmail.send"
@@ -108,7 +108,7 @@ def send_gmail_message(
     html_body: str | None = None,
     gmail_service: Any | None = None,
 ) -> dict[str, Any]:
-    service = gmail_service or build("gmail", "v1", credentials=credentials)
+    service = gmail_service or build_gmail_api_service(credentials)
     raw = build_gmail_raw_message(
         sender=sender,
         recipient=recipient,

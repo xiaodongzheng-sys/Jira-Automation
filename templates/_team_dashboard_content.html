@@ -7,6 +7,7 @@
   {% if can_view_team_dashboard_monthly_report %}
     data-monthly-report-template-url="{{ url_for('team_dashboard_monthly_report_template') }}"
     data-monthly-report-template-save-url="{{ url_for('save_team_dashboard_monthly_report_template') }}"
+    data-monthly-report-latest-draft-url="{{ url_for('team_dashboard_monthly_report_latest_draft') }}"
     data-monthly-report-draft-url="{{ url_for('team_dashboard_monthly_report_draft') }}"
     data-monthly-report-send-url="{{ url_for('team_dashboard_monthly_report_send') }}"
   {% endif %}

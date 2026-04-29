@@ -333,6 +333,26 @@ class JobStore:
         }
         return payload
 
+    def latest_completed_result(self, action: str) -> dict[str, Any] | None:
+        with self._lock:
+            self._refresh_locked()
+            candidates = [
+                job
+                for job in self._jobs.values()
+                if job.action == action and job.state == "completed" and job.results
+            ]
+            if not candidates:
+                return None
+            latest = max(candidates, key=lambda item: item.updated_at)
+            result = latest.results[0] if latest.results else {}
+            if not isinstance(result, dict):
+                return None
+            return {
+                **result,
+                "job_id": latest.job_id,
+                "generated_at": latest.updated_at,
+            }
+
 
 class TeamDashboardConfigStore:
     CONFIG_KEY = "team_dashboard"
@@ -3447,6 +3467,25 @@ def create_app() -> Flask:
             }
         )
 
+    @app.get("/api/team-dashboard/monthly-report/latest-draft")
+    def team_dashboard_monthly_report_latest_draft():
+        access_gate = _require_team_dashboard_monthly_report_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        result = current_app.config["JOB_STORE"].latest_completed_result("team-dashboard-monthly-report-draft")
+        draft_markdown = str((result or {}).get("draft_markdown") or "").strip()
+        if not draft_markdown:
+            return jsonify({"status": "empty", "draft_markdown": ""})
+        return jsonify(
+            {
+                "status": "ok",
+                "draft_markdown": draft_markdown,
+                "subject": monthly_report_subject(),
+                "job_id": (result or {}).get("job_id") or "",
+                "generated_at": (result or {}).get("generated_at") or 0,
+            }
+        )
+
     @app.post("/admin/team-dashboard/monthly-report-template")
     def save_team_dashboard_monthly_report_template():
         access_gate = _require_team_dashboard_monthly_report_access(settings, api=True)
@@ -5950,6 +5989,7 @@ def _build_team_dashboard_task_group(
     under_prd_biz_projects, pending_live_biz_projects = _split_team_dashboard_biz_projects_by_status(biz_projects or [])
     under_prd_projects = _group_team_dashboard_tasks_by_project(under_prd)
     under_prd_projects = _merge_team_dashboard_biz_projects(under_prd_projects, under_prd_biz_projects)
+    _sort_team_dashboard_under_prd_projects(under_prd_projects)
     pending_live_projects = _group_team_dashboard_tasks_by_project(pending_live, sort_by_release=True)
     pending_live_projects = _merge_team_dashboard_biz_projects(
         pending_live_projects,
@@ -6066,6 +6106,8 @@ def _backfill_team_dashboard_empty_project_jira_tasks(bpmis_client: Any, team_pa
             project["jira_tickets"] = tickets
             project["task_count"] = len(tickets)
             _apply_team_dashboard_project_release_date(project)
+        if section_key == "under_prd":
+            _sort_team_dashboard_under_prd_projects(projects)
 
 
 def _remove_team_dashboard_zero_jira_pending_live_projects(team_payload: dict[str, Any]) -> None:
@@ -6356,6 +6398,31 @@ def _parse_team_dashboard_release_date(value: Any) -> tuple[time.struct_time | N
 
 def _team_dashboard_project_name_sort_key(project: dict[str, Any]) -> tuple[str, str]:
     return (
+        str(project.get("project_name") or "").casefold(),
+        str(project.get("bpmis_id") or "").casefold(),
+    )
+
+
+def _sort_team_dashboard_under_prd_projects(projects: list[dict[str, Any]]) -> None:
+    projects.sort(key=_team_dashboard_under_prd_project_sort_key)
+
+
+def _team_dashboard_under_prd_project_sort_key(project: dict[str, Any]) -> tuple[int, str, str, str]:
+    release_sort = str(project.get("release_date_sort") or "").strip()
+    if not release_sort:
+        parsed, _text = _parse_team_dashboard_release_date(project.get("release_date"))
+        if parsed:
+            release_sort = time.strftime("%Y-%m-%d", parsed)
+    jira_count = len(project.get("jira_tickets") or [])
+    if release_sort:
+        bucket = 0
+    elif jira_count > 0:
+        bucket = 1
+    else:
+        bucket = 2
+    return (
+        bucket,
+        release_sort,
         str(project.get("project_name") or "").casefold(),
         str(project.get("bpmis_id") or "").casefold(),
     )

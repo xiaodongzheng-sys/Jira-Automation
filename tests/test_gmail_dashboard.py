@@ -13,6 +13,7 @@ from bpmis_jira_tool.gmail_dashboard import (
     GMAIL_EXPORT_EXCLUDED_SENDERS,
     GMAIL_EXPORT_MAX_TOTAL_MESSAGES,
     GmailDashboardService,
+    build_gmail_api_service,
     _build_export_query,
     _build_thread_export_query,
     _clean_export_body_text,
@@ -80,6 +81,19 @@ class _FakeThreadsApi:
 class GmailDashboardServiceTests(unittest.TestCase):
     def setUp(self):
         GmailDashboardService.clear_cache()
+
+    def test_gmail_api_service_uses_bounded_http_timeout(self):
+        credentials = object()
+        with patch.dict("os.environ", {"GMAIL_HTTP_TIMEOUT_SECONDS": "7"}):
+            with patch("bpmis_jira_tool.gmail_dashboard.httplib2.Http") as http_cls:
+                with patch("bpmis_jira_tool.gmail_dashboard.google_auth_httplib2.AuthorizedHttp") as auth_http_cls:
+                    with patch("bpmis_jira_tool.gmail_dashboard.build") as build_mock:
+                        result = build_gmail_api_service(credentials)
+
+        http_cls.assert_called_once_with(timeout=7)
+        auth_http_cls.assert_called_once_with(credentials, http=http_cls.return_value)
+        build_mock.assert_called_once_with("gmail", "v1", http=auth_http_cls.return_value, cache_discovery=False)
+        self.assertEqual(result, build_mock.return_value)
 
     def test_build_dashboard_aggregates_mailbox_metrics(self):
         now = datetime(2026, 4, 21, 16, 0).astimezone()

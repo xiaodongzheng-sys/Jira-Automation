@@ -173,8 +173,13 @@ class PRDBriefingServiceTests(unittest.TestCase):
             page=page,
         )
 
-        self.assertIn("业务目标一致性", prompt)
-        self.assertIn("异常场景补漏", prompt)
+        self.assertIn("不问商业价值", prompt)
+        self.assertIn("不管技术细节", prompt)
+        self.assertIn("主流程的绝对闭环", prompt)
+        self.assertIn("异常分支与逆向流程", prompt)
+        self.assertIn("规则冲突与严密性", prompt)
+        self.assertIn("执行逻辑体检结论", prompt)
+        self.assertIn("必须补齐的异常分支", prompt)
         self.assertIn("AF-123", prompt)
         self.assertIn("This PRD introduces approval workflow", prompt)
 

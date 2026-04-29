@@ -28,6 +28,7 @@ MAX_PROJECT_UPDATES = 10
 MAX_OTHER_UPDATES = 8
 MAX_TEAM_MEMBER_REMINDERS = 8
 MAX_USEFUL_AWARENESS_OTHER_UPDATES = 5
+MAX_TOP_FOCUS_ITEMS = 3
 ALLOWED_OTHER_UPDATE_SIGNAL_TYPES = {
     "incident",
     "launch",
@@ -99,6 +100,48 @@ TEAM_MEMBER_REMINDER_DOMAIN_OVERRIDES = {
     "sophia wang zijun": "Credit Risk",
 }
 RAW_SEATALK_ID_PATTERN = re.compile(r"\b(?:group|buddy)-\d+\b|\bUID\s+\d+\b", re.IGNORECASE)
+TODO_ACTION_TYPES = {"direct_action", "watch_delegate"}
+WATCH_DELEGATE_HINTS = (
+    "ensure ",
+    "follow up with",
+    "check with",
+    "monitor",
+    "confirm team",
+    "confirm with",
+    "make sure",
+)
+DIRECT_ACTION_HINTS = (
+    "answer",
+    "review",
+    "attend",
+    "drive",
+    "decide",
+    "approve",
+    "reply",
+    "send",
+    "prepare",
+    "provide",
+    "join",
+)
+PENDING_STATUS_HINTS = (
+    "pending confirmation",
+    "still pending",
+    "tomorrow clarify",
+    "tomorrow's location meeting",
+    "no fixed date",
+    "not fixed",
+    "awaiting confirmation",
+)
+RISK_BLOCKED_HINTS = (
+    "blocked",
+    "mas",
+    "launching before",
+    "launch before",
+    "risk endorsement",
+    "itc endorsement",
+    "real-time fraud surveillance",
+    "without real-time",
+)
 
 
 @dataclass(frozen=True)
@@ -218,12 +261,26 @@ def build_daily_briefing(
     seatalk_has_messages = any(line.startswith("[") for line in history_text.splitlines())
     gmail_has_messages = any(line.startswith("Message ") for line in gmail_history_text.splitlines())
     if not seatalk_has_messages and not gmail_has_messages:
+        quality_metadata = _build_quality_metadata(
+            project_updates=[],
+            other_updates=[],
+            my_todos=[],
+            direct_action_todos=[],
+            watch_delegate_todos=[],
+            reminders=[],
+            source_texts=[history_text, gmail_history_text],
+            deduped_topic_count=0,
+        )
         return {
             "project_updates": [],
             "other_updates": [],
             "my_todos": [],
+            "direct_action_todos": [],
+            "watch_delegate_todos": [],
+            "top_focus": [],
             "team_member_reminders": [],
             "team_todos": [],
+            "quality_metadata": quality_metadata,
             "generated_at": local_now.isoformat(),
             "period_hours": hours,
         }
@@ -245,23 +302,57 @@ def build_daily_briefing(
         ),
     )
     name_mappings = _load_seatalk_name_mappings(service)
-    project_updates = _dedupe_brief_items(_normalize_brief_items(parsed.get("project_updates", []), name_mappings=name_mappings))[:MAX_PROJECT_UPDATES]
-    other_updates = _dedupe_brief_items(_filter_other_updates(_normalize_brief_items(parsed.get("other_updates", []), name_mappings=name_mappings)))[
-        :MAX_OTHER_UPDATES
-    ]
-    my_todos = _dedupe_brief_items(_normalize_brief_items(parsed.get("my_todos", []), name_mappings=name_mappings), text_fields=("task",))[:MAX_MY_TODOS]
+    project_updates = _dedupe_brief_items(
+        _normalize_update_items(_normalize_brief_items(parsed.get("project_updates", []), name_mappings=name_mappings))
+    )[:MAX_PROJECT_UPDATES]
+    other_updates = _dedupe_brief_items(
+        _filter_other_updates(_normalize_update_items(_normalize_brief_items(parsed.get("other_updates", []), name_mappings=name_mappings)))
+    )[:MAX_OTHER_UPDATES]
+    my_todos = _dedupe_brief_items(
+        _normalize_todo_items(_normalize_brief_items(parsed.get("my_todos", []), name_mappings=name_mappings)),
+        text_fields=("task",),
+    )[:MAX_MY_TODOS]
     reminders = _dedupe_brief_items(
         _filter_seatalk_reminders(
             _normalize_brief_items(parsed.get("team_member_reminders", []), default_source_type="seatalk", name_mappings=name_mappings)
         ),
         text_fields=("person", "reminder"),
     )[:MAX_TEAM_MEMBER_REMINDERS]
+    my_todos = SeaTalkDashboardService._sort_todos(my_todos)
+    direct_action_todos, watch_delegate_todos = _split_todos_by_action_type(my_todos)
+    deduped_topic_count = _apply_cross_section_topic_metadata(
+        project_updates=project_updates,
+        other_updates=other_updates,
+        my_todos=my_todos,
+        reminders=reminders,
+    )
+    top_focus = _select_top_focus(
+        direct_action_todos=direct_action_todos,
+        watch_delegate_todos=watch_delegate_todos,
+        project_updates=project_updates,
+        other_updates=other_updates,
+        now=local_now,
+    )
+    quality_metadata = _build_quality_metadata(
+        project_updates=project_updates,
+        other_updates=other_updates,
+        my_todos=my_todos,
+        direct_action_todos=direct_action_todos,
+        watch_delegate_todos=watch_delegate_todos,
+        reminders=reminders,
+        source_texts=[history_text, gmail_history_text],
+        deduped_topic_count=deduped_topic_count,
+    )
     return {
         "project_updates": project_updates,
         "other_updates": other_updates,
-        "my_todos": SeaTalkDashboardService._sort_todos(my_todos),
+        "my_todos": my_todos,
+        "direct_action_todos": direct_action_todos,
+        "watch_delegate_todos": watch_delegate_todos,
+        "top_focus": top_focus,
         "team_member_reminders": reminders,
         "team_todos": [],
+        "quality_metadata": quality_metadata,
         "generated_at": local_now.isoformat(),
         "period_hours": hours,
     }
@@ -271,18 +362,41 @@ def render_email(*, briefing: dict[str, Any], now: datetime) -> tuple[str, str, 
     local_now = now.astimezone(SEATALK_INSIGHTS_TIMEZONE)
     subject = f"Daily Brief - {local_now.date().isoformat()}"
     todos = [item for item in briefing.get("my_todos") or [] if isinstance(item, dict)]
+    direct_action_todos = [item for item in briefing.get("direct_action_todos") or [] if isinstance(item, dict)]
+    watch_delegate_todos = [item for item in briefing.get("watch_delegate_todos") or [] if isinstance(item, dict)]
+    if not direct_action_todos and not watch_delegate_todos:
+        direct_action_todos, watch_delegate_todos = _split_todos_by_action_type(_normalize_todo_items(todos))
     updates = [item for item in briefing.get("project_updates") or [] if isinstance(item, dict)]
     other_updates = [item for item in briefing.get("other_updates") or [] if isinstance(item, dict)]
     reminders = [item for item in briefing.get("team_member_reminders") or [] if isinstance(item, dict)]
+    top_focus = [item for item in briefing.get("top_focus") or [] if isinstance(item, dict)]
+    if not top_focus:
+        top_focus = _select_top_focus(
+            direct_action_todos=direct_action_todos,
+            watch_delegate_todos=watch_delegate_todos,
+            project_updates=updates,
+            other_updates=other_updates,
+            now=local_now,
+        )
     text_lines = [
         f"Subject: {subject}",
         "",
-        "To-do",
+        "Today Focus",
     ]
-    if not todos:
+    if not top_focus:
+        text_lines.append("- No urgent focus item found in the briefing window.")
+    else:
+        text_lines.extend(_render_focus_text(top_focus))
+    text_lines.extend(["", "To-do", "", "Xiaodong Action Required"])
+    if not direct_action_todos:
         text_lines.append("- No clear Xiaodong-owned to-do found in the briefing window.")
     else:
-        text_lines.extend(_render_grouped_text(todos, kind="todo"))
+        text_lines.extend(_render_grouped_text(direct_action_todos, kind="todo"))
+    text_lines.extend(["", "Watch / Delegate"])
+    if not watch_delegate_todos:
+        text_lines.append("- No watch/delegate item found.")
+    else:
+        text_lines.extend(_render_grouped_text(watch_delegate_todos, kind="todo"))
     text_lines.extend(["", "Project Updates"])
     if not updates:
         text_lines.append("- No clear project update found in the briefing window.")
@@ -293,7 +407,7 @@ def render_email(*, briefing: dict[str, Any], now: datetime) -> tuple[str, str, 
         text_lines.append("- No additional high-value awareness update found in the briefing window.")
     else:
         text_lines.extend(_render_grouped_text(other_updates, kind="update"))
-    text_lines.extend(["", "Team Member Reminder"])
+    text_lines.extend(["", "Suggested Team Follow-up"])
     if not reminders:
         text_lines.append("- No unresolved SeaTalk team-member mention found in the briefing window.")
     else:
@@ -302,13 +416,18 @@ def render_email(*, briefing: dict[str, Any], now: datetime) -> tuple[str, str, 
     html_body = (
         "<html><body>"
         f"<h2>{html.escape(subject)}</h2>"
+        "<h3>Today Focus</h3>"
+        f"{_render_focus_html(top_focus)}"
         "<h3>To-do</h3>"
-        f"{_render_grouped_html(todos, kind='todo')}"
+        "<h4>Xiaodong Action Required</h4>"
+        f"{_render_grouped_html(direct_action_todos, kind='todo')}"
+        "<h4>Watch / Delegate</h4>"
+        f"{_render_grouped_html(watch_delegate_todos, kind='watch_todo')}"
         "<h3>Project Updates</h3>"
         f"{_render_grouped_html(updates, kind='update')}"
         "<h3>Other Update</h3>"
         f"{_render_grouped_html(other_updates, kind='other')}"
-        "<h3>Team Member Reminder</h3>"
+        "<h3>Suggested Team Follow-up</h3>"
         f"{_render_grouped_html(reminders, kind='reminder')}"
         "</body></html>"
     )
@@ -388,18 +507,20 @@ def _daily_brief_user_prompt(
         "Return a JSON object with exactly these top-level keys: project_updates, other_updates, my_todos, team_member_reminders, team_todos.\n"
         "project_updates: array of objects with keys domain, title, summary, status, evidence, source_type.\n"
         "other_updates: array of objects with keys domain, title, summary, status, evidence, source_type, signal_type.\n"
-        "my_todos: array of objects with keys task, domain, priority, due, evidence, source_type.\n"
+        "my_todos: array of objects with keys task, domain, priority, due, evidence, source_type, action_type.\n"
         "team_member_reminders: array of objects with keys domain, person, reminder, evidence, source_type.\n"
         "team_todos must always be an empty array.\n\n"
         "## Allowed Values\n"
         "domain: Anti-fraud, Credit Risk, Ops Risk, General.\n"
         "status: done, in_progress, blocked, unknown.\n"
         "priority: high, medium, low, unknown.\n"
+        "action_type: direct_action or watch_delegate.\n"
         "source_type: seatalk, gmail, mixed. Use mixed only when one synthesized item is supported by both SeaTalk and Gmail.\n"
         "other_updates.signal_type: incident, launch, policy_process, risk_compliance, cross_team_dependency, leadership_decision, cross_product_milestone, useful_awareness.\n"
         "If an other_updates item is useful but does not fit a stronger signal type, set signal_type to useful_awareness. Do not omit signal_type.\n\n"
         "## Section Rules\n"
-        "my_todos: include only Xiaodong-owned actions, decisions needed from Xiaodong, or follow-ups Xiaodong clearly needs to drive. Do not include tasks owned by other people. Max 8 items. Sort high priority first, then earliest due date, then most actionable.\n"
+        "my_todos: include only Xiaodong-owned actions, decisions needed from Xiaodong, follow-ups Xiaodong clearly needs to drive, or watch/delegate items where Xiaodong should ensure another owner follows through. Do not include tasks fully owned by other people with no Xiaodong follow-up value. Max 8 items. Sort high priority first, then earliest due date, then most actionable.\n"
+        "For each my_todos item, set action_type=direct_action only when Xiaodong must personally reply, decide, review, approve, attend, provide, or drive the next step. Set action_type=watch_delegate when Xiaodong mainly needs to monitor, ensure, follow up with someone, check with a team, or confirm another owner follows through.\n"
         "project_updates: include updates from SeaTalk or Gmail where Xiaodong is involved, mentioned, directly asked, or clearly participating. Summarize the decision, milestone, blocker, or current state. Max 10 items. Sort blocked and in_progress before done.\n"
         "other_updates: include useful awareness from SeaTalk or Gmail where Xiaodong is not directly involved but the information may matter to a Digital Banking PM. Prioritize incident, launch, policy/process, risk/compliance, cross-team dependency, leadership decision, and cross-product milestone. Include at most 5 useful_awareness items and at most 8 other_updates total. Do not include generic chatter, greetings, pure thanks, meeting logistics with no decision, or low-value FYI.\n"
         "team_member_reminders: use SeaTalk only. Never create these from Gmail. Only include people from the explicit allowed reminder list below. Max 8 items. Sort by most actionable first.\n\n"
@@ -417,6 +538,10 @@ def _daily_brief_user_prompt(
         "Do not output unresolved raw SeaTalk IDs such as group-123, buddy-123, or UID 123 in evidence. Use mapped display names when visible; otherwise use a generic label such as SeaTalk group or SeaTalk contact.\n"
         "For Gmail thread messages marked context only, use them only to understand the in-window message; never summarize context-only messages as new To-do, Project Updates, or Other Updates.\n"
         "Merge duplicate items across SeaTalk and Gmail when they refer to the same project, owner, decision, task, or milestone. Keep one synthesized item and use source_type mixed when both sources support it.\n\n"
+        "## Quality Rules\n"
+        "Use status=done only when the outcome is fully complete. If an item says pending confirmation, still pending, tomorrow clarify, no fixed date, or awaiting confirmation, use status=in_progress or unknown, not done.\n"
+        "If an item mentions MAS, launch before a fix, risk endorsement, ITC endorsement, blocked, or missing real-time fraud surveillance, treat it as high-risk and prefer status=blocked or signal_type=risk_compliance when appropriate.\n"
+        "Avoid repeating the same topic across sections unless each section has a distinct role: Xiaodong next action, project state, or team member follow-up.\n\n"
         "## Exclusions\n"
         "For other_updates and team_member_reminders, ignore bot-generated alerts, automated reminders, system notifications, Jira/Confluence/calendar reminders, and no-reply notification emails unless a human adds meaningful follow-up in the same thread.\n\n"
         "## Formatting Inside JSON\n"
@@ -523,6 +648,244 @@ def _normalize_brief_items(
             clean["signal_type"] = _normalize_signal_type(clean.get("signal_type"))
         normalized.append(clean)
     return normalized
+
+
+def _normalize_todo_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for item in items:
+        clean = dict(item)
+        clean["domain"] = _display_domain(clean.get("domain"))
+        clean["priority"] = _normalize_priority(clean.get("priority"))
+        clean["due"] = _display_due(clean.get("due"))
+        clean["action_type"] = _classify_todo_action_type(clean)
+        normalized.append(clean)
+    return normalized
+
+
+def _normalize_update_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for item in items:
+        clean = dict(item)
+        clean["domain"] = _display_domain(clean.get("domain"))
+        clean["status"] = _correct_update_status(clean)
+        if _is_risk_blocked_item(clean):
+            clean["risk_level"] = "high"
+            if clean.get("status") in {"done", "unknown"}:
+                clean["status"] = "blocked"
+            if "signal_type" in clean:
+                clean["signal_type"] = "risk_compliance"
+        normalized.append(clean)
+    return normalized
+
+
+def _classify_todo_action_type(item: dict[str, Any]) -> str:
+    raw = str(item.get("action_type") or "").strip().lower().replace("-", "_")
+    if raw in TODO_ACTION_TYPES:
+        return raw
+    task = _item_text(item, fields=("task", "title", "summary"))
+    if "join or monitor" in task or "monitor" in task:
+        return "watch_delegate"
+    if any(hint in task for hint in WATCH_DELEGATE_HINTS) and not any(
+        hint in task for hint in ("answer", "review", "attend", "decide", "approve", "reply")
+    ):
+        return "watch_delegate"
+    if any(hint in task for hint in DIRECT_ACTION_HINTS):
+        return "direct_action"
+    return "direct_action"
+
+
+def _split_todos_by_action_type(items: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    direct: list[dict[str, Any]] = []
+    watch: list[dict[str, Any]] = []
+    for item in _normalize_todo_items(items):
+        if item.get("action_type") == "watch_delegate":
+            watch.append(item)
+        else:
+            direct.append(item)
+    return SeaTalkDashboardService._sort_todos(direct), SeaTalkDashboardService._sort_todos(watch)
+
+
+def _correct_update_status(item: dict[str, Any]) -> str:
+    status = str(item.get("status") or "unknown").strip().lower().replace("-", "_").replace(" ", "_")
+    if status not in {"done", "in_progress", "blocked", "unknown"}:
+        status = "unknown"
+    text = _item_text(item)
+    if any(hint in text for hint in PENDING_STATUS_HINTS) and status == "done":
+        return "in_progress"
+    if _is_risk_blocked_item(item):
+        return "blocked"
+    return status
+
+
+def _is_risk_blocked_item(item: dict[str, Any]) -> bool:
+    text = _item_text(item)
+    return any(hint in text for hint in RISK_BLOCKED_HINTS)
+
+
+def _apply_cross_section_topic_metadata(
+    *,
+    project_updates: list[dict[str, Any]],
+    other_updates: list[dict[str, Any]],
+    my_todos: list[dict[str, Any]],
+    reminders: list[dict[str, Any]],
+) -> int:
+    sectioned_items = [
+        ("project_updates", item) for item in project_updates
+    ] + [
+        ("other_updates", item) for item in other_updates
+    ] + [
+        ("my_todos", item) for item in my_todos
+    ] + [
+        ("team_member_reminders", item) for item in reminders
+    ]
+    topics: dict[str, dict[str, Any]] = {}
+    for section, item in sectioned_items:
+        key = _topic_key(item)
+        if not key:
+            continue
+        item["topic_key"] = key
+        topic = topics.setdefault(key, {"sections": set(), "evidence": ""})
+        topic["sections"].add(section)
+        topic["evidence"] = _merge_evidence(topic.get("evidence"), item.get("evidence"))
+    deduped_topic_count = 0
+    for section, item in sectioned_items:
+        key = item.get("topic_key")
+        if not key or key not in topics:
+            continue
+        topic = topics[key]
+        if len(topic["sections"]) > 1:
+            item["evidence"] = topic["evidence"]
+            item["cross_section_duplicate"] = True
+            deduped_topic_count += 1
+    return deduped_topic_count
+
+
+def _topic_key(item: dict[str, Any]) -> str:
+    evidence_key = _normalize_dedupe_text(str(item.get("evidence") or ""))
+    if evidence_key:
+        return f"{_display_domain(item.get('domain')).lower()}:source:{evidence_key[:80]}"
+    text = " ".join(
+        str(item.get(field) or "")
+        for field in ("domain", "title", "summary", "task", "reminder", "evidence")
+    )
+    normalized = _normalize_dedupe_text(text)
+    if not normalized:
+        return ""
+    return f"{_display_domain(item.get('domain')).lower()}:{normalized[:120]}"
+
+
+def _select_top_focus(
+    *,
+    direct_action_todos: list[dict[str, Any]],
+    watch_delegate_todos: list[dict[str, Any]],
+    project_updates: list[dict[str, Any]],
+    other_updates: list[dict[str, Any]],
+    now: datetime,
+) -> list[dict[str, Any]]:
+    candidates: list[tuple[int, dict[str, Any]]] = []
+    for item in direct_action_todos:
+        score = 70
+        if _normalize_priority(item.get("priority")) == "high":
+            score += 30
+        if _due_is_today_or_tomorrow(item.get("due"), now=now):
+            score += 25
+        candidates.append((score, _focus_from_todo(item, section="Xiaodong Action Required")))
+    for item in watch_delegate_todos:
+        score = 35
+        if _normalize_priority(item.get("priority")) == "high":
+            score += 15
+        if _due_is_today_or_tomorrow(item.get("due"), now=now):
+            score += 20
+        candidates.append((score, _focus_from_todo(item, section="Watch / Delegate")))
+    for section, items in (("Project Updates", project_updates), ("Other Update", other_updates)):
+        for item in items:
+            if item.get("status") == "blocked" or item.get("risk_level") == "high":
+                candidates.append((90, _focus_from_update(item, section=section)))
+    seen: set[str] = set()
+    focus: list[dict[str, Any]] = []
+    for _score, item in sorted(candidates, key=lambda pair: pair[0], reverse=True):
+        key = _topic_key(item) or _normalize_dedupe_text(item.get("title") or item.get("summary") or "")
+        if key in seen:
+            continue
+        seen.add(key)
+        focus.append(item)
+        if len(focus) >= MAX_TOP_FOCUS_ITEMS:
+            break
+    return focus
+
+
+def _focus_from_todo(item: dict[str, Any], *, section: str) -> dict[str, Any]:
+    due = _display_due(item.get("due"))
+    reason = f"{_display_priority(item.get('priority'))} priority"
+    if due != "TBD":
+        reason = f"{reason}; due {due}"
+    return {
+        "domain": _display_domain(item.get("domain")),
+        "title": _sentence_text(item.get("task"), "Untitled"),
+        "reason": reason,
+        "source": item.get("evidence") or "Unknown",
+        "section": section,
+    }
+
+
+def _focus_from_update(item: dict[str, Any], *, section: str) -> dict[str, Any]:
+    reason = "Blocked or high-risk update"
+    return {
+        "domain": _display_domain(item.get("domain")),
+        "title": _sentence_text(item.get("summary") or item.get("title"), "Untitled"),
+        "reason": reason,
+        "source": item.get("evidence") or "Unknown",
+        "section": section,
+    }
+
+
+def _build_quality_metadata(
+    *,
+    project_updates: list[dict[str, Any]],
+    other_updates: list[dict[str, Any]],
+    my_todos: list[dict[str, Any]],
+    direct_action_todos: list[dict[str, Any]],
+    watch_delegate_todos: list[dict[str, Any]],
+    reminders: list[dict[str, Any]],
+    source_texts: list[str],
+    deduped_topic_count: int,
+) -> dict[str, Any]:
+    source_types = {
+        str(item.get("source_type") or "").strip().lower()
+        for item in [*project_updates, *other_updates, *my_todos, *reminders]
+        if str(item.get("source_type") or "").strip()
+    }
+    joined_sources = "\n".join(source_texts).lower()
+    if "seatalk" in joined_sources:
+        source_types.add("seatalk")
+    if "gmail" in joined_sources or "message " in joined_sources:
+        source_types.add("gmail")
+    high_confidence = sum(1 for item in direct_action_todos if _normalize_priority(item.get("priority")) == "high")
+    manual_notes: list[str] = []
+    if any(_display_due(item.get("due")) == "TBD" for item in my_todos):
+        manual_notes.append("Some to-do due dates are TBD.")
+    if any(item.get("status") in {"unknown", "in_progress"} and any(hint in _item_text(item) for hint in PENDING_STATUS_HINTS) for item in [*project_updates, *other_updates]):
+        manual_notes.append("Some updates need confirmation before they can be treated as done.")
+    if not manual_notes:
+        manual_notes.append("No obvious manual review flag.")
+    return {
+        "source_coverage": _source_coverage_label(source_types),
+        "deduped_topic_count": int(deduped_topic_count),
+        "high_confidence_todo_count": int(high_confidence),
+        "direct_action_count": len(direct_action_todos),
+        "watch_delegate_count": len(watch_delegate_todos),
+        "manual_review_notes": manual_notes[:3],
+    }
+
+
+def _source_coverage_label(source_types: set[str]) -> str:
+    if "mixed" in source_types or {"seatalk", "gmail"}.issubset(source_types):
+        return "SeaTalk + Gmail"
+    if "seatalk" in source_types:
+        return "SeaTalk"
+    if "gmail" in source_types:
+        return "Gmail"
+    return "No message source"
 
 
 def _filter_seatalk_reminders(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -721,10 +1084,44 @@ def _render_update_text(item: dict[str, Any]) -> str:
 
 
 def _render_reminder_text(item: dict[str, Any]) -> str:
+    reason = str(item.get("why") or item.get("reason") or "").strip()
+    reason_text = f" Why it matters: {_sentence_text(reason, '').strip()}" if reason else ""
     return (
         f"{item.get('person') or 'Unknown'}: {_sentence_text(item.get('reminder'), 'Follow-up may be needed')} "
-        f"(Source: {item.get('evidence') or 'Unknown'})"
+        f"{reason_text}(Source: {item.get('evidence') or 'Unknown'})"
     )
+
+
+def _render_focus_text(items: list[dict[str, Any]]) -> list[str]:
+    return [
+        f"- [{_display_domain(item.get('domain'))}] {_sentence_text(item.get('title'), 'Untitled')} "
+        f"({_sentence_text(item.get('reason'), 'Focus item').rstrip('.')}; Source: {item.get('source') or 'Unknown'})"
+        for item in items
+    ]
+
+
+def _render_focus_html(items: list[dict[str, Any]]) -> str:
+    if not items:
+        return "<p>No urgent focus item found in the briefing window.</p>"
+    rows = "".join(f"<li>{html.escape(line.removeprefix('- '))}</li>" for line in _render_focus_text(items))
+    return f"<ul>{rows}</ul>"
+
+
+def _render_quality_text(metadata: dict[str, Any]) -> list[str]:
+    notes = metadata.get("manual_review_notes") if isinstance(metadata.get("manual_review_notes"), list) else []
+    note_text = "; ".join(str(note) for note in notes if str(note).strip()) or "No obvious manual review flag."
+    return [
+        f"- Sources: {metadata.get('source_coverage') or 'Unknown'}",
+        f"- Deduped topics: {int(metadata.get('deduped_topic_count') or 0)}",
+        f"- High-confidence direct to-dos: {int(metadata.get('high_confidence_todo_count') or 0)}",
+        f"- Direct actions: {int(metadata.get('direct_action_count') or 0)}; Watch/delegate: {int(metadata.get('watch_delegate_count') or 0)}",
+        f"- Manual review: {note_text}",
+    ]
+
+
+def _render_quality_html(metadata: dict[str, Any]) -> str:
+    rows = "".join(f"<li>{html.escape(line.removeprefix('- '))}</li>" for line in _render_quality_text(metadata))
+    return f"<ul>{rows}</ul>"
 
 
 def _domain_order(domain: str) -> tuple[int, str]:
@@ -746,6 +1143,17 @@ def _display_domain(value: Any) -> str:
 
 
 def _display_priority(value: Any) -> str:
+    return _display_priority_label(_normalize_priority(value))
+
+
+def _normalize_priority(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if text in {"high", "medium", "low", "unknown"}:
+        return text
+    return "unknown"
+
+
+def _display_priority_label(value: Any) -> str:
     text = str(value or "").strip().lower()
     return {"high": "High", "medium": "Medium", "low": "Low", "unknown": "Unknown"}.get(text, str(value or "Unknown"))
 
@@ -760,6 +1168,24 @@ def _display_due(value: Any) -> str:
     if not text or text.lower() in {"unknown", "none", "n/a", "na"}:
         return "TBD"
     return text
+
+
+def _item_text(item: dict[str, Any], *, fields: tuple[str, ...] = ("title", "summary", "task", "reminder", "evidence")) -> str:
+    return " ".join(str(item.get(field) or "").strip().lower() for field in fields if str(item.get(field) or "").strip())
+
+
+def _due_is_today_or_tomorrow(value: Any, *, now: datetime) -> bool:
+    text = str(value or "").strip().lower()
+    if not text or text in {"tbd", "unknown", "none", "n/a", "na"}:
+        return False
+    if text in {"today", "tomorrow"}:
+        return True
+    today = now.date()
+    tomorrow = today + timedelta(days=1)
+    for candidate in (today.isoformat(), tomorrow.isoformat()):
+        if candidate in text:
+            return True
+    return False
 
 
 def _sentence_text(value: Any, fallback: str) -> str:
@@ -789,12 +1215,16 @@ def _render_grouped_html(items: list[dict[str, Any]], *, kind: str) -> str:
             "No clear Xiaodong-owned to-do found in the briefing window."
             if kind == "todo"
             else (
-                "No additional high-value awareness update found in the briefing window."
-                if kind == "other"
+                "No watch/delegate item found."
+                if kind == "watch_todo"
                 else (
-                    "No unresolved SeaTalk team-member mention found in the briefing window."
-                    if kind == "reminder"
-                    else "No clear project update found in the briefing window."
+                    "No additional high-value awareness update found in the briefing window."
+                    if kind == "other"
+                    else (
+                        "No unresolved SeaTalk team-member mention found in the briefing window."
+                        if kind == "reminder"
+                        else "No clear project update found in the briefing window."
+                    )
                 )
             )
         )
@@ -808,7 +1238,7 @@ def _render_grouped_html(items: list[dict[str, Any]], *, kind: str) -> str:
 
 
 def _renderer_for_kind(kind: str):
-    if kind == "todo":
+    if kind in {"todo", "watch_todo"}:
         return _render_todo_text
     if kind == "reminder":
         return _render_reminder_text

@@ -57,6 +57,7 @@
   const teamOrder = ['AF', 'CRMS', 'GRC'];
   const jiraPageSize = 10;
   const taskCacheKey = 'team-dashboard:jira-tasks:v6';
+  const monthlyReportDraftCacheKey = 'team-dashboard:monthly-report-draft:v1';
 
   let initialConfig = (() => {
     try {
@@ -136,6 +137,28 @@
       window.localStorage.removeItem(taskCacheKey);
     } catch (error) {
       writeTaskCache({});
+    }
+  };
+
+  const readMonthlyReportDraftCache = () => {
+    try {
+      const payload = JSON.parse(window.localStorage.getItem(monthlyReportDraftCacheKey) || '{}');
+      return payload && typeof payload === 'object' ? payload : {};
+    } catch (error) {
+      return {};
+    }
+  };
+
+  const writeMonthlyReportDraftCache = (payload) => {
+    try {
+      window.localStorage.setItem(monthlyReportDraftCacheKey, JSON.stringify({
+        draft_markdown: String(payload?.draft_markdown || ''),
+        subject: String(payload?.subject || monthlyReportSubject || 'Monthly Report'),
+        saved_at: payload?.saved_at || new Date().toISOString(),
+        source: String(payload?.source || 'browser'),
+      }));
+    } catch (error) {
+      // Browser storage can be disabled or full; draft editing should still work.
     }
   };
 
@@ -334,6 +357,42 @@
 
   const itemCount = (projects) => (Array.isArray(projects) ? projects : [])
     .reduce((countValue, project) => countValue + (project.jira_tickets || []).length, 0);
+
+  const parseProjectDateSort = (project) => {
+    const releaseSort = String(project?.release_date_sort || '').trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(releaseSort)) return releaseSort;
+    const text = String(project?.release_date || '').trim();
+    let match = text.match(/^(\d{4})[-/](\d{2})[-/](\d{2})/);
+    if (match) return `${match[1]}-${match[2]}-${match[3]}`;
+    match = text.match(/^(\d{2})[-/](\d{2})[-/](\d{4})/);
+    if (match) return `${match[3]}-${match[2]}-${match[1]}`;
+    return '';
+  };
+
+  const sortUnderPrdProjects = (projects) => [...(Array.isArray(projects) ? projects : [])].sort((left, right) => {
+    const leftDate = parseProjectDateSort(left);
+    const rightDate = parseProjectDateSort(right);
+    const leftJiraCount = (left?.jira_tickets || []).length;
+    const rightJiraCount = (right?.jira_tickets || []).length;
+    const bucket = (date, count) => (date ? 0 : count > 0 ? 1 : 2);
+    const leftKey = [
+      bucket(leftDate, leftJiraCount),
+      leftDate,
+      String(left?.project_name || '').toLowerCase(),
+      String(left?.bpmis_id || '').toLowerCase(),
+    ];
+    const rightKey = [
+      bucket(rightDate, rightJiraCount),
+      rightDate,
+      String(right?.project_name || '').toLowerCase(),
+      String(right?.bpmis_id || '').toLowerCase(),
+    ];
+    for (let index = 0; index < leftKey.length; index += 1) {
+      if (leftKey[index] < rightKey[index]) return -1;
+      if (leftKey[index] > rightKey[index]) return 1;
+    }
+    return 0;
+  });
 
   const projectMatchesPm = (project, selectedPm) => {
     if (!selectedPm) return true;
@@ -588,7 +647,7 @@
     const notLoaded = !team.loaded && !team.loading && !team.error;
     const teamKey = team.team_key || 'team';
     const selectedPm = String(pmFilterState[teamKey] || '').trim().toLowerCase();
-    const filteredUnderPrd = filterProjectsByKeyProject(filterProjectsByPm(underPrd, selectedPm));
+    const filteredUnderPrd = sortUnderPrdProjects(filterProjectsByKeyProject(filterProjectsByPm(underPrd, selectedPm)));
     const filteredPendingLive = filterProjectsByKeyProject(filterProjectsByPm(pendingLive, selectedPm));
     const actionLabel = team.loaded || team.error ? 'Reload Jira' : 'Load Jira';
     return `
@@ -796,7 +855,7 @@
     }
   };
 
-  const updateMonthlyReportPreview = () => {
+  const updateMonthlyReportPreview = ({ persist = false } = {}) => {
     if (!monthlyReportDraft || !monthlyReportPreview) return;
     const value = monthlyReportDraft.value || '';
     monthlyReportPreview.innerHTML = value.trim()
@@ -804,6 +863,13 @@
       : '<p>Generate a draft to preview the email body.</p>';
     if (monthlyReportSendButton) {
       monthlyReportSendButton.disabled = !value.trim();
+    }
+    if (persist && value.trim()) {
+      writeMonthlyReportDraftCache({
+        draft_markdown: value,
+        subject: monthlyReportSubject,
+        source: 'browser',
+      });
     }
   };
 
@@ -938,6 +1004,41 @@
     }
   };
 
+  const restoreMonthlyReportDraft = async () => {
+    if (!monthlyReportDraft) return;
+    const cached = readMonthlyReportDraftCache();
+    const cachedDraft = String(cached.draft_markdown || '').trim();
+    const cachedSavedAt = Date.parse(cached.saved_at || '') || 0;
+    if (String(cached.draft_markdown || '').trim()) {
+      monthlyReportSubject = cached.subject || monthlyReportSubject;
+      monthlyReportDraft.value = cached.draft_markdown || '';
+      updateMonthlyReportPreview();
+      setStatus(monthlyReportStatus, 'Restored the last Monthly Report draft from this browser.', 'neutral');
+    }
+    try {
+      const response = await fetch(root.dataset.monthlyReportLatestDraftUrl || '/api/team-dashboard/monthly-report/latest-draft', {
+        headers: { Accept: 'application/json' },
+        credentials: 'same-origin',
+      });
+      const payload = await readJson(response, 'Could not load the latest Monthly Report draft.');
+      if (!String(payload.draft_markdown || '').trim()) return;
+      const serverGeneratedAt = Number(payload.generated_at || 0) * 1000;
+      if (cachedDraft && cachedSavedAt >= serverGeneratedAt) return;
+      monthlyReportSubject = payload.subject || monthlyReportSubject;
+      monthlyReportDraft.value = payload.draft_markdown || '';
+      writeMonthlyReportDraftCache({
+        draft_markdown: payload.draft_markdown,
+        subject: monthlyReportSubject,
+        saved_at: payload.generated_at ? new Date(Number(payload.generated_at) * 1000).toISOString() : undefined,
+        source: 'server',
+      });
+      updateMonthlyReportPreview();
+      setStatus(monthlyReportStatus, 'Restored the latest generated Monthly Report draft.', 'neutral');
+    } catch (error) {
+      // Missing historical drafts should not block the Team Dashboard.
+    }
+  };
+
   const generateMonthlyReport = async () => {
     if (!monthlyReportGenerateButton || !monthlyReportDraft) return;
     monthlyReportGenerateButton.disabled = true;
@@ -956,6 +1057,11 @@
         ? await pollMonthlyReportJob(initialPayload.job_id)
         : initialPayload;
       monthlyReportDraft.value = payload.draft_markdown || '';
+      writeMonthlyReportDraftCache({
+        draft_markdown: monthlyReportDraft.value,
+        subject: monthlyReportSubject,
+        source: 'generate',
+      });
       updateMonthlyReportPreview();
       const evidence = payload.evidence_summary || {};
       const projectCount = Number(evidence.key_project_count || 0);
@@ -1026,8 +1132,9 @@
 
   setupTabs();
   loadConfiguredTeams();
+  restoreMonthlyReportDraft();
   adminForm?.addEventListener('submit', saveMembers);
-  monthlyReportDraft?.addEventListener('input', updateMonthlyReportPreview);
+  monthlyReportDraft?.addEventListener('input', () => updateMonthlyReportPreview({ persist: true }));
   monthlyReportGenerateButton?.addEventListener('click', generateMonthlyReport);
   monthlyReportSendButton?.addEventListener('click', sendMonthlyReport);
   monthlyReportTemplateForm?.addEventListener('submit', saveMonthlyReportTemplate);

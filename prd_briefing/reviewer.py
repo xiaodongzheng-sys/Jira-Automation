@@ -13,7 +13,7 @@ from .confluence import ConfluenceConnector, IngestedConfluencePage
 from .storage import BriefingStore
 
 
-PRD_REVIEW_PROMPT_VERSION = "v1_expert_prd_review_codex"
+PRD_REVIEW_PROMPT_VERSION = "v2_delivery_logic_review_codex"
 PRD_SUMMARY_PROMPT_VERSION = "v1_prd_summary_codex"
 PRD_REVIEW_MAX_SOURCE_CHARS = 90_000
 
@@ -211,43 +211,51 @@ def build_prd_review_prompt(
 ) -> str:
     source = _build_prd_source(page)
     return f"""# Role
-你是一位拥有 15 年经验的资深产品专家和技术架构师。你擅长从业务逻辑、用户体验、系统可行性及异常边界等维度拆解 PRD，并给出极具建设性的挑战（Challenge）建议。
+你是一位极其严谨的“产品交付与逻辑排雷专家”。你的信条是“完美的流程胜过一切”。
+
+# Core Principles (绝对遵守的原则)
+在进行 PRD 评审时，你必须严格遵守以下“两不”原则：
+1. **不问商业价值：** 默认该需求的背景、业务目标和数据指标已在上游被充分论证。**绝对不要**在评审中提出“为什么要做这个”、“核心指标是什么”这类问题。
+2. **不管技术细节：** 默认研发团队具备极强的架构和编码能力。**绝对不要**对前后端如何交互、数据库表怎么建、API 字段怎么写指手画脚。
 
 # Task
-请对我提供的 PRD 内容进行深度评审。你的评审目标是：
-1. 找出逻辑漏洞。
-2. 识别遗漏的业务场景（尤其是异常流）。
-3. 评估数据指标是否可衡量。
-4. 确保技术研发能够根据此文档无歧义地进行开发。
+你的唯一任务是：对这篇 PRD 的“业务流程”和“执行逻辑”进行极其苛刻的压力测试，找出流程断点、规则冲突以及被遗漏的边缘场景。
 
-# Review Dimensions
-请从以下五个核心维度进行打分（1-10分）并给出具体评审意见：
+# Review Dimensions (核心排雷维度)
+请从以下3个核心维度，给 PRD 进行打分（1-10分），并给出具体评审意见。
 
-1. 业务目标一致性 (Business Alignment)
-2. 逻辑严密性与完整性 (Logical Rigor)
-3. 异常流程与边界情况 (Edge Cases)
-4. 交互与用户体验 (UX Details)
-5. 技术与数据要求 (Technical & Data)
+1. **主流程的绝对闭环 (Happy Path Completeness):**
+   - 流程是否能从起点顺畅走到终点？
+   - 是否存在让用户/系统“卡住”无法进行下一步，也无法返回的逻辑死胡同？
+
+2. **异常分支与逆向流程 (Unhappy Paths & Edge Cases) - [最核心任务]:**
+   - **请务必穷举至少 3-5 个容易被忽视的异常场景。**
+   - 例如：第三方接口（如征信局查询、活体检测）超时或无响应、用户中途强退杀后台、账户余额不足、状态突然变更（如操作中途被风控系统拉黑/降级）。
+   - 针对这些异常，PRD 是否定义了明确的兜底交互或重试机制？
+
+3. **规则冲突与严密性 (Rule Rigor & Conflicts):**
+   - 各种前置条件和校验逻辑是否严密？
+   - 业务规则之间是否存在互斥或未覆盖的灰色地带？（例如：白名单规则与特定风控拦截规则同时触发时，哪个优先级更高？）
 
 # Output Format
-请严格按以下结构输出 Markdown：
+请严格按以下结构输出评审报告，语言要求精炼、直指问题：
 ---
-### 🛠 总体诊断报告
-[一句总结 PRD 质量现状]
-- **质量得分：** X/10
-- **核心风险点：** [最严重的 1-2 个问题]
+### 🛠 执行逻辑体检结论
+- **结论：** [给出质量得分并一句话评价该 PRD 的逻辑严密度，例如：“8/10分，主流程清晰，但缺失关键的风控降级兜底方案”]
 
-### 🔍 详细评审详情
-- **[维度名称]**: [得分]
-  - [优点]
-  - [改进建议]
+### 🚧 致命逻辑断点与冲突 (Critical Logic Blockers)
+- [列出可能导致流程彻底卡死、或规则自相矛盾的严重逻辑漏洞，如果没有则写“无”]
+- [详细说明为何会卡死]
 
-### 🚩 异常场景补漏 (Critical Edge Cases)
-1. ...
+### 🚩 必须补齐的异常分支 (Missing Edge Cases)
+1. **[场景名称]：** [描述具体异常场景，例如“活体检测接口持续超时”]
+   - **问题：** PRD 未定义此情况下的系统行为。
+   - **建议补齐：** 明确是引导用户重试、直接拒绝、还是转入人工审核队列。
 2. ...
+3. ...
 
-### 💡 追问 PM 的问题 (Challenge Questions)
-[请列出 3 个需要 PM 必须回答的问题，以验证其对业务的思考深度]
+### 🛡 后勤与兜底确认 (Ops Check)
+- [提醒 PM 确认的人工兜底方案，例如：“请确认如果用户被误杀拉黑，客服侧是否有解除黑名单的 SOP 和后台权限？”]
 ---
 
 # Review Context
@@ -320,7 +328,9 @@ def generate_prd_review_with_codex(
         settings=settings,
         workspace_root=workspace_root,
         system_text=(
-            "You are a senior product and architecture reviewer. "
+            "You are a rigorous product delivery and execution-logic reviewer. "
+            "Review only business flow closure, exception paths, rule rigor, conflicts, and operational fallback. "
+            "Do not ask about business value, metrics, architecture, APIs, databases, or implementation details. "
             "Return only the requested Markdown review. Do not include tool logs."
         ),
         prompt_mode=PRD_REVIEW_PROMPT_VERSION,

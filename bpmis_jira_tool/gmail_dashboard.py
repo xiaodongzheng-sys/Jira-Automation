@@ -8,6 +8,7 @@ from datetime import datetime, time, timedelta
 from email.utils import getaddresses
 from urllib.parse import quote
 import html
+import os
 from threading import Lock
 from typing import Any
 import re
@@ -15,6 +16,7 @@ import socket
 import time as time_module
 
 import httplib2
+import google_auth_httplib2
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
@@ -32,6 +34,7 @@ GMAIL_EXPORT_MAX_TOTAL_MESSAGES = 200
 GMAIL_EXPORT_MAX_BODY_CHARS = 4000
 GMAIL_EXPORT_FETCH_WORKERS = 1
 GMAIL_REQUEST_RETRY_DELAYS_SECONDS = (1.0, 3.0)
+GMAIL_HTTP_TIMEOUT_SECONDS = 20
 GMAIL_RETRYABLE_HTTP_STATUSES = {429, 500, 502, 503, 504}
 GMAIL_TRANSIENT_ERRORS = (TimeoutError, socket.timeout, OSError, httplib2.HttpLib2Error)
 GMAIL_EXPORT_INTERNAL_DOMAINS = (
@@ -106,6 +109,22 @@ class GmailDashboardCacheEntry:
 class GmailExportCacheEntry:
     payload: Any
     expires_at: datetime
+
+
+def _gmail_http_timeout_seconds() -> int:
+    raw_value = str(os.getenv("GMAIL_HTTP_TIMEOUT_SECONDS") or "").strip()
+    if not raw_value:
+        return GMAIL_HTTP_TIMEOUT_SECONDS
+    try:
+        return max(5, min(int(raw_value), 120))
+    except ValueError:
+        return GMAIL_HTTP_TIMEOUT_SECONDS
+
+
+def build_gmail_api_service(credentials, *, cache_discovery: bool = False):
+    http = httplib2.Http(timeout=_gmail_http_timeout_seconds())
+    authed_http = google_auth_httplib2.AuthorizedHttp(credentials, http=http)
+    return build("gmail", "v1", http=authed_http, cache_discovery=cache_discovery)
 
 
 def _normalize_header_map(headers: list[dict[str, str]] | None) -> dict[str, str]:
@@ -315,7 +334,7 @@ class GmailDashboardService:
 
     def __init__(self, credentials, *, gmail_service=None, cache_key: str | None = None) -> None:
         self.credentials = credentials
-        self.service = gmail_service or build("gmail", "v1", credentials=credentials, cache_discovery=False)
+        self.service = gmail_service or build_gmail_api_service(credentials, cache_discovery=False)
         self.cache_key = str(cache_key or "").strip().lower()
 
     def build_dashboard(self, *, days: int = GMAIL_DASHBOARD_DEFAULT_DAYS, now: datetime | None = None) -> dict[str, Any]:

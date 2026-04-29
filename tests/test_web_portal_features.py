@@ -1390,6 +1390,41 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertEqual(config_response.get_json()["config"]["teams"]["AF"]["member_emails"], ["remote@npt.sg"])
         self.assertEqual(remote_client.configs["team_dashboard"]["teams"]["AF"]["member_emails"], ["remote@npt.sg"])
 
+    def test_team_dashboard_under_prd_projects_sort_by_live_date_then_jira_count(self):
+        projects = [
+            {
+                "bpmis_id": "zero-1",
+                "project_name": "No Jira Project",
+                "release_date": "-",
+                "jira_tickets": [],
+            },
+            {
+                "bpmis_id": "jira-1",
+                "project_name": "No Date With Jira",
+                "release_date": "-",
+                "jira_tickets": [{"jira_id": "AF-1"}],
+            },
+            {
+                "bpmis_id": "late-1",
+                "project_name": "Later Live",
+                "release_date": "02-07-2026",
+                "jira_tickets": [{"jira_id": "AF-2"}],
+            },
+            {
+                "bpmis_id": "early-1",
+                "project_name": "Earlier Live",
+                "release_date": "21-05-2026",
+                "jira_tickets": [{"jira_id": "AF-3"}],
+            },
+        ]
+
+        web_module._sort_team_dashboard_under_prd_projects(projects)
+
+        self.assertEqual(
+            [project["bpmis_id"] for project in projects],
+            ["early-1", "late-1", "jira-1", "zero-1"],
+        )
+
     def test_team_dashboard_tasks_api_groups_under_prd_and_pending_live_by_team(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
@@ -3153,12 +3188,16 @@ class WebPortalFeatureTests(unittest.TestCase):
                     if job_payload.get("state") == "completed":
                         break
                     time.sleep(0.05)
+                latest_payload = client.get("/api/team-dashboard/monthly-report/latest-draft").get_json()
         self.assertEqual(job_payload["state"], "completed")
         self.assertEqual(job_payload["progress"]["stage"], "completed")
         result = job_payload["results"][0]
         self.assertIn("Monthly Report", result["draft_markdown"])
         self.assertEqual(result["evidence_summary"]["key_project_count"], 1)
         self.assertEqual(result["generation_summary"]["total_batches"], 1)
+        self.assertEqual(latest_payload["status"], "ok")
+        self.assertEqual(latest_payload["draft_markdown"], result["draft_markdown"])
+        self.assertEqual(latest_payload["job_id"], payload["job_id"])
 
     @patch("bpmis_jira_tool.web.send_monthly_report_email")
     def test_team_dashboard_monthly_report_send_sends_edited_draft(self, mock_send):
