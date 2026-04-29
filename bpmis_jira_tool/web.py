@@ -364,7 +364,7 @@ class TeamDashboardConfigStore:
             if raw_emails is None:
                 raw_emails = default["teams"][team_key]["member_emails"]
             normalized_emails = _normalize_team_dashboard_emails(raw_emails)
-            if normalized_emails == list(TEAM_DASHBOARD_LEGACY_DEFAULT_MEMBER_EMAILS):
+            if set(normalized_emails) == set(TEAM_DASHBOARD_LEGACY_DEFAULT_MEMBER_EMAILS):
                 normalized_emails = list(default["teams"][team_key]["member_emails"])
             normalized_teams[team_key] = {
                 "label": label,

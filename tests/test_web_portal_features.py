@@ -952,6 +952,43 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertEqual(saved_payload["config"]["teams"]["AF"]["member_emails"], ["pm1@npt.sg", "pm2@npt.sg"])
         self.assertEqual(saved_payload["config"]["teams"]["GRC"]["member_emails"], ["ops@npt.sg", "ops2@npt.sg"])
 
+    def test_team_dashboard_legacy_default_members_migrate_even_when_order_changes(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_ALLOWED_EMAILS": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
+            },
+            clear=True,
+        ):
+            app = create_app()
+            app.testing = True
+            legacy_members = list(reversed(web_module.TEAM_DASHBOARD_LEGACY_DEFAULT_MEMBER_EMAILS))
+            app.config["TEAM_DASHBOARD_CONFIG_STORE"].save(
+                {
+                    "teams": {
+                        "AF": {"member_emails": legacy_members},
+                        "CRMS": {"member_emails": legacy_members},
+                        "GRC": {"member_emails": legacy_members},
+                    }
+                }
+            )
+
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong"}
+                    session["google_credentials"] = {"token": "x"}
+                response = client.get("/api/team-dashboard/config")
+
+        payload = response.get_json()
+        self.assertEqual(payload["config"]["teams"]["AF"]["member_emails"], list(web_module.TEAM_DASHBOARD_DEFAULT_MEMBER_EMAILS_BY_TEAM["AF"]))
+        self.assertEqual(payload["config"]["teams"]["CRMS"]["member_emails"], list(web_module.TEAM_DASHBOARD_DEFAULT_MEMBER_EMAILS_BY_TEAM["CRMS"]))
+        self.assertEqual(payload["config"]["teams"]["GRC"]["member_emails"], list(web_module.TEAM_DASHBOARD_DEFAULT_MEMBER_EMAILS_BY_TEAM["GRC"]))
+
     def test_team_dashboard_config_uses_remote_local_agent_store_when_enabled(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
