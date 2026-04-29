@@ -3598,6 +3598,68 @@ def create_app() -> Flask:
                 HTTPStatus.INTERNAL_SERVER_ERROR,
             )
 
+    @app.post("/api/team-dashboard/prd-summary")
+    def team_dashboard_prd_summary():
+        access_gate = _require_team_dashboard_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        payload = request.get_json(silent=True) or {}
+        user_identity = _get_user_identity(settings)
+        summary_payload = {
+            "owner_key": str(user_identity.get("config_key") or ""),
+            "jira_id": str(payload.get("jira_id") or ""),
+            "jira_link": str(payload.get("jira_link") or ""),
+            "prd_url": str(payload.get("prd_url") or ""),
+            "force_refresh": bool(payload.get("force_refresh")),
+        }
+        try:
+            if _local_agent_source_code_qa_enabled(settings):
+                data = _build_local_agent_client(settings).prd_summary(summary_payload)
+            else:
+                data = _build_prd_review_service(settings).summarize(PRDReviewRequest(**summary_payload))
+            _log_portal_event(
+                "team_dashboard_prd_summary_success",
+                **_build_request_log_context(
+                    settings,
+                    user_identity=user_identity,
+                    extra={
+                        "jira_id": summary_payload["jira_id"],
+                        "prd_url_hash": hashlib.sha256(summary_payload["prd_url"].encode("utf-8")).hexdigest()[:12],
+                        "cached": bool(data.get("cached")),
+                    },
+                ),
+            )
+            return jsonify(data)
+        except ToolError as error:
+            error_details = _classify_portal_error(error)
+            _log_portal_event(
+                "team_dashboard_prd_summary_tool_error",
+                level=logging.WARNING,
+                **_build_request_log_context(
+                    settings,
+                    user_identity=user_identity,
+                    extra={**error_details, "jira_id": summary_payload["jira_id"]},
+                ),
+            )
+            return jsonify({"status": "error", "message": str(error), **error_details}), HTTPStatus.BAD_REQUEST
+        except Exception as error:  # noqa: BLE001
+            _log_portal_event(
+                "team_dashboard_prd_summary_unexpected_error",
+                level=logging.ERROR,
+                **_build_request_log_context(settings, user_identity=user_identity, extra={"jira_id": summary_payload["jira_id"]}),
+            )
+            current_app.logger.exception("Team Dashboard PRD summary failed.")
+            return (
+                jsonify(
+                    {
+                        "status": "error",
+                        "message": "PRD summary failed unexpectedly. Please retry or share the request ID.",
+                        **_classify_portal_error(error),
+                    }
+                ),
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+
     @app.get("/download/default-sheet-template.csv")
     def download_default_sheet_template():
         sample_row = [

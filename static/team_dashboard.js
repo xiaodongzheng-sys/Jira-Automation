@@ -134,7 +134,17 @@
           <button
             class="button button-secondary team-dashboard-review-button"
             type="button"
-            data-prd-review
+            data-prd-action="summary"
+            data-jira-id="${escapeHtml(jiraItem?.jira_id || '')}"
+            data-jira-link="${escapeHtml(jiraItem?.jira_link || '')}"
+            data-prd-url="${escapeHtml(url)}"
+            data-prd-index="${index}"
+            ${url ? '' : 'disabled'}
+          >AI Summary</button>
+          <button
+            class="button button-secondary team-dashboard-review-button"
+            type="button"
+            data-prd-action="review"
             data-jira-id="${escapeHtml(jiraItem?.jira_id || '')}"
             data-jira-link="${escapeHtml(jiraItem?.jira_link || '')}"
             data-prd-url="${escapeHtml(url)}"
@@ -491,9 +501,11 @@
       return;
     }
 
-    const reviewButton = event.target.closest('[data-prd-review]');
-    const button = reviewButton;
+    const actionButton = event.target.closest('[data-prd-action]');
+    const button = actionButton;
     if (!button) return;
+    const action = button.dataset.prdAction === 'summary' ? 'summary' : 'review';
+    const isSummary = action === 'summary';
     const jiraId = button.dataset.jiraId || '';
     const jiraLink = button.dataset.jiraLink || '';
     const prdUrl = externalHref(button.dataset.prdUrl || '');
@@ -507,21 +519,21 @@
     const forceRefresh = button.dataset.forceRefresh === 'true';
     button.dataset.forceRefresh = 'false';
     button.disabled = true;
-    button.textContent = 'Reviewing...';
+    button.textContent = isSummary ? 'Summarizing...' : 'Reviewing...';
     panelRow.hidden = false;
-    panel.innerHTML = '<div class="team-dashboard-review-loading">Reviewing PRD...</div>';
+    panel.innerHTML = `<div class="team-dashboard-review-loading">${isSummary ? 'Summarizing PRD...' : 'Reviewing PRD...'}</div>`;
     try {
-      const response = await fetch('/api/team-dashboard/prd-review', {
+      const response = await fetch(`/api/team-dashboard/prd-${action}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
         credentials: 'same-origin',
         body: JSON.stringify({ jira_id: jiraId, jira_link: jiraLink, prd_url: prdUrl, force_refresh: forceRefresh }),
       });
-      const payload = await readJson(response, 'Could not review PRD.');
-      const result = payload.review || {};
+      const payload = await readJson(response, isSummary ? 'Could not summarize PRD.' : 'Could not review PRD.');
+      const result = isSummary ? (payload.summary || {}) : (payload.review || {});
       panel.innerHTML = `
         <div class="team-dashboard-review-meta">
-          <strong>${escapeHtml(payload.cached ? 'Cached PRD Review' : 'PRD Review')}</strong>
+          <strong>${escapeHtml(payload.cached ? `Cached PRD ${isSummary ? 'Summary' : 'Review'}` : `PRD ${isSummary ? 'Summary' : 'Review'}`)}</strong>
           <span>${escapeHtml(result.updated_at || '')}</span>
         </div>
         <div class="team-dashboard-review-markdown">${renderMarkdown(result.result_markdown || '')}</div>
@@ -529,17 +541,17 @@
           <button class="button button-secondary team-dashboard-review-refresh" type="button" data-prd-refresh>Regenerate</button>
         </div>
       `;
-      button.textContent = 'View Review';
+      button.textContent = isSummary ? 'View Summary' : 'View Review';
       if (toggleButton) {
         toggleButton.hidden = false;
-        toggleButton.textContent = 'Hide Review';
+        toggleButton.textContent = `Hide ${isSummary ? 'Summary' : 'Review'}`;
       }
       panel.querySelector('[data-prd-refresh]')?.addEventListener('click', () => {
         button.dataset.forceRefresh = 'true';
         button.click();
       });
     } catch (error) {
-      panel.innerHTML = `<p class="productization-inline-status" data-tone="error">${escapeHtml(error.message || 'Could not review PRD.')}</p>`;
+      panel.innerHTML = `<p class="productization-inline-status" data-tone="error">${escapeHtml(error.message || (isSummary ? 'Could not summarize PRD.' : 'Could not review PRD.'))}</p>`;
       button.textContent = 'Retry';
     } finally {
       button.disabled = false;

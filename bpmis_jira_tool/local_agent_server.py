@@ -226,6 +226,21 @@ def create_local_agent_app() -> Flask:
         )
         return jsonify(result)
 
+    @app.post("/api/local-agent/prd-summary")
+    def prd_summary():
+        payload = request.get_json(silent=True) or {}
+        service = _build_prd_review_service(settings)
+        result = service.summarize(
+            PRDReviewRequest(
+                owner_key=str(payload.get("owner_key") or ""),
+                jira_id=str(payload.get("jira_id") or ""),
+                jira_link=str(payload.get("jira_link") or ""),
+                prd_url=str(payload.get("prd_url") or ""),
+                force_refresh=bool(payload.get("force_refresh")),
+            )
+        )
+        return jsonify(result)
+
     @app.post("/api/local-agent/source-code-qa/sessions/list")
     def source_code_qa_sessions_list():
         payload = request.get_json(silent=True) or {}

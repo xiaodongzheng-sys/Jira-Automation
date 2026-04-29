@@ -14,6 +14,7 @@ from .storage import BriefingStore
 
 
 PRD_REVIEW_PROMPT_VERSION = "v1_expert_prd_review_codex"
+PRD_SUMMARY_PROMPT_VERSION = "v1_prd_summary_codex"
 PRD_REVIEW_MAX_SOURCE_CHARS = 90_000
 
 
@@ -93,6 +94,60 @@ class PRDReviewService:
             trace=generated["trace"],
         )
         return {"status": "ok", "cached": False, "review": review, "prd": self._page_metadata(page)}
+
+    def summarize(self, request: PRDReviewRequest) -> dict[str, Any]:
+        normalized = self._normalize_request(request)
+        page = self.confluence.ingest_page(normalized.prd_url, "prd-summary")
+        if not page.sections:
+            raise ToolError("PRD page did not contain readable sections.")
+        cached = None if normalized.force_refresh else self.store.get_prd_review_result(
+            owner_key=normalized.owner_key,
+            jira_id=normalized.jira_id,
+            prd_url=page.source_url,
+            prd_updated_at=page.updated_at,
+            prompt_version=PRD_SUMMARY_PROMPT_VERSION,
+        )
+        if cached and cached.get("status") == "completed" and cached.get("result_markdown"):
+            return {"status": "ok", "cached": True, "summary": cached, "prd": self._page_metadata(page)}
+
+        prompt = build_prd_summary_prompt(
+            jira_id=normalized.jira_id,
+            jira_link=normalized.jira_link,
+            prd_url=page.source_url,
+            page=page,
+        )
+        try:
+            generated = generate_prd_summary_with_codex(
+                prompt=prompt,
+                settings=self.settings,
+                workspace_root=self.workspace_root,
+            )
+        except Exception as error:  # noqa: BLE001 - persist the failure for visible retry context.
+            self.store.save_prd_review_result(
+                owner_key=normalized.owner_key,
+                jira_id=normalized.jira_id,
+                jira_link=normalized.jira_link,
+                prd_url=page.source_url,
+                prd_updated_at=page.updated_at,
+                prompt_version=PRD_SUMMARY_PROMPT_VERSION,
+                status="failed",
+                error=str(error),
+            )
+            raise ToolError(str(error)) from error
+
+        summary = self.store.save_prd_review_result(
+            owner_key=normalized.owner_key,
+            jira_id=normalized.jira_id,
+            jira_link=normalized.jira_link,
+            prd_url=page.source_url,
+            prd_updated_at=page.updated_at,
+            prompt_version=PRD_SUMMARY_PROMPT_VERSION,
+            status="completed",
+            result_markdown=generated["result_markdown"],
+            model_id=generated["model_id"],
+            trace=generated["trace"],
+        )
+        return {"status": "ok", "cached": False, "summary": summary, "prd": self._page_metadata(page)}
 
     @staticmethod
     def _normalize_request(request: PRDReviewRequest) -> PRDReviewRequest:
@@ -207,6 +262,53 @@ def build_prd_review_prompt(
 """
 
 
+def build_prd_summary_prompt(
+    *,
+    jira_id: str,
+    jira_link: str,
+    prd_url: str,
+    page: IngestedConfluencePage,
+) -> str:
+    source = _build_prd_source(page)
+    return f"""# Role
+你是一位资深产品经理，擅长把 PRD 快速整理成业务、产品、研发都能直接阅读的摘要。
+
+# Task
+请阅读 PRD 内容，输出一份简洁但完整的中文摘要。重点覆盖：
+1. 背景和目标。
+2. 用户/业务流程。
+3. 主要功能范围。
+4. 关键规则、数据口径、状态流转。
+5. 上线/依赖/待确认事项。
+
+# Output Format
+请严格按 Markdown 输出：
+---
+### PRD Summary
+[3-5 句话概括]
+
+### Scope
+- ...
+
+### Key Logic
+- ...
+
+### Dependencies / Open Questions
+- ...
+---
+
+# Context
+- Jira ID: {jira_id}
+- Jira Link: {jira_link or "-"}
+- PRD Title: {page.title}
+- PRD Link: {prd_url}
+- PRD Updated At: {page.updated_at or "-"}
+
+# PRD Content
+{source}
+"""
+
+
 def generate_prd_review_with_codex(
     *,
     prompt: str,
@@ -222,6 +324,24 @@ def generate_prd_review_with_codex(
             "Return only the requested Markdown review. Do not include tool logs."
         ),
         prompt_mode=PRD_REVIEW_PROMPT_VERSION,
+    )
+
+
+def generate_prd_summary_with_codex(
+    *,
+    prompt: str,
+    settings: Settings,
+    workspace_root: Path,
+) -> dict[str, Any]:
+    return _generate_with_codex(
+        prompt=prompt,
+        settings=settings,
+        workspace_root=workspace_root,
+        system_text=(
+            "You are a senior product manager. "
+            "Return only the requested Markdown PRD summary. Do not include tool logs."
+        ),
+        prompt_mode=PRD_SUMMARY_PROMPT_VERSION,
     )
 
 

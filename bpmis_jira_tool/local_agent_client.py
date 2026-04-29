@@ -143,6 +143,10 @@ class LocalAgentClient:
         result = self._request("POST", "/api/local-agent/prd-review", payload)
         return result if isinstance(result, dict) else {}
 
+    def prd_summary(self, payload: dict[str, Any]) -> dict[str, Any]:
+        result = self._request("POST", "/api/local-agent/prd-summary", payload)
+        return result if isinstance(result, dict) else {}
+
     def seatalk_overview(self) -> dict[str, Any]:
         return self._request("POST", "/api/local-agent/seatalk/overview", {})
 
