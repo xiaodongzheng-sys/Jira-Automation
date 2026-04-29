@@ -198,6 +198,16 @@ class LocalAgentClient:
         saved = payload.get("profile")
         return saved if isinstance(saved, dict) else {}
 
+    def team_dashboard_config_load(self) -> dict[str, Any]:
+        payload = self._request("POST", "/api/local-agent/team-dashboard/config/load", {})
+        config = payload.get("config")
+        return config if isinstance(config, dict) else {}
+
+    def team_dashboard_config_save(self, config: dict[str, Any]) -> dict[str, Any]:
+        payload = self._request("POST", "/api/local-agent/team-dashboard/config/save", {"config": config})
+        saved = payload.get("config")
+        return saved if isinstance(saved, dict) else {}
+
     def bpmis_projects_list(self, *, user_key: str) -> list[dict[str, Any]]:
         payload = self._request("POST", "/api/local-agent/bpmis/projects/list", {"user_key": user_key})
         projects = payload.get("projects")
@@ -756,6 +766,17 @@ class RemoteBPMISProjectStore:
             version_name=version_name,
             version_id=version_id,
         )
+
+
+class RemoteTeamDashboardConfigStore:
+    def __init__(self, client: LocalAgentClient) -> None:
+        self.client = client
+
+    def load(self) -> dict[str, Any]:
+        return self.client.team_dashboard_config_load()
+
+    def save(self, config: dict[str, Any]) -> dict[str, Any]:
+        return self.client.team_dashboard_config_save(config)
 
 
 class RemoteSourceCodeQASessionStore:

@@ -88,6 +88,16 @@ class _RemoteBPMISConfigClient:
     def bpmis_team_profile_save(self, *, team_key, profile):
         return self.store.save_team_profile(team_key, profile)
 
+    def team_dashboard_config_load(self):
+        from bpmis_jira_tool.web import TeamDashboardConfigStore
+
+        return TeamDashboardConfigStore(self.store.db_path).load()
+
+    def team_dashboard_config_save(self, config):
+        from bpmis_jira_tool.web import TeamDashboardConfigStore
+
+        return TeamDashboardConfigStore(self.store.db_path).save(config)
+
 
 class _FakeLocalAgentConfigClient:
     def __init__(self):
@@ -102,6 +112,17 @@ class _FakeLocalAgentConfigClient:
 
     def bpmis_team_profiles_load(self):
         return {}
+
+    def team_dashboard_config_load(self):
+        return self.configs.get("team_dashboard") or web_module.TeamDashboardConfigStore(
+            Path(tempfile.mkdtemp()) / "team_dashboard.db"
+        ).default_config()
+
+    def team_dashboard_config_save(self, config):
+        self.configs["team_dashboard"] = web_module.TeamDashboardConfigStore(
+            Path(tempfile.mkdtemp()) / "team_dashboard.db"
+        ).normalize_config(config)
+        return self.configs["team_dashboard"]
 
 
 class _FakePRDReviewService:
@@ -910,11 +931,64 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertEqual(config_response.status_code, 200)
         config_payload = config_response.get_json()
         self.assertEqual(set(config_payload["config"]["teams"].keys()), {"AF", "CRMS", "GRC"})
-        self.assertIn("huixian.nah@npt.sg", config_payload["config"]["teams"]["AF"]["member_emails"])
+        self.assertEqual(
+            config_payload["config"]["teams"]["AF"]["member_emails"],
+            [
+                "jireh.tanyx@npt.sg",
+                "keryin.lim@npt.sg",
+                "chongzj@npt.sg",
+                "chang.wang@npt.sg",
+                "zoey.luxy@npt.sg",
+                "xiaodong.zheng@npt.sg",
+            ],
+        )
+        self.assertEqual(
+            config_payload["config"]["teams"]["CRMS"]["member_emails"],
+            ["huixian.nah@npt.sg", "liye.ng@npt.sg", "mingming.yeo@npt.sg", "sophia.wangzj@npt.sg"],
+        )
+        self.assertEqual(config_payload["config"]["teams"]["GRC"]["member_emails"], ["sabrina.chan@npt.sg"])
         self.assertEqual(save_response.status_code, 200)
         saved_payload = save_response.get_json()
         self.assertEqual(saved_payload["config"]["teams"]["AF"]["member_emails"], ["pm1@npt.sg", "pm2@npt.sg"])
         self.assertEqual(saved_payload["config"]["teams"]["GRC"]["member_emails"], ["ops@npt.sg", "ops2@npt.sg"])
+
+    def test_team_dashboard_config_uses_remote_local_agent_store_when_enabled(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_ALLOWED_EMAILS": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
+                "BPMIS_CALL_MODE": "local_agent",
+                "LOCAL_AGENT_MODE": "sync",
+                "LOCAL_AGENT_BPMIS_ENABLED": "true",
+                "LOCAL_AGENT_BASE_URL": "https://agent.example.com",
+                "LOCAL_AGENT_HMAC_SECRET": "secret",
+            },
+            clear=True,
+        ):
+            remote_client = _FakeLocalAgentConfigClient()
+            app = create_app()
+            app.testing = True
+
+            with patch("bpmis_jira_tool.web._build_local_agent_client", return_value=remote_client):
+                with app.test_client() as client:
+                    with client.session_transaction() as session:
+                        session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong"}
+                        session["google_credentials"] = {"token": "x"}
+                    save_response = client.post(
+                        "/admin/team-dashboard/members",
+                        json={"teams": {"AF": {"member_emails": ["Remote@npt.sg"]}}},
+                    )
+                    config_response = client.get("/api/team-dashboard/config")
+
+        self.assertEqual(save_response.status_code, 200)
+        self.assertEqual(config_response.status_code, 200)
+        self.assertEqual(config_response.get_json()["config"]["teams"]["AF"]["member_emails"], ["remote@npt.sg"])
+        self.assertEqual(remote_client.configs["team_dashboard"]["teams"]["AF"]["member_emails"], ["remote@npt.sg"])
 
     def test_team_dashboard_tasks_api_groups_under_prd_and_pending_live_by_team(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(

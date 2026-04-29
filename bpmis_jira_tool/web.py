@@ -44,6 +44,7 @@ from bpmis_jira_tool.local_agent_client import (
     RemoteSeaTalkDashboardService,
     RemoteSeaTalkNameMappingStore,
     RemoteSeaTalkTodoStore,
+    RemoteTeamDashboardConfigStore,
     RemoteSourceCodeQAAttachmentStore,
     RemoteSourceCodeQAModelAvailabilityStore,
     RemoteSourceCodeQARuntimeEvidenceStore,
@@ -80,7 +81,7 @@ SYNC_EMAIL_EDIT_ALLOWLIST = {"xiaodong.zheng@npt.sg", "xiaodong.zheng1991@gmail.
 SOURCE_CODE_QA_BUILTIN_ADMIN_EMAILS = {"xiaodong.zheng@npt.sg"}
 GMAIL_SEATALK_BUILTIN_OWNER_EMAILS = {"xiaodong.zheng@npt.sg"}
 TEAM_DASHBOARD_ADMIN_EMAIL = "xiaodong.zheng@npt.sg"
-TEAM_DASHBOARD_DEFAULT_MEMBER_EMAILS = (
+TEAM_DASHBOARD_LEGACY_DEFAULT_MEMBER_EMAILS = (
     "huixian.nah@npt.sg",
     "jireh.tanyx@npt.sg",
     "keryin.lim@npt.sg",
@@ -92,6 +93,25 @@ TEAM_DASHBOARD_DEFAULT_MEMBER_EMAILS = (
     "chang.wang@npt.sg",
     "zoey.luxy@npt.sg",
 )
+TEAM_DASHBOARD_DEFAULT_MEMBER_EMAILS_BY_TEAM = {
+    "AF": (
+        "jireh.tanyx@npt.sg",
+        "keryin.lim@npt.sg",
+        "chongzj@npt.sg",
+        "chang.wang@npt.sg",
+        "zoey.luxy@npt.sg",
+        "xiaodong.zheng@npt.sg",
+    ),
+    "CRMS": (
+        "huixian.nah@npt.sg",
+        "liye.ng@npt.sg",
+        "mingming.yeo@npt.sg",
+        "sophia.wangzj@npt.sg",
+    ),
+    "GRC": (
+        "sabrina.chan@npt.sg",
+    ),
+}
 TEAM_DASHBOARD_TEAMS = {
     "AF": "Anti-fraud",
     "CRMS": "Credit Risk",
@@ -325,7 +345,7 @@ class TeamDashboardConfigStore:
             "teams": {
                 team_key: {
                     "label": label,
-                    "member_emails": list(TEAM_DASHBOARD_DEFAULT_MEMBER_EMAILS),
+                    "member_emails": list(TEAM_DASHBOARD_DEFAULT_MEMBER_EMAILS_BY_TEAM.get(team_key, ())),
                 }
                 for team_key, label in TEAM_DASHBOARD_TEAMS.items()
             }
@@ -341,9 +361,12 @@ class TeamDashboardConfigStore:
             raw_emails = raw_team.get("member_emails") if isinstance(raw_team, dict) else None
             if raw_emails is None:
                 raw_emails = default["teams"][team_key]["member_emails"]
+            normalized_emails = _normalize_team_dashboard_emails(raw_emails)
+            if normalized_emails == list(TEAM_DASHBOARD_LEGACY_DEFAULT_MEMBER_EMAILS):
+                normalized_emails = list(default["teams"][team_key]["member_emails"])
             normalized_teams[team_key] = {
                 "label": label,
-                "member_emails": _normalize_team_dashboard_emails(raw_emails),
+                "member_emails": normalized_emails,
             }
         return {"teams": normalized_teams}
 
@@ -4217,6 +4240,9 @@ def _get_bpmis_project_store() -> BPMISProjectStore:
 
 
 def _get_team_dashboard_config_store() -> TeamDashboardConfigStore:
+    settings: Settings = current_app.config["SETTINGS"]
+    if _remote_bpmis_config_enabled(settings):
+        return RemoteTeamDashboardConfigStore(_build_local_agent_client(settings))
     return current_app.config["TEAM_DASHBOARD_CONFIG_STORE"]
 
 

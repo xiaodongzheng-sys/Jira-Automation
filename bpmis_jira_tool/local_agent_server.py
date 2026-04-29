@@ -564,6 +564,23 @@ def create_local_agent_app() -> Flask:
         saved = _build_config_store(settings).save_team_profile(team_key, profile)
         return jsonify({"status": "ok", "profile": saved})
 
+    @app.post("/api/local-agent/team-dashboard/config/load")
+    def team_dashboard_config_load():
+        if not settings.local_agent_bpmis_enabled:
+            raise ToolError("BPMIS local-agent proxy is disabled.")
+        return jsonify({"status": "ok", "config": _build_team_dashboard_config_store(settings).load()})
+
+    @app.post("/api/local-agent/team-dashboard/config/save")
+    def team_dashboard_config_save():
+        if not settings.local_agent_bpmis_enabled:
+            raise ToolError("BPMIS local-agent proxy is disabled.")
+        payload = request.get_json(silent=True) or {}
+        config = payload.get("config")
+        if not isinstance(config, dict):
+            return jsonify({"status": "error", "message": "config must be an object."}), HTTPStatus.BAD_REQUEST
+        saved = _build_team_dashboard_config_store(settings).save(config)
+        return jsonify({"status": "ok", "config": saved})
+
     @app.post("/api/local-agent/bpmis/projects/list")
     def bpmis_projects_list():
         if not settings.local_agent_bpmis_enabled:
@@ -901,6 +918,12 @@ def _build_config_store(settings: Settings) -> WebConfigStore:
         legacy_root=Path(__file__).resolve().parent.parent,
         encryption_key=settings.team_portal_config_encryption_key,
     )
+
+
+def _build_team_dashboard_config_store(settings: Settings):
+    from bpmis_jira_tool.web import TeamDashboardConfigStore
+
+    return TeamDashboardConfigStore(_build_config_store(settings).db_path)
 
 
 def _build_bpmis_project_store(settings: Settings) -> BPMISProjectStore:
