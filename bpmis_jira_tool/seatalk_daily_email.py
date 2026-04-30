@@ -7,7 +7,7 @@ import os
 import signal
 import threading
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 from pathlib import Path
 from typing import Any
 import re
@@ -32,6 +32,10 @@ from bpmis_jira_tool.trello_daily_summary import (
 
 DEFAULT_RECIPIENT = "xiaodong.zheng@npt.sg"
 DEFAULT_HOURS = 24
+MORNING_SLOT = "morning"
+MIDDAY_SLOT = "midday"
+LEGACY_SLOT = "daily"
+DAILY_EMAIL_SLOTS = {MORNING_SLOT, MIDDAY_SLOT}
 GMAIL_EXPORT_TIMEOUT_SECONDS = 90
 MAX_MY_TODOS = 8
 MAX_PROJECT_UPDATES = 10
@@ -160,6 +164,9 @@ class DailyEmailResult:
     recipient: str
     subject: str
     run_date: str
+    run_slot: str = LEGACY_SLOT
+    window_start: str = ""
+    window_end: str = ""
     message_id: str = ""
     trello_status: str = "skipped"
     trello_created_count: int = 0
@@ -167,21 +174,47 @@ class DailyEmailResult:
     trello_cards: list[dict[str, str]] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class DailyEmailWindow:
+    run_date: str
+    run_slot: str
+    start: datetime
+    end: datetime
+
+    @property
+    def label(self) -> str:
+        return f"{_format_window_endpoint(self.start)} - {_format_window_endpoint(self.end)}"
+
+
 class DailyEmailRunStore:
     def __init__(self, storage_path: Path) -> None:
         self.storage_path = storage_path
 
-    def already_sent(self, *, run_date: str, recipient: str) -> bool:
-        return self._key(run_date=run_date, recipient=recipient) in self._load().get("sent", {})
+    def already_sent(self, *, run_date: str, recipient: str, run_slot: str = LEGACY_SLOT) -> bool:
+        return self._key(run_date=run_date, recipient=recipient, run_slot=run_slot) in self._load().get("sent", {})
 
-    def mark_sent(self, *, run_date: str, recipient: str, subject: str, message_id: str, sent_at: datetime) -> None:
+    def mark_sent(
+        self,
+        *,
+        run_date: str,
+        recipient: str,
+        subject: str,
+        message_id: str,
+        sent_at: datetime,
+        run_slot: str = LEGACY_SLOT,
+        window_start: datetime | None = None,
+        window_end: datetime | None = None,
+    ) -> None:
         payload = self._load()
         sent = payload.setdefault("sent", {})
-        sent[self._key(run_date=run_date, recipient=recipient)] = {
+        sent[self._key(run_date=run_date, recipient=recipient, run_slot=run_slot)] = {
             "recipient": recipient,
             "subject": subject,
             "message_id": message_id,
             "sent_at": sent_at.isoformat(),
+            "run_slot": run_slot,
+            "window_start": window_start.isoformat() if window_start else "",
+            "window_end": window_end.isoformat() if window_end else "",
         }
         self.storage_path.parent.mkdir(parents=True, exist_ok=True)
         temp_path = self.storage_path.with_name(f".{self.storage_path.name}.{os.getpid()}.tmp")
@@ -198,8 +231,38 @@ class DailyEmailRunStore:
         return payload if isinstance(payload, dict) else {"sent": {}}
 
     @staticmethod
-    def _key(*, run_date: str, recipient: str) -> str:
-        return f"{run_date}:{recipient.strip().lower()}"
+    def _key(*, run_date: str, recipient: str, run_slot: str = LEGACY_SLOT) -> str:
+        return f"{run_date}:{run_slot}:{recipient.strip().lower()}"
+
+
+def resolve_daily_email_window(*, now: datetime, slot: str = "auto") -> DailyEmailWindow:
+    local_now = now.astimezone(SEATALK_INSIGHTS_TIMEZONE)
+    normalized_slot = str(slot or "auto").strip().lower()
+    if normalized_slot == "auto":
+        normalized_slot = MIDDAY_SLOT if local_now >= _local_datetime(local_now.date(), 13) else MORNING_SLOT
+    if normalized_slot == MIDDAY_SLOT:
+        start = _local_datetime(local_now.date(), 8)
+        end = _local_datetime(local_now.date(), 13)
+    elif normalized_slot == MORNING_SLOT:
+        start = _local_datetime(local_now.date() - timedelta(days=1), 13)
+        end = _local_datetime(local_now.date(), 8)
+    else:
+        raise ConfigError(f"Unsupported daily email slot: {slot}. Use auto, morning, or midday.")
+    return DailyEmailWindow(
+        run_date=local_now.date().isoformat(),
+        run_slot=normalized_slot,
+        start=start,
+        end=end,
+    )
+
+
+def _local_datetime(value: Any, hour: int) -> datetime:
+    return datetime.combine(value, time(hour=hour), tzinfo=SEATALK_INSIGHTS_TIMEZONE)
+
+
+def _format_window_endpoint(value: datetime) -> str:
+    local_value = value.astimezone(SEATALK_INSIGHTS_TIMEZONE)
+    return local_value.strftime("%Y-%m-%d %H:%M")
 
 
 def data_root_from_settings(settings: Settings) -> Path:
@@ -244,6 +307,19 @@ def export_rolling_history(
     return service.export_history_since(since=since, now=local_now, days=days)
 
 
+def export_window_history(
+    service: SeaTalkDashboardService,
+    *,
+    window_start: datetime,
+    window_end: datetime,
+) -> str:
+    local_start = window_start.astimezone(SEATALK_INSIGHTS_TIMEZONE)
+    local_end = window_end.astimezone(SEATALK_INSIGHTS_TIMEZONE)
+    span_days = max(1, (local_end.date() - local_start.date()).days + 1)
+    days = max(SEATALK_DASHBOARD_DEFAULT_DAYS, span_days + 1)
+    return service.export_history_since(since=local_start, now=local_end, days=days)
+
+
 def export_rolling_gmail_threads(
     service: GmailDashboardService,
     *,
@@ -253,6 +329,18 @@ def export_rolling_gmail_threads(
     local_now = now.astimezone(SEATALK_INSIGHTS_TIMEZONE)
     since = local_now - timedelta(hours=max(1, int(hours)))
     return service.export_thread_history_since(since=since, now=local_now)
+
+
+def export_window_gmail_threads(
+    service: GmailDashboardService,
+    *,
+    window_start: datetime,
+    window_end: datetime,
+) -> str:
+    return service.export_thread_history_since(
+        since=window_start.astimezone(SEATALK_INSIGHTS_TIMEZONE),
+        now=window_end.astimezone(SEATALK_INSIGHTS_TIMEZONE),
+    )
 
 
 def _gmail_export_timeout_seconds() -> int:
@@ -293,6 +381,33 @@ def _export_rolling_gmail_threads_with_timeout(
             signal.setitimer(signal.ITIMER_REAL, previous_timer[0], previous_timer[1])
 
 
+def _export_window_gmail_threads_with_timeout(
+    service: GmailDashboardService,
+    *,
+    window_start: datetime,
+    window_end: datetime,
+) -> str:
+    timeout_seconds = _gmail_export_timeout_seconds()
+    if threading.current_thread() is not threading.main_thread() or not hasattr(signal, "setitimer"):
+        return export_window_gmail_threads(service, window_start=window_start, window_end=window_end)
+
+    def _raise_timeout(signum: int, frame: Any) -> None:
+        raise TimeoutError(f"Gmail thread export exceeded {timeout_seconds} seconds.")
+
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    previous_timer = signal.setitimer(signal.ITIMER_REAL, timeout_seconds)
+    signal.signal(signal.SIGALRM, _raise_timeout)
+    try:
+        return export_window_gmail_threads(service, window_start=window_start, window_end=window_end)
+    except TimeoutError as error:
+        raise ConfigError("Gmail data could not be loaded within the daily brief timeout. Please try again shortly.") from error
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        if previous_timer[0] > 0:
+            signal.setitimer(signal.ITIMER_REAL, previous_timer[0], previous_timer[1])
+
+
 def ensure_gmail_daily_scopes(credentials_payload: dict[str, Any]) -> None:
     scopes = {str(scope).strip() for scope in (credentials_payload.get("scopes") or []) if str(scope).strip()}
     missing = [scope for scope in (GMAIL_READONLY_SCOPE, "https://www.googleapis.com/auth/gmail.send") if scope not in scopes]
@@ -306,9 +421,22 @@ def build_daily_briefing(
     now: datetime,
     hours: int = DEFAULT_HOURS,
     gmail_history_text: str = "",
+    window_start: datetime | None = None,
+    window_end: datetime | None = None,
 ) -> dict[str, Any]:
     local_now = now.astimezone(SEATALK_INSIGHTS_TIMEZONE)
-    history_text = service._filter_system_generated_history(export_rolling_history(service, now=local_now, hours=hours))
+    local_window_start = window_start.astimezone(SEATALK_INSIGHTS_TIMEZONE) if window_start else None
+    local_window_end = window_end.astimezone(SEATALK_INSIGHTS_TIMEZONE) if window_end else None
+    if local_window_start and local_window_end:
+        history_text = service._filter_system_generated_history(
+            export_window_history(service, window_start=local_window_start, window_end=local_window_end)
+        )
+        period_hours = max(1, int((local_window_end - local_window_start).total_seconds() // 3600))
+        window_label = f"{_format_window_endpoint(local_window_start)} - {_format_window_endpoint(local_window_end)}"
+    else:
+        history_text = service._filter_system_generated_history(export_rolling_history(service, now=local_now, hours=hours))
+        period_hours = hours
+        window_label = f"previous {hours} hours"
     gmail_history_text = str(gmail_history_text or "").strip()
     seatalk_has_messages = any(line.startswith("[") for line in history_text.splitlines())
     gmail_has_messages = any(line.startswith("Message ") for line in gmail_history_text.splitlines())
@@ -334,7 +462,10 @@ def build_daily_briefing(
             "team_todos": [],
             "quality_metadata": quality_metadata,
             "generated_at": local_now.isoformat(),
-            "period_hours": hours,
+            "period_hours": period_hours,
+            "window_start": local_window_start.isoformat() if local_window_start else "",
+            "window_end": local_window_end.isoformat() if local_window_end else "",
+            "window_label": window_label,
         }
     history_text = service._compact_history_for_insights(
         history_text,
@@ -349,8 +480,9 @@ def build_daily_briefing(
         prompt=_daily_brief_user_prompt(
             history_text=history_text,
             gmail_history_text=gmail_history_text,
-            hours=hours,
+            hours=period_hours,
             local_now=local_now,
+            window_label=window_label,
         ),
     )
     name_mappings = _load_seatalk_name_mappings(service)
@@ -406,13 +538,19 @@ def build_daily_briefing(
         "team_todos": [],
         "quality_metadata": quality_metadata,
         "generated_at": local_now.isoformat(),
-        "period_hours": hours,
+        "period_hours": period_hours,
+        "window_start": local_window_start.isoformat() if local_window_start else "",
+        "window_end": local_window_end.isoformat() if local_window_end else "",
+        "window_label": window_label,
     }
 
 
-def render_email(*, briefing: dict[str, Any], now: datetime) -> tuple[str, str, str]:
+def render_email(*, briefing: dict[str, Any], now: datetime, window_label: str = "") -> tuple[str, str, str]:
     local_now = now.astimezone(SEATALK_INSIGHTS_TIMEZONE)
+    label = str(window_label or briefing.get("window_label") or "").strip()
     subject = f"Daily Brief - {local_now.date().isoformat()}"
+    if label:
+        subject = f"{subject} ({label})"
     todos = [item for item in briefing.get("my_todos") or [] if isinstance(item, dict)]
     direct_action_todos = [item for item in briefing.get("direct_action_todos") or [] if isinstance(item, dict)]
     watch_delegate_todos = [item for item in briefing.get("watch_delegate_todos") or [] if isinstance(item, dict)]
@@ -423,6 +561,7 @@ def render_email(*, briefing: dict[str, Any], now: datetime) -> tuple[str, str, 
     reminders = [item for item in briefing.get("team_member_reminders") or [] if isinstance(item, dict)]
     text_lines = [
         f"Subject: {subject}",
+        f"Window: {label}" if label else "",
         "",
         "To-do",
         "",
@@ -453,9 +592,10 @@ def render_email(*, briefing: dict[str, Any], now: datetime) -> tuple[str, str, 
     else:
         text_lines.extend(_render_grouped_text(reminders, kind="reminder"))
     text_body = "\n".join(text_lines).strip() + "\n"
-    html_body = (
-        "<html><body>"
-        f"<h2>{html.escape(subject)}</h2>"
+    html_body = "<html><body>" f"<h2>{html.escape(subject)}</h2>"
+    if label:
+        html_body += f"<p><strong>Window:</strong> {html.escape(label)}</p>"
+    html_body += (
         "<h3>To-do</h3>"
         "<h4>Xiaodong Action Required</h4>"
         f"{_render_grouped_html(direct_action_todos, kind='todo')}"
@@ -476,7 +616,8 @@ def send_daily_email(
     *,
     settings: Settings,
     recipient: str = DEFAULT_RECIPIENT,
-    hours: int = DEFAULT_HOURS,
+    hours: int | None = None,
+    slot: str = "auto",
     now: datetime | None = None,
     force: bool = False,
     dry_run: bool = False,
@@ -485,12 +626,27 @@ def send_daily_email(
     trello_store: TrelloDailySummaryStore | None = None,
 ) -> DailyEmailResult:
     local_now = (now or datetime.now(SEATALK_INSIGHTS_TIMEZONE)).astimezone(SEATALK_INSIGHTS_TIMEZONE)
-    run_date = local_now.date().isoformat()
+    email_window = resolve_daily_email_window(now=local_now, slot=slot) if hours is None else None
+    run_date = email_window.run_date if email_window else local_now.date().isoformat()
+    run_slot = email_window.run_slot if email_window else LEGACY_SLOT
+    window_start = email_window.start if email_window else None
+    window_end = email_window.end if email_window else None
+    window_label = email_window.label if email_window else ""
     data_root = data_root_from_settings(settings)
     run_store = DailyEmailRunStore(data_root / "seatalk" / "daily_email_runs.json")
     subject = f"Daily Brief - {run_date}"
-    if not force and run_store.already_sent(run_date=run_date, recipient=recipient):
-        return DailyEmailResult(status="skipped", recipient=recipient, subject=subject, run_date=run_date)
+    if window_label:
+        subject = f"{subject} ({window_label})"
+    if not force and run_store.already_sent(run_date=run_date, recipient=recipient, run_slot=run_slot):
+        return DailyEmailResult(
+            status="skipped",
+            recipient=recipient,
+            subject=subject,
+            run_date=run_date,
+            run_slot=run_slot,
+            window_start=window_start.isoformat() if window_start else "",
+            window_end=window_end.isoformat() if window_end else "",
+        )
     credential_store = StoredGoogleCredentials(
         data_root / "google" / "credentials.json",
         encryption_key=settings.team_portal_config_encryption_key,
@@ -501,14 +657,39 @@ def send_daily_email(
     credentials = credentials_from_payload(credentials_payload)
     service = build_seatalk_service(settings, data_root=data_root)
     gmail_brief_service = GmailDashboardService(credentials=credentials, gmail_service=gmail_service, cache_key=owner_email)
-    gmail_history_text = _export_rolling_gmail_threads_with_timeout(gmail_brief_service, now=local_now, hours=hours)
-    briefing = build_daily_briefing(service, now=local_now, hours=hours, gmail_history_text=gmail_history_text)
-    subject, text_body, html_body = render_email(briefing=briefing, now=local_now)
+    if email_window:
+        gmail_history_text = _export_window_gmail_threads_with_timeout(
+            gmail_brief_service,
+            window_start=email_window.start,
+            window_end=email_window.end,
+        )
+        briefing = build_daily_briefing(
+            service,
+            now=local_now,
+            gmail_history_text=gmail_history_text,
+            window_start=email_window.start,
+            window_end=email_window.end,
+        )
+    else:
+        effective_hours = hours if hours is not None else DEFAULT_HOURS
+        gmail_history_text = _export_rolling_gmail_threads_with_timeout(gmail_brief_service, now=local_now, hours=effective_hours)
+        briefing = build_daily_briefing(service, now=local_now, hours=effective_hours, gmail_history_text=gmail_history_text)
+    subject, text_body, html_body = render_email(briefing=briefing, now=local_now, window_label=window_label)
     if dry_run:
-        return DailyEmailResult(status="dry_run", recipient=recipient, subject=subject, run_date=run_date)
+        return DailyEmailResult(
+            status="dry_run",
+            recipient=recipient,
+            subject=subject,
+            run_date=run_date,
+            run_slot=run_slot,
+            window_start=window_start.isoformat() if window_start else "",
+            window_end=window_end.isoformat() if window_end else "",
+        )
     trello_result = sync_daily_summary_to_trello(
         briefing=briefing,
         run_date=run_date,
+        run_slot=run_slot,
+        window_label=window_label,
         data_root=data_root,
         now=local_now,
         trello_client=trello_client,
@@ -530,12 +711,18 @@ def send_daily_email(
         subject=subject,
         message_id=message_id,
         sent_at=local_now,
+        run_slot=run_slot,
+        window_start=window_start,
+        window_end=window_end,
     )
     return DailyEmailResult(
         status="sent",
         recipient=recipient,
         subject=subject,
         run_date=run_date,
+        run_slot=run_slot,
+        window_start=window_start.isoformat() if window_start else "",
+        window_end=window_end.isoformat() if window_end else "",
         message_id=message_id,
         trello_status=trello_result.status,
         trello_created_count=trello_result.created_count,
@@ -548,6 +735,8 @@ def sync_daily_summary_to_trello(
     *,
     briefing: dict[str, Any],
     run_date: str,
+    run_slot: str = LEGACY_SLOT,
+    window_label: str = "",
     data_root: Path,
     now: datetime,
     trello_client: TrelloDailySummaryClient | None = None,
@@ -555,7 +744,7 @@ def sync_daily_summary_to_trello(
 ) -> TrelloSyncResult:
     client = trello_client or TrelloDailySummaryClient.from_env()
     store = trello_store or TrelloDailySummaryStore(data_root / "seatalk" / "daily_trello_cards.json")
-    specs = build_trello_card_specs(briefing=briefing, run_date=run_date)
+    specs = build_trello_card_specs(briefing=briefing, run_date=run_date, window_label=window_label)
     if not specs:
         return TrelloSyncResult(status="no_cards")
 
@@ -564,9 +753,10 @@ def sync_daily_summary_to_trello(
     skipped = 0
     cards: list[dict[str, str]] = []
     created_at = now.astimezone(SEATALK_INSIGHTS_TIMEZONE).isoformat()
+    run_key = f"{run_date}:{run_slot}"
     for spec in specs:
         fingerprint = fingerprint_daily_card(
-            run_date=run_date,
+            run_date=run_key,
             section=spec.section,
             item_text=spec.fingerprint_text,
             domain=spec.domain,
@@ -592,7 +782,7 @@ def sync_daily_summary_to_trello(
     )
 
 
-def build_trello_card_specs(*, briefing: dict[str, Any], run_date: str) -> list[TrelloCardSpec]:
+def build_trello_card_specs(*, briefing: dict[str, Any], run_date: str, window_label: str = "") -> list[TrelloCardSpec]:
     direct_action_todos = [item for item in briefing.get("direct_action_todos") or [] if isinstance(item, dict)]
     watch_delegate_todos = [item for item in briefing.get("watch_delegate_todos") or [] if isinstance(item, dict)]
     if not direct_action_todos and not watch_delegate_todos:
@@ -608,7 +798,12 @@ def build_trello_card_specs(*, briefing: dict[str, Any], run_date: str) -> list[
             TrelloCardSpec(
                 section="Xiaodong Action Required",
                 name=f"[Direct] {task}",
-                description=_trello_todo_description(item, run_date=run_date, section="Xiaodong Action Required"),
+                description=_trello_todo_description(
+                    item,
+                    run_date=run_date,
+                    section="Xiaodong Action Required",
+                    window_label=window_label,
+                ),
                 fingerprint_text=task,
                 domain=_display_domain(item.get("domain")),
             )
@@ -619,7 +814,12 @@ def build_trello_card_specs(*, briefing: dict[str, Any], run_date: str) -> list[
             TrelloCardSpec(
                 section="Watch / Delegate",
                 name=f"[Watch] {task}",
-                description=_trello_todo_description(item, run_date=run_date, section="Watch / Delegate"),
+                description=_trello_todo_description(
+                    item,
+                    run_date=run_date,
+                    section="Watch / Delegate",
+                    window_label=window_label,
+                ),
                 fingerprint_text=task,
                 domain=_display_domain(item.get("domain")),
             )
@@ -631,7 +831,7 @@ def build_trello_card_specs(*, briefing: dict[str, Any], run_date: str) -> list[
             TrelloCardSpec(
                 section="Suggested Team Follow-up",
                 name=f"[Follow-up] {person}: {reminder}",
-                description=_trello_reminder_description(item, run_date=run_date),
+                description=_trello_reminder_description(item, run_date=run_date, window_label=window_label),
                 fingerprint_text=f"{person} {reminder}",
                 domain=_display_domain(item.get("domain")),
             )
@@ -639,7 +839,7 @@ def build_trello_card_specs(*, briefing: dict[str, Any], run_date: str) -> list[
     return specs
 
 
-def _trello_todo_description(item: dict[str, Any], *, run_date: str, section: str) -> str:
+def _trello_todo_description(item: dict[str, Any], *, run_date: str, section: str, window_label: str = "") -> str:
     lines = [
         f"Report date: {run_date}",
         f"Section: {section}",
@@ -649,13 +849,15 @@ def _trello_todo_description(item: dict[str, Any], *, run_date: str, section: st
         f"Due: {_display_due(item.get('due'))}",
         f"Source: {item.get('evidence') or 'Unknown'}",
     ]
+    if window_label:
+        lines.insert(1, f"Report window: {window_label}")
     source_type = str(item.get("source_type") or "").strip()
     if source_type:
         lines.append(f"Source type: {source_type}")
     return "\n".join(lines)
 
 
-def _trello_reminder_description(item: dict[str, Any], *, run_date: str) -> str:
+def _trello_reminder_description(item: dict[str, Any], *, run_date: str, window_label: str = "") -> str:
     lines = [
         f"Report date: {run_date}",
         "Section: Suggested Team Follow-up",
@@ -664,6 +866,8 @@ def _trello_reminder_description(item: dict[str, Any], *, run_date: str) -> str:
         f"Reminder: {_sentence_text(item.get('reminder'), 'Follow-up may be needed')}",
         f"Source: {item.get('evidence') or 'Unknown'}",
     ]
+    if window_label:
+        lines.insert(1, f"Report window: {window_label}")
     source_type = str(item.get("source_type") or "").strip()
     if source_type:
         lines.append(f"Source type: {source_type}")
@@ -685,7 +889,9 @@ def _daily_brief_user_prompt(
     gmail_history_text: str,
     hours: int,
     local_now: datetime,
+    window_label: str = "",
 ) -> str:
+    window_text = window_label or f"previous {hours} hours"
     return (
         "## Output Contract\n"
         "Return a JSON object with exactly these top-level keys: project_updates, other_updates, my_todos, team_member_reminders, team_todos.\n"
@@ -735,7 +941,7 @@ def _daily_brief_user_prompt(
         "For my_todos.task, write one synthesized action sentence. For due, extract a real deadline if present; otherwise use TBD.\n"
         "For project_updates.summary and other_updates.summary, write one synthesized sentence, not a transcript.\n"
         "For evidence, provide only the source label. Do not include long snippets.\n\n"
-        f"Window: previous {hours} hours. Generated at: {local_now.isoformat()}.\n\n"
+        f"Window: {window_text}. Generated at: {local_now.isoformat()}.\n\n"
         "=== SeaTalk history ===\n"
         f"{history_text}\n\n"
         "=== Gmail thread history ===\n"
@@ -1455,7 +1661,8 @@ def _renderer_for_kind(kind: str):
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Send the daily SeaTalk + Gmail briefing email.")
     parser.add_argument("--recipient", default=DEFAULT_RECIPIENT)
-    parser.add_argument("--hours", type=int, default=DEFAULT_HOURS)
+    parser.add_argument("--hours", type=int, default=None, help="Legacy rolling window override. Omit to use the 8am/1pm fixed schedule.")
+    parser.add_argument("--slot", choices=["auto", MORNING_SLOT, MIDDAY_SLOT], default="auto")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--now", default="")
@@ -1469,6 +1676,7 @@ def main(argv: list[str] | None = None) -> int:
         settings=Settings.from_env(),
         recipient=args.recipient,
         hours=args.hours,
+        slot=args.slot,
         now=now,
         force=args.force,
         dry_run=args.dry_run,

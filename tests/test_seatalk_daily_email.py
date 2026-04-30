@@ -32,6 +32,7 @@ from bpmis_jira_tool.seatalk_daily_email import (
     export_rolling_history,
     export_rolling_gmail_threads,
     render_email,
+    resolve_daily_email_window,
     send_daily_email,
     seatalk_name_overrides_path,
     sync_daily_summary_to_trello,
@@ -962,6 +963,67 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         self.assertEqual(second.created_count, 0)
         self.assertEqual(second.skipped_count, 3)
 
+    def test_daily_trello_sync_tracks_morning_and_midday_separately(self):
+        class FakeTrelloClient:
+            def __init__(self):
+                self.created = []
+
+            def get_or_create_list_id(self):
+                return "list-1"
+
+            def create_card(self, *, list_id, name, description):
+                self.created.append({"list_id": list_id, "name": name, "description": description})
+                from bpmis_jira_tool.trello_daily_summary import TrelloCardResult
+
+                return TrelloCardResult(status="created", name=name, url=f"https://trello.test/{len(self.created)}", trello_id=f"card-{len(self.created)}")
+
+        briefing = {
+            "direct_action_todos": [{"task": "Review rollout", "domain": "Anti-fraud", "priority": "high", "due": "today", "evidence": "Alice"}],
+            "watch_delegate_todos": [],
+            "team_member_reminders": [],
+        }
+        now = datetime(2026, 4, 30, 13, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = TrelloDailySummaryStore(Path(temp_dir) / "daily_trello_cards.json")
+            client = FakeTrelloClient()
+            morning = sync_daily_summary_to_trello(
+                briefing=briefing,
+                run_date="2026-04-30",
+                run_slot="morning",
+                window_label="2026-04-29 13:00 - 2026-04-30 08:00",
+                data_root=Path(temp_dir),
+                now=now,
+                trello_client=client,
+                trello_store=store,
+            )
+            midday = sync_daily_summary_to_trello(
+                briefing=briefing,
+                run_date="2026-04-30",
+                run_slot="midday",
+                window_label="2026-04-30 08:00 - 2026-04-30 13:00",
+                data_root=Path(temp_dir),
+                now=now,
+                trello_client=client,
+                trello_store=store,
+            )
+            midday_again = sync_daily_summary_to_trello(
+                briefing=briefing,
+                run_date="2026-04-30",
+                run_slot="midday",
+                window_label="2026-04-30 08:00 - 2026-04-30 13:00",
+                data_root=Path(temp_dir),
+                now=now,
+                trello_client=client,
+                trello_store=store,
+            )
+
+        self.assertEqual(morning.created_count, 1)
+        self.assertEqual(midday.created_count, 1)
+        self.assertEqual(midday_again.created_count, 0)
+        self.assertEqual(midday_again.skipped_count, 1)
+        self.assertIn("Report window: 2026-04-30 08:00 - 2026-04-30 13:00", client.created[1]["description"])
+
     def test_gmail_raw_message_contains_expected_headers_and_body(self):
         raw = build_gmail_raw_message(
             sender="xiaodong.zheng@npt.sg",
@@ -1012,12 +1074,47 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
             )
             self.assertTrue(store.already_sent(run_date="2026-04-27", recipient="xiaodong.zheng@npt.sg"))
 
+    def test_fixed_daily_email_windows_cover_8_to_13_and_13_to_next_8(self):
+        midday = resolve_daily_email_window(
+            now=datetime(2026, 4, 30, 13, 5, tzinfo=SEATALK_INSIGHTS_TIMEZONE),
+            slot="auto",
+        )
+        self.assertEqual(midday.run_slot, "midday")
+        self.assertEqual(midday.run_date, "2026-04-30")
+        self.assertEqual(midday.start.isoformat(), "2026-04-30T08:00:00+08:00")
+        self.assertEqual(midday.end.isoformat(), "2026-04-30T13:00:00+08:00")
+
+        morning = resolve_daily_email_window(
+            now=datetime(2026, 4, 30, 8, 5, tzinfo=SEATALK_INSIGHTS_TIMEZONE),
+            slot="auto",
+        )
+        self.assertEqual(morning.run_slot, "morning")
+        self.assertEqual(morning.run_date, "2026-04-30")
+        self.assertEqual(morning.start.isoformat(), "2026-04-29T13:00:00+08:00")
+        self.assertEqual(morning.end.isoformat(), "2026-04-30T08:00:00+08:00")
+
+    def test_daily_email_run_store_tracks_morning_and_midday_separately(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = DailyEmailRunStore(Path(temp_dir) / "runs.json")
+            now = datetime(2026, 4, 30, 13, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE)
+            store.mark_sent(
+                run_date="2026-04-30",
+                run_slot="midday",
+                recipient="xiaodong.zheng@npt.sg",
+                subject="Daily Brief - 2026-04-30",
+                message_id="msg-1",
+                sent_at=now,
+            )
+            self.assertTrue(store.already_sent(run_date="2026-04-30", run_slot="midday", recipient="xiaodong.zheng@npt.sg"))
+            self.assertFalse(store.already_sent(run_date="2026-04-30", run_slot="morning", recipient="xiaodong.zheng@npt.sg"))
+
     def test_send_daily_email_skips_existing_run_before_work(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             settings = _settings(temp_dir)
             now = datetime(2026, 4, 27, 19, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE)
             DailyEmailRunStore(Path(temp_dir) / "seatalk" / "daily_email_runs.json").mark_sent(
                 run_date="2026-04-27",
+                run_slot="midday",
                 recipient="xiaodong.zheng@npt.sg",
                 subject="SeaTalk Daily Brief - 2026-04-27",
                 message_id="msg-1",
@@ -1067,7 +1164,7 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
             trello_store = TrelloDailySummaryStore(Path(temp_dir) / "seatalk" / "daily_trello_cards.json")
 
             with patch("bpmis_jira_tool.seatalk_daily_email.build_seatalk_service", return_value=FakeSeaTalkService()):
-                with patch("bpmis_jira_tool.seatalk_daily_email.export_rolling_gmail_threads", return_value=""):
+                with patch("bpmis_jira_tool.seatalk_daily_email.export_window_gmail_threads", return_value=""):
                     with patch("bpmis_jira_tool.seatalk_daily_email.build_daily_briefing", return_value=briefing):
                         with patch("bpmis_jira_tool.seatalk_daily_email.send_gmail_message", return_value={"id": "msg-1"}):
                             result = send_daily_email(
@@ -1105,7 +1202,7 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
             )
 
             with patch("bpmis_jira_tool.seatalk_daily_email.build_seatalk_service", return_value=FakeSeaTalkService()):
-                with patch("bpmis_jira_tool.seatalk_daily_email.export_rolling_gmail_threads", side_effect=TimeoutError):
+                with patch("bpmis_jira_tool.seatalk_daily_email.export_window_gmail_threads", side_effect=TimeoutError):
                     with self.assertRaisesRegex(ConfigError, "daily brief timeout"):
                         send_daily_email(
                             settings=settings,
