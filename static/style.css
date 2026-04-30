@@ -3792,52 +3792,6 @@ body.briefing-no-image-mode .briefing-presentation-card {
   right: 68px;
 }
 
-.briefing-floating-toggle {
-  position: fixed;
-  left: 50vw;
-  top: 50vh;
-  transform: translate(-50%, -50%);
-  z-index: 10000;
-  min-height: 54px;
-  padding: 0 24px;
-  border: 2px solid rgba(255, 255, 255, 0.92);
-  border-radius: 999px;
-  background: #0f766e;
-  color: #fff;
-  box-shadow:
-    0 0 0 4px rgba(15, 118, 110, 0.18),
-    0 20px 44px rgba(15, 23, 42, 0.28);
-  font-size: 15px;
-  font-weight: 900;
-  letter-spacing: 0;
-  cursor: pointer;
-  touch-action: none;
-  user-select: none;
-  pointer-events: auto;
-}
-
-.briefing-floating-toggle:hover {
-  background: #115e59;
-  box-shadow:
-    0 0 0 5px rgba(15, 118, 110, 0.22),
-    0 24px 52px rgba(15, 23, 42, 0.32);
-}
-
-.briefing-floating-toggle[aria-pressed="true"] {
-  background: #1f2937;
-  border-color: rgba(255, 255, 255, 0.92);
-  box-shadow:
-    0 0 0 4px rgba(31, 41, 55, 0.2),
-    0 20px 44px rgba(15, 23, 42, 0.3);
-}
-
-.briefing-floating-toggle.is-dragging {
-  cursor: grabbing;
-  box-shadow:
-    0 0 0 5px rgba(31, 41, 55, 0.18),
-    0 26px 58px rgba(15, 23, 42, 0.34);
-}
-
 .briefing-scroll-hint {
   display: inline-flex;
   align-items: center;

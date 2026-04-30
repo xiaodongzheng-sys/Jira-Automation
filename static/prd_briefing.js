@@ -8,7 +8,6 @@
   const chatLogNode = document.querySelector('[data-chat-log]');
   const narrateButton = document.querySelector('[data-play-section]');
   const readerModeToggle = document.querySelector('[data-reader-mode-toggle]');
-  const noImageModeToggle = document.querySelector('[data-no-image-mode-toggle]');
   const quickQuestionButtons = document.querySelectorAll('[data-quick-question]');
   const imageLightbox = document.querySelector('[data-image-lightbox]');
   const imageLightboxMedia = document.querySelector('[data-image-lightbox-media]');
@@ -32,13 +31,10 @@
     isNarrating: false,
     currentAudio: null,
     readerMode: false,
-    noImageMode: false,
     briefingLanguage: 'zh',
   };
 
   const READER_MODE_STORAGE_KEY = 'prd_briefing_reader_mode';
-  const NO_IMAGE_MODE_STORAGE_KEY = 'prd_briefing_no_image_mode';
-  const NO_IMAGE_MODE_POSITION_STORAGE_KEY = 'prd_briefing_no_image_mode_position';
 
   const isValidHttpUrl = (value) => /^https?:\/\/\S+/i.test(String(value || '').trim());
 
@@ -446,222 +442,6 @@
       readerModeToggle.textContent = enabled ? 'Exit Reader Mode' : 'Enter Reader Mode';
       readerModeToggle.setAttribute('aria-pressed', enabled ? 'true' : 'false');
     }
-  };
-
-  const renderNoImageMode = () => {
-    const enabled = Boolean(state.noImageMode);
-    document.body.classList.toggle('briefing-no-image-mode', enabled);
-    if (noImageModeToggle) {
-      noImageModeToggle.textContent = enabled ? 'Show Images' : 'No-image Mode';
-      noImageModeToggle.setAttribute('aria-pressed', enabled ? 'true' : 'false');
-    }
-    if (enabled) {
-      closeImageLightbox();
-    }
-  };
-
-  const captureReadingAnchor = () => {
-    if (!sectionDetailNode) return null;
-    const viewportTop = 0;
-    const viewportBottom = window.innerHeight || document.documentElement.clientHeight || 0;
-    const viewportAnchorY = Math.round(viewportBottom * 0.42);
-    const sections = Array.from(sectionDetailNode.querySelectorAll('[data-source-section-index]'));
-    if (!sections.length) return null;
-    let best = null;
-    sections.forEach((node) => {
-      const rect = node.getBoundingClientRect();
-      const visibleTop = Math.max(rect.top, viewportTop);
-      const visibleBottom = Math.min(rect.bottom, viewportBottom);
-      const visibleHeight = Math.max(0, visibleBottom - visibleTop);
-      const containsAnchor = rect.top <= viewportAnchorY && rect.bottom >= viewportAnchorY;
-      const distance = containsAnchor
-        ? 0
-        : Math.min(Math.abs(rect.top - viewportAnchorY), Math.abs(rect.bottom - viewportAnchorY));
-      if (
-        !best
-        || (containsAnchor && !best.containsAnchor)
-        || (containsAnchor === best.containsAnchor && visibleHeight > best.visibleHeight)
-        || (containsAnchor === best.containsAnchor && visibleHeight === best.visibleHeight && distance < best.distance)
-      ) {
-        best = {
-          index: node.dataset.sourceSectionIndex,
-          node,
-          top: rect.top,
-          anchorY: viewportAnchorY,
-          containsAnchor,
-          visibleHeight,
-          distance,
-        };
-      }
-    });
-    if (best?.node) {
-      const readableNodes = Array.from(best.node.querySelectorAll([
-        '.briefing-source-heading',
-        'h1',
-        'h2',
-        'h3',
-        'h4',
-        'h5',
-        'h6',
-        'p',
-        'li',
-        'td',
-        'th',
-        'blockquote',
-        'pre',
-      ].join(','))).filter((node) => {
-        const text = (node.innerText || node.textContent || '').replace(/\s+/g, ' ').trim();
-        const rect = node.getBoundingClientRect();
-        return text.length > 0 && rect.width > 0 && rect.height > 0;
-      });
-      let readableAnchor = null;
-      readableNodes.forEach((node) => {
-        const rect = node.getBoundingClientRect();
-        const containsAnchor = rect.top <= viewportAnchorY && rect.bottom >= viewportAnchorY;
-        const distance = containsAnchor ? 0 : Math.min(Math.abs(rect.top - viewportAnchorY), Math.abs(rect.bottom - viewportAnchorY));
-        if (!readableAnchor || distance < readableAnchor.distance) {
-          readableAnchor = {
-            node,
-            top: rect.top,
-            offset: clamp(viewportAnchorY - rect.top, 0, Math.max(0, rect.height)),
-            distance,
-          };
-        }
-      });
-      if (readableAnchor) {
-        best.readableNode = readableAnchor.node;
-        best.readableTop = readableAnchor.top;
-        best.readableOffset = readableAnchor.offset;
-      }
-      delete best.node;
-    }
-    return best;
-  };
-
-  const restoreReadingAnchor = (anchor) => {
-    if (!anchor || !sectionDetailNode) return;
-    const node = Array.from(sectionDetailNode.querySelectorAll('[data-source-section-index]'))
-      .find((item) => String(item.dataset.sourceSectionIndex) === String(anchor.index));
-    if (!node) return;
-    if (anchor.readableNode && node.contains(anchor.readableNode)) {
-      const readableRect = anchor.readableNode.getBoundingClientRect();
-      if (readableRect.width > 0 && readableRect.height > 0) {
-        const offset = clamp(Number(anchor.readableOffset) || 0, 0, readableRect.height);
-        window.scrollBy({
-          top: readableRect.top + offset - anchor.anchorY,
-          left: 0,
-          behavior: 'auto',
-        });
-        return;
-      }
-    }
-    const rect = node.getBoundingClientRect();
-    window.scrollBy({
-      top: rect.top - anchor.top,
-      left: 0,
-      behavior: 'auto',
-    });
-  };
-
-  const restoreReadingAnchorAfterLayout = (anchor) => {
-    if (!anchor) return;
-    window.requestAnimationFrame(() => {
-      restoreReadingAnchor(anchor);
-      window.setTimeout(() => restoreReadingAnchor(anchor), 120);
-      window.setTimeout(() => restoreReadingAnchor(anchor), 320);
-    });
-  };
-
-  const applyNoImageTogglePosition = (position) => {
-    if (!noImageModeToggle || !position) return;
-    const margin = 12;
-    const rect = noImageModeToggle.getBoundingClientRect();
-    const width = rect.width || 118;
-    const height = rect.height || 44;
-    const maxLeft = Math.max(margin, window.innerWidth - width - margin);
-    const maxTop = Math.max(margin, window.innerHeight - height - margin);
-    const left = clamp(Number(position.left) || margin, margin, maxLeft);
-    const top = clamp(Number(position.top) || margin, margin, maxTop);
-    noImageModeToggle.style.left = `${left}px`;
-    noImageModeToggle.style.top = `${top}px`;
-    noImageModeToggle.style.right = 'auto';
-    noImageModeToggle.style.bottom = 'auto';
-    noImageModeToggle.style.transform = 'none';
-  };
-
-  const saveNoImageTogglePosition = () => {
-    if (!noImageModeToggle) return;
-    const rect = noImageModeToggle.getBoundingClientRect();
-    try {
-      window.localStorage.setItem(NO_IMAGE_MODE_POSITION_STORAGE_KEY, JSON.stringify({
-        left: Math.round(rect.left),
-        top: Math.round(rect.top),
-      }));
-    } catch {}
-  };
-
-  const restoreNoImageTogglePosition = () => {
-    if (!noImageModeToggle) return;
-    try {
-      const saved = JSON.parse(window.localStorage.getItem(NO_IMAGE_MODE_POSITION_STORAGE_KEY) || 'null');
-      if (saved && Number.isFinite(Number(saved.left)) && Number.isFinite(Number(saved.top))) {
-        applyNoImageTogglePosition(saved);
-      }
-    } catch {}
-  };
-
-  const setupNoImageToggleDrag = () => {
-    if (!noImageModeToggle) return;
-    let dragState = null;
-    noImageModeToggle.addEventListener('pointerdown', (event) => {
-      if (event.button !== 0) return;
-      const rect = noImageModeToggle.getBoundingClientRect();
-      dragState = {
-        pointerId: event.pointerId,
-        startX: event.clientX,
-        startY: event.clientY,
-        left: rect.left,
-        top: rect.top,
-        moved: false,
-      };
-      noImageModeToggle.setPointerCapture?.(event.pointerId);
-      noImageModeToggle.classList.add('is-dragging');
-    });
-    noImageModeToggle.addEventListener('pointermove', (event) => {
-      if (!dragState || event.pointerId !== dragState.pointerId) return;
-      const deltaX = event.clientX - dragState.startX;
-      const deltaY = event.clientY - dragState.startY;
-      if (Math.abs(deltaX) + Math.abs(deltaY) > 4) {
-        dragState.moved = true;
-      }
-      if (!dragState.moved) return;
-      event.preventDefault();
-      applyNoImageTogglePosition({
-        left: dragState.left + deltaX,
-        top: dragState.top + deltaY,
-      });
-    });
-    const finishDrag = (event) => {
-      if (!dragState || event.pointerId !== dragState.pointerId) return;
-      noImageModeToggle.releasePointerCapture?.(event.pointerId);
-      noImageModeToggle.classList.remove('is-dragging');
-      if (dragState.moved) {
-        noImageModeToggle.dataset.suppressClick = 'true';
-        saveNoImageTogglePosition();
-        window.setTimeout(() => {
-          delete noImageModeToggle.dataset.suppressClick;
-        }, 250);
-      }
-      dragState = null;
-    };
-    noImageModeToggle.addEventListener('pointerup', finishDrag);
-    noImageModeToggle.addEventListener('pointercancel', finishDrag);
-    window.addEventListener('resize', () => {
-      if (!noImageModeToggle.style.left || !noImageModeToggle.style.top) return;
-      const rect = noImageModeToggle.getBoundingClientRect();
-      applyNoImageTogglePosition({ left: rect.left, top: rect.top });
-      saveNoImageTogglePosition();
-    });
   };
 
   const stopNarration = () => {
@@ -1296,22 +1076,6 @@
     });
   }
 
-  if (noImageModeToggle) {
-    noImageModeToggle.addEventListener('click', (event) => {
-      if (noImageModeToggle.dataset.suppressClick === 'true') {
-        event.preventDefault();
-        return;
-      }
-      const readingAnchor = captureReadingAnchor();
-      state.noImageMode = !state.noImageMode;
-      try {
-        window.localStorage.setItem(NO_IMAGE_MODE_STORAGE_KEY, state.noImageMode ? '1' : '0');
-      } catch {}
-      renderNoImageMode();
-      restoreReadingAnchorAfterLayout(readingAnchor);
-    });
-  }
-
   if (imageLightboxClose) {
     imageLightboxClose.addEventListener('click', () => {
       closeImageLightbox();
@@ -1364,13 +1128,5 @@
   } catch {
     state.readerMode = false;
   }
-  try {
-    state.noImageMode = window.localStorage.getItem(NO_IMAGE_MODE_STORAGE_KEY) === '1';
-  } catch {
-    state.noImageMode = false;
-  }
   renderReaderMode();
-  renderNoImageMode();
-  restoreNoImageTogglePosition();
-  setupNoImageToggleDrag();
 })();
