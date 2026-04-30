@@ -246,6 +246,14 @@ class ConfluenceConnector:
             phrases.append(" ".join(meaningful[:4]))
         if len(meaningful) >= 4:
             phrases.append(" ".join(meaningful[1:5]))
+            phrases.append(" ".join(meaningful[-4:]))
+        if len(meaningful) >= 6:
+            phrases.append(" ".join(meaningful[-6:]))
+        suffix_match = re.search(r"\s+-\s+(.+)$", cleaned)
+        if suffix_match:
+            suffix = suffix_match.group(1).strip()
+            if suffix:
+                phrases.append(suffix)
         phrases.append(title)
         return list(dict.fromkeys(phrase for phrase in phrases if phrase))
 

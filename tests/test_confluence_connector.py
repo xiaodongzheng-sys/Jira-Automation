@@ -187,6 +187,15 @@ class ConfluenceConnectorTests(unittest.TestCase):
         self.assertTrue(request_urls[3].endswith("/rest/api/search"))
         self.assertTrue(request_urls[4].endswith("/rest/api/content/67890"))
 
+    def test_title_search_phrases_include_tail_when_version_prefix_changed(self):
+        phrases = self.connector._title_search_phrases(
+            "Antifraud V3.45_0608 - UI improvements on FV instruction to discourage wrong person attempts"
+        )
+
+        self.assertIn("discourage wrong person attempts", phrases)
+        self.assertIn("instruction to discourage wrong person attempts", phrases)
+        self.assertIn("UI improvements on FV instruction to discourage wrong person attempts", phrases)
+
     def test_parse_sections_skips_toc_heading_and_keeps_real_sections(self):
         html = """
         <h1><div class='toc-macro'><ul><li><a href='#x'>1. Project Management</a></li><li><a href='#y'>2. Introduction</a></li></ul></div></h1>
