@@ -99,6 +99,10 @@ class BPMISClient(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def link_jira_ticket_to_project(self, ticket_key: str, project_issue_id: str | int) -> dict[str, Any]:
+        raise NotImplementedError
+
+    @abstractmethod
     def delink_jira_ticket_from_project(self, ticket_key: str, project_issue_id: str | int) -> dict[str, Any]:
         raise NotImplementedError
 
@@ -811,6 +815,41 @@ class BPMISDirectApiClient(BPMISClient):
             "Could not update Jira fix version. "
             "A direct Jira API token is required for editing an existing Jira ticket's Fix Version."
         )
+
+    def link_jira_ticket_to_project(self, ticket_key: str, project_issue_id: str | int) -> dict[str, Any]:
+        normalized_ticket_key = self._extract_issue_key(str(ticket_key or "")) or str(ticket_key or "").strip()
+        normalized_project_id = str(project_issue_id or "").strip()
+        if not normalized_ticket_key:
+            raise BPMISError("Jira ticket key is required.")
+        if not normalized_project_id:
+            raise BPMISError("BPMIS project issue ID is required.")
+
+        if self._issue_is_linked_to_parent(normalized_ticket_key, normalized_project_id):
+            return self.get_jira_ticket_detail(normalized_ticket_key)
+
+        ticket_link = self._normalize_ticket_link(normalized_ticket_key) or normalized_ticket_key
+        try:
+            response = self._api_request(
+                "/api/v1/issues/batchCreateJiraIssue",
+                method="POST",
+                body=[
+                    {
+                        "typeId": self.TASK_TYPE_ID,
+                        "parentIssueId": int(normalized_project_id),
+                        "jiraLink": ticket_link,
+                    }
+                ],
+            )
+            self._write_debug_capture({"parentIssueId": normalized_project_id, "jiraLink": ticket_link}, response)
+        except (BPMISError, ValueError) as error:
+            raise BPMISError(
+                "Could not link Jira task to BPMIS Biz Project through BPMIS. "
+                f"Last error: {error}"
+            ) from error
+
+        if not self._issue_is_linked_to_parent(normalized_ticket_key, normalized_project_id):
+            raise BPMISError("BPMIS accepted the link request, but the Jira task is still not linked to this Biz Project.")
+        return self.get_jira_ticket_detail(normalized_ticket_key)
 
     def delink_jira_ticket_from_project(self, ticket_key: str, project_issue_id: str | int) -> dict[str, Any]:
         normalized_ticket_key = self._extract_issue_key(str(ticket_key or "")) or str(ticket_key or "").strip()

@@ -748,6 +748,9 @@ class RemoteBPMISClient:
     def update_jira_ticket_fix_version(self, ticket_key: str, version_name: str, version_id: str | None = None) -> dict[str, Any]:
         return self._call("update_jira_ticket_fix_version", ticket_key, version_name, version_id) or {}
 
+    def link_jira_ticket_to_project(self, ticket_key: str, project_issue_id: str | int) -> dict[str, Any]:
+        return self._call("link_jira_ticket_to_project", ticket_key, project_issue_id) or {}
+
     def delink_jira_ticket_from_project(self, ticket_key: str, project_issue_id: str | int) -> dict[str, Any]:
         return self._call("delink_jira_ticket_from_project", ticket_key, project_issue_id) or {}
 

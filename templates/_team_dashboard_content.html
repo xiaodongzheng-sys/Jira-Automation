@@ -4,6 +4,7 @@
   data-save-url="{{ url_for('save_team_dashboard_members') }}"
   data-tasks-url="{{ url_for('team_dashboard_tasks') }}"
   data-key-project-url="{{ url_for('save_team_dashboard_key_project') }}"
+  data-link-biz-project-url="{{ url_for('team_dashboard_link_biz_projects') }}"
   {% if can_view_team_dashboard_monthly_report %}
     data-monthly-report-template-url="{{ url_for('team_dashboard_monthly_report_template') }}"
     data-monthly-report-template-save-url="{{ url_for('save_team_dashboard_monthly_report_template') }}"
@@ -25,6 +26,7 @@
     {% if can_view_team_dashboard_monthly_report %}
       <button class="workspace-tab" type="button" role="tab" aria-selected="false" data-team-dashboard-tab="monthly-report">Monthly Report</button>
     {% endif %}
+    <button class="workspace-tab" type="button" role="tab" aria-selected="false" data-team-dashboard-tab="link-biz-project">Link Biz Project</button>
     {% if can_manage_team_dashboard %}
       <button class="workspace-tab" type="button" role="tab" aria-selected="false" data-team-dashboard-tab="admin">Team Admin</button>
     {% endif %}
@@ -93,6 +95,36 @@
       </div>
     </section>
   {% endif %}
+
+  <section data-team-dashboard-panel="link-biz-project" hidden>
+    <div class="productization-section-head">
+      <div>
+        <h3>Link Biz Project</h3>
+        <span data-link-biz-project-summary>Find Jira tickets without a BPMIS Biz Project and link them to the closest match.</span>
+      </div>
+      <div class="button-row">
+        <button class="button button-secondary" type="button" data-link-biz-project-refresh>Refresh</button>
+      </div>
+    </div>
+    <p class="productization-inline-status" data-link-biz-project-status></p>
+    <div class="table-wrap premium-table-wrap team-dashboard-link-biz-wrap">
+      <table class="productization-table team-dashboard-table team-dashboard-link-biz-table">
+        <thead>
+          <tr>
+            <th>Jira ID</th>
+            <th>Jira Title</th>
+            <th>Reporter Email</th>
+            <th>Suggested BPMIS ID</th>
+            <th>Suggested Biz Project Title</th>
+            <th>Link</th>
+          </tr>
+        </thead>
+        <tbody data-link-biz-project-rows>
+          <tr><td colspan="6" class="team-dashboard-empty-cell">Open this tab to load unlinked Jira tickets.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
 
   {% if can_manage_team_dashboard %}
     <section data-team-dashboard-panel="admin" hidden>

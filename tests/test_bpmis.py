@@ -1032,6 +1032,59 @@ class BPMISClientTests(unittest.TestCase):
             self.assertEqual(update_call[1], "DELETE")
             self.assertEqual(detail["parentIds"], [])
 
+    def test_link_jira_ticket_to_project_links_existing_ticket_and_verifies_parent(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings = Settings(
+                flask_secret_key="secret",
+                google_oauth_client_secret_file=Path(temp_dir) / "client.json",
+                google_oauth_redirect_uri=None,
+                team_portal_host="127.0.0.1",
+                team_portal_port=5000,
+                team_portal_base_url=None,
+                team_allowed_emails=(),
+                team_allowed_email_domains=(),
+                team_portal_data_dir=Path(temp_dir),
+                spreadsheet_id="sheet",
+                common_tab_name="Common",
+                input_tab_name="Input",
+                bpmis_base_url="https://example.com",
+                bpmis_api_access_token="token",
+            )
+
+            client = BPMISDirectApiClient(settings)
+            calls: list[tuple[str, str, dict | None, object | None]] = []
+            state = {"linked": False}
+
+            def fake_api_request(path, method="GET", params=None, body=None):
+                calls.append((path, method, params, body))
+                if path == "/api/v1/issues/detail":
+                    return {
+                        "data": {
+                            "row": {
+                                "id": 9001,
+                                "jiraKey": "AF-101",
+                                "summary": "Live AF task",
+                                "parentIds": [225159] if state["linked"] else [],
+                            }
+                        }
+                    }
+                if path == "/api/v1/issues/list":
+                    return {"data": {"rows": [{"id": 9001, "jiraKey": "AF-101"}] if state["linked"] else []}}
+                if path == "/api/v1/issues/batchCreateJiraIssue":
+                    self.assertEqual(method, "POST")
+                    state["linked"] = True
+                    return {"data": {"add": [{"jiraLink": "https://jira.shopee.io/browse/AF-101"}]}}
+                raise AssertionError(path)
+
+            client._api_request = fake_api_request  # type: ignore[method-assign]
+
+            detail = client.link_jira_ticket_to_project("AF-101", "225159")
+
+            link_call = next(call for call in calls if call[0] == "/api/v1/issues/batchCreateJiraIssue")
+            self.assertEqual(link_call[3][0]["parentIssueId"], 225159)
+            self.assertEqual(link_call[3][0]["jiraLink"], "https://jira.shopee.io/browse/AF-101")
+            self.assertEqual(detail["parentIds"], [225159])
+
     def test_get_jira_ticket_detail_uses_direct_jira_api_when_token_configured(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             settings = Settings(

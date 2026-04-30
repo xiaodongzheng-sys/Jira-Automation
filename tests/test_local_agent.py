@@ -524,6 +524,8 @@ class LocalAgentClientTests(unittest.TestCase):
                     return {"status": {"label": "Testing"}}
                 if operation == "update_jira_ticket_fix_version":
                     return {"fixVersions": ["Planning_26Q4"]}
+                if operation == "link_jira_ticket_to_project":
+                    return {"parentIds": [221664]}
                 if operation == "delink_jira_ticket_from_project":
                     return {"parentIds": []}
                 return None
@@ -537,6 +539,7 @@ class LocalAgentClientTests(unittest.TestCase):
         self.assertEqual(remote.get_brd_doc_links_for_projects(["221664"])["221664"], ["https://brd"])
         self.assertEqual(remote.update_jira_ticket_status("SPDBP-95742", "Testing")["status"]["label"], "Testing")
         self.assertEqual(remote.update_jira_ticket_fix_version("SPDBP-95742", "Planning_26Q4")["fixVersions"], ["Planning_26Q4"])
+        self.assertEqual(remote.link_jira_ticket_to_project("SPDBP-95742", "221664")["parentIds"], [221664])
         self.assertEqual(remote.delink_jira_ticket_from_project("SPDBP-95742", "221664")["parentIds"], [])
         self.assertEqual(calls[0], ("get_jira_ticket_detail", "token", ["SPDBP-95742"], {}))
 

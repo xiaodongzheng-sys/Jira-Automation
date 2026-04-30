@@ -33,7 +33,7 @@ import requests
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 from bpmis_jira_tool.config import Settings
-from bpmis_jira_tool.errors import ConfigError, ToolError
+from bpmis_jira_tool.errors import BPMISError, ConfigError, ToolError
 from bpmis_jira_tool.google_auth import (
     create_google_authorization_url,
     finish_google_oauth,
@@ -132,6 +132,11 @@ TEAM_DASHBOARD_UNDER_PRD_STATUSES = {"waiting", "prd in progress", "prd reviewed
 TEAM_DASHBOARD_EXCLUDED_PENDING_STATUSES = {"icebox", "closed", "done"}
 TEAM_DASHBOARD_UNDER_PRD_BIZ_PROJECT_STATUSES = {"pending review", "confirmed"}
 TEAM_DASHBOARD_PENDING_LIVE_BIZ_PROJECT_STATUSES = {"developing", "testing", "uat"}
+TEAM_DASHBOARD_LINK_BIZ_EXCLUDED_TITLE_PHRASES = (
+    "sync af productization",
+    "productisation upgrade",
+    "deployment of productization",
+)
 _gmail_export_active_users: set[str] = set()
 _gmail_export_active_users_lock = threading.Lock()
 _source_code_qa_codex_session_locks: dict[str, threading.Lock] = {}
@@ -3712,6 +3717,146 @@ def create_app() -> Flask:
             }
         )
 
+    @app.get("/api/team-dashboard/link-biz-projects")
+    def team_dashboard_link_biz_projects():
+        access_gate = _require_team_dashboard_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        try:
+            config = _get_team_dashboard_config_store().load()
+            team_payloads = _load_team_dashboard_link_biz_project_payloads(settings, config)
+            rows = _build_team_dashboard_link_biz_project_rows(team_payloads)
+            return jsonify({"status": "ok", "rows": rows, "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())})
+        except Exception as error:  # noqa: BLE001
+            _log_portal_event(
+                "team_dashboard_link_biz_project_load_error",
+                level=logging.ERROR,
+                **_build_request_log_context(settings, user_identity=_get_user_identity(settings), extra=_classify_portal_error(error)),
+            )
+            current_app.logger.exception("Team Dashboard Link Biz Project load failed.")
+            return (
+                jsonify(
+                    {
+                        "status": "error",
+                        "message": "Could not load unlinked Jira tickets. Please retry or share the request ID.",
+                        **_classify_portal_error(error),
+                    }
+                ),
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+
+    @app.post("/api/team-dashboard/link-biz-projects")
+    def link_team_dashboard_biz_project():
+        access_gate = _require_team_dashboard_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        payload = request.get_json(silent=True) or {}
+        jira_id = _extract_issue_key_from_text(str(payload.get("jira_id") or payload.get("jira_link") or ""))
+        jira_link = str(payload.get("jira_link") or "").strip()
+        bpmis_id = str(payload.get("suggested_bpmis_id") or payload.get("bpmis_id") or "").strip()
+        if not jira_id:
+            return jsonify({"status": "error", "message": "Jira ID is required."}), HTTPStatus.BAD_REQUEST
+        if not bpmis_id:
+            return jsonify({"status": "error", "message": "Suggested BPMIS ID is required."}), HTTPStatus.BAD_REQUEST
+
+        user_identity = _get_user_identity(settings)
+        try:
+            bpmis_client = _build_bpmis_client_for_current_user(settings)
+            linked_detail = bpmis_client.link_jira_ticket_to_project(jira_id, bpmis_id)
+            if bpmis_id not in _extract_parent_issue_ids_from_any(linked_detail):
+                raise BPMISError("BPMIS link verification failed because the Jira detail does not include this Biz Project parent.")
+
+            project_detail = {}
+            try:
+                project_detail = bpmis_client.get_issue_detail(bpmis_id)
+            except Exception:  # noqa: BLE001 - the verified link is the source of truth; project cache can be sparse.
+                project_detail = {}
+            project = _normalize_team_dashboard_project(
+                {
+                    **(project_detail if isinstance(project_detail, dict) else {}),
+                    "bpmis_id": bpmis_id,
+                    "issue_id": bpmis_id,
+                }
+            )
+            if not project.get("project_name"):
+                project["project_name"] = str(
+                    (project_detail if isinstance(project_detail, dict) else {}).get("project_name")
+                    or (project_detail if isinstance(project_detail, dict) else {}).get("summary")
+                    or payload.get("suggested_project_title")
+                    or ""
+                ).strip()
+            if not jira_link:
+                jira_link = f"{_jira_browse_base_url()}{jira_id}"
+
+            store = _get_bpmis_project_store()
+            store.upsert_project(
+                user_key=str(user_identity.get("config_key") or ""),
+                bpmis_id=bpmis_id,
+                project_name=str(project.get("project_name") or bpmis_id),
+                brd_link="",
+                market=str(project.get("market") or ""),
+            )
+            ticket = store.upsert_synced_jira_ticket(
+                user_key=str(user_identity.get("config_key") or ""),
+                bpmis_id=bpmis_id,
+                component=str(linked_detail.get("component") or ""),
+                market=str(linked_detail.get("market") or project.get("market") or ""),
+                system=str(linked_detail.get("system") or ""),
+                jira_title=str(linked_detail.get("jira_title") or linked_detail.get("summary") or payload.get("jira_title") or ""),
+                prd_link="",
+                description=str(linked_detail.get("description") or linked_detail.get("desc") or ""),
+                fix_version_name=str(linked_detail.get("fix_version_name") or linked_detail.get("version") or ""),
+                fix_version_id=str(linked_detail.get("fix_version_id") or ""),
+                ticket_key=jira_id,
+                ticket_link=jira_link,
+                status="linked",
+                message="Linked from Team Dashboard Link Biz Project.",
+                raw_response=linked_detail if isinstance(linked_detail, dict) else {},
+            )
+            _log_portal_event(
+                "team_dashboard_link_biz_project_success",
+                **_build_request_log_context(
+                    settings,
+                    user_identity=user_identity,
+                    extra={"jira_id": jira_id, "bpmis_id": bpmis_id},
+                ),
+            )
+            return jsonify(
+                {
+                    "status": "ok",
+                    "jira_id": jira_id,
+                    "jira_link": jira_link,
+                    "bpmis_id": bpmis_id,
+                    "project": project,
+                    "ticket": ticket or {},
+                }
+            )
+        except (BPMISError, ToolError) as error:
+            error_details = _classify_portal_error(error)
+            _log_portal_event(
+                "team_dashboard_link_biz_project_tool_error",
+                level=logging.WARNING,
+                **_build_request_log_context(settings, user_identity=user_identity, extra={**error_details, "jira_id": jira_id, "bpmis_id": bpmis_id}),
+            )
+            return jsonify({"status": "error", "message": str(error), **error_details}), HTTPStatus.BAD_REQUEST
+        except Exception as error:  # noqa: BLE001
+            _log_portal_event(
+                "team_dashboard_link_biz_project_unexpected_error",
+                level=logging.ERROR,
+                **_build_request_log_context(settings, user_identity=user_identity, extra={"jira_id": jira_id, "bpmis_id": bpmis_id}),
+            )
+            current_app.logger.exception("Team Dashboard Link Biz Project failed.")
+            return (
+                jsonify(
+                    {
+                        "status": "error",
+                        "message": "Link Biz Project failed unexpectedly. Please retry or share the request ID.",
+                        **_classify_portal_error(error),
+                    }
+                ),
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+
     @app.post("/api/team-dashboard/monthly-report/draft")
     def team_dashboard_monthly_report_draft():
         access_gate = _require_team_dashboard_monthly_report_access(settings, api=True)
@@ -6146,6 +6291,139 @@ def _load_all_team_dashboard_task_payloads(settings: Settings, config: dict[str,
         _backfill_team_dashboard_empty_project_jira_tasks(bpmis_client, team_payload)
         team_payloads.append(team_payload)
     return team_payloads
+
+
+def _load_team_dashboard_link_biz_project_payloads(settings: Settings, config: dict[str, Any]) -> list[dict[str, Any]]:
+    key_project_overrides = config.get("key_project_overrides") if isinstance(config.get("key_project_overrides"), dict) else {}
+    bpmis_client = _build_bpmis_client_for_current_user(settings)
+    team_payloads: list[dict[str, Any]] = []
+    for team_key, label in TEAM_DASHBOARD_TEAMS.items():
+        team_config = (config.get("teams") or {}).get(team_key) or {}
+        emails = _normalize_team_dashboard_emails(team_config.get("member_emails") or [])
+        tasks = bpmis_client.list_jira_tasks_created_by_emails(
+            emails,
+            max_pages=_team_dashboard_jira_max_pages(),
+            enrich_missing_parent=False,
+            release_after=_team_dashboard_jira_release_after(),
+        )
+        biz_projects = _team_dashboard_biz_projects_for_emails(bpmis_client, emails)
+        team_payload = _build_team_dashboard_task_group(
+            team_key,
+            label,
+            emails,
+            tasks,
+            biz_projects,
+            key_project_overrides=key_project_overrides,
+        )
+        _backfill_team_dashboard_empty_project_jira_tasks(bpmis_client, team_payload)
+        _remove_team_dashboard_zero_jira_pending_live_projects(team_payload)
+        team_payloads.append(team_payload)
+    return team_payloads
+
+
+def _build_team_dashboard_link_biz_project_rows(team_payloads: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    candidate_projects: list[dict[str, Any]] = []
+    unlinked_items: list[tuple[str, dict[str, Any]]] = []
+    for team in team_payloads or []:
+        team_key = str(team.get("team_key") or "").strip()
+        for section_key in ("under_prd", "pending_live"):
+            for project in team.get(section_key) or []:
+                if not isinstance(project, dict):
+                    continue
+                bpmis_id = str(project.get("bpmis_id") or "").strip()
+                tickets = project.get("jira_tickets") if isinstance(project.get("jira_tickets"), list) else []
+                if bpmis_id:
+                    candidate_projects.append(project)
+                    continue
+                for ticket in tickets:
+                    if isinstance(ticket, dict) and not _team_dashboard_link_biz_title_excluded(str(ticket.get("jira_title") or "")):
+                        unlinked_items.append((team_key, ticket))
+
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for team_key, ticket in unlinked_items:
+        jira_id = str(ticket.get("jira_id") or ticket.get("issue_id") or "").strip()
+        if not jira_id or jira_id in seen:
+            continue
+        seen.add(jira_id)
+        suggestion = _suggest_team_dashboard_biz_project(ticket, candidate_projects)
+        rows.append(
+            {
+                "team_key": team_key,
+                "jira_id": jira_id,
+                "jira_link": str(ticket.get("jira_link") or (f"{_jira_browse_base_url()}{jira_id}" if jira_id else "")).strip(),
+                "jira_title": str(ticket.get("jira_title") or "").strip(),
+                "reporter_email": str(ticket.get("pm_email") or "").strip().lower(),
+                "suggested_bpmis_id": str(suggestion.get("bpmis_id") or ""),
+                "suggested_project_title": str(suggestion.get("project_name") or ""),
+                "match_score": float(suggestion.get("match_score") or 0.0),
+            }
+        )
+    rows.sort(key=lambda row: (str(row.get("team_key") or ""), str(row.get("jira_id") or "")))
+    return rows
+
+
+def _team_dashboard_link_biz_title_excluded(title: str) -> bool:
+    normalized = str(title or "").casefold()
+    return any(phrase in normalized for phrase in TEAM_DASHBOARD_LINK_BIZ_EXCLUDED_TITLE_PHRASES)
+
+
+def _normalize_team_dashboard_link_match_text(value: str) -> str:
+    text = str(value or "").strip()
+    while True:
+        updated = re.sub(r"^\s*\[[^\]]+\]\s*", "", text).strip()
+        if updated == text:
+            break
+        text = updated
+    text = re.sub(r"[_\-|:/\\]+", " ", text.casefold())
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _suggest_team_dashboard_biz_project(ticket: dict[str, Any], candidates: list[dict[str, Any]]) -> dict[str, Any]:
+    source = _normalize_team_dashboard_link_match_text(str(ticket.get("jira_title") or ""))
+    best: dict[str, Any] = {}
+    best_score = -1.0
+    best_sort_key: tuple[str, str] = ("", "")
+    for project in candidates:
+        bpmis_id = str(project.get("bpmis_id") or "").strip()
+        project_name = str(project.get("project_name") or "").strip()
+        target = _normalize_team_dashboard_link_match_text(project_name)
+        if not bpmis_id or not target:
+            continue
+        score = difflib.SequenceMatcher(None, source, target).ratio() if source else 0.0
+        sort_key = (project_name.casefold(), bpmis_id.casefold())
+        if score > best_score or (score == best_score and (not best or sort_key < best_sort_key)):
+            best_score = score
+            best_sort_key = sort_key
+            best = {
+                "bpmis_id": bpmis_id,
+                "project_name": project_name,
+                "match_score": round(score, 4),
+            }
+    return best
+
+
+def _extract_parent_issue_ids_from_any(value: Any) -> set[str]:
+    if not isinstance(value, dict):
+        return set()
+    parent_values = value.get("parentIds")
+    if parent_values is None:
+        parent_values = value.get("parentIssueId")
+    if parent_values is None and isinstance(value.get("raw_jira"), dict):
+        return _extract_parent_issue_ids_from_any(value["raw_jira"])
+    if not isinstance(parent_values, list):
+        parent_values = [parent_values] if parent_values not in (None, "") else []
+    ids: set[str] = set()
+    for parent in parent_values:
+        if isinstance(parent, dict):
+            candidate = parent.get("id") or parent.get("issueId") or parent.get("value")
+        else:
+            candidate = parent
+        text = str(candidate or "").strip()
+        if text:
+            ids.add(text)
+    return ids
 
 
 def _backfill_team_dashboard_empty_project_jira_tasks(bpmis_client: Any, team_payload: dict[str, Any]) -> None:

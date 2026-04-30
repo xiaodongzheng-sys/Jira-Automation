@@ -7159,6 +7159,26 @@ select:focus {
   text-align: center;
 }
 
+.team-dashboard-link-biz-wrap {
+  margin-top: 12px;
+}
+
+.team-dashboard-link-biz-table th:nth-child(2),
+.team-dashboard-link-biz-table td:nth-child(2),
+.team-dashboard-link-biz-table th:nth-child(5),
+.team-dashboard-link-biz-table td:nth-child(5) {
+  min-width: 220px;
+}
+
+.team-dashboard-link-biz-row-status {
+  display: block;
+  margin-top: 6px;
+  max-width: 220px;
+  color: #b42318;
+  font-size: 0.82rem;
+  line-height: 1.35;
+}
+
 @media (max-width: 1180px) {
   .showcase-grid,
   .workspace-grid,

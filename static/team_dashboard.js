@@ -48,6 +48,9 @@
   const monthlyReportTemplateForm = root.querySelector('[data-monthly-report-template-form]');
   const monthlyReportTemplate = root.querySelector('[data-monthly-report-template]');
   const monthlyReportTemplateStatus = root.querySelector('[data-monthly-report-template-status]');
+  const linkBizProjectStatus = root.querySelector('[data-link-biz-project-status]');
+  const linkBizProjectRows = root.querySelector('[data-link-biz-project-rows]');
+  const linkBizProjectRefresh = root.querySelector('[data-link-biz-project-refresh]');
   const canManageKeyProjects = root.dataset.canManageKeyProjects === 'true';
   const teamLabels = {
     AF: 'Anti-fraud',
@@ -71,6 +74,8 @@
   let keyProjectOnly = false;
   let monthlyReportSubject = 'Monthly Report';
   let monthlyReportLoaded = false;
+  let linkBizProjectLoaded = false;
+  let linkBizProjectLoading = false;
   let monthlyReportProgressTimer = null;
   let monthlyReportProgressStartedAt = 0;
   let monthlyReportLastProgress = null;
@@ -225,6 +230,8 @@
       });
       if (name === 'monthly-report') {
         loadMonthlyReportTemplate();
+      } else if (name === 'link-biz-project') {
+        loadLinkBizProjects();
       }
     };
     triggers.forEach((trigger) => {
@@ -717,6 +724,65 @@
     `;
   };
 
+  const renderLinkBizRows = (rows) => {
+    if (!linkBizProjectRows) return;
+    const items = Array.isArray(rows) ? rows : [];
+    if (!items.length) {
+      linkBizProjectRows.innerHTML = '<tr><td colspan="6" class="team-dashboard-empty-cell">No unlinked Jira tickets found.</td></tr>';
+      return;
+    }
+    linkBizProjectRows.innerHTML = items.map((row) => {
+      const bpmisId = String(row.suggested_bpmis_id || '').trim();
+      const disabled = bpmisId ? '' : 'disabled';
+      return `
+        <tr data-link-biz-project-row="${escapeHtml(row.jira_id || '')}">
+          <td>${renderLink(row.jira_link || '', row.jira_id || '-')}</td>
+          <td>${escapeHtml(row.jira_title || '-')}</td>
+          <td>${escapeHtml(row.reporter_email || '-')}</td>
+          <td>${escapeHtml(bpmisId || '-')}</td>
+          <td>${escapeHtml(row.suggested_project_title || '-')}</td>
+          <td>
+            <button
+              class="button button-secondary"
+              type="button"
+              data-link-biz-project-action
+              data-jira-id="${escapeHtml(row.jira_id || '')}"
+              data-jira-link="${escapeHtml(row.jira_link || '')}"
+              data-jira-title="${escapeHtml(row.jira_title || '')}"
+              data-suggested-bpmis-id="${escapeHtml(bpmisId)}"
+              data-suggested-project-title="${escapeHtml(row.suggested_project_title || '')}"
+              ${disabled}
+            >Link</button>
+            <span class="team-dashboard-link-biz-row-status" data-link-biz-project-row-status></span>
+          </td>
+        </tr>
+      `;
+    }).join('');
+  };
+
+  const loadLinkBizProjects = async (force = false) => {
+    if (!linkBizProjectRows || linkBizProjectLoading) return;
+    if (linkBizProjectLoaded && !force) return;
+    linkBizProjectLoading = true;
+    linkBizProjectRows.innerHTML = '<tr><td colspan="6" class="team-dashboard-empty-cell">Loading unlinked Jira tickets...</td></tr>';
+    setStatus(linkBizProjectStatus, 'Loading unlinked Jira tickets...', 'neutral');
+    try {
+      const response = await fetch(root.dataset.linkBizProjectUrl || '/api/team-dashboard/link-biz-projects', {
+        headers: { Accept: 'application/json' },
+        credentials: 'same-origin',
+      });
+      const payload = await readJson(response, 'Could not load unlinked Jira tickets.');
+      renderLinkBizRows(payload.rows || []);
+      linkBizProjectLoaded = true;
+      setStatus(linkBizProjectStatus, `${(payload.rows || []).length} unlinked Jira tickets found.`, 'success');
+    } catch (error) {
+      linkBizProjectRows.innerHTML = '<tr><td colspan="6" class="team-dashboard-empty-cell">Could not load unlinked Jira tickets.</td></tr>';
+      setStatus(linkBizProjectStatus, error.message || 'Could not load unlinked Jira tickets.', 'error');
+    } finally {
+      linkBizProjectLoading = false;
+    }
+  };
+
   const configuredTeams = async () => {
     const response = await fetch(root.dataset.configUrl || '/api/team-dashboard/config', {
       headers: { Accept: 'application/json' },
@@ -1154,6 +1220,48 @@
   monthlyReportGenerateButton?.addEventListener('click', generateMonthlyReport);
   monthlyReportSendButton?.addEventListener('click', sendMonthlyReport);
   monthlyReportTemplateForm?.addEventListener('submit', saveMonthlyReportTemplate);
+  linkBizProjectRefresh?.addEventListener('click', () => {
+    linkBizProjectLoaded = false;
+    loadLinkBizProjects(true);
+  });
+  linkBizProjectRows?.addEventListener('click', async (event) => {
+    const button = event.target.closest('[data-link-biz-project-action]');
+    if (!button) return;
+    const row = button.closest('[data-link-biz-project-row]');
+    const rowStatus = row?.querySelector('[data-link-biz-project-row-status]');
+    const jiraId = button.dataset.jiraId || '';
+    const suggestedBpmisId = button.dataset.suggestedBpmisId || '';
+    if (!jiraId || !suggestedBpmisId) return;
+    button.disabled = true;
+    button.textContent = 'Linking...';
+    if (rowStatus) rowStatus.textContent = '';
+    try {
+      const response = await fetch(root.dataset.linkBizProjectUrl || '/api/team-dashboard/link-biz-projects', {
+        method: 'POST',
+        headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({
+          jira_id: jiraId,
+          jira_link: button.dataset.jiraLink || '',
+          jira_title: button.dataset.jiraTitle || '',
+          suggested_bpmis_id: suggestedBpmisId,
+          suggested_project_title: button.dataset.suggestedProjectTitle || '',
+        }),
+      });
+      await readJson(response, 'Could not link Jira ticket to BPMIS Biz Project.');
+      clearTaskCache();
+      row?.remove();
+      setStatus(linkBizProjectStatus, `${jiraId} linked to BPMIS ${suggestedBpmisId}. Task List cache was cleared.`, 'success');
+      if (linkBizProjectRows && !linkBizProjectRows.querySelector('[data-link-biz-project-row]')) {
+        renderLinkBizRows([]);
+      }
+    } catch (error) {
+      button.disabled = false;
+      button.textContent = 'Retry';
+      if (rowStatus) rowStatus.textContent = error.message || 'Link failed.';
+      setStatus(linkBizProjectStatus, error.message || 'Could not link Jira ticket to BPMIS Biz Project.', 'error');
+    }
+  });
   taskList?.addEventListener('click', (event) => {
     const trackButton = event.target.closest('[data-team-dashboard-track]');
     if (trackButton) {

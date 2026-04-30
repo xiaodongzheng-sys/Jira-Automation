@@ -11,7 +11,7 @@ from openpyxl import load_workbook
 
 import bpmis_jira_tool.web as web_module
 from bpmis_jira_tool.config import Settings
-from bpmis_jira_tool.errors import ToolError
+from bpmis_jira_tool.errors import BPMISError, ToolError
 from bpmis_jira_tool.models import CreatedTicket
 from bpmis_jira_tool.monthly_report import MonthlyReportSendResult
 from bpmis_jira_tool.user_config import WebConfigStore
@@ -1726,6 +1726,187 @@ class WebPortalFeatureTests(unittest.TestCase):
                 }
             ],
         )
+
+    def test_team_dashboard_link_biz_projects_lists_unlinked_jira_with_fuzzy_suggestions(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_ALLOWED_EMAILS": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_DASHBOARD_JIRA_RELEASE_AFTER": "2026-04-29",
+            },
+            clear=True,
+        ):
+            app = create_app()
+            app.testing = True
+            app.config["TEAM_DASHBOARD_CONFIG_STORE"].save(
+                {
+                    "teams": {
+                        "AF": {"member_emails": ["af@npt.sg"]},
+                        "CRMS": {"member_emails": ["cr@npt.sg"]},
+                        "GRC": {"member_emails": ["ops@npt.sg"]},
+                    }
+                }
+            )
+
+            class FakeLinkBizClient:
+                def list_biz_projects_for_pm_email(self, email):
+                    if email == "af@npt.sg":
+                        return [
+                            {
+                                "issue_id": "225159",
+                                "project_name": "Fraud Alert Revamp",
+                                "market": "SG",
+                                "status": "Confirmed",
+                            }
+                        ]
+                    if email == "cr@npt.sg":
+                        return [
+                            {
+                                "issue_id": "225200",
+                                "project_name": "Credit Scoring Improvements",
+                                "market": "ID",
+                                "status": "Confirmed",
+                            }
+                        ]
+                    return []
+
+                def list_jira_tasks_created_by_emails(self, emails, **_kwargs):
+                    if emails == ["af@npt.sg"]:
+                        return [
+                            {
+                                "jira_id": "AF-1",
+                                "jira_title": "[Feature][SG][DBP-Anti-fraud] Fraud Alert Revamp",
+                                "pm_email": "af@npt.sg",
+                                "jira_status": "Testing",
+                            },
+                            {
+                                "jira_id": "AF-2",
+                                "jira_title": "Sync AF productization weekly check",
+                                "pm_email": "af@npt.sg",
+                                "jira_status": "Testing",
+                            },
+                        ]
+                    if emails == ["cr@npt.sg"]:
+                        return [
+                            {
+                                "jira_id": "CR-1",
+                                "jira_title": "[Feature][ID] Credit Scoring Improvement",
+                                "pm_email": "cr@npt.sg",
+                                "jira_status": "Waiting",
+                            }
+                        ]
+                    return []
+
+                def list_jira_tasks_for_project_created_by_email(self, _bpmis_id, _email):
+                    return []
+
+            with patch("bpmis_jira_tool.web._build_bpmis_client_for_current_user", return_value=FakeLinkBizClient()):
+                with app.test_client() as client:
+                    with client.session_transaction() as session:
+                        session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong"}
+                        session["google_credentials"] = {"token": "x"}
+                    response = client.get("/api/team-dashboard/link-biz-projects")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual([row["jira_id"] for row in payload["rows"]], ["AF-1", "CR-1"])
+        suggestions = {row["jira_id"]: row for row in payload["rows"]}
+        self.assertEqual(suggestions["AF-1"]["suggested_bpmis_id"], "225159")
+        self.assertEqual(suggestions["AF-1"]["suggested_project_title"], "Fraud Alert Revamp")
+        self.assertEqual(suggestions["CR-1"]["suggested_bpmis_id"], "225200")
+        self.assertGreater(suggestions["AF-1"]["match_score"], 0.8)
+
+    def test_team_dashboard_link_biz_project_links_real_bpmis_and_updates_portal_cache(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_ALLOWED_EMAILS": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+            },
+            clear=True,
+        ):
+            app = create_app()
+            app.testing = True
+
+            class FakeLinkClient:
+                def __init__(self):
+                    self.link_calls = []
+
+                def link_jira_ticket_to_project(self, ticket_key, project_issue_id):
+                    self.link_calls.append((ticket_key, project_issue_id))
+                    return {
+                        "jiraKey": ticket_key,
+                        "summary": "Fraud Alert Revamp",
+                        "parentIds": [int(project_issue_id)],
+                        "status": {"label": "Testing"},
+                    }
+
+                def get_issue_detail(self, issue_id):
+                    return {"issue_id": issue_id, "project_name": "Fraud Alert Revamp", "market": "SG"}
+
+            fake_client = FakeLinkClient()
+            with patch("bpmis_jira_tool.web._build_bpmis_client_for_current_user", return_value=fake_client):
+                with app.test_client() as client:
+                    with client.session_transaction() as session:
+                        session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong"}
+                        session["google_credentials"] = {"token": "x"}
+                    response = client.post(
+                        "/api/team-dashboard/link-biz-projects",
+                        json={
+                            "jira_id": "AF-1",
+                            "jira_link": "https://jira.shopee.io/browse/AF-1",
+                            "jira_title": "Fraud Alert Revamp",
+                            "suggested_bpmis_id": "225159",
+                            "suggested_project_title": "Fraud Alert Revamp",
+                        },
+                    )
+
+            projects = app.config["BPMIS_PROJECT_STORE"].list_projects(user_key="google:xiaodong.zheng@npt.sg")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(fake_client.link_calls, [("AF-1", "225159")])
+        self.assertEqual(projects[0]["bpmis_id"], "225159")
+        self.assertEqual(projects[0]["jira_tickets"][0]["ticket_key"], "AF-1")
+        self.assertEqual(projects[0]["jira_tickets"][0]["status"], "linked")
+
+    def test_team_dashboard_link_biz_project_failure_does_not_update_portal_cache(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_ALLOWED_EMAILS": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+            },
+            clear=True,
+        ):
+            app = create_app()
+            app.testing = True
+
+            class BrokenLinkClient:
+                def link_jira_ticket_to_project(self, _ticket_key, _project_issue_id):
+                    raise BPMISError("BPMIS link endpoint rejected the ticket.")
+
+            with patch("bpmis_jira_tool.web._build_bpmis_client_for_current_user", return_value=BrokenLinkClient()):
+                with app.test_client() as client:
+                    with client.session_transaction() as session:
+                        session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong"}
+                        session["google_credentials"] = {"token": "x"}
+                    response = client.post(
+                        "/api/team-dashboard/link-biz-projects",
+                        json={"jira_id": "AF-1", "suggested_bpmis_id": "225159"},
+                    )
+
+            projects = app.config["BPMIS_PROJECT_STORE"].list_projects(user_key="google:xiaodong.zheng@npt.sg")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(projects, [])
 
     def test_team_dashboard_backfills_empty_project_jira_tasks_by_parent_id(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
