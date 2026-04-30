@@ -20,7 +20,7 @@
   const prdReviewPanel = document.querySelector('[data-prd-review-panel]');
   const chatSubmitButton = chatForm?.querySelector('button[type="submit"]');
   const CACHED_NARRATION_DELAY_MS = 0;
-  const MAX_SOURCE_HTML_RENDER_CHARS = 70000;
+  let sourceContentCache = new Map();
 
   let state = {
     sessionId: null,
@@ -49,65 +49,17 @@
     .replaceAll('"', '&quot;')
     .replaceAll("'", '&#39;');
 
-  const sanitizePrdHtmlFragment = (value) => {
-    const template = document.createElement('template');
-    template.innerHTML = String(value || '');
-
-    template.content.querySelectorAll([
-      'script',
-      'style',
-      'link',
-      'meta',
-      'iframe',
-      'object',
-      'embed',
-      'form',
-      'input',
-      'button',
-      'textarea',
-      'select',
-      'dialog',
-    ].join(',')).forEach((node) => node.remove());
-
-    template.content.querySelectorAll('*').forEach((node) => {
-      Array.from(node.attributes || []).forEach((attribute) => {
-        const name = attribute.name.toLowerCase();
-        if (
-          name.startsWith('on')
-          || ['style', 'srcdoc', 'autofocus', 'hidden'].includes(name)
-        ) {
-          node.removeAttribute(attribute.name);
-        }
-      });
-
-      if (node.tagName === 'A') {
-        const href = node.getAttribute('href') || '';
-        if (/^\s*javascript:/i.test(href)) {
-          node.removeAttribute('href');
-        }
-        node.setAttribute('target', '_blank');
-        node.setAttribute('rel', 'noreferrer');
-      }
-
-      if (node.tagName === 'IMG') {
-        const src = node.getAttribute('src') || '';
-        if (/^\s*javascript:/i.test(src)) {
-          node.removeAttribute('src');
-        }
-        node.setAttribute('loading', 'lazy');
-        node.setAttribute('decoding', 'async');
-      }
-    });
-
-    return template.innerHTML;
+  const renderPlainSourceContent = (sectionIndex, section) => {
+    if (sourceContentCache.has(sectionIndex)) {
+      return sourceContentCache.get(sectionIndex);
+    }
+    const text = String(section.content || '').trim();
+    const markup = text
+      ? `<div class="briefing-source-text">${escapeHtml(text)}</div>`
+      : '';
+    sourceContentCache.set(sectionIndex, markup);
+    return markup;
   };
-
-  const renderPlainSourceContent = (section) => (section.content || '')
-    .split('\n')
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .map((line) => `<p>${escapeHtml(line)}</p>`)
-    .join('');
 
   const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
 
@@ -908,7 +860,7 @@
         ? (section.image_refs || []).map((src) => `<img src="${escapeHtml(src)}" alt="${escapeHtml(section.section_path)}">`).join('')
         : '';
       const rawHtml = String(section.html_content || '').trim();
-      const contentMarkup = renderPlainSourceContent(section);
+      const contentMarkup = renderPlainSourceContent(sectionIndex, section);
       const sourceNotice = rawHtml
         ? '<p class="briefing-source-render-note">PRD source rendered as text for browser performance.</p>'
         : '';
@@ -941,24 +893,6 @@
       </article>
       <div class="briefing-source-stack">${sourceMarkup}</div>
     `;
-    enhancePresentationTables();
-    classifyTableLayouts();
-    addHorizontalHints();
-    classifySectionImages();
-    hideDecorativeArrowArtifacts();
-    sectionDetailNode.querySelectorAll('img').forEach((image) => {
-      image.setAttribute('tabindex', '0');
-      image.setAttribute('role', 'button');
-      image.setAttribute('aria-label', `${block.title} image preview`);
-      const openPreview = () => openImageLightbox(image.currentSrc || image.src, image.alt || block.title);
-      image.addEventListener('click', openPreview);
-      image.addEventListener('keydown', (event) => {
-        if (event.key === 'Enter' || event.key === ' ') {
-          event.preventDefault();
-          openPreview();
-        }
-      });
-    });
     sectionListNode.querySelectorAll('[data-block-index]').forEach((button) => {
       button.addEventListener('click', () => {
         stopNarration();
@@ -1028,6 +962,7 @@
     state.sections = payload.sections || [];
     state.briefingBlocks = payload.briefing_blocks || [];
     state.briefingLanguage = payload.session?.audience === 'developer_en' ? 'en' : 'zh';
+    sourceContentCache = new Map();
     state.currentSectionIndex = 0;
     state.currentBlockIndex = 0;
     setStatus(`Generated the ${briefingLanguageLabel()} developer walkthrough for "${payload.session.title}".`, 'success');

@@ -501,7 +501,7 @@ class PRDBriefingService:
         prd_chunks = self.store.list_session_prd_chunks(session_id, owner_key)
         sections = self._build_sections(prd_chunks)
         sections = [self._annotate_section_cache(owner_key=owner_key, section=section, language=language) for section in sections]
-        briefing_blocks = self._build_briefing_blocks(sections)
+        briefing_blocks = self._build_briefing_blocks(sections, language=language)
         briefing_blocks = [self._annotate_block_cache(owner_key=owner_key, block=block, language=language) for block in briefing_blocks]
         session_overview = self._build_session_overview(
             owner_key=owner_key,
@@ -576,7 +576,7 @@ class PRDBriefingService:
         prd_chunks = self.store.list_session_prd_chunks(session_id, owner_key)
         sections = self._build_sections(prd_chunks)
         if briefing_block_id:
-            blocks = self._build_briefing_blocks(sections)
+            blocks = self._build_briefing_blocks(sections, language=language)
             block = next((item for item in blocks if item.get("block_id") == briefing_block_id), None)
             if not block:
                 raise ValueError("Briefing block is out of range.")
@@ -688,8 +688,8 @@ class PRDBriefingService:
             for index, chunk in enumerate(prd_chunks)
         ]
 
-    def _build_briefing_blocks(self, sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        return build_pm_briefing_blocks(sections)
+    def _build_briefing_blocks(self, sections: list[dict[str, Any]], *, language: str = "zh") -> list[dict[str, Any]]:
+        return build_pm_briefing_blocks(sections, language=language)
 
     def _compose_walkthrough_section(self, *, owner_key: str, section: dict[str, Any], language: str = "zh") -> tuple[str, bool]:
         language = normalize_walkthrough_language(language)
@@ -796,7 +796,7 @@ class PRDBriefingService:
         if not self.text_client.is_configured():
             return
         language = normalize_walkthrough_language(language)
-        briefing_blocks = self._build_briefing_blocks(sections)
+        briefing_blocks = self._build_briefing_blocks(sections, language=language)
         for block in briefing_blocks[:WALKTHROUGH_PREWARM_LIMIT]:
             try:
                 self._compose_walkthrough_block(
@@ -1451,29 +1451,57 @@ def has_feature_level_signal(value: str) -> bool:
 
 
 BRIEFING_CATEGORY_META = {
-    "workflow": {
-        "title": "主流程和页面跳转",
-        "goal": "帮助开发先理解用户从入口到完成操作的主路径，以及页面之间怎么衔接。",
+    "zh": {
+        "workflow": {
+            "title": "主流程和页面跳转",
+            "goal": "帮助开发先理解用户从入口到完成操作的主路径，以及页面之间怎么衔接。",
+        },
+        "ui_rules": {
+            "title": "页面布局和字段规则",
+            "goal": "把页面结构、字段展示、默认值、显隐、只读和必填规则合并讲清楚。",
+        },
+        "state_actions": {
+            "title": "状态流转和操作动作",
+            "goal": "集中说明提交、复核、审批、撤回、重开等动作会如何改变状态和可用操作。",
+        },
+        "reporting": {
+            "title": "报表、下载和历史记录",
+            "goal": "说明报表下载、历史记录、审计输出等功能对前后端实现的要求。",
+        },
+        "permission_edge": {
+            "title": "权限、校验和异常边界",
+            "goal": "把权限条件、强校验、失败路径和边界 case 单独拎出来，避免实现时漏规则。",
+        },
+        "feature": {
+            "title": "核心功能说明",
+            "goal": "合并 PRD 里真正影响开发实现的功能说明，过滤低价值背景和元数据。",
+        },
     },
-    "ui_rules": {
-        "title": "页面布局和字段规则",
-        "goal": "把页面结构、字段展示、默认值、显隐、只读和必填规则合并讲清楚。",
-    },
-    "state_actions": {
-        "title": "状态流转和操作动作",
-        "goal": "集中说明提交、复核、审批、撤回、重开等动作会如何改变状态和可用操作。",
-    },
-    "reporting": {
-        "title": "报表、下载和历史记录",
-        "goal": "说明报表下载、历史记录、审计输出等功能对前后端实现的要求。",
-    },
-    "permission_edge": {
-        "title": "权限、校验和异常边界",
-        "goal": "把权限条件、强校验、失败路径和边界 case 单独拎出来，避免实现时漏规则。",
-    },
-    "feature": {
-        "title": "核心功能说明",
-        "goal": "合并 PRD 里真正影响开发实现的功能说明，过滤低价值背景和元数据。",
+    "en": {
+        "workflow": {
+            "title": "Main Flow and Navigation",
+            "goal": "Help developers understand the primary user path from entry point to completion, including how pages connect.",
+        },
+        "ui_rules": {
+            "title": "Page Layout and Field Rules",
+            "goal": "Consolidate page structure, field display, defaults, visibility, readonly, and required-field rules.",
+        },
+        "state_actions": {
+            "title": "Status Transitions and Actions",
+            "goal": "Explain how submit, review, approve, withdraw, reopen, and related actions change status and available operations.",
+        },
+        "reporting": {
+            "title": "Reports, Downloads, and History",
+            "goal": "Summarize implementation requirements for report downloads, history records, audit output, and related exports.",
+        },
+        "permission_edge": {
+            "title": "Permissions, Validation, and Edge Cases",
+            "goal": "Separate permission conditions, hard validation, failure paths, and edge cases so implementation does not miss rules.",
+        },
+        "feature": {
+            "title": "Core Feature Requirements",
+            "goal": "Merge PRD content that affects implementation while filtering low-value background and metadata.",
+        },
     },
 }
 
@@ -1482,7 +1510,8 @@ MAX_BRIEFING_BLOCK_SECTIONS = 4
 MAX_BRIEFING_BLOCK_HTML_CHARS = 180_000
 
 
-def build_pm_briefing_blocks(sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def build_pm_briefing_blocks(sections: list[dict[str, Any]], *, language: str = "zh") -> list[dict[str, Any]]:
+    language = normalize_walkthrough_language(language)
     candidates: list[tuple[int, dict[str, Any], str, int]] = []
     for index, section in enumerate(sections):
         section_path = str(section.get("section_path", "")).strip()
@@ -1512,7 +1541,8 @@ def build_pm_briefing_blocks(sections: list[dict[str, Any]]) -> list[dict[str, A
     blocks: list[dict[str, Any]] = []
     for category in category_order:
         entries = sorted(grouped[category], key=lambda item: item[0])
-        meta = BRIEFING_CATEGORY_META.get(category, BRIEFING_CATEGORY_META["feature"])
+        category_meta = BRIEFING_CATEGORY_META[language]
+        meta = category_meta.get(category, category_meta["feature"])
         entry_groups = split_briefing_entries(entries)
         for group_index, group_entries in enumerate(entry_groups, start=1):
             title = meta["title"]
@@ -1528,8 +1558,11 @@ def build_pm_briefing_blocks(sections: list[dict[str, Any]]) -> list[dict[str, A
                 }
                 for index, section, _score in group_entries
             ]
-            developer_focus = [localize_detail_point_zh(item) for item in extract_detail_points(block_sections, category="developer")]
-            merged_summary = build_block_summary(title, block_sections)
+            developer_focus = [
+                localize_detail_point_zh(item) if language == "zh" else item
+                for item in extract_detail_points(block_sections, category="developer")
+            ]
+            merged_summary = build_block_summary(title, block_sections, language=language)
             blocks.append(
                 {
                     "block_id": (
@@ -1587,13 +1620,20 @@ def classify_briefing_category(section_path: str, content: str) -> str:
     return "feature"
 
 
-def build_block_summary(title: str, sections: list[dict[str, Any]]) -> str:
+def build_block_summary(title: str, sections: list[dict[str, Any]], *, language: str = "zh") -> str:
+    language = normalize_walkthrough_language(language)
     focus_sentences = extract_candidate_sentences(sections, limit=3)
     if focus_sentences:
+        if language == "en":
+            return f"{title}: {'; '.join(focus_sentences[:3])}."
         return f"{title}：{'；'.join(focus_sentences[:3])}。"
     titles = [str(section.get("section_path", "")).strip() for section in sections if str(section.get("section_path", "")).strip()]
     if titles:
+        if language == "en":
+            return f"{title}: Review {'; '.join(titles[:4])} as one implementation capability."
         return f"{title}：建议把 {'、'.join(titles[:4])} 作为同一个产品能力一起 briefing。"
+    if language == "en":
+        return f"{title}: The system grouped related PRD content into one developer walkthrough module."
     return f"{title}：系统已把相关 PRD 内容合并成一个产品 briefing 模块。"
 
 

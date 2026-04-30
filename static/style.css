@@ -3352,6 +3352,12 @@ select {
   color: var(--ink);
 }
 
+.briefing-original-content .briefing-source-text {
+  line-height: 1.72;
+  color: var(--ink);
+  white-space: pre-wrap;
+}
+
 .briefing-original-content .briefing-source-render-note {
   padding: 10px 12px;
   border: 1px solid rgba(22, 119, 255, 0.18);

@@ -474,6 +474,19 @@ class PRDBriefingServiceTests(unittest.TestCase):
         self.assertEqual(state_block["section_indexes"], [3, 4])
         self.assertTrue(ui_block["source_refs"])
 
+    def test_pm_briefing_blocks_use_english_labels_for_english_walkthrough(self):
+        sections = [
+            {"section_path": "3.5.1 Search Layout", "content": "The page shows search criteria and default fields. User can click Search button."},
+            {"section_path": "3.6.1 Submit Review", "content": "User can submit for review and status changes from Draft to Pending Review."},
+        ]
+
+        blocks = build_pm_briefing_blocks(sections, language="en")
+
+        self.assertTrue(any(block["title"] == "Page Layout and Field Rules" for block in blocks))
+        self.assertTrue(any(block["title"] == "Status Transitions and Actions" for block in blocks))
+        self.assertTrue(all("：" not in block["merged_summary"] for block in blocks))
+        self.assertTrue(all("说明" not in block["briefing_goal"] for block in blocks))
+
     def test_pm_briefing_blocks_split_large_related_groups(self):
         sections = [
             {
