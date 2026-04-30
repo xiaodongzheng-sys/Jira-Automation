@@ -20,6 +20,7 @@
   const prdReviewPanel = document.querySelector('[data-prd-review-panel]');
   const chatSubmitButton = chatForm?.querySelector('button[type="submit"]');
   const CACHED_NARRATION_DELAY_MS = 0;
+  const MAX_SOURCE_HTML_RENDER_CHARS = 70000;
 
   let state = {
     sessionId: null,
@@ -47,6 +48,66 @@
     .replaceAll('>', '&gt;')
     .replaceAll('"', '&quot;')
     .replaceAll("'", '&#39;');
+
+  const sanitizePrdHtmlFragment = (value) => {
+    const template = document.createElement('template');
+    template.innerHTML = String(value || '');
+
+    template.content.querySelectorAll([
+      'script',
+      'style',
+      'link',
+      'meta',
+      'iframe',
+      'object',
+      'embed',
+      'form',
+      'input',
+      'button',
+      'textarea',
+      'select',
+      'dialog',
+    ].join(',')).forEach((node) => node.remove());
+
+    template.content.querySelectorAll('*').forEach((node) => {
+      Array.from(node.attributes || []).forEach((attribute) => {
+        const name = attribute.name.toLowerCase();
+        if (
+          name.startsWith('on')
+          || ['style', 'srcdoc', 'autofocus', 'hidden'].includes(name)
+        ) {
+          node.removeAttribute(attribute.name);
+        }
+      });
+
+      if (node.tagName === 'A') {
+        const href = node.getAttribute('href') || '';
+        if (/^\s*javascript:/i.test(href)) {
+          node.removeAttribute('href');
+        }
+        node.setAttribute('target', '_blank');
+        node.setAttribute('rel', 'noreferrer');
+      }
+
+      if (node.tagName === 'IMG') {
+        const src = node.getAttribute('src') || '';
+        if (/^\s*javascript:/i.test(src)) {
+          node.removeAttribute('src');
+        }
+        node.setAttribute('loading', 'lazy');
+        node.setAttribute('decoding', 'async');
+      }
+    });
+
+    return template.innerHTML;
+  };
+
+  const renderPlainSourceContent = (section) => (section.content || '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => `<p>${escapeHtml(line)}</p>`)
+    .join('');
 
   const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
 
@@ -846,21 +907,22 @@
       const images = !hasOriginalHtml
         ? (section.image_refs || []).map((src) => `<img src="${escapeHtml(src)}" alt="${escapeHtml(section.section_path)}">`).join('')
         : '';
-      const contentMarkup = section.html_content && section.html_content.trim()
-        ? section.html_content
-        : (section.content || '')
-          .split('\n')
-          .map((line) => line.trim())
-          .filter(Boolean)
-          .map((line) => `<p>${escapeHtml(line)}</p>`)
-          .join('');
+      const sanitizedHtml = section.html_content && section.html_content.trim()
+        ? sanitizePrdHtmlFragment(section.html_content)
+        : '';
+      const contentMarkup = sanitizedHtml && sanitizedHtml.length <= MAX_SOURCE_HTML_RENDER_CHARS
+        ? sanitizedHtml
+        : renderPlainSourceContent(section);
+      const sourceNotice = sanitizedHtml && sanitizedHtml.length > MAX_SOURCE_HTML_RENDER_CHARS
+        ? '<p class="briefing-source-render-note">Large PRD source rendered as text for browser performance.</p>'
+        : '';
       return `
         <section class="briefing-source-section" data-source-section-index="${sectionIndex}">
           <div class="briefing-source-heading">
             <span>PRD ${sectionIndex + 1}</span>
             <strong>${escapeHtml(section.section_path)}</strong>
           </div>
-          <div class="briefing-original-content">${contentMarkup || `<p>${escapeHtml(section.content || '')}</p>`}</div>
+          <div class="briefing-original-content">${sourceNotice}${contentMarkup || `<p>${escapeHtml(section.content || '')}</p>`}</div>
           ${images ? `<div class="briefing-image-grid">${images}</div>` : ''}
         </section>
       `;
@@ -1004,7 +1066,12 @@
         setSessionSubmitLoading(false);
         setStatus('PRD loaded. Rendering the page...');
         await wait(0);
-        applySessionPayload(payload);
+        try {
+          applySessionPayload(payload);
+        } catch (renderError) {
+          console.error(renderError);
+          setStatus('PRD loaded, but the page could not render the walkthrough safely. Please try again or use another PRD link.', 'error');
+        }
       } catch (error) {
         setStatus(error.message || 'Could not generate the PRD walkthrough right now.', 'error');
       } finally {
