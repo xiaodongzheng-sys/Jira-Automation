@@ -907,13 +907,14 @@
       const images = !hasOriginalHtml
         ? (section.image_refs || []).map((src) => `<img src="${escapeHtml(src)}" alt="${escapeHtml(section.section_path)}">`).join('')
         : '';
-      const sanitizedHtml = section.html_content && section.html_content.trim()
-        ? sanitizePrdHtmlFragment(section.html_content)
+      const rawHtml = String(section.html_content || '').trim();
+      const sanitizedHtml = rawHtml && rawHtml.length <= MAX_SOURCE_HTML_RENDER_CHARS
+        ? sanitizePrdHtmlFragment(rawHtml)
         : '';
-      const contentMarkup = sanitizedHtml && sanitizedHtml.length <= MAX_SOURCE_HTML_RENDER_CHARS
+      const contentMarkup = sanitizedHtml
         ? sanitizedHtml
         : renderPlainSourceContent(section);
-      const sourceNotice = sanitizedHtml && sanitizedHtml.length > MAX_SOURCE_HTML_RENDER_CHARS
+      const sourceNotice = rawHtml && rawHtml.length > MAX_SOURCE_HTML_RENDER_CHARS
         ? '<p class="briefing-source-render-note">Large PRD source rendered as text for browser performance.</p>'
         : '';
       return `
