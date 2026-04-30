@@ -1912,6 +1912,73 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertIn("Fraud Alert Revamp", option_titles)
         self.assertIn("Credit Scoring Improvements", option_titles)
 
+    def test_team_dashboard_link_biz_project_suggestions_can_use_loaded_task_payload_candidates(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_ALLOWED_EMAILS": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_DASHBOARD_JIRA_RELEASE_AFTER": "2026-04-29",
+            },
+            clear=True,
+        ):
+            app = create_app()
+            app.testing = True
+
+            class FakeLinkBizClient:
+                def list_biz_projects_for_pm_email(self, email):
+                    raise AssertionError("Loaded Task List payloads should provide team candidates.")
+
+                def list_jira_tasks_created_by_emails(self, emails, **kwargs):
+                    raise AssertionError("Loaded Task List payloads should avoid Jira reload.")
+
+                def search_biz_projects_by_title_keywords(self, keywords, *, max_pages=None):
+                    return []
+
+            with patch("bpmis_jira_tool.web._build_bpmis_client_for_current_user", return_value=FakeLinkBizClient()):
+                with app.test_client() as client:
+                    with client.session_transaction() as session:
+                        session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong"}
+                        session["google_credentials"] = {"token": "x"}
+                    response = client.post(
+                        "/api/team-dashboard/link-biz-projects/suggestions",
+                        json={
+                            "rows": [
+                                {
+                                    "team_key": "AF",
+                                    "jira_id": "AF-1",
+                                    "jira_title": "[Feature] Fraud Alert Revamp",
+                                    "reporter_email": "af@npt.sg",
+                                }
+                            ],
+                            "team_payloads": [
+                                {
+                                    "team_key": "AF",
+                                    "under_prd": [
+                                        {
+                                            "bpmis_id": "225159",
+                                            "project_name": "Fraud Alert Revamp",
+                                            "jira_tickets": [],
+                                        },
+                                        {
+                                            "bpmis_id": "225160",
+                                            "project_name": "Busy Fraud Project",
+                                            "jira_tickets": [{"jira_id": "AF-9"}],
+                                        },
+                                    ],
+                                    "pending_live": [],
+                                }
+                            ],
+                        },
+                    )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["rows"][0]["suggested_bpmis_id"], "225159")
+        self.assertEqual(payload["select_biz_project_options"], [{"bpmis_id": "225159", "project_name": "Fraud Alert Revamp", "team_key": "AF", "market": ""}])
+
     def test_team_dashboard_link_biz_project_links_real_bpmis_and_updates_portal_cache(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,

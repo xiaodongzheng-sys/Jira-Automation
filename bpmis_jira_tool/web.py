@@ -3793,11 +3793,12 @@ def create_app() -> Flask:
             return access_gate
         payload = request.get_json(silent=True) or {}
         rows = payload.get("rows") if isinstance(payload.get("rows"), list) else []
+        team_payloads = payload.get("team_payloads") if isinstance(payload.get("team_payloads"), list) else None
         user_identity = _get_user_identity(settings)
         try:
             config = _get_team_dashboard_config_store().load()
             started_at = time.monotonic()
-            result = _suggest_team_dashboard_link_biz_project_rows(settings, config, rows)
+            result = _suggest_team_dashboard_link_biz_project_rows(settings, config, rows, team_payloads=team_payloads)
             elapsed_seconds = round(time.monotonic() - started_at, 2)
             _log_portal_event(
                 "team_dashboard_link_biz_project_suggestions_loaded",
@@ -6497,9 +6498,11 @@ def _suggest_team_dashboard_link_biz_project_rows(
     settings: Settings,
     config: dict[str, Any],
     rows: list[Any],
+    *,
+    team_payloads: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     bpmis_client = _build_bpmis_client_for_current_user(settings)
-    team_payloads = _load_team_dashboard_link_biz_project_payloads(settings, config, bpmis_client=bpmis_client)
+    team_payloads = team_payloads or _load_team_dashboard_link_biz_project_payloads(settings, config, bpmis_client=bpmis_client)
     team_candidates = _team_dashboard_link_biz_candidate_projects_from_payloads(team_payloads)
     select_options = _team_dashboard_zero_jira_biz_project_options(team_payloads)
     suggested_rows: list[dict[str, Any]] = []

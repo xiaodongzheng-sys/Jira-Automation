@@ -782,12 +782,73 @@
     }).join('');
   };
 
+  const linkBizProjectLoadedTeams = () => taskTeams.filter((team) => team && team.loaded && !team.error);
+
+  const linkBizTitleExcluded = (title) => {
+    const normalized = String(title || '').toLowerCase();
+    return [
+      'sync af productization',
+      'productisation upgrade',
+      'deployment of productization',
+    ].some((phrase) => normalized.includes(phrase));
+  };
+
+  const linkBizRowsFromLoadedTeams = (teams) => {
+    const rows = [];
+    const seen = new Set();
+    (Array.isArray(teams) ? teams : []).forEach((team) => {
+      const teamKey = String(team?.team_key || '').trim();
+      ['under_prd', 'pending_live'].forEach((sectionKey) => {
+        (team?.[sectionKey] || []).forEach((project) => {
+          const projectBpmisId = String(project?.bpmis_id || '').trim();
+          const unavailableProject = !projectBpmisId || String(project?.project_name || '').trim().toLowerCase() === 'bpmis unavailable';
+          if (!unavailableProject) return;
+          (project?.jira_tickets || []).forEach((ticket) => {
+            const jiraId = String(ticket?.jira_id || ticket?.issue_id || '').trim();
+            const jiraTitle = String(ticket?.jira_title || '').trim();
+            if (!jiraId || seen.has(jiraId) || linkBizTitleExcluded(jiraTitle)) return;
+            seen.add(jiraId);
+            rows.push({
+              team_key: teamKey,
+              jira_id: jiraId,
+              jira_link: String(ticket?.jira_link || `https://jira.shopee.io/browse/${jiraId}`).trim(),
+              jira_title: jiraTitle,
+              reporter_email: String(ticket?.pm_email || ticket?.reporter_email || '').trim().toLowerCase(),
+              suggested_bpmis_id: '',
+              suggested_project_title: '',
+              match_score: 0,
+              match_source: '',
+            });
+          });
+        });
+      });
+    });
+    return rows.sort((left, right) => (
+      `${left.team_key || ''}:${left.jira_id || ''}`.localeCompare(`${right.team_key || ''}:${right.jira_id || ''}`)
+    ));
+  };
+
   const loadLinkBizJira = async () => {
     if (!linkBizProjectRows || linkBizProjectLoading) return;
     linkBizProjectLoading = true;
     if (linkBizProjectFindJira) linkBizProjectFindJira.disabled = true;
     if (linkBizProjectSuggest) linkBizProjectSuggest.disabled = true;
     linkBizProjectRows.innerHTML = '<tr><td colspan="6" class="team-dashboard-empty-cell">Finding unlinked Jira tickets...</td></tr>';
+    const cachedTeams = linkBizProjectLoadedTeams();
+    if (cachedTeams.length) {
+      linkBizProjectRowsState = linkBizRowsFromLoadedTeams(cachedTeams);
+      linkBizProjectSelectOptions = [];
+      renderLinkBizRows(linkBizProjectRowsState);
+      if (linkBizProjectSuggest) linkBizProjectSuggest.disabled = !linkBizProjectRowsState.length;
+      setStatus(
+        linkBizProjectStatus,
+        `${linkBizProjectRowsState.length} unlinked Jira tickets found from ${cachedTeams.length} loaded Task List team${cachedTeams.length === 1 ? '' : 's'}.`,
+        'success',
+      );
+      linkBizProjectLoading = false;
+      if (linkBizProjectFindJira) linkBizProjectFindJira.disabled = false;
+      return;
+    }
     setStatus(linkBizProjectStatus, 'Loading unlinked Jira tickets...', 'neutral');
     try {
       const response = await fetch(root.dataset.linkBizProjectJiraUrl || '/api/team-dashboard/link-biz-projects/jira', {
@@ -821,7 +882,7 @@
         method: 'POST',
         headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
         credentials: 'same-origin',
-        body: JSON.stringify({ rows: linkBizProjectRowsState }),
+        body: JSON.stringify({ rows: linkBizProjectRowsState, team_payloads: linkBizProjectLoadedTeams() }),
       });
       const payload = await readJson(response, 'Could not suggest BPMIS Biz Projects.');
       linkBizProjectRowsState = payload.rows || [];
