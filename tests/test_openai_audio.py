@@ -49,9 +49,9 @@ class OpenAIAudioTests(unittest.TestCase):
                 store=store,
                 openai_client=client,
                 tts_provider="openai",
-                edge_mandarin_voice="zh-CN-XiaoxiaoNeural",
+                edge_mandarin_voice="zh-CN-XiaozhenNeural",
                 edge_english_voice="en-US-JennyNeural",
-                edge_rate="-8%",
+                edge_rate="-12%",
                 openai_mandarin_voice="sage",
                 openai_voice_speed=0.96,
                 openai_custom_voice_enabled=False,
@@ -81,9 +81,9 @@ class OpenAIAudioTests(unittest.TestCase):
                 store=store,
                 openai_client=client,
                 tts_provider="openai",
-                edge_mandarin_voice="zh-CN-XiaoxiaoNeural",
+                edge_mandarin_voice="zh-CN-XiaozhenNeural",
                 edge_english_voice="en-US-JennyNeural",
-                edge_rate="-8%",
+                edge_rate="-12%",
                 openai_mandarin_voice="sage",
                 openai_voice_speed=0.96,
                 openai_custom_voice_enabled=False,
@@ -116,9 +116,9 @@ class OpenAIAudioTests(unittest.TestCase):
                 store=store,
                 openai_client=client,
                 tts_provider="edge",
-                edge_mandarin_voice="zh-CN-XiaoxiaoNeural",
+                edge_mandarin_voice="zh-CN-XiaozhenNeural",
                 edge_english_voice="en-US-JennyNeural",
-                edge_rate="-8%",
+                edge_rate="-12%",
                 openai_mandarin_voice="sage",
                 openai_voice_speed=0.96,
                 openai_custom_voice_enabled=False,
@@ -138,7 +138,7 @@ class OpenAIAudioTests(unittest.TestCase):
 
             self.assertIsNotNone(audio_path)
             edge_tts.assert_called_once()
-            self.assertEqual(edge_tts.call_args.kwargs["voice_id"], "zh-CN-XiaoxiaoNeural")
+            self.assertEqual(edge_tts.call_args.kwargs["voice_id"], "zh-CN-XiaozhenNeural")
             client.synthesize_speech.assert_not_called()
             self.assertEqual(
                 service.get_cached_audio_for_text(owner_key="anon:test", text="中文讲解", language_code="zh"),

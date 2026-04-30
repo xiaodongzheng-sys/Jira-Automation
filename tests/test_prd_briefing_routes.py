@@ -225,6 +225,8 @@ class PRDBriefingRouteTests(unittest.TestCase):
             self.assertIn(b"data-prd-review-generate", response.data)
             self.assertIn(b"data-briefing-language", response.data)
             self.assertIn(b"data-presenter-view", response.data)
+            self.assertIn(b"data-theater-toggle", response.data)
+            self.assertIn("开启宣讲模式".encode("utf-8"), response.data)
             self.assertIn(b"PRD Details", response.data)
             self.assertIn(b"No PRD output yet", response.data)
             self.assertNotIn(b"Developer Walkthrough", response.data)

@@ -10,6 +10,7 @@
   const imageLightboxMedia = document.querySelector('[data-image-lightbox-media]');
   const imageLightboxClose = document.querySelector('[data-image-lightbox-close]');
   const imageLightboxOpen = document.querySelector('[data-image-lightbox-open]');
+  const theaterToggle = document.querySelector('[data-theater-toggle]');
 
   /**
    * @typedef {Object} PresentationTimestamp
@@ -40,11 +41,19 @@
     continueRequired: false,
     currentAudio: null,
     currentAudioIndex: -1,
+    theaterMode: false,
+    panicPaused: false,
+    shareSoundReminderShown: false,
+    manualPauseContext: null,
+    audioContextUnlocked: false,
   };
 
   const pendingAudio = new Map();
   const audioVersions = new Map();
   let prefetchTail = Promise.resolve();
+  let panicFeedbackTimer = null;
+  let shareSoundToastTimer = null;
+  let qaAudioContext = null;
 
   const escapeHtml = (value) => String(value ?? '')
     .replaceAll('&', '&amp;')
@@ -114,6 +123,17 @@
   });
 
   const activeChunk = () => state.chunks[state.currentIndex] || null;
+
+  const isEditableTarget = (target) => {
+    const element = target instanceof Element ? target : null;
+    if (!element) return false;
+    const tagName = element.tagName.toLowerCase();
+    return tagName === 'input'
+      || tagName === 'textarea'
+      || tagName === 'select'
+      || element.isContentEditable
+      || Boolean(element.closest('[data-edit-content]'));
+  };
 
   const statusLabel = (chunk) => {
     const status = chunk?.audioStatus || 'draft';
@@ -252,6 +272,86 @@
     state.currentAudioIndex = -1;
   };
 
+  const showShareSoundReminder = () => {
+    if (state.shareSoundReminderShown) return;
+    state.shareSoundReminderShown = true;
+    const toast = document.createElement('div');
+    toast.className = 'briefing-share-sound-toast';
+    toast.textContent = '请确保 Zoom 屏幕共享已勾选「共享声音 / Share Sound」';
+    document.body.appendChild(toast);
+    window.clearTimeout(shareSoundToastTimer);
+    shareSoundToastTimer = window.setTimeout(() => {
+      toast.classList.add('is-hiding');
+      window.setTimeout(() => toast.remove(), 180);
+    }, 5200);
+  };
+
+  const unlockQuestionCueAudio = async () => {
+    const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextCtor) return;
+    if (!qaAudioContext) qaAudioContext = new AudioContextCtor();
+    try {
+      if (qaAudioContext.state === 'suspended') {
+        await qaAudioContext.resume();
+      }
+      state.audioContextUnlocked = qaAudioContext.state === 'running';
+    } catch {
+      state.audioContextUnlocked = false;
+    }
+  };
+
+  const playQuestionCue = () => {
+    if (!state.audioContextUnlocked || !qaAudioContext || qaAudioContext.state !== 'running') return;
+    try {
+      const now = qaAudioContext.currentTime;
+      const gain = qaAudioContext.createGain();
+      gain.gain.setValueAtTime(0.0001, now);
+      gain.gain.exponentialRampToValueAtTime(0.14, now + 0.015);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.42);
+      gain.connect(qaAudioContext.destination);
+
+      [0, 0.16].forEach((offset, index) => {
+        const oscillator = qaAudioContext.createOscillator();
+        oscillator.type = 'sine';
+        oscillator.frequency.setValueAtTime(index === 0 ? 880 : 1174.66, now + offset);
+        oscillator.connect(gain);
+        oscillator.start(now + offset);
+        oscillator.stop(now + offset + 0.18);
+      });
+    } catch {
+      // The cue is helpful but not critical; never block the briefing on it.
+    }
+  };
+
+  const setTheaterMode = (enabled) => {
+    state.theaterMode = Boolean(enabled);
+    document.body.classList.toggle('briefing-theater-mode', state.theaterMode);
+    if (theaterToggle) {
+      theaterToggle.textContent = state.theaterMode ? '退出宣讲模式' : '开启宣讲模式';
+    }
+    if (state.theaterMode) {
+      showShareSoundReminder();
+      unlockQuestionCueAudio();
+    }
+    renderPresenterView();
+  };
+
+  const flashPanicFeedback = () => {
+    state.panicPaused = true;
+    document.body.classList.add('briefing-panic-active');
+    window.clearTimeout(panicFeedbackTimer);
+    panicFeedbackTimer = window.setTimeout(() => {
+      document.body.classList.remove('briefing-panic-active');
+      renderPresenterView();
+    }, 900);
+  };
+
+  const clearPanicFeedback = () => {
+    state.panicPaused = false;
+    document.body.classList.remove('briefing-panic-active');
+    window.clearTimeout(panicFeedbackTimer);
+  };
+
   const abortAudioRequest = (index) => {
     const pending = pendingAudio.get(index);
     if (pending?.controller) {
@@ -352,9 +452,25 @@
     });
   };
 
+  const resolveManualRewindPoint = (chunk, audio) => {
+    const timestamps = chunk.timestamps?.length ? chunk.timestamps : estimateTimestamps(chunk.content, chunk.duration || 30);
+    const current = Number(audio?.currentTime || 0);
+    let sentenceIndex = Number(state.activeSentenceIndex);
+    if (sentenceIndex < 0) {
+      sentenceIndex = timestamps.findIndex((item) => current >= Number(item.start || 0) && current < Number(item.end || 0));
+    }
+    const sentenceStart = sentenceIndex >= 0 ? Number(timestamps[sentenceIndex]?.start) : Number.NaN;
+    return {
+      sentenceIndex,
+      rewindTo: Number.isFinite(sentenceStart) ? Math.max(0, sentenceStart) : Math.max(0, current - 3),
+    };
+  };
+
   const playCurrentChunk = async () => {
     const chunk = activeChunk();
     if (!chunk) return;
+    showShareSoundReminder();
+    await unlockQuestionCueAudio();
     if (chunk.audioStatus === 'audio-failed') {
       setStatus('这段音频生成失败，可以手动朗读后继续下一段。', 'error');
       return;
@@ -367,6 +483,20 @@
 
     stopCurrentAudio();
     const audio = new Audio(chunk.audioUrl);
+    const manualContext = state.manualPauseContext?.index === state.currentIndex ? state.manualPauseContext : null;
+    if (manualContext) {
+      const rewindTo = Math.max(0, Number(manualContext.rewindTo || 0));
+      try {
+        audio.currentTime = rewindTo;
+        state.activeSentenceIndex = Number(manualContext.sentenceIndex ?? state.activeSentenceIndex);
+      } catch {
+        audio.addEventListener('loadedmetadata', () => {
+          audio.currentTime = Math.min(Math.max(0, rewindTo), Number(audio.duration || rewindTo));
+        }, { once: true });
+      }
+    }
+    state.manualPauseContext = null;
+    clearPanicFeedback();
     state.currentAudio = audio;
     state.currentAudioIndex = state.currentIndex;
     state.continueRequired = false;
@@ -374,18 +504,20 @@
     renderPresenterView();
     ensurePrefetchWindow(state.currentIndex + 1);
 
+    const playingIndex = state.currentIndex;
     audio.addEventListener('timeupdate', syncSentenceHighlight);
     audio.addEventListener('ended', () => {
-      const endedChunk = state.chunks[state.currentIndex];
+      const endedChunk = state.chunks[playingIndex];
       if (endedChunk) endedChunk.audioStatus = 'ready';
       state.currentAudio = null;
       state.currentAudioIndex = -1;
       state.activeSentenceIndex = (endedChunk?.timestamps || []).length - 1;
       state.continueRequired = true;
+      playQuestionCue();
       renderPresenterView();
     }, { once: true });
     audio.addEventListener('error', () => {
-      const failedChunk = state.chunks[state.currentIndex];
+      const failedChunk = state.chunks[playingIndex];
       if (failedChunk) {
         failedChunk.audioStatus = 'audio-failed';
         failedChunk.errorMessage = 'Audio playback failed. You can manually read this chunk.';
@@ -405,12 +537,31 @@
     }
   };
 
-  const pauseCurrentChunk = () => {
+  const pauseCurrentChunk = ({ panic = false } = {}) => {
     const chunk = activeChunk();
-    if (!chunk || chunk.audioStatus !== 'playing') return;
+    if (!chunk || chunk.audioStatus !== 'playing' || !state.currentAudio) return;
+    const rewind = resolveManualRewindPoint(chunk, state.currentAudio);
+    state.manualPauseContext = {
+      index: state.currentIndex,
+      sentenceIndex: rewind.sentenceIndex,
+      rewindTo: rewind.rewindTo,
+    };
     stopCurrentAudio();
     chunk.audioStatus = 'ready';
+    if (panic) flashPanicFeedback();
     renderPresenterView();
+  };
+
+  const toggleCurrentChunkPlayback = () => {
+    const chunk = activeChunk();
+    if (!chunk) return;
+    if (chunk.audioStatus === 'playing') {
+      pauseCurrentChunk({ panic: true });
+      return;
+    }
+    if (state.manualPauseContext?.index === state.currentIndex || chunk.audioStatus === 'ready') {
+      playCurrentChunk();
+    }
   };
 
   const continueToNextChunk = async () => {
@@ -422,6 +573,8 @@
     state.currentIndex += 1;
     state.activeSentenceIndex = -1;
     state.continueRequired = false;
+    state.manualPauseContext = null;
+    clearPanicFeedback();
     renderPresenterView();
     ensurePrefetchWindow(state.currentIndex);
     await playCurrentChunk();
@@ -433,6 +586,8 @@
     state.currentIndex = index;
     state.activeSentenceIndex = -1;
     state.continueRequired = false;
+    state.manualPauseContext = null;
+    clearPanicFeedback();
     renderPresenterView();
     ensurePrefetchWindow(index);
   };
@@ -448,6 +603,8 @@
     chunk.audioStatus = 'editing';
     state.currentIndex = index;
     state.continueRequired = false;
+    state.manualPauseContext = null;
+    clearPanicFeedback();
     renderPresenterView();
   };
 
@@ -466,6 +623,7 @@
     chunk.audioStatus = 'draft';
     chunk.errorMessage = '';
     state.activeSentenceIndex = -1;
+    state.manualPauseContext = null;
     renderPresenterView();
     enqueueAudio(index);
   };
@@ -494,6 +652,9 @@
 
     const chunk = activeChunk();
     const timestamps = chunk.timestamps?.length ? chunk.timestamps : estimateTimestamps(chunk.content, chunk.duration || 30);
+    const progressPercent = state.chunks.length
+      ? Math.min(100, Math.max(0, ((state.currentIndex + Math.max(0, state.activeSentenceIndex + 1) / Math.max(1, timestamps.length)) / state.chunks.length) * 100))
+      : 0;
     const images = (chunk.imageUrls || []).map((src) => `
       <button class="briefing-presenter-image" type="button" data-preview-image="${escapeHtml(src)}">
         <img src="${escapeHtml(src)}" alt="${escapeHtml(chunk.title)}">
@@ -506,8 +667,14 @@
     const hasFailed = chunk.audioStatus === 'audio-failed';
 
     presenterView.innerHTML = `
-      <div class="briefing-presenter-layout">
-        <aside class="briefing-presenter-outline" aria-label="Briefing outline">
+      <div class="briefing-presenter-layout ${state.theaterMode ? 'is-theater' : ''} ${images ? 'has-images' : 'has-no-images'}">
+        ${state.theaterMode ? `
+          <div class="briefing-theater-chrome">
+            <span>Chapter ${state.currentIndex + 1} / ${state.chunks.length}</span>
+            <button class="button button-secondary" type="button" data-theater-exit>退出宣讲模式</button>
+          </div>
+        ` : ''}
+        ${state.theaterMode ? '' : `<aside class="briefing-presenter-outline" aria-label="Briefing outline">
           ${state.chunks.map((item, index) => `
             <button class="briefing-presenter-outline-item ${index === state.currentIndex ? 'is-active' : ''}" type="button" data-go-chunk="${index}">
               <span>${index + 1}</span>
@@ -515,7 +682,7 @@
               <small data-status="${escapeHtml(item.audioStatus || 'draft')}">${escapeHtml(statusLabel(item))}</small>
             </button>
           `).join('')}
-        </aside>
+        </aside>`}
         <article class="briefing-presenter-stage">
           <div class="briefing-presenter-stage-head">
             <div>
@@ -558,6 +725,12 @@
             </div>
           ` : ''}
         </article>
+        ${state.panicPaused ? '<div class="briefing-panic-watermark">答疑中</div>' : ''}
+        ${state.theaterMode ? `
+          <div class="briefing-theater-progress" aria-hidden="true">
+            <span style="width: ${progressPercent.toFixed(1)}%"></span>
+          </div>
+        ` : ''}
       </div>
     `;
 
@@ -568,6 +741,7 @@
     presenterView.querySelector('[data-pause-current]')?.addEventListener('click', pauseCurrentChunk);
     presenterView.querySelector('[data-next-current]')?.addEventListener('click', () => goToChunk(state.currentIndex + 1));
     presenterView.querySelector('[data-continue-next]')?.addEventListener('click', continueToNextChunk);
+    presenterView.querySelector('[data-theater-exit]')?.addEventListener('click', () => setTheaterMode(false));
     presenterView.querySelector('[data-manual-advance]')?.addEventListener('click', manualAdvance);
     presenterView.querySelector('[data-edit-chunk]')?.addEventListener('dblclick', () => enterEditMode(state.currentIndex));
     presenterView.querySelector('[data-save-edit]')?.addEventListener('click', (event) => saveEdit(Number(event.currentTarget.dataset.saveEdit || state.currentIndex)));
@@ -599,7 +773,13 @@
       continueRequired: false,
       currentAudio: null,
       currentAudioIndex: -1,
+      theaterMode: state.theaterMode,
+      panicPaused: false,
+      shareSoundReminderShown: state.shareSoundReminderShown,
+      manualPauseContext: null,
+      audioContextUnlocked: state.audioContextUnlocked,
     };
+    clearPanicFeedback();
     renderPresenterView();
     setSessionSubmitLoading(true);
     setStatus('正在读取 PRD 并生成宣讲大纲，预计需要 30-40 秒。');
@@ -676,9 +856,24 @@
     });
   }
 
+  if (theaterToggle) {
+    theaterToggle.addEventListener('click', () => setTheaterMode(!state.theaterMode));
+  }
+
   document.addEventListener('keydown', (event) => {
     if (event.key === 'Escape' && imageLightbox?.open) {
       closeImageLightbox();
+      return;
+    }
+    if (event.key === 'Escape' && state.theaterMode) {
+      setTheaterMode(false);
+      return;
+    }
+    if (event.code === 'Space' && !isEditableTarget(event.target)) {
+      const chunk = activeChunk();
+      if (!chunk || (!state.currentAudio && chunk.audioStatus !== 'ready' && state.manualPauseContext?.index !== state.currentIndex)) return;
+      event.preventDefault();
+      toggleCurrentChunkPlayback();
     }
   });
 
