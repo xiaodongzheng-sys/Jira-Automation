@@ -1727,7 +1727,7 @@ class WebPortalFeatureTests(unittest.TestCase):
             ],
         )
 
-    def test_team_dashboard_link_biz_projects_lists_unlinked_jira_with_fuzzy_suggestions(self):
+    def test_team_dashboard_link_biz_project_jira_step_does_not_load_bpmis_projects(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
@@ -1752,26 +1752,12 @@ class WebPortalFeatureTests(unittest.TestCase):
             )
 
             class FakeLinkBizClient:
+                def __init__(self):
+                    self.project_calls = []
+
                 def list_biz_projects_for_pm_email(self, email):
-                    if email == "af@npt.sg":
-                        return [
-                            {
-                                "issue_id": "225159",
-                                "project_name": "Fraud Alert Revamp",
-                                "market": "SG",
-                                "status": "Confirmed",
-                            }
-                        ]
-                    if email == "cr@npt.sg":
-                        return [
-                            {
-                                "issue_id": "225200",
-                                "project_name": "Credit Scoring Improvements",
-                                "market": "ID",
-                                "status": "Confirmed",
-                            }
-                        ]
-                    return []
+                    self.project_calls.append(email)
+                    raise AssertionError("Jira-only step must not load BPMIS Biz Projects.")
 
                 def list_jira_tasks_created_by_emails(self, emails, **_kwargs):
                     if emails == ["af@npt.sg"]:
@@ -1800,24 +1786,121 @@ class WebPortalFeatureTests(unittest.TestCase):
                         ]
                     return []
 
-                def list_jira_tasks_for_project_created_by_email(self, _bpmis_id, _email):
-                    return []
-
-            with patch("bpmis_jira_tool.web._build_bpmis_client_for_current_user", return_value=FakeLinkBizClient()):
+            fake_client = FakeLinkBizClient()
+            with patch("bpmis_jira_tool.web._build_bpmis_client_for_current_user", return_value=fake_client):
                 with app.test_client() as client:
                     with client.session_transaction() as session:
                         session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong"}
                         session["google_credentials"] = {"token": "x"}
-                    response = client.get("/api/team-dashboard/link-biz-projects")
+                    response = client.get("/api/team-dashboard/link-biz-projects/jira")
 
         self.assertEqual(response.status_code, 200)
         payload = response.get_json()
         self.assertEqual(payload["status"], "ok")
         self.assertEqual([row["jira_id"] for row in payload["rows"]], ["AF-1", "CR-1"])
+        self.assertEqual(payload["rows"][0]["suggested_bpmis_id"], "")
+        self.assertEqual(fake_client.project_calls, [])
+
+    def test_team_dashboard_link_biz_project_suggestions_use_team_and_keyword_fallback(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_ALLOWED_EMAILS": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_DASHBOARD_JIRA_RELEASE_AFTER": "2026-04-29",
+            },
+            clear=True,
+        ):
+            app = create_app()
+            app.testing = True
+            app.config["TEAM_DASHBOARD_CONFIG_STORE"].save(
+                {
+                    "teams": {
+                        "AF": {"member_emails": ["af@npt.sg"]},
+                        "CRMS": {"member_emails": ["cr@npt.sg"]},
+                        "GRC": {"member_emails": ["ops@npt.sg"]},
+                    }
+                }
+            )
+
+            class FakeLinkBizClient:
+                def __init__(self):
+                    self.keyword_calls = []
+
+                def list_biz_projects_for_pm_email(self, email):
+                    if email == "af@npt.sg":
+                        return [
+                            {
+                                "issue_id": "225159",
+                                "project_name": "Fraud Alert Revamp",
+                                "market": "SG",
+                                "status": "Confirmed",
+                            }
+                        ]
+                    if email == "cr@npt.sg":
+                        return [
+                            {
+                                "issue_id": "225200",
+                                "project_name": "Credit Scoring Improvements",
+                                "market": "ID",
+                                "status": "Confirmed",
+                            }
+                        ]
+                    return []
+
+                def search_biz_projects_by_title_keywords(self, keywords, *, max_pages=None):
+                    self.keyword_calls.append((keywords, max_pages))
+                    if "regional onboarding" in keywords:
+                        return [
+                            {
+                                "issue_id": "225999",
+                                "bpmis_id": "225999",
+                                "project_name": "Regional Onboarding Risk Project",
+                                "market": "Regional",
+                                "status": "Confirmed",
+                            },
+                        ]
+                    return []
+
+            fake_client = FakeLinkBizClient()
+            with patch("bpmis_jira_tool.web._build_bpmis_client_for_current_user", return_value=fake_client):
+                with app.test_client() as client:
+                    with client.session_transaction() as session:
+                        session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong"}
+                        session["google_credentials"] = {"token": "x"}
+                    response = client.post(
+                        "/api/team-dashboard/link-biz-projects/suggestions",
+                        json={
+                            "rows": [
+                                {
+                                    "team_key": "AF",
+                                    "jira_id": "AF-1",
+                                    "jira_title": "[Feature][SG][DBP-Anti-fraud] Fraud Alert Revamp",
+                                    "reporter_email": "af@npt.sg",
+                                },
+                                {
+                                    "team_key": "AF",
+                                    "jira_id": "AF-9",
+                                    "jira_title": "[Feature][Regional] Regional Onboarding Risk",
+                                    "reporter_email": "af@npt.sg",
+                                },
+                            ]
+                        },
+                    )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["status"], "ok")
         suggestions = {row["jira_id"]: row for row in payload["rows"]}
         self.assertEqual(suggestions["AF-1"]["suggested_bpmis_id"], "225159")
         self.assertEqual(suggestions["AF-1"]["suggested_project_title"], "Fraud Alert Revamp")
-        self.assertEqual(suggestions["CR-1"]["suggested_bpmis_id"], "225200")
+        self.assertEqual(suggestions["AF-1"]["match_source"], "team")
+        self.assertEqual(suggestions["AF-9"]["suggested_bpmis_id"], "225999")
+        self.assertEqual(suggestions["AF-9"]["match_source"], "keyword")
+        self.assertEqual(payload["keyword_search_count"], 1)
+        self.assertEqual(fake_client.keyword_calls[0][1], 2)
         self.assertGreater(suggestions["AF-1"]["match_score"], 0.8)
 
     def test_team_dashboard_link_biz_project_links_real_bpmis_and_updates_portal_cache(self):

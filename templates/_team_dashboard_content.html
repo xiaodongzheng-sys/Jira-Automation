@@ -5,6 +5,8 @@
   data-tasks-url="{{ url_for('team_dashboard_tasks') }}"
   data-key-project-url="{{ url_for('save_team_dashboard_key_project') }}"
   data-link-biz-project-url="{{ url_for('team_dashboard_link_biz_projects') }}"
+  data-link-biz-project-jira-url="{{ url_for('team_dashboard_link_biz_project_jira') }}"
+  data-link-biz-project-suggestions-url="{{ url_for('team_dashboard_link_biz_project_suggestions') }}"
   {% if can_view_team_dashboard_monthly_report %}
     data-monthly-report-template-url="{{ url_for('team_dashboard_monthly_report_template') }}"
     data-monthly-report-template-save-url="{{ url_for('save_team_dashboard_monthly_report_template') }}"
@@ -103,7 +105,8 @@
         <span data-link-biz-project-summary>Find Jira tickets without a BPMIS Biz Project and link them to the closest match.</span>
       </div>
       <div class="button-row">
-        <button class="button button-secondary" type="button" data-link-biz-project-refresh>Refresh</button>
+        <button class="button button-secondary" type="button" data-link-biz-project-find-jira>Find Unlinked Jira</button>
+        <button class="button button-secondary" type="button" data-link-biz-project-suggest disabled>Suggest BPMIS Biz Project</button>
       </div>
     </div>
     <p class="productization-inline-status" data-link-biz-project-status></p>
@@ -120,7 +123,7 @@
           </tr>
         </thead>
         <tbody data-link-biz-project-rows>
-          <tr><td colspan="6" class="team-dashboard-empty-cell">Open this tab to load unlinked Jira tickets.</td></tr>
+          <tr><td colspan="6" class="team-dashboard-empty-cell">Click Find Unlinked Jira to start.</td></tr>
         </tbody>
       </table>
     </div>

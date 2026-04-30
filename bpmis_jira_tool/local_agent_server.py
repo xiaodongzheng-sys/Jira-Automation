@@ -54,6 +54,7 @@ BPMIS_PROXY_OPERATIONS = {
     "find_project",
     "create_jira_ticket",
     "list_biz_projects_for_pm_email",
+    "search_biz_projects_by_title_keywords",
     "list_jira_tasks_for_project_created_by_email",
     "list_jira_tasks_created_by_emails",
     "get_single_brd_doc_link_for_project",
@@ -968,6 +969,8 @@ def _summarize_bpmis_proxy_args(operation: str, args: list[Any]) -> dict[str, An
             summary["email_present"] = bool(str(args[1] or "").strip())
     elif operation == "list_biz_projects_for_pm_email" and args:
         summary["email_present"] = bool(str(args[0] or "").strip())
+    elif operation == "search_biz_projects_by_title_keywords" and args:
+        summary["keyword_present"] = bool(str(args[0] or "").strip())
     elif operation in {"get_issue_detail", "get_jira_ticket_detail", "list_issues_for_version"} and args:
         summary["lookup_id_present"] = bool(str(args[0] or "").strip())
     elif operation == "create_jira_ticket":

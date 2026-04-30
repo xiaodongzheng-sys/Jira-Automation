@@ -516,6 +516,8 @@ class LocalAgentClientTests(unittest.TestCase):
                 calls.append((operation, access_token, args or [], kwargs or {}))
                 if operation == "get_jira_ticket_detail":
                     return {"status": {"label": "In Progress"}}
+                if operation == "search_biz_projects_by_title_keywords":
+                    return [{"bpmis_id": "221664", "project_name": "Project Match"}]
                 if operation == "search_versions":
                     return [{"name": "Planning_26Q2"}]
                 if operation == "get_brd_doc_links_for_projects":
@@ -535,6 +537,7 @@ class LocalAgentClientTests(unittest.TestCase):
         remote = RemoteBPMISClient(FakeClient(), access_token="token")
 
         self.assertEqual(remote.get_jira_ticket_detail("SPDBP-95742")["status"]["label"], "In Progress")
+        self.assertEqual(remote.search_biz_projects_by_title_keywords("Project Match", max_pages=2)[0]["bpmis_id"], "221664")
         self.assertEqual(remote.search_versions("Planning")[0]["name"], "Planning_26Q2")
         self.assertEqual(remote.get_brd_doc_links_for_projects(["221664"])["221664"], ["https://brd"])
         self.assertEqual(remote.update_jira_ticket_status("SPDBP-95742", "Testing")["status"]["label"], "Testing")

@@ -3724,8 +3724,8 @@ def create_app() -> Flask:
             return access_gate
         try:
             config = _get_team_dashboard_config_store().load()
-            team_payloads = _load_team_dashboard_link_biz_project_payloads(settings, config)
-            rows = _build_team_dashboard_link_biz_project_rows(team_payloads)
+            started_at = time.monotonic()
+            rows = _load_team_dashboard_link_biz_jira_rows(settings, config)
             return jsonify({"status": "ok", "rows": rows, "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())})
         except Exception as error:  # noqa: BLE001
             _log_portal_event(
@@ -3739,6 +3739,93 @@ def create_app() -> Flask:
                     {
                         "status": "error",
                         "message": "Could not load unlinked Jira tickets. Please retry or share the request ID.",
+                        **_classify_portal_error(error),
+                    }
+                ),
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+
+    @app.get("/api/team-dashboard/link-biz-projects/jira")
+    def team_dashboard_link_biz_project_jira():
+        access_gate = _require_team_dashboard_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        user_identity = _get_user_identity(settings)
+        try:
+            config = _get_team_dashboard_config_store().load()
+            started_at = time.monotonic()
+            rows = _load_team_dashboard_link_biz_jira_rows(settings, config)
+            elapsed_seconds = round(time.monotonic() - started_at, 2)
+            _log_portal_event(
+                "team_dashboard_link_biz_project_jira_loaded",
+                **_build_request_log_context(settings, user_identity=user_identity, extra={"row_count": len(rows), "elapsed_seconds": elapsed_seconds}),
+            )
+            return jsonify(
+                {
+                    "status": "ok",
+                    "rows": rows,
+                    "elapsed_seconds": elapsed_seconds,
+                    "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                }
+            )
+        except Exception as error:  # noqa: BLE001
+            _log_portal_event(
+                "team_dashboard_link_biz_project_jira_error",
+                level=logging.ERROR,
+                **_build_request_log_context(settings, user_identity=user_identity, extra=_classify_portal_error(error)),
+            )
+            current_app.logger.exception("Team Dashboard Link Biz Project Jira load failed.")
+            return (
+                jsonify(
+                    {
+                        "status": "error",
+                        "message": "Could not load unlinked Jira tickets. Please retry or share the request ID.",
+                        **_classify_portal_error(error),
+                    }
+                ),
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+
+    @app.post("/api/team-dashboard/link-biz-projects/suggestions")
+    def team_dashboard_link_biz_project_suggestions():
+        access_gate = _require_team_dashboard_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        payload = request.get_json(silent=True) or {}
+        rows = payload.get("rows") if isinstance(payload.get("rows"), list) else []
+        user_identity = _get_user_identity(settings)
+        try:
+            config = _get_team_dashboard_config_store().load()
+            started_at = time.monotonic()
+            result = _suggest_team_dashboard_link_biz_project_rows(settings, config, rows)
+            elapsed_seconds = round(time.monotonic() - started_at, 2)
+            _log_portal_event(
+                "team_dashboard_link_biz_project_suggestions_loaded",
+                **_build_request_log_context(
+                    settings,
+                    user_identity=user_identity,
+                    extra={
+                        "row_count": len(result["rows"]),
+                        "matched_count": result["matched_count"],
+                        "team_candidate_count": result["team_candidate_count"],
+                        "keyword_candidate_count": result["keyword_candidate_count"],
+                        "elapsed_seconds": elapsed_seconds,
+                    },
+                ),
+            )
+            return jsonify({"status": "ok", "elapsed_seconds": elapsed_seconds, **result})
+        except Exception as error:  # noqa: BLE001
+            _log_portal_event(
+                "team_dashboard_link_biz_project_suggestions_error",
+                level=logging.ERROR,
+                **_build_request_log_context(settings, user_identity=user_identity, extra=_classify_portal_error(error)),
+            )
+            current_app.logger.exception("Team Dashboard Link Biz Project suggestions failed.")
+            return (
+                jsonify(
+                    {
+                        "status": "error",
+                        "message": "Could not suggest BPMIS Biz Projects. Please retry or share the request ID.",
                         **_classify_portal_error(error),
                     }
                 ),
@@ -6321,6 +6408,39 @@ def _load_team_dashboard_link_biz_project_payloads(settings: Settings, config: d
     return team_payloads
 
 
+def _load_team_dashboard_link_biz_jira_rows(settings: Settings, config: dict[str, Any]) -> list[dict[str, Any]]:
+    bpmis_client = _build_bpmis_client_for_current_user(settings)
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for team_key, _label in TEAM_DASHBOARD_TEAMS.items():
+        team_config = (config.get("teams") or {}).get(team_key) or {}
+        emails = _normalize_team_dashboard_emails(team_config.get("member_emails") or [])
+        tasks = bpmis_client.list_jira_tasks_created_by_emails(
+            emails,
+            max_pages=_team_dashboard_jira_max_pages(),
+            enrich_missing_parent=False,
+            release_after=_team_dashboard_jira_release_after(),
+        )
+        for raw_task in tasks or []:
+            if not isinstance(raw_task, dict):
+                continue
+            task = _normalize_team_dashboard_task(raw_task)
+            if str((task.get("parent_project") or {}).get("bpmis_id") or "").strip():
+                continue
+            if _team_dashboard_link_biz_title_excluded(str(task.get("jira_title") or "")):
+                continue
+            status_key = str(task.get("jira_status") or "").strip().casefold()
+            if status_key not in TEAM_DASHBOARD_UNDER_PRD_STATUSES and status_key in TEAM_DASHBOARD_EXCLUDED_PENDING_STATUSES:
+                continue
+            jira_id = str(task.get("jira_id") or task.get("issue_id") or "").strip()
+            if not jira_id or jira_id in seen:
+                continue
+            seen.add(jira_id)
+            rows.append(_team_dashboard_link_biz_row_from_ticket(team_key, task, {}))
+    rows.sort(key=lambda row: (str(row.get("team_key") or ""), str(row.get("jira_id") or "")))
+    return rows
+
+
 def _build_team_dashboard_link_biz_project_rows(team_payloads: list[dict[str, Any]]) -> list[dict[str, Any]]:
     candidate_projects: list[dict[str, Any]] = []
     unlinked_items: list[tuple[str, dict[str, Any]]] = []
@@ -6347,20 +6467,108 @@ def _build_team_dashboard_link_biz_project_rows(team_payloads: list[dict[str, An
             continue
         seen.add(jira_id)
         suggestion = _suggest_team_dashboard_biz_project(ticket, candidate_projects)
-        rows.append(
-            {
-                "team_key": team_key,
-                "jira_id": jira_id,
-                "jira_link": str(ticket.get("jira_link") or (f"{_jira_browse_base_url()}{jira_id}" if jira_id else "")).strip(),
-                "jira_title": str(ticket.get("jira_title") or "").strip(),
-                "reporter_email": str(ticket.get("pm_email") or "").strip().lower(),
-                "suggested_bpmis_id": str(suggestion.get("bpmis_id") or ""),
-                "suggested_project_title": str(suggestion.get("project_name") or ""),
-                "match_score": float(suggestion.get("match_score") or 0.0),
-            }
-        )
+        rows.append(_team_dashboard_link_biz_row_from_ticket(team_key, ticket, suggestion))
     rows.sort(key=lambda row: (str(row.get("team_key") or ""), str(row.get("jira_id") or "")))
     return rows
+
+
+def _team_dashboard_link_biz_row_from_ticket(team_key: str, ticket: dict[str, Any], suggestion: dict[str, Any]) -> dict[str, Any]:
+    jira_id = str(ticket.get("jira_id") or ticket.get("issue_id") or "").strip()
+    return {
+        "team_key": team_key,
+        "jira_id": jira_id,
+        "jira_link": str(ticket.get("jira_link") or (f"{_jira_browse_base_url()}{jira_id}" if jira_id else "")).strip(),
+        "jira_title": str(ticket.get("jira_title") or "").strip(),
+        "reporter_email": str(ticket.get("pm_email") or ticket.get("reporter_email") or "").strip().lower(),
+        "suggested_bpmis_id": str(suggestion.get("bpmis_id") or ""),
+        "suggested_project_title": str(suggestion.get("project_name") or ""),
+        "match_score": float(suggestion.get("match_score") or 0.0),
+        "match_source": str(suggestion.get("match_source") or ""),
+    }
+
+
+def _suggest_team_dashboard_link_biz_project_rows(
+    settings: Settings,
+    config: dict[str, Any],
+    rows: list[Any],
+) -> dict[str, Any]:
+    bpmis_client = _build_bpmis_client_for_current_user(settings)
+    team_candidates = _team_dashboard_link_biz_candidate_projects_for_config(bpmis_client, config)
+    suggested_rows: list[dict[str, Any]] = []
+    keyword_candidate_count = 0
+    keyword_search_count = 0
+    for raw_row in rows:
+        if not isinstance(raw_row, dict):
+            continue
+        ticket = {
+            "jira_id": str(raw_row.get("jira_id") or "").strip(),
+            "jira_link": str(raw_row.get("jira_link") or "").strip(),
+            "jira_title": str(raw_row.get("jira_title") or "").strip(),
+            "pm_email": str(raw_row.get("reporter_email") or raw_row.get("pm_email") or "").strip().lower(),
+        }
+        if not ticket["jira_id"]:
+            continue
+        suggestion = _suggest_team_dashboard_biz_project(ticket, team_candidates)
+        if float(suggestion.get("match_score") or 0.0) < _team_dashboard_link_biz_keyword_fallback_threshold():
+            keywords = _team_dashboard_link_biz_keywords(str(ticket.get("jira_title") or ""))
+            keyword_candidates: list[dict[str, Any]] = []
+            if keywords and hasattr(bpmis_client, "search_biz_projects_by_title_keywords"):
+                keyword_search_count += 1
+                keyword_candidates = bpmis_client.search_biz_projects_by_title_keywords(keywords, max_pages=2) or []
+                keyword_candidate_count += len(keyword_candidates)
+            if keyword_candidates:
+                keyword_suggestion = _suggest_team_dashboard_biz_project(ticket, _tag_team_dashboard_candidate_source(keyword_candidates, "keyword"))
+                if float(keyword_suggestion.get("match_score") or 0.0) > float(suggestion.get("match_score") or 0.0):
+                    suggestion = keyword_suggestion
+        suggested_rows.append(_team_dashboard_link_biz_row_from_ticket(str(raw_row.get("team_key") or ""), ticket, suggestion))
+
+    matched_count = len([row for row in suggested_rows if str(row.get("suggested_bpmis_id") or "").strip()])
+    return {
+        "rows": suggested_rows,
+        "matched_count": matched_count,
+        "team_candidate_count": len(team_candidates),
+        "keyword_candidate_count": keyword_candidate_count,
+        "keyword_search_count": keyword_search_count,
+    }
+
+
+def _team_dashboard_link_biz_candidate_projects_for_config(bpmis_client: Any, config: dict[str, Any]) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for team_key in TEAM_DASHBOARD_TEAMS:
+        team_config = (config.get("teams") or {}).get(team_key) or {}
+        emails = _normalize_team_dashboard_emails(team_config.get("member_emails") or [])
+        candidates.extend(_team_dashboard_biz_projects_for_emails(bpmis_client, emails))
+    return _tag_team_dashboard_candidate_source(_dedupe_team_dashboard_candidate_projects(candidates), "team")
+
+
+def _dedupe_team_dashboard_candidate_projects(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    deduped: dict[str, dict[str, Any]] = {}
+    for raw_project in candidates:
+        project = _normalize_team_dashboard_project(raw_project if isinstance(raw_project, dict) else {})
+        bpmis_id = str(project.get("bpmis_id") or "").strip()
+        if not bpmis_id or bpmis_id in deduped:
+            continue
+        deduped[bpmis_id] = project
+    return list(deduped.values())
+
+
+def _tag_team_dashboard_candidate_source(candidates: list[dict[str, Any]], source: str) -> list[dict[str, Any]]:
+    return [{**(candidate if isinstance(candidate, dict) else {}), "match_source": source} for candidate in candidates]
+
+
+def _team_dashboard_link_biz_keyword_fallback_threshold() -> float:
+    raw_value = str(os.getenv("TEAM_DASHBOARD_LINK_BIZ_KEYWORD_FALLBACK_SCORE") or "0.78").strip()
+    try:
+        return max(0.0, min(1.0, float(raw_value)))
+    except ValueError:
+        return 0.78
+
+
+def _team_dashboard_link_biz_keywords(title: str) -> str:
+    normalized = _normalize_team_dashboard_link_match_text(title)
+    stop_words = {"the", "and", "for", "with", "from", "into", "jira", "feature", "support", "tech"}
+    tokens = [token for token in normalized.split() if len(token) >= 3 and token not in stop_words]
+    return " ".join(tokens[:8])
 
 
 def _team_dashboard_link_biz_title_excluded(title: str) -> bool:
@@ -6400,6 +6608,7 @@ def _suggest_team_dashboard_biz_project(ticket: dict[str, Any], candidates: list
                 "bpmis_id": bpmis_id,
                 "project_name": project_name,
                 "match_score": round(score, 4),
+                "match_source": str(project.get("match_source") or "team"),
             }
     return best
 

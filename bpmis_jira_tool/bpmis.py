@@ -47,6 +47,10 @@ class BPMISClient(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def search_biz_projects_by_title_keywords(self, keywords: str, *, max_pages: int | None = None) -> list[dict[str, str]]:
+        raise NotImplementedError
+
+    @abstractmethod
     def list_jira_tasks_for_project_created_by_email(self, project_issue_id: str, email: str) -> list[dict[str, Any]]:
         raise NotImplementedError
 
@@ -270,31 +274,42 @@ class BPMISDirectApiClient(BPMISClient):
                 break
             page += 1
 
-        deduped: dict[str, dict[str, str]] = {}
-        for row in rows:
-            issue_id = str(row.get("id") or "").strip()
-            if not issue_id or issue_id in deduped:
-                continue
-            if not self._is_team_dashboard_biz_project_status_allowed(row):
-                continue
-            project = self._normalize_team_dashboard_parent_project(row, fallback_id=issue_id)
-            if self._team_dashboard_project_requires_enrichment(project):
-                detail = self._get_parent_issue_detail(issue_id)
-                if detail:
-                    row = self._merge_issue_payloads(row, detail)
-                    if not self._is_team_dashboard_biz_project_status_allowed(row):
-                        continue
-                    project = self._normalize_team_dashboard_parent_project(row, fallback_id=issue_id)
-            deduped[issue_id] = {
-                "issue_id": issue_id,
-                "bpmis_id": str(project.get("bpmis_id") or issue_id),
-                "project_name": str(project.get("project_name") or ""),
-                "market": str(project.get("market") or ""),
-                "priority": str(project.get("priority") or ""),
-                "regional_pm_pic": str(project.get("regional_pm_pic") or ""),
-                "status": self._team_dashboard_biz_project_status_label(row),
-            }
-        return list(deduped.values())
+        return self._normalize_team_dashboard_biz_project_rows(rows)
+
+    def search_biz_projects_by_title_keywords(self, keywords: str, *, max_pages: int | None = None) -> list[dict[str, str]]:
+        normalized_keywords = re.sub(r"\s+", " ", str(keywords or "").strip())
+        if not normalized_keywords:
+            return []
+
+        rows: list[dict[str, Any]] = []
+        page = 1
+        page_size = 50
+        page_cap = max(1, int(max_pages or 2))
+        while page <= page_cap:
+            response = self._api_request(
+                "/api/v1/issues/list",
+                params={
+                    "search": json.dumps(
+                        {
+                            "joinType": "and",
+                            "subQueries": [
+                                {"typeId": [self.BIZ_PROJECT_TYPE_ID]},
+                                {"statusId": self.SYNC_BIZ_PROJECT_STATUS_IDS},
+                            ],
+                            "keyword": normalized_keywords,
+                            "page": page,
+                            "pageSize": page_size,
+                            "mapping": True,
+                        }
+                    )
+                },
+            )
+            page_rows = (response.get("data") or {}).get("rows") or []
+            rows.extend(page_rows)
+            if len(page_rows) < page_size:
+                break
+            page += 1
+        return self._normalize_team_dashboard_biz_project_rows(rows)
 
     def get_single_brd_doc_link_for_project(self, project_issue_id: str) -> str:
         return self.get_single_brd_doc_links_for_projects([project_issue_id]).get(str(project_issue_id).strip(), "")
@@ -1799,6 +1814,33 @@ class BPMISDirectApiClient(BPMISClient):
             and str(project.get("priority") or "").strip()
             and str(project.get("regional_pm_pic") or "").strip()
         )
+
+    def _normalize_team_dashboard_biz_project_rows(self, rows: list[dict[str, Any]]) -> list[dict[str, str]]:
+        deduped: dict[str, dict[str, str]] = {}
+        for row in rows:
+            issue_id = str(row.get("id") or row.get("issue_id") or row.get("bpmis_id") or "").strip()
+            if not issue_id or issue_id in deduped:
+                continue
+            if not self._is_team_dashboard_biz_project_status_allowed(row):
+                continue
+            project = self._normalize_team_dashboard_parent_project(row, fallback_id=issue_id)
+            if self._team_dashboard_project_requires_enrichment(project):
+                detail = self._get_parent_issue_detail(issue_id)
+                if detail:
+                    row = self._merge_issue_payloads(row, detail)
+                    if not self._is_team_dashboard_biz_project_status_allowed(row):
+                        continue
+                    project = self._normalize_team_dashboard_parent_project(row, fallback_id=issue_id)
+            deduped[issue_id] = {
+                "issue_id": issue_id,
+                "bpmis_id": str(project.get("bpmis_id") or issue_id),
+                "project_name": str(project.get("project_name") or ""),
+                "market": str(project.get("market") or ""),
+                "priority": str(project.get("priority") or ""),
+                "regional_pm_pic": str(project.get("regional_pm_pic") or ""),
+                "status": self._team_dashboard_biz_project_status_label(row),
+            }
+        return list(deduped.values())
 
     def _team_dashboard_biz_project_status_label(self, row: dict[str, Any]) -> str:
         return self._issue_first_text(row, "statusId", "status", "statusName", "issueStatus")

@@ -700,6 +700,12 @@ class RemoteBPMISClient:
     def list_biz_projects_for_pm_email(self, email: str) -> list[dict[str, str]]:
         return self._call("list_biz_projects_for_pm_email", email) or []
 
+    def search_biz_projects_by_title_keywords(self, keywords: str, *, max_pages: int | None = None) -> list[dict[str, str]]:
+        kwargs: dict[str, Any] = {}
+        if max_pages is not None:
+            kwargs["max_pages"] = max_pages
+        return self._call("search_biz_projects_by_title_keywords", keywords, **kwargs) or []
+
     def list_jira_tasks_for_project_created_by_email(self, project_issue_id: str, email: str) -> list[dict[str, Any]]:
         return self._call("list_jira_tasks_for_project_created_by_email", project_issue_id, email) or []
 

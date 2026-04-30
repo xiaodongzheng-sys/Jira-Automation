@@ -587,6 +587,55 @@ class BPMISClientTests(unittest.TestCase):
                 ],
             )
 
+    def test_search_biz_projects_by_title_keywords_uses_keyword_and_allowed_statuses(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            client = BPMISDirectApiClient(self._settings(temp_dir))
+            calls: list[tuple[str, dict | None]] = []
+
+            def fake_api_request(path, method="GET", params=None, body=None):
+                calls.append((path, params))
+                if path == "/api/v1/issues/list":
+                    search_payload = json.loads(params["search"])
+                    if (search_payload.get("subQueries") or [{}])[0].get("id") == [225159]:
+                        return {
+                            "data": {
+                                "rows": [
+                                    {
+                                        "id": 225159,
+                                        "summary": "Fraud Alert Revamp",
+                                        "marketId": "SG",
+                                        "bizPriorityId": "P1",
+                                        "statusId": "Confirmed",
+                                    }
+                                ]
+                            }
+                        }
+                    self.assertEqual(search_payload["keyword"], "Fraud Alert Revamp")
+                    self.assertEqual(search_payload["subQueries"][0], {"typeId": [BPMISDirectApiClient.BIZ_PROJECT_TYPE_ID]})
+                    self.assertEqual(search_payload["subQueries"][1], {"statusId": [4, 23, 10, 11, 12]})
+                    return {
+                        "data": {
+                            "rows": [
+                                {
+                                    "id": 225159,
+                                    "summary": "Fraud Alert Revamp",
+                                    "marketId": "SG",
+                                    "bizPriorityId": "P1",
+                                    "statusId": "Confirmed",
+                                }
+                            ]
+                        }
+                    }
+                raise AssertionError(path)
+
+            client._api_request = fake_api_request  # type: ignore[method-assign]
+
+            projects = client.search_biz_projects_by_title_keywords(" Fraud   Alert Revamp ", max_pages=1)
+
+        self.assertEqual(calls[0][0], "/api/v1/issues/list")
+        self.assertEqual(projects[0]["bpmis_id"], "225159")
+        self.assertEqual(projects[0]["project_name"], "Fraud Alert Revamp")
+
     def test_single_brd_doc_link_returns_link_only_when_exactly_one_brd_exists(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             settings = Settings(
