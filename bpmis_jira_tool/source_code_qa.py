@@ -1272,7 +1272,7 @@ class CodexCliBridgeSourceCodeQALLMProvider(SourceCodeQALLMProvider):
             "- Read only from the provided repository workspace and retrieval evidence.\n"
             "- Do not modify files, create commits, deploy, install dependencies, or run write commands.\n"
             f"- Tool availability: `rg` is expected on PATH. If not, call it by absolute path: {CodexCliBridgeSourceCodeQALLMProvider._codex_rg_hint() or 'not detected; use grep -R/find fallback'}.\n"
-            "- Return a concise answer in the requested JSON shape when possible.\n\n"
+            "- Return the answer in the requested JSON shape when possible.\n\n"
             f"{user_text}"
         ).strip()
 
@@ -2942,7 +2942,7 @@ class SourceCodeQAService:
                 "Call out missing test evidence explicitly instead of inferring coverage.",
             ]
         return [
-            "Answer in one concise direct paragraph, then add evidence-backed bullets only when useful.",
+            "Answer directly, then add evidence-backed bullets when useful.",
             "Prefer business-readable names while keeping citation tags on concrete claims.",
         ]
 
@@ -15678,7 +15678,7 @@ class SourceCodeQAService:
             "Do not edit files, install dependencies, create commits, deploy, or run mutating commands. "
             "Prefer rg, sed, nl, and direct file reads. "
             "Always follow the three-stage investigation contract: first discover candidate evidence, then verify gaps/absence with targeted searches, then answer with explicit certainty levels. "
-            "Return concise JSON with direct_answer, investigation_steps, attachment_facts, screenshot_evidence, source_code_evidence, confirmed_from_code, inferred_from_code, not_found, missing_production_evidence, next_checks, claims, missing_evidence, and confidence. "
+            "Return JSON with direct_answer, investigation_steps, attachment_facts, screenshot_evidence, source_code_evidence, confirmed_from_code, inferred_from_code, not_found, missing_production_evidence, next_checks, claims, missing_evidence, and confidence. "
             "Put only verified production/config code facts in confirmed_from_code; put weaker deductions in inferred_from_code. "
             "For screenshot-driven questions, extract visible screenshot facts first, then tie them to code paths/functions/fields; never present screenshot content as repository fact. "
             "When source evidence is incomplete, put the exact missing repository/table/config/log/export in not_found and missing_evidence instead of filling the gap from naming or prior assumptions. "
@@ -16466,9 +16466,9 @@ class SourceCodeQAService:
                 "Never upgrade DTO/carrier evidence into a final data source. "
                 "Separate confirmed_from_code, inferred_from_code, and not_found/missing evidence instead of blending certainty levels. "
                 "Avoid speculative language such as likely, suggests, or appears unless explicitly marking missing evidence. "
-                "Prioritize the user's actual question, give the direct answer first, and keep the final response concise. "
+                "Prioritize the user's actual question and give the direct answer first. "
                 "Use short citation tags for concrete code-backed claims. "
-                "Keep the final answer compact, but do not omit evidence that is necessary to answer the question. "
+                "Do not omit evidence that is necessary to answer the question. "
                 "If the evidence is insufficient for a confident answer, say exactly what is missing and the closest confirmed flow."
             )
         return (
@@ -16482,7 +16482,7 @@ class SourceCodeQAService:
             "Prioritize answering the user's actual question directly and accurately. "
             "Do not dump ranked references, but do cite concrete claims with provided citation ids. "
             "If the evidence is insufficient for a confident answer, say what is missing and give the best next question to ask. "
-            "Keep the answer concise, practical, and business-readable."
+            "Keep the answer practical and business-readable."
         )
 
     @staticmethod
@@ -16520,11 +16520,11 @@ class SourceCodeQAService:
             "\"not_found\":[\"...\"],\"missing_production_evidence\":[\"...\"],"
             "\"next_checks\":[\"...\"],\"claims\":[{\"text\":\"...\",\"citations\":[\"S1\"]}],"
             "\"missing_evidence\":[],\"confidence\":\"high|medium|low\"}. "
-            "If a short prose answer is more appropriate, still keep citation tags on concrete claims.\n"
+            "If a prose answer is more appropriate, still keep citation tags on concrete claims.\n"
             "- Start with the direct answer.\n"
-            "- Use investigation_steps to show the three-stage investigation at a compact level: candidate evidence checked, gap verification performed, and certainty split used.\n"
+            "- Use investigation_steps to show the three-stage investigation: candidate evidence checked, gap verification performed, and certainty split used.\n"
             "- For image/screenshot attachments, first extract visible facts exactly into attachment_facts/screenshot_evidence: IDs, trace IDs, timestamps, status values, field names, expected-vs-actual behavior, and business impact.\n"
-            "- For screenshot-driven incident questions, answer with these visible sections: Conclusion, Screenshot Evidence, Source-code Evidence, Missing Production Evidence, Next Checks. Keep them concise.\n"
+            "- For screenshot-driven incident questions, answer with these visible sections: Conclusion, Screenshot Evidence, Source-code Evidence, Missing Production Evidence, Next Checks.\n"
             "- source_code_evidence must include concrete file/function/class/field/table/API names when available. If you cannot name them, say the source-code evidence is incomplete.\n"
             "- Put production-code, mapper, client, SQL, route, config, and directly opened file facts in confirmed_from_code.\n"
             "- Put carrier DTOs, call-chain deductions, and relation hypotheses in inferred_from_code unless a raw snippet directly proves the claim.\n"
@@ -16570,7 +16570,7 @@ class SourceCodeQAService:
             f"{context}\n\n"
             f"{(attachment_section + chr(10) + chr(10)) if attachment_section else ''}"
             "First-pass task for Vertex AI:\n"
-            "- Write a concise prose draft answer only; do not return JSON in this pass.\n"
+            "- Write a prose draft answer only; do not return JSON in this pass.\n"
             "- Use raw code snippets as the source of truth and cite concrete claims with tags like [S1].\n"
             "- Identify any missing upstream/downstream/source evidence explicitly.\n"
             "- Do not turn DTO, request, input, or info classes into final data sources.\n"
@@ -17166,9 +17166,6 @@ class SourceCodeQAService:
             issues.extend(str(issue) for issue in claim_check.get("issues") or [])
             if repairable_intent:
                 repair_targets.append("add citation-backed claims or remove unsupported concrete claims")
-        if len(answer_text) < 80 and len(supported_items) >= 2:
-            issues.append("answer is too thin for the available typed evidence")
-            repair_targets.append("summarize the strongest typed evidence")
         if intent.get("data_source"):
             has_source_item = any(item.get("type") in {"table", "api", "external_dependency", "read_write"} for item in supported_items)
             if has_source_item and not any(
@@ -17486,8 +17483,6 @@ class SourceCodeQAService:
             boundary_markers = self._answer_expected_terms(evidence_summary, "operational_boundaries")
             if boundary_markers and not any(marker in lowered_answer for marker in boundary_markers):
                 issues.append("answer omits operational boundary terms found in evidence")
-        if len(str(answer or "").strip()) < 80 and evidence_summary.get("source_count", 0) >= 2:
-            issues.append("answer is too thin for available evidence")
         retryable = bool(issues) and quality_gate.get("status") != "needs_more_trace" or bool(issues and evidence_summary.get("source_count", 0))
         return {
             "status": "retry" if retryable else "ok",
