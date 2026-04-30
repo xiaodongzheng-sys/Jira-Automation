@@ -20,6 +20,7 @@
   const prdReviewPanel = document.querySelector('[data-prd-review-panel]');
   const chatSubmitButton = chatForm?.querySelector('button[type="submit"]');
   const CACHED_NARRATION_DELAY_MS = 0;
+  const MAX_CONFLUENCE_HTML_RENDER_CHARS = 90000;
   let sourceContentCache = new Map();
 
   let state = {
@@ -49,16 +50,85 @@
     .replaceAll('"', '&quot;')
     .replaceAll("'", '&#39;');
 
+  const sanitizeConfluenceHtml = (value) => {
+    const template = document.createElement('template');
+    template.innerHTML = String(value || '');
+    template.content.querySelectorAll([
+      'script',
+      'style',
+      'link',
+      'meta',
+      'iframe',
+      'object',
+      'embed',
+      'form',
+      'input',
+      'button',
+      'textarea',
+      'select',
+      'dialog',
+    ].join(',')).forEach((node) => node.remove());
+    template.content.querySelectorAll('*').forEach((node) => {
+      Array.from(node.attributes || []).forEach((attribute) => {
+        const name = attribute.name.toLowerCase();
+        if (
+          name.startsWith('on')
+          || ['style', 'srcdoc', 'autofocus', 'hidden'].includes(name)
+        ) {
+          node.removeAttribute(attribute.name);
+        }
+      });
+      if (node.tagName === 'A') {
+        const href = node.getAttribute('href') || '';
+        if (/^\s*javascript:/i.test(href)) {
+          node.removeAttribute('href');
+        }
+        node.setAttribute('target', '_blank');
+        node.setAttribute('rel', 'noreferrer');
+      }
+      if (node.tagName === 'IMG') {
+        const src = node.getAttribute('src') || '';
+        if (/^\s*javascript:/i.test(src)) {
+          node.removeAttribute('src');
+        }
+        node.setAttribute('loading', 'lazy');
+        node.setAttribute('decoding', 'async');
+      }
+    });
+    return template.innerHTML;
+  };
+
   const renderPlainSourceContent = (sectionIndex, section) => {
-    if (sourceContentCache.has(sectionIndex)) {
-      return sourceContentCache.get(sectionIndex);
+    const cacheKey = `text:${sectionIndex}`;
+    if (sourceContentCache.has(cacheKey)) {
+      return sourceContentCache.get(cacheKey);
     }
     const text = String(section.content || '').trim();
     const markup = text
       ? `<div class="briefing-source-text">${escapeHtml(text)}</div>`
       : '';
-    sourceContentCache.set(sectionIndex, markup);
+    sourceContentCache.set(cacheKey, markup);
     return markup;
+  };
+
+  const renderSourceContent = (sectionIndex, section) => {
+    const rawHtml = String(section.html_content || '').trim();
+    if (rawHtml && rawHtml.length <= MAX_CONFLUENCE_HTML_RENDER_CHARS) {
+      const cacheKey = `html:${sectionIndex}`;
+      if (!sourceContentCache.has(cacheKey)) {
+        sourceContentCache.set(cacheKey, sanitizeConfluenceHtml(rawHtml));
+      }
+      return {
+        markup: sourceContentCache.get(cacheKey) || renderPlainSourceContent(sectionIndex, section),
+        isConfluenceHtml: true,
+        isLargeFallback: false,
+      };
+    }
+    return {
+      markup: renderPlainSourceContent(sectionIndex, section),
+      isConfluenceHtml: false,
+      isLargeFallback: Boolean(rawHtml),
+    };
   };
 
   const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
@@ -859,10 +929,9 @@
       const images = !hasOriginalHtml
         ? (section.image_refs || []).map((src) => `<img src="${escapeHtml(src)}" alt="${escapeHtml(section.section_path)}">`).join('')
         : '';
-      const rawHtml = String(section.html_content || '').trim();
-      const contentMarkup = renderPlainSourceContent(sectionIndex, section);
-      const sourceNotice = rawHtml
-        ? '<p class="briefing-source-render-note">PRD source rendered as text for browser performance.</p>'
+      const sourceContent = renderSourceContent(sectionIndex, section);
+      const sourceNotice = sourceContent.isLargeFallback
+        ? '<p class="briefing-source-render-note">Large PRD section shown as text for browser performance.</p>'
         : '';
       return `
         <section class="briefing-source-section" data-source-section-index="${sectionIndex}">
@@ -870,7 +939,7 @@
             <span>PRD ${sectionIndex + 1}</span>
             <strong>${escapeHtml(section.section_path)}</strong>
           </div>
-          <div class="briefing-original-content">${sourceNotice}${contentMarkup || `<p>${escapeHtml(section.content || '')}</p>`}</div>
+          <div class="briefing-original-content ${sourceContent.isConfluenceHtml ? 'is-confluence-rendered' : 'is-text-rendered'}">${sourceNotice}${sourceContent.markup || `<p>${escapeHtml(section.content || '')}</p>`}</div>
           ${images ? `<div class="briefing-image-grid">${images}</div>` : ''}
         </section>
       `;
@@ -893,6 +962,22 @@
       </article>
       <div class="briefing-source-stack">${sourceMarkup}</div>
     `;
+    classifyTableLayouts();
+    classifySectionImages();
+    hideDecorativeArrowArtifacts();
+    sectionDetailNode.querySelectorAll('img').forEach((image) => {
+      image.setAttribute('tabindex', '0');
+      image.setAttribute('role', 'button');
+      image.setAttribute('aria-label', `${block.title} image preview`);
+      const openPreview = () => openImageLightbox(image.currentSrc || image.src, image.alt || block.title);
+      image.addEventListener('click', openPreview);
+      image.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          openPreview();
+        }
+      });
+    });
     sectionListNode.querySelectorAll('[data-block-index]').forEach((button) => {
       button.addEventListener('click', () => {
         stopNarration();
