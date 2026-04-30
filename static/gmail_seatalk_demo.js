@@ -304,11 +304,26 @@
     return mappings;
   };
 
-  const loadSeaTalkNameMappings = async (root, mappingsUrl) => {
+  const loadSeaTalkNameMappings = async (root, mappingsUrl, options = {}) => {
     if (!mappingsUrl) return;
-    setScopedStatus(root, '[data-seatalk-mapping-status]', 'Loading frequent unknown IDs…', 'neutral');
+    const refreshButton = root.querySelector('[data-seatalk-name-mapping-refresh]');
+    const forceRefresh = options.forceRefresh === true;
+    const originalButtonText = refreshButton?.textContent || 'Refresh Candidates';
+    if (refreshButton && forceRefresh) {
+      refreshButton.disabled = true;
+      refreshButton.textContent = 'Refreshing...';
+    }
+    setScopedStatus(
+      root,
+      '[data-seatalk-mapping-status]',
+      forceRefresh ? 'Refreshing recent SeaTalk IDs...' : 'Loading frequent unknown IDs...',
+      'neutral',
+    );
     try {
-      const response = await fetch(mappingsUrl, { method: 'GET' });
+      const url = forceRefresh
+        ? `${mappingsUrl}${mappingsUrl.includes('?') ? '&' : '?'}refresh=1`
+        : mappingsUrl;
+      const response = await fetch(url, { method: 'GET' });
       const payload = await parseDashboardResponse(response);
       if (!response.ok) throw new Error(payload.message || 'Could not load SeaTalk name mappings.');
       renderNameMappings(root, payload);
@@ -316,6 +331,11 @@
       root.dataset.seatalkMappingsLoaded = 'true';
     } catch (error) {
       setScopedStatus(root, '[data-seatalk-mapping-status]', error.message || 'Could not load SeaTalk name mappings.', 'error');
+    } finally {
+      if (refreshButton && forceRefresh) {
+        refreshButton.disabled = false;
+        refreshButton.textContent = originalButtonText;
+      }
     }
   };
 
@@ -558,6 +578,10 @@
     const saveMappingsButton = seatalkRoot.querySelector('[data-seatalk-name-mapping-save]');
     if (saveMappingsButton) {
       saveMappingsButton.addEventListener('click', () => saveSeaTalkNameMappings(seatalkRoot, nameMappingsUrl));
+    }
+    const refreshMappingsButton = seatalkRoot.querySelector('[data-seatalk-name-mapping-refresh]');
+    if (refreshMappingsButton) {
+      refreshMappingsButton.addEventListener('click', () => loadSeaTalkNameMappings(seatalkRoot, nameMappingsUrl, { forceRefresh: true }));
     }
     loadSeaTalkNameMappings(seatalkRoot, nameMappingsUrl);
   };

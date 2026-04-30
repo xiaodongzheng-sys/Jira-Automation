@@ -3189,7 +3189,8 @@ def create_app() -> Flask:
             SeaTalkDashboardService.clear_cache()
             return jsonify({"status": "ok", "mappings": mappings})
         try:
-            candidates = _build_seatalk_dashboard_service(settings).build_name_mappings()
+            force_refresh = str(request.args.get("refresh") or "").strip().lower() in {"1", "true", "yes", "on"}
+            candidates = _build_seatalk_dashboard_service(settings).build_name_mappings(force_refresh=force_refresh)
             mappings = mapping_store.mappings()
             mapped_keys = {alias for key in mappings for alias in SeaTalkNameMappingStore.equivalent_keys(key)}
             candidates = dict(candidates)

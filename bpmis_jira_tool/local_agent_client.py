@@ -203,8 +203,8 @@ class LocalAgentClient:
     def seatalk_todos(self, *, name_mappings: dict[str, str] | None = None, todo_since: str | None = None) -> dict[str, Any]:
         return self._request("POST", "/api/local-agent/seatalk/todos", {"name_mappings": name_mappings or {}, "todo_since": todo_since or ""})
 
-    def seatalk_name_mappings(self) -> dict[str, Any]:
-        return self._request("POST", "/api/local-agent/seatalk/name-mappings", {})
+    def seatalk_name_mappings(self, *, force_refresh: bool = False) -> dict[str, Any]:
+        return self._request("POST", "/api/local-agent/seatalk/name-mappings", {"force_refresh": bool(force_refresh)})
 
     def seatalk_export(self, *, name_mappings: dict[str, str] | None = None) -> tuple[str, str]:
         payload = self._request("POST", "/api/local-agent/seatalk/export", {"name_mappings": name_mappings or {}})
@@ -590,8 +590,8 @@ class RemoteSeaTalkDashboardService:
     def build_todos(self, *, todo_since: str | None = None) -> dict[str, Any]:
         return _strip_status(self.client.seatalk_todos(name_mappings=self.name_mappings_provider(), todo_since=todo_since))
 
-    def build_name_mappings(self) -> dict[str, Any]:
-        return _strip_status(self.client.seatalk_name_mappings())
+    def build_name_mappings(self, *, force_refresh: bool = False) -> dict[str, Any]:
+        return _strip_status(self.client.seatalk_name_mappings(force_refresh=force_refresh))
 
     def export_history_text(self) -> tuple[str, str]:
         return self.client.seatalk_export(name_mappings=self.name_mappings_provider())

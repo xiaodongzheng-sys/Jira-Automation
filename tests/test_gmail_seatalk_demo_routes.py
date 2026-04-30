@@ -120,6 +120,8 @@ class GmailSeaTalkDemoRouteTests(unittest.TestCase):
         self.assertNotIn(b"To-do Items", response.data)
         self.assertNotIn(b"Summary</button>", response.data)
         self.assertIn(b"Name Mapping", response.data)
+        self.assertIn(b"Refresh Candidates", response.data)
+        self.assertIn(b"data-seatalk-name-mapping-refresh", response.data)
         self.assertIn(b"data-seatalk-name-mappings-url", response.data)
         self.assertIn(b"data-seatalk-name-mapping-save-feedback", response.data)
         self.assertIn(b"/api/gmail-sea-talk-demo/seatalk/name-mappings", response.data)
@@ -729,7 +731,7 @@ class GmailSeaTalkDemoRouteTests(unittest.TestCase):
 
     def test_owner_can_load_and_save_seatalk_name_mappings(self):
         class FakeSeaTalkService:
-            def build_name_mappings(self):
+            def build_name_mappings(self, *, force_refresh=False):
                 return {
                     "unknown_ids": [
                         {"id": "group-123", "type": "group", "count": 12, "example": "2026-04-21: kickoff"},
@@ -773,7 +775,7 @@ class GmailSeaTalkDemoRouteTests(unittest.TestCase):
 
     def test_owner_seatalk_name_mappings_dedupes_buddy_and_uid_candidates(self):
         class FakeSeaTalkService:
-            def build_name_mappings(self):
+            def build_name_mappings(self, *, force_refresh=False):
                 return {
                     "unknown_ids": [
                         {
@@ -813,9 +815,33 @@ class GmailSeaTalkDemoRouteTests(unittest.TestCase):
         self.assertEqual(payload["unknown_ids"][0]["count"], 91)
         self.assertEqual(payload["unknown_ids"][0]["priority_reason"], "@mentioned me")
 
+    def test_owner_seatalk_name_mappings_refresh_bypasses_cache(self):
+        calls = []
+
+        class FakeSeaTalkService:
+            def build_name_mappings(self, *, force_refresh=False):
+                calls.append(force_refresh)
+                return {
+                    "unknown_ids": [
+                        {"id": "UID 456", "type": "uid", "count": 6, "example": "2026-04-21: hello"},
+                    ],
+                    "generated_at": "2026-04-21T21:00:00+08:00",
+                    "period_days": 7,
+                    "cache": {"hit": False},
+                }
+
+        with patch("bpmis_jira_tool.web._build_seatalk_dashboard_service", return_value=FakeSeaTalkService()):
+            with self.app.test_client() as client:
+                self._login_owner(client, scopes=[GMAIL_READONLY_SCOPE])
+                response = client.get("/api/gmail-sea-talk-demo/seatalk/name-mappings?refresh=1")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(calls, [True])
+        self.assertEqual(response.get_json()["unknown_ids"][0]["id"], "UID 456")
+
     def test_owner_seatalk_name_mappings_api_reports_export_error(self):
         class FakeSeaTalkService:
-            def build_name_mappings(self):
+            def build_name_mappings(self, *, force_refresh=False):
                 raise web_module.ToolError("SeaTalk desktop database was not found.")
 
         with patch("bpmis_jira_tool.web._build_seatalk_dashboard_service", return_value=FakeSeaTalkService()):

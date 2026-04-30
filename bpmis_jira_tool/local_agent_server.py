@@ -538,7 +538,13 @@ def create_local_agent_app() -> Flask:
 
     @app.post("/api/local-agent/seatalk/name-mappings")
     def seatalk_name_mappings():
-        return jsonify({"status": "ok", **_build_seatalk_service(settings).build_name_mappings()})
+        payload = request.get_json(silent=True) or {}
+        return jsonify(
+            {
+                "status": "ok",
+                **_build_seatalk_service(settings).build_name_mappings(force_refresh=bool(payload.get("force_refresh"))),
+            }
+        )
 
     @app.post("/api/local-agent/seatalk/todos/completed-ids")
     def seatalk_todos_completed_ids():

@@ -320,9 +320,10 @@ class SeaTalkDashboardService:
         *,
         days: int = SEATALK_DASHBOARD_DEFAULT_DAYS,
         now: datetime | None = None,
+        force_refresh: bool = False,
     ) -> dict[str, Any]:
         now = now or datetime.now().astimezone()
-        daily_cached = self._load_daily_cache(kind="name_mappings", days=days, now=now)
+        daily_cached = None if force_refresh else self._load_daily_cache(kind="name_mappings", days=days, now=now)
         if daily_cached is not None:
             payload = json.loads(json.dumps(daily_cached))
             payload["cache"] = {"hit": True, "expires_at": self._insights_cache_expiry(now).isoformat()}

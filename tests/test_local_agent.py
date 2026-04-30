@@ -462,6 +462,15 @@ class LocalAgentClientTests(unittest.TestCase):
 
         self.assertEqual(request.call_args.kwargs["timeout"], (4, 120))
 
+    def test_seatalk_name_mappings_can_force_refresh(self):
+        client = LocalAgentClient(base_url="https://portal.example", hmac_secret="shared-secret")
+        with patch.object(client, "_request", return_value={"status": "ok", "unknown_ids": []}) as request:
+            payload = client.seatalk_name_mappings(force_refresh=True)
+
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(request.call_args.args[1], "/api/local-agent/seatalk/name-mappings")
+        self.assertEqual(request.call_args.args[2], {"force_refresh": True})
+
     def test_unreadable_response_includes_status_and_preview(self):
         class FakeResponse:
             status_code = 404
