@@ -192,9 +192,12 @@ def create_prd_briefing_blueprint() -> Blueprint:
         if parsed.scheme not in {"http", "https"}:
             return jsonify({"status": "error", "message": "Unsupported image source."}), 400
         service = _build_service()
-        if not _is_allowed_confluence_image_source(src, service.confluence.base_url):
-            return jsonify({"status": "error", "message": "Unsupported image source."}), 400
         settings = current_app.config["SETTINGS"]
+        confluence_base_url = service.confluence.base_url or settings.confluence_base_url
+        if _local_agent_prd_briefing_enabled(settings) and not confluence_base_url:
+            confluence_base_url = "https://confluence.shopee.io"
+        if not _is_allowed_confluence_image_source(src, confluence_base_url):
+            return jsonify({"status": "error", "message": "Unsupported image source."}), 400
         if _local_agent_prd_briefing_enabled(settings) and not _is_loopback_url(settings.local_agent_base_url):
             response = requests.get(
                 f"{str(settings.local_agent_base_url or '').rstrip('/')}/prd-briefing/image-proxy?src={quote(src, safe='')}",
