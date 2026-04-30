@@ -22,6 +22,8 @@ def create_prd_briefing_blueprint() -> Blueprint:
 
     @blueprint.before_request
     def enforce_owner_access():
+        if request.endpoint == "prd_briefing.image_proxy":
+            return None
         identity = current_app.config["GET_USER_IDENTITY"]()
         email = str(identity.get("email") or "").strip().lower()
         allowed = bool(current_app.config["CAN_ACCESS_PRD_BRIEFING"]())
@@ -141,6 +143,8 @@ def create_prd_briefing_blueprint() -> Blueprint:
         if parsed.scheme not in {"http", "https"}:
             return jsonify({"status": "error", "message": "Unsupported image source."}), 400
         service = _build_service()
+        if not _is_allowed_confluence_image_source(src, service.confluence.base_url):
+            return jsonify({"status": "error", "message": "Unsupported image source."}), 400
         connector = service.confluence
         response = connector._request(src, accept="image/*,*/*;q=0.8")
         return Response(
@@ -151,6 +155,19 @@ def create_prd_briefing_blueprint() -> Blueprint:
         )
 
     return blueprint
+
+
+def _is_allowed_confluence_image_source(src: str, confluence_base_url: str | None) -> bool:
+    parsed = urlparse(src)
+    base = urlparse(str(confluence_base_url or ""))
+    if parsed.scheme not in {"http", "https"}:
+        return False
+    if not base.scheme or not base.netloc:
+        return False
+    if parsed.scheme != base.scheme or parsed.netloc.lower() != base.netloc.lower():
+        return False
+    path = parsed.path or ""
+    return path.startswith(("/download/attachments/", "/download/thumbnails/"))
 
 
 def _local_agent_mode_enabled(settings: Settings) -> bool:

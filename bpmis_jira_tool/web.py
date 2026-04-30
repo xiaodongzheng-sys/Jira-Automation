@@ -2046,6 +2046,7 @@ def create_app() -> Flask:
             "google_callback",
             "google_logout",
             "access_denied",
+            "prd_briefing.image_proxy",
         }:
             return None
         login_gate = _require_google_login(

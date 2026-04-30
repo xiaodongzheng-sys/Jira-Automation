@@ -120,6 +120,28 @@ class FakePRDReviewLocalAgentClient:
         }
 
 
+class FakeImageProxyConnector:
+    base_url = "https://confluence.shopee.io"
+
+    def __init__(self):
+        self.requested_url = None
+
+    def _request(self, url, accept):
+        self.requested_url = url
+
+        class Response:
+            content = b"png-bytes"
+            status_code = 200
+            headers = {"content-type": "image/png"}
+
+        return Response()
+
+
+class FakeImageProxyService:
+    def __init__(self):
+        self.confluence = FakeImageProxyConnector()
+
+
 class FakeCodexTextGenerationClient:
     init_kwargs = None
 
@@ -367,6 +389,35 @@ class PRDBriefingRouteTests(unittest.TestCase):
             response = client.get("/prd-briefing/", follow_redirects=False)
             self.assertEqual(response.status_code, 302)
             self.assertEqual(response.headers["Location"], "/")
+
+    @patch("prd_briefing.blueprint._build_service", return_value=FakeImageProxyService())
+    def test_image_proxy_allows_confluence_attachment_without_session(self, mock_service):
+        with self.app.test_client() as client:
+            response = client.get(
+                "/prd-briefing/image-proxy",
+                query_string={
+                    "src": "https://confluence.shopee.io/download/attachments/123/mock.png?api=v2"
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content_type, "image/png")
+        self.assertEqual(response.data, b"png-bytes")
+        self.assertEqual(
+            mock_service.return_value.confluence.requested_url,
+            "https://confluence.shopee.io/download/attachments/123/mock.png?api=v2",
+        )
+
+    @patch("prd_briefing.blueprint._build_service", return_value=FakeImageProxyService())
+    def test_image_proxy_rejects_non_confluence_source(self, _mock_service):
+        with self.app.test_client() as client:
+            response = client.get(
+                "/prd-briefing/image-proxy",
+                query_string={"src": "https://example.com/download/attachments/123/mock.png"},
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Unsupported image source", response.get_json()["message"])
 
 
 if __name__ == "__main__":
