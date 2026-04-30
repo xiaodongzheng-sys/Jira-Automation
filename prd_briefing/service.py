@@ -21,7 +21,9 @@ from .text_generation import TextGenerationClient
 
 
 DEVELOPER_AUDIENCE = "developer_zh"
+DEVELOPER_AUDIENCE_EN = "developer_en"
 DEVELOPER_LANGUAGE = "Mandarin Chinese"
+DEVELOPER_LANGUAGE_EN = "English"
 
 WALKTHROUGH_SCRIPT_PROMPT_VERSION = "v1_openai_only_pm_briefing"
 WALKTHROUGH_BLOCK_PROMPT_VERSION = "v1_pm_briefing_block"
@@ -49,6 +51,117 @@ STOPWORDS = {
     "who",
     "why",
 }
+
+
+def normalize_walkthrough_language(language: str | None) -> str:
+    normalized = str(language or "zh").strip().lower()
+    return "en" if normalized in {"en", "english"} else "zh"
+
+
+def walkthrough_audience(language: str | None) -> str:
+    return DEVELOPER_AUDIENCE_EN if normalize_walkthrough_language(language) == "en" else DEVELOPER_AUDIENCE
+
+
+def walkthrough_language_code(language: str | None) -> str:
+    return "en" if normalize_walkthrough_language(language) == "en" else "zh"
+
+
+def walkthrough_language_name(language: str | None) -> str:
+    return DEVELOPER_LANGUAGE_EN if normalize_walkthrough_language(language) == "en" else DEVELOPER_LANGUAGE
+
+
+def walkthrough_language_from_session(session: dict[str, Any]) -> str:
+    return "en" if str(session.get("audience") or "").strip() == DEVELOPER_AUDIENCE_EN else "zh"
+
+
+def build_walkthrough_section_system_prompt(language: str | None = "zh") -> str:
+    language = normalize_walkthrough_language(language)
+    base = (
+        f"You are a product manager briefing a PRD section to software engineers in {walkthrough_language_name(language)}. "
+        "Speak the way PMs normally align requirements with developers during grooming or walkthrough sessions. "
+        "Be direct, practical, and structured. First explain the purpose of this section, then the main flow, "
+        "then what developers need to build or pay attention to. Call out scope, user actions, system behavior, "
+        "validation rules, dependencies, edge cases, and any implementation-sensitive details when present. "
+        "Do not sound like a keynote presenter. Do not read the PRD word for word. "
+        "Do not mechanically read every field, bullet, or table row. Summarize dense tables into what engineering should understand. "
+    )
+    if language == "en":
+        return base + (
+            "Use natural spoken English for a developer walkthrough: frame the goal first, then explain the flow, "
+            "what changes on the page, what gets triggered, what should be validated, and what cases developers need to watch."
+        )
+    return base + (
+        "Use spoken PM phrasing that feels normal in a dev sync, for example framing the goal first, then saying what the flow is, "
+        "what changes on the page, what gets triggered, what should be validated, and what cases developers need to pay attention to."
+    )
+
+
+def build_walkthrough_section_user_prompt(*, section: dict[str, Any], notes: list[str], language: str | None = "zh") -> str:
+    body = (
+        f"Section: {section['section_path']}\n\n"
+        f"Presenter summary:\n{section.get('briefing_summary', '')}\n\n"
+        f"Presenter notes:\n- " + "\n- ".join(notes) + "\n\n"
+        f"Source:\n{section['content']}\n\n"
+    )
+    if normalize_walkthrough_language(language) == "en":
+        return body + (
+            "Write a natural spoken script of around 5 to 9 sentences in English. "
+            "The first sentence should explain why this section matters to implementation. "
+            "Then explain the intended flow in order. "
+            "After that, highlight the key engineering takeaways, such as important rules, triggers, state changes, "
+            "input or output expectations, and any edge cases or risks implied by the source. "
+            "If the section is mostly UI fields, summarize the pattern and only name the most important fields. "
+            "Make it sound like live PM speech rather than written prose. "
+            "Natural phrasing is encouraged, such as: "
+            "'This part is mainly about...', 'For implementation, focus on...', 'The actual flow is...', "
+            "'The key thing to validate is...', 'There are many fields here, but the core idea is...'. "
+            "Do not force all phrases in every answer, but keep the overall tone close to that style."
+        )
+    return body + (
+        "Write a natural spoken script of around 5 to 9 sentences in Mandarin. "
+        "The first sentence should explain why this section matters to implementation. "
+        "Then explain the intended flow in order. "
+        "After that, highlight the key engineering takeaways, such as important rules, triggers, state changes, "
+        "input or output expectations, and any edge cases or risks implied by the source. "
+        "If the section is mostly UI fields, summarize the pattern and only name the most important fields. "
+        "Make it sound like live PM speech rather than written prose. "
+        "Natural phrasing is encouraged, such as: "
+        "'这一块主要是...', '开发这里重点看...', '实际 flow 是...', '这里需要注意...', "
+        "'这个字段很多，但本质上是为了...', '异常情况主要是...'. "
+        "Do not force all phrases in every answer, but keep the overall tone close to that style."
+    )
+
+
+def build_walkthrough_block_system_prompt(language: str | None = "zh") -> str:
+    return (
+        f"You are a product manager briefing related PRD sections to software engineers in {walkthrough_language_name(language)}. "
+        "The input is already grouped into one product briefing block, so explain the merged capability instead of reading each Confluence section separately. "
+        "Be concrete about user flow, page behavior, field or status rules, backend/system responsibilities, dependencies, and implementation risks. "
+        "Do not read the PRD word for word. Keep the tone like a live PM walkthrough for developers."
+    )
+
+
+def build_walkthrough_block_user_prompt(*, block: dict[str, Any], source_lines: list[str], language: str | None = "zh") -> str:
+    body = (
+        f"Briefing block: {block['title']}\n\n"
+        f"Briefing goal:\n{block.get('briefing_goal', '')}\n\n"
+        f"Merged summary:\n{block.get('merged_summary', '')}\n\n"
+        f"Developer focus:\n- " + "\n- ".join(block.get("developer_focus") or []) + "\n\n"
+        f"Related PRD source sections:\n\n" + "\n\n".join(source_lines) + "\n\n"
+    )
+    if normalize_walkthrough_language(language) == "en":
+        return body + (
+            "Write a natural spoken script of around 7 to 12 sentences in English. "
+            "Start with why this merged module matters. Then explain the user/system flow in order. "
+            "Call out the related PRD sections by their product meaning, but do not mechanically enumerate section numbers. "
+            "End with what developers should double-check before implementation or QA."
+        )
+    return body + (
+        "Write a natural spoken script of around 7 to 12 sentences in Mandarin. "
+        "Start with why this merged module matters. Then explain the user/system flow in order. "
+        "Call out the related PRD sections by their product meaning, but do not mechanically enumerate section numbers. "
+        "End with what developers should double-check before implementation or QA."
+    )
 
 
 class RetrievalService:
@@ -174,7 +287,7 @@ class VoiceService:
                 audio_bytes, suffix = self.openai_client.synthesize_speech(
                     text=normalized_text,
                     voice=voice_id,
-                    instructions=self._build_openai_voice_instructions(),
+                    instructions=self._build_openai_voice_instructions(language_code=language_code),
                     speed=self.openai_voice_speed,
                 )
             except Exception:  # noqa: BLE001
@@ -231,9 +344,10 @@ class VoiceService:
             }
         return None
 
-    def _build_openai_voice_instructions(self) -> str:
+    def _build_openai_voice_instructions(self, *, language_code: str = "zh") -> str:
+        language_name = "English" if str(language_code or "").lower().startswith("en") else "Mandarin"
         return (
-            "Speak like an experienced product manager walking software engineers through a requirement in Mandarin. "
+            f"Speak like an experienced product manager walking software engineers through a requirement in {language_name}. "
             "Sound natural, grounded, and practical, as if you are in a normal requirement grooming session. "
             "Use calm confidence, short pauses between ideas, and slightly slower pacing for dense logic. "
             "Emphasize what the flow is, what needs to be built, and what developers need to pay attention to. "
@@ -337,13 +451,14 @@ class PRDBriefingService:
         self.answer_audio_enabled = answer_audio_enabled
         self.walkthrough_prewarm_enabled = walkthrough_prewarm_enabled
 
-    def create_session(self, *, owner_key: str, page_ref: str, mode: str) -> dict[str, Any]:
+    def create_session(self, *, owner_key: str, page_ref: str, mode: str, language: str = "zh") -> dict[str, Any]:
+        walkthrough_language = normalize_walkthrough_language(language)
         page = self.confluence.ingest_page(page_ref, "pending")
         session_id = self.store.create_session(
             owner_key=owner_key,
             confluence_page_id=page.page_id,
             confluence_page_url=page.source_url,
-            audience=DEVELOPER_AUDIENCE,
+            audience=walkthrough_audience(walkthrough_language),
             mode=mode,
             title=page.title,
         )
@@ -374,6 +489,7 @@ class PRDBriefingService:
             self._spawn_prewarm_walkthrough_scripts(
                 owner_key=owner_key,
                 sections=payload["sections"],
+                language=walkthrough_language,
             )
         return payload
 
@@ -381,11 +497,12 @@ class PRDBriefingService:
         session = self.store.get_session(session_id, owner_key)
         if not session:
             raise ValueError("Briefing session was not found.")
+        language = walkthrough_language_from_session(session)
         prd_chunks = self.store.list_session_prd_chunks(session_id, owner_key)
         sections = self._build_sections(prd_chunks)
-        sections = [self._annotate_section_cache(owner_key=owner_key, section=section) for section in sections]
+        sections = [self._annotate_section_cache(owner_key=owner_key, section=section, language=language) for section in sections]
         briefing_blocks = self._build_briefing_blocks(sections)
-        briefing_blocks = [self._annotate_block_cache(owner_key=owner_key, block=block) for block in briefing_blocks]
+        briefing_blocks = [self._annotate_block_cache(owner_key=owner_key, block=block, language=language) for block in briefing_blocks]
         session_overview = self._build_session_overview(
             owner_key=owner_key,
             session=session,
@@ -454,6 +571,8 @@ class PRDBriefingService:
         session = self.store.get_session(session_id, owner_key)
         if not session:
             raise ValueError("Briefing session was not found.")
+        language = walkthrough_language_from_session(session)
+        language_code = walkthrough_language_code(language)
         prd_chunks = self.store.list_session_prd_chunks(session_id, owner_key)
         sections = self._build_sections(prd_chunks)
         if briefing_block_id:
@@ -461,12 +580,12 @@ class PRDBriefingService:
             block = next((item for item in blocks if item.get("block_id") == briefing_block_id), None)
             if not block:
                 raise ValueError("Briefing block is out of range.")
-            script, cached = self._compose_walkthrough_block(owner_key=owner_key, block=block)
+            script, cached = self._compose_walkthrough_block(owner_key=owner_key, block=block, language=language)
             audio_cached = bool(
                 self.voice_service.get_cached_audio_for_text(
                     owner_key=owner_key,
                     text=script,
-                    language_code="zh",
+                    language_code=language_code,
                 )
             )
             audio_path = None
@@ -474,7 +593,7 @@ class PRDBriefingService:
                 audio_path = self.voice_service.synthesize(
                     session_id=session_id,
                     text=script,
-                    language_code="zh",
+                    language_code=language_code,
                     owner_key=owner_key,
                 )
             return {
@@ -484,16 +603,17 @@ class PRDBriefingService:
                 "audio_cached": audio_cached,
                 "briefing_block_id": block["block_id"],
                 "section_indexes": block["section_indexes"],
+                "language": language,
             }
         if section_index < 0 or section_index >= len(sections):
             raise ValueError("Section index is out of range.")
         section = sections[section_index]
-        script, cached = self._compose_walkthrough_section(owner_key=owner_key, section=section)
+        script, cached = self._compose_walkthrough_section(owner_key=owner_key, section=section, language=language)
         audio_cached = bool(
             self.voice_service.get_cached_audio_for_text(
                 owner_key=owner_key,
                 text=script,
-                language_code="zh",
+                language_code=language_code,
             )
         )
         audio_path = None
@@ -501,7 +621,7 @@ class PRDBriefingService:
             audio_path = self.voice_service.synthesize(
                 session_id=session_id,
                 text=script,
-                language_code="zh",
+                language_code=language_code,
                 owner_key=owner_key,
             )
         return {
@@ -509,6 +629,7 @@ class PRDBriefingService:
             "audio_url": f"/prd-briefing/assets/{audio_path}" if audio_path else None,
             "cached": cached,
             "audio_cached": audio_cached,
+            "language": language,
         }
 
     def _sections_to_chunks(
@@ -570,38 +691,11 @@ class PRDBriefingService:
     def _build_briefing_blocks(self, sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return build_pm_briefing_blocks(sections)
 
-    def _compose_walkthrough_section(self, *, owner_key: str, section: dict[str, Any]) -> tuple[str, bool]:
-        prompt = (
-            f"You are a product manager briefing a PRD section to software engineers in {DEVELOPER_LANGUAGE}. "
-            "Speak the way PMs normally align requirements with developers during grooming or walkthrough sessions. "
-            "Be direct, practical, and structured. First explain the purpose of this section, then the main flow, "
-            "then what developers need to build or pay attention to. Call out scope, user actions, system behavior, "
-            "validation rules, dependencies, edge cases, and any implementation-sensitive details when present. "
-            "Do not sound like a keynote presenter. Do not read the PRD word for word. "
-            "Do not mechanically read every field, bullet, or table row. Summarize dense tables into what engineering should understand. "
-            "Use spoken PM phrasing that feels normal in a dev sync, for example framing the goal first, then saying what the flow is, "
-            "what changes on the page, what gets triggered, what should be validated, and what cases developers need to pay attention to."
-        )
+    def _compose_walkthrough_section(self, *, owner_key: str, section: dict[str, Any], language: str = "zh") -> tuple[str, bool]:
+        language = normalize_walkthrough_language(language)
+        prompt = build_walkthrough_section_system_prompt(language)
         notes = section.get("briefing_notes") or []
-        body = (
-            f"Section: {section['section_path']}\n\n"
-            f"Presenter summary:\n{section.get('briefing_summary', '')}\n\n"
-            f"Presenter notes:\n- " + "\n- ".join(notes) + "\n\n"
-            f"Source:\n{section['content']}\n\n"
-        )
-        body += (
-            "Write a natural spoken script of around 5 to 9 sentences in Mandarin. "
-            "The first sentence should explain why this section matters to implementation. "
-            "Then explain the intended flow in order. "
-            "After that, highlight the key engineering takeaways, such as important rules, triggers, state changes, "
-            "input or output expectations, and any edge cases or risks implied by the source. "
-            "If the section is mostly UI fields, summarize the pattern and only name the most important fields. "
-            "Make it sound like live PM speech rather than written prose. "
-            "Natural phrasing is encouraged, such as: "
-            "'这一块主要是...', '开发这里重点看...', '实际 flow 是...', '这里需要注意...', "
-            "'这个字段很多，但本质上是为了...', '异常情况主要是...'. "
-            "Do not force all phrases in every answer, but keep the overall tone close to that style."
-        )
+        body = build_walkthrough_section_user_prompt(section=section, notes=notes, language=language)
         if not self.text_client.is_configured():
             raise RuntimeError("Walkthrough script generation now requires a configured OpenAI text model.")
         cache_lookup = self._build_walkthrough_cache_lookup(
@@ -610,6 +704,7 @@ class PRDBriefingService:
             prompt=prompt,
             body=body,
             notes=notes,
+            language=language,
         )
         model_id = cache_lookup["model_id"]
         section_payload = cache_lookup["section_payload"]
@@ -622,7 +717,7 @@ class PRDBriefingService:
             # requests hit the fast path without needing OpenAI again.
             self.store.cache_script(
                 owner_key=owner_key,
-                audience=DEVELOPER_AUDIENCE,
+                audience=walkthrough_audience(language),
                 model_id=model_id,
                 prompt_version=WALKTHROUGH_SCRIPT_PROMPT_VERSION,
                 section_payload=section_payload,
@@ -635,7 +730,7 @@ class PRDBriefingService:
             raise RuntimeError(f"Text model could not generate the walkthrough script: {error}") from error
         self.store.cache_script(
             owner_key=owner_key,
-            audience=DEVELOPER_AUDIENCE,
+            audience=walkthrough_audience(language),
             model_id=model_id,
             prompt_version=WALKTHROUGH_SCRIPT_PROMPT_VERSION,
             section_payload=section_payload,
@@ -643,29 +738,15 @@ class PRDBriefingService:
         )
         return script, False
 
-    def _compose_walkthrough_block(self, *, owner_key: str, block: dict[str, Any]) -> tuple[str, bool]:
-        prompt = (
-            f"You are a product manager briefing related PRD sections to software engineers in {DEVELOPER_LANGUAGE}. "
-            "The input is already grouped into one product briefing block, so explain the merged capability instead of reading each Confluence section separately. "
-            "Be concrete about user flow, page behavior, field or status rules, backend/system responsibilities, dependencies, and implementation risks. "
-            "Do not read the PRD word for word. Keep the tone like a live PM walkthrough for developers."
-        )
+    def _compose_walkthrough_block(self, *, owner_key: str, block: dict[str, Any], language: str = "zh") -> tuple[str, bool]:
+        language = normalize_walkthrough_language(language)
+        prompt = build_walkthrough_block_system_prompt(language)
         source_lines = []
         for ref in block.get("source_refs") or []:
             source_lines.append(
                 f"[{int(ref.get('section_index', 0)) + 1}] {ref.get('section_path')}\n{ref.get('content_excerpt', '')}"
             )
-        body = (
-            f"Briefing block: {block['title']}\n\n"
-            f"Briefing goal:\n{block.get('briefing_goal', '')}\n\n"
-            f"Merged summary:\n{block.get('merged_summary', '')}\n\n"
-            f"Developer focus:\n- " + "\n- ".join(block.get("developer_focus") or []) + "\n\n"
-            f"Related PRD source sections:\n\n" + "\n\n".join(source_lines) + "\n\n"
-            "Write a natural spoken script of around 7 to 12 sentences in Mandarin. "
-            "Start with why this merged module matters. Then explain the user/system flow in order. "
-            "Call out the related PRD sections by their product meaning, but do not mechanically enumerate section numbers. "
-            "End with what developers should double-check before implementation or QA."
-        )
+        body = build_walkthrough_block_user_prompt(block=block, source_lines=source_lines, language=language)
         if not self.text_client.is_configured():
             raise RuntimeError("Walkthrough script generation now requires a configured OpenAI text model.")
         cache_lookup = self._build_walkthrough_block_cache_lookup(
@@ -673,6 +754,7 @@ class PRDBriefingService:
             block=block,
             prompt=prompt,
             body=body,
+            language=language,
         )
         model_id = cache_lookup["model_id"]
         block_payload = cache_lookup["block_payload"]
@@ -683,7 +765,7 @@ class PRDBriefingService:
         if legacy_cached_script:
             self.store.cache_script(
                 owner_key=owner_key,
-                audience=DEVELOPER_AUDIENCE,
+                audience=walkthrough_audience(language),
                 model_id=model_id,
                 prompt_version=WALKTHROUGH_BLOCK_PROMPT_VERSION,
                 section_payload=block_payload,
@@ -696,7 +778,7 @@ class PRDBriefingService:
             raise RuntimeError(f"Text model could not generate the walkthrough script: {error}") from error
         self.store.cache_script(
             owner_key=owner_key,
-            audience=DEVELOPER_AUDIENCE,
+            audience=walkthrough_audience(language),
             model_id=model_id,
             prompt_version=WALKTHROUGH_BLOCK_PROMPT_VERSION,
             section_payload=block_payload,
@@ -709,15 +791,18 @@ class PRDBriefingService:
         *,
         owner_key: str,
         sections: list[dict[str, Any]],
+        language: str = "zh",
     ) -> None:
         if not self.text_client.is_configured():
             return
+        language = normalize_walkthrough_language(language)
         briefing_blocks = self._build_briefing_blocks(sections)
         for block in briefing_blocks[:WALKTHROUGH_PREWARM_LIMIT]:
             try:
                 self._compose_walkthrough_block(
                     owner_key=owner_key,
                     block=block,
+                    language=language,
                 )
             except Exception:  # noqa: BLE001
                 continue
@@ -727,9 +812,11 @@ class PRDBriefingService:
         *,
         owner_key: str,
         sections: list[dict[str, Any]],
+        language: str = "zh",
     ) -> None:
         if not self.text_client.is_configured():
             return
+        language = normalize_walkthrough_language(language)
         section_copies = [
             dict(section, image_refs=list(section.get("image_refs") or []), briefing_notes=list(section.get("briefing_notes") or []))
             for section in sections
@@ -739,16 +826,18 @@ class PRDBriefingService:
             kwargs={
                 "owner_key": owner_key,
                 "sections": section_copies,
+                "language": language,
             },
             daemon=True,
             name="prd-briefing-prewarm",
         )
         worker.start()
 
-    def _annotate_section_cache(self, *, owner_key: str, section: dict[str, Any]) -> dict[str, Any]:
+    def _annotate_section_cache(self, *, owner_key: str, section: dict[str, Any], language: str = "zh") -> dict[str, Any]:
         annotated = dict(section)
+        language = normalize_walkthrough_language(language)
         try:
-            cache_lookup = self._build_walkthrough_cache_lookup(owner_key=owner_key, section=section)
+            cache_lookup = self._build_walkthrough_cache_lookup(owner_key=owner_key, section=section, language=language)
             cached_script = cache_lookup["cached_script"] or cache_lookup["legacy_cached_script"]
             annotated["walkthrough_cached"] = bool(cached_script)
             annotated["walkthrough_audio_cached"] = bool(
@@ -756,7 +845,7 @@ class PRDBriefingService:
                 and self.voice_service.get_cached_audio_for_text(
                     owner_key=owner_key,
                     text=cached_script,
-                    language_code="zh",
+                    language_code=walkthrough_language_code(language),
                 )
             )
         except Exception:  # noqa: BLE001
@@ -764,10 +853,11 @@ class PRDBriefingService:
             annotated["walkthrough_audio_cached"] = False
         return annotated
 
-    def _annotate_block_cache(self, *, owner_key: str, block: dict[str, Any]) -> dict[str, Any]:
+    def _annotate_block_cache(self, *, owner_key: str, block: dict[str, Any], language: str = "zh") -> dict[str, Any]:
         annotated = dict(block)
+        language = normalize_walkthrough_language(language)
         try:
-            cache_lookup = self._build_walkthrough_block_cache_lookup(owner_key=owner_key, block=block)
+            cache_lookup = self._build_walkthrough_block_cache_lookup(owner_key=owner_key, block=block, language=language)
             cached_script = cache_lookup["cached_script"] or cache_lookup["legacy_cached_script"]
             annotated["walkthrough_cached"] = bool(cached_script)
             annotated["walkthrough_audio_cached"] = bool(
@@ -775,7 +865,7 @@ class PRDBriefingService:
                 and self.voice_service.get_cached_audio_for_text(
                     owner_key=owner_key,
                     text=cached_script,
-                    language_code="zh",
+                    language_code=walkthrough_language_code(language),
                 )
             )
         except Exception:  # noqa: BLE001
@@ -791,36 +881,12 @@ class PRDBriefingService:
         prompt: str | None = None,
         body: str | None = None,
         notes: list[str] | None = None,
+        language: str = "zh",
     ) -> dict[str, Any]:
-        prompt = prompt or (
-            f"You are a product manager briefing a PRD section to software engineers in {DEVELOPER_LANGUAGE}. "
-            "Speak the way PMs normally align requirements with developers during grooming or walkthrough sessions. "
-            "Be direct, practical, and structured. First explain the purpose of this section, then the main flow, "
-            "then what developers need to build or pay attention to. Call out scope, user actions, system behavior, "
-            "validation rules, dependencies, edge cases, and any implementation-sensitive details when present. "
-            "Do not sound like a keynote presenter. Do not read the PRD word for word. "
-            "Do not mechanically read every field, bullet, or table row. Summarize dense tables into what engineering should understand. "
-            "Use spoken PM phrasing that feels normal in a dev sync, for example framing the goal first, then saying what the flow is, "
-            "what changes on the page, what gets triggered, what should be validated, and what cases developers need to pay attention to."
-        )
+        language = normalize_walkthrough_language(language)
+        prompt = prompt or build_walkthrough_section_system_prompt(language)
         notes = notes if notes is not None else (section.get("briefing_notes") or [])
-        body = body or (
-            f"Section: {section['section_path']}\n\n"
-            f"Presenter summary:\n{section.get('briefing_summary', '')}\n\n"
-            f"Presenter notes:\n- " + "\n- ".join(notes) + "\n\n"
-            f"Source:\n{section['content']}\n\n"
-            "Write a natural spoken script of around 5 to 9 sentences in Mandarin. "
-            "The first sentence should explain why this section matters to implementation. "
-            "Then explain the intended flow in order. "
-            "After that, highlight the key engineering takeaways, such as important rules, triggers, state changes, "
-            "input or output expectations, and any edge cases or risks implied by the source. "
-            "If the section is mostly UI fields, summarize the pattern and only name the most important fields. "
-            "Make it sound like live PM speech rather than written prose. "
-            "Natural phrasing is encouraged, such as: "
-            "'这一块主要是...', '开发这里重点看...', '实际 flow 是...', '这里需要注意...', "
-            "'这个字段很多，但本质上是为了...', '异常情况主要是...'. "
-            "Do not force all phrases in every answer, but keep the overall tone close to that style."
-        )
+        body = body or build_walkthrough_section_user_prompt(section=section, notes=notes, language=language)
         model_id = str(getattr(self.text_client, "model_id", getattr(self.openai_client, "chat_model", "text_model")))
         section_payload = json.dumps(
             {
@@ -836,14 +902,14 @@ class PRDBriefingService:
         )
         cached_script = self.store.get_cached_script(
             owner_key=owner_key,
-            audience=DEVELOPER_AUDIENCE,
+            audience=walkthrough_audience(language),
             model_id=model_id,
             prompt_version=WALKTHROUGH_SCRIPT_PROMPT_VERSION,
             section_payload=section_payload,
         )
         legacy_cached_script = self.store.get_cached_script_any_model(
             owner_key=owner_key,
-            audience=DEVELOPER_AUDIENCE,
+            audience=walkthrough_audience(language),
             prompt_version=WALKTHROUGH_SCRIPT_PROMPT_VERSION,
             section_payload=section_payload,
         )
@@ -861,13 +927,10 @@ class PRDBriefingService:
         block: dict[str, Any],
         prompt: str | None = None,
         body: str | None = None,
+        language: str = "zh",
     ) -> dict[str, Any]:
-        prompt = prompt or (
-            f"You are a product manager briefing related PRD sections to software engineers in {DEVELOPER_LANGUAGE}. "
-            "The input is already grouped into one product briefing block, so explain the merged capability instead of reading each Confluence section separately. "
-            "Be concrete about user flow, page behavior, field or status rules, backend/system responsibilities, dependencies, and implementation risks. "
-            "Do not read the PRD word for word. Keep the tone like a live PM walkthrough for developers."
-        )
+        language = normalize_walkthrough_language(language)
+        prompt = prompt or build_walkthrough_block_system_prompt(language)
         source_payload = [
             {
                 "section_index": ref.get("section_index"),
@@ -907,14 +970,14 @@ class PRDBriefingService:
         )
         cached_script = self.store.get_cached_script(
             owner_key=owner_key,
-            audience=DEVELOPER_AUDIENCE,
+            audience=walkthrough_audience(language),
             model_id=model_id,
             prompt_version=WALKTHROUGH_BLOCK_PROMPT_VERSION,
             section_payload=block_payload,
         )
         legacy_cached_script = self.store.get_cached_script_any_model(
             owner_key=owner_key,
-            audience=DEVELOPER_AUDIENCE,
+            audience=walkthrough_audience(language),
             prompt_version=WALKTHROUGH_BLOCK_PROMPT_VERSION,
             section_payload=block_payload,
         )

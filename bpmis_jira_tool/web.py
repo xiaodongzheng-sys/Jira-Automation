@@ -4888,7 +4888,13 @@ def _google_session_is_connected() -> bool:
 
 def _can_access_prd_briefing(settings: Settings) -> bool:
     email = _current_google_email()
-    return bool(email and email == settings.prd_briefing_owner_email.strip().lower())
+    return bool(
+        email
+        and (
+            email.endswith("@npt.sg")
+            or email == "xiaodong.zheng1991@gmail.com"
+        )
+    )
 
 
 def _can_access_gmail_seatalk_demo(settings: Settings) -> bool:

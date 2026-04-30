@@ -16,6 +16,7 @@ from .storage import BriefingStore
 PRD_REVIEW_PROMPT_VERSION = "v3_strict_delivery_logic_review_codex"
 PRD_SUMMARY_PROMPT_VERSION = "v1_prd_summary_codex"
 PRD_REVIEW_MAX_SOURCE_CHARS = 90_000
+PRD_BRIEFING_REVIEW_CACHE_KEY = "__prd_briefing_url_review__"
 
 
 @dataclass(frozen=True)
@@ -24,6 +25,14 @@ class PRDReviewRequest:
     jira_id: str
     jira_link: str
     prd_url: str
+    force_refresh: bool = False
+
+
+@dataclass(frozen=True)
+class PRDBriefingReviewRequest:
+    owner_key: str
+    prd_url: str
+    language: str = "zh"
     force_refresh: bool = False
 
 
@@ -94,6 +103,64 @@ class PRDReviewService:
             trace=generated["trace"],
         )
         return {"status": "ok", "cached": False, "review": review, "prd": self._page_metadata(page)}
+
+    def review_url(self, request: PRDBriefingReviewRequest) -> dict[str, Any]:
+        normalized = self._normalize_briefing_review_request(request)
+        page = self.confluence.ingest_page(normalized.prd_url, "prd-briefing-review")
+        if not page.sections:
+            raise ToolError("PRD page did not contain readable sections.")
+        prompt_version = prd_briefing_review_prompt_version(normalized.language)
+        cached = None if normalized.force_refresh else self.store.get_prd_review_result(
+            owner_key=normalized.owner_key,
+            jira_id=PRD_BRIEFING_REVIEW_CACHE_KEY,
+            prd_url=page.source_url,
+            prd_updated_at=page.updated_at,
+            prompt_version=prompt_version,
+        )
+        if cached and cached.get("status") == "completed" and cached.get("result_markdown"):
+            return {"status": "ok", "cached": True, "review": cached, "prd": self._page_metadata(page), "language": normalized.language}
+
+        prompt = build_prd_review_prompt(
+            jira_id="",
+            jira_link="",
+            prd_url=page.source_url,
+            page=page,
+            language=normalized.language,
+        )
+        try:
+            generated = generate_prd_review_with_codex(
+                prompt=prompt,
+                settings=self.settings,
+                workspace_root=self.workspace_root,
+                language=normalized.language,
+                prompt_version=prompt_version,
+            )
+        except Exception as error:  # noqa: BLE001 - persist the failure for visible retry context.
+            self.store.save_prd_review_result(
+                owner_key=normalized.owner_key,
+                jira_id=PRD_BRIEFING_REVIEW_CACHE_KEY,
+                jira_link="",
+                prd_url=page.source_url,
+                prd_updated_at=page.updated_at,
+                prompt_version=prompt_version,
+                status="failed",
+                error=str(error),
+            )
+            raise ToolError(str(error)) from error
+
+        review = self.store.save_prd_review_result(
+            owner_key=normalized.owner_key,
+            jira_id=PRD_BRIEFING_REVIEW_CACHE_KEY,
+            jira_link="",
+            prd_url=page.source_url,
+            prd_updated_at=page.updated_at,
+            prompt_version=prompt_version,
+            status="completed",
+            result_markdown=generated["result_markdown"],
+            model_id=generated["model_id"],
+            trace=generated["trace"],
+        )
+        return {"status": "ok", "cached": False, "review": review, "prd": self._page_metadata(page), "language": normalized.language}
 
     def summarize(self, request: PRDReviewRequest) -> dict[str, Any]:
         normalized = self._normalize_request(request)
@@ -172,6 +239,24 @@ class PRDReviewService:
         )
 
     @staticmethod
+    def _normalize_briefing_review_request(request: PRDBriefingReviewRequest) -> PRDBriefingReviewRequest:
+        owner_key = str(request.owner_key or "").strip()
+        prd_url = str(request.prd_url or "").strip()
+        language = normalize_prd_review_language(request.language)
+        if not owner_key:
+            raise ToolError("Owner identity is required.")
+        if not prd_url:
+            raise ToolError("PRD link is required.")
+        if not prd_url.lower().startswith(("http://", "https://")):
+            raise ToolError("PRD link must be an HTTP or HTTPS URL.")
+        return PRDBriefingReviewRequest(
+            owner_key=owner_key,
+            prd_url=prd_url,
+            language=language,
+            force_refresh=bool(request.force_refresh),
+        )
+
+    @staticmethod
     def _page_metadata(page: IngestedConfluencePage) -> dict[str, str]:
         return {
             "title": page.title,
@@ -202,14 +287,77 @@ def _build_prd_source(page: IngestedConfluencePage) -> str:
     return source
 
 
+def normalize_prd_review_language(language: str | None) -> str:
+    normalized = str(language or "zh").strip().lower()
+    return "en" if normalized in {"en", "english"} else "zh"
+
+
+def prd_briefing_review_prompt_version(language: str | None) -> str:
+    return f"{PRD_REVIEW_PROMPT_VERSION}_briefing_{normalize_prd_review_language(language)}"
+
+
 def build_prd_review_prompt(
     *,
     jira_id: str,
     jira_link: str,
     prd_url: str,
     page: IngestedConfluencePage,
+    language: str = "zh",
 ) -> str:
     source = _build_prd_source(page)
+    if normalize_prd_review_language(language) == "en":
+        return f"""# Role
+You are an extremely rigorous product delivery and execution-logic reviewer. Your standard is simple: a PRD is only dev-ready when the business flow is closed, the rules do not conflict, and the failure paths are explicit.
+
+# Core Principles
+1. **Do not question business value:** Assume the background, business goal, and success metrics are already justified. Do not ask why the feature should exist.
+2. **Do not review technical implementation:** Assume engineering can implement correctly. Do not comment on code, database design, APIs, or architecture.
+3. **Score honestly and create separation:** Do not average everything into 6 or 7. Use low scores for broken execution logic and reserve 9-10 for genuinely dev-ready documents.
+
+# Task
+Pressure-test this PRD only for business process and execution logic. Identify flow dead ends, missing exception paths, rule conflicts, and missing operational fallback.
+
+# Scoring Rubric
+- **9 - 10 (Ready for Dev):** The flow is closed end to end, key exception paths have fallback, and operational/customer-support intervention is clear.
+- **7 - 8 (Minor Gaps):** The happy path is clear, with only 1-2 secondary edge cases missing.
+- **4 - 6 (Major Blockers):** Main-flow blockers, unresolved rule conflicts, or weak exception handling would likely block delivery.
+- **1 - 3 (Fundamentally Broken):** The core flow is incomplete or internally inconsistent.
+
+# Review Dimensions
+1. **Happy Path Closure:** Can the user/system move from start to finish without getting stuck?
+2. **Exception and Reverse Paths:** Are timeout, interruption, retry, rejection, rollback, blacklisting, cancellation, and other edge cases handled?
+3. **Rule Conflicts:** Are preconditions, priorities, statuses, and overlapping rules unambiguous?
+
+# Output Format
+Return only concise Markdown in English:
+---
+### Logic Rigor Assessment
+- **Final Score: [X] / 10**
+- **Reason:** [One sentence explaining the score.]
+
+### Critical Flow Breaks and Conflicts
+- [List blockers that can break the flow or make rules contradictory. Write "None" if there are none.]
+
+### Missing Edge Cases
+1. **[Scenario Name]:** [Concrete exception scenario]
+   - **Issue:** [What the PRD does not define.]
+   - **Recommendation:** [What should be clarified.]
+2. ...
+
+### Ops Fallback Checks
+- [Operational or manual fallback items the PM should confirm.]
+---
+
+# Review Context
+- Jira ID: {jira_id or "-"}
+- Jira Link: {jira_link or "-"}
+- PRD Title: {page.title}
+- PRD Link: {prd_url}
+- PRD Updated At: {page.updated_at or "-"}
+
+# PRD Content
+{source}
+"""
     return f"""# Role
 你是一位极其严谨、甚至有些毒舌的“产品交付与逻辑排雷专家”。你的信条是“完美的流程胜过一切”，对于千疮百孔的逻辑零容忍。
 
@@ -255,7 +403,7 @@ def build_prd_review_prompt(
 ---
 
 # Review Context
-- Jira ID: {jira_id}
+- Jira ID: {jira_id or "-"}
 - Jira Link: {jira_link or "-"}
 - PRD Title: {page.title}
 - PRD Link: {prd_url}
@@ -318,20 +466,27 @@ def generate_prd_review_with_codex(
     prompt: str,
     settings: Settings,
     workspace_root: Path,
+    language: str = "zh",
+    prompt_version: str = PRD_REVIEW_PROMPT_VERSION,
 ) -> dict[str, Any]:
     return _generate_with_codex(
         prompt=prompt,
         settings=settings,
         workspace_root=workspace_root,
-        system_text=(
-            "You are a rigorous and blunt product delivery and execution-logic reviewer. "
-            "Review only business flow closure, exception paths, rule rigor, conflicts, and operational fallback. "
-            "Score harshly and spread scores honestly: use 1-4 for broken documents, 4-6 for major blockers, "
-            "7-8 only for minor gaps, and 9-10 only for dev-ready documents with complete edge-case fallback. "
-            "Do not ask about business value, metrics, architecture, APIs, databases, or implementation details. "
-            "Return only the requested Markdown review. Do not include tool logs."
-        ),
-        prompt_mode=PRD_REVIEW_PROMPT_VERSION,
+        system_text=build_prd_review_system_text(language),
+        prompt_mode=prompt_version,
+    )
+
+
+def build_prd_review_system_text(language: str | None = "zh") -> str:
+    output_language = "English" if normalize_prd_review_language(language) == "en" else "Chinese"
+    return (
+        "You are a rigorous and blunt product delivery and execution-logic reviewer. "
+        "Review only business flow closure, exception paths, rule rigor, conflicts, and operational fallback. "
+        "Score harshly and spread scores honestly: use 1-4 for broken documents, 4-6 for major blockers, "
+        "7-8 only for minor gaps, and 9-10 only for dev-ready documents with complete edge-case fallback. "
+        "Do not ask about business value, metrics, architecture, APIs, databases, or implementation details. "
+        f"Return only the requested Markdown review in {output_language}. Do not include tool logs."
     )
 
 

@@ -3043,6 +3043,23 @@ select {
   margin-top: 10px;
 }
 
+.briefing-review-controls {
+  display: grid;
+  gap: 8px;
+  padding-top: 4px;
+}
+
+.briefing-review-action-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+}
+
+.briefing-review-action-row select {
+  min-width: 140px;
+}
+
 .briefing-primary-panel,
 .briefing-secondary-panel {
   width: 100%;
@@ -3948,6 +3965,85 @@ body.briefing-reader-mode .briefing-original-content td {
 .briefing-status[data-tone="error"] {
   border-style: solid;
   border-color: rgba(164, 52, 45, 0.24);
+}
+
+.briefing-review-panel {
+  margin-top: 16px;
+  border-radius: 18px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.9);
+  padding: 18px;
+}
+
+.briefing-review-panel[data-tone="error"] {
+  border-color: rgba(164, 52, 45, 0.26);
+}
+
+.briefing-review-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
+  color: var(--muted);
+  margin-bottom: 12px;
+}
+
+.briefing-review-meta strong {
+  display: block;
+  color: var(--ink);
+  margin-bottom: 2px;
+}
+
+.briefing-review-markdown {
+  display: grid;
+  gap: 10px;
+  line-height: 1.62;
+}
+
+.briefing-review-markdown h4 {
+  margin: 10px 0 0;
+  font-size: 1.02rem;
+}
+
+.briefing-review-markdown p,
+.briefing-review-markdown ul {
+  margin: 0;
+}
+
+.briefing-review-markdown ul {
+  padding-left: 20px;
+}
+
+.briefing-markdown-table-wrap {
+  overflow-x: auto;
+}
+
+.briefing-markdown-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.92rem;
+}
+
+.briefing-markdown-table th,
+.briefing-markdown-table td {
+  border: 1px solid var(--line);
+  padding: 8px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.briefing-markdown-table th {
+  background: rgba(47, 103, 246, 0.08);
+}
+
+.briefing-review-loading {
+  color: var(--muted);
+}
+
+.briefing-review-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 14px;
 }
 
 .chat-log {

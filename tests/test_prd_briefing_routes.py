@@ -7,12 +7,17 @@ from bpmis_jira_tool.web import create_app
 
 
 class FakeBriefingService:
+    def __init__(self):
+        self.create_session_kwargs = []
+
     def create_session(self, **kwargs):
+        self.create_session_kwargs.append(kwargs)
+        audience = "developer_en" if kwargs.get("language") == "en" else "developer_zh"
         return {
             "session": {
                 "session_id": "session-1",
                 "title": "PRD",
-                "audience": "developer_zh",
+                "audience": audience,
             },
             "session_overview": {
                 "overview": "overview",
@@ -67,6 +72,53 @@ class FakeBriefingService:
         }
 
 
+class FakePRDReviewService:
+    def __init__(self):
+        self.requests = []
+
+    def review_url(self, request):
+        self.requests.append(request)
+        if not request.prd_url:
+            from bpmis_jira_tool.errors import ToolError
+
+            raise ToolError("PRD link is required.")
+        if not request.prd_url.lower().startswith(("http://", "https://")):
+            from bpmis_jira_tool.errors import ToolError
+
+            raise ToolError("PRD link must be an HTTP or HTTPS URL.")
+        return {
+            "status": "ok",
+            "cached": False,
+            "language": request.language,
+            "review": {
+                "prd_url": request.prd_url,
+                "status": "completed",
+                "result_markdown": "### Review\n- Good",
+                "updated_at": "2026-04-30T00:00:00Z",
+            },
+            "prd": {"title": "PRD"},
+        }
+
+
+class FakePRDReviewLocalAgentClient:
+    def __init__(self):
+        self.payload = None
+
+    def prd_briefing_review(self, payload):
+        self.payload = payload
+        return {
+            "status": "ok",
+            "cached": True,
+            "language": payload["language"],
+            "review": {
+                "status": "completed",
+                "result_markdown": "### Cached Review",
+                "updated_at": "2026-04-30T00:00:00Z",
+            },
+            "prd": {"title": "Remote PRD"},
+        }
+
+
 class PRDBriefingRouteTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -95,11 +147,14 @@ class PRDBriefingRouteTests(unittest.TestCase):
             self.assertIn(b"page-shell-briefing", response.data)
             self.assertIn(b"data-image-lightbox", response.data)
             self.assertIn(b"data-no-image-mode-toggle", response.data)
+            self.assertIn(b"data-prd-review-generate", response.data)
+            self.assertIn(b"data-prd-review-language", response.data)
+            self.assertIn(b"data-briefing-language", response.data)
             self.assertNotIn("3 分钟".encode("utf-8"), response.data)
             self.assertNotIn(b"Team Knowledge Base", response.data)
 
     @patch("prd_briefing.blueprint._build_service", return_value=FakeBriefingService())
-    def test_create_session_endpoint_returns_payload(self, _mock_service):
+    def test_create_session_endpoint_returns_payload(self, mock_service):
         with self.app.test_client() as client:
             with client.session_transaction() as session:
                 session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong Zheng"}
@@ -116,6 +171,27 @@ class PRDBriefingRouteTests(unittest.TestCase):
             self.assertEqual(payload["session"]["session_id"], "session-1")
             self.assertEqual(payload["session"]["audience"], "developer_zh")
             self.assertEqual(payload["briefing_blocks"][0]["block_id"], "block-1-feature")
+            self.assertEqual(mock_service.return_value.create_session_kwargs[-1]["language"], "zh")
+
+    @patch("prd_briefing.blueprint._build_service", return_value=FakeBriefingService())
+    def test_create_session_endpoint_accepts_english_briefing_language(self, mock_service):
+        with self.app.test_client() as client:
+            with client.session_transaction() as session:
+                session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong Zheng"}
+                session["google_credentials"] = {"token": "x"}
+            response = client.post(
+                "/prd-briefing/api/session",
+                json={
+                    "page_ref": "https://example.atlassian.net/wiki/pages/123",
+                    "mode": "walkthrough",
+                    "language": "en",
+                },
+            )
+            self.assertEqual(response.status_code, 200)
+            payload = response.get_json()
+
+        self.assertEqual(payload["session"]["audience"], "developer_en")
+        self.assertEqual(mock_service.return_value.create_session_kwargs[-1]["language"], "en")
 
     @patch("prd_briefing.blueprint._build_service", return_value=FakeBriefingService())
     def test_narrate_endpoint_accepts_briefing_block_id(self, _mock_service):
@@ -147,15 +223,109 @@ class PRDBriefingRouteTests(unittest.TestCase):
             self.assertEqual(payload["groundedness"], "grounded")
             self.assertEqual(payload["answer_text"], "Grounded answer")
 
-    def test_portal_route_blocks_non_owner_google_user(self):
+    @patch("prd_briefing.blueprint._build_prd_review_service", return_value=FakePRDReviewService())
+    def test_review_endpoint_returns_chinese_markdown(self, _mock_service):
+        with self.app.test_client() as client:
+            with client.session_transaction() as session:
+                session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong Zheng"}
+                session["google_credentials"] = {"token": "x"}
+            response = client.post(
+                "/prd-briefing/api/review",
+                json={"prd_url": "https://example.atlassian.net/wiki/pages/123", "language": "zh"},
+            )
+            self.assertEqual(response.status_code, 200)
+            payload = response.get_json()
+            self.assertEqual(payload["status"], "ok")
+            self.assertEqual(payload["language"], "zh")
+            self.assertIn("### Review", payload["review"]["result_markdown"])
+
+    @patch("prd_briefing.blueprint._build_prd_review_service", return_value=FakePRDReviewService())
+    def test_review_endpoint_passes_english_language(self, mock_service):
+        service = mock_service.return_value
+        with self.app.test_client() as client:
+            with client.session_transaction() as session:
+                session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong Zheng"}
+                session["google_credentials"] = {"token": "x"}
+            response = client.post(
+                "/prd-briefing/api/review",
+                json={"prd_url": "https://example.atlassian.net/wiki/pages/123", "language": "en"},
+            )
+            self.assertEqual(response.status_code, 200)
+            payload = response.get_json()
+
+        self.assertEqual(payload["language"], "en")
+        self.assertEqual(service.requests[-1].language, "en")
+
+    @patch("prd_briefing.blueprint._build_prd_review_service", return_value=FakePRDReviewService())
+    def test_review_endpoint_validates_required_prd_link(self, _mock_service):
+        with self.app.test_client() as client:
+            with client.session_transaction() as session:
+                session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong Zheng"}
+                session["google_credentials"] = {"token": "x"}
+            response = client.post("/prd-briefing/api/review", json={"language": "zh"})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("PRD link is required", response.get_json()["message"])
+
+    @patch("prd_briefing.blueprint._build_prd_review_service", return_value=FakePRDReviewService())
+    def test_review_endpoint_validates_http_prd_link(self, _mock_service):
+        with self.app.test_client() as client:
+            with client.session_transaction() as session:
+                session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong Zheng"}
+                session["google_credentials"] = {"token": "x"}
+            response = client.post("/prd-briefing/api/review", json={"prd_url": "not-a-url"})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("HTTP or HTTPS", response.get_json()["message"])
+
+    @patch("prd_briefing.blueprint._local_agent_source_code_qa_enabled", return_value=True)
+    def test_review_endpoint_can_route_to_local_agent(self, _mock_enabled):
+        fake_client = FakePRDReviewLocalAgentClient()
+        with patch("prd_briefing.blueprint._build_local_agent_client", return_value=fake_client):
+            with self.app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong Zheng"}
+                    session["google_credentials"] = {"token": "x"}
+                response = client.post(
+                    "/prd-briefing/api/review",
+                    json={"prd_url": "https://example.atlassian.net/wiki/pages/123", "language": "en"},
+                )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertTrue(payload["cached"])
+        self.assertEqual(payload["review"]["result_markdown"], "### Cached Review")
+        self.assertEqual(fake_client.payload["language"], "en")
+
+    def test_portal_route_allows_npt_google_user(self):
         with self.app.test_client() as client:
             with client.session_transaction() as session:
                 session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
                 session["google_credentials"] = {"token": "x"}
 
             response = client.get("/prd-briefing/", follow_redirects=False)
+            self.assertEqual(response.status_code, 200)
+            self.assertIn(b"PRD Briefing Tool", response.data)
+
+    def test_portal_route_allows_test_gmail_user(self):
+        with self.app.test_client() as client:
+            with client.session_transaction() as session:
+                session["google_profile"] = {"email": "xiaodong.zheng1991@gmail.com", "name": "Test User"}
+                session["google_credentials"] = {"token": "x"}
+
+            response = client.get("/prd-briefing/", follow_redirects=False)
+            self.assertEqual(response.status_code, 200)
+            self.assertIn(b"PRD Briefing Tool", response.data)
+
+    def test_portal_route_blocks_unapproved_google_user(self):
+        with self.app.test_client() as client:
+            with client.session_transaction() as session:
+                session["google_profile"] = {"email": "outsider@gmail.com", "name": "Outsider"}
+                session["google_credentials"] = {"token": "x"}
+
+            response = client.get("/prd-briefing/", follow_redirects=False)
             self.assertEqual(response.status_code, 302)
-            self.assertEqual(response.headers["Location"], "/")
+            self.assertEqual(response.headers["Location"], "/access-denied")
 
     def test_portal_route_redirects_anonymous_user_to_google_login(self):
         with self.app.test_client() as client:

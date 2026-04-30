@@ -15,6 +15,10 @@
   const imageLightboxClose = document.querySelector('[data-image-lightbox-close]');
   const imageLightboxOpen = document.querySelector('[data-image-lightbox-open]');
   const sessionSubmitButton = sessionForm?.querySelector('button[type="submit"]');
+  const briefingLanguage = document.querySelector('[data-briefing-language]');
+  const prdReviewButton = document.querySelector('[data-prd-review-generate]');
+  const prdReviewLanguage = document.querySelector('[data-prd-review-language]');
+  const prdReviewPanel = document.querySelector('[data-prd-review-panel]');
   const chatSubmitButton = chatForm?.querySelector('button[type="submit"]');
   const CACHED_NARRATION_DELAY_MS = 0;
 
@@ -29,6 +33,7 @@
     currentAudio: null,
     readerMode: false,
     noImageMode: false,
+    briefingLanguage: 'zh',
   };
 
   const READER_MODE_STORAGE_KEY = 'prd_briefing_reader_mode';
@@ -80,7 +85,7 @@
   const clearWalkthroughStatus = () => {
     if (!walkthroughStatusNode) return;
     walkthroughStatusNode.hidden = true;
-    walkthroughStatusNode.innerHTML = '<p>这里会显示当前讲解生成状态。</p>';
+    walkthroughStatusNode.innerHTML = '<p>Narration status appears here.</p>';
     delete walkthroughStatusNode.dataset.tone;
   };
 
@@ -88,10 +93,12 @@
     window.setTimeout(resolve, durationMs);
   });
 
+  const briefingLanguageLabel = () => (state.briefingLanguage === 'en' ? 'English' : 'Chinese');
+
   const setSessionSubmitLoading = (isLoading) => {
     if (!sessionSubmitButton) return;
     sessionSubmitButton.disabled = isLoading;
-    sessionSubmitButton.textContent = isLoading ? '正在生成…' : '生成中文开发讲解';
+    sessionSubmitButton.textContent = isLoading ? 'Generating...' : 'Generate Developer Walkthrough';
   };
 
   const parseJsonResponse = async (response) => {
@@ -102,19 +109,178 @@
 
     const text = await response.text().catch(() => '');
     if (response.redirected) {
-      throw new Error('当前会话已失效或需要重新登录，请刷新页面后重试。');
+      throw new Error('Your session expired or requires sign-in. Refresh the page and try again.');
     }
     if (text.trim().startsWith('<!DOCTYPE') || text.trim().startsWith('<html')) {
-      throw new Error('服务端返回了页面而不是接口结果。请刷新页面后重试；如果还不行，通常是登录态失效或服务短暂异常。');
+      throw new Error('The server returned a page instead of an API response. Refresh the page and try again.');
     }
-    throw new Error(`接口返回格式异常（${contentType || 'unknown'}）。`);
+    throw new Error(`Unexpected API response format (${contentType || 'unknown'}).`);
+  };
+
+  const renderMarkdown = (value) => {
+    const html = [];
+    let inList = false;
+    let table = null;
+    const closeList = () => {
+      if (inList) {
+        html.push('</ul>');
+        inList = false;
+      }
+    };
+    const inline = (text) => escapeHtml(text)
+      .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+      .replace(/`(.+?)`/g, '<code>$1</code>');
+    const splitTableRow = (line) => {
+      let text = String(line || '').trim();
+      if (text.startsWith('|')) text = text.slice(1);
+      if (text.endsWith('|')) text = text.slice(0, -1);
+      return text.split('|').map((cell) => cell.trim());
+    };
+    const isTableSeparator = (line) => {
+      const cells = splitTableRow(line);
+      return cells.length > 1 && cells.every((cell) => /^:?-{3,}:?$/.test(cell.replace(/\s+/g, '')));
+    };
+    const renderTable = () => {
+      if (!table) return;
+      const columnCount = Math.max(table.headers.length, ...table.rows.map((row) => row.length), 1);
+      const renderCells = (cells, tag) => Array.from({ length: columnCount }, (_, index) => (
+        `<${tag}>${inline(cells[index] || '')}</${tag}>`
+      )).join('');
+      html.push(
+        '<div class="briefing-markdown-table-wrap"><table class="briefing-markdown-table">'
+        + `<thead><tr>${renderCells(table.headers, 'th')}</tr></thead>`
+        + `<tbody>${table.rows.map((row) => `<tr>${renderCells(row, 'td')}</tr>`).join('')}</tbody>`
+        + '</table></div>',
+      );
+      table = null;
+    };
+    const closeBlocks = () => {
+      closeList();
+      renderTable();
+    };
+    const lines = String(value || '').split(/\r?\n/);
+    lines.forEach((line, index) => {
+      const trimmed = line.trim();
+      if (!trimmed) {
+        closeBlocks();
+        return;
+      }
+      const nextLine = lines[index + 1]?.trim() || '';
+      if (!table && trimmed.includes('|') && isTableSeparator(nextLine)) {
+        closeList();
+        table = { headers: splitTableRow(trimmed), rows: [] };
+        return;
+      }
+      if (table) {
+        if (isTableSeparator(trimmed)) return;
+        if (trimmed.includes('|') && !isTableSeparator(trimmed)) {
+          table.rows.push(splitTableRow(trimmed));
+          return;
+        }
+        renderTable();
+      }
+      const heading = trimmed.match(/^(#{2,4})\s+(.+)$/);
+      if (heading) {
+        closeList();
+        html.push(`<h4>${inline(heading[2])}</h4>`);
+        return;
+      }
+      const listItem = trimmed.match(/^(\d+[.)]|[-*])\s+(.+)$/);
+      if (listItem) {
+        if (!inList) {
+          html.push('<ul>');
+          inList = true;
+        }
+        html.push(`<li>${inline(listItem[2])}</li>`);
+        return;
+      }
+      closeList();
+      html.push(`<p>${inline(trimmed)}</p>`);
+    });
+    closeBlocks();
+    return html.join('');
+  };
+
+  const setPrdReviewLoading = (isLoading) => {
+    if (!prdReviewButton) return;
+    prdReviewButton.disabled = isLoading;
+    prdReviewButton.textContent = isLoading ? 'Generating Review...' : 'Generate AI PRD Review';
+  };
+
+  const renderPrdReview = (payload) => {
+    if (!prdReviewPanel) return;
+    const review = payload.review || {};
+    const prd = payload.prd || {};
+    const language = payload.language === 'en' ? 'English' : 'Chinese';
+    prdReviewPanel.hidden = false;
+    prdReviewPanel.dataset.tone = 'success';
+    prdReviewPanel.innerHTML = `
+      <div class="briefing-review-meta">
+        <div>
+          <strong>${escapeHtml(payload.cached ? 'Cached AI PRD Review' : 'AI PRD Review')}</strong>
+          <span>${escapeHtml(language)} · ${escapeHtml(prd.title || 'PRD')}</span>
+        </div>
+        <span>${escapeHtml(review.updated_at || '')}</span>
+      </div>
+      <div class="briefing-review-markdown">${renderMarkdown(review.result_markdown || '')}</div>
+      <div class="briefing-review-actions">
+        <button class="button button-secondary" type="button" data-prd-review-regenerate>Regenerate</button>
+      </div>
+    `;
+    prdReviewPanel.querySelector('[data-prd-review-regenerate]')?.addEventListener('click', () => {
+      generatePrdReview({ forceRefresh: true });
+    });
+  };
+
+  const renderPrdReviewError = (message) => {
+    if (!prdReviewPanel) return;
+    prdReviewPanel.hidden = false;
+    prdReviewPanel.dataset.tone = 'error';
+    prdReviewPanel.innerHTML = `<p>${escapeHtml(message || 'Could not generate AI PRD Review right now.')}</p>`;
+  };
+
+  const generatePrdReview = async ({ forceRefresh = false } = {}) => {
+    const formData = sessionForm ? new FormData(sessionForm) : new FormData();
+    const pageRef = String(formData.get('page_ref') || '').trim();
+    if (!isValidHttpUrl(pageRef)) {
+      setStatus('Enter a valid Confluence page URL.', 'error');
+      renderPrdReviewError('Enter a valid Confluence page URL.');
+      return;
+    }
+    setPrdReviewLoading(true);
+    if (prdReviewPanel) {
+      prdReviewPanel.hidden = false;
+      prdReviewPanel.dataset.tone = 'neutral';
+      prdReviewPanel.innerHTML = '<div class="briefing-review-loading">Reading the PRD and generating an AI PRD Review with Codex...</div>';
+    }
+    try {
+      const response = await fetch('/prd-briefing/api/review', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          prd_url: pageRef,
+          language: prdReviewLanguage?.value || 'zh',
+          force_refresh: forceRefresh,
+        }),
+      });
+      const payload = await parseJsonResponse(response);
+      if (!response.ok) throw new Error(payload.message || 'Could not generate AI PRD Review right now.');
+      renderPrdReview(payload);
+      setStatus(payload.cached ? 'Loaded cached AI PRD Review.' : 'AI PRD Review generated.', 'success');
+    } catch (error) {
+      const message = error.message || 'Could not generate AI PRD Review right now.';
+      setStatus(message, 'error');
+      renderPrdReviewError(message);
+    } finally {
+      setPrdReviewLoading(false);
+    }
   };
 
   const renderReaderMode = () => {
     const enabled = Boolean(state.readerMode);
     document.body.classList.toggle('briefing-reader-mode', enabled);
     if (readerModeToggle) {
-      readerModeToggle.textContent = enabled ? '退出阅读模式' : '进入阅读模式';
+      readerModeToggle.textContent = enabled ? 'Exit Reader Mode' : 'Enter Reader Mode';
       readerModeToggle.setAttribute('aria-pressed', enabled ? 'true' : 'false');
     }
   };
@@ -123,7 +289,7 @@
     const enabled = Boolean(state.noImageMode);
     document.body.classList.toggle('briefing-no-image-mode', enabled);
     if (noImageModeToggle) {
-      noImageModeToggle.textContent = enabled ? '显示图片' : '无图模式';
+      noImageModeToggle.textContent = enabled ? 'Show Images' : 'No-image Mode';
       noImageModeToggle.setAttribute('aria-pressed', enabled ? 'true' : 'false');
     }
     if (enabled) {
@@ -390,7 +556,7 @@
   const openImageLightbox = (src, alt) => {
     if (!imageLightbox || !imageLightboxMedia || !src) return;
     imageLightboxMedia.src = src;
-    imageLightboxMedia.alt = alt || '放大的 PRD 图片预览';
+    imageLightboxMedia.alt = alt || 'Enlarged PRD image preview';
     if (imageLightboxOpen) imageLightboxOpen.href = src;
     if (typeof imageLightbox.showModal === 'function') {
       imageLightbox.showModal();
@@ -407,7 +573,7 @@
       if (hasOverflow && !wrapper.previousElementSibling?.classList.contains('briefing-scroll-hint')) {
         const hint = document.createElement('div');
         hint.className = 'briefing-scroll-hint';
-        hint.textContent = '可左右滚动查看完整内容';
+        hint.textContent = 'Scroll horizontally to view the full content';
         wrapper.parentNode?.insertBefore(hint, wrapper);
       }
       const syncState = () => {
@@ -561,7 +727,7 @@
     clearWalkthroughStatus();
     if (narrateButton) {
       narrateButton.disabled = true;
-      narrateButton.textContent = '正在生成中文讲解…';
+      narrateButton.textContent = `Generating ${briefingLanguageLabel()} narration...`;
     }
     try {
       const response = await fetch(`/prd-briefing/api/session/${state.sessionId}/narrate`, {
@@ -574,9 +740,9 @@
         }),
       });
       const payload = await parseJsonResponse(response);
-      if (!response.ok) throw new Error(payload.message || '当前模块无法生成讲解。');
+      if (!response.ok) throw new Error(payload.message || 'Could not generate narration for this module.');
       if (payload.cached) {
-        setWalkthroughStatus('命中缓存，正在整理当前模块的中文讲解并准备播放…', 'neutral');
+        setWalkthroughStatus(`Cache hit. Preparing the ${briefingLanguageLabel()} narration for this module...`, 'neutral');
         await wait(CACHED_NARRATION_DELAY_MS);
       }
       if (payload.audio_url) {
@@ -606,20 +772,20 @@
         clearSourceHighlights();
         if (narrateButton) {
           narrateButton.disabled = false;
-          narrateButton.textContent = '开始中文讲解这个模块';
+          narrateButton.textContent = `Start ${briefingLanguageLabel()} Narration`;
         }
-        throw new Error('服务端语音当前不可用，浏览器机械音兜底已关闭。');
+        throw new Error('Server-side voice is unavailable right now. Browser speech fallback is disabled.');
       }
       setStatus(
         payload.audio_url
-          ? (payload.cached ? '已命中缓存并准备好当前模块的中文讲解。' : '当前模块的中文讲解已经生成。')
-          : '服务端语音当前不可用。',
+          ? (payload.cached ? `Cached ${briefingLanguageLabel()} narration is ready for this module.` : `${briefingLanguageLabel()} narration has been generated for this module.`)
+          : 'Server-side voice is unavailable right now.',
         'success',
       );
       setWalkthroughStatus(
         payload.cached
-          ? '已命中缓存，当前模块的中文讲解已经准备好并开始播放，相关 PRD 原文已高亮。'
-          : '当前模块的中文讲解已经生成并开始播放，相关 PRD 原文已高亮。',
+          ? `Cached ${briefingLanguageLabel()} narration is playing. Related PRD source sections are highlighted.`
+          : `${briefingLanguageLabel()} narration is playing. Related PRD source sections are highlighted.`,
         'success',
       );
     } catch (error) {
@@ -627,14 +793,14 @@
       clearSourceHighlights();
       if (narrateButton) {
         narrateButton.disabled = false;
-        narrateButton.textContent = '开始中文讲解这个模块';
+        narrateButton.textContent = `Start ${briefingLanguageLabel()} Narration`;
       }
-      const raw = error.message || '当前 section 无法生成讲解。';
+      const raw = error.message || 'Could not generate narration for this section.';
       const hasOpenAI = raw.includes('OpenAI');
       const friendly = raw.includes('429') || raw.includes('Too Many Requests')
         ? (hasOpenAI
-            ? 'OpenAI 当前触发限流，暂时无法生成这一节的讲解，请稍后再试。'
-            : '当前文本模型触发限流，暂时无法生成这一节的讲解，请稍后再试。')
+            ? 'OpenAI is rate limited right now. Try this narration again later.'
+            : 'The text model is rate limited right now. Try this narration again later.')
         : raw;
       setStatus(friendly, 'error');
       setWalkthroughStatus(friendly, 'error');
@@ -645,16 +811,16 @@
     if (!sectionListNode || !sectionDetailNode) return;
     if (!state.sections.length) {
       clearWalkthroughStatus();
-      sectionListNode.innerHTML = '<div class="empty-state"><p>生成完成后，这里会出现 PM briefing 模块导航。</p></div>';
-      sectionDetailNode.innerHTML = '<div class="empty-state"><p>请选择一个 briefing 模块查看合并讲解和 PRD 原文。</p></div>';
+      sectionListNode.innerHTML = '<div class="empty-state"><p>PM briefing module navigation appears here after generation.</p></div>';
+      sectionDetailNode.innerHTML = '<div class="empty-state"><p>Select a briefing module to view the merged walkthrough and original PRD content.</p></div>';
       narrateButton.disabled = true;
-      narrateButton.textContent = '开始中文讲解这个模块';
+      narrateButton.textContent = `Start ${briefingLanguageLabel()} Narration`;
       return;
     }
     const blocks = state.briefingBlocks.length ? state.briefingBlocks : state.sections.map((section, index) => ({
       block_id: `section-${index}`,
       title: section.section_path,
-      briefing_goal: '按原 PRD section 生成讲解。',
+      briefing_goal: 'Generate the walkthrough from the original PRD section.',
       merged_summary: section.briefing_summary || section.content || '',
       section_indexes: [index],
       source_refs: [{ section_index: index, section_path: section.section_path }],
@@ -666,10 +832,10 @@
       <button class="briefing-outline-item ${index === state.currentBlockIndex ? 'is-active' : ''}" type="button" data-block-index="${index}">
         <span>${index + 1}</span>
         <strong>${escapeHtml(block.title)}</strong>
-        <small>${escapeHtml((block.section_indexes || []).length)} 个 PRD section</small>
+        <small>${escapeHtml((block.section_indexes || []).length)} PRD section(s)</small>
         <div class="briefing-cache-pill-row">
-          ${block.walkthrough_cached ? '<em class="briefing-cache-pill">文案已缓存</em>' : ''}
-          ${block.walkthrough_audio_cached ? '<em class="briefing-cache-pill briefing-cache-pill-secondary">音频已缓存</em>' : ''}
+          ${block.walkthrough_cached ? '<em class="briefing-cache-pill">Script cached</em>' : ''}
+          ${block.walkthrough_audio_cached ? '<em class="briefing-cache-pill briefing-cache-pill-secondary">Audio cached</em>' : ''}
         </div>
       </button>
     `).join('');
@@ -707,7 +873,7 @@
     sectionDetailNode.innerHTML = `
       <div class="briefing-section-heading">
         <h3>${escapeHtml(block.title)}</h3>
-        <span class="briefing-section-meta">第 ${state.currentBlockIndex + 1} / ${blocks.length} 个 briefing 模块</span>
+        <span class="briefing-section-meta">Briefing module ${state.currentBlockIndex + 1} / ${blocks.length}</span>
       </div>
       <article class="briefing-block-summary">
         <p class="briefing-overview-kicker">PM Briefing Goal</p>
@@ -727,7 +893,7 @@
     sectionDetailNode.querySelectorAll('img').forEach((image) => {
       image.setAttribute('tabindex', '0');
       image.setAttribute('role', 'button');
-      image.setAttribute('aria-label', `${block.title} 图片预览`);
+      image.setAttribute('aria-label', `${block.title} image preview`);
       const openPreview = () => openImageLightbox(image.currentSrc || image.src, image.alt || block.title);
       image.addEventListener('click', openPreview);
       image.addEventListener('keydown', (event) => {
@@ -746,8 +912,8 @@
         renderSections();
         if (selectedBlock?.walkthrough_cached) {
           const detail = selectedBlock.walkthrough_audio_cached
-            ? '这个模块的文案和音频都已命中缓存，点击“开始中文讲解这个模块”时不会重新调用文本模型或语音生成。'
-            : '这个模块的文案已命中缓存，点击“开始中文讲解这个模块”时不会重新调用文本模型。';
+            ? `This module already has cached script and audio. Clicking "Start ${briefingLanguageLabel()} Narration" will not call text or voice generation again.`
+            : `This module already has a cached script. Clicking "Start ${briefingLanguageLabel()} Narration" will not call the text model again.`;
           setWalkthroughStatus(detail, 'success');
         } else {
           clearWalkthroughStatus();
@@ -755,19 +921,19 @@
       });
     });
     narrateButton.disabled = state.isNarrating;
-    if (!state.isNarrating) narrateButton.textContent = '开始中文讲解这个模块';
+    if (!state.isNarrating) narrateButton.textContent = `Start ${briefingLanguageLabel()} Narration`;
   };
 
   const renderMessages = (messages = []) => {
     if (!chatLogNode) return;
     state.messages = messages;
     if (!messages.length) {
-      chatLogNode.innerHTML = '<div class="empty-state"><p>先生成中文开发讲解，再继续追问你的第一个问题。</p></div>';
+      chatLogNode.innerHTML = '<div class="empty-state"><p>Generate a walkthrough before asking your first follow-up question.</p></div>';
       return;
     }
     chatLogNode.innerHTML = messages.map((message) => {
       if (message.role === 'user') {
-        return `<article class="chat-bubble chat-bubble-user"><strong>你</strong><p>${escapeHtml(message.body)}</p></article>`;
+        return `<article class="chat-bubble chat-bubble-user"><strong>You</strong><p>${escapeHtml(message.body)}</p></article>`;
       }
       const citations = (() => {
         try {
@@ -789,8 +955,8 @@
       return `
         <article class="chat-bubble chat-bubble-assistant">
           <div class="chat-bubble-head">
-            <strong>讲解助手</strong>
-            <span class="briefing-pill">${escapeHtml(message.groundedness || '回答')}</span>
+            <strong>Briefing Assistant</strong>
+            <span class="briefing-pill">${escapeHtml(message.groundedness || 'Answer')}</span>
           </div>
           <p>${escapeHtml(message.body).replaceAll('\n', '<br>')}</p>
           ${citationMarkup}
@@ -805,9 +971,10 @@
     state.sessionId = payload.session.session_id;
     state.sections = payload.sections || [];
     state.briefingBlocks = payload.briefing_blocks || [];
+    state.briefingLanguage = payload.session?.audience === 'developer_en' ? 'en' : 'zh';
     state.currentSectionIndex = 0;
     state.currentBlockIndex = 0;
-    setStatus(`已生成《${payload.session.title}》的中文开发讲解。`, 'success');
+    setStatus(`Generated the ${briefingLanguageLabel()} developer walkthrough for "${payload.session.title}".`, 'success');
     renderSections();
     renderMessages(payload.messages || []);
   };
@@ -818,11 +985,12 @@
       const formData = new FormData(sessionForm);
       const pageRef = String(formData.get('page_ref') || '').trim();
       if (!isValidHttpUrl(pageRef)) {
-        setStatus('请输入有效的 Confluence 页面链接。', 'error');
+        setStatus('Enter a valid Confluence page URL.', 'error');
         return;
       }
       setSessionSubmitLoading(true);
-      setStatus('正在读取 Confluence PRD，并生成中文开发讲解…');
+      const language = briefingLanguage?.value || 'zh';
+      setStatus(`Reading the Confluence PRD and generating a ${language === 'en' ? 'English' : 'Chinese'} developer walkthrough...`);
       try {
         const response = await fetch('/prd-briefing/api/session', {
           method: 'POST',
@@ -830,19 +998,26 @@
           body: JSON.stringify({
             page_ref: pageRef,
             mode: formData.get('mode'),
+            language,
           }),
         });
         const payload = await parseJsonResponse(response);
-        if (!response.ok) throw new Error(payload.message || '当前无法生成 PRD 讲解。');
+        if (!response.ok) throw new Error(payload.message || 'Could not generate the PRD walkthrough right now.');
         setSessionSubmitLoading(false);
-        setStatus('已读取 PRD，正在渲染页面…');
+        setStatus('PRD loaded. Rendering the page...');
         await wait(0);
         applySessionPayload(payload);
       } catch (error) {
-        setStatus(error.message || '当前无法生成 PRD 讲解。', 'error');
+        setStatus(error.message || 'Could not generate the PRD walkthrough right now.', 'error');
       } finally {
         setSessionSubmitLoading(false);
       }
+    });
+  }
+
+  if (prdReviewButton) {
+    prdReviewButton.addEventListener('click', () => {
+      generatePrdReview();
     });
   }
 
@@ -850,7 +1025,7 @@
     chatForm.addEventListener('submit', async (event) => {
       event.preventDefault();
       if (!state.sessionId) {
-        setStatus('请先生成中文开发讲解。', 'error');
+        setStatus('Generate a walkthrough first.', 'error');
         return;
       }
       const formData = new FormData(chatForm);
@@ -858,7 +1033,7 @@
       if (!question) return;
       if (chatSubmitButton) {
         chatSubmitButton.disabled = true;
-        chatSubmitButton.textContent = '正在回答…';
+        chatSubmitButton.textContent = 'Answering...';
       }
       try {
         const response = await fetch(`/prd-briefing/api/session/${state.sessionId}/answer`, {
@@ -867,7 +1042,7 @@
           body: JSON.stringify({ question }),
         });
         const payload = await parseJsonResponse(response);
-        if (!response.ok) throw new Error(payload.message || '当前无法回答这个问题。');
+        if (!response.ok) throw new Error(payload.message || 'Could not answer this question right now.');
         const userBubble = { role: 'user', body: question };
         const assistantBubble = {
           role: 'assistant',
@@ -879,11 +1054,11 @@
         renderMessages([...(state.messages || []), userBubble, assistantBubble]);
         chatForm.reset();
       } catch (error) {
-        setStatus(error.message || '当前无法回答这个问题。', 'error');
+        setStatus(error.message || 'Could not answer this question right now.', 'error');
       } finally {
         if (chatSubmitButton) {
           chatSubmitButton.disabled = false;
-          chatSubmitButton.textContent = '提交开发问题';
+          chatSubmitButton.textContent = 'Submit Question';
         }
       }
     });

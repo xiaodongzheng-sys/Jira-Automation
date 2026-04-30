@@ -2,10 +2,20 @@ import tempfile
 import unittest
 from dataclasses import dataclass
 from pathlib import Path
+from unittest.mock import patch
 import json
 
+from bpmis_jira_tool.config import Settings
+
 from prd_briefing.confluence import IngestedConfluencePage, ParsedSection
-from prd_briefing.reviewer import PRD_REVIEW_PROMPT_VERSION, build_prd_review_prompt
+from prd_briefing.reviewer import (
+    PRD_BRIEFING_REVIEW_CACHE_KEY,
+    PRD_REVIEW_PROMPT_VERSION,
+    PRDBriefingReviewRequest,
+    PRDReviewService,
+    build_prd_review_prompt,
+    prd_briefing_review_prompt_version,
+)
 from prd_briefing.service import (
     PRDBriefingService,
     build_pm_briefing_blocks,
@@ -40,8 +50,10 @@ class FakeOpenAIClient:
 class FakeVoiceService:
     def __init__(self):
         self.cached_texts = set()
+        self.synthesize_calls = []
 
     def synthesize(self, **kwargs):
+        self.synthesize_calls.append(kwargs)
         return None
 
     def get_cached_audio_for_text(self, *, owner_key, text, language_code):
@@ -93,6 +105,24 @@ class PRDBriefingServiceTests(unittest.TestCase):
             openai_client=self.openai_client,
             voice_service=self.voice_service,
             walkthrough_prewarm_enabled=False,
+        )
+
+    def _settings(self) -> Settings:
+        return Settings(
+            flask_secret_key="secret",
+            google_oauth_client_secret_file=Path(self.temp_dir.name) / "client.json",
+            google_oauth_redirect_uri=None,
+            team_portal_host="127.0.0.1",
+            team_portal_port=5000,
+            team_portal_base_url=None,
+            team_allowed_emails=(),
+            team_allowed_email_domains=(),
+            team_portal_data_dir=Path(self.temp_dir.name),
+            spreadsheet_id="sheet",
+            common_tab_name="Common",
+            input_tab_name="Input",
+            bpmis_base_url="https://example.com",
+            bpmis_api_access_token="token",
         )
 
     def tearDown(self):
@@ -221,6 +251,88 @@ class PRDBriefingServiceTests(unittest.TestCase):
         self.assertEqual(cached["trace"]["session_id"], "s1")
         self.assertIsNone(stale)
 
+    def test_prd_briefing_review_prompt_can_be_url_only(self):
+        page = self.service.confluence.page
+
+        prompt = build_prd_review_prompt(
+            jira_id="",
+            jira_link="",
+            prd_url=page.source_url,
+            page=page,
+        )
+
+        self.assertIn("Jira ID: -", prompt)
+        self.assertIn("逻辑严密度评估", prompt)
+        self.assertIn("This PRD introduces approval workflow", prompt)
+
+    def test_prd_briefing_review_english_prompt_requests_english_output(self):
+        page = self.service.confluence.page
+
+        prompt = build_prd_review_prompt(
+            jira_id="",
+            jira_link="",
+            prd_url=page.source_url,
+            page=page,
+            language="en",
+        )
+
+        self.assertIn("Return only concise Markdown in English", prompt)
+        self.assertIn("Logic Rigor Assessment", prompt)
+        self.assertNotIn("逻辑严密度评估", prompt)
+
+    @patch("prd_briefing.reviewer.generate_prd_review_with_codex")
+    def test_prd_briefing_review_cache_varies_by_language_and_updated_at(self, mock_generate):
+        mock_generate.return_value = {
+            "result_markdown": "### Review",
+            "model_id": "codex-cli",
+            "trace": {"session_id": "s1"},
+        }
+        service = PRDReviewService(
+            store=self.store,
+            confluence=self.service.confluence,
+            settings=self._settings(),
+            workspace_root=Path(self.temp_dir.name),
+        )
+
+        first = service.review_url(
+            PRDBriefingReviewRequest(
+                owner_key="anon:test",
+                prd_url="https://example.atlassian.net/wiki/pages/123",
+                language="zh",
+            )
+        )
+        cached = service.review_url(
+            PRDBriefingReviewRequest(
+                owner_key="anon:test",
+                prd_url="https://example.atlassian.net/wiki/pages/123",
+                language="zh",
+            )
+        )
+        english = service.review_url(
+            PRDBriefingReviewRequest(
+                owner_key="anon:test",
+                prd_url="https://example.atlassian.net/wiki/pages/123",
+                language="en",
+            )
+        )
+
+        self.assertFalse(first["cached"])
+        self.assertTrue(cached["cached"])
+        self.assertFalse(english["cached"])
+        self.assertEqual(mock_generate.call_count, 2)
+        self.assertEqual(first["review"]["jira_id"], PRD_BRIEFING_REVIEW_CACHE_KEY)
+        self.assertEqual(first["review"]["prompt_version"], prd_briefing_review_prompt_version("zh"))
+        self.assertEqual(english["review"]["prompt_version"], prd_briefing_review_prompt_version("en"))
+
+        stale = self.store.get_prd_review_result(
+            owner_key="anon:test",
+            jira_id=PRD_BRIEFING_REVIEW_CACHE_KEY,
+            prd_url=self.service.confluence.page.source_url,
+            prd_updated_at="2026-04-16T10:00:00Z",
+            prompt_version=prd_briefing_review_prompt_version("zh"),
+        )
+        self.assertIsNone(stale)
+
     def test_unsupported_question_is_declined(self):
         payload = self.service.create_session(
             owner_key="anon:test",
@@ -290,6 +402,58 @@ class PRDBriefingServiceTests(unittest.TestCase):
         self.assertFalse(first["cached"])
         self.assertTrue(second["cached"])
         self.assertEqual(self.openai_client.answer_calls, 1)
+
+    def test_create_session_supports_english_walkthrough_prompt_and_cache(self):
+        self.openai_client.is_configured = lambda: True
+        payload = self.service.create_session(
+            owner_key="anon:english",
+            page_ref="https://example.atlassian.net/wiki/pages/123",
+            mode="walkthrough",
+            language="en",
+        )
+        self.openai_client.answer_calls = 0
+        self.openai_client.last_system_prompt = None
+        self.openai_client.last_user_prompt = None
+
+        first = self.service.narrate_section(
+            session_id=payload["session"]["session_id"],
+            owner_key="anon:english",
+            section_index=0,
+            include_audio=False,
+        )
+        second = self.service.narrate_section(
+            session_id=payload["session"]["session_id"],
+            owner_key="anon:english",
+            section_index=0,
+            include_audio=False,
+        )
+
+        self.assertEqual(payload["session"]["audience"], "developer_en")
+        self.assertEqual(first["language"], "en")
+        self.assertFalse(first["cached"])
+        self.assertTrue(second["cached"])
+        self.assertEqual(self.openai_client.answer_calls, 1)
+        self.assertIn("software engineers in English", self.openai_client.last_system_prompt)
+        self.assertIn("around 5 to 9 sentences in English", self.openai_client.last_user_prompt)
+
+    def test_english_walkthrough_audio_uses_english_language_code(self):
+        self.openai_client.is_configured = lambda: True
+        payload = self.service.create_session(
+            owner_key="anon:english-audio",
+            page_ref="https://example.atlassian.net/wiki/pages/123",
+            mode="walkthrough",
+            language="en",
+        )
+
+        result = self.service.narrate_section(
+            session_id=payload["session"]["session_id"],
+            owner_key="anon:english-audio",
+            section_index=0,
+            include_audio=True,
+        )
+
+        self.assertEqual(result["language"], "en")
+        self.assertEqual(self.voice_service.synthesize_calls[-1]["language_code"], "en")
 
     def test_pm_briefing_blocks_filter_metadata_and_merge_related_sections(self):
         sections = [

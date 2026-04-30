@@ -147,6 +147,10 @@ class LocalAgentClient:
         result = self._request("POST", "/api/local-agent/prd-summary", payload)
         return result if isinstance(result, dict) else {}
 
+    def prd_briefing_review(self, payload: dict[str, Any]) -> dict[str, Any]:
+        result = self._request("POST", "/api/local-agent/prd-briefing-review", payload)
+        return result if isinstance(result, dict) else {}
+
     def team_dashboard_monthly_report_draft(self, payload: dict[str, Any], *, progress_callback: Callable[..., None] | None = None) -> dict[str, Any]:
         if progress_callback is None:
             result = self._request("POST", "/api/local-agent/team-dashboard/monthly-report/draft", payload)

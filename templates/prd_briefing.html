@@ -6,29 +6,28 @@
   <section class="briefing-shell">
     <div class="briefing-hero">
       <div class="briefing-copy">
-        <p class="showcase-kicker">中文开发讲解工作台</p>
+        <p class="showcase-kicker">Developer Briefing Workspace</p>
         <h1>PRD Briefing Tool</h1>
         <p class="showcase-lede">
-          把 Confluence PRD 转成更容易消化的中文开发讲解，同时保留原文对照和追问能力，
-          帮助 PM 与开发团队更快对齐流程、规则、状态流转和边界情况。
+          Turn a Confluence PRD into a developer-friendly walkthrough with source comparison, narration, follow-up Q&A, and AI review support.
         </p>
         <div class="showcase-badges">
           <span>Confluence PRD</span>
-          <span>中文开发讲解</span>
-          <span>开发追问</span>
+          <span>Developer Walkthrough</span>
+          <span>Developer Follow-up</span>
         </div>
         <div class="showcase-metrics briefing-metrics">
           <article class="metric-card">
-            <strong>快速对齐</strong>
-            <span>先把 PRD 讲成开发更容易理解的中文说明，再进入细节讨论。</span>
+            <strong>Fast Alignment</strong>
+            <span>Translate the PRD into implementation-oriented language before diving into details.</span>
           </article>
           <article class="metric-card">
-            <strong>原文对照</strong>
-            <span>中文讲解和英文原文并排保留，方便你随时回看和确认。</span>
+            <strong>Source Comparison</strong>
+            <span>Keep the walkthrough and original PRD content together for quick verification.</span>
           </article>
           <article class="metric-card">
-            <strong>继续追问</strong>
-            <span>生成后可以继续追问流程、规则、异常 case 和前后端职责。</span>
+            <strong>Follow-up Q&A</strong>
+            <span>After generation, ask about flows, rules, edge cases, and frontend/backend ownership.</span>
           </article>
         </div>
       </div>
@@ -39,12 +38,12 @@
             <p class="executive-eyebrow">Live Session</p>
             <h2>Briefing Snapshot</h2>
           </div>
-          <span class="executive-pill">第一版</span>
+          <span class="executive-pill">V1</span>
         </div>
         <ul class="executive-list">
           <li>
             <span>Primary Use</span>
-            <strong>中文开发需求讲解</strong>
+            <strong>Developer PRD Walkthrough</strong>
           </li>
           <li>
             <span>Source</span>
@@ -52,15 +51,15 @@
           </li>
           <li>
             <span>Output</span>
-            <strong>讲解摘要、分节阅读、追问回答</strong>
+            <strong>Briefing summary, section reading, follow-up answers</strong>
           </li>
           <li>
             <span>Audience</span>
-            <strong>PM 与中国开发团队</strong>
+            <strong>PM and development teams</strong>
           </li>
         </ul>
         <div class="executive-note">
-          <p>先生成 briefing，再按 section 阅读、播放中文讲解，最后继续追问还没讲清楚的部分。</p>
+          <p>Generate a briefing, read by section, play narration, then ask follow-up questions where the PRD is still unclear.</p>
         </div>
       </aside>
     </div>
@@ -69,54 +68,74 @@
       <section class="panel glass-panel briefing-panel briefing-start-panel">
         <div class="panel-head">
           <div>
-            <h2>生成中文开发讲解</h2>
-            <p class="help-text">输入一个 Confluence PRD 链接，系统会自动生成面向开发团队的中文讲解，并保留原始内容供对照。</p>
+            <h2>Generate Developer Walkthrough</h2>
+            <p class="help-text">Paste a Confluence PRD link to generate a developer-oriented walkthrough while preserving the original content for comparison.</p>
           </div>
         </div>
         <form class="stack" data-briefing-session-form>
           <div>
             <label for="page_ref">Confluence Page URL</label>
             <input id="page_ref" name="page_ref" value="https://confluence.shopee.io/display/SPDB/8.1+Part+1+of+PRD" placeholder="https://your-domain.atlassian.net/wiki/spaces/..." required>
-            <p class="help-text briefing-form-help">建议直接粘贴 PRD 页面链接。生成后会自动拆成 section，方便逐段阅读和播放中文讲解。</p>
+            <p class="help-text briefing-form-help">Paste the PRD page link directly. After generation, the tool splits it into sections for reading and narration.</p>
+          </div>
+          <div class="briefing-review-controls">
+            <label for="briefing_language">Walkthrough Language</label>
+            <div class="briefing-review-action-row">
+              <select id="briefing_language" name="briefing_language" data-briefing-language>
+                <option value="zh" selected>Chinese</option>
+                <option value="en">English</option>
+              </select>
+            </div>
+          </div>
+          <div class="briefing-review-controls" data-prd-review-controls>
+            <label for="prd_review_language">AI PRD Review</label>
+            <div class="briefing-review-action-row">
+              <select id="prd_review_language" name="review_language" data-prd-review-language>
+                <option value="zh" selected>Chinese</option>
+                <option value="en">English</option>
+              </select>
+              <button class="button button-secondary" type="button" data-prd-review-generate>Generate AI PRD Review</button>
+            </div>
           </div>
           <input type="hidden" name="mode" value="walkthrough">
           <div class="button-row">
-            <button class="button" type="submit">生成中文开发讲解</button>
+            <button class="button" type="submit">Generate Developer Walkthrough</button>
           </div>
         </form>
         <div class="empty-state briefing-status" data-briefing-status>
-          <p>还没有生成讲解。输入 PRD 链接后开始。</p>
+          <p>No walkthrough yet. Enter a PRD link to begin.</p>
         </div>
+        <div class="briefing-review-panel" data-prd-review-panel hidden></div>
       </section>
     </div>
 
     <section class="panel panel-wide glass-panel briefing-panel briefing-primary-panel">
         <div class="panel-head">
           <div>
-            <h2>中文开发讲解</h2>
-            <p class="help-text">每一节都同时保留英文 PRD 原文和中文开发讲解。重点帮助开发快速理解需求目的、主流程、规则、状态变化和异常情况。</p>
+            <h2>Developer Walkthrough</h2>
+            <p class="help-text">Each section keeps the original PRD content beside the generated walkthrough so developers can quickly understand goals, flow, rules, status changes, and edge cases.</p>
           </div>
           <div class="button-row">
-            <button class="button button-secondary" type="button" data-reader-mode-toggle aria-pressed="false">进入阅读模式</button>
-            <button class="button button-secondary" type="button" data-play-section disabled>开始中文讲解这一节</button>
+            <button class="button button-secondary" type="button" data-reader-mode-toggle aria-pressed="false">Enter Reader Mode</button>
+            <button class="button button-secondary" type="button" data-play-section disabled>Start Narration</button>
           </div>
         </div>
         <div class="briefing-voice-controls">
           <div>
-            <label>语音讲解</label>
-            <div class="briefing-provider-note">讲解文案由服务端模型生成，语音默认使用 Edge TTS。若服务端语音不可用，页面会直接提示错误，不再退回机械浏览器音。</div>
+            <label>Voice Narration</label>
+            <div class="briefing-provider-note">Walkthrough scripts are generated server-side. Voice uses Edge TTS by default; if server-side audio is unavailable, the page shows an error instead of falling back to browser speech.</div>
           </div>
         </div>
-        <p class="microcopy briefing-action-copy">先从上方选择 section，再点击 <strong>开始中文讲解这一节</strong>。切换 section 时当前讲解会立刻停止，方便你按开发视角逐段理解 PRD。</p>
+        <p class="microcopy briefing-action-copy">Select a section, then click <strong>Start Narration</strong>. Switching sections stops the current narration so you can review the PRD step by step.</p>
         <div class="empty-state briefing-inline-status" data-walkthrough-status hidden>
-          <p>这里会显示当前讲解生成状态。</p>
+          <p>Narration status appears here.</p>
         </div>
         <div class="briefing-columns">
           <aside class="briefing-outline" data-section-list>
-            <div class="empty-state"><p>生成完成后，这里会出现 PRD section 导航。</p></div>
+            <div class="empty-state"><p>PRD section navigation appears here after generation.</p></div>
           </aside>
           <article class="briefing-section-card" data-section-detail>
-            <div class="empty-state"><p>请选择一个 section 查看原文内容和中文开发讲解。</p></div>
+            <div class="empty-state"><p>Select a section to view original PRD content and the generated walkthrough.</p></div>
           </article>
         </div>
     </section>
@@ -124,23 +143,23 @@
     <section class="panel panel-wide glass-panel briefing-panel briefing-secondary-panel">
         <div class="panel-head">
           <div>
-            <h2>开发追问</h2>
-            <p class="help-text">适合继续追问流程、字段、校验、状态流转、异常 case、前后端职责和还没写清楚的点。回答会尽量基于当前 PRD 原文。</p>
+            <h2>Developer Follow-up</h2>
+            <p class="help-text">Ask follow-up questions about flows, fields, validation, status changes, edge cases, frontend/backend ownership, or unclear PRD details. Answers stay grounded in the current PRD where possible.</p>
           </div>
         </div>
         <div class="briefing-quick-questions">
-          <button class="button button-secondary" type="button" data-quick-question="这一节主流程是什么？">主流程是什么？</button>
-          <button class="button button-secondary" type="button" data-quick-question="这一节前端和后端分别要做什么？">前后端分别做什么？</button>
-          <button class="button button-secondary" type="button" data-quick-question="这里有哪些校验规则或状态变化？">校验和状态变化？</button>
-          <button class="button button-secondary" type="button" data-quick-question="这里有哪些异常 case 或待确认点？">异常 case / 待确认点？</button>
+          <button class="button button-secondary" type="button" data-quick-question="What is the main flow in this section?">Main flow?</button>
+          <button class="button button-secondary" type="button" data-quick-question="What should frontend and backend each do in this section?">Frontend/backend split?</button>
+          <button class="button button-secondary" type="button" data-quick-question="What validation rules or status changes are defined here?">Validation/status changes?</button>
+          <button class="button button-secondary" type="button" data-quick-question="What edge cases or open questions are here?">Edge cases / open questions?</button>
         </div>
         <div class="chat-log" data-chat-log>
-          <div class="empty-state"><p>先生成中文开发讲解，再继续追问你的第一个问题。</p></div>
+          <div class="empty-state"><p>Generate a walkthrough before asking your first follow-up question.</p></div>
         </div>
         <form class="stack" data-chat-form>
-          <textarea name="question" rows="4" placeholder="例如：这里有哪些校验规则？和旧逻辑差异是什么？这个字段为什么需要？异常情况怎么处理？" required></textarea>
+          <textarea name="question" rows="4" placeholder="Example: What validation rules apply here? What changed from the old logic? Why is this field needed? How should exceptions be handled?" required></textarea>
           <div class="button-row">
-            <button class="button" type="submit">提交开发问题</button>
+            <button class="button" type="submit">Submit Question</button>
           </div>
         </form>
     </section>
@@ -148,12 +167,12 @@
   </section>
 
   <dialog class="briefing-image-lightbox" data-image-lightbox>
-    <button class="briefing-image-lightbox-close" type="button" data-image-lightbox-close aria-label="关闭图片预览">×</button>
-    <a class="button button-secondary briefing-image-lightbox-open" data-image-lightbox-open href="#" target="_blank" rel="noreferrer">打开原图</a>
-    <img class="briefing-image-lightbox-media" data-image-lightbox-media alt="放大的 PRD 图片预览">
+    <button class="briefing-image-lightbox-close" type="button" data-image-lightbox-close aria-label="Close image preview">×</button>
+    <a class="button button-secondary briefing-image-lightbox-open" data-image-lightbox-open href="#" target="_blank" rel="noreferrer">Open original image</a>
+    <img class="briefing-image-lightbox-media" data-image-lightbox-media alt="Enlarged PRD image preview">
   </dialog>
 
-  <button class="briefing-floating-toggle" type="button" data-no-image-mode-toggle aria-pressed="false">无图模式</button>
+  <button class="briefing-floating-toggle" type="button" data-no-image-mode-toggle aria-pressed="false">No-image mode</button>
 {% endblock %}
 
 {% block extra_scripts %}

@@ -42,7 +42,7 @@ from bpmis_jira_tool.web import (
     _generate_productization_detailed_features_with_local_codex,
 )
 from prd_briefing.confluence import ConfluenceConnector
-from prd_briefing.reviewer import PRDReviewRequest, PRDReviewService
+from prd_briefing.reviewer import PRDBriefingReviewRequest, PRDReviewRequest, PRDReviewService
 from prd_briefing.storage import BriefingStore
 
 
@@ -244,6 +244,20 @@ def create_local_agent_app() -> Flask:
                 jira_id=str(payload.get("jira_id") or ""),
                 jira_link=str(payload.get("jira_link") or ""),
                 prd_url=str(payload.get("prd_url") or ""),
+                force_refresh=bool(payload.get("force_refresh")),
+            )
+        )
+        return jsonify(result)
+
+    @app.post("/api/local-agent/prd-briefing-review")
+    def prd_briefing_review():
+        payload = request.get_json(silent=True) or {}
+        service = _build_prd_review_service(settings)
+        result = service.review_url(
+            PRDBriefingReviewRequest(
+                owner_key=str(payload.get("owner_key") or ""),
+                prd_url=str(payload.get("prd_url") or ""),
+                language=str(payload.get("language") or "zh"),
                 force_refresh=bool(payload.get("force_refresh")),
             )
         )

@@ -5,8 +5,13 @@ from urllib.parse import urlparse
 
 from flask import Blueprint, Response, current_app, flash, jsonify, redirect, render_template, request, send_file, url_for
 
+from bpmis_jira_tool.config import Settings
+from bpmis_jira_tool.errors import ToolError
+from bpmis_jira_tool.local_agent_client import LocalAgentClient
+
 from .confluence import ConfluenceConnector
 from .openai_client import OpenAIClient
+from .reviewer import PRDBriefingReviewRequest, PRDReviewService
 from .service import PRDBriefingService, VoiceService
 from .storage import BriefingStore
 from .text_generation import TextGenerationClient
@@ -26,11 +31,11 @@ def create_prd_briefing_blueprint() -> Blueprint:
         if request.path.startswith("/prd-briefing/api/"):
             if not email:
                 return jsonify({"status": "error", "message": "Sign in with your NPT Google account first."}), 401
-            return jsonify({"status": "error", "message": "PRD Briefing Tool is restricted to xiaodong.zheng@npt.sg."}), 403
+            return jsonify({"status": "error", "message": "PRD Briefing Tool is available to signed-in npt.sg users and the configured test account."}), 403
 
         if not email:
             return redirect(url_for("index"))
-        flash("PRD Briefing Tool is restricted to xiaodong.zheng@npt.sg.", "error")
+        flash("PRD Briefing Tool is available to signed-in npt.sg users and the configured test account.", "error")
         return redirect(url_for("index"))
 
     @blueprint.get("/")
@@ -47,8 +52,31 @@ def create_prd_briefing_blueprint() -> Blueprint:
                 owner_key=owner_key,
                 page_ref=str(payload.get("page_ref") or ""),
                 mode=str(payload.get("mode") or "walkthrough"),
+                language=str(payload.get("language") or "zh"),
             )
             return jsonify(data)
+        except Exception as error:  # noqa: BLE001
+            return jsonify({"status": "error", "message": str(error)}), 400
+
+    @blueprint.post("/api/review")
+    def review_prd():
+        try:
+            owner_key = current_app.config["GET_USER_IDENTITY"]()["config_key"]
+            payload = request.get_json(force=True)
+            review_payload = {
+                "owner_key": owner_key,
+                "prd_url": str(payload.get("prd_url") or payload.get("page_ref") or ""),
+                "language": str(payload.get("language") or "zh"),
+                "force_refresh": bool(payload.get("force_refresh")),
+            }
+            settings = current_app.config["SETTINGS"]
+            if _local_agent_source_code_qa_enabled(settings):
+                data = _build_local_agent_client(settings).prd_briefing_review(review_payload)
+            else:
+                data = _build_prd_review_service().review_url(PRDBriefingReviewRequest(**review_payload))
+            return jsonify(data)
+        except ToolError as error:
+            return jsonify({"status": "error", "message": str(error)}), 400
         except Exception as error:  # noqa: BLE001
             return jsonify({"status": "error", "message": str(error)}), 400
 
@@ -123,6 +151,47 @@ def create_prd_briefing_blueprint() -> Blueprint:
         )
 
     return blueprint
+
+
+def _local_agent_mode_enabled(settings: Settings) -> bool:
+    mode = (settings.local_agent_mode or "").strip().lower()
+    return mode in {"sync", "remote", "cloud_run", "enabled"}
+
+
+def _local_agent_source_code_qa_enabled(settings: Settings) -> bool:
+    return bool(
+        _local_agent_mode_enabled(settings)
+        and settings.local_agent_base_url
+        and settings.local_agent_hmac_secret
+        and settings.local_agent_source_code_qa_enabled
+    )
+
+
+def _build_local_agent_client(settings: Settings) -> LocalAgentClient:
+    return LocalAgentClient(
+        base_url=settings.local_agent_base_url or "",
+        hmac_secret=settings.local_agent_hmac_secret or "",
+        timeout_seconds=settings.local_agent_timeout_seconds,
+        connect_timeout_seconds=settings.local_agent_connect_timeout_seconds,
+    )
+
+
+def _build_prd_review_service() -> PRDReviewService:
+    settings = current_app.config["SETTINGS"]
+    store: BriefingStore = current_app.config["PRD_BRIEFING_STORE"]
+    confluence = ConfluenceConnector(
+        base_url=settings.confluence_base_url,
+        email=settings.confluence_email,
+        api_token=settings.confluence_api_token,
+        bearer_token=settings.confluence_bearer_token,
+        store=store,
+    )
+    return PRDReviewService(
+        store=store,
+        confluence=confluence,
+        settings=settings,
+        workspace_root=Path(__file__).resolve().parent.parent,
+    )
 
 
 def _build_service() -> PRDBriefingService:
