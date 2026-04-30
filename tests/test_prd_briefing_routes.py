@@ -148,8 +148,10 @@ class PRDBriefingRouteTests(unittest.TestCase):
             self.assertIn(b"data-image-lightbox", response.data)
             self.assertIn(b"data-no-image-mode-toggle", response.data)
             self.assertIn(b"data-prd-review-generate", response.data)
-            self.assertIn(b"data-prd-review-language", response.data)
             self.assertIn(b"data-briefing-language", response.data)
+            self.assertIn(b"PRD Details", response.data)
+            self.assertIn(b"Output Language", response.data)
+            self.assertNotIn(b"data-prd-review-language", response.data)
             self.assertNotIn("3 分钟".encode("utf-8"), response.data)
             self.assertNotIn(b"Team Knowledge Base", response.data)
 

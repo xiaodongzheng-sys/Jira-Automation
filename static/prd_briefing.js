@@ -17,7 +17,6 @@
   const sessionSubmitButton = sessionForm?.querySelector('button[type="submit"]');
   const briefingLanguage = document.querySelector('[data-briefing-language]');
   const prdReviewButton = document.querySelector('[data-prd-review-generate]');
-  const prdReviewLanguage = document.querySelector('[data-prd-review-language]');
   const prdReviewPanel = document.querySelector('[data-prd-review-panel]');
   const chatSubmitButton = chatForm?.querySelector('button[type="submit"]');
   const CACHED_NARRATION_DELAY_MS = 0;
@@ -259,7 +258,7 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           prd_url: pageRef,
-          language: prdReviewLanguage?.value || 'zh',
+          language: briefingLanguage?.value || 'zh',
           force_refresh: forceRefresh,
         }),
       });

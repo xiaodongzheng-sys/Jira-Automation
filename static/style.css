@@ -3060,6 +3060,10 @@ select {
   min-width: 140px;
 }
 
+.briefing-action-buttons {
+  padding-top: 6px;
+}
+
 .briefing-primary-panel,
 .briefing-secondary-panel {
   width: 100%;

@@ -68,7 +68,7 @@
       <section class="panel glass-panel briefing-panel briefing-start-panel">
         <div class="panel-head">
           <div>
-            <h2>Generate Developer Walkthrough</h2>
+            <h2>PRD Details</h2>
             <p class="help-text">Paste a Confluence PRD link to generate a developer-oriented walkthrough while preserving the original content for comparison.</p>
           </div>
         </div>
@@ -79,7 +79,7 @@
             <p class="help-text briefing-form-help">Paste the PRD page link directly. After generation, the tool splits it into sections for reading and narration.</p>
           </div>
           <div class="briefing-review-controls">
-            <label for="briefing_language">Walkthrough Language</label>
+            <label for="briefing_language">Output Language</label>
             <div class="briefing-review-action-row">
               <select id="briefing_language" name="briefing_language" data-briefing-language>
                 <option value="zh" selected>Chinese</option>
@@ -87,19 +87,10 @@
               </select>
             </div>
           </div>
-          <div class="briefing-review-controls" data-prd-review-controls>
-            <label for="prd_review_language">AI PRD Review</label>
-            <div class="briefing-review-action-row">
-              <select id="prd_review_language" name="review_language" data-prd-review-language>
-                <option value="zh" selected>Chinese</option>
-                <option value="en">English</option>
-              </select>
-              <button class="button button-secondary" type="button" data-prd-review-generate>Generate AI PRD Review</button>
-            </div>
-          </div>
           <input type="hidden" name="mode" value="walkthrough">
-          <div class="button-row">
+          <div class="button-row briefing-action-buttons">
             <button class="button" type="submit">Generate Developer Walkthrough</button>
+            <button class="button button-secondary" type="button" data-prd-review-generate>Generate AI PRD Review</button>
           </div>
         </form>
         <div class="empty-state briefing-status" data-briefing-status>
