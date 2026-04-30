@@ -265,7 +265,6 @@
       const payload = await parseJsonResponse(response);
       if (!response.ok) throw new Error(payload.message || 'Could not generate AI PRD Review right now.');
       renderPrdReview(payload);
-      setStatus(payload.cached ? 'Loaded cached AI PRD Review.' : 'AI PRD Review generated.', 'success');
     } catch (error) {
       const message = error.message || 'Could not generate AI PRD Review right now.';
       setStatus(message, 'error');
