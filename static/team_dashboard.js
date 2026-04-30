@@ -169,8 +169,8 @@
     }
   };
 
-  const cachedTeamFor = (teamKey, memberEmails) => {
-    const cache = readTaskCache();
+  const cachedTeamFor = (teamKey, memberEmails, sourceCache = null) => {
+    const cache = sourceCache || readTaskCache();
     const team = cache?.teams?.[teamKey];
     if (!team || team.email_signature !== emailSignature(memberEmails)) return null;
     return team;
@@ -910,6 +910,9 @@
       credentials: 'same-origin',
     });
     const payload = await readJson(response, 'Could not load Team Dashboard config.');
+    const serverTaskCache = payload.config?.task_cache && typeof payload.config.task_cache === 'object'
+      ? payload.config.task_cache
+      : null;
     return Object.entries(payload.config?.teams || {}).map(([teamKey, team]) => {
       const memberEmails = Array.isArray(team.member_emails) ? team.member_emails : [];
       const baseTeam = {
@@ -922,7 +925,7 @@
         loading: false,
         loaded: false,
       };
-      const cached = cachedTeamFor(teamKey, memberEmails);
+      const cached = cachedTeamFor(teamKey, memberEmails, serverTaskCache) || cachedTeamFor(teamKey, memberEmails);
       if (!cached) return baseTeam;
       return {
         ...baseTeam,
@@ -934,10 +937,13 @@
     });
   };
 
-  const teamTaskUrl = (teamKey) => {
+  const teamTaskUrl = (teamKey, reload = false) => {
     const url = new URL(root.dataset.tasksUrl || '/api/team-dashboard/tasks', window.location.origin);
     url.searchParams.set('team', teamKey);
-    url.searchParams.set('_reload', String(Date.now()));
+    if (reload) {
+      url.searchParams.set('reload', '1');
+      url.searchParams.set('_reload', String(Date.now()));
+    }
     return url.toString();
   };
 
@@ -959,7 +965,7 @@
       const restored = taskTeams.filter((team) => team.loaded).length;
       setStatus(
         taskStatus,
-        restored ? `Restored last loaded Jira tasks for ${restored} team${restored === 1 ? '' : 's'}. Click Reload Jira to refresh.` : '',
+        restored ? `Restored saved Jira tasks for ${restored} team${restored === 1 ? '' : 's'}. Click Reload Jira to refresh.` : '',
         'neutral',
       );
     } catch (error) {
@@ -982,7 +988,7 @@
     updateTaskSummary(taskTeams);
     setStatus(taskStatus, `Loading ${currentTeam.label || currentTeam.team_key} Jira tasks...`, 'neutral');
     try {
-      const response = await fetch(teamTaskUrl(teamKey), {
+      const response = await fetch(teamTaskUrl(teamKey, true), {
         headers: { Accept: 'application/json' },
         credentials: 'same-origin',
         cache: 'no-store',

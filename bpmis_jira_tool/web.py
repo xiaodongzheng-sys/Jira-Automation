@@ -416,6 +416,8 @@ class TeamDashboardConfigStore:
         raw_key_project_overrides = config.get("key_project_overrides") if isinstance(config, dict) else {}
         raw_key_project_overrides = raw_key_project_overrides if isinstance(raw_key_project_overrides, dict) else {}
         raw_monthly_report_template = config.get("monthly_report_template") if isinstance(config, dict) else ""
+        raw_task_cache = config.get("task_cache") if isinstance(config, dict) else {}
+        raw_task_cache = raw_task_cache if isinstance(raw_task_cache, dict) else {}
         default = self.default_config()
         normalized_teams: dict[str, dict[str, Any]] = {}
         for team_key, label in TEAM_DASHBOARD_TEAMS.items():
@@ -444,6 +446,32 @@ class TeamDashboardConfigStore:
             "teams": normalized_teams,
             "key_project_overrides": normalized_key_project_overrides,
             "monthly_report_template": normalize_monthly_report_template(raw_monthly_report_template),
+            "task_cache": self._normalize_task_cache(raw_task_cache),
+        }
+
+    def _normalize_task_cache(self, task_cache: dict[str, Any]) -> dict[str, Any]:
+        raw_teams = task_cache.get("teams") if isinstance(task_cache.get("teams"), dict) else {}
+        teams: dict[str, dict[str, Any]] = {}
+        for team_key in TEAM_DASHBOARD_TEAMS:
+            raw_team = raw_teams.get(team_key)
+            if not isinstance(raw_team, dict):
+                continue
+            teams[team_key] = {
+                **raw_team,
+                "team_key": team_key,
+                "email_signature": str(raw_team.get("email_signature") or "").strip(),
+                "cached_at": str(raw_team.get("cached_at") or "").strip(),
+                "loaded": bool(raw_team.get("loaded", True)),
+                "loading": False,
+                "error": "",
+                "progress_text": "",
+                "under_prd": raw_team.get("under_prd") if isinstance(raw_team.get("under_prd"), list) else [],
+                "pending_live": raw_team.get("pending_live") if isinstance(raw_team.get("pending_live"), list) else [],
+            }
+        return {
+            "version": int(task_cache.get("version") or 1),
+            "updated_at": str(task_cache.get("updated_at") or "").strip(),
+            "teams": teams,
         }
 
     def _ensure_db(self) -> None:
@@ -3490,6 +3518,8 @@ def create_app() -> Flask:
         existing_config = store.load()
         if isinstance(existing_config.get("key_project_overrides"), dict):
             payload["key_project_overrides"] = existing_config["key_project_overrides"]
+        if isinstance(existing_config.get("task_cache"), dict):
+            payload["task_cache"] = existing_config["task_cache"]
         payload["monthly_report_template"] = existing_config.get("monthly_report_template") or DEFAULT_MONTHLY_REPORT_TEMPLATE
         saved = store.save(payload)
         _log_portal_event(
@@ -3572,10 +3602,12 @@ def create_app() -> Flask:
         access_gate = _require_team_dashboard_access(settings, api=True)
         if access_gate is not None:
             return access_gate
-        config = _get_team_dashboard_config_store().load()
+        store = _get_team_dashboard_config_store()
+        config = store.load()
         key_project_overrides = config.get("key_project_overrides") if isinstance(config.get("key_project_overrides"), dict) else {}
         bpmis_client = _build_bpmis_client_for_current_user(settings)
         requested_team_key = str(request.args.get("team") or request.args.get("team_key") or "").strip().upper()
+        force_reload = str(request.args.get("reload") or "").strip().lower() in {"1", "true", "yes"}
         if requested_team_key and requested_team_key not in TEAM_DASHBOARD_TEAMS:
             return (
                 jsonify({"status": "error", "message": f"Unknown team: {requested_team_key}."}),
@@ -3591,6 +3623,10 @@ def create_app() -> Flask:
         for team_key, label in team_items:
             team_config = (config.get("teams") or {}).get(team_key) or {}
             emails = _normalize_team_dashboard_emails(team_config.get("member_emails") or [])
+            cached_team = None if force_reload else _cached_team_dashboard_task_payload(config, team_key, emails)
+            if cached_team is not None:
+                team_payloads.append(cached_team)
+                continue
             started_at = time.monotonic()
             try:
                 tasks = bpmis_client.list_jira_tasks_created_by_emails(
@@ -3628,6 +3664,7 @@ def create_app() -> Flask:
                     ),
                 )
                 team_payloads.append(team_payload)
+                _store_team_dashboard_task_payload(store, team_key, emails, team_payload)
             except Exception as error:  # noqa: BLE001 - keep other team groups renderable.
                 has_error = True
                 error_details = _classify_portal_error(error)
@@ -6413,6 +6450,67 @@ def _load_team_dashboard_link_biz_project_payloads(settings: Settings, config: d
         _remove_team_dashboard_zero_jira_pending_live_projects(team_payload)
         team_payloads.append(team_payload)
     return team_payloads
+
+
+def _team_dashboard_task_cache_signature(emails: list[str]) -> str:
+    return "|".join(_normalize_team_dashboard_emails(emails))
+
+
+def _cached_team_dashboard_task_payload(config: dict[str, Any], team_key: str, emails: list[str]) -> dict[str, Any] | None:
+    task_cache = config.get("task_cache") if isinstance(config.get("task_cache"), dict) else {}
+    cached_teams = task_cache.get("teams") if isinstance(task_cache.get("teams"), dict) else {}
+    cached_team = cached_teams.get(team_key)
+    if not isinstance(cached_team, dict):
+        return None
+    if str(cached_team.get("email_signature") or "") != _team_dashboard_task_cache_signature(emails):
+        return None
+    payload = {
+        **cached_team,
+        "team_key": team_key,
+        "member_emails": emails,
+        "loading": False,
+        "loaded": True,
+        "error": "",
+        "progress_text": "",
+        "cache_source": "server",
+    }
+    key_project_overrides = config.get("key_project_overrides") if isinstance(config.get("key_project_overrides"), dict) else {}
+    for section_key in ("under_prd", "pending_live"):
+        projects = payload.get(section_key)
+        if isinstance(projects, list):
+            _apply_team_dashboard_key_project_states(projects, key_project_overrides)
+    return payload
+
+
+def _store_team_dashboard_task_payload(
+    store: TeamDashboardConfigStore | RemoteTeamDashboardConfigStore,
+    team_key: str,
+    emails: list[str],
+    team_payload: dict[str, Any],
+) -> None:
+    if not team_key or team_payload.get("error"):
+        return
+    config = store.load()
+    task_cache = config.get("task_cache") if isinstance(config.get("task_cache"), dict) else {}
+    cached_teams = task_cache.get("teams") if isinstance(task_cache.get("teams"), dict) else {}
+    cached_team = {
+        **team_payload,
+        "team_key": team_key,
+        "member_emails": emails,
+        "email_signature": _team_dashboard_task_cache_signature(emails),
+        "cached_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "loading": False,
+        "loaded": True,
+        "error": "",
+        "progress_text": "",
+    }
+    cached_teams[team_key] = cached_team
+    config["task_cache"] = {
+        "version": 1,
+        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "teams": cached_teams,
+    }
+    store.save(config)
 
 
 def _load_team_dashboard_link_biz_jira_rows(settings: Settings, config: dict[str, Any]) -> list[dict[str, Any]]:
