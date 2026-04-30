@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import patch
 
 from bpmis_jira_tool.web import create_app
+from prd_briefing import blueprint as prd_blueprint_module
 
 
 class FakeBriefingService:
@@ -119,6 +120,23 @@ class FakePRDReviewLocalAgentClient:
         }
 
 
+class FakeCodexTextGenerationClient:
+    init_kwargs = None
+
+    def __init__(self, **kwargs):
+        FakeCodexTextGenerationClient.init_kwargs = kwargs
+
+    @property
+    def model_id(self):
+        return "codex:test"
+
+    def is_configured(self):
+        return True
+
+    def create_answer(self, **kwargs):
+        return "Codex walkthrough"
+
+
 class PRDBriefingRouteTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -154,6 +172,18 @@ class PRDBriefingRouteTests(unittest.TestCase):
             self.assertNotIn(b"data-prd-review-language", response.data)
             self.assertNotIn("3 分钟".encode("utf-8"), response.data)
             self.assertNotIn(b"Team Knowledge Base", response.data)
+
+    def test_build_service_uses_codex_for_walkthrough_generation(self):
+        FakeCodexTextGenerationClient.init_kwargs = None
+        with self.app.app_context(), patch.object(
+            prd_blueprint_module,
+            "CodexTextGenerationClient",
+            FakeCodexTextGenerationClient,
+        ):
+            service = prd_blueprint_module._build_service()  # noqa: SLF001
+
+        self.assertIsInstance(service.text_client, FakeCodexTextGenerationClient)
+        self.assertEqual(FakeCodexTextGenerationClient.init_kwargs["prompt_mode"], "prd_briefing_developer_walkthrough_codex")
 
     @patch("prd_briefing.blueprint._build_service", return_value=FakeBriefingService())
     def test_create_session_endpoint_returns_payload(self, mock_service):

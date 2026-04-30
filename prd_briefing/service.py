@@ -25,8 +25,8 @@ DEVELOPER_AUDIENCE_EN = "developer_en"
 DEVELOPER_LANGUAGE = "Mandarin Chinese"
 DEVELOPER_LANGUAGE_EN = "English"
 
-WALKTHROUGH_SCRIPT_PROMPT_VERSION = "v1_openai_only_pm_briefing"
-WALKTHROUGH_BLOCK_PROMPT_VERSION = "v1_pm_briefing_block"
+WALKTHROUGH_SCRIPT_PROMPT_VERSION = "v2_codex_pm_briefing"
+WALKTHROUGH_BLOCK_PROMPT_VERSION = "v2_codex_pm_briefing_block"
 SESSION_BRIEF_PROMPT_VERSION = "v7_two_part_chinese_summary"
 WALKTHROUGH_PREWARM_LIMIT = 12
 
@@ -697,7 +697,7 @@ class PRDBriefingService:
         notes = section.get("briefing_notes") or []
         body = build_walkthrough_section_user_prompt(section=section, notes=notes, language=language)
         if not self.text_client.is_configured():
-            raise RuntimeError("Walkthrough script generation now requires a configured OpenAI text model.")
+            raise RuntimeError("Walkthrough script generation now requires Codex to be configured on this server.")
         cache_lookup = self._build_walkthrough_cache_lookup(
             owner_key=owner_key,
             section=section,
@@ -748,7 +748,7 @@ class PRDBriefingService:
             )
         body = build_walkthrough_block_user_prompt(block=block, source_lines=source_lines, language=language)
         if not self.text_client.is_configured():
-            raise RuntimeError("Walkthrough script generation now requires a configured OpenAI text model.")
+            raise RuntimeError("Walkthrough script generation now requires Codex to be configured on this server.")
         cache_lookup = self._build_walkthrough_block_cache_lookup(
             owner_key=owner_key,
             block=block,

@@ -18,6 +18,7 @@ from prd_briefing.reviewer import (
 )
 from prd_briefing.service import (
     PRDBriefingService,
+    WALKTHROUGH_SCRIPT_PROMPT_VERSION,
     build_pm_briefing_blocks,
     build_heuristic_session_overview,
     overview_is_low_signal,
@@ -604,13 +605,13 @@ class PRDBriefingServiceTests(unittest.TestCase):
                 delete from briefing_script_cache
                 where owner_key = ? and audience = ? and prompt_version = ?
                 """,
-                ("anon:test", "developer_zh", "v1_openai_only_pm_briefing"),
+                ("anon:test", "developer_zh", WALKTHROUGH_SCRIPT_PROMPT_VERSION),
             )
         self.store.cache_script(
             owner_key="anon:test",
             audience="developer_zh",
             model_id="openai:gpt-4.1-mini|gemini:gemini-2.5-flash",
-            prompt_version="v1_openai_only_pm_briefing",
+            prompt_version=WALKTHROUGH_SCRIPT_PROMPT_VERSION,
             section_payload=section_payload,
             script="legacy cached script",
         )
@@ -684,7 +685,7 @@ class PRDBriefingServiceTests(unittest.TestCase):
             mode="walkthrough",
         )
 
-        with self.assertRaisesRegex(RuntimeError, "configured OpenAI text model"):
+        with self.assertRaisesRegex(RuntimeError, "Codex to be configured"):
             self.service.narrate_section(
                 session_id=payload["session"]["session_id"],
                 owner_key="anon:test",

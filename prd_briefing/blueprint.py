@@ -14,7 +14,7 @@ from .openai_client import OpenAIClient
 from .reviewer import PRDBriefingReviewRequest, PRDReviewService
 from .service import PRDBriefingService, VoiceService
 from .storage import BriefingStore
-from .text_generation import TextGenerationClient
+from .text_generation import CodexTextGenerationClient
 
 
 def create_prd_briefing_blueprint() -> Blueprint:
@@ -205,8 +205,10 @@ def _build_service() -> PRDBriefingService:
         transcription_model=settings.prd_briefing_transcription_model,
         tts_model=settings.prd_briefing_tts_model,
     )
-    text_client = TextGenerationClient(
-        primary_openai=openai_client,
+    text_client = CodexTextGenerationClient(
+        settings=settings,
+        workspace_root=Path(__file__).resolve().parent.parent,
+        prompt_mode="prd_briefing_developer_walkthrough_codex",
     )
     confluence = ConfluenceConnector(
         base_url=settings.confluence_base_url,
