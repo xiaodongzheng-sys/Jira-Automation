@@ -3380,6 +3380,14 @@ select {
   opacity: 0.72;
 }
 
+.briefing-confluence-frame {
+  width: 100%;
+  min-height: min(760px, 72vh);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+
 .briefing-original-content .briefing-source-render-note {
   padding: 10px 12px;
   border: 1px solid rgba(22, 119, 255, 0.18);

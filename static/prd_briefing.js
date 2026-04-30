@@ -111,6 +111,56 @@
     return markup;
   };
 
+  const buildConfluenceFrameDocument = (bodyMarkup) => `<!doctype html>
+    <html>
+      <head>
+        <base target="_blank">
+        <style>
+          :root { color-scheme: light; }
+          body {
+            box-sizing: border-box;
+            color: #1f2937;
+            font: 15px/1.58 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            margin: 0;
+            padding: 18px;
+            overflow-wrap: anywhere;
+          }
+          * { box-sizing: border-box; }
+          table {
+            border-collapse: collapse;
+            margin: 10px 0;
+            max-width: 100%;
+            table-layout: fixed;
+            width: 100%;
+          }
+          th, td {
+            border: 1px solid #d8dee8;
+            padding: 8px 10px;
+            vertical-align: top;
+            word-break: break-word;
+          }
+          th {
+            background: #f6f8fb;
+            font-weight: 700;
+            text-align: left;
+          }
+          img {
+            display: block;
+            height: auto;
+            max-width: 100%;
+          }
+          p, ul, ol { margin-top: 0; }
+          a { color: #0b66d8; }
+          .table-wrap,
+          .confluence-embedded-file-wrapper {
+            max-width: 100%;
+            overflow-x: auto;
+          }
+        </style>
+      </head>
+      <body>${bodyMarkup}</body>
+    </html>`;
+
   const renderConfluenceSourceContent = (sectionIndex, section) => {
     const rawHtml = String(section.html_content || '').trim();
     if (!rawHtml || rawHtml.length > MAX_CONFLUENCE_HTML_RENDER_CHARS) {
@@ -993,11 +1043,13 @@
           }
           target.classList.remove('is-text-rendered');
           target.classList.add('is-confluence-rendered');
-          target.innerHTML = html;
-          classifyTableLayouts();
-          classifySectionImages();
-          hideDecorativeArrowArtifacts();
-          attachImagePreview();
+          target.innerHTML = '';
+          const frame = document.createElement('iframe');
+          frame.className = 'briefing-confluence-frame';
+          frame.title = `${section.section_path || 'PRD section'} Confluence view`;
+          frame.setAttribute('sandbox', 'allow-popups allow-popups-to-escape-sandbox');
+          frame.srcdoc = buildConfluenceFrameDocument(html);
+          target.appendChild(frame);
           button.textContent = 'Confluence View Rendered';
         }, 0);
       });
