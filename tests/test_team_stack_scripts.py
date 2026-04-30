@@ -130,6 +130,10 @@ exit 0
                     "CLOUD_RUN_RESTART_LOCAL_AGENT_AFTER_DEPLOY": "0",
                     "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg",
                     "BPMIS_BASE_URL": "https://bpmis.example.test",
+                    "TRELLO_API_KEY": "trello-key",
+                    "TRELLO_API_TOKEN": "trello-token",
+                    "TRELLO_BOARD_ID": "trello-board",
+                    "TRELLO_DAILY_LIST_NAME": "Daily Summary Email",
                 },
                 cwd=PROJECT_ROOT,
             )
@@ -181,6 +185,10 @@ exit 0
                     "CLOUD_RUN_LOCAL_AGENT_BASE_URL": "https://agent.example.ngrok.app",
                     "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg",
                     "BPMIS_BASE_URL": "https://bpmis.example.test",
+                    "TRELLO_API_KEY": "trello-key",
+                    "TRELLO_API_TOKEN": "trello-token",
+                    "TRELLO_BOARD_ID": "trello-board",
+                    "TRELLO_DAILY_LIST_NAME": "Daily Summary Email",
                 },
                 cwd=PROJECT_ROOT,
             )
@@ -194,6 +202,10 @@ exit 0
             self.assertIn("TEAM_PORTAL_STAGE=uat", deploy_calls[0])
             self.assertIn("TEAM_PORTAL_BASE_URL=https://uat---team-portal-ekaykywtvq-as.a.run.app", deploy_calls[0])
             self.assertIn("TEAM_PORTAL_RELEASE_REVISION=", deploy_calls[0])
+            self.assertIn("TRELLO_API_KEY=trello-key", deploy_calls[0])
+            self.assertIn("TRELLO_API_TOKEN=trello-token", deploy_calls[0])
+            self.assertIn("TRELLO_BOARD_ID=trello-board", deploy_calls[0])
+            self.assertIn("TRELLO_DAILY_LIST_NAME=Daily Summary Email", deploy_calls[0])
             self.assertIn("Cloud Run UAT revision: team-portal-00091-uat", completed.stdout)
             self.assertIn("keeps live traffic unchanged", completed.stdout)
 

@@ -127,6 +127,17 @@ ENV_VARS=(
   "TEAM_PORTAL_BASE_URL=$UAT_URL"
   "TEAM_PORTAL_RELEASE_REVISION=$GIT_SHA"
 )
+append_optional_env_var() {
+  local key="$1"
+  local value="${!key:-$(read_env_value "$key")}"
+  if [[ -n "$value" ]]; then
+    ENV_VARS+=("$key=$value")
+  fi
+}
+append_optional_env_var TRELLO_API_KEY
+append_optional_env_var TRELLO_API_TOKEN
+append_optional_env_var TRELLO_BOARD_ID
+append_optional_env_var TRELLO_DAILY_LIST_NAME
 if [[ -n "$LOCAL_AGENT_URL" ]]; then
   ENV_VARS+=("LOCAL_AGENT_BASE_URL=$LOCAL_AGENT_URL")
 fi
