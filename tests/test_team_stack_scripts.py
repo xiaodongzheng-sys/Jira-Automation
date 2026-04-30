@@ -368,6 +368,15 @@ exit 0
         self.assertIn("CLOUD_RUN_RESTART_LOCAL_AGENT_AFTER_DEPLOY:-1", contents)
         self.assertIn('"$ROOT_DIR/scripts/run_local_agent.sh" restart', contents)
 
+    def test_mac_stack_restart_refreshes_local_agent_when_bpmis_proxy_is_enabled(self):
+        stack_script = PROJECT_ROOT / "scripts/run_team_stack.sh"
+
+        contents = stack_script.read_text(encoding="utf-8")
+
+        self.assertIn("restart_local_agent_if_needed", contents)
+        self.assertIn('read_env_value BPMIS_CALL_MODE', contents)
+        self.assertIn('"$ROOT_DIR/scripts/run_local_agent.sh" restart', contents)
+
     def test_cloud_run_full_deploy_skips_base_url_update_when_service_exists(self):
         deploy_script = PROJECT_ROOT / "scripts/deploy_cloud_run_full.sh"
 

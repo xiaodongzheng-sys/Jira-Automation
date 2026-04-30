@@ -145,6 +145,8 @@ git pull --ff-only
 ./scripts/run_team_stack.sh doctor
 ```
 
+When `BPMIS_CALL_MODE=local_agent`, `run_team_stack.sh restart` also restarts the Mac local-agent first so portal BPMIS proxy changes do not run against a stale local-agent process.
+
 The doctor check should pass before treating the Mac-hosted portal/ngrok stack as live. It verifies portal health, public URL health, ngrok inspector health, revision alignment, data directory readiness, and launchd friendliness.
 
 For the fixed-ngrok primary-entry setup, confirm these values in the host `.env` before restart:

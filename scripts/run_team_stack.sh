@@ -325,8 +325,22 @@ status() {
   "$ROOT_DIR/scripts/run_ngrok_tunnel.sh" status || true
 }
 
+restart_local_agent_if_needed() {
+  local bpmis_call_mode="${BPMIS_CALL_MODE:-$(read_env_value BPMIS_CALL_MODE)}"
+  if [[ "$bpmis_call_mode" != "local_agent" ]]; then
+    return 0
+  fi
+  if [[ ! -x "$ROOT_DIR/scripts/run_local_agent.sh" ]]; then
+    echo "BPMIS_CALL_MODE=local_agent but scripts/run_local_agent.sh is not executable."
+    return 1
+  fi
+  echo "BPMIS_CALL_MODE=local_agent; restarting Mac local-agent to avoid stale BPMIS proxy code."
+  "$ROOT_DIR/scripts/run_local_agent.sh" restart
+}
+
 restart() {
   local guard_env="$1"
+  restart_local_agent_if_needed
   if launchd_stack_installed; then
     local domain_label
     domain_label="$(launchd_domain_label)"
