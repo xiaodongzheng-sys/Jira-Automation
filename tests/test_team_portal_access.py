@@ -198,6 +198,30 @@ class TeamPortalAccessTests(unittest.TestCase):
         self.assertIn(b">UAT<", response.data)
         self.assertIn(b"Testing environment", response.data)
 
+    def test_uat_stage_renders_environment_banner_before_login(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_ALLOWED_EMAILS": "allowed@npt.sg",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_STAGE": "uat",
+            },
+            clear=False,
+        ):
+            app = create_app()
+            app.testing = True
+
+            with app.test_client() as client:
+                response = client.get("/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"environment-banner-uat", response.data)
+        self.assertIn(b">UAT<", response.data)
+        self.assertIn(b"Testing environment", response.data)
+        self.assertIn(b"Continue with Google", response.data)
+
     def test_live_stage_does_not_render_environment_banner_by_default(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,

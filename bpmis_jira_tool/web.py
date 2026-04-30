@@ -2010,6 +2010,8 @@ def create_app() -> Flask:
                 "can_access_gmail_seatalk_demo": False,
                 "can_access_source_code_qa": False,
                 "can_manage_source_code_qa": False,
+                "asset_revision": _current_release_revision(),
+                "portal_stage": str(settings.team_portal_stage or "").strip().lower(),
             }
         user_identity = _get_user_identity(settings)
         can_access_team_dashboard = _can_access_team_dashboard(user_identity)
