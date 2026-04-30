@@ -42,8 +42,11 @@ from bpmis_jira_tool.web import (
     _generate_productization_detailed_features_with_local_codex,
 )
 from prd_briefing.confluence import ConfluenceConnector
+from prd_briefing.openai_client import OpenAIClient
 from prd_briefing.reviewer import PRDBriefingReviewRequest, PRDReviewRequest, PRDReviewService
+from prd_briefing.service import PRDBriefingService, VoiceService
 from prd_briefing.storage import BriefingStore
+from prd_briefing.text_generation import CodexTextGenerationClient
 
 
 BPMIS_PROXY_SLOW_OPERATION_SECONDS = 5.0
@@ -263,6 +266,30 @@ def create_local_agent_app() -> Flask:
                 force_refresh=bool(payload.get("force_refresh")),
             )
         )
+        return jsonify(result)
+
+    @app.post("/api/local-agent/prd-briefing/process-prd")
+    def prd_briefing_process_prd():
+        payload = request.get_json(silent=True) or {}
+        service = _build_prd_briefing_service(settings)
+        result = service.process_prd_for_presentation(
+            owner_key=str(payload.get("owner_key") or ""),
+            page_ref=str(payload.get("page_ref") or payload.get("prd_url") or ""),
+            text=str(payload.get("text") or ""),
+        )
+        return jsonify(result)
+
+    @app.post("/api/local-agent/prd-briefing/generate-audio")
+    def prd_briefing_generate_audio():
+        payload = request.get_json(silent=True) or {}
+        chunk = payload.get("chunk") if isinstance(payload.get("chunk"), dict) else payload
+        service = _build_prd_briefing_service(settings)
+        result = service.generate_presentation_audio(
+            owner_key=str(payload.get("owner_key") or ""),
+            session_id=str(payload.get("session_id") or payload.get("sessionId") or ""),
+            chunk=chunk,
+        )
+        _inline_prd_briefing_audio_data_url(service.store, result)
         return jsonify(result)
 
     @app.post("/api/local-agent/team-dashboard/monthly-report/draft")
@@ -1237,6 +1264,74 @@ def _build_prd_review_service(settings: Settings) -> PRDReviewService:
         settings=settings,
         workspace_root=Path(__file__).resolve().parent.parent,
     )
+
+
+def _build_prd_briefing_service(settings: Settings) -> PRDBriefingService:
+    store = BriefingStore(_data_root(settings) / "prd_briefing")
+    openai_client = OpenAIClient(
+        api_key=settings.openai_api_key,
+        base_url=settings.openai_api_base_url,
+        text_model=settings.prd_briefing_text_model,
+        embedding_model=settings.prd_briefing_embedding_model,
+        transcription_model=settings.prd_briefing_transcription_model,
+        tts_model=settings.prd_briefing_tts_model,
+    )
+    text_client = CodexTextGenerationClient(
+        settings=settings,
+        workspace_root=Path(__file__).resolve().parent.parent,
+        prompt_mode="prd_briefing_presentation_chunks_codex",
+        codex_model=settings.prd_briefing_codex_model,
+    )
+    confluence = ConfluenceConnector(
+        base_url=settings.confluence_base_url,
+        email=settings.confluence_email,
+        api_token=settings.confluence_api_token,
+        bearer_token=settings.confluence_bearer_token,
+        store=store,
+    )
+    voice_service = VoiceService(
+        store=store,
+        openai_client=openai_client,
+        tts_provider=settings.prd_briefing_tts_provider,
+        edge_mandarin_voice=settings.prd_briefing_edge_mandarin_voice,
+        edge_english_voice=settings.prd_briefing_edge_english_voice,
+        edge_rate=settings.prd_briefing_edge_rate,
+        openai_mandarin_voice=settings.prd_briefing_openai_mandarin_voice,
+        openai_voice_speed=settings.prd_briefing_openai_voice_speed,
+        openai_custom_voice_enabled=settings.prd_briefing_openai_custom_voice_enabled,
+        openai_tts_fallback_enabled=settings.prd_briefing_openai_tts_fallback_enabled,
+        elevenlabs_api_key=settings.elevenlabs_api_key,
+        elevenlabs_mandarin_model_id=settings.elevenlabs_mandarin_model_id,
+        elevenlabs_mandarin_voice_id=settings.elevenlabs_mandarin_voice_id,
+    )
+    return PRDBriefingService(
+        store=store,
+        confluence=confluence,
+        openai_client=openai_client,
+        text_client=text_client,
+        voice_service=voice_service,
+        answer_audio_enabled=settings.prd_briefing_answer_audio_enabled,
+        walkthrough_prewarm_enabled=False,
+    )
+
+
+def _inline_prd_briefing_audio_data_url(store: BriefingStore, result: dict[str, Any]) -> None:
+    chunk = result.get("chunk") if isinstance(result.get("chunk"), dict) else None
+    if not chunk:
+        return
+    audio_url = str(chunk.get("audioUrl") or "")
+    prefix = "/prd-briefing/assets/"
+    if not audio_url.startswith(prefix):
+        return
+    relative_path = audio_url[len(prefix):]
+    asset_path = (store.root_dir / relative_path).resolve()
+    try:
+        if store.root_dir.resolve() not in asset_path.parents or not asset_path.exists():
+            return
+        encoded = base64.b64encode(asset_path.read_bytes()).decode("ascii")
+    except OSError:
+        return
+    chunk["audioUrl"] = f"data:audio/mpeg;base64,{encoded}"
 
 
 def _build_monthly_report_service(settings: Settings) -> MonthlyReportService:

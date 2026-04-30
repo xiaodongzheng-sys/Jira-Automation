@@ -151,6 +151,14 @@ class LocalAgentClient:
         result = self._request("POST", "/api/local-agent/prd-briefing-review", payload)
         return result if isinstance(result, dict) else {}
 
+    def prd_briefing_process_prd(self, payload: dict[str, Any]) -> dict[str, Any]:
+        result = self._request("POST", "/api/local-agent/prd-briefing/process-prd", payload)
+        return result if isinstance(result, dict) else {}
+
+    def prd_briefing_generate_audio(self, payload: dict[str, Any]) -> dict[str, Any]:
+        result = self._request("POST", "/api/local-agent/prd-briefing/generate-audio", payload)
+        return result if isinstance(result, dict) else {}
+
     def team_dashboard_monthly_report_draft(self, payload: dict[str, Any], *, progress_callback: Callable[..., None] | None = None) -> dict[str, Any]:
         if progress_callback is None:
             result = self._request("POST", "/api/local-agent/team-dashboard/monthly-report/draft", payload)

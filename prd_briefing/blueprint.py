@@ -87,12 +87,17 @@ def create_prd_briefing_blueprint() -> Blueprint:
         try:
             owner_key = current_app.config["GET_USER_IDENTITY"]()["config_key"]
             payload = request.get_json(force=True)
-            service = _build_service()
-            data = service.process_prd_for_presentation(
-                owner_key=owner_key,
-                page_ref=str(payload.get("page_ref") or payload.get("prd_url") or "").strip(),
-                text=str(payload.get("text") or "").strip(),
-            )
+            request_payload = {
+                "owner_key": owner_key,
+                "page_ref": str(payload.get("page_ref") or payload.get("prd_url") or "").strip(),
+                "text": str(payload.get("text") or "").strip(),
+            }
+            settings = current_app.config["SETTINGS"]
+            if _local_agent_prd_briefing_enabled(settings):
+                data = _build_local_agent_client(settings).prd_briefing_process_prd(request_payload)
+            else:
+                service = _build_service()
+                data = service.process_prd_for_presentation(**request_payload)
             return jsonify(data)
         except ToolError as error:
             return jsonify({"status": "error", "message": str(error)}), 400
@@ -110,12 +115,17 @@ def create_prd_briefing_blueprint() -> Blueprint:
             owner_key = current_app.config["GET_USER_IDENTITY"]()["config_key"]
             payload = request.get_json(force=True)
             chunk = payload.get("chunk") if isinstance(payload.get("chunk"), dict) else payload
-            service = _build_service()
-            data = service.generate_presentation_audio(
-                owner_key=owner_key,
-                session_id=str(payload.get("session_id") or payload.get("sessionId") or "").strip(),
-                chunk=chunk,
-            )
+            request_payload = {
+                "owner_key": owner_key,
+                "session_id": str(payload.get("session_id") or payload.get("sessionId") or "").strip(),
+                "chunk": chunk,
+            }
+            settings = current_app.config["SETTINGS"]
+            if _local_agent_prd_briefing_enabled(settings):
+                data = _build_local_agent_client(settings).prd_briefing_generate_audio(request_payload)
+            else:
+                service = _build_service()
+                data = service.generate_presentation_audio(**request_payload)
             return jsonify(data)
         except Exception as error:  # noqa: BLE001
             return jsonify({"status": "error", "message": str(error) or "Could not generate audio for this chunk."}), 400
@@ -219,6 +229,14 @@ def _local_agent_source_code_qa_enabled(settings: Settings) -> bool:
         and settings.local_agent_base_url
         and settings.local_agent_hmac_secret
         and settings.local_agent_source_code_qa_enabled
+    )
+
+
+def _local_agent_prd_briefing_enabled(settings: Settings) -> bool:
+    return bool(
+        _local_agent_mode_enabled(settings)
+        and settings.local_agent_base_url
+        and settings.local_agent_hmac_secret
     )
 
 
