@@ -1118,9 +1118,19 @@ class BPMISClientTests(unittest.TestCase):
                         }
                     }
                 if path == "/api/v1/issues/list":
-                    return {"data": {"rows": [{"id": 9001, "jiraKey": "AF-101"}] if state["linked"] else []}}
+                    if method == "PUT":
+                        self.assertEqual(body["id"], [9001])
+                        self.assertEqual(body["parentIds"], [225159])
+                        self.assertEqual(body["parentIssueId"], 225159)
+                        state["linked"] = True
+                        return {"data": {"issuesToUpdate": [{"id": 9001, "parentIds": [225159]}]}}
+                    search = json.loads(params["search"])
+                    sub_queries = search.get("subQueries") or []
+                    if len(sub_queries) > 1 and sub_queries[1] == {"parentIds": [225159]}:
+                        return {"data": {"rows": [{"id": 9001, "jiraKey": "AF-101"}] if state["linked"] else []}}
+                    return {"data": {"rows": [{"id": 9001, "jiraKey": "AF-101", "parentIds": []}]}}
                 if path == "/api/v1/issues/batchCreateJiraIssue":
-                    self.assertEqual(method, "POST")
+                    self.fail("Existing Jira link must update the BPMIS task row, not create Jira.")
                     state["linked"] = True
                     return {"data": {"add": [{"jiraLink": "https://jira.shopee.io/browse/AF-101"}]}}
                 raise AssertionError(path)
@@ -1129,9 +1139,10 @@ class BPMISClientTests(unittest.TestCase):
 
             detail = client.link_jira_ticket_to_project("AF-101", "225159")
 
-            link_call = next(call for call in calls if call[0] == "/api/v1/issues/batchCreateJiraIssue")
-            self.assertEqual(link_call[3][0]["parentIssueId"], 225159)
-            self.assertEqual(link_call[3][0]["jiraLink"], "https://jira.shopee.io/browse/AF-101")
+            link_call = next(call for call in calls if call[0] == "/api/v1/issues/list" and call[1] == "PUT")
+            self.assertEqual(link_call[3]["id"], [9001])
+            self.assertEqual(link_call[3]["parentIds"], [225159])
+            self.assertEqual(link_call[3]["parentIssueId"], 225159)
             self.assertEqual(detail["parentIds"], [225159])
 
     def test_get_jira_ticket_detail_uses_direct_jira_api_when_token_configured(self):

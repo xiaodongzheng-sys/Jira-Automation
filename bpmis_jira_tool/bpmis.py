@@ -842,20 +842,31 @@ class BPMISDirectApiClient(BPMISClient):
         if self._issue_is_linked_to_parent(normalized_ticket_key, normalized_project_id):
             return self.get_jira_ticket_detail(normalized_ticket_key)
 
-        ticket_link = self._normalize_ticket_link(normalized_ticket_key) or normalized_ticket_key
+        issue_row = self._find_bpmis_task_row_for_jira_key(normalized_ticket_key)
+        issue_id = self._extract_issue_identifier(issue_row)
+        if not issue_id:
+            raise BPMISError(
+                "Could not link Jira task to BPMIS Biz Project through BPMIS. "
+                "BPMIS does not have a synced task row for this Jira ticket yet."
+            )
+
+        existing_parent_ids = self._extract_parent_issue_ids(issue_row)
+        parent_ids = [int(parent_id) for parent_id in existing_parent_ids if str(parent_id).strip().isdigit()]
+        project_parent_id = int(normalized_project_id)
+        if project_parent_id not in parent_ids:
+            parent_ids.append(project_parent_id)
+        link_payload = {
+            "id": [int(issue_id)],
+            "parentIds": parent_ids,
+            "parentIssueId": project_parent_id,
+        }
         try:
             response = self._api_request(
-                "/api/v1/issues/batchCreateJiraIssue",
-                method="POST",
-                body=[
-                    {
-                        "typeId": self.TASK_TYPE_ID,
-                        "parentIssueId": int(normalized_project_id),
-                        "jiraLink": ticket_link,
-                    }
-                ],
+                "/api/v1/issues/list",
+                method="PUT",
+                body=link_payload,
             )
-            self._write_debug_capture({"parentIssueId": normalized_project_id, "jiraLink": ticket_link}, response)
+            self._write_debug_capture(link_payload, response)
         except (BPMISError, ValueError) as error:
             raise BPMISError(
                 "Could not link Jira task to BPMIS Biz Project through BPMIS. "
@@ -893,6 +904,26 @@ class BPMISDirectApiClient(BPMISClient):
         if self._issue_is_linked_to_parent(normalized_ticket_key, normalized_project_id):
             raise BPMISError("BPMIS accepted the delink request, but the Jira task is still linked to this Biz Project.")
         return self.get_jira_ticket_detail(normalized_ticket_key)
+
+    def _find_bpmis_task_row_for_jira_key(self, ticket_key: str) -> dict[str, Any]:
+        normalized_ticket_key = self._extract_issue_key(str(ticket_key or "")) or str(ticket_key or "").strip()
+        if not normalized_ticket_key:
+            return {}
+        for search_payload in self._jira_ticket_search_payloads(normalized_ticket_key):
+            payload = self._safe_api_request(
+                "/api/v1/issues/list",
+                params={"search": json.dumps(search_payload)},
+            )
+            rows = ((payload or {}).get("data") or {}).get("rows") or []
+            match = next((row for row in rows if self._row_matches_jira_key(row, normalized_ticket_key)), None)
+            if not isinstance(match, dict):
+                continue
+            issue_id = self._extract_issue_identifier(match)
+            if not issue_id:
+                return match
+            detail = self.get_issue_detail(issue_id)
+            return self._merge_issue_payloads(match, detail) if detail else match
+        return {}
 
     def _build_create_payload(
         self,
