@@ -1521,6 +1521,22 @@
     return items;
   };
 
+  const renderRawModelAnswer = (payload, answer, directAnswer, hasStructuredSections) => {
+    const rawAnswer = String(payload?.llm_answer || answer || '').trim();
+    if (!hasStructuredSections || !rawAnswer) return '';
+    const normalizedDirect = String(directAnswer || '').trim();
+    const shouldShow = rawAnswer.length > normalizedDirect.length + 80 || /\n\s*(?:Conclusion|Evidence|Source-code Evidence|Missing|Next Checks|Confidence)\b/i.test(rawAnswer);
+    if (!shouldShow) return '';
+    const provider = String(payload?.llm_provider || '').toLowerCase();
+    const label = provider.includes('codex') ? 'Raw Codex Answer' : 'Raw Model Answer';
+    return `
+      <details class="source-qa-raw-answer">
+        <summary>${escapeHtml(label)}</summary>
+        <pre>${escapeHtml(rawAnswer)}</pre>
+      </details>
+    `;
+  };
+
   const renderReadableAnswerBody = (payload, answer) => {
     const structured = payload?.structured_answer || {};
     const claims = normalizedClaimsForDisplay(Array.isArray(structured.claims) ? structured.claims : []);
@@ -1554,6 +1570,7 @@
             <ul>${missing.slice(0, 6).map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</ul>
           </section>
         ` : ''}
+        ${renderRawModelAnswer(payload, answer, directAnswer, Boolean(claims.length || missing.length))}
       `;
     }
     const paragraphs = answer.split(/\n{2,}/).map((part) => part.trim()).filter(Boolean);
