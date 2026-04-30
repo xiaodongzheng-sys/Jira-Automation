@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
+import requests
 from flask import Blueprint, Response, current_app, flash, jsonify, redirect, render_template, request, send_file, url_for
 
 from bpmis_jira_tool.config import Settings
@@ -193,6 +194,19 @@ def create_prd_briefing_blueprint() -> Blueprint:
         service = _build_service()
         if not _is_allowed_confluence_image_source(src, service.confluence.base_url):
             return jsonify({"status": "error", "message": "Unsupported image source."}), 400
+        settings = current_app.config["SETTINGS"]
+        if _local_agent_prd_briefing_enabled(settings) and not _is_loopback_url(settings.local_agent_base_url):
+            response = requests.get(
+                f"{str(settings.local_agent_base_url or '').rstrip('/')}/prd-briefing/image-proxy?src={quote(src, safe='')}",
+                headers={"Accept": "image/*,*/*;q=0.8"},
+                timeout=(settings.local_agent_connect_timeout_seconds, settings.local_agent_timeout_seconds),
+            )
+            return Response(
+                response.content,
+                status=response.status_code,
+                content_type=response.headers.get("content-type", "application/octet-stream"),
+                headers={"Cache-Control": "private, max-age=300"},
+            )
         connector = service.confluence
         response = connector._request(src, accept="image/*,*/*;q=0.8")
         return Response(
@@ -238,6 +252,11 @@ def _local_agent_prd_briefing_enabled(settings: Settings) -> bool:
         and settings.local_agent_base_url
         and settings.local_agent_hmac_secret
     )
+
+
+def _is_loopback_url(value: str | None) -> bool:
+    parsed = urlparse(str(value or ""))
+    return parsed.hostname in {"127.0.0.1", "localhost", "::1"}
 
 
 def _build_local_agent_client(settings: Settings) -> LocalAgentClient:

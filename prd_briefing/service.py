@@ -605,6 +605,8 @@ class PRDBriefingService:
             title=title,
         )
         chunks = self._compose_presentation_chunks(source_text=source_text, image_urls=image_urls)
+        for chunk in chunks:
+            chunk["imageUrls"] = [proxy_confluence_image_url(url) for url in normalize_image_urls(chunk.get("imageUrls") or [])]
         return {
             "status": "ok",
             "session": {
@@ -2256,6 +2258,13 @@ def normalize_image_urls(value: Any) -> list[str]:
         if url.startswith("/prd-briefing/image-proxy") or url.startswith("/prd-briefing/assets/") or url.startswith("http://") or url.startswith("https://"):
             urls.append(url)
     return dedupe_non_empty(urls)[:6]
+
+
+def proxy_confluence_image_url(url: str) -> str:
+    clean = str(url or "").strip()
+    if clean.startswith("http://") or clean.startswith("https://"):
+        return f"/prd-briefing/image-proxy?src={quote(clean, safe='')}"
+    return clean
 
 
 def normalize_presentation_chunks(chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
