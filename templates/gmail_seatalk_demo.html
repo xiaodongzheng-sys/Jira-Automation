@@ -503,11 +503,6 @@
 
     <section
       data-seatalk-demo-root
-      data-seatalk-insights-url="{{ seatalk_insights_url }}"
-      data-seatalk-project-updates-url="{{ seatalk_project_updates_url }}"
-      data-seatalk-todos-url="{{ seatalk_todos_url }}"
-      data-seatalk-open-todos-url="{{ seatalk_open_todos_url }}"
-      data-seatalk-todo-complete-url="{{ seatalk_todo_complete_url }}"
       data-seatalk-name-mappings-url="{{ seatalk_name_mappings_url }}"
       data-seatalk-configured="{{ 'true' if seatalk_configured else 'false' }}"
     >
@@ -516,68 +511,21 @@
           <div>
             <p class="eyebrow">SeaTalk</p>
             <h2>SeaTalk Summary</h2>
-            <p class="help-text">Project updates and my to-do items from recent SeaTalk conversations.</p>
-          </div>
-          <div class="button-row">
-            <a class="button button-secondary" href="{{ url_for('gmail_seatalk_demo_seatalk_export') }}">
-              Download 7-Day Chat History
-            </a>
+            <p class="help-text">Map SeaTalk source IDs to readable names used in exports and Codex evidence.</p>
           </div>
         </div>
         <div class="empty-state mail-demo-status" data-seatalk-status data-tone="neutral">
           {% if seatalk_configured %}
-            <p>Choose a section to generate.</p>
+            <p>Loading name mapping workspace.</p>
           {% else %}
-            <p>SeaTalk desktop data is not available yet. Open the SeaTalk Mac app on this machine to enable the summary.</p>
+            <p>SeaTalk desktop data is not available yet. Open the SeaTalk Mac app on this machine to enable name mapping.</p>
           {% endif %}
         </div>
         <div class="mail-demo-grid" data-seatalk-content {% if not seatalk_configured %}hidden{% endif %}>
-          <div class="seatalk-tabs" role="tablist" aria-label="SeaTalk Summary tabs">
-            <button class="seatalk-tab" type="button" role="tab" aria-selected="true" data-seatalk-tab="summary">Summary</button>
-            <button class="seatalk-tab" type="button" role="tab" aria-selected="false" data-seatalk-tab="mapping">Name Mapping</button>
+          <div class="seatalk-tabs" role="tablist" aria-label="SeaTalk tabs">
+            <button class="seatalk-tab" type="button" role="tab" aria-selected="true" data-seatalk-tab="mapping">Name Mapping</button>
           </div>
-          <section data-seatalk-panel="summary">
-            <section class="seatalk-insights-grid" data-seatalk-insights-content>
-              <article class="mail-demo-card">
-                <div class="mail-demo-pill">Action items</div>
-                <div class="panel-head panel-head-compact">
-                  <div>
-                    <h3>To-do Items</h3>
-                    <p>My to-dos inferred from new SeaTalk messages, sorted by priority.</p>
-                  </div>
-                  <button class="button button-primary" type="button" data-seatalk-generate-todos>Generate To-dos</button>
-                </div>
-                <div class="empty-state mail-demo-status" data-seatalk-todos-status data-tone="neutral">
-                  <p>Loading saved to-dos...</p>
-                </div>
-                <div class="seatalk-todo-columns" data-seatalk-todos hidden>
-                  <div class="seatalk-insight-list" data-seatalk-my-todos></div>
-                </div>
-              </article>
-              <article class="mail-demo-card">
-                <div class="mail-demo-pill">Project updates</div>
-                <div class="panel-head panel-head-compact">
-                  <div>
-                    <h3>Project Updates</h3>
-                    <p>Major updates from the last 7 days across your SeaTalk conversations.</p>
-                  </div>
-                  <button class="button button-primary" type="button" data-seatalk-generate-project-updates>Generate Project Updates</button>
-                </div>
-                <div class="empty-state mail-demo-status" data-seatalk-project-updates-status data-tone="neutral">
-                  <p>Click Generate Project Updates to load updates.</p>
-                </div>
-                <div data-seatalk-project-updates hidden>
-                  <div class="seatalk-project-tabs" role="tablist" aria-label="Project update product lines">
-                    <button class="seatalk-project-tab" type="button" role="tab" aria-selected="true">Anti-fraud</button>
-                    <button class="seatalk-project-tab" type="button" role="tab" aria-selected="false">Credit Risk</button>
-                    <button class="seatalk-project-tab" type="button" role="tab" aria-selected="false">Ops Risk</button>
-                    <button class="seatalk-project-tab" type="button" role="tab" aria-selected="false">General</button>
-                  </div>
-                </div>
-              </article>
-            </section>
-          </section>
-          <section data-seatalk-panel="mapping" hidden>
+          <section data-seatalk-panel="mapping">
             <article class="mail-demo-card">
               <div class="mail-demo-pill">Name mapping</div>
               <h3>Name Mapping</h3>
