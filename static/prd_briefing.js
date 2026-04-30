@@ -148,6 +148,9 @@
             height: auto;
             max-width: 100%;
           }
+          img[src] {
+            cursor: zoom-in;
+          }
           p, ul, ol { margin-top: 0; }
           a { color: #0b66d8; }
           .table-wrap,
@@ -156,6 +159,44 @@
             overflow-x: auto;
           }
         </style>
+        <script>
+          (() => {
+            const openImagePreview = (image) => {
+              const src = image.currentSrc || image.src || image.getAttribute('src') || '';
+              if (!src) return;
+              window.parent.postMessage({
+                type: 'prd-briefing:image-preview',
+                src,
+                alt: image.alt || image.getAttribute('aria-label') || 'PRD image preview',
+              }, '*');
+            };
+            document.addEventListener('click', (event) => {
+              const image = event.target && event.target.closest ? event.target.closest('img[src]') : null;
+              if (!image) return;
+              event.preventDefault();
+              openImagePreview(image);
+            });
+            document.addEventListener('keydown', (event) => {
+              if (event.key !== 'Enter' && event.key !== ' ') return;
+              const image = event.target && event.target.closest ? event.target.closest('img[src]') : null;
+              if (!image) return;
+              event.preventDefault();
+              openImagePreview(image);
+            });
+            const prepareImages = () => {
+              document.querySelectorAll('img[src]').forEach((image) => {
+                if (!image.hasAttribute('tabindex')) image.setAttribute('tabindex', '0');
+                image.setAttribute('role', 'button');
+                if (!image.hasAttribute('aria-label')) image.setAttribute('aria-label', image.alt || 'Open PRD image preview');
+              });
+            };
+            if (document.readyState === 'loading') {
+              document.addEventListener('DOMContentLoaded', prepareImages);
+            } else {
+              prepareImages();
+            }
+          })();
+        </script>
       </head>
       <body>${bodyMarkup}</body>
     </html>`;
@@ -685,6 +726,17 @@
     }
   };
 
+  const imagePreviewSrcFromFrameMessage = (src) => {
+    try {
+      const url = new URL(String(src || ''), window.location.href);
+      if (url.origin !== window.location.origin) return '';
+      if (url.pathname !== '/prd-briefing/image-proxy') return '';
+      return url.href;
+    } catch {
+      return '';
+    }
+  };
+
   const addHorizontalHints = () => {
     if (!sectionDetailNode) return;
     sectionDetailNode.querySelectorAll('.briefing-scroll-hint').forEach((hint) => hint.remove());
@@ -1040,7 +1092,7 @@
         const frame = document.createElement('iframe');
         frame.className = 'briefing-confluence-frame';
         frame.title = `${section.section_path || 'PRD section'} Confluence view`;
-        frame.setAttribute('sandbox', 'allow-popups allow-popups-to-escape-sandbox');
+        frame.setAttribute('sandbox', 'allow-scripts allow-popups allow-popups-to-escape-sandbox');
         frame.srcdoc = buildConfluenceFrameDocument(html);
         target.appendChild(frame);
         if (status) status.textContent = 'Confluence view';
@@ -1281,6 +1333,15 @@
       }
     });
   }
+
+  window.addEventListener('message', (event) => {
+    if (event.source === window) return;
+    const payload = event.data || {};
+    if (payload.type !== 'prd-briefing:image-preview') return;
+    const src = imagePreviewSrcFromFrameMessage(payload.src);
+    if (!src) return;
+    openImageLightbox(src, payload.alt || 'PRD image preview');
+  });
 
   document.addEventListener('keydown', (event) => {
     if (event.key === 'Escape') {
