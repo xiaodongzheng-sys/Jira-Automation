@@ -963,6 +963,24 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         self.assertEqual(second.created_count, 0)
         self.assertEqual(second.skipped_count, 3)
 
+    def test_daily_trello_sync_is_disabled_when_env_is_missing(self):
+        briefing = {
+            "direct_action_todos": [{"task": "Review rollout", "domain": "Anti-fraud", "priority": "high", "due": "today", "evidence": "Alice"}],
+            "watch_delegate_todos": [],
+            "team_member_reminders": [],
+        }
+        now = datetime(2026, 4, 30, 13, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch.dict("os.environ", {"TRELLO_API_KEY": "", "TRELLO_API_TOKEN": "", "TRELLO_BOARD_ID": ""}, clear=False):
+                result = sync_daily_summary_to_trello(
+                    briefing=briefing,
+                    run_date="2026-04-30",
+                    run_slot="midday",
+                    data_root=Path(temp_dir),
+                    now=now,
+                )
+        self.assertEqual(result.status, "disabled")
+
     def test_daily_trello_sync_tracks_morning_and_midday_separately(self):
         class FakeTrelloClient:
             def __init__(self):

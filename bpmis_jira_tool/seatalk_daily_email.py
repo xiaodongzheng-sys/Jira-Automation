@@ -742,7 +742,10 @@ def sync_daily_summary_to_trello(
     trello_client: TrelloDailySummaryClient | None = None,
     trello_store: TrelloDailySummaryStore | None = None,
 ) -> TrelloSyncResult:
-    client = trello_client or TrelloDailySummaryClient.from_env()
+    try:
+        client = trello_client or TrelloDailySummaryClient.from_env()
+    except ConfigError:
+        return TrelloSyncResult(status="disabled")
     store = trello_store or TrelloDailySummaryStore(data_root / "seatalk" / "daily_trello_cards.json")
     specs = build_trello_card_specs(briefing=briefing, run_date=run_date, window_label=window_label)
     if not specs:
