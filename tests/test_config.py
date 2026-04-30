@@ -12,6 +12,15 @@ class ConfigTests(unittest.TestCase):
             settings = Settings.from_env()
             self.assertIsNone(settings.bpmis_api_access_token)
 
+    def test_from_env_loads_team_portal_stage(self):
+        with patch.dict(os.environ, {"TEAM_PORTAL_STAGE": "uat"}, clear=True), patch(
+            "bpmis_jira_tool.config.find_dotenv",
+            return_value="",
+        ):
+            settings = Settings.from_env()
+
+        self.assertEqual(settings.team_portal_stage, "uat")
+
     def test_from_env_loads_dotenv_values(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             original_cwd = os.getcwd()

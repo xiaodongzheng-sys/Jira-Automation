@@ -1,10 +1,11 @@
 # Release Checklist
 
-Use this checklist for every routine portal release. The default release target is the Mac-hosted portal exposed through the fixed ngrok URL:
+Use this checklist for every routine portal release. The default release flow is UAT first, then fixed-ngrok Live only after explicit approval:
 
 - The Mac-hosted portal exposed through the fixed ngrok URL is the primary teammate entrypoint.
 - The Mac host owns Mac-only capabilities and durable portal state, including Source Code Q&A repos/indexes, Codex CLI access, Source Code Q&A sessions/attachments/runtime evidence, BPMIS setup/project rows, SeaTalk desktop data, and VPN-only BPMIS calls.
-- Cloud Run is a backup surface only. Do not deploy, dry-run, describe, or smoke-test Cloud Run unless the release request explicitly says to deploy or validate Cloud Run.
+- Cloud Run tagged revisions provide the UAT environment. UAT uses `--no-traffic --tag uat`, so it does not change Cloud Run live traffic or the fixed-ngrok Live portal.
+- Fixed-ngrok Live must not be updated until the user explicitly confirms UAT has passed and asks to publish Live.
 
 ## 1. Pre-Release
 
@@ -58,11 +59,52 @@ LOCAL_AGENT_SEATALK_ENABLED
 LOCAL_AGENT_BPMIS_ENABLED
 SOURCE_CODE_QA_QUERY_SYNC_MODE
 BPMIS_CALL_MODE
+TEAM_PORTAL_STAGE
+TEAM_PORTAL_RELEASE_REVISION
 ```
 
-## 2. Cloud Run Opt-In Release
+## 2. UAT Release
 
-Skip this section for routine releases. Use it only when the user explicitly asks to deploy Cloud Run, publish the cloud version, update the cloud backup, or validate Cloud Run.
+Run this for routine releases after changes are committed and pushed to `origin/main`.
+
+- Deploy the pushed commit to a Cloud Run tagged UAT revision. The script requires a clean checkout with `HEAD == origin/main`, sets `TEAM_PORTAL_STAGE=uat`, pins `TEAM_PORTAL_RELEASE_REVISION` to the Git SHA, and deploys with `--no-traffic --tag uat`.
+
+```bash
+CLOUD_RUN_DEPLOY_ACCOUNT=vertex-ai-user@civil-partition-492805-v7.iam.gserviceaccount.com \
+./scripts/deploy_cloud_run_uat.sh
+```
+
+- If the active personal `gcloud` account works for the current shell, the account override can be omitted. If not, keep the configured deploy service account:
+
+```bash
+CLOUD_RUN_DEPLOY_ACCOUNT=vertex-ai-user@civil-partition-492805-v7.iam.gserviceaccount.com \
+CLOUD_RUN_UAT_DRY_RUN=1 ./scripts/deploy_cloud_run_uat.sh
+```
+
+- Verify UAT before asking for Live publication:
+
+```bash
+curl https://<uat-tag-url>/healthz/
+curl https://<uat-tag-url>/api/local-agent/healthz
+```
+
+- Confirm these before treating UAT as passed:
+  - UAT URL opens and shows the `UAT` environment badge.
+  - UAT `/healthz/` revision equals the intended Git commit.
+  - The fixed-ngrok Live `/healthz` still serves the old Live revision until promotion.
+  - Any changed workflow passes the expected manual smoke checks.
+
+UAT intentionally shares the existing Mac local-agent public path for Mac-only capabilities. It isolates code and traffic, not all downstream data or external write effects. If a change touches local-agent code, restart and smoke-test the local-agent path separately before approval.
+
+If Google OAuth login must be tested on UAT, add the UAT callback URL in Google Cloud Console:
+
+```text
+https://<uat-tag-url>/auth/google/callback
+```
+
+## 3. Explicit Cloud Run Live/Backup Release
+
+Skip this section for routine UAT-gated releases. Use it only when the user explicitly asks to deploy Cloud Run live, publish the cloud version, update the cloud backup, or validate Cloud Run live traffic.
 
 - Run a dry-run first to catch missing `gcloud`, base URL, local-agent URL, and deploy-env problems before Cloud Build starts:
 
@@ -104,7 +146,7 @@ LOCAL_AGENT_BPMIS_ENABLED=true
 
 - Do not point Cloud Run at a localhost local-agent URL. Cloud Run needs the public Mac local-agent URL, normally from `LOCAL_AGENT_PUBLIC_URL` or `CLOUD_RUN_LOCAL_AGENT_BASE_URL`. If those are not set and `LOCAL_AGENT_BASE_URL` is localhost, the deploy scripts fall back to non-localhost `TEAM_PORTAL_BASE_URL` because the Mac portal exposes `/api/local-agent/*` as a proxy.
 
-## 3. Mac Local-Agent Release
+## 4. Mac Local-Agent Release
 
 - Update the host workspace that actually runs the Mac-local services, usually:
 
@@ -134,27 +176,33 @@ curl https://your-fixed-agent-domain.ngrok.app/healthz
 
 - Confirm `LOCAL_AGENT_TEAM_PORTAL_DATA_DIR` points at the durable Mac data directory that contains `team_portal.db`, Source Code Q&A repos/indexes, sessions, attachments, runtime evidence, and BPMIS project/config rows. Do not rely on Cloud Run container storage for these records.
 
-## 4. Default Mac-Hosted Portal Release
+## 5. Live Promotion
 
-This is the routine release path for teammate-facing changes because the fixed ngrok URL is the primary portal entrypoint. Update the host workspace and restart the supervised stack:
+Run this only after the user explicitly confirms UAT passed and asks to publish Live. The promotion script reads the Cloud Run `uat` tag, verifies the tagged revision's `TEAM_PORTAL_RELEASE_REVISION`, refuses to publish if `origin/main` has moved past that UAT commit, fast-forwards the host workspace, restarts fixed-ngrok Live, and verifies `/healthz`.
+
+```bash
+CLOUD_RUN_DEPLOY_ACCOUNT=vertex-ai-user@civil-partition-492805-v7.iam.gserviceaccount.com \
+./scripts/promote_uat_to_live.sh
+```
+
+The script does not change Cloud Run live traffic. The fixed-ngrok URL remains the primary Live portal.
+
+After promotion, run doctor for the full stack view:
 
 ```bash
 cd ~/Workspace/jira-creation-stack-host
-git pull --ff-only
-./scripts/run_team_stack.sh restart
 ./scripts/run_team_stack.sh doctor
 ```
 
-When `BPMIS_CALL_MODE=local_agent`, `run_team_stack.sh restart` also restarts the Mac local-agent first so portal BPMIS proxy changes do not run against a stale local-agent process.
+When `BPMIS_CALL_MODE=local_agent`, `run_team_stack.sh restart` also restarts the Mac local-agent first so portal BPMIS proxy changes do not run against a stale local-agent process. The doctor check verifies portal health, public URL health, ngrok inspector health, revision alignment, data directory readiness, and launchd friendliness.
 
-The doctor check should pass before treating the Mac-hosted portal/ngrok stack as live. It verifies portal health, public URL health, ngrok inspector health, revision alignment, data directory readiness, and launchd friendliness.
-
-For the fixed-ngrok primary-entry setup, confirm these values in the host `.env` before restart:
+For the fixed-ngrok primary-entry setup, confirm these values in the host `.env`:
 
 ```text
 TEAM_PORTAL_BASE_URL=https://<fixed-portal-ngrok-host>
 TEAM_PORTAL_HOST=127.0.0.1
 TEAM_PORTAL_PORT=5000
+TEAM_PORTAL_STAGE=
 ```
 
 Google OAuth callback URLs must match `TEAM_PORTAL_BASE_URL` exactly:
@@ -163,7 +211,7 @@ Google OAuth callback URLs must match `TEAM_PORTAL_BASE_URL` exactly:
 https://<fixed-portal-ngrok-host>/auth/google/callback
 ```
 
-## 5. Post-Release Acceptance
+## 6. Post-Release Acceptance
 
 Run these after the Mac-hosted portal is updated:
 
@@ -178,14 +226,16 @@ Run these after the Mac-hosted portal is updated:
 - SeaTalk Summary reads Mac desktop data from the Mac host.
 - `./scripts/run_team_stack.sh doctor` is clean.
 
-Only when the user explicitly requested Cloud Run deployment or validation, also verify:
+Only when the user explicitly requested Cloud Run live deployment or validation, also verify:
 
 - Cloud Run `/healthz` returns the expected revision and deploy hash.
 - `gcloud run services describe` reports the latest ready revision serving `100%` traffic, and `TEAM_PORTAL_DEPLOY_HASH` matches the deploy script's local hash.
 - Cloud Run `/api/local-agent/healthz` returns `source_code_qa: true` and `codex_ready: true` through the public Mac path.
 
-## 6. Easy-To-Miss Release Surfaces
+## 7. Easy-To-Miss Release Surfaces
 
+- UAT deploys do not restart the Mac local-agent by default. Local-agent code changes need an explicit local-agent restart/smoke before UAT is considered complete.
+- UAT deploys must not be promoted if `origin/main` has advanced beyond the tagged UAT commit. Re-deploy UAT from the latest commit instead.
 - Source Code Q&A index/retrieval changes need the Mac-hosted portal restarted because the Mac owns both the primary web request path and durable repos/indexes.
 - Local-agent code changes still need the Mac local-agent restarted when Cloud Run backup mode or local-agent-only features are in use.
 - BPMIS proxy changes need the fixed ngrok portal path checked by default; check Cloud Run env only when the user explicitly requested Cloud Run.
@@ -193,13 +243,14 @@ Only when the user explicitly requested Cloud Run deployment or validation, also
 - `scripts/deploy_cloud_run.sh` and `scripts/deploy_cloud_run_full.sh` matter only for explicit Cloud Run releases.
 - OAuth/base URL changes need Google Cloud Console callback URLs to match the released hostname.
 
-## 7. Rollback Notes
+## 8. Rollback Notes
 
-- Cloud Run rollback, only for explicit Cloud Run releases: redeploy a known-good image or source revision with `./scripts/deploy_cloud_run.sh`.
+- UAT rollback: re-run `./scripts/deploy_cloud_run_uat.sh` from the intended pushed commit. It replaces the `uat` tag without touching Live traffic.
+- Cloud Run live rollback, only for explicit Cloud Run live releases: redeploy a known-good image or source revision with `./scripts/deploy_cloud_run.sh`.
 - Mac local-agent rollback: check out the known-good commit in `~/Workspace/jira-creation-stack-host`, then restart `run_local_agent` and its tunnel.
 - Primary Mac-hosted portal rollback: check out the known-good commit in the host workspace, then run `./scripts/run_team_stack.sh restart` and `./scripts/run_team_stack.sh doctor`.
 
-## 8. Keep This Checklist Current
+## 9. Keep This Checklist Current
 
 Whenever a new production, deployment, local-agent, BPMIS proxy, Source Code Q&A, SeaTalk, OAuth, ngrok, launchd, host-workspace, or explicit Cloud Run issue is found, update this checklist in the same fix cycle.
 

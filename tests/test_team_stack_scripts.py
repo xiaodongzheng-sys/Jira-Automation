@@ -71,6 +71,8 @@ esac
             "scripts/install_team_stack_launchd.sh",
             "scripts/deploy_cloud_run.sh",
             "scripts/deploy_cloud_run_full.sh",
+            "scripts/deploy_cloud_run_uat.sh",
+            "scripts/promote_uat_to_live.sh",
             "scripts/build_cloud_run_image.sh",
         ]
 
@@ -137,6 +139,125 @@ exit 0
             self.assertIn("Cloud Run source hash:", completed.stdout)
             self.assertIn("Dry run only", completed.stdout)
             self.assertNotIn("unexpected deploy", completed.stderr)
+
+    def test_cloud_run_uat_deploy_uses_no_traffic_tagged_revision(self):
+        deploy_script = PROJECT_ROOT / "scripts/deploy_cloud_run_uat.sh"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            fake_bin = temp_path / "bin"
+            fake_bin.mkdir()
+            calls_path = temp_path / "gcloud-calls.log"
+            gcloud_path = fake_bin / "gcloud"
+            gcloud_path.write_text(
+                """#!/usr/bin/env bash
+set -euo pipefail
+
+printf '%s\\n' "$*" >> "$FAKE_GCLOUD_CALLS"
+if [[ "$*" == "run services describe"* ]]; then
+  printf '{"metadata":{"annotations":{"run.googleapis.com/invoker-iam-disabled":"true"}},"status":{"url":"https://team-portal-ekaykywtvq-as.a.run.app","traffic":[{"revisionName":"team-portal-00090-live","percent":100},{"tag":"uat","url":"https://uat---team-portal-ekaykywtvq-as.a.run.app","revisionName":"team-portal-00091-uat","percent":0}]}}\\n'
+  exit 0
+fi
+if [[ "$*" == "run deploy"* ]]; then
+  exit 0
+fi
+exit 0
+""",
+                encoding="utf-8",
+            )
+            gcloud_path.chmod(0o755)
+
+            completed = subprocess.run(
+                ["bash", str(deploy_script)],
+                capture_output=True,
+                text=True,
+                check=False,
+                env={
+                    **os.environ,
+                    "PATH": f"{fake_bin}:{os.environ['PATH']}",
+                    "PYTHON_BIN": sys.executable,
+                    "FAKE_GCLOUD_CALLS": str(calls_path),
+                    "CLOUD_RUN_UAT_SKIP_GIT_CHECK": "1",
+                    "CLOUD_RUN_LOCAL_AGENT_BASE_URL": "https://agent.example.ngrok.app",
+                    "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg",
+                    "BPMIS_BASE_URL": "https://bpmis.example.test",
+                },
+                cwd=PROJECT_ROOT,
+            )
+
+            self.assertEqual(completed.returncode, 0, msg=completed.stderr)
+            calls = calls_path.read_text(encoding="utf-8")
+            deploy_calls = [line for line in calls.splitlines() if line.startswith("run deploy")]
+            self.assertEqual(len(deploy_calls), 1, msg=calls)
+            self.assertIn("--no-traffic", deploy_calls[0])
+            self.assertIn("--tag uat", deploy_calls[0])
+            self.assertIn("TEAM_PORTAL_STAGE=uat", deploy_calls[0])
+            self.assertIn("TEAM_PORTAL_BASE_URL=https://uat---team-portal-ekaykywtvq-as.a.run.app", deploy_calls[0])
+            self.assertIn("TEAM_PORTAL_RELEASE_REVISION=", deploy_calls[0])
+            self.assertIn("Cloud Run UAT revision: team-portal-00091-uat", completed.stdout)
+            self.assertIn("keeps live traffic unchanged", completed.stdout)
+
+    def test_promote_uat_to_live_fails_when_origin_main_differs_from_uat_commit(self):
+        promote_script = PROJECT_ROOT / "scripts/promote_uat_to_live.sh"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            origin_path = temp_path / "origin"
+            host_path = temp_path / "host"
+            seed_path = temp_path / "seed"
+            subprocess.run(["git", "init", "-b", "main", str(seed_path)], check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=seed_path, check=True)
+            subprocess.run(["git", "config", "user.name", "Test User"], cwd=seed_path, check=True)
+            (seed_path / "README.md").write_text("first\n", encoding="utf-8")
+            subprocess.run(["git", "add", "README.md"], cwd=seed_path, check=True)
+            subprocess.run(["git", "commit", "-m", "first"], cwd=seed_path, check=True, capture_output=True)
+            uat_commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=seed_path, text=True).strip()
+            subprocess.run(["git", "clone", "--bare", str(seed_path), str(origin_path)], check=True, capture_output=True)
+            subprocess.run(["git", "clone", str(origin_path), str(host_path)], check=True, capture_output=True)
+            (seed_path / "README.md").write_text("second\n", encoding="utf-8")
+            subprocess.run(["git", "commit", "-am", "second"], cwd=seed_path, check=True, capture_output=True)
+            subprocess.run(["git", "remote", "add", "origin", str(origin_path)], cwd=seed_path, check=True)
+            subprocess.run(["git", "push", "origin", "main"], cwd=seed_path, check=True, capture_output=True)
+
+            fake_bin = temp_path / "bin"
+            fake_bin.mkdir()
+            gcloud_path = fake_bin / "gcloud"
+            gcloud_path.write_text(
+                """#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "$*" == "run services describe"* ]]; then
+  printf '{"status":{"traffic":[{"tag":"uat","url":"https://uat---team-portal-ekaykywtvq-as.a.run.app","revisionName":"team-portal-00091-uat","percent":0}]}}\\n'
+  exit 0
+fi
+if [[ "$*" == "run revisions describe"* ]]; then
+  printf '{"spec":{"containers":[{"env":[{"name":"TEAM_PORTAL_RELEASE_REVISION","value":"%s"}]}]}}\\n' "$FAKE_UAT_COMMIT"
+  exit 0
+fi
+exit 0
+""",
+                encoding="utf-8",
+            )
+            gcloud_path.chmod(0o755)
+
+            completed = subprocess.run(
+                ["bash", str(promote_script)],
+                capture_output=True,
+                text=True,
+                check=False,
+                env={
+                    **os.environ,
+                    "PATH": f"{fake_bin}:{os.environ['PATH']}",
+                    "PYTHON_BIN": sys.executable,
+                    "FAKE_UAT_COMMIT": uat_commit,
+                    "TEAM_STACK_HOST_ROOT": str(host_path),
+                    "PROMOTE_UAT_DRY_RUN": "1",
+                },
+                cwd=PROJECT_ROOT,
+            )
+
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn("UAT commit is not the current origin/main", completed.stdout)
 
     def test_cloud_run_default_deploy_still_uses_source(self):
         deploy_script = PROJECT_ROOT / "scripts/deploy_cloud_run.sh"

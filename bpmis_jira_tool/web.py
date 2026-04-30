@@ -2061,6 +2061,7 @@ def create_app() -> Flask:
             "can_access_source_code_qa": _can_access_source_code_qa(settings),
             "can_manage_source_code_qa": _can_manage_source_code_qa(settings),
             "asset_revision": _current_release_revision(),
+            "portal_stage": str(settings.team_portal_stage or "").strip().lower(),
         }
 
     @app.before_request

@@ -634,6 +634,29 @@ body {
   padding-inline: 12px;
 }
 
+.environment-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 auto 14px;
+  padding: 10px 14px;
+  border-radius: 8px;
+  font-size: 0.88rem;
+  line-height: 1.2;
+}
+
+.environment-banner strong {
+  font-size: 0.76rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.environment-banner-uat {
+  border: 1px solid rgba(180, 83, 9, 0.28);
+  background: #fff7ed;
+  color: #7c2d12;
+}
+
 .session-bar {
   display: flex;
   align-items: center;

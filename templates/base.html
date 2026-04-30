@@ -9,6 +9,12 @@
   </head>
   <body>
     <main class="page-shell{% block page_shell_class %}{% endblock %}">
+      {% if portal_stage == "uat" %}
+        <section class="environment-banner environment-banner-uat" aria-label="Portal environment">
+          <strong>UAT</strong>
+          <span>Testing environment</span>
+        </section>
+      {% endif %}
       {% if user_identity is defined %}
         <section class="session-bar" aria-label="Current session">
           <div class="session-copy">

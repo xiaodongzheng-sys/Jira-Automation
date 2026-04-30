@@ -142,6 +142,7 @@ class Settings:
     local_agent_seatalk_enabled: bool = False
     local_agent_bpmis_enabled: bool = False
     bpmis_call_mode: str = "direct"
+    team_portal_stage: str | None = None
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -167,6 +168,7 @@ class Settings:
             team_portal_host=_env_str("TEAM_PORTAL_HOST", "127.0.0.1"),
             team_portal_port=int(_env_str("TEAM_PORTAL_PORT", "5000")),
             team_portal_base_url=_env_str("TEAM_PORTAL_BASE_URL"),
+            team_portal_stage=_env_str("TEAM_PORTAL_STAGE"),
             team_allowed_emails=_env_csv("TEAM_ALLOWED_EMAILS"),
             team_allowed_email_domains=_env_csv("TEAM_ALLOWED_EMAIL_DOMAINS"),
             team_portal_data_dir=Path(_env_str("TEAM_PORTAL_DATA_DIR", ".")),

@@ -171,6 +171,82 @@ class TeamPortalAccessTests(unittest.TestCase):
                 self.assertEqual(response.headers.get("Pragma"), "no-cache")
                 self.assertEqual(response.headers.get("Expires"), "0")
 
+    def test_uat_stage_renders_environment_banner(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_ALLOWED_EMAILS": "allowed@npt.sg",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_STAGE": "uat",
+            },
+            clear=False,
+        ):
+            app = create_app()
+            app.testing = True
+
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["google_profile"] = {"email": "allowed@npt.sg", "name": "Allowed User"}
+                    session["google_credentials"] = {"token": "x"}
+
+                response = client.get("/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"environment-banner-uat", response.data)
+        self.assertIn(b">UAT<", response.data)
+        self.assertIn(b"Testing environment", response.data)
+
+    def test_live_stage_does_not_render_environment_banner_by_default(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_ALLOWED_EMAILS": "allowed@npt.sg",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_STAGE": "",
+            },
+            clear=False,
+        ):
+            app = create_app()
+            app.testing = True
+
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["google_profile"] = {"email": "allowed@npt.sg", "name": "Allowed User"}
+                    session["google_credentials"] = {"token": "x"}
+
+                response = client.get("/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn(b"environment-banner-uat", response.data)
+        self.assertNotIn(b"Testing environment", response.data)
+
+    def test_healthz_returns_pinned_release_revision(self):
+        _current_release_revision.cache_clear()
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+                os.environ,
+                {
+                    "FLASK_SECRET_KEY": "test-secret",
+                    "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg",
+                    "TEAM_PORTAL_DATA_DIR": temp_dir,
+                    "TEAM_PORTAL_RELEASE_REVISION": "uat-sha-123",
+                },
+                clear=False,
+            ):
+                app = create_app()
+                app.testing = True
+
+                with app.test_client() as client:
+                    response = client.get("/healthz")
+                    self.assertEqual(response.status_code, 200)
+                    self.assertEqual(response.get_json(), {"status": "ok", "revision": "uat-sha-123"})
+        finally:
+            _current_release_revision.cache_clear()
+
     def test_cloud_run_index_degrades_when_local_agent_is_offline(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
