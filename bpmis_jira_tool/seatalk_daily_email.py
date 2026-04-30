@@ -6,7 +6,7 @@ import json
 import os
 import signal
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -20,6 +20,13 @@ from bpmis_jira_tool.seatalk_dashboard import (
     SEATALK_DASHBOARD_DEFAULT_DAYS,
     SEATALK_INSIGHTS_TIMEZONE,
     SeaTalkDashboardService,
+)
+from bpmis_jira_tool.trello_daily_summary import (
+    TrelloCardSpec,
+    TrelloDailySummaryClient,
+    TrelloDailySummaryStore,
+    TrelloSyncResult,
+    fingerprint_daily_card,
 )
 
 
@@ -154,6 +161,10 @@ class DailyEmailResult:
     subject: str
     run_date: str
     message_id: str = ""
+    trello_status: str = "skipped"
+    trello_created_count: int = 0
+    trello_skipped_count: int = 0
+    trello_cards: list[dict[str, str]] = field(default_factory=list)
 
 
 class DailyEmailRunStore:
@@ -410,25 +421,13 @@ def render_email(*, briefing: dict[str, Any], now: datetime) -> tuple[str, str, 
     updates = [item for item in briefing.get("project_updates") or [] if isinstance(item, dict)]
     other_updates = [item for item in briefing.get("other_updates") or [] if isinstance(item, dict)]
     reminders = [item for item in briefing.get("team_member_reminders") or [] if isinstance(item, dict)]
-    top_focus = [item for item in briefing.get("top_focus") or [] if isinstance(item, dict)]
-    if not top_focus:
-        top_focus = _select_top_focus(
-            direct_action_todos=direct_action_todos,
-            watch_delegate_todos=watch_delegate_todos,
-            project_updates=updates,
-            other_updates=other_updates,
-            now=local_now,
-        )
     text_lines = [
         f"Subject: {subject}",
         "",
-        "Today Focus",
+        "To-do",
+        "",
+        "Xiaodong Action Required",
     ]
-    if not top_focus:
-        text_lines.append("- No urgent focus item found in the briefing window.")
-    else:
-        text_lines.extend(_render_focus_text(top_focus))
-    text_lines.extend(["", "To-do", "", "Xiaodong Action Required"])
     if not direct_action_todos:
         text_lines.append("- No clear Xiaodong-owned to-do found in the briefing window.")
     else:
@@ -457,8 +456,6 @@ def render_email(*, briefing: dict[str, Any], now: datetime) -> tuple[str, str, 
     html_body = (
         "<html><body>"
         f"<h2>{html.escape(subject)}</h2>"
-        "<h3>Today Focus</h3>"
-        f"{_render_focus_html(top_focus)}"
         "<h3>To-do</h3>"
         "<h4>Xiaodong Action Required</h4>"
         f"{_render_grouped_html(direct_action_todos, kind='todo')}"
@@ -484,6 +481,8 @@ def send_daily_email(
     force: bool = False,
     dry_run: bool = False,
     gmail_service: Any | None = None,
+    trello_client: TrelloDailySummaryClient | None = None,
+    trello_store: TrelloDailySummaryStore | None = None,
 ) -> DailyEmailResult:
     local_now = (now or datetime.now(SEATALK_INSIGHTS_TIMEZONE)).astimezone(SEATALK_INSIGHTS_TIMEZONE)
     run_date = local_now.date().isoformat()
@@ -507,6 +506,14 @@ def send_daily_email(
     subject, text_body, html_body = render_email(briefing=briefing, now=local_now)
     if dry_run:
         return DailyEmailResult(status="dry_run", recipient=recipient, subject=subject, run_date=run_date)
+    trello_result = sync_daily_summary_to_trello(
+        briefing=briefing,
+        run_date=run_date,
+        data_root=data_root,
+        now=local_now,
+        trello_client=trello_client,
+        trello_store=trello_store,
+    )
     response = send_gmail_message(
         credentials=credentials,
         sender=owner_email,
@@ -524,7 +531,143 @@ def send_daily_email(
         message_id=message_id,
         sent_at=local_now,
     )
-    return DailyEmailResult(status="sent", recipient=recipient, subject=subject, run_date=run_date, message_id=message_id)
+    return DailyEmailResult(
+        status="sent",
+        recipient=recipient,
+        subject=subject,
+        run_date=run_date,
+        message_id=message_id,
+        trello_status=trello_result.status,
+        trello_created_count=trello_result.created_count,
+        trello_skipped_count=trello_result.skipped_count,
+        trello_cards=trello_result.cards,
+    )
+
+
+def sync_daily_summary_to_trello(
+    *,
+    briefing: dict[str, Any],
+    run_date: str,
+    data_root: Path,
+    now: datetime,
+    trello_client: TrelloDailySummaryClient | None = None,
+    trello_store: TrelloDailySummaryStore | None = None,
+) -> TrelloSyncResult:
+    client = trello_client or TrelloDailySummaryClient.from_env()
+    store = trello_store or TrelloDailySummaryStore(data_root / "seatalk" / "daily_trello_cards.json")
+    specs = build_trello_card_specs(briefing=briefing, run_date=run_date)
+    if not specs:
+        return TrelloSyncResult(status="no_cards")
+
+    list_id = client.get_or_create_list_id()
+    created = 0
+    skipped = 0
+    cards: list[dict[str, str]] = []
+    created_at = now.astimezone(SEATALK_INSIGHTS_TIMEZONE).isoformat()
+    for spec in specs:
+        fingerprint = fingerprint_daily_card(
+            run_date=run_date,
+            section=spec.section,
+            item_text=spec.fingerprint_text,
+            domain=spec.domain,
+        )
+        if store.has_card(fingerprint):
+            skipped += 1
+            continue
+        card = client.create_card(list_id=list_id, name=spec.name, description=spec.description)
+        store.mark_card(
+            fingerprint=fingerprint,
+            name=card.name,
+            url=card.url,
+            trello_id=card.trello_id,
+            created_at=created_at,
+        )
+        created += 1
+        cards.append({"name": card.name, "url": card.url, "id": card.trello_id})
+    return TrelloSyncResult(
+        status="synced",
+        created_count=created,
+        skipped_count=skipped,
+        cards=cards,
+    )
+
+
+def build_trello_card_specs(*, briefing: dict[str, Any], run_date: str) -> list[TrelloCardSpec]:
+    direct_action_todos = [item for item in briefing.get("direct_action_todos") or [] if isinstance(item, dict)]
+    watch_delegate_todos = [item for item in briefing.get("watch_delegate_todos") or [] if isinstance(item, dict)]
+    if not direct_action_todos and not watch_delegate_todos:
+        direct_action_todos, watch_delegate_todos = _split_todos_by_action_type(
+            _normalize_todo_items([item for item in briefing.get("my_todos") or [] if isinstance(item, dict)])
+        )
+    reminders = [item for item in briefing.get("team_member_reminders") or [] if isinstance(item, dict)]
+
+    specs: list[TrelloCardSpec] = []
+    for item in direct_action_todos:
+        task = _sentence_text(item.get("task"), "Untitled").rstrip(".")
+        specs.append(
+            TrelloCardSpec(
+                section="Xiaodong Action Required",
+                name=f"[Direct] {task}",
+                description=_trello_todo_description(item, run_date=run_date, section="Xiaodong Action Required"),
+                fingerprint_text=task,
+                domain=_display_domain(item.get("domain")),
+            )
+        )
+    for item in watch_delegate_todos:
+        task = _sentence_text(item.get("task"), "Untitled").rstrip(".")
+        specs.append(
+            TrelloCardSpec(
+                section="Watch / Delegate",
+                name=f"[Watch] {task}",
+                description=_trello_todo_description(item, run_date=run_date, section="Watch / Delegate"),
+                fingerprint_text=task,
+                domain=_display_domain(item.get("domain")),
+            )
+        )
+    for item in reminders:
+        person = str(item.get("person") or "Unknown").strip()
+        reminder = _sentence_text(item.get("reminder"), "Follow-up may be needed").rstrip(".")
+        specs.append(
+            TrelloCardSpec(
+                section="Suggested Team Follow-up",
+                name=f"[Follow-up] {person}: {reminder}",
+                description=_trello_reminder_description(item, run_date=run_date),
+                fingerprint_text=f"{person} {reminder}",
+                domain=_display_domain(item.get("domain")),
+            )
+        )
+    return specs
+
+
+def _trello_todo_description(item: dict[str, Any], *, run_date: str, section: str) -> str:
+    lines = [
+        f"Report date: {run_date}",
+        f"Section: {section}",
+        f"Domain: {_display_domain(item.get('domain'))}",
+        f"Task: {_sentence_text(item.get('task'), 'Untitled')}",
+        f"Priority: {_display_priority(item.get('priority'))}",
+        f"Due: {_display_due(item.get('due'))}",
+        f"Source: {item.get('evidence') or 'Unknown'}",
+    ]
+    source_type = str(item.get("source_type") or "").strip()
+    if source_type:
+        lines.append(f"Source type: {source_type}")
+    return "\n".join(lines)
+
+
+def _trello_reminder_description(item: dict[str, Any], *, run_date: str) -> str:
+    lines = [
+        f"Report date: {run_date}",
+        "Section: Suggested Team Follow-up",
+        f"Domain: {_display_domain(item.get('domain'))}",
+        f"Person: {item.get('person') or 'Unknown'}",
+        f"Reminder: {_sentence_text(item.get('reminder'), 'Follow-up may be needed')}",
+        f"Source: {item.get('evidence') or 'Unknown'}",
+    ]
+    source_type = str(item.get("source_type") or "").strip()
+    if source_type:
+        lines.append(f"Source type: {source_type}")
+    return "\n".join(lines)
 
 
 def _daily_brief_system_prompt() -> str:
@@ -572,7 +715,9 @@ def _daily_brief_user_prompt(
         "Do not create team_member_reminders for people outside the allowed reminder list, even if they appear in SeaTalk.\n"
         "A valid reminder exists when a human in a SeaTalk group asks, mentions, assigns, blocks on, or appears to need follow-up from one of those people, and neither the named person nor Xiaodong follows up later in that same group during the available window.\n"
         "Mentions may appear as direct @ mentions, plain names, mapped display names, name variants, or quoted text. Prefer real names in the person field.\n"
-        "Do not include private chats. Do not include bot/system alerts or automated reminders. Do not include items where the named person replied, acknowledged, handled it, or Xiaodong already followed up later.\n"
+        "A cc-only mention is not enough. If a person is only copied after 'cc' and the actual ask is addressed to someone else, do not create a reminder for the cc'd person. If the direct assignee is outside the allowed list and an allowed teammate is only cc'd, produce no team_member_reminders item for that message.\n"
+        "Do not include private chats. Do not include bot/system alerts, automated reminders, SDLC Checker output, or SDLC material/approval reminder messages. Do not include items where the named person replied, acknowledged, handled it, or Xiaodong already followed up later.\n"
+        "If the source message is annotated as a thread reply, make the reminder and evidence say thread, for example 'UDL数据小群 / thread: PH A-Card Model V2.1 Deployment'. Do not write 'in the group' for thread replies.\n"
         "If the mention looks human and action-relevant but you are unsure whether a later follow-up resolved it, include one concise reminder rather than dropping it. Set source_type to seatalk.\n\n"
         "## Source And Evidence Rules\n"
         "For SeaTalk evidence, use the group ID/name or the key people involved. For Gmail evidence, use sender or key participants plus subject and thread link when available.\n"
@@ -585,6 +730,7 @@ def _daily_brief_user_prompt(
         "Avoid repeating the same topic across sections unless each section has a distinct role: Xiaodong next action, project state, or team member follow-up.\n\n"
         "## Exclusions\n"
         "For other_updates and team_member_reminders, ignore bot-generated alerts, automated reminders, system notifications, Jira/Confluence/calendar reminders, and no-reply notification emails unless a human adds meaningful follow-up in the same thread.\n\n"
+        "For team_member_reminders, always exclude SDLC Checker and SG BAU SDLC material check content; those are automated release hygiene signals, not human team follow-up requests.\n\n"
         "## Formatting Inside JSON\n"
         "For my_todos.task, write one synthesized action sentence. For due, extract a real deadline if present; otherwise use TBD.\n"
         "For project_updates.summary and other_updates.summary, write one synthesized sentence, not a transcript.\n"
@@ -932,7 +1078,7 @@ def _source_coverage_label(source_types: set[str]) -> str:
 def _filter_seatalk_reminders(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     filtered: list[dict[str, Any]] = []
     for item in items:
-        if item.get("source_type") != "seatalk" or _is_bot_alert_or_reminder_item(item):
+        if item.get("source_type") != "seatalk" or _is_bot_alert_or_reminder_item(item) or _is_sdlc_checker_reminder_item(item):
             continue
         canonical_person = _canonical_team_member_name(item.get("person"))
         if not canonical_person:
@@ -944,6 +1090,26 @@ def _filter_seatalk_reminders(items: list[dict[str, Any]]) -> list[dict[str, Any
         item["domain"] = domain
         filtered.append(item)
     return filtered
+
+
+def _is_sdlc_checker_reminder_item(item: dict[str, Any]) -> bool:
+    combined = " ".join(
+        str(item.get(field) or "").lower()
+        for field in ("evidence", "title", "summary", "reminder", "person")
+    )
+    return any(
+        phrase in combined
+        for phrase in (
+            "sdlc checker",
+            "sdlc material check",
+            "sg bau sdlc material check",
+            "sdlc material and approval reminders",
+            "approval reminders",
+            "prd/trd document",
+            "sg-prd-approval",
+            "sg-trd-approval",
+        )
+    )
 
 
 def _filter_other_updates(items: list[dict[str, Any]]) -> list[dict[str, Any]]:

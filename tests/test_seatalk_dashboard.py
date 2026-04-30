@@ -186,6 +186,9 @@ class SeaTalkDashboardServiceTests(unittest.TestCase):
         self.assertIn("Recent Daily Brief source", source)
         self.assertIn("UNKNOWN_ID_DISPLAY_LIMIT", source)
         self.assertIn("daily_brief_source", source)
+        self.assertIn("loadThreadRootSummaries", source)
+        self.assertIn("Thread replies are annotated", source)
+        self.assertIn("thread reply", source)
 
     def test_name_mapping_daily_cache_key_has_candidate_version(self):
         service = SeaTalkDashboardService(

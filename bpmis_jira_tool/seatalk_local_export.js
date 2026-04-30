@@ -333,6 +333,32 @@ function buildMappingExample(row, text) {
   return snippet ? `${formatTimestamp(row.ts)}: ${snippet}` : formatTimestamp(row.ts);
 }
 
+function loadThreadRootSummaries(db, rows) {
+  const rootMids = Array.from(new Set(rows
+    .map((row) => String(row.rtmid || '').trim())
+    .filter(Boolean)));
+  if (!rootMids.length) return new Map();
+  const placeholders = rootMids.map(() => '?').join(', ');
+  const roots = new Map();
+  try {
+    const rootRows = db.prepare(`
+      SELECT mid, t, c
+      FROM chat_message_view
+      WHERE mid IN (${placeholders})
+    `).all(...rootMids);
+    for (const row of rootRows) {
+      const parsed = safeParseJson(row.c);
+      const text = extractText(row, parsed).replace(/\s+/g, ' ').trim();
+      if (row.mid && text && text !== '[empty message]') {
+        roots.set(String(row.mid), text.slice(0, 120));
+      }
+    }
+  } catch {
+    return new Map();
+  }
+  return roots;
+}
+
 function exampleScore(example) {
   const text = String(example || '');
   const lowered = text.toLowerCase();
@@ -371,11 +397,12 @@ function formatTimestamp(epochSeconds) {
 function buildHistoryText(rows, selfUid, days, nowIso, db, overrides, sinceIso = '') {
   const { uidNames, sidNames } = buildNameMaps(rows, db);
   const filteredRows = rows.filter((row) => !isBotConversationRow(row, sidNames));
+  const threadRootSummaries = loadThreadRootSummaries(db, filteredRows);
   const lines = [
     'SeaTalk Chat History Export',
     sinceIso ? `Window: since ${sinceIso}` : `Window: last ${days} days`,
     `Generated at: ${nowIso}`,
-    `Includes thread replies when they are stored as regular message rows in the local SeaTalk database.`,
+    `Includes thread replies when they are stored as regular message rows in the local SeaTalk database. Thread replies are annotated and may not appear as new main-chat messages in SeaTalk.`,
     'Private SeaTalk bot conversations are excluded from this export.',
     '',
   ];
@@ -389,8 +416,11 @@ function buildHistoryText(rows, selfUid, days, nowIso, db, overrides, sinceIso =
       currentConversation = row.sid;
       lines.push(`=== ${conversation.display} ===`);
     }
+    const threadLabel = row.rtmid
+      ? ` [thread reply${threadRootSummaries.get(String(row.rtmid)) ? ` under: ${threadRootSummaries.get(String(row.rtmid))}` : ''}]`
+      : '';
     const normalizedText = text.split('\n').map((part, index) => (index === 0 ? part : `    ${part}`)).join('\n');
-    lines.push(`[${formatTimestamp(row.ts)}] ${sender.display}: ${normalizedText}`);
+    lines.push(`[${formatTimestamp(row.ts)}] ${sender.display}${threadLabel}: ${normalizedText}`);
   }
   return `${lines.join('\n')}\n`;
 }
@@ -503,7 +533,7 @@ function main() {
     const excludedTypes = Array.from(EXCLUDED_MESSAGE_TYPES);
     const placeholders = excludedTypes.map(() => '?').join(', ');
     const rows = db.prepare(`
-      SELECT sid, ts, t, u, c, q
+      SELECT sid, ts, t, u, c, q, mid, rtmid
       FROM chat_message_view
       WHERE ts >= ? AND ts < ?
         AND (sid LIKE 'group-%' OR sid LIKE 'buddy-%')

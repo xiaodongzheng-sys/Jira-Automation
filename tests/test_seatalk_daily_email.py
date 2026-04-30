@@ -27,14 +27,17 @@ from bpmis_jira_tool.seatalk_daily_email import (
     MAX_TEAM_MEMBER_REMINDERS,
     MAX_USEFUL_AWARENESS_OTHER_UPDATES,
     build_daily_briefing,
+    build_trello_card_specs,
     ensure_gmail_daily_scopes,
     export_rolling_history,
     export_rolling_gmail_threads,
     render_email,
     send_daily_email,
     seatalk_name_overrides_path,
+    sync_daily_summary_to_trello,
 )
 from bpmis_jira_tool.seatalk_dashboard import SEATALK_INSIGHTS_TIMEZONE
+from bpmis_jira_tool.trello_daily_summary import TrelloDailySummaryClient, TrelloDailySummaryStore
 
 
 def _settings(temp_dir: str, encryption_key: str | None = None) -> Settings:
@@ -374,6 +377,67 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         self.assertEqual(len(payload["team_member_reminders"]), 1)
         self.assertEqual(payload["team_member_reminders"][0]["reminder"], "Check the human unresolved group mention.")
         self.assertIn("ignore bot-generated alerts", service.last_prompt)
+
+    def test_build_daily_briefing_filters_sdlc_checker_team_followups(self):
+        class SdlcCheckerService(FakeSeaTalkService):
+            def _run_codex_insights_prompt(self, *, prompt, system_prompt):
+                self.last_prompt = prompt
+                return None, {
+                    "project_updates": [],
+                    "other_updates": [],
+                    "team_member_reminders": [
+                        {
+                            "domain": "Anti-fraud",
+                            "person": "Wang Chang",
+                            "reminder": "The SDLC checker listed SGDB approvals and PRD/TRD documents as pending.",
+                            "evidence": "SG BAU SDLC material check",
+                            "source_type": "seatalk",
+                        },
+                        {
+                            "domain": "Anti-fraud",
+                            "person": "Rene Chong",
+                            "reminder": "Wendy asked Rene to help check the ID appeal case.",
+                            "evidence": "[ID] AFA PM Local x Regional",
+                            "source_type": "seatalk",
+                        },
+                    ],
+                    "my_todos": [],
+                    "team_todos": [],
+                }
+
+        now = datetime(2026, 4, 30, 19, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE)
+        service = SdlcCheckerService("SeaTalk Chat History Export\n[2026-04-30 15:00:00] SDLC Checker: approval reminder\n")
+        payload = build_daily_briefing(service, now=now)
+
+        self.assertEqual([item["person"] for item in payload["team_member_reminders"]], ["Rene Chong"])
+        self.assertIn("always exclude SDLC Checker", service.last_prompt)
+
+    def test_build_daily_briefing_prompt_handles_thread_and_cc_only_mentions(self):
+        class ThreadCcService(FakeSeaTalkService):
+            def _run_codex_insights_prompt(self, *, prompt, system_prompt):
+                self.last_prompt = prompt
+                return None, {
+                    "project_updates": [],
+                    "other_updates": [],
+                    "team_member_reminders": [],
+                    "my_todos": [],
+                    "team_todos": [],
+                }
+
+        now = datetime(2026, 4, 30, 19, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE)
+        history = (
+            "SeaTalk Chat History Export\n"
+            "=== UDL数据小群 (group-2721110) ===\n"
+            "[2026-04-30 15:14:18] Tan Jing Jie [thread reply under: PH A-Card Model V2.1 Deployment]: "
+            "Hihi @Lang Jiang can help me check partitions\n"
+            "    cc:@Liye | 吴立业\n"
+        )
+        service = ThreadCcService(history)
+        build_daily_briefing(service, now=now)
+
+        self.assertIn("A cc-only mention is not enough", service.last_prompt)
+        self.assertIn("If the source message is annotated as a thread reply", service.last_prompt)
+        self.assertIn("Do not write 'in the group' for thread replies", service.last_prompt)
 
     def test_build_daily_briefing_keeps_seatalk_reminder_when_source_type_missing(self):
         class MissingSourceReminderService(FakeSeaTalkService):
@@ -719,11 +783,184 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         self.assertIn("A policy dependency may affect downstream rollout planning. [Status: In Progress]", html_body)
         self.assertIn("Suggested Team Follow-up", text_body)
         self.assertIn("Ker Yin: Please check whether the pending GRC confirmation still needs owner follow-up.", html_body)
-        self.assertIn("Today Focus", text_body)
+        self.assertNotIn("Today Focus", text_body)
+        self.assertNotIn("Today Focus", html_body)
         self.assertIn("Xiaodong Action Required", text_body)
         self.assertIn("Watch / Delegate", text_body)
         self.assertNotIn("Generation Quality", text_body)
         self.assertNotIn("Generation Quality", html_body)
+
+    def test_build_trello_card_specs_includes_direct_watch_and_followups(self):
+        briefing = {
+            "direct_action_todos": [
+                {
+                    "task": "Review rollout note",
+                    "domain": "Anti-fraud",
+                    "priority": "high",
+                    "due": "today",
+                    "evidence": "Alice",
+                    "source_type": "seatalk",
+                }
+            ],
+            "watch_delegate_todos": [
+                {
+                    "task": "Follow up with Rene on closure",
+                    "domain": "General",
+                    "priority": "medium",
+                    "due": "TBD",
+                    "evidence": "SeaTalk group",
+                    "source_type": "mixed",
+                }
+            ],
+            "team_member_reminders": [
+                {
+                    "domain": "Anti-fraud",
+                    "person": "Rene Chong",
+                    "reminder": "Check the ID appeal case.",
+                    "evidence": "AFA PM Local x Regional",
+                    "source_type": "seatalk",
+                }
+            ],
+        }
+
+        specs = build_trello_card_specs(briefing=briefing, run_date="2026-04-30")
+
+        self.assertEqual([spec.name for spec in specs], [
+            "[Direct] Review rollout note",
+            "[Watch] Follow up with Rene on closure",
+            "[Follow-up] Rene Chong: Check the ID appeal case",
+        ])
+        self.assertIn("Section: Xiaodong Action Required", specs[0].description)
+        self.assertIn("Due: today", specs[0].description)
+        self.assertIn("Section: Watch / Delegate", specs[1].description)
+        self.assertIn("Person: Rene Chong", specs[2].description)
+
+    def test_trello_client_reuses_list_and_creates_cards(self):
+        class FakeResponse:
+            def __init__(self, payload):
+                self.payload = payload
+                self.text = ""
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return self.payload
+
+        class FakeSession:
+            def __init__(self):
+                self.posts = []
+
+            def get(self, url, params, timeout):
+                return FakeResponse([{"id": "list-1", "name": "Daily Summary Email", "closed": False}])
+
+            def post(self, url, params, timeout):
+                self.posts.append({"url": url, "params": params})
+                return FakeResponse({"id": "card-1", "name": params["name"], "url": "https://trello.test/card-1"})
+
+        session = FakeSession()
+        client = TrelloDailySummaryClient(
+            api_key="key",
+            api_token="token",
+            board_id="board-1",
+            session=session,
+            base_url="https://trello.test/1",
+        )
+
+        list_id = client.get_or_create_list_id()
+        card = client.create_card(list_id=list_id, name="[Direct] Review", description="Report date: 2026-04-30")
+
+        self.assertEqual(list_id, "list-1")
+        self.assertEqual(card.url, "https://trello.test/card-1")
+        self.assertEqual(session.posts[0]["params"]["idList"], "list-1")
+
+    def test_trello_client_creates_missing_daily_list(self):
+        class FakeResponse:
+            def __init__(self, payload):
+                self.payload = payload
+                self.text = ""
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return self.payload
+
+        class FakeSession:
+            def __init__(self):
+                self.posts = []
+
+            def get(self, url, params, timeout):
+                return FakeResponse([])
+
+            def post(self, url, params, timeout):
+                self.posts.append({"url": url, "params": params})
+                return FakeResponse({"id": "new-list", "name": params["name"]})
+
+        session = FakeSession()
+        client = TrelloDailySummaryClient(api_key="key", api_token="token", board_id="board-1", session=session)
+
+        self.assertEqual(client.get_or_create_list_id(), "new-list")
+        self.assertEqual(session.posts[0]["params"]["name"], "Daily Summary Email")
+
+    def test_trello_client_requires_env_config(self):
+        with self.assertRaisesRegex(ConfigError, "TRELLO_API_KEY"):
+            TrelloDailySummaryClient(api_key="", api_token="token", board_id="board")
+        with self.assertRaisesRegex(ConfigError, "TRELLO_API_KEY"):
+            TrelloDailySummaryClient(api_key="key", api_token="", board_id="board")
+        with self.assertRaisesRegex(ConfigError, "TRELLO_API_KEY"):
+            TrelloDailySummaryClient(api_key="key", api_token="token", board_id="")
+
+    def test_daily_trello_sync_is_idempotent(self):
+        class FakeTrelloClient:
+            def __init__(self):
+                self.created = []
+
+            def get_or_create_list_id(self):
+                return "list-1"
+
+            def create_card(self, *, list_id, name, description):
+                self.created.append({"list_id": list_id, "name": name, "description": description})
+                from bpmis_jira_tool.trello_daily_summary import TrelloCardResult
+
+                return TrelloCardResult(
+                    status="created",
+                    name=name,
+                    url=f"https://trello.test/{len(self.created)}",
+                    trello_id=f"card-{len(self.created)}",
+                )
+
+        briefing = {
+            "direct_action_todos": [{"task": "Review rollout", "domain": "Anti-fraud", "priority": "high", "due": "today", "evidence": "Alice"}],
+            "watch_delegate_todos": [{"task": "Monitor closure", "domain": "General", "priority": "medium", "due": "TBD", "evidence": "Bob"}],
+            "team_member_reminders": [{"person": "Rene Chong", "reminder": "Check the case", "domain": "Anti-fraud", "evidence": "Group"}],
+        }
+        now = datetime(2026, 4, 30, 19, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = TrelloDailySummaryStore(Path(temp_dir) / "daily_trello_cards.json")
+            client = FakeTrelloClient()
+            first = sync_daily_summary_to_trello(
+                briefing=briefing,
+                run_date="2026-04-30",
+                data_root=Path(temp_dir),
+                now=now,
+                trello_client=client,
+                trello_store=store,
+            )
+            second = sync_daily_summary_to_trello(
+                briefing=briefing,
+                run_date="2026-04-30",
+                data_root=Path(temp_dir),
+                now=now,
+                trello_client=client,
+                trello_store=store,
+            )
+
+        self.assertEqual(first.created_count, 3)
+        self.assertEqual(first.skipped_count, 0)
+        self.assertEqual(second.created_count, 0)
+        self.assertEqual(second.skipped_count, 3)
 
     def test_gmail_raw_message_contains_expected_headers_and_body(self):
         raw = build_gmail_raw_message(
@@ -790,6 +1027,66 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
                 result = send_daily_email(settings=settings, now=now)
             briefing.assert_not_called()
             self.assertEqual(result.status, "skipped")
+
+    def test_send_daily_email_syncs_trello_cards_before_marking_sent(self):
+        class FakeTrelloClient:
+            def __init__(self):
+                self.created = []
+
+            def get_or_create_list_id(self):
+                return "list-1"
+
+            def create_card(self, *, list_id, name, description):
+                self.created.append({"list_id": list_id, "name": name, "description": description})
+                from bpmis_jira_tool.trello_daily_summary import TrelloCardResult
+
+                return TrelloCardResult(status="created", name=name, url=f"https://trello.test/{len(self.created)}", trello_id=f"card-{len(self.created)}")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            encryption_key = Fernet.generate_key().decode("utf-8")
+            settings = _settings(temp_dir, encryption_key=encryption_key)
+            store = StoredGoogleCredentials(
+                Path(temp_dir) / "google" / "credentials.json",
+                encryption_key=encryption_key,
+            )
+            store.save(
+                owner_email="xiaodong.zheng@npt.sg",
+                credentials_payload={
+                    "token": "access-token",
+                    "scopes": [GMAIL_SEND_SCOPE, GMAIL_READONLY_SCOPE],
+                },
+            )
+            briefing = {
+                "direct_action_todos": [{"task": "Review rollout", "domain": "Anti-fraud", "priority": "high", "due": "today", "evidence": "Alice"}],
+                "watch_delegate_todos": [{"task": "Monitor closure", "domain": "General", "priority": "medium", "due": "TBD", "evidence": "Bob"}],
+                "team_member_reminders": [{"person": "Rene Chong", "reminder": "Check the case", "domain": "Anti-fraud", "evidence": "Group"}],
+                "my_todos": [],
+                "project_updates": [],
+            }
+            trello_client = FakeTrelloClient()
+            trello_store = TrelloDailySummaryStore(Path(temp_dir) / "seatalk" / "daily_trello_cards.json")
+
+            with patch("bpmis_jira_tool.seatalk_daily_email.build_seatalk_service", return_value=FakeSeaTalkService()):
+                with patch("bpmis_jira_tool.seatalk_daily_email.export_rolling_gmail_threads", return_value=""):
+                    with patch("bpmis_jira_tool.seatalk_daily_email.build_daily_briefing", return_value=briefing):
+                        with patch("bpmis_jira_tool.seatalk_daily_email.send_gmail_message", return_value={"id": "msg-1"}):
+                            result = send_daily_email(
+                                settings=settings,
+                                now=datetime(2026, 4, 30, 19, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE),
+                                gmail_service=object(),
+                                trello_client=trello_client,
+                                trello_store=trello_store,
+                            )
+
+        self.assertEqual(result.status, "sent")
+        self.assertEqual(result.trello_status, "synced")
+        self.assertEqual(result.trello_created_count, 3)
+        self.assertEqual(result.trello_skipped_count, 0)
+        self.assertEqual([card["name"] for card in result.trello_cards], [
+            "[Direct] Review rollout",
+            "[Watch] Monitor closure",
+            "[Follow-up] Rene Chong: Check the case",
+        ])
 
     def test_send_daily_email_reports_gmail_export_timeout(self):
         with tempfile.TemporaryDirectory() as temp_dir:
