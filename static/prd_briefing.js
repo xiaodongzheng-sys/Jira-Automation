@@ -111,24 +111,16 @@
     return markup;
   };
 
-  const renderSourceContent = (sectionIndex, section) => {
+  const renderConfluenceSourceContent = (sectionIndex, section) => {
     const rawHtml = String(section.html_content || '').trim();
-    if (rawHtml && rawHtml.length <= MAX_CONFLUENCE_HTML_RENDER_CHARS) {
-      const cacheKey = `html:${sectionIndex}`;
-      if (!sourceContentCache.has(cacheKey)) {
-        sourceContentCache.set(cacheKey, sanitizeConfluenceHtml(rawHtml));
-      }
-      return {
-        markup: sourceContentCache.get(cacheKey) || renderPlainSourceContent(sectionIndex, section),
-        isConfluenceHtml: true,
-        isLargeFallback: false,
-      };
+    if (!rawHtml || rawHtml.length > MAX_CONFLUENCE_HTML_RENDER_CHARS) {
+      return null;
     }
-    return {
-      markup: renderPlainSourceContent(sectionIndex, section),
-      isConfluenceHtml: false,
-      isLargeFallback: Boolean(rawHtml),
-    };
+    const cacheKey = `html:${sectionIndex}`;
+    if (!sourceContentCache.has(cacheKey)) {
+      sourceContentCache.set(cacheKey, sanitizeConfluenceHtml(rawHtml));
+    }
+    return sourceContentCache.get(cacheKey) || null;
   };
 
   const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
@@ -929,9 +921,14 @@
       const images = !hasOriginalHtml
         ? (section.image_refs || []).map((src) => `<img src="${escapeHtml(src)}" alt="${escapeHtml(section.section_path)}">`).join('')
         : '';
-      const sourceContent = renderSourceContent(sectionIndex, section);
-      const sourceNotice = sourceContent.isLargeFallback
+      const rawHtml = String(section.html_content || '').trim();
+      const canRenderConfluence = rawHtml && rawHtml.length <= MAX_CONFLUENCE_HTML_RENDER_CHARS;
+      const contentMarkup = renderPlainSourceContent(sectionIndex, section);
+      const sourceNotice = rawHtml && !canRenderConfluence
         ? '<p class="briefing-source-render-note">Large PRD section shown as text for browser performance.</p>'
+        : '';
+      const renderAction = canRenderConfluence
+        ? `<button class="briefing-source-render-button" type="button" data-render-confluence-section="${sectionIndex}">Render Confluence View</button>`
         : '';
       return `
         <section class="briefing-source-section" data-source-section-index="${sectionIndex}">
@@ -939,7 +936,8 @@
             <span>PRD ${sectionIndex + 1}</span>
             <strong>${escapeHtml(section.section_path)}</strong>
           </div>
-          <div class="briefing-original-content ${sourceContent.isConfluenceHtml ? 'is-confluence-rendered' : 'is-text-rendered'}">${sourceNotice}${sourceContent.markup || `<p>${escapeHtml(section.content || '')}</p>`}</div>
+          <div class="briefing-source-actions">${renderAction}</div>
+          <div class="briefing-original-content is-text-rendered" data-source-content-index="${sectionIndex}">${sourceNotice}${contentMarkup || `<p>${escapeHtml(section.content || '')}</p>`}</div>
           ${images ? `<div class="briefing-image-grid">${images}</div>` : ''}
         </section>
       `;
@@ -962,10 +960,9 @@
       </article>
       <div class="briefing-source-stack">${sourceMarkup}</div>
     `;
-    classifyTableLayouts();
-    classifySectionImages();
-    hideDecorativeArrowArtifacts();
-    sectionDetailNode.querySelectorAll('img').forEach((image) => {
+    const attachImagePreview = () => sectionDetailNode.querySelectorAll('img').forEach((image) => {
+      if (image.dataset.briefingPreviewReady === 'true') return;
+      image.dataset.briefingPreviewReady = 'true';
       image.setAttribute('tabindex', '0');
       image.setAttribute('role', 'button');
       image.setAttribute('aria-label', `${block.title} image preview`);
@@ -976,6 +973,33 @@
           event.preventDefault();
           openPreview();
         }
+      });
+    });
+    attachImagePreview();
+    sectionDetailNode.querySelectorAll('[data-render-confluence-section]').forEach((button) => {
+      button.addEventListener('click', () => {
+        const sectionIndex = Number(button.dataset.renderConfluenceSection || '-1');
+        const section = state.sections[sectionIndex];
+        if (!section) return;
+        const target = sectionDetailNode.querySelector(`[data-source-content-index="${sectionIndex}"]`);
+        if (!target) return;
+        button.disabled = true;
+        button.textContent = 'Rendering...';
+        window.setTimeout(() => {
+          const html = renderConfluenceSourceContent(sectionIndex, section);
+          if (!html) {
+            button.textContent = 'Confluence View Unavailable';
+            return;
+          }
+          target.classList.remove('is-text-rendered');
+          target.classList.add('is-confluence-rendered');
+          target.innerHTML = html;
+          classifyTableLayouts();
+          classifySectionImages();
+          hideDecorativeArrowArtifacts();
+          attachImagePreview();
+          button.textContent = 'Confluence View Rendered';
+        }, 0);
       });
     });
     sectionListNode.querySelectorAll('[data-block-index]').forEach((button) => {
