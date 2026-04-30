@@ -17,6 +17,7 @@ team_portal.db
 node_modules
 node_modules/
 output/
+outputs/
 AF_Chatbot_Knowledge_Base/
 AF_Codebases/
 AI_Knowledge_Pack/
