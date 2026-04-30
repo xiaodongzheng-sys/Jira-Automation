@@ -908,14 +908,9 @@
         ? (section.image_refs || []).map((src) => `<img src="${escapeHtml(src)}" alt="${escapeHtml(section.section_path)}">`).join('')
         : '';
       const rawHtml = String(section.html_content || '').trim();
-      const sanitizedHtml = rawHtml && rawHtml.length <= MAX_SOURCE_HTML_RENDER_CHARS
-        ? sanitizePrdHtmlFragment(rawHtml)
-        : '';
-      const contentMarkup = sanitizedHtml
-        ? sanitizedHtml
-        : renderPlainSourceContent(section);
-      const sourceNotice = rawHtml && rawHtml.length > MAX_SOURCE_HTML_RENDER_CHARS
-        ? '<p class="briefing-source-render-note">Large PRD source rendered as text for browser performance.</p>'
+      const contentMarkup = renderPlainSourceContent(section);
+      const sourceNotice = rawHtml
+        ? '<p class="briefing-source-render-note">PRD source rendered as text for browser performance.</p>'
         : '';
       return `
         <section class="briefing-source-section" data-source-section-index="${sectionIndex}">
