@@ -217,11 +217,25 @@
       if (value.startsWith('buddy-')) return `UID ${value.slice('buddy-'.length)}`;
       return value;
     };
+    const reasonRank = (reason) => {
+      const value = String(reason || '').toLowerCase();
+      if (value.includes('@mentioned')) return 3;
+      if (value.includes('direct') || value.includes('private')) return 2;
+      return value ? 1 : 0;
+    };
     const mappingValueFor = (id) => mappings[id] || mappings[personAlias(id)] || '';
     unknownRows.forEach((row) => {
       if (!row?.id) return;
-      rowsById.set(String(row.id), {
-        id: String(row.id),
+      const canonicalId = canonicalMappingId(row.id);
+      const existing = rowsById.get(canonicalId);
+      if (existing) {
+        existing.count += Number(row.count || 0);
+        if (!existing.example && row.example) existing.example = row.example;
+        if (reasonRank(row.priority_reason) > reasonRank(existing.priorityReason)) existing.priorityReason = row.priority_reason;
+        return;
+      }
+      rowsById.set(canonicalId, {
+        id: canonicalId,
         type: row.type || 'uid',
         count: Number(row.count || 0),
         example: row.example || '',

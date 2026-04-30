@@ -766,6 +766,48 @@ class GmailSeaTalkDemoRouteTests(unittest.TestCase):
         self.assertEqual(payload["mappings"]["UID 456"], "Important DM")
         self.assertEqual(payload["unknown_ids"], [])
 
+    def test_owner_seatalk_name_mappings_dedupes_buddy_and_uid_candidates(self):
+        class FakeSeaTalkService:
+            def build_name_mappings(self):
+                return {
+                    "unknown_ids": [
+                        {
+                            "id": "buddy-627112",
+                            "type": "buddy",
+                            "count": 25,
+                            "example": "2026-04-30: direct chat",
+                            "priority_reason": "Private chat",
+                        },
+                        {
+                            "id": "UID 627112",
+                            "type": "uid",
+                            "count": 66,
+                            "example": "2026-04-30: @mentioned me",
+                            "priority_reason": "@mentioned me",
+                        },
+                        {
+                            "id": "buddy-364199",
+                            "type": "buddy",
+                            "count": 13,
+                            "example": "2026-04-29: direct chat",
+                            "priority_reason": "Private chat",
+                        },
+                    ],
+                    "generated_at": "2026-04-30T08:30:00+08:00",
+                    "period_days": 7,
+                }
+
+        with patch("bpmis_jira_tool.web._build_seatalk_dashboard_service", return_value=FakeSeaTalkService()):
+            with self.app.test_client() as client:
+                self._login_owner(client, scopes=[GMAIL_READONLY_SCOPE])
+                response = client.get("/api/gmail-sea-talk-demo/seatalk/name-mappings")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual([row["id"] for row in payload["unknown_ids"]], ["UID 627112", "UID 364199"])
+        self.assertEqual(payload["unknown_ids"][0]["count"], 91)
+        self.assertEqual(payload["unknown_ids"][0]["priority_reason"], "@mentioned me")
+
     def test_owner_seatalk_name_mappings_api_reports_export_error(self):
         class FakeSeaTalkService:
             def build_name_mappings(self):

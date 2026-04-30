@@ -711,6 +711,14 @@ class SeaTalkNameMappingStore:
         return {key, *cls.person_aliases(key)} if key else set()
 
     @classmethod
+    def canonical_display_key(cls, value: Any) -> str:
+        key = cls.normalize_key(value)
+        if key.startswith("buddy-"):
+            suffix = key.removeprefix("buddy-").strip()
+            return f"UID {suffix}" if suffix else key
+        return key
+
+    @classmethod
     def normalize_mappings(cls, value: Any) -> dict[str, str]:
         if not isinstance(value, dict):
             return {}
@@ -767,6 +775,46 @@ class SeaTalkNameMappingStore:
             self._payload["mappings"] = current
             self._persist_locked()
             return dict(current)
+
+
+def _dedupe_seatalk_name_mapping_candidates(rows: Any) -> list[dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        canonical_id = SeaTalkNameMappingStore.canonical_display_key(row.get("id"))
+        if not canonical_id:
+            continue
+        if canonical_id not in merged:
+            order.append(canonical_id)
+            merged[canonical_id] = {**row, "id": canonical_id}
+        else:
+            current = merged[canonical_id]
+            current["count"] = _safe_int(current.get("count")) + _safe_int(row.get("count"))
+            if not current.get("example") and row.get("example"):
+                current["example"] = row.get("example")
+            if _seatalk_mapping_reason_rank(row.get("priority_reason")) > _seatalk_mapping_reason_rank(current.get("priority_reason")):
+                current["priority_reason"] = row.get("priority_reason")
+            if current.get("type") != "group" and row.get("type") == "group":
+                current["type"] = "group"
+    return [merged[key] for key in order]
+
+
+def _seatalk_mapping_reason_rank(value: Any) -> int:
+    reason = str(value or "").strip().lower()
+    if "@mentioned" in reason:
+        return 3
+    if "direct" in reason or "private" in reason:
+        return 2
+    return 1 if reason else 0
+
+
+def _safe_int(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 class SourceCodeQASessionStore:
@@ -3105,10 +3153,10 @@ def create_app() -> Flask:
             mappings = mapping_store.mappings()
             mapped_keys = {alias for key in mappings for alias in SeaTalkNameMappingStore.equivalent_keys(key)}
             candidates = dict(candidates)
-            candidates["unknown_ids"] = [
+            candidates["unknown_ids"] = _dedupe_seatalk_name_mapping_candidates([
                 row for row in (candidates.get("unknown_ids") or [])
                 if isinstance(row, dict) and not (SeaTalkNameMappingStore.equivalent_keys(row.get("id")) & mapped_keys)
-            ]
+            ])
             return jsonify({"status": "ok", "mappings": mappings, **candidates})
         except ToolError as error:
             error_details = _classify_portal_error(error)
