@@ -76,6 +76,34 @@ class TeamPortalAccessTests(unittest.TestCase):
                 self.assertEqual(response.status_code, 302)
                 self.assertEqual(response.headers["Location"], "/")
 
+    def test_forwarded_https_scheme_is_used_for_slash_redirects(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg",
+                "TEAM_PORTAL_BASE_URL": "https://breeze-lung-clunky.ngrok-free.dev",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+            },
+            clear=False,
+        ):
+            app = create_app()
+            app.testing = True
+
+            with app.test_client() as client:
+                response = client.get(
+                    "/prd-briefing",
+                    follow_redirects=False,
+                    headers={
+                        "Host": "breeze-lung-clunky.ngrok-free.dev",
+                        "X-Forwarded-Proto": "https",
+                        "X-Forwarded-Host": "breeze-lung-clunky.ngrok-free.dev",
+                    },
+                )
+
+        self.assertEqual(response.status_code, 308)
+        self.assertEqual(response.headers["Location"], "https://breeze-lung-clunky.ngrok-free.dev/prd-briefing/")
+
     def test_blocked_google_user_is_logged_out_and_shown_index(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,

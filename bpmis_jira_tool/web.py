@@ -30,6 +30,7 @@ from google.oauth2.credentials import Credentials
 from openpyxl import Workbook
 from openpyxl.styles import Font
 import requests
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 from bpmis_jira_tool.config import Settings
 from bpmis_jira_tool.errors import ConfigError, ToolError
@@ -1885,6 +1886,7 @@ def create_app() -> Flask:
         template_folder=str(project_root / "templates"),
         static_folder=str(project_root / "static"),
     )
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1)
     app.config["SECRET_KEY"] = settings.flask_secret_key
     app.config["SETTINGS"] = settings
     app.config["CONFIG_STORE"] = config_store
