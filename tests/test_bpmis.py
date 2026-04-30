@@ -1128,6 +1128,9 @@ class BPMISClientTests(unittest.TestCase):
                     sub_queries = search.get("subQueries") or []
                     if len(sub_queries) > 1 and sub_queries[1] == {"parentIds": [225159]}:
                         return {"data": {"rows": [{"id": 9001, "jiraKey": "AF-101"}] if state["linked"] else []}}
+                    if search.get("jiraLink") == "AF-101":
+                        self.assertEqual(search.get("typeId"), BPMISDirectApiClient.TASK_TYPE_ID)
+                        return {"data": {"rows": [{"id": 9001, "jiraLink": "AF-101", "parentIds": []}]}}
                     return {"data": {"rows": [{"id": 9001, "jiraKey": "AF-101", "parentIds": []}]}}
                 if path == "/api/v1/issues/batchCreateJiraIssue":
                     self.fail("Existing Jira link must update the BPMIS task row, not create Jira.")
@@ -1217,6 +1220,71 @@ class BPMISClientTests(unittest.TestCase):
             self.assertEqual(add_call[1], "POST")
             self.assertEqual(detail["parentIds"], [225159])
             self.assertEqual(detail["summary"], "Added AF task")
+
+    def test_link_jira_ticket_to_project_finds_existing_task_by_jira_link(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings = Settings(
+                flask_secret_key="secret",
+                google_oauth_client_secret_file=Path(temp_dir) / "client.json",
+                google_oauth_redirect_uri=None,
+                team_portal_host="127.0.0.1",
+                team_portal_port=5000,
+                team_portal_base_url=None,
+                team_allowed_emails=(),
+                team_allowed_email_domains=(),
+                team_portal_data_dir=Path(temp_dir),
+                spreadsheet_id="sheet",
+                common_tab_name="Common",
+                input_tab_name="Input",
+                bpmis_base_url="https://example.com",
+                bpmis_api_access_token="token",
+            )
+
+            client = BPMISDirectApiClient(settings)
+            calls: list[tuple[str, str, dict | None, object | None]] = []
+            state = {"linked": False}
+
+            def fake_api_request(path, method="GET", params=None, body=None):
+                calls.append((path, method, params, body))
+                if path == "/api/v1/issues/detail":
+                    return {
+                        "data": {
+                            "row": {
+                                "id": 9003,
+                                "jiraLink": "AF-103",
+                                "summary": "Existing task only has jiraLink",
+                                "parentIds": [225159] if state["linked"] else [],
+                            }
+                        }
+                    }
+                if path == "/api/v1/issues/list":
+                    if method == "PUT":
+                        self.assertEqual(body["id"], [9003])
+                        state["linked"] = True
+                        return {"data": {"issuesToUpdate": [{"id": 9003, "parentIds": [225159]}]}}
+                    search = json.loads(params["search"])
+                    sub_queries = search.get("subQueries") or []
+                    if len(sub_queries) > 1 and sub_queries[1] == {"parentIds": [225159]}:
+                        return {"data": {"rows": [{"id": 9003, "jiraLink": "AF-103"}] if state["linked"] else []}}
+                    if search.get("jiraLink") == "AF-103":
+                        return {"data": {"rows": [{"id": 9003, "jiraLink": "AF-103", "parentIds": [225159] if state["linked"] else []}]}}
+                    return {"data": {"rows": []}}
+                if path == "/api/v1/issues/batchCreateJiraIssue":
+                    self.fail("A globally existing Jira task row should be linked by issue update, not batch-created.")
+                raise AssertionError(path)
+
+            client._api_request = fake_api_request  # type: ignore[method-assign]
+            client._get_jira_ticket_detail_via_jira = lambda _ticket_key: {  # type: ignore[method-assign]
+                "jiraKey": "AF-103",
+                "summary": "Direct Jira task detail",
+                "raw_jira": {"key": "AF-103"},
+            }
+
+            detail = client.link_jira_ticket_to_project("AF-103", "225159")
+
+            self.assertTrue(any(call[0] == "/api/v1/issues/list" and call[1] == "PUT" for call in calls))
+            self.assertEqual(detail["parentIds"], [225159])
+            self.assertEqual(detail["summary"], "Existing task only has jiraLink")
 
     def test_get_jira_ticket_detail_uses_direct_jira_api_when_token_configured(self):
         with tempfile.TemporaryDirectory() as temp_dir:

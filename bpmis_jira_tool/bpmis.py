@@ -1292,6 +1292,7 @@ class BPMISDirectApiClient(BPMISClient):
     def _jira_ticket_search_payloads(self, ticket_key: str) -> list[dict[str, Any]]:
         base = {"page": 1, "pageSize": 10, "mapping": True}
         return [
+            {**base, "typeId": self.TASK_TYPE_ID, "jiraLink": ticket_key},
             {**base, "jiraKey": ticket_key},
             {**base, "issueKey": ticket_key},
             {**base, "key": ticket_key},
