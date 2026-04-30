@@ -1435,6 +1435,7 @@ class WebPortalFeatureTests(unittest.TestCase):
                 "TEAM_ALLOWED_EMAILS": "",
                 "TEAM_ALLOWED_EMAIL_DOMAINS": "",
                 "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
+                "TEAM_DASHBOARD_JIRA_RELEASE_AFTER": "2026-04-29",
             },
             clear=True,
         ):

@@ -155,6 +155,8 @@ class BPMISDirectApiClient(BPMISClient):
         self.request_stats: dict[str, int] = {
             "api_call_count": 0,
             "issue_detail_lookup_count": 0,
+            "jira_live_detail_lookup_count": 0,
+            "jira_live_status_override_count": 0,
             "issue_detail_enrichment_skipped_count": 0,
             "issue_created_before_cutoff_count": 0,
             "issue_release_before_cutoff_count": 0,
@@ -421,6 +423,7 @@ class BPMISDirectApiClient(BPMISClient):
                     row = self._merge_issue_payloads(row, detail)
             if not self._issue_reported_by(row, normalized_email):
                 continue
+            row = self._with_live_jira_fields(row, issue_key)
             tasks.append(self._normalize_project_jira_task(row))
         return tasks
 
@@ -524,6 +527,7 @@ class BPMISDirectApiClient(BPMISClient):
             elif issue_id and not self._extract_parent_issue_ids(row):
                 self.request_stats["issue_detail_enrichment_skipped_count"] += 1
             parent_project = self._parent_project_for_task(row, parent_project_cache)
+            row = self._with_live_jira_fields(row, issue_key)
             tasks.append(self._normalize_team_dashboard_jira_task(row, pm_email=matched_email, parent_project=parent_project))
         return tasks
 
@@ -1320,6 +1324,39 @@ class BPMISDirectApiClient(BPMISClient):
             if text:
                 return text
         return ""
+
+    def _with_live_jira_fields(self, row: dict[str, Any], ticket_key: str) -> dict[str, Any]:
+        normalized_ticket_key = self._extract_issue_key(str(ticket_key or "")) or str(ticket_key or "").strip()
+        if not normalized_ticket_key or not self._jira_token():
+            return row
+        self.request_stats["jira_live_detail_lookup_count"] += 1
+        try:
+            detail = self._get_jira_ticket_detail_via_jira(normalized_ticket_key)
+        except BPMISError as error:
+            self.event_logger.warning("Could not refresh live Jira status for %s: %s", normalized_ticket_key, error)
+            return row
+        if not detail:
+            return row
+
+        merged = dict(row)
+        live_status = self._extract_jira_status_label(detail)
+        current_status = self._extract_jira_status_label(row)
+        if live_status:
+            merged["status"] = {"label": live_status}
+            merged["jiraStatus"] = {"label": live_status}
+            if current_status and not self._status_labels_match(current_status, live_status):
+                self.request_stats["jira_live_status_override_count"] += 1
+
+        live_summary = str(detail.get("summary") or "").strip()
+        if live_summary:
+            merged["summary"] = live_summary
+        live_fix_versions = detail.get("fixVersions")
+        if isinstance(live_fix_versions, list) and live_fix_versions:
+            merged["fixVersions"] = live_fix_versions
+        live_components = detail.get("components")
+        if isinstance(live_components, list) and live_components:
+            merged["components"] = live_components
+        return merged
 
     @staticmethod
     def _status_labels_match(left: str, right: str) -> bool:

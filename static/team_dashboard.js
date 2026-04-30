@@ -578,7 +578,7 @@
               aria-label="${escapeHtml(starLabel)}"
               title="${escapeHtml(`${starLabel} - ${sourceLabel}`)}"
               ${canManageKeyProjects && bpmisId !== '-' ? '' : 'disabled'}
-            >${isKeyProject ? '★' : '☆'}</button>
+            ><span class="team-dashboard-key-star-icon" aria-hidden="true">${isKeyProject ? '★' : '☆'}</span></button>
           </div>
         </div>
         <div class="bpmis-task-panel" data-team-dashboard-panel-id="${escapeHtml(panelId)}" ${expanded ? '' : 'hidden'}>

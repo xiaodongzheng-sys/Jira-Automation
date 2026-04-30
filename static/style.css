@@ -6876,13 +6876,20 @@ select:focus {
   line-height: 1.25;
 }
 
-.team-dashboard-project-count span,
-.team-dashboard-key-project span {
+.team-dashboard-project-count > span,
+.team-dashboard-key-project > span {
   display: block;
   color: #667085;
   font-size: 12px;
   font-weight: 700;
   text-transform: uppercase;
+}
+
+.team-dashboard-key-project {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
 }
 
 .team-dashboard-project-count strong,
@@ -6893,8 +6900,9 @@ select:focus {
 }
 
 .team-dashboard-key-star {
-  display: grid;
-  place-items: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   width: 30px;
   height: 30px;
   margin-top: 0;
@@ -6905,6 +6913,15 @@ select:focus {
   font-size: 20px;
   line-height: 1;
   cursor: pointer;
+}
+
+.team-dashboard-project-card .team-dashboard-key-star .team-dashboard-key-star-icon {
+  display: block;
+  color: inherit;
+  font-size: inherit;
+  font-weight: inherit;
+  line-height: 1;
+  transform: translateY(-1px);
 }
 
 .team-dashboard-key-star.is-key {

@@ -1376,6 +1376,33 @@ class BPMISClientTests(unittest.TestCase):
                     }
                 self.assertEqual(path, "/api/v1/issues/list")
                 search = json.loads((params or {}).get("search") or "{}")
+                if search.get("subQueries") == [{"id": [225159]}]:
+                    return {
+                        "data": {
+                            "rows": [
+                                {
+                                    "id": 225159,
+                                    "summary": "Parent Project 225159",
+                                    "typeId": "Biz Project",
+                                    "marketId": {"label": "SG"},
+                                    "bizPriorityId": {"label": "P1"},
+                                    "regionalPmPicId": [{"emailAddress": "rpm@npt.sg"}],
+                                }
+                            ]
+                        }
+                    }
+                if search.get("subQueries") == [{"id": [225160]}]:
+                    return {
+                        "data": {
+                            "rows": [
+                                {
+                                    "id": 225160,
+                                    "summary": "Parent Project 225160",
+                                    "typeId": "Biz Project",
+                                }
+                            ]
+                        }
+                    }
                 calls.append(search)
                 self.assertEqual(search["subQueries"][0], {"typeId": [BPMISDirectApiClient.TASK_TYPE_ID]})
                 self.assertEqual(
@@ -1456,6 +1483,89 @@ class BPMISClientTests(unittest.TestCase):
             self.assertEqual(tasks[1]["pm_email"], "pm2@npt.sg")
             self.assertEqual(tasks[1]["version"], "Planning_26Q3")
             self.assertEqual(tasks[1]["parent_project"]["bpmis_id"], "225160")
+
+    def test_list_jira_tasks_created_by_emails_uses_live_jira_status_when_available(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings = Settings(
+                flask_secret_key="secret",
+                google_oauth_client_secret_file=Path(temp_dir) / "client.json",
+                google_oauth_redirect_uri=None,
+                team_portal_host="127.0.0.1",
+                team_portal_port=5000,
+                team_portal_base_url=None,
+                team_allowed_emails=(),
+                team_allowed_email_domains=(),
+                team_portal_data_dir=Path(temp_dir),
+                spreadsheet_id="sheet",
+                common_tab_name="Common",
+                input_tab_name="Input",
+                bpmis_base_url="https://example.com",
+                bpmis_api_access_token="token",
+            )
+
+            client = BPMISDirectApiClient(settings)
+            client._resolve_bpmis_user_ids_by_emails = lambda emails: {"pm1@npt.sg": [101]}  # type: ignore[method-assign]
+
+            def fake_api_request(path, method="GET", params=None, body=None):
+                if path == "/api/v1/issues/detail":
+                    issue_id = str((params or {}).get("id") or (params or {}).get("issueId") or "")
+                    return {
+                        "data": {
+                            "id": issue_id,
+                            "summary": f"Parent Project {issue_id}",
+                            "typeId": "Biz Project",
+                            "marketId": {"label": "SG"},
+                        }
+                    }
+                self.assertEqual(path, "/api/v1/issues/list")
+                return {
+                    "data": {
+                        "rows": [
+                            {
+                                "id": 991,
+                                "jiraKey": "SGDB-68363",
+                                "summary": "BPMIS stale task title",
+                                "reporter": {"id": 101},
+                                "status": {"label": "Waiting"},
+                                "parentIds": [225159],
+                            }
+                        ]
+                    }
+                }
+
+            def fake_request(**kwargs):
+                self.assertTrue(kwargs["url"].endswith("/rest/api/2/issue/SGDB-68363"))
+                return self._FakeResponse(
+                    200,
+                    {
+                        "id": "10001",
+                        "key": "SGDB-68363",
+                        "fields": {
+                            "summary": "[Feature] AF - DFP upgrade trojan malware detection",
+                            "status": {"name": "Closed"},
+                            "fixVersions": [],
+                            "components": [],
+                        },
+                    },
+                )
+
+            env = {
+                "JIRA_API_TOKEN": "dXNlcjp0b2tlbg==",
+                "JIRA_AUTH_SCHEME": "basic",
+                "JIRA_BASE_URL": "https://jira.example.test",
+                "JIRA_USERNAME": "",
+                "JIRA_EMAIL": "",
+            }
+            client._api_request = fake_api_request  # type: ignore[method-assign]
+            with patch.dict(os.environ, env), patch("bpmis_jira_tool.bpmis.requests.request", side_effect=fake_request):
+                tasks = client.list_jira_tasks_created_by_emails(["pm1@npt.sg"])
+
+            self.assertEqual(tasks[0]["jira_id"], "SGDB-68363")
+            self.assertEqual(tasks[0]["issue_id"], "991")
+            self.assertEqual(tasks[0]["jira_status"], "Closed")
+            self.assertEqual(tasks[0]["jira_title"], "[Feature] AF - DFP upgrade trojan malware detection")
+            self.assertEqual(client.request_stats["jira_live_detail_lookup_count"], 1)
+            self.assertEqual(client.request_stats["jira_live_status_override_count"], 1)
 
     def test_team_dashboard_jira_lookup_can_cap_pages_and_skip_missing_parent_detail(self):
         with tempfile.TemporaryDirectory() as temp_dir:

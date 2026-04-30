@@ -6109,6 +6109,8 @@ def _team_dashboard_fetch_stats(bpmis_client: Any) -> dict[str, int]:
             "issue_release_before_cutoff_count",
             "issue_release_missing_included_count",
             "issue_detail_lookup_count",
+            "jira_live_detail_lookup_count",
+            "jira_live_status_override_count",
             "issue_detail_enrichment_skipped_count",
             "issue_list_created_cutoff_hit",
             "issue_list_page_cap_hit",
