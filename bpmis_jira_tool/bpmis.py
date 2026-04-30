@@ -912,14 +912,14 @@ class BPMISDirectApiClient(BPMISClient):
             },
         ]
         last_error: Exception | None = None
-        for payload in payloads:
+        for body in self._add_existing_jira_request_bodies(payloads):
             try:
                 response = self._api_request(
                     "/api/v1/issues/batchCreateJiraIssue",
                     method="POST",
-                    body=[payload],
+                    body=body,
                 )
-                self._write_debug_capture(payload, response)
+                self._write_debug_capture(body, response)
                 batch_error = self._extract_batch_jira_issue_error(response)
                 if batch_error:
                     last_error = BPMISError(batch_error)
@@ -936,6 +936,14 @@ class BPMISDirectApiClient(BPMISClient):
             "Could not add existing Jira task to BPMIS Biz Project through BPMIS."
             f"{detail}"
         )
+
+    def _add_existing_jira_request_bodies(self, payloads: list[dict[str, Any]]) -> list[Any]:
+        bodies: list[Any] = []
+        for payload in payloads:
+            bodies.append({"values": [payload]})
+        for payload in payloads:
+            bodies.append([payload])
+        return bodies
 
     def _extract_batch_jira_issue_error(self, response: dict[str, Any]) -> str:
         data = response.get("data") or {}

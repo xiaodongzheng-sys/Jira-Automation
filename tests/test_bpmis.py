@@ -1197,9 +1197,9 @@ class BPMISClientTests(unittest.TestCase):
                     return {"data": {"rows": []}}
                 if path == "/api/v1/issues/batchCreateJiraIssue":
                     self.assertEqual(method, "POST")
-                    self.assertEqual(body[0]["typeId"], BPMISDirectApiClient.TASK_TYPE_ID)
-                    self.assertEqual(body[0]["parentIssueId"], 225159)
-                    self.assertEqual(body[0]["jiraLink"], "https://jira.shopee.io/browse/AF-102")
+                    self.assertEqual(body["values"][0]["typeId"], BPMISDirectApiClient.TASK_TYPE_ID)
+                    self.assertEqual(body["values"][0]["parentIssueId"], 225159)
+                    self.assertEqual(body["values"][0]["jiraLink"], "https://jira.shopee.io/browse/AF-102")
                     state["linked"] = True
                     return {"data": {"add": [{"jiraLink": "https://jira.shopee.io/browse/AF-102"}]}}
                 raise AssertionError(path)
