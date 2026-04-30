@@ -1,42 +1,50 @@
 (() => {
   const sessionForm = document.querySelector('[data-briefing-session-form]');
-  const chatForm = document.querySelector('[data-chat-form]');
   const statusNode = document.querySelector('[data-briefing-status]');
-  const walkthroughStatusNode = document.querySelector('[data-walkthrough-status]');
-  const sectionListNode = document.querySelector('[data-section-list]');
-  const sectionDetailNode = document.querySelector('[data-section-detail]');
-  const chatLogNode = document.querySelector('[data-chat-log]');
-  const narrateButton = document.querySelector('[data-play-section]');
-  const readerModeToggle = document.querySelector('[data-reader-mode-toggle]');
-  const quickQuestionButtons = document.querySelectorAll('[data-quick-question]');
-  const imageLightbox = document.querySelector('[data-image-lightbox]');
-  const imageLightboxMedia = document.querySelector('[data-image-lightbox-media]');
-  const imageLightboxClose = document.querySelector('[data-image-lightbox-close]');
-  const imageLightboxOpen = document.querySelector('[data-image-lightbox-open]');
+  const presenterView = document.querySelector('[data-presenter-view]');
   const sessionSubmitButton = sessionForm?.querySelector('button[type="submit"]');
   const briefingLanguage = document.querySelector('[data-briefing-language]');
   const prdReviewButton = document.querySelector('[data-prd-review-generate]');
   const prdReviewPanel = document.querySelector('[data-prd-review-panel]');
-  const chatSubmitButton = chatForm?.querySelector('button[type="submit"]');
-  const CACHED_NARRATION_DELAY_MS = 0;
-  let sourceContentCache = new Map();
+  const imageLightbox = document.querySelector('[data-image-lightbox]');
+  const imageLightboxMedia = document.querySelector('[data-image-lightbox-media]');
+  const imageLightboxClose = document.querySelector('[data-image-lightbox-close]');
+  const imageLightboxOpen = document.querySelector('[data-image-lightbox-open]');
+
+  /**
+   * @typedef {Object} PresentationTimestamp
+   * @property {string} sentence
+   * @property {number} start
+   * @property {number} end
+   *
+   * @typedef {Object} PresentationChunk
+   * @property {string} id
+   * @property {string} title
+   * @property {string} content
+   * @property {string=} audioUrl
+   * @property {number=} duration
+   * @property {PresentationTimestamp[]=} timestamps
+   * @property {string[]=} imageUrls
+   * @property {'draft'|'editing'|'audio-loading'|'ready'|'playing'|'audio-failed'=} audioStatus
+   */
+
+  const PREFETCH_WINDOW_SIZE = 2;
 
   let state = {
     sessionId: null,
-    sections: [],
-    briefingBlocks: [],
-    currentSectionIndex: 0,
-    currentBlockIndex: 0,
-    messages: [],
-    isNarrating: false,
+    sessionTitle: '',
+    chunks: [],
+    currentIndex: 0,
+    activeSentenceIndex: -1,
+    isGenerating: false,
+    continueRequired: false,
     currentAudio: null,
-    readerMode: false,
-    briefingLanguage: 'zh',
+    currentAudioIndex: -1,
   };
 
-  const READER_MODE_STORAGE_KEY = 'prd_briefing_reader_mode';
-
-  const isValidHttpUrl = (value) => /^https?:\/\/\S+/i.test(String(value || '').trim());
+  const pendingAudio = new Map();
+  const audioVersions = new Map();
+  let prefetchTail = Promise.resolve();
 
   const escapeHtml = (value) => String(value ?? '')
     .replaceAll('&', '&amp;')
@@ -45,189 +53,7 @@
     .replaceAll('"', '&quot;')
     .replaceAll("'", '&#39;');
 
-  const sanitizeConfluenceHtml = (value) => {
-    const template = document.createElement('template');
-    template.innerHTML = String(value || '');
-    template.content.querySelectorAll([
-      'script',
-      'style',
-      'link',
-      'meta',
-      'iframe',
-      'object',
-      'embed',
-      'form',
-      'input',
-      'button',
-      'textarea',
-      'select',
-      'dialog',
-    ].join(',')).forEach((node) => node.remove());
-    template.content.querySelectorAll('*').forEach((node) => {
-      Array.from(node.attributes || []).forEach((attribute) => {
-        const name = attribute.name.toLowerCase();
-        if (
-          name.startsWith('on')
-          || ['style', 'srcdoc', 'autofocus', 'hidden'].includes(name)
-        ) {
-          node.removeAttribute(attribute.name);
-        }
-      });
-      if (node.tagName === 'A') {
-        const href = node.getAttribute('href') || '';
-        if (/^\s*javascript:/i.test(href)) {
-          node.removeAttribute('href');
-        }
-        node.setAttribute('target', '_blank');
-        node.setAttribute('rel', 'noreferrer');
-      }
-      if (node.tagName === 'IMG') {
-        const src = node.getAttribute('src') || '';
-        if (/^\s*javascript:/i.test(src)) {
-          node.removeAttribute('src');
-        }
-        node.setAttribute('loading', 'lazy');
-        node.setAttribute('decoding', 'async');
-      }
-    });
-    return template.innerHTML;
-  };
-
-  const renderPlainSourceContent = (sectionIndex, section) => {
-    const cacheKey = `text:${sectionIndex}`;
-    if (sourceContentCache.has(cacheKey)) {
-      return sourceContentCache.get(cacheKey);
-    }
-    const text = String(section.content || '').trim();
-    const markup = text
-      ? `<div class="briefing-source-text">${escapeHtml(text)}</div>`
-      : '';
-    sourceContentCache.set(cacheKey, markup);
-    return markup;
-  };
-
-  const buildConfluenceFrameDocument = (bodyMarkup) => `<!doctype html>
-    <html>
-      <head>
-        <base target="_blank">
-        <style>
-          :root { color-scheme: light; }
-          body {
-            box-sizing: border-box;
-            color: #1f2937;
-            font: 15px/1.58 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-            margin: 0;
-            padding: 18px;
-            overflow-wrap: anywhere;
-          }
-          * { box-sizing: border-box; }
-          table {
-            border-collapse: collapse;
-            margin: 10px 0;
-            max-width: 100%;
-            table-layout: fixed;
-            width: 100%;
-          }
-          th, td {
-            border: 1px solid #d8dee8;
-            padding: 8px 10px;
-            vertical-align: top;
-            word-break: break-word;
-          }
-          th {
-            background: #f6f8fb;
-            font-weight: 700;
-            text-align: left;
-          }
-          img {
-            display: block;
-            height: auto;
-            max-width: 100%;
-          }
-          img[src] {
-            cursor: zoom-in;
-          }
-          p, ul, ol { margin-top: 0; }
-          a { color: #0b66d8; }
-          .table-wrap,
-          .confluence-embedded-file-wrapper {
-            max-width: 100%;
-            overflow-x: auto;
-          }
-        </style>
-        <script>
-          (() => {
-            const openImagePreview = (image) => {
-              const src = image.currentSrc || image.src || image.getAttribute('src') || '';
-              if (!src) return;
-              window.parent.postMessage({
-                type: 'prd-briefing:image-preview',
-                src,
-                alt: image.alt || image.getAttribute('aria-label') || 'PRD image preview',
-              }, '*');
-            };
-            document.addEventListener('click', (event) => {
-              const image = event.target && event.target.closest ? event.target.closest('img[src]') : null;
-              if (!image) return;
-              event.preventDefault();
-              openImagePreview(image);
-            });
-            document.addEventListener('keydown', (event) => {
-              if (event.key !== 'Enter' && event.key !== ' ') return;
-              const image = event.target && event.target.closest ? event.target.closest('img[src]') : null;
-              if (!image) return;
-              event.preventDefault();
-              openImagePreview(image);
-            });
-            const prepareImages = () => {
-              document.querySelectorAll('img[src]').forEach((image) => {
-                if (!image.hasAttribute('tabindex')) image.setAttribute('tabindex', '0');
-                image.setAttribute('role', 'button');
-                if (!image.hasAttribute('aria-label')) image.setAttribute('aria-label', image.alt || 'Open PRD image preview');
-              });
-            };
-            if (document.readyState === 'loading') {
-              document.addEventListener('DOMContentLoaded', prepareImages);
-            } else {
-              prepareImages();
-            }
-          })();
-        </script>
-      </head>
-      <body>${bodyMarkup}</body>
-    </html>`;
-
-  const renderConfluenceSourceContent = (sectionIndex, section) => {
-    const rawHtml = String(section.html_content || '').trim();
-    if (!rawHtml) {
-      return null;
-    }
-    const cacheKey = `html:${sectionIndex}`;
-    if (!sourceContentCache.has(cacheKey)) {
-      sourceContentCache.set(cacheKey, sanitizeConfluenceHtml(rawHtml));
-    }
-    return sourceContentCache.get(cacheKey) || null;
-  };
-
-  const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
-
-  const normalizeDecorativeText = (value) => String(value || '')
-    .replace(/[\u200b-\u200d\ufeff]/g, '')
-    .replace(/\s+/g, '');
-
-  const fastNodeText = (node) => String(node?.textContent || '').replace(/\s+/g, ' ').trim();
-
-  const isDecorativeArrowText = (value) => {
-    const text = normalizeDecorativeText(value);
-    return Boolean(text) && /^[↓↑←→↕↔↘↙↖↗⇩⇧⇦⇨⇣⇡⇠⇢⇓⇑⇒⇐▼▲◀▶▾▴⌄⌃⌵⏷⏶\-–—|.,:;()]+$/.test(text);
-  };
-
-  const isDecorativeMarkerText = (value) => {
-    const text = normalizeDecorativeText(value);
-    if (!text) return true;
-    if (isDecorativeArrowText(text)) return true;
-    return /^(?:[0-9]+|[ivxlcdmIVXLCDM]+|[a-zA-Z])[.)、:]?(?:(?:[0-9]+|[ivxlcdmIVXLCDM]+|[a-zA-Z])[.)、:]?)*$/.test(text);
-  };
+  const isValidHttpUrl = (value) => /^https?:\/\/\S+/i.test(String(value || '').trim());
 
   const setStatus = (message, tone = 'neutral') => {
     if (!statusNode) return;
@@ -235,30 +61,10 @@
     statusNode.dataset.tone = tone;
   };
 
-  const setWalkthroughStatus = (message, tone = 'neutral') => {
-    if (!walkthroughStatusNode) return;
-    walkthroughStatusNode.hidden = false;
-    walkthroughStatusNode.innerHTML = `<p>${escapeHtml(message)}</p>`;
-    walkthroughStatusNode.dataset.tone = tone;
-  };
-
-  const clearWalkthroughStatus = () => {
-    if (!walkthroughStatusNode) return;
-    walkthroughStatusNode.hidden = true;
-    walkthroughStatusNode.innerHTML = '<p>Narration status appears here.</p>';
-    delete walkthroughStatusNode.dataset.tone;
-  };
-
-  const wait = (durationMs) => new Promise((resolve) => {
-    window.setTimeout(resolve, durationMs);
-  });
-
-  const briefingLanguageLabel = () => (state.briefingLanguage === 'en' ? 'English' : 'Chinese');
-
   const setSessionSubmitLoading = (isLoading) => {
     if (!sessionSubmitButton) return;
     sessionSubmitButton.disabled = isLoading;
-    sessionSubmitButton.textContent = isLoading ? 'Generating...' : 'Generate Developer Walkthrough';
+    sessionSubmitButton.textContent = isLoading ? '生成中...' : '生成宣讲';
   };
 
   const parseJsonResponse = async (response) => {
@@ -266,21 +72,63 @@
     if (contentType.includes('application/json')) {
       return response.json();
     }
-
     const text = await response.text().catch(() => '');
-    if (response.redirected) {
+    if (response.redirected || text.trim().startsWith('<!DOCTYPE') || text.trim().startsWith('<html')) {
       throw new Error('Your session expired or requires sign-in. Refresh the page and try again.');
-    }
-    if (text.trim().startsWith('<!DOCTYPE') || text.trim().startsWith('<html')) {
-      throw new Error('The server returned a page instead of an API response. Refresh the page and try again.');
     }
     throw new Error(`Unexpected API response format (${contentType || 'unknown'}).`);
   };
 
+  const splitSentences = (text) => {
+    const normalized = String(text || '').replace(/\s+/g, ' ').trim();
+    if (!normalized) return [];
+    const matches = normalized.match(/[^。！？!?；;]+[。！？!?；;]?/g) || [normalized];
+    return matches.map((item) => item.trim()).filter(Boolean);
+  };
+
+  const estimateTimestamps = (content, duration = 30) => {
+    const sentences = splitSentences(content);
+    const weights = sentences.map((sentence) => Math.max(1, sentence.replace(/\s+/g, '').length));
+    const total = weights.reduce((sum, value) => sum + value, 0) || 1;
+    let cursor = 0;
+    return sentences.map((sentence, index) => {
+      const end = index === sentences.length - 1
+        ? duration
+        : Math.min(duration, cursor + (duration * weights[index] / total));
+      const item = { sentence, start: Number(cursor.toFixed(2)), end: Number(Math.max(end, cursor + 0.2).toFixed(2)) };
+      cursor = end;
+      return item;
+    });
+  };
+
+  const sanitizeChunk = (chunk, index) => ({
+    id: String(chunk.id || `chunk-${index + 1}`),
+    title: String(chunk.title || `宣讲段落 ${index + 1}`),
+    content: String(chunk.content || '').trim(),
+    audioUrl: chunk.audioUrl || '',
+    duration: Number(chunk.duration || 0),
+    timestamps: Array.isArray(chunk.timestamps) ? chunk.timestamps : [],
+    imageUrls: Array.isArray(chunk.imageUrls) ? chunk.imageUrls.filter(Boolean) : [],
+    audioStatus: chunk.audioStatus || (chunk.audioUrl ? 'ready' : 'draft'),
+    errorMessage: '',
+  });
+
+  const activeChunk = () => state.chunks[state.currentIndex] || null;
+
+  const statusLabel = (chunk) => {
+    const status = chunk?.audioStatus || 'draft';
+    if (status === 'ready') return 'Audio ready';
+    if (status === 'playing') return 'Playing';
+    if (status === 'audio-loading') return 'Generating audio';
+    if (status === 'audio-failed') return 'Manual read';
+    if (status === 'editing') return 'Editing';
+    return 'Draft';
+  };
+
   const renderMarkdown = (value) => {
-    const html = [];
+    const lines = String(value || '').split(/\r?\n/);
     let inList = false;
-    let table = null;
+    const html = [];
     const closeList = () => {
       if (inList) {
         html.push('</ul>');
@@ -290,54 +138,11 @@
     const inline = (text) => escapeHtml(text)
       .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
       .replace(/`(.+?)`/g, '<code>$1</code>');
-    const splitTableRow = (line) => {
-      let text = String(line || '').trim();
-      if (text.startsWith('|')) text = text.slice(1);
-      if (text.endsWith('|')) text = text.slice(0, -1);
-      return text.split('|').map((cell) => cell.trim());
-    };
-    const isTableSeparator = (line) => {
-      const cells = splitTableRow(line);
-      return cells.length > 1 && cells.every((cell) => /^:?-{3,}:?$/.test(cell.replace(/\s+/g, '')));
-    };
-    const renderTable = () => {
-      if (!table) return;
-      const columnCount = Math.max(table.headers.length, ...table.rows.map((row) => row.length), 1);
-      const renderCells = (cells, tag) => Array.from({ length: columnCount }, (_, index) => (
-        `<${tag}>${inline(cells[index] || '')}</${tag}>`
-      )).join('');
-      html.push(
-        '<div class="briefing-markdown-table-wrap"><table class="briefing-markdown-table">'
-        + `<thead><tr>${renderCells(table.headers, 'th')}</tr></thead>`
-        + `<tbody>${table.rows.map((row) => `<tr>${renderCells(row, 'td')}</tr>`).join('')}</tbody>`
-        + '</table></div>',
-      );
-      table = null;
-    };
-    const closeBlocks = () => {
-      closeList();
-      renderTable();
-    };
-    const lines = String(value || '').split(/\r?\n/);
-    lines.forEach((line, index) => {
+    lines.forEach((line) => {
       const trimmed = line.trim();
       if (!trimmed) {
-        closeBlocks();
-        return;
-      }
-      const nextLine = lines[index + 1]?.trim() || '';
-      if (!table && trimmed.includes('|') && isTableSeparator(nextLine)) {
         closeList();
-        table = { headers: splitTableRow(trimmed), rows: [] };
         return;
-      }
-      if (table) {
-        if (isTableSeparator(trimmed)) return;
-        if (trimmed.includes('|') && !isTableSeparator(trimmed)) {
-          table.rows.push(splitTableRow(trimmed));
-          return;
-        }
-        renderTable();
       }
       const heading = trimmed.match(/^(#{2,4})\s+(.+)$/);
       if (heading) {
@@ -357,7 +162,7 @@
       closeList();
       html.push(`<p>${inline(trimmed)}</p>`);
     });
-    closeBlocks();
+    closeList();
     return html.join('');
   };
 
@@ -435,58 +240,396 @@
     }
   };
 
-  const renderReaderMode = () => {
-    const enabled = Boolean(state.readerMode);
-    document.body.classList.toggle('briefing-reader-mode', enabled);
-    if (readerModeToggle) {
-      readerModeToggle.textContent = enabled ? 'Exit Reader Mode' : 'Enter Reader Mode';
-      readerModeToggle.setAttribute('aria-pressed', enabled ? 'true' : 'false');
+  const stopCurrentAudio = ({ reset = false } = {}) => {
+    if (!state.currentAudio) return;
+    state.currentAudio.pause();
+    if (reset) state.currentAudio.currentTime = 0;
+    const chunk = state.chunks[state.currentAudioIndex];
+    if (chunk && chunk.audioStatus === 'playing') {
+      chunk.audioStatus = 'ready';
+    }
+    state.currentAudio = null;
+    state.currentAudioIndex = -1;
+  };
+
+  const abortAudioRequest = (index) => {
+    const pending = pendingAudio.get(index);
+    if (pending?.controller) {
+      pending.controller.abort();
+    }
+    pendingAudio.delete(index);
+  };
+
+  const applyAudioPayload = (index, payload, version) => {
+    const chunk = state.chunks[index];
+    if (!chunk || audioVersions.get(index) !== version) return;
+    const generated = payload.chunk || payload;
+    chunk.audioUrl = generated.audioUrl || '';
+    chunk.duration = Number(generated.duration || 0);
+    chunk.timestamps = Array.isArray(generated.timestamps) ? generated.timestamps : [];
+    chunk.imageUrls = Array.isArray(generated.imageUrls) && generated.imageUrls.length ? generated.imageUrls : chunk.imageUrls;
+    chunk.audioStatus = chunk.audioUrl ? 'ready' : 'audio-failed';
+    chunk.errorMessage = chunk.audioUrl ? '' : 'No audio URL returned.';
+    if (index === state.currentIndex) {
+      setStatus(chunk.audioUrl ? `第 ${index + 1} 段音频已就绪，可以播放。` : `第 ${index + 1} 段音频不可用，可手动朗读。`, chunk.audioUrl ? 'success' : 'error');
+    }
+    renderPresenterView();
+  };
+
+  const enqueueAudio = (index) => {
+    const chunk = state.chunks[index];
+    if (!chunk || !state.sessionId) return Promise.resolve();
+    if (chunk.audioStatus === 'ready' || chunk.audioStatus === 'playing' || chunk.audioStatus === 'audio-loading') {
+      return pendingAudio.get(index)?.promise || Promise.resolve();
+    }
+
+    const version = (audioVersions.get(index) || 0) + 1;
+    audioVersions.set(index, version);
+    const controller = new AbortController();
+    chunk.audioStatus = 'audio-loading';
+    chunk.errorMessage = '';
+    renderPresenterView();
+
+    const task = async () => {
+      try {
+        const response = await fetch('/prd-briefing/api/generate-audio', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            session_id: state.sessionId,
+            chunk: {
+              id: chunk.id,
+              title: chunk.title,
+              content: chunk.content,
+              imageUrls: chunk.imageUrls || [],
+            },
+          }),
+          signal: controller.signal,
+        });
+        const payload = await parseJsonResponse(response);
+        if (!response.ok) throw new Error(payload.message || 'Could not generate audio for this chunk.');
+        applyAudioPayload(index, payload, version);
+      } catch (error) {
+        if (controller.signal.aborted || audioVersions.get(index) !== version) return;
+        const current = state.chunks[index];
+        if (current) {
+          current.audioStatus = 'audio-failed';
+          current.errorMessage = error.message || 'TTS failed. You can manually read this chunk.';
+        }
+        if (index === state.currentIndex) {
+          setStatus(current?.errorMessage || 'TTS failed. You can manually read this chunk.', 'error');
+        }
+        renderPresenterView();
+      } finally {
+        pendingAudio.delete(index);
+      }
+    };
+
+    const promise = prefetchTail.then(task, task);
+    prefetchTail = promise.catch(() => {});
+    pendingAudio.set(index, { controller, promise });
+    return promise;
+  };
+
+  const ensurePrefetchWindow = (anchorIndex = state.currentIndex) => {
+    const last = Math.min(state.chunks.length - 1, anchorIndex + PREFETCH_WINDOW_SIZE);
+    for (let index = anchorIndex; index <= last; index += 1) {
+      enqueueAudio(index);
     }
   };
 
-  const stopNarration = () => {
-    if (state.currentAudio) {
-      state.currentAudio.pause();
-      state.currentAudio.currentTime = 0;
+  const syncSentenceHighlight = () => {
+    const chunk = activeChunk();
+    const audio = state.currentAudio;
+    if (!chunk || !audio) return;
+    const timestamps = chunk.timestamps?.length ? chunk.timestamps : estimateTimestamps(chunk.content, chunk.duration || 30);
+    const current = audio.currentTime;
+    const activeIndex = timestamps.findIndex((item) => current >= Number(item.start || 0) && current < Number(item.end || 0));
+    if (activeIndex === state.activeSentenceIndex) return;
+    state.activeSentenceIndex = activeIndex;
+    presenterView?.querySelectorAll('[data-sentence-index]').forEach((node) => {
+      node.classList.toggle('is-active', Number(node.dataset.sentenceIndex || '-1') === activeIndex);
+    });
+  };
+
+  const playCurrentChunk = async () => {
+    const chunk = activeChunk();
+    if (!chunk) return;
+    if (chunk.audioStatus === 'audio-failed') {
+      setStatus('这段音频生成失败，可以手动朗读后继续下一段。', 'error');
+      return;
+    }
+    if (chunk.audioStatus !== 'ready') {
+      setStatus(`正在生成第 ${state.currentIndex + 1} 段音频，请稍等。`, 'neutral');
+      await enqueueAudio(state.currentIndex);
+      if (activeChunk()?.audioStatus !== 'ready') return;
+    }
+
+    stopCurrentAudio();
+    const audio = new Audio(chunk.audioUrl);
+    state.currentAudio = audio;
+    state.currentAudioIndex = state.currentIndex;
+    state.continueRequired = false;
+    chunk.audioStatus = 'playing';
+    renderPresenterView();
+    ensurePrefetchWindow(state.currentIndex + 1);
+
+    audio.addEventListener('timeupdate', syncSentenceHighlight);
+    audio.addEventListener('ended', () => {
+      const endedChunk = state.chunks[state.currentIndex];
+      if (endedChunk) endedChunk.audioStatus = 'ready';
       state.currentAudio = null;
+      state.currentAudioIndex = -1;
+      state.activeSentenceIndex = (endedChunk?.timestamps || []).length - 1;
+      state.continueRequired = true;
+      renderPresenterView();
+    }, { once: true });
+    audio.addEventListener('error', () => {
+      const failedChunk = state.chunks[state.currentIndex];
+      if (failedChunk) {
+        failedChunk.audioStatus = 'audio-failed';
+        failedChunk.errorMessage = 'Audio playback failed. You can manually read this chunk.';
+      }
+      state.currentAudio = null;
+      state.currentAudioIndex = -1;
+      renderPresenterView();
+    }, { once: true });
+
+    try {
+      await audio.play();
+    } catch {
+      if (chunk.audioStatus === 'playing') chunk.audioStatus = 'ready';
+      state.currentAudio = null;
+      state.currentAudioIndex = -1;
+      renderPresenterView();
     }
-    clearSourceHighlights();
-    state.isNarrating = false;
-    if (narrateButton) narrateButton.disabled = !state.sessionId;
   };
 
-  const activeBlock = () => {
-    if (!state.briefingBlocks.length) return null;
-    return state.briefingBlocks[state.currentBlockIndex] || state.briefingBlocks[0] || null;
+  const pauseCurrentChunk = () => {
+    const chunk = activeChunk();
+    if (!chunk || chunk.audioStatus !== 'playing') return;
+    stopCurrentAudio();
+    chunk.audioStatus = 'ready';
+    renderPresenterView();
   };
 
-  const activeSection = () => state.sections[state.currentSectionIndex] || state.sections[0] || null;
-
-  const activeSectionIndexes = () => {
-    const block = activeBlock();
-    if (block) return (block.section_indexes || []).map((value) => Number(value)).filter(Number.isFinite);
-    return [state.currentSectionIndex];
+  const continueToNextChunk = async () => {
+    if (state.currentIndex >= state.chunks.length - 1) {
+      state.continueRequired = false;
+      renderPresenterView();
+      return;
+    }
+    state.currentIndex += 1;
+    state.activeSentenceIndex = -1;
+    state.continueRequired = false;
+    renderPresenterView();
+    ensurePrefetchWindow(state.currentIndex);
+    await playCurrentChunk();
   };
 
-  const clearSourceHighlights = () => {
-    if (!sectionDetailNode) return;
-    sectionDetailNode.querySelectorAll('.briefing-source-section.is-narrating-source').forEach((node) => {
-      node.classList.remove('is-narrating-source');
+  const goToChunk = (index) => {
+    if (index < 0 || index >= state.chunks.length) return;
+    stopCurrentAudio({ reset: true });
+    state.currentIndex = index;
+    state.activeSentenceIndex = -1;
+    state.continueRequired = false;
+    renderPresenterView();
+    ensurePrefetchWindow(index);
+  };
+
+  const enterEditMode = (index) => {
+    const chunk = state.chunks[index];
+    if (!chunk) return;
+    if (state.currentAudioIndex === index) {
+      stopCurrentAudio();
+    }
+    abortAudioRequest(index);
+    audioVersions.set(index, (audioVersions.get(index) || 0) + 1);
+    chunk.audioStatus = 'editing';
+    state.currentIndex = index;
+    state.continueRequired = false;
+    renderPresenterView();
+  };
+
+  const saveEdit = (index) => {
+    const chunk = state.chunks[index];
+    const textarea = presenterView?.querySelector(`[data-edit-content="${index}"]`);
+    if (!chunk || !textarea) return;
+    const nextContent = String(textarea.value || '').trim();
+    if (!nextContent) return;
+    abortAudioRequest(index);
+    audioVersions.set(index, (audioVersions.get(index) || 0) + 1);
+    chunk.content = nextContent;
+    chunk.audioUrl = '';
+    chunk.duration = 0;
+    chunk.timestamps = [];
+    chunk.audioStatus = 'draft';
+    chunk.errorMessage = '';
+    state.activeSentenceIndex = -1;
+    renderPresenterView();
+    enqueueAudio(index);
+  };
+
+  const cancelEdit = (index) => {
+    const chunk = state.chunks[index];
+    if (!chunk) return;
+    chunk.audioStatus = chunk.audioUrl ? 'ready' : 'draft';
+    renderPresenterView();
+  };
+
+  const manualAdvance = () => {
+    const chunk = activeChunk();
+    if (!chunk) return;
+    state.activeSentenceIndex = (chunk.timestamps || estimateTimestamps(chunk.content)).length - 1;
+    state.continueRequired = true;
+    renderPresenterView();
+  };
+
+  const renderPresenterView = () => {
+    if (!presenterView) return;
+    if (!state.chunks.length) {
+      presenterView.innerHTML = '<div class="empty-state"><p>生成宣讲后，研发视角大纲和播放器会显示在这里。</p></div>';
+      return;
+    }
+
+    const chunk = activeChunk();
+    const timestamps = chunk.timestamps?.length ? chunk.timestamps : estimateTimestamps(chunk.content, chunk.duration || 30);
+    const images = (chunk.imageUrls || []).map((src) => `
+      <button class="briefing-presenter-image" type="button" data-preview-image="${escapeHtml(src)}">
+        <img src="${escapeHtml(src)}" alt="${escapeHtml(chunk.title)}">
+      </button>
+    `).join('');
+    const isPlaying = chunk.audioStatus === 'playing';
+    const isEditing = chunk.audioStatus === 'editing';
+    const canPlay = chunk.audioStatus === 'ready';
+    const isLoading = chunk.audioStatus === 'audio-loading';
+    const hasFailed = chunk.audioStatus === 'audio-failed';
+
+    presenterView.innerHTML = `
+      <div class="briefing-presenter-layout">
+        <aside class="briefing-presenter-outline" aria-label="Briefing outline">
+          ${state.chunks.map((item, index) => `
+            <button class="briefing-presenter-outline-item ${index === state.currentIndex ? 'is-active' : ''}" type="button" data-go-chunk="${index}">
+              <span>${index + 1}</span>
+              <strong>${escapeHtml(item.title)}</strong>
+              <small data-status="${escapeHtml(item.audioStatus || 'draft')}">${escapeHtml(statusLabel(item))}</small>
+            </button>
+          `).join('')}
+        </aside>
+        <article class="briefing-presenter-stage">
+          <div class="briefing-presenter-stage-head">
+            <div>
+              <p class="briefing-overview-kicker">Chunk ${state.currentIndex + 1} / ${state.chunks.length}</p>
+              <h3>${escapeHtml(chunk.title)}</h3>
+            </div>
+            <span class="briefing-presenter-status" data-status="${escapeHtml(chunk.audioStatus || 'draft')}">${escapeHtml(statusLabel(chunk))}</span>
+          </div>
+          ${images ? `<div class="briefing-presenter-images">${images}</div>` : ''}
+          ${isEditing ? `
+            <div class="briefing-presenter-editor">
+              <textarea data-edit-content="${state.currentIndex}" rows="8">${escapeHtml(chunk.content)}</textarea>
+              <div class="button-row">
+                <button class="button" type="button" data-save-edit="${state.currentIndex}">保存并重新生成音频</button>
+                <button class="button button-secondary" type="button" data-cancel-edit="${state.currentIndex}">Cancel</button>
+              </div>
+            </div>
+          ` : `
+            <div class="briefing-presenter-script" data-edit-chunk="${state.currentIndex}" title="Double click to edit this chunk">
+              ${timestamps.map((item, index) => `
+                <span class="briefing-presenter-sentence ${index === state.activeSentenceIndex ? 'is-active' : ''}" data-sentence-index="${index}">
+                  ${escapeHtml(item.sentence)}
+                </span>
+              `).join('')}
+            </div>
+          `}
+          ${chunk.errorMessage ? `<p class="briefing-presenter-error">${escapeHtml(chunk.errorMessage)}</p>` : ''}
+          <div class="briefing-presenter-controls">
+            <button class="button" type="button" data-play-current ${canPlay ? '' : 'disabled'}>${isPlaying ? '播放中' : '播放/继续'}</button>
+            <button class="button button-secondary" type="button" data-pause-current ${isPlaying ? '' : 'disabled'}>暂停</button>
+            <button class="button button-secondary" type="button" data-next-current ${state.currentIndex >= state.chunks.length - 1 ? 'disabled' : ''}>下一段</button>
+            ${isLoading ? '<span class="briefing-presenter-loading">正在生成本段音频...</span>' : ''}
+            ${hasFailed ? '<button class="button button-secondary" type="button" data-manual-advance>手动朗读并继续</button>' : ''}
+          </div>
+          ${state.continueRequired ? `
+            <div class="briefing-presenter-continue">
+              <button class="button" type="button" data-continue-next>
+                ${state.currentIndex >= state.chunks.length - 1 ? '宣讲已结束' : '开发/测试提问结束，继续下一段'}
+              </button>
+            </div>
+          ` : ''}
+        </article>
+      </div>
+    `;
+
+    presenterView.querySelectorAll('[data-go-chunk]').forEach((button) => {
+      button.addEventListener('click', () => goToChunk(Number(button.dataset.goChunk || 0)));
+    });
+    presenterView.querySelector('[data-play-current]')?.addEventListener('click', playCurrentChunk);
+    presenterView.querySelector('[data-pause-current]')?.addEventListener('click', pauseCurrentChunk);
+    presenterView.querySelector('[data-next-current]')?.addEventListener('click', () => goToChunk(state.currentIndex + 1));
+    presenterView.querySelector('[data-continue-next]')?.addEventListener('click', continueToNextChunk);
+    presenterView.querySelector('[data-manual-advance]')?.addEventListener('click', manualAdvance);
+    presenterView.querySelector('[data-edit-chunk]')?.addEventListener('dblclick', () => enterEditMode(state.currentIndex));
+    presenterView.querySelector('[data-save-edit]')?.addEventListener('click', (event) => saveEdit(Number(event.currentTarget.dataset.saveEdit || state.currentIndex)));
+    presenterView.querySelector('[data-cancel-edit]')?.addEventListener('click', (event) => cancelEdit(Number(event.currentTarget.dataset.cancelEdit || state.currentIndex)));
+    presenterView.querySelectorAll('[data-preview-image]').forEach((button) => {
+      button.addEventListener('click', () => openImageLightbox(button.dataset.previewImage, chunk.title));
     });
   };
 
-  const highlightActiveSources = () => {
-    if (!sectionDetailNode) return;
-    clearSourceHighlights();
-    const indexes = new Set(activeSectionIndexes());
-    let first = null;
-    sectionDetailNode.querySelectorAll('[data-source-section-index]').forEach((node) => {
-      const index = Number(node.dataset.sourceSectionIndex || '-1');
-      const active = indexes.has(index);
-      node.classList.toggle('is-narrating-source', active);
-      if (active && !first) first = node;
-    });
-    first?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  const generatePresentation = async () => {
+    const formData = sessionForm ? new FormData(sessionForm) : new FormData();
+    const pageRef = String(formData.get('page_ref') || '').trim();
+    if (!isValidHttpUrl(pageRef)) {
+      setStatus('Enter a valid Confluence page URL.', 'error');
+      return;
+    }
+
+    stopCurrentAudio({ reset: true });
+    pendingAudio.forEach((item) => item.controller?.abort());
+    pendingAudio.clear();
+    audioVersions.clear();
+    state = {
+      sessionId: null,
+      sessionTitle: '',
+      chunks: [],
+      currentIndex: 0,
+      activeSentenceIndex: -1,
+      isGenerating: true,
+      continueRequired: false,
+      currentAudio: null,
+      currentAudioIndex: -1,
+    };
+    renderPresenterView();
+    setSessionSubmitLoading(true);
+    setStatus('正在读取 PRD 并生成宣讲大纲，预计需要 30-40 秒。');
+
+    try {
+      const response = await fetch('/prd-briefing/api/process-prd', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ page_ref: pageRef }),
+      });
+      const payload = await parseJsonResponse(response);
+      if (!response.ok) throw new Error(payload.message || 'Could not process this PRD.');
+      state.sessionId = payload.session?.session_id || null;
+      state.sessionTitle = payload.session?.title || 'PRD';
+      state.chunks = (payload.chunks || []).map(sanitizeChunk).filter((chunk) => chunk.content);
+      state.isGenerating = false;
+      state.currentIndex = 0;
+      setStatus(`已生成 "${state.sessionTitle}" 的宣讲大纲。正在优先生成开场音频。`, 'success');
+      renderPresenterView();
+      enqueueAudio(0).then(() => ensurePrefetchWindow(1));
+    } catch (error) {
+      state.isGenerating = false;
+      const message = error.message || 'Could not process this PRD.';
+      setStatus(message, 'error');
+      if (presenterView) {
+        presenterView.innerHTML = `<div class="empty-state"><p>${escapeHtml(message)}</p></div>`;
+      }
+    } finally {
+      setSessionSubmitLoading(false);
+    }
   };
 
   const closeImageLightbox = () => {
@@ -499,502 +642,17 @@
   const openImageLightbox = (src, alt) => {
     if (!imageLightbox || !imageLightboxMedia || !src) return;
     imageLightboxMedia.src = src;
-    imageLightboxMedia.alt = alt || 'Enlarged PRD image preview';
+    imageLightboxMedia.alt = alt || 'PRD image preview';
     if (imageLightboxOpen) imageLightboxOpen.href = src;
     if (typeof imageLightbox.showModal === 'function') {
       imageLightbox.showModal();
     }
   };
 
-  const imagePreviewSrcFromFrameMessage = (src) => {
-    try {
-      const url = new URL(String(src || ''), window.location.href);
-      if (url.origin !== window.location.origin) return '';
-      if (url.pathname !== '/prd-briefing/image-proxy') return '';
-      return url.href;
-    } catch {
-      return '';
-    }
-  };
-
-  const addHorizontalHints = () => {
-    if (!sectionDetailNode) return;
-    sectionDetailNode.querySelectorAll('.briefing-scroll-hint').forEach((hint) => hint.remove());
-    const wrappers = sectionDetailNode.querySelectorAll('.confluence-embedded-file-wrapper');
-    wrappers.forEach((wrapper) => {
-      wrapper.classList.add('briefing-horizontal-scroll');
-      const hasOverflow = wrapper.scrollWidth > wrapper.clientWidth + 8;
-      if (hasOverflow && !wrapper.previousElementSibling?.classList.contains('briefing-scroll-hint')) {
-        const hint = document.createElement('div');
-        hint.className = 'briefing-scroll-hint';
-        hint.textContent = 'Scroll horizontally to view the full content';
-        wrapper.parentNode?.insertBefore(hint, wrapper);
-      }
-      const syncState = () => {
-        wrapper.classList.toggle('is-scrollable-right', wrapper.scrollLeft + wrapper.clientWidth < wrapper.scrollWidth - 8);
-        wrapper.classList.toggle('is-scrollable-left', wrapper.scrollLeft > 8);
-      };
-      syncState();
-      wrapper.addEventListener('scroll', syncState, { passive: true });
-    });
-  };
-
-  const enhancePresentationTables = () => {
-    if (!sectionDetailNode) return;
-    const wrappers = sectionDetailNode.querySelectorAll('.table-wrap');
-    wrappers.forEach((wrapper) => {
-      const table = wrapper.querySelector('table');
-      if (!table || table.dataset.briefingEnhanced === 'true') return;
-      const rows = Array.from(table.querySelectorAll('tr'));
-      if (rows.length < 2) return;
-      const bodyRows = rows.filter((row) => row.querySelectorAll('td').length >= 2);
-      if (!bodyRows.length) return;
-      const screenshotLikeRows = bodyRows.filter((row) => {
-        const cells = row.querySelectorAll('td');
-        if (cells.length < 2) return false;
-        const leftTextLength = (cells[0].innerText || '').trim().length;
-        const rightImages = cells[1].querySelectorAll('img').length;
-        return leftTextLength > 30 && rightImages > 0;
-      });
-      if (screenshotLikeRows.length < Math.max(1, Math.floor(bodyRows.length / 2))) return;
-
-      table.dataset.briefingEnhanced = 'true';
-      wrapper.classList.add('briefing-presentation-table');
-      const cards = document.createElement('div');
-      cards.className = 'briefing-presentation-cards';
-
-      bodyRows.forEach((row, index) => {
-        const cells = row.querySelectorAll('td');
-        if (cells.length < 2) return;
-        const card = document.createElement('article');
-        card.className = 'briefing-presentation-card';
-
-        const textPane = document.createElement('div');
-        textPane.className = 'briefing-presentation-copy';
-        textPane.innerHTML = cells[0].innerHTML;
-
-        const imagePane = document.createElement('div');
-        imagePane.className = 'briefing-presentation-visual';
-        imagePane.innerHTML = cells[1].innerHTML;
-
-        const label = document.createElement('div');
-        label.className = 'briefing-presentation-step';
-        label.textContent = `Reference ${index + 1}`;
-
-        card.appendChild(label);
-        card.appendChild(textPane);
-        card.appendChild(imagePane);
-        cards.appendChild(card);
-      });
-
-      if (!cards.children.length) return;
-
-      wrapper.insertAdjacentElement('afterend', cards);
-      wrapper.classList.add('is-replaced');
-    });
-  };
-
-  const classifyTableLayouts = () => {
-    if (!sectionDetailNode) return;
-    sectionDetailNode.querySelectorAll('.table-wrap table').forEach((table) => {
-      const rows = Array.from(table.querySelectorAll('tr'));
-      const maxColumns = rows.reduce((largest, row) => Math.max(largest, row.querySelectorAll('th, td').length), 0);
-      const imageCells = Array.from(table.querySelectorAll('td, th')).filter((cell) => cell.querySelector('img'));
-      const hasMedia = imageCells.length > 0;
-      const hasDenseColumns = maxColumns >= 5;
-      const hasMediaSplit = hasMedia && maxColumns === 2;
-
-      table.classList.toggle('briefing-dense-table', hasDenseColumns);
-      table.classList.toggle('briefing-media-table', hasMedia);
-      table.classList.toggle('briefing-media-split-table', hasMediaSplit);
-      if (hasDenseColumns || hasMedia) {
-        table.closest('.table-wrap')?.classList.add('briefing-natural-table-wrap');
-      }
-
-      imageCells.forEach((cell) => {
-        cell.classList.add('briefing-media-cell');
-        const text = fastNodeText(cell);
-        cell.classList.toggle('briefing-pure-media-cell', text.length === 0 || isDecorativeArrowText(text));
-      });
-    });
-  };
-
-  const hideDecorativeArrowArtifacts = () => {
-    if (!sectionDetailNode) return;
-    sectionDetailNode.querySelectorAll('.briefing-decorative-arrow-only, .briefing-decorative-marker-row').forEach((node) => {
-      node.classList.remove('briefing-decorative-arrow-only');
-      node.classList.remove('briefing-decorative-marker-row');
-    });
-    sectionDetailNode.querySelectorAll('.briefing-original-content tr').forEach((row) => {
-      const cells = Array.from(row.children).filter((child) => child.matches?.('td, th'));
-      if (!cells.length) return;
-      const isMarkerOnlyRow = cells.every((cell) => {
-        const hasMedia = Boolean(cell.querySelector('img, video, svg, canvas'));
-        return !hasMedia && isDecorativeMarkerText(fastNodeText(cell));
-      });
-      if (isMarkerOnlyRow) {
-        row.classList.add('briefing-decorative-marker-row');
-      }
-    });
-    sectionDetailNode.querySelectorAll('.briefing-original-content p, .briefing-original-content li, .briefing-presentation-copy p, .briefing-presentation-copy li').forEach((node) => {
-      const hasMedia = Boolean(node.querySelector('img, video, svg, canvas'));
-      if (!hasMedia && isDecorativeMarkerText(fastNodeText(node))) {
-        node.classList.add('briefing-decorative-arrow-only');
-      }
-    });
-    sectionDetailNode.querySelectorAll('.briefing-original-content td, .briefing-original-content th').forEach((node) => {
-      const hasMedia = Boolean(node.querySelector('img, video, svg, canvas'));
-      if (!hasMedia && isDecorativeArrowText(fastNodeText(node))) {
-        node.classList.add('briefing-decorative-arrow-only');
-      }
-    });
-  };
-
-  const classifySectionImages = () => {
-    if (!sectionDetailNode) return;
-    sectionDetailNode.querySelectorAll('img').forEach((image) => {
-      const applyClass = () => {
-        const inMediaArea = Boolean(image.closest('.briefing-media-cell, .briefing-presentation-visual'));
-        const contextText = image.closest('.briefing-presentation-copy, td, th, p, li')?.textContent?.toLowerCase() || '';
-        const src = `${image.currentSrc || image.src || ''}`.toLowerCase();
-        const isSmallAsset = image.naturalWidth > 0 && image.naturalHeight > 0 && image.naturalWidth <= 180 && image.naturalHeight <= 180;
-        const isIconLike =
-          !inMediaArea
-          && (image.closest('.briefing-presentation-copy')
-          || isSmallAsset
-          || /arrow|expand|collapse|up|down|icon/.test(src)
-          || /expand|collapse|icon/.test(contextText));
-        image.classList.toggle('briefing-inline-icon', Boolean(isIconLike));
-      };
-
-      if (image.complete) {
-        applyClass();
-      } else {
-        image.addEventListener('load', applyClass, { once: true });
-      }
-    });
-  };
-
-  const playCurrentSection = async () => {
-    if (!state.sessionId || state.isNarrating) return;
-    state.isNarrating = true;
-    clearWalkthroughStatus();
-    if (narrateButton) {
-      narrateButton.disabled = true;
-      narrateButton.textContent = `Generating ${briefingLanguageLabel()} narration...`;
-    }
-    try {
-      const response = await fetch(`/prd-briefing/api/session/${state.sessionId}/narrate`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          briefing_block_id: activeBlock()?.block_id || null,
-          section_index: state.currentSectionIndex,
-          include_audio: true,
-        }),
-      });
-      const payload = await parseJsonResponse(response);
-      if (!response.ok) throw new Error(payload.message || 'Could not generate narration for this module.');
-      if (payload.cached) {
-        setWalkthroughStatus(`Cache hit. Preparing the ${briefingLanguageLabel()} narration for this module...`, 'neutral');
-        await wait(CACHED_NARRATION_DELAY_MS);
-      }
-      if (payload.audio_url) {
-        const audio = new Audio(payload.audio_url);
-        state.currentAudio = audio;
-        highlightActiveSources();
-        audio.addEventListener('ended', () => {
-          state.currentAudio = null;
-          state.isNarrating = false;
-          clearSourceHighlights();
-          if (narrateButton) narrateButton.disabled = false;
-        }, { once: true });
-        audio.addEventListener('error', () => {
-          state.currentAudio = null;
-          state.isNarrating = false;
-          clearSourceHighlights();
-          if (narrateButton) narrateButton.disabled = false;
-        }, { once: true });
-        await audio.play().catch(() => {
-          state.currentAudio = null;
-          state.isNarrating = false;
-          clearSourceHighlights();
-          if (narrateButton) narrateButton.disabled = false;
-        });
-      } else {
-        state.isNarrating = false;
-        clearSourceHighlights();
-        if (narrateButton) {
-          narrateButton.disabled = false;
-          narrateButton.textContent = `Start ${briefingLanguageLabel()} Narration`;
-        }
-        throw new Error('Server-side voice is unavailable right now. Browser speech fallback is disabled.');
-      }
-      setStatus(
-        payload.audio_url
-          ? (payload.cached ? `Cached ${briefingLanguageLabel()} narration is ready for this module.` : `${briefingLanguageLabel()} narration has been generated for this module.`)
-          : 'Server-side voice is unavailable right now.',
-        'success',
-      );
-      setWalkthroughStatus(
-        payload.cached
-          ? `Cached ${briefingLanguageLabel()} narration is playing. Related PRD source sections are highlighted.`
-          : `${briefingLanguageLabel()} narration is playing. Related PRD source sections are highlighted.`,
-        'success',
-      );
-    } catch (error) {
-      state.isNarrating = false;
-      clearSourceHighlights();
-      if (narrateButton) {
-        narrateButton.disabled = false;
-        narrateButton.textContent = `Start ${briefingLanguageLabel()} Narration`;
-      }
-      const raw = error.message || 'Could not generate narration for this section.';
-      const hasOpenAI = raw.includes('OpenAI');
-      const friendly = raw.includes('429') || raw.includes('Too Many Requests')
-        ? (hasOpenAI
-            ? 'OpenAI is rate limited right now. Try this narration again later.'
-            : 'The text model is rate limited right now. Try this narration again later.')
-        : raw;
-      setStatus(friendly, 'error');
-      setWalkthroughStatus(friendly, 'error');
-    }
-  };
-
-  const renderSections = () => {
-    if (!sectionListNode || !sectionDetailNode) return;
-    if (!state.sections.length) {
-      clearWalkthroughStatus();
-      sectionListNode.innerHTML = '<div class="empty-state"><p>PM briefing module navigation appears here after generation.</p></div>';
-      sectionDetailNode.innerHTML = '<div class="empty-state"><p>Select a briefing module to view the merged walkthrough and original PRD content.</p></div>';
-      narrateButton.disabled = true;
-      narrateButton.textContent = `Start ${briefingLanguageLabel()} Narration`;
-      return;
-    }
-    const blocks = state.briefingBlocks.length ? state.briefingBlocks : state.sections.map((section, index) => ({
-      block_id: `section-${index}`,
-      title: section.section_path,
-      briefing_goal: 'Generate the walkthrough from the original PRD section.',
-      merged_summary: section.briefing_summary || section.content || '',
-      section_indexes: [index],
-      source_refs: [{ section_index: index, section_path: section.section_path }],
-      developer_focus: section.briefing_notes || [],
-      walkthrough_cached: section.walkthrough_cached,
-      walkthrough_audio_cached: section.walkthrough_audio_cached,
-    }));
-    sectionListNode.innerHTML = blocks.map((block, index) => `
-      <button class="briefing-outline-item ${index === state.currentBlockIndex ? 'is-active' : ''}" type="button" data-block-index="${index}">
-        <span>${index + 1}</span>
-        <strong>${escapeHtml(block.title)}</strong>
-        <small>${escapeHtml((block.section_indexes || []).length)} PRD section(s)</small>
-        <div class="briefing-cache-pill-row">
-          ${block.walkthrough_cached ? '<em class="briefing-cache-pill">Script cached</em>' : ''}
-          ${block.walkthrough_audio_cached ? '<em class="briefing-cache-pill briefing-cache-pill-secondary">Audio cached</em>' : ''}
-        </div>
-      </button>
-    `).join('');
-    const block = blocks[state.currentBlockIndex] || blocks[0];
-    const sourceIndexes = (block.section_indexes || []).map((value) => Number(value)).filter(Number.isFinite);
-    const renderSourceSection = (sectionIndex) => {
-      const section = state.sections[sectionIndex];
-      if (!section) return '';
-      const hasOriginalHtml = Boolean(section.html_content && section.html_content.trim());
-      const images = !hasOriginalHtml
-        ? (section.image_refs || []).map((src) => `<img src="${escapeHtml(src)}" alt="${escapeHtml(section.section_path)}">`).join('')
-        : '';
-      const rawHtml = String(section.html_content || '').trim();
-      const contentMarkup = renderPlainSourceContent(sectionIndex, section);
-      const renderStatus = rawHtml
-        ? '<div class="briefing-source-render-status" data-render-confluence-status="pending">Rendering Confluence view...</div>'
-        : '';
-      return `
-        <section class="briefing-source-section" data-source-section-index="${sectionIndex}">
-          <div class="briefing-source-heading">
-            <span>PRD ${sectionIndex + 1}</span>
-            <strong>${escapeHtml(section.section_path)}</strong>
-          </div>
-          <div class="briefing-source-actions">${renderStatus}</div>
-          <div class="briefing-original-content is-text-rendered" data-source-content-index="${sectionIndex}">${contentMarkup || `<p>${escapeHtml(section.content || '')}</p>`}</div>
-          ${images ? `<div class="briefing-image-grid">${images}</div>` : ''}
-        </section>
-      `;
-    };
-    const sourceMarkup = (sourceIndexes.length ? sourceIndexes : [state.currentSectionIndex])
-      .map(renderSourceSection)
-      .join('');
-    sectionDetailNode.innerHTML = `
-      <div class="briefing-section-heading">
-        <h3>${escapeHtml(block.title)}</h3>
-        <span class="briefing-section-meta">Briefing module ${state.currentBlockIndex + 1} / ${blocks.length}</span>
-      </div>
-      <article class="briefing-block-summary">
-        <p class="briefing-overview-kicker">PM Briefing Goal</p>
-        <p>${escapeHtml(block.briefing_goal || '')}</p>
-        <p>${escapeHtml(block.merged_summary || '')}</p>
-        ${(block.developer_focus || []).length ? `
-          <ul>${(block.developer_focus || []).slice(0, 4).map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</ul>
-        ` : ''}
-      </article>
-      <div class="briefing-source-stack">${sourceMarkup}</div>
-    `;
-    const attachImagePreview = () => sectionDetailNode.querySelectorAll('img').forEach((image) => {
-      if (image.dataset.briefingPreviewReady === 'true') return;
-      image.dataset.briefingPreviewReady = 'true';
-      image.setAttribute('tabindex', '0');
-      image.setAttribute('role', 'button');
-      image.setAttribute('aria-label', `${block.title} image preview`);
-      const openPreview = () => openImageLightbox(image.currentSrc || image.src, image.alt || block.title);
-      image.addEventListener('click', openPreview);
-      image.addEventListener('keydown', (event) => {
-        if (event.key === 'Enter' || event.key === ' ') {
-          event.preventDefault();
-          openPreview();
-        }
-      });
-    });
-    const renderConfluenceView = (sectionIndex) => {
-      const section = state.sections[sectionIndex];
-      if (!section) return;
-      const sourceNode = sectionDetailNode.querySelector(`[data-source-section-index="${sectionIndex}"]`);
-      const target = sourceNode?.querySelector(`[data-source-content-index="${sectionIndex}"]`);
-      const status = sourceNode?.querySelector('[data-render-confluence-status]');
-      if (!target || target.dataset.confluenceRendered === 'true') return;
-      window.requestAnimationFrame(() => {
-        const html = renderConfluenceSourceContent(sectionIndex, section);
-        if (!html) {
-          if (status) status.textContent = '';
-          return;
-        }
-        target.dataset.confluenceRendered = 'true';
-        target.classList.remove('is-text-rendered');
-        target.classList.add('is-confluence-rendered');
-        target.innerHTML = '';
-        const frame = document.createElement('iframe');
-        frame.className = 'briefing-confluence-frame';
-        frame.title = `${section.section_path || 'PRD section'} Confluence view`;
-        frame.setAttribute('sandbox', 'allow-scripts allow-popups allow-popups-to-escape-sandbox');
-        frame.srcdoc = buildConfluenceFrameDocument(html);
-        target.appendChild(frame);
-        if (status) status.textContent = 'Confluence view';
-      });
-    };
-    attachImagePreview();
-    sourceIndexes.forEach(renderConfluenceView);
-    sectionListNode.querySelectorAll('[data-block-index]').forEach((button) => {
-      button.addEventListener('click', () => {
-        stopNarration();
-        state.currentBlockIndex = Number(button.dataset.blockIndex || 0);
-        const selectedBlock = blocks[state.currentBlockIndex] || null;
-        state.currentSectionIndex = Number((selectedBlock?.section_indexes || [0])[0] || 0);
-        renderSections();
-        if (selectedBlock?.walkthrough_cached) {
-          const detail = selectedBlock.walkthrough_audio_cached
-            ? `This module already has cached script and audio. Clicking "Start ${briefingLanguageLabel()} Narration" will not call text or voice generation again.`
-            : `This module already has a cached script. Clicking "Start ${briefingLanguageLabel()} Narration" will not call the text model again.`;
-          setWalkthroughStatus(detail, 'success');
-        } else {
-          clearWalkthroughStatus();
-        }
-      });
-    });
-    narrateButton.disabled = state.isNarrating;
-    if (!state.isNarrating) narrateButton.textContent = `Start ${briefingLanguageLabel()} Narration`;
-  };
-
-  const renderMessages = (messages = []) => {
-    if (!chatLogNode) return;
-    state.messages = messages;
-    if (!messages.length) {
-      chatLogNode.innerHTML = '<div class="empty-state"><p>Generate a walkthrough before asking your first follow-up question.</p></div>';
-      return;
-    }
-    chatLogNode.innerHTML = messages.map((message) => {
-      if (message.role === 'user') {
-        return `<article class="chat-bubble chat-bubble-user"><strong>You</strong><p>${escapeHtml(message.body)}</p></article>`;
-      }
-      const citations = (() => {
-        try {
-          return JSON.parse(message.citations_json || '[]');
-        } catch {
-          return [];
-        }
-      })();
-      const citationMarkup = citations.length ? `
-        <div class="citation-list">
-          ${citations.map((citation) => `
-            <a href="${escapeHtml(citation.source_url)}" target="_blank" rel="noreferrer">
-              ${escapeHtml(citation.title)} · ${escapeHtml(citation.section_path)}
-            </a>
-          `).join('')}
-        </div>
-      ` : '';
-      const audioMarkup = message.audio_url ? `<audio controls src="${escapeHtml(message.audio_url)}"></audio>` : '';
-      return `
-        <article class="chat-bubble chat-bubble-assistant">
-          <div class="chat-bubble-head">
-            <strong>Briefing Assistant</strong>
-            <span class="briefing-pill">${escapeHtml(message.groundedness || 'Answer')}</span>
-          </div>
-          <p>${escapeHtml(message.body).replaceAll('\n', '<br>')}</p>
-          ${citationMarkup}
-          ${audioMarkup}
-        </article>
-      `;
-    }).join('');
-  };
-
-  const applySessionPayload = (payload) => {
-    stopNarration();
-    state.sessionId = payload.session.session_id;
-    state.sections = payload.sections || [];
-    state.briefingBlocks = payload.briefing_blocks || [];
-    state.briefingLanguage = payload.session?.audience === 'developer_en' ? 'en' : 'zh';
-    sourceContentCache = new Map();
-    state.currentSectionIndex = 0;
-    state.currentBlockIndex = 0;
-    setStatus(`Generated the ${briefingLanguageLabel()} developer walkthrough for "${payload.session.title}".`, 'success');
-    renderSections();
-    renderMessages(payload.messages || []);
-  };
-
   if (sessionForm) {
-    sessionForm.addEventListener('submit', async (event) => {
+    sessionForm.addEventListener('submit', (event) => {
       event.preventDefault();
-      const formData = new FormData(sessionForm);
-      const pageRef = String(formData.get('page_ref') || '').trim();
-      if (!isValidHttpUrl(pageRef)) {
-        setStatus('Enter a valid Confluence page URL.', 'error');
-        return;
-      }
-      setSessionSubmitLoading(true);
-      const language = briefingLanguage?.value || 'zh';
-      setStatus(`Reading the Confluence PRD and generating a ${language === 'en' ? 'English' : 'Chinese'} developer walkthrough...`);
-      try {
-        const response = await fetch('/prd-briefing/api/session', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            page_ref: pageRef,
-            mode: formData.get('mode'),
-            language,
-          }),
-        });
-        const payload = await parseJsonResponse(response);
-        if (!response.ok) throw new Error(payload.message || 'Could not generate the PRD walkthrough right now.');
-        setSessionSubmitLoading(false);
-        setStatus('PRD loaded. Rendering the page...');
-        await wait(0);
-        try {
-          applySessionPayload(payload);
-        } catch (renderError) {
-          console.error(renderError);
-          setStatus('PRD loaded, but the page could not render the walkthrough safely. Please try again or use another PRD link.', 'error');
-        }
-      } catch (error) {
-        setStatus(error.message || 'Could not generate the PRD walkthrough right now.', 'error');
-      } finally {
-        setSessionSubmitLoading(false);
-      }
+      generatePresentation();
     });
   }
 
@@ -1004,129 +662,25 @@
     });
   }
 
-  if (chatForm) {
-    chatForm.addEventListener('submit', async (event) => {
-      event.preventDefault();
-      if (!state.sessionId) {
-        setStatus('Generate a walkthrough first.', 'error');
-        return;
-      }
-      const formData = new FormData(chatForm);
-      const question = String(formData.get('question') || '').trim();
-      if (!question) return;
-      if (chatSubmitButton) {
-        chatSubmitButton.disabled = true;
-        chatSubmitButton.textContent = 'Answering...';
-      }
-      try {
-        const response = await fetch(`/prd-briefing/api/session/${state.sessionId}/answer`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ question }),
-        });
-        const payload = await parseJsonResponse(response);
-        if (!response.ok) throw new Error(payload.message || 'Could not answer this question right now.');
-        const userBubble = { role: 'user', body: question };
-        const assistantBubble = {
-          role: 'assistant',
-          body: payload.answer_text,
-          groundedness: payload.groundedness,
-          citations_json: JSON.stringify(payload.citations || []),
-          audio_url: payload.audio_url,
-        };
-        renderMessages([...(state.messages || []), userBubble, assistantBubble]);
-        chatForm.reset();
-      } catch (error) {
-        setStatus(error.message || 'Could not answer this question right now.', 'error');
-      } finally {
-        if (chatSubmitButton) {
-          chatSubmitButton.disabled = false;
-          chatSubmitButton.textContent = 'Submit Question';
-        }
-      }
-    });
-  }
-
-  quickQuestionButtons.forEach((button) => {
-    button.addEventListener('click', () => {
-      const textarea = chatForm?.querySelector('textarea[name="question"]');
-      if (!textarea) return;
-      textarea.value = button.dataset.quickQuestion || '';
-      textarea.focus();
-    });
-  });
-
-  if (narrateButton) {
-    narrateButton.addEventListener('click', async () => {
-      if (!state.sessionId) return;
-      await playCurrentSection();
-    });
-  }
-
-  if (readerModeToggle) {
-    readerModeToggle.addEventListener('click', () => {
-      state.readerMode = !state.readerMode;
-      try {
-        window.localStorage.setItem(READER_MODE_STORAGE_KEY, state.readerMode ? '1' : '0');
-      } catch {}
-      renderReaderMode();
-      if (state.readerMode) {
-        document.querySelector('.briefing-primary-panel')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      }
-    });
-  }
-
   if (imageLightboxClose) {
-    imageLightboxClose.addEventListener('click', () => {
-      closeImageLightbox();
-    });
+    imageLightboxClose.addEventListener('click', closeImageLightbox);
   }
 
   if (imageLightbox) {
     imageLightbox.addEventListener('click', (event) => {
-      if (event.target === imageLightbox) {
-        closeImageLightbox();
-      }
+      if (event.target === imageLightbox) closeImageLightbox();
     });
     imageLightbox.addEventListener('close', () => {
-      if (imageLightboxMedia) {
-        imageLightboxMedia.removeAttribute('src');
-      }
-      if (imageLightboxOpen) {
-        imageLightboxOpen.setAttribute('href', '#');
-      }
+      imageLightboxMedia?.removeAttribute('src');
+      imageLightboxOpen?.setAttribute('href', '#');
     });
   }
 
-  window.addEventListener('message', (event) => {
-    if (event.source === window) return;
-    const payload = event.data || {};
-    if (payload.type !== 'prd-briefing:image-preview') return;
-    const src = imagePreviewSrcFromFrameMessage(payload.src);
-    if (!src) return;
-    openImageLightbox(src, payload.alt || 'PRD image preview');
-  });
-
   document.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape') {
-      if (imageLightbox?.open) {
-        closeImageLightbox();
-        return;
-      }
-      if (state.readerMode) {
-        state.readerMode = false;
-        try {
-          window.localStorage.setItem(READER_MODE_STORAGE_KEY, '0');
-        } catch {}
-        renderReaderMode();
-      }
+    if (event.key === 'Escape' && imageLightbox?.open) {
+      closeImageLightbox();
     }
   });
 
-  try {
-    state.readerMode = window.localStorage.getItem(READER_MODE_STORAGE_KEY) === '1';
-  } catch {
-    state.readerMode = false;
-  }
-  renderReaderMode();
+  renderPresenterView();
 })();

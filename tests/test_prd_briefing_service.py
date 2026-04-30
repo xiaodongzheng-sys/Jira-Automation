@@ -23,6 +23,7 @@ from prd_briefing.service import (
     build_heuristic_session_overview,
     overview_is_low_signal,
     optimize_tts_text,
+    parse_presentation_chunks,
     parse_session_overview,
     select_sections_for_overview,
 )
@@ -108,6 +109,18 @@ class PRDBriefingServiceTests(unittest.TestCase):
             voice_service=self.voice_service,
             walkthrough_prewarm_enabled=False,
         )
+
+    def test_parse_presentation_chunks_extracts_json_array(self):
+        chunks = parse_presentation_chunks(
+            'Here is the JSON:\n```json\n[{"id":"chunk-1","title":"开场","content":"研发先看主流程。"}]\n```'
+        )
+
+        self.assertEqual(chunks[0]["id"], "chunk-1")
+        self.assertEqual(chunks[0]["title"], "开场")
+
+    def test_parse_presentation_chunks_rejects_invalid_json(self):
+        with self.assertRaises(ValueError):
+            parse_presentation_chunks('{"id":"chunk-1"}')
 
     def _settings(self) -> Settings:
         return Settings(

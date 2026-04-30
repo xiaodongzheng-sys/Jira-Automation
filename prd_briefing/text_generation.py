@@ -27,11 +27,11 @@ class TextGenerationClient:
 
 
 class CodexTextGenerationClient:
-    def __init__(self, *, settings: Settings, workspace_root: Path, prompt_mode: str) -> None:
+    def __init__(self, *, settings: Settings, workspace_root: Path, prompt_mode: str, codex_model: str | None = None) -> None:
         self.settings = settings
         self.workspace_root = Path(workspace_root)
         self.prompt_mode = str(prompt_mode or "prd_briefing_codex").strip() or "prd_briefing_codex"
-        self.codex_model = os.getenv("SOURCE_CODE_QA_CODEX_MODEL", "codex-cli")
+        self.codex_model = str(codex_model or os.getenv("PRD_BRIEFING_CODEX_MODEL") or os.getenv("SOURCE_CODE_QA_CODEX_MODEL") or "codex-cli").strip() or "codex-cli"
         self.provider = CodexCliBridgeSourceCodeQALLMProvider(
             workspace_root=self.workspace_root,
             timeout_seconds=settings.source_code_qa_codex_timeout_seconds,

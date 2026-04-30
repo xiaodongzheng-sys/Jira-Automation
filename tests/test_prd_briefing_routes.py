@@ -72,6 +72,40 @@ class FakeBriefingService:
             "section_indexes": [0],
         }
 
+    def process_prd_for_presentation(self, **kwargs):
+        return {
+            "status": "ok",
+            "session": {
+                "session_id": "session-1",
+                "title": "PRD",
+                "model_id": "codex:gpt-5.5",
+                "prompt_version": "v1_codex_gpt55_prd_presentation_chunks",
+            },
+            "chunks": [
+                {
+                    "id": "chunk-1",
+                    "title": "开场",
+                    "content": "这一段给开发说明主流程。",
+                    "imageUrls": ["/prd-briefing/image-proxy?src=x"],
+                    "audioStatus": "draft",
+                }
+            ],
+        }
+
+    def generate_presentation_audio(self, **kwargs):
+        return {
+            "status": "ok",
+            "chunk": {
+                "id": kwargs["chunk"]["id"],
+                "title": kwargs["chunk"]["title"],
+                "content": kwargs["chunk"]["content"],
+                "audioUrl": "/prd-briefing/assets/audio/session-1/mock.mp3",
+                "duration": 3.2,
+                "timestamps": [{"sentence": kwargs["chunk"]["content"], "start": 0, "end": 3.2}],
+                "imageUrls": kwargs["chunk"].get("imageUrls") or [],
+            },
+        }
+
 
 class FakePRDReviewService:
     def __init__(self):
@@ -184,21 +218,23 @@ class PRDBriefingRouteTests(unittest.TestCase):
             response = client.get("/prd-briefing/")
             self.assertEqual(response.status_code, 200)
             self.assertIn("PRD Briefing Tool".encode("utf-8"), response.data)
+            self.assertIn("AI PRD Briefing Tool".encode("utf-8"), response.data)
+            self.assertIn("生成宣讲".encode("utf-8"), response.data)
             self.assertIn(b"page-shell-briefing", response.data)
             self.assertIn(b"data-image-lightbox", response.data)
-            self.assertIn(b"data-no-image-mode-toggle", response.data)
             self.assertIn(b"data-prd-review-generate", response.data)
             self.assertIn(b"data-briefing-language", response.data)
+            self.assertIn(b"data-presenter-view", response.data)
             self.assertIn(b"PRD Details", response.data)
-            self.assertIn(b"Output Language", response.data)
-            self.assertIn(b"developer walkthrough or an AI PRD review", response.data)
             self.assertIn(b"No PRD output yet", response.data)
+            self.assertNotIn(b"Developer Walkthrough", response.data)
+            self.assertNotIn(b"Developer Follow-up", response.data)
             self.assertNotIn(b"data-prd-review-language", response.data)
             self.assertNotIn(b"No walkthrough yet", response.data)
             self.assertNotIn("3 分钟".encode("utf-8"), response.data)
             self.assertNotIn(b"Team Knowledge Base", response.data)
 
-    def test_build_service_uses_codex_for_walkthrough_generation(self):
+    def test_build_service_uses_codex_for_presentation_generation(self):
         FakeCodexTextGenerationClient.init_kwargs = None
         with self.app.app_context(), patch.object(
             prd_blueprint_module,
@@ -208,7 +244,44 @@ class PRDBriefingRouteTests(unittest.TestCase):
             service = prd_blueprint_module._build_service()  # noqa: SLF001
 
         self.assertIsInstance(service.text_client, FakeCodexTextGenerationClient)
-        self.assertEqual(FakeCodexTextGenerationClient.init_kwargs["prompt_mode"], "prd_briefing_developer_walkthrough_codex")
+        self.assertEqual(FakeCodexTextGenerationClient.init_kwargs["prompt_mode"], "prd_briefing_presentation_chunks_codex")
+        self.assertEqual(FakeCodexTextGenerationClient.init_kwargs["codex_model"], "gpt-5.5")
+
+    @patch("prd_briefing.blueprint._build_service", return_value=FakeBriefingService())
+    def test_process_prd_endpoint_returns_presentation_chunks(self, _mock_service):
+        with self.app.test_client() as client:
+            with client.session_transaction() as session:
+                session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong Zheng"}
+                session["google_credentials"] = {"token": "x"}
+            response = client.post(
+                "/prd-briefing/api/process-prd",
+                json={"page_ref": "https://example.atlassian.net/wiki/pages/123"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["session"]["model_id"], "codex:gpt-5.5")
+        self.assertEqual(payload["chunks"][0]["id"], "chunk-1")
+        self.assertEqual(payload["chunks"][0]["imageUrls"], ["/prd-briefing/image-proxy?src=x"])
+
+    @patch("prd_briefing.blueprint._build_service", return_value=FakeBriefingService())
+    def test_generate_audio_endpoint_returns_presentation_chunk(self, _mock_service):
+        with self.app.test_client() as client:
+            with client.session_transaction() as session:
+                session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong Zheng"}
+                session["google_credentials"] = {"token": "x"}
+            response = client.post(
+                "/prd-briefing/api/generate-audio",
+                json={
+                    "session_id": "session-1",
+                    "chunk": {"id": "chunk-1", "title": "开场", "content": "这一段给开发说明主流程。"},
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["chunk"]["audioUrl"], "/prd-briefing/assets/audio/session-1/mock.mp3")
+        self.assertEqual(payload["chunk"]["timestamps"][0]["start"], 0)
 
     @patch("prd_briefing.blueprint._build_service", return_value=FakeBriefingService())
     def test_create_session_endpoint_returns_payload(self, mock_service):

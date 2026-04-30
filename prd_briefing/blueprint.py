@@ -82,6 +82,44 @@ def create_prd_briefing_blueprint() -> Blueprint:
         except Exception as error:  # noqa: BLE001
             return jsonify({"status": "error", "message": str(error)}), 400
 
+    @blueprint.post("/api/process-prd")
+    def process_prd():
+        try:
+            owner_key = current_app.config["GET_USER_IDENTITY"]()["config_key"]
+            payload = request.get_json(force=True)
+            service = _build_service()
+            data = service.process_prd_for_presentation(
+                owner_key=owner_key,
+                page_ref=str(payload.get("page_ref") or payload.get("prd_url") or "").strip(),
+                text=str(payload.get("text") or "").strip(),
+            )
+            return jsonify(data)
+        except ToolError as error:
+            return jsonify({"status": "error", "message": str(error)}), 400
+        except RuntimeError as error:
+            return jsonify({"status": "error", "message": str(error)}), 400
+        except Exception as error:  # noqa: BLE001
+            message = str(error) or "Could not process this PRD."
+            if any(token in message.lower() for token in ("unauthorized", "forbidden", "permission", "401", "403")):
+                message = "Confluence access failed. Your token may be expired or this page may not be shared with the configured account."
+            return jsonify({"status": "error", "message": message}), 400
+
+    @blueprint.post("/api/generate-audio")
+    def generate_audio():
+        try:
+            owner_key = current_app.config["GET_USER_IDENTITY"]()["config_key"]
+            payload = request.get_json(force=True)
+            chunk = payload.get("chunk") if isinstance(payload.get("chunk"), dict) else payload
+            service = _build_service()
+            data = service.generate_presentation_audio(
+                owner_key=owner_key,
+                session_id=str(payload.get("session_id") or payload.get("sessionId") or "").strip(),
+                chunk=chunk,
+            )
+            return jsonify(data)
+        except Exception as error:  # noqa: BLE001
+            return jsonify({"status": "error", "message": str(error) or "Could not generate audio for this chunk."}), 400
+
     @blueprint.get("/api/session/<session_id>")
     def get_session(session_id: str):
         try:
@@ -225,7 +263,8 @@ def _build_service() -> PRDBriefingService:
     text_client = CodexTextGenerationClient(
         settings=settings,
         workspace_root=Path(__file__).resolve().parent.parent,
-        prompt_mode="prd_briefing_developer_walkthrough_codex",
+        prompt_mode="prd_briefing_presentation_chunks_codex",
+        codex_model=settings.prd_briefing_codex_model,
     )
     confluence = ConfluenceConnector(
         base_url=settings.confluence_base_url,

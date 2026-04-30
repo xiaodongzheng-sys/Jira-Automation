@@ -6,13 +6,13 @@
   <section class="briefing-shell">
     <div class="portal-compact-hero briefing-compact-hero">
       <div class="portal-compact-title">
-        <p class="showcase-kicker">Developer Briefing</p>
-        <h1>PRD Briefing Tool</h1>
+        <p class="showcase-kicker">AI PRD Briefing</p>
+        <h1>AI PRD Briefing Tool</h1>
       </div>
       <div class="portal-compact-meta">
         <span>Confluence PRD</span>
-        <span>Walkthrough</span>
-        <span>Follow-up Q&A</span>
+        <span>Codex Outline</span>
+        <span>Edge TTS</span>
       </div>
     </div>
 
@@ -21,92 +21,41 @@
         <div class="panel-head">
           <div>
             <h2>PRD Details</h2>
-            <p class="help-text">Paste a Confluence PRD link, choose an output language, then generate either a developer walkthrough or an AI PRD review from the same source.</p>
+            <p class="help-text">Paste a Confluence PRD link, generate a Chinese engineering briefing outline, preview and edit the chunks, then play the TTS narration when audio is ready.</p>
           </div>
         </div>
         <form class="stack" data-briefing-session-form>
           <div>
             <label for="page_ref">Confluence Page URL</label>
             <input id="page_ref" name="page_ref" value="https://confluence.shopee.io/display/SPDB/8.1+Part+1+of+PRD" placeholder="https://your-domain.atlassian.net/wiki/spaces/..." required>
-            <p class="help-text briefing-form-help">Paste the PRD page link directly. The walkthrough creates section-based reading and narration; the review checks execution logic, blockers, edge cases, and operational fallback.</p>
+            <p class="help-text briefing-form-help">Generating the outline may take 30-40 seconds for long PRDs. Audio is generated progressively, starting with the opening chunk.</p>
           </div>
-          <div class="briefing-review-controls">
-            <label for="briefing_language">Output Language</label>
-            <div class="briefing-review-action-row">
-              <select id="briefing_language" name="briefing_language" data-briefing-language>
-                <option value="zh" selected>Chinese</option>
-                <option value="en">English</option>
-              </select>
-            </div>
-          </div>
-          <input type="hidden" name="mode" value="walkthrough">
+          <input type="hidden" name="briefing_language" value="zh" data-briefing-language>
           <div class="button-row briefing-action-buttons">
-            <button class="button" type="submit">Generate Developer Walkthrough</button>
+            <button class="button" type="submit">生成宣讲</button>
             <button class="button button-secondary" type="button" data-prd-review-generate>Generate AI PRD Review</button>
           </div>
         </form>
         <div class="empty-state briefing-status" data-briefing-status>
-          <p>No PRD output yet. Enter a PRD link, then choose an action to begin.</p>
+          <p>No PRD output yet. Enter a PRD link, then generate the briefing outline.</p>
         </div>
         <div class="briefing-review-panel" data-prd-review-panel hidden></div>
       </section>
     </div>
 
-    <section class="panel panel-wide glass-panel briefing-panel briefing-primary-panel">
-        <div class="panel-head">
-          <div>
-            <h2>Developer Walkthrough</h2>
-            <p class="help-text">Each section keeps the original PRD content beside the generated walkthrough so developers can quickly understand goals, flow, rules, status changes, and edge cases.</p>
-          </div>
-          <div class="button-row">
-            <button class="button button-secondary" type="button" data-reader-mode-toggle aria-pressed="false">Enter Reader Mode</button>
-            <button class="button button-secondary" type="button" data-play-section disabled>Start Narration</button>
-          </div>
+    <section class="panel panel-wide glass-panel briefing-panel briefing-presenter-panel" data-presenter-panel>
+      <div class="panel-head">
+        <div>
+          <h2>AI 宣讲播放器</h2>
+          <p class="help-text">大纲会先展示出来；音频按当前段落后的 2 段滑动窗口串行预取。双击段落可编辑，保存后会重新生成该段音频。</p>
         </div>
-        <div class="briefing-voice-controls">
-          <div>
-            <label>Voice Narration</label>
-            <div class="briefing-provider-note">Walkthrough scripts are generated server-side. Voice uses Edge TTS by default; if server-side audio is unavailable, the page shows an error instead of falling back to browser speech.</div>
-          </div>
+      </div>
+      <div class="briefing-presenter" data-presenter-view>
+        <div class="empty-state">
+          <p>生成宣讲后，研发视角大纲和播放器会显示在这里。</p>
         </div>
-        <p class="microcopy briefing-action-copy">Select a section, then click <strong>Start Narration</strong>. Switching sections stops the current narration so you can review the PRD step by step.</p>
-        <div class="empty-state briefing-inline-status" data-walkthrough-status hidden>
-          <p>Narration status appears here.</p>
-        </div>
-        <div class="briefing-columns">
-          <aside class="briefing-outline" data-section-list>
-            <div class="empty-state"><p>PRD section navigation appears here after generation.</p></div>
-          </aside>
-          <article class="briefing-section-card" data-section-detail>
-            <div class="empty-state"><p>Select a section to view original PRD content and the generated walkthrough.</p></div>
-          </article>
-        </div>
+      </div>
     </section>
-
-    <section class="panel panel-wide glass-panel briefing-panel briefing-secondary-panel">
-        <div class="panel-head">
-          <div>
-            <h2>Developer Follow-up</h2>
-            <p class="help-text">Ask follow-up questions about flows, fields, validation, status changes, edge cases, frontend/backend ownership, or unclear PRD details. Answers stay grounded in the current PRD where possible.</p>
-          </div>
-        </div>
-        <div class="briefing-quick-questions">
-          <button class="button button-secondary" type="button" data-quick-question="What is the main flow in this section?">Main flow?</button>
-          <button class="button button-secondary" type="button" data-quick-question="What should frontend and backend each do in this section?">Frontend/backend split?</button>
-          <button class="button button-secondary" type="button" data-quick-question="What validation rules or status changes are defined here?">Validation/status changes?</button>
-          <button class="button button-secondary" type="button" data-quick-question="What edge cases or open questions are here?">Edge cases / open questions?</button>
-        </div>
-        <div class="chat-log" data-chat-log>
-          <div class="empty-state"><p>Generate a walkthrough before asking your first follow-up question.</p></div>
-        </div>
-        <form class="stack" data-chat-form>
-          <textarea name="question" rows="4" placeholder="Example: What validation rules apply here? What changed from the old logic? Why is this field needed? How should exceptions be handled?" required></textarea>
-          <div class="button-row">
-            <button class="button" type="submit">Submit Question</button>
-          </div>
-        </form>
-    </section>
-
   </section>
 
   <dialog class="briefing-image-lightbox" data-image-lightbox>

@@ -117,6 +117,7 @@ class Settings:
     confluence_base_url: str | None = None
     openai_api_key: str | None = None
     openai_api_base_url: str = "https://api.openai.com/v1"
+    prd_briefing_codex_model: str = "gpt-5.5"
     prd_briefing_text_model: str = "gpt-4.1-mini"
     prd_briefing_embedding_model: str = "text-embedding-3-large"
     prd_briefing_transcription_model: str = "gpt-4o-mini-transcribe"
@@ -242,6 +243,7 @@ class Settings:
             confluence_base_url=_env_str("CONFLUENCE_BASE_URL"),
             openai_api_key=_env_str("OPENAI_API_KEY"),
             openai_api_base_url=_env_str("OPENAI_API_BASE_URL", "https://api.openai.com/v1"),
+            prd_briefing_codex_model=_env_str("PRD_BRIEFING_CODEX_MODEL", "gpt-5.5"),
             prd_briefing_text_model=_env_str("PRD_BRIEFING_TEXT_MODEL", "gpt-4.1-mini"),
             prd_briefing_embedding_model=_env_str("PRD_BRIEFING_EMBEDDING_MODEL", "text-embedding-3-large"),
             prd_briefing_transcription_model=_env_str("PRD_BRIEFING_TRANSCRIPTION_MODEL", "gpt-4o-mini-transcribe"),

@@ -5,6 +5,7 @@ import math
 import re
 import threading
 import asyncio
+import uuid
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -29,6 +30,8 @@ WALKTHROUGH_SCRIPT_PROMPT_VERSION = "v2_codex_pm_briefing"
 WALKTHROUGH_BLOCK_PROMPT_VERSION = "v2_codex_pm_briefing_block"
 SESSION_BRIEF_PROMPT_VERSION = "v7_two_part_chinese_summary"
 WALKTHROUGH_PREWARM_LIMIT = 12
+PRESENTATION_PROMPT_VERSION = "v1_codex_gpt55_prd_presentation_chunks"
+PRESENTATION_MAX_SOURCE_CHARS = 52000
 
 STOPWORDS = {
     "a",
@@ -308,6 +311,60 @@ class VoiceService:
             )
         return asset_path
 
+    def synthesize_presentation_chunk(
+        self,
+        *,
+        session_id: str,
+        owner_key: str,
+        chunk: dict[str, Any],
+        language_code: str = "zh",
+    ) -> dict[str, Any]:
+        content = str(chunk.get("content") or "").strip()
+        if not content:
+            raise ValueError("Chunk content is required.")
+        normalized_text = optimize_tts_text(content, language_code=language_code)
+        voice_id = self._edge_voice_for_language(language_code)
+        provider = "edge"
+        model_id = f"edge-tts:{self.edge_rate}:timed"
+        audio_path = self.store.get_cached_audio(
+            owner_key=owner_key,
+            provider=provider,
+            voice_id=voice_id,
+            language_code=language_code,
+            model_id=model_id,
+            text=normalized_text,
+        )
+        boundaries: list[dict[str, Any]] = []
+        if not audio_path:
+            audio_bytes, boundaries = self._synthesize_with_edge_tts_with_boundaries(
+                text=normalized_text,
+                voice_id=voice_id,
+            )
+            if not audio_bytes:
+                raise RuntimeError("Edge TTS did not return audio.")
+            audio_path = self.store.save_audio_blob(session_id, "mp3", audio_bytes)
+            self.store.cache_audio(
+                owner_key=owner_key,
+                provider=provider,
+                voice_id=voice_id,
+                language_code=language_code,
+                model_id=model_id,
+                text=normalized_text,
+                asset_path=audio_path,
+            )
+
+        duration = duration_from_edge_boundaries(boundaries) or estimate_tts_duration_seconds(normalized_text, language_code=language_code)
+        timestamps = build_sentence_timestamps(content, duration_seconds=duration)
+        return {
+            "id": str(chunk.get("id") or uuid.uuid4().hex),
+            "title": str(chunk.get("title") or "宣讲段落").strip() or "宣讲段落",
+            "content": content,
+            "audioUrl": f"/prd-briefing/assets/{audio_path}",
+            "duration": duration,
+            "timestamps": timestamps,
+            "imageUrls": normalize_image_urls(chunk.get("imageUrls") or chunk.get("image_urls") or []),
+        }
+
     def get_cached_audio_for_text(self, *, owner_key: str, text: str, language_code: str) -> str | None:
         normalized_text = optimize_tts_text(text, language_code=language_code)
         cache_target = self._resolve_cache_target(language_code=language_code)
@@ -360,6 +417,9 @@ class VoiceService:
     def _synthesize_with_edge_tts(self, *, text: str, voice_id: str) -> bytes:
         return self._run_edge_tts_async(self._edge_tts_bytes(text=text, voice_id=voice_id))
 
+    def _synthesize_with_edge_tts_with_boundaries(self, *, text: str, voice_id: str) -> tuple[bytes, list[dict[str, Any]]]:
+        return self._run_edge_tts_async(self._edge_tts_bytes_and_boundaries(text=text, voice_id=voice_id))
+
     async def _edge_tts_bytes(self, *, text: str, voice_id: str) -> bytes:
         import edge_tts
 
@@ -371,6 +431,22 @@ class VoiceService:
                 if data:
                     chunks.append(bytes(data))
         return b"".join(chunks)
+
+    async def _edge_tts_bytes_and_boundaries(self, *, text: str, voice_id: str) -> tuple[bytes, list[dict[str, Any]]]:
+        import edge_tts
+
+        communicate = edge_tts.Communicate(text, voice=voice_id, rate=self.edge_rate)
+        chunks: list[bytes] = []
+        boundaries: list[dict[str, Any]] = []
+        async for chunk in communicate.stream():
+            chunk_type = str(chunk.get("type") or "")
+            if chunk_type == "audio":
+                data = chunk.get("data") or b""
+                if data:
+                    chunks.append(bytes(data))
+            elif "boundary" in chunk_type.lower():
+                boundaries.append(dict(chunk))
+        return b"".join(chunks), boundaries
 
     @staticmethod
     def _run_edge_tts_async(coro):
@@ -492,6 +568,92 @@ class PRDBriefingService:
                 language=walkthrough_language,
             )
         return payload
+
+    def process_prd_for_presentation(self, *, owner_key: str, page_ref: str = "", text: str = "") -> dict[str, Any]:
+        page_ref = str(page_ref or "").strip()
+        source_text = str(text or "").strip()
+        title = "PRD"
+        source_url = page_ref
+        page_id = f"manual:{uuid.uuid4().hex}"
+        updated_at = ""
+        image_urls: list[str] = []
+
+        if page_ref:
+            page = self.confluence.ingest_page(page_ref, "prd-briefing-presentation")
+            title = page.title or title
+            source_url = page.source_url
+            page_id = page.page_id
+            updated_at = page.updated_at
+            image_urls = [
+                f"/prd-briefing/image-proxy?src={quote(ref, safe='')}" if ref.startswith("http") else f"/prd-briefing/assets/{ref}"
+                for section in page.sections
+                for ref in section.image_refs
+            ]
+            source_text = build_presentation_source_text(page.sections)
+
+        if not source_text:
+            raise ValueError("PRD text or Confluence page URL is required.")
+        if not self.text_client.is_configured():
+            raise RuntimeError("PRD presentation generation requires Codex to be configured on this server.")
+
+        session_id = self.store.create_session(
+            owner_key=owner_key,
+            confluence_page_id=page_id,
+            confluence_page_url=source_url or "manual",
+            audience=DEVELOPER_AUDIENCE,
+            mode="presentation",
+            title=title,
+        )
+        chunks = self._compose_presentation_chunks(source_text=source_text, image_urls=image_urls)
+        return {
+            "status": "ok",
+            "session": {
+                "session_id": session_id,
+                "title": title,
+                "source_url": source_url,
+                "model_id": self.text_client.model_id,
+                "prompt_version": PRESENTATION_PROMPT_VERSION,
+            },
+            "chunks": chunks,
+        }
+
+    def generate_presentation_audio(self, *, owner_key: str, session_id: str, chunk: dict[str, Any]) -> dict[str, Any]:
+        session_id = str(session_id or "").strip()
+        if not session_id:
+            raise ValueError("session_id is required.")
+        session = self.store.get_session(session_id, owner_key)
+        if not session:
+            raise ValueError("Briefing session was not found.")
+        return {
+            "status": "ok",
+            "chunk": self.voice_service.synthesize_presentation_chunk(
+                session_id=session_id,
+                owner_key=owner_key,
+                chunk=chunk,
+                language_code="zh",
+            ),
+        }
+
+    def _compose_presentation_chunks(self, *, source_text: str, image_urls: list[str]) -> list[dict[str, Any]]:
+        prompt = build_presentation_system_prompt()
+        body = build_presentation_user_prompt(source_text=source_text, image_urls=image_urls)
+        try:
+            raw = self.text_client.create_answer(system_prompt=prompt, user_prompt=body)
+            chunks = parse_presentation_chunks(raw)
+        except Exception as first_error:  # noqa: BLE001
+            repair_prompt = (
+                "Return only a strict JSON array. Each object must contain id, title, content, and optional imageUrls. "
+                "Do not include markdown fences, explanations, or trailing commentary."
+            )
+            try:
+                repaired = self.text_client.create_answer(
+                    system_prompt=repair_prompt,
+                    user_prompt=f"The previous response was invalid JSON. Fix it into the required JSON array only.\n\n{locals().get('raw', '')}",
+                )
+                chunks = parse_presentation_chunks(repaired)
+            except Exception as repair_error:  # noqa: BLE001
+                raise RuntimeError(f"Codex did not return valid presentation JSON: {repair_error}") from first_error
+        return normalize_presentation_chunks(chunks)
 
     def get_session_payload(self, *, session_id: str, owner_key: str) -> dict[str, Any]:
         session = self.store.get_session(session_id, owner_key)
@@ -2025,5 +2187,159 @@ def build_sections_from_text(text: str, chunk_size: int = 1400) -> list[ParsedSe
     return sections
 
 
+def build_presentation_source_text(sections: list[ParsedSection]) -> str:
+    blocks: list[str] = []
+    for index, section in enumerate(sections, start=1):
+        image_lines = "\n".join(f"[IMAGE] {ref}" for ref in section.image_refs[:6])
+        blocks.append(
+            f"## Section {index}: {section.section_path}\n"
+            f"{section.content.strip()}\n"
+            f"{image_lines}".strip()
+        )
+    text = "\n\n".join(blocks).strip()
+    if len(text) > PRESENTATION_MAX_SOURCE_CHARS:
+        return text[:PRESENTATION_MAX_SOURCE_CHARS].rsplit("\n", 1)[0].strip()
+    return text
+
+
+def build_presentation_system_prompt() -> str:
+    return (
+        "You are Codex using ChatGPT 5.5. Convert a Confluence PRD into a concise Mandarin briefing outline for software engineers. "
+        "Return only a strict JSON array, with no markdown fences and no explanation. "
+        "Each object must contain: id, title, content, and optional imageUrls. "
+        "id must be stable like chunk-1, chunk-2. title must be short Chinese. "
+        "content must be polished spoken Mandarin for PM-to-engineering briefing, 4 to 7 sentences, focused on user flow, system behavior, fields, validation, state changes, dependencies, edge cases, and QA attention points. "
+        "If the input has [IMAGE] lines that are relevant to the chunk, include those exact URLs in imageUrls. "
+        "Do not invent requirements. Do not include English unless the source has unavoidable system names."
+    )
+
+
+def build_presentation_user_prompt(*, source_text: str, image_urls: list[str]) -> str:
+    image_hint = "\n".join(f"- {url}" for url in image_urls[:24]) or "- None"
+    return (
+        "Create 4 to 10 presentation chunks from this PRD. Merge tiny or metadata-only sections. "
+        "Make each chunk useful for developers and QA to understand what to build and verify.\n\n"
+        f"Known image URLs:\n{image_hint}\n\n"
+        f"PRD source:\n{source_text}"
+    )
+
+
+def extract_json_array_text(value: str) -> str:
+    text = str(value or "").strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE).strip()
+        text = re.sub(r"\s*```$", "", text).strip()
+    if text.startswith("["):
+        return text
+    start = text.find("[")
+    end = text.rfind("]")
+    if start >= 0 and end > start:
+        return text[start : end + 1]
+    return text
+
+
+def parse_presentation_chunks(value: str) -> list[dict[str, Any]]:
+    parsed = json.loads(extract_json_array_text(value))
+    if not isinstance(parsed, list):
+        raise ValueError("Presentation output must be a JSON array.")
+    return [dict(item) for item in parsed if isinstance(item, dict)]
+
+
+def normalize_image_urls(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    urls: list[str] = []
+    for item in value:
+        url = str(item or "").strip()
+        if not url:
+            continue
+        if url.startswith("/prd-briefing/image-proxy") or url.startswith("/prd-briefing/assets/") or url.startswith("http://") or url.startswith("https://"):
+            urls.append(url)
+    return dedupe_non_empty(urls)[:6]
+
+
+def normalize_presentation_chunks(chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for index, chunk in enumerate(chunks, start=1):
+        title = str(chunk.get("title") or f"宣讲段落 {index}").strip()
+        content = str(chunk.get("content") or "").strip()
+        if not content:
+            continue
+        normalized.append(
+            {
+                "id": str(chunk.get("id") or f"chunk-{index}").strip() or f"chunk-{index}",
+                "title": title or f"宣讲段落 {index}",
+                "content": content,
+                "imageUrls": normalize_image_urls(chunk.get("imageUrls") or chunk.get("image_urls") or []),
+                "audioStatus": "draft",
+            }
+        )
+    if not normalized:
+        raise ValueError("Presentation output did not contain any usable chunks.")
+    return normalized
+
+
+def split_presentation_sentences(text: str) -> list[str]:
+    normalized = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not normalized:
+        return []
+    parts = re.findall(r"[^。！？!?；;]+[。！？!?；;]?", normalized)
+    sentences = [part.strip() for part in parts if part.strip()]
+    return sentences or [normalized]
+
+
+def estimate_tts_duration_seconds(text: str, *, language_code: str) -> float:
+    clean = re.sub(r"\s+", "", str(text or ""))
+    if not clean:
+        return 1.0
+    chars_per_second = 4.2 if str(language_code or "").lower().startswith("zh") else 12.0
+    return round(max(1.5, min(900.0, len(clean) / chars_per_second)), 2)
+
+
+def duration_from_edge_boundaries(boundaries: list[dict[str, Any]]) -> float | None:
+    latest = 0.0
+    for boundary in boundaries:
+        try:
+            offset = float(boundary.get("offset") or boundary.get("Offset") or 0) / 10_000_000
+            duration = float(boundary.get("duration") or boundary.get("Duration") or 0) / 10_000_000
+        except (TypeError, ValueError):
+            continue
+        latest = max(latest, offset + duration)
+    return round(latest, 2) if latest > 0 else None
+
+
+def build_sentence_timestamps(text: str, *, duration_seconds: float) -> list[dict[str, Any]]:
+    sentences = split_presentation_sentences(text)
+    weights = [max(1, len(re.sub(r"\s+", "", sentence))) for sentence in sentences]
+    total = max(1, sum(weights))
+    current = 0.0
+    timestamps: list[dict[str, Any]] = []
+    for index, sentence in enumerate(sentences):
+        if index == len(sentences) - 1:
+            end = float(duration_seconds)
+        else:
+            end = min(float(duration_seconds), current + (float(duration_seconds) * weights[index] / total))
+        timestamps.append(
+            {
+                "sentence": sentence,
+                "start": round(current, 2),
+                "end": round(max(end, current + 0.2), 2),
+            }
+        )
+        current = end
+    return timestamps
+
+
 def optimize_tts_text(text: str, *, language_code: str) -> str:
-    return re.sub(r"\s+", " ", text).strip()
+    normalized = re.sub(r"\s+", " ", text).strip()
+    if not str(language_code or "").lower().startswith("zh"):
+        return normalized
+    if len(normalized) <= 420:
+        return normalized
+    truncated = normalized[:420].rstrip()
+    sentence_end = max(truncated.rfind("。"), truncated.rfind("."), truncated.rfind("!"), truncated.rfind("?"))
+    if sentence_end >= 160:
+        truncated = truncated[: sentence_end + 1]
+    else:
+        truncated = truncated.rstrip("，,；;：:、 ") + ("。" if str(language_code or "").lower().startswith("zh") else ".")
+    return truncated[:421]
