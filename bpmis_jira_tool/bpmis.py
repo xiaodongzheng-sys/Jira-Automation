@@ -840,7 +840,7 @@ class BPMISDirectApiClient(BPMISClient):
             raise BPMISError("BPMIS project issue ID is required.")
 
         if self._issue_is_linked_to_parent(normalized_ticket_key, normalized_project_id):
-            return self.get_jira_ticket_detail(normalized_ticket_key)
+            return self._verified_linked_jira_detail(normalized_ticket_key, normalized_project_id)
 
         issue_row = self._find_bpmis_task_row_for_jira_key(normalized_ticket_key)
         issue_id = self._extract_issue_identifier(issue_row)
@@ -875,7 +875,7 @@ class BPMISDirectApiClient(BPMISClient):
 
         if not self._issue_is_linked_to_parent(normalized_ticket_key, normalized_project_id):
             raise BPMISError("BPMIS accepted the link request, but the Jira task is still not linked to this Biz Project.")
-        return self.get_jira_ticket_detail(normalized_ticket_key)
+        return self._verified_linked_jira_detail(normalized_ticket_key, normalized_project_id)
 
     def delink_jira_ticket_from_project(self, ticket_key: str, project_issue_id: str | int) -> dict[str, Any]:
         normalized_ticket_key = self._extract_issue_key(str(ticket_key or "")) or str(ticket_key or "").strip()
@@ -1137,6 +1137,23 @@ class BPMISDirectApiClient(BPMISClient):
             raise
         rows = ((response.get("data") or {}).get("rows") or []) if isinstance(response, dict) else []
         return any(isinstance(row, dict) and self._row_matches_jira_key(row, ticket_key) for row in rows)
+
+    def _verified_linked_jira_detail(self, ticket_key: str, project_issue_id: str | int) -> dict[str, Any]:
+        normalized_project_id = str(project_issue_id or "").strip()
+        linked_row = self._find_bpmis_task_row_for_jira_key(ticket_key)
+        if linked_row and normalized_project_id in self._extract_parent_issue_ids(linked_row):
+            return linked_row
+
+        # The link was already verified through BPMIS. If the live Jira API is configured,
+        # its native issue detail does not carry BPMIS parent fields, so preserve the verified
+        # BPMIS parent in the returned payload for the portal-level cache/update step.
+        detail = self.get_jira_ticket_detail(ticket_key)
+        if normalized_project_id and normalized_project_id not in self._extract_parent_issue_ids(detail):
+            detail = dict(detail)
+            parent_ids = self._extract_parent_issue_ids(detail)
+            parent_ids.append(normalized_project_id)
+            detail["parentIds"] = parent_ids
+        return detail
 
     def _find_linked_bpmis_task_id(self, ticket_key: str, project_issue_id: str | int) -> str:
         normalized_project_id = str(project_issue_id or "").strip()

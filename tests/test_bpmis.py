@@ -1136,6 +1136,11 @@ class BPMISClientTests(unittest.TestCase):
                 raise AssertionError(path)
 
             client._api_request = fake_api_request  # type: ignore[method-assign]
+            client._get_jira_ticket_detail_via_jira = lambda _ticket_key: {  # type: ignore[method-assign]
+                "jiraKey": "AF-101",
+                "summary": "Direct Jira task detail",
+                "raw_jira": {"key": "AF-101"},
+            }
 
             detail = client.link_jira_ticket_to_project("AF-101", "225159")
 
@@ -1143,7 +1148,8 @@ class BPMISClientTests(unittest.TestCase):
             self.assertEqual(link_call[3]["id"], [9001])
             self.assertEqual(link_call[3]["parentIds"], [225159])
             self.assertEqual(link_call[3]["parentIssueId"], 225159)
-            self.assertEqual(detail["parentIds"], [225159])
+            self.assertEqual(detail["parentIds"], ["225159"])
+            self.assertEqual(detail["summary"], "Direct Jira task detail")
 
     def test_get_jira_ticket_detail_uses_direct_jira_api_when_token_configured(self):
         with tempfile.TemporaryDirectory() as temp_dir:
