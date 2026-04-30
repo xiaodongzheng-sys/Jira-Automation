@@ -3840,7 +3840,12 @@ def create_app() -> Flask:
         payload = request.get_json(silent=True) or {}
         jira_id = _extract_issue_key_from_text(str(payload.get("jira_id") or payload.get("jira_link") or ""))
         jira_link = str(payload.get("jira_link") or "").strip()
-        bpmis_id = str(payload.get("suggested_bpmis_id") or payload.get("bpmis_id") or "").strip()
+        bpmis_id = str(
+            payload.get("selected_bpmis_id")
+            or payload.get("suggested_bpmis_id")
+            or payload.get("bpmis_id")
+            or ""
+        ).strip()
         if not jira_id:
             return jsonify({"status": "error", "message": "Jira ID is required."}), HTTPStatus.BAD_REQUEST
         if not bpmis_id:
@@ -3869,6 +3874,7 @@ def create_app() -> Flask:
                 project["project_name"] = str(
                     (project_detail if isinstance(project_detail, dict) else {}).get("project_name")
                     or (project_detail if isinstance(project_detail, dict) else {}).get("summary")
+                    or payload.get("selected_project_title")
                     or payload.get("suggested_project_title")
                     or ""
                 ).strip()
@@ -6380,9 +6386,9 @@ def _load_all_team_dashboard_task_payloads(settings: Settings, config: dict[str,
     return team_payloads
 
 
-def _load_team_dashboard_link_biz_project_payloads(settings: Settings, config: dict[str, Any]) -> list[dict[str, Any]]:
+def _load_team_dashboard_link_biz_project_payloads(settings: Settings, config: dict[str, Any], bpmis_client: Any | None = None) -> list[dict[str, Any]]:
     key_project_overrides = config.get("key_project_overrides") if isinstance(config.get("key_project_overrides"), dict) else {}
-    bpmis_client = _build_bpmis_client_for_current_user(settings)
+    bpmis_client = bpmis_client or _build_bpmis_client_for_current_user(settings)
     team_payloads: list[dict[str, Any]] = []
     for team_key, label in TEAM_DASHBOARD_TEAMS.items():
         team_config = (config.get("teams") or {}).get(team_key) or {}
@@ -6493,7 +6499,9 @@ def _suggest_team_dashboard_link_biz_project_rows(
     rows: list[Any],
 ) -> dict[str, Any]:
     bpmis_client = _build_bpmis_client_for_current_user(settings)
-    team_candidates = _team_dashboard_link_biz_candidate_projects_for_config(bpmis_client, config)
+    team_payloads = _load_team_dashboard_link_biz_project_payloads(settings, config, bpmis_client=bpmis_client)
+    team_candidates = _team_dashboard_link_biz_candidate_projects_from_payloads(team_payloads)
+    select_options = _team_dashboard_zero_jira_biz_project_options(team_payloads)
     suggested_rows: list[dict[str, Any]] = []
     keyword_candidate_count = 0
     keyword_search_count = 0
@@ -6529,16 +6537,43 @@ def _suggest_team_dashboard_link_biz_project_rows(
         "team_candidate_count": len(team_candidates),
         "keyword_candidate_count": keyword_candidate_count,
         "keyword_search_count": keyword_search_count,
+        "select_biz_project_options": select_options,
     }
 
 
-def _team_dashboard_link_biz_candidate_projects_for_config(bpmis_client: Any, config: dict[str, Any]) -> list[dict[str, Any]]:
+def _team_dashboard_link_biz_candidate_projects_from_payloads(team_payloads: list[dict[str, Any]]) -> list[dict[str, Any]]:
     candidates: list[dict[str, Any]] = []
-    for team_key in TEAM_DASHBOARD_TEAMS:
-        team_config = (config.get("teams") or {}).get(team_key) or {}
-        emails = _normalize_team_dashboard_emails(team_config.get("member_emails") or [])
-        candidates.extend(_team_dashboard_biz_projects_for_emails(bpmis_client, emails))
+    for team in team_payloads or []:
+        if not isinstance(team, dict):
+            continue
+        for section_key in ("under_prd", "pending_live"):
+            for project in team.get(section_key) or []:
+                if isinstance(project, dict) and str(project.get("bpmis_id") or "").strip():
+                    candidates.append(project)
     return _tag_team_dashboard_candidate_source(_dedupe_team_dashboard_candidate_projects(candidates), "team")
+
+
+def _team_dashboard_zero_jira_biz_project_options(team_payloads: list[dict[str, Any]]) -> list[dict[str, str]]:
+    options: dict[str, dict[str, str]] = {}
+    for team in team_payloads or []:
+        if not isinstance(team, dict):
+            continue
+        for section_key in ("under_prd", "pending_live"):
+            for raw_project in team.get(section_key) or []:
+                if not isinstance(raw_project, dict):
+                    continue
+                project = _normalize_team_dashboard_project(raw_project)
+                bpmis_id = str(project.get("bpmis_id") or "").strip()
+                project_name = str(project.get("project_name") or "").strip()
+                if not bpmis_id or not project_name or len(raw_project.get("jira_tickets") or []) > 0:
+                    continue
+                options[bpmis_id] = {
+                    "bpmis_id": bpmis_id,
+                    "project_name": project_name,
+                    "team_key": str(team.get("team_key") or "").strip(),
+                    "market": str(project.get("market") or "").strip(),
+                }
+    return sorted(options.values(), key=lambda item: (item["project_name"].casefold(), item["bpmis_id"].casefold()))
 
 
 def _dedupe_team_dashboard_candidate_projects(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:

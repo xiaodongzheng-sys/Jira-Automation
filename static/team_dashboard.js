@@ -76,6 +76,7 @@
   let monthlyReportSubject = 'Monthly Report';
   let monthlyReportLoaded = false;
   let linkBizProjectRowsState = [];
+  let linkBizProjectSelectOptions = [];
   let linkBizProjectLoading = false;
   let monthlyReportProgressTimer = null;
   let monthlyReportProgressStartedAt = 0;
@@ -730,23 +731,38 @@
       linkBizProjectRows.innerHTML = '<tr><td colspan="6" class="team-dashboard-empty-cell">No unlinked Jira tickets found.</td></tr>';
       return;
     }
+    const selectOptions = Array.isArray(linkBizProjectSelectOptions) ? linkBizProjectSelectOptions : [];
     linkBizProjectRows.innerHTML = items.map((row) => {
       const bpmisId = String(row.suggested_bpmis_id || '').trim();
-      const disabled = bpmisId ? '' : 'disabled';
+      const selectedBpmisId = String(row.selected_bpmis_id || '').trim();
+      const effectiveBpmisId = selectedBpmisId || bpmisId;
+      const disabled = effectiveBpmisId ? '' : 'disabled';
       const suggestedTitle = String(row.suggested_project_title || '').trim();
+      const selectedProjectTitle = String(row.selected_project_title || '').trim();
       const matchSource = String(row.match_source || '').trim();
       const matchScore = Number(row.match_score || 0);
       const suggestionLabel = suggestedTitle || 'Not matched yet';
       const suggestionMeta = suggestedTitle && matchSource
         ? `<span class="team-dashboard-link-biz-match-meta">${escapeHtml(matchSource)} · ${Math.round(matchScore * 100)}%</span>`
         : '';
+      const selectHtml = `
+        <select class="team-dashboard-link-biz-select" data-link-biz-project-select>
+          <option value="">Use suggested match</option>
+          ${selectOptions.map((option) => {
+            const optionId = String(option.bpmis_id || '').trim();
+            const optionTitle = String(option.project_name || '').trim();
+            if (!optionId || !optionTitle) return '';
+            return `<option value="${escapeHtml(optionId)}" ${optionId === selectedBpmisId ? 'selected' : ''}>${escapeHtml(optionTitle)}</option>`;
+          }).join('')}
+        </select>
+      `;
       return `
         <tr data-link-biz-project-row="${escapeHtml(row.jira_id || '')}">
           <td>${renderLink(row.jira_link || '', row.jira_id || '-')}</td>
           <td>${escapeHtml(row.jira_title || '-')}</td>
           <td>${escapeHtml(row.reporter_email || '-')}</td>
-          <td>${escapeHtml(bpmisId || '-')}</td>
           <td>${escapeHtml(suggestionLabel)}${suggestionMeta}</td>
+          <td>${selectHtml}</td>
           <td>
             <button
               class="button button-secondary"
@@ -755,8 +771,8 @@
               data-jira-id="${escapeHtml(row.jira_id || '')}"
               data-jira-link="${escapeHtml(row.jira_link || '')}"
               data-jira-title="${escapeHtml(row.jira_title || '')}"
-              data-suggested-bpmis-id="${escapeHtml(bpmisId)}"
-              data-suggested-project-title="${escapeHtml(row.suggested_project_title || '')}"
+              data-suggested-bpmis-id="${escapeHtml(effectiveBpmisId)}"
+              data-suggested-project-title="${escapeHtml(selectedProjectTitle || row.suggested_project_title || '')}"
               ${disabled}
             >Link</button>
             <span class="team-dashboard-link-biz-row-status" data-link-biz-project-row-status></span>
@@ -780,6 +796,7 @@
       });
       const payload = await readJson(response, 'Could not load unlinked Jira tickets.');
       linkBizProjectRowsState = payload.rows || [];
+      linkBizProjectSelectOptions = [];
       renderLinkBizRows(linkBizProjectRowsState);
       if (linkBizProjectSuggest) linkBizProjectSuggest.disabled = !linkBizProjectRowsState.length;
       const elapsed = payload.elapsed_seconds ? ` in ${formatDuration(payload.elapsed_seconds)}` : '';
@@ -808,6 +825,7 @@
       });
       const payload = await readJson(response, 'Could not suggest BPMIS Biz Projects.');
       linkBizProjectRowsState = payload.rows || [];
+      linkBizProjectSelectOptions = payload.select_biz_project_options || [];
       renderLinkBizRows(linkBizProjectRowsState);
       const elapsed = payload.elapsed_seconds ? ` in ${formatDuration(payload.elapsed_seconds)}` : '';
       const keywordCount = Number(payload.keyword_search_count || 0);
@@ -1264,6 +1282,25 @@
   monthlyReportTemplateForm?.addEventListener('submit', saveMonthlyReportTemplate);
   linkBizProjectFindJira?.addEventListener('click', loadLinkBizJira);
   linkBizProjectSuggest?.addEventListener('click', suggestLinkBizProjects);
+  linkBizProjectRows?.addEventListener('change', (event) => {
+    const select = event.target.closest('[data-link-biz-project-select]');
+    if (!select) return;
+    const row = select.closest('[data-link-biz-project-row]');
+    const jiraId = row?.dataset.linkBizProjectRow || '';
+    const selectedBpmisId = String(select.value || '').trim();
+    const selectedOption = linkBizProjectSelectOptions.find(
+      (option) => String(option.bpmis_id || '').trim() === selectedBpmisId,
+    ) || {};
+    linkBizProjectRowsState = linkBizProjectRowsState.map((item) => {
+      if (String(item.jira_id || '') !== jiraId) return item;
+      return {
+        ...item,
+        selected_bpmis_id: selectedBpmisId,
+        selected_project_title: selectedBpmisId ? String(selectedOption.project_name || '').trim() : '',
+      };
+    });
+    renderLinkBizRows(linkBizProjectRowsState);
+  });
   linkBizProjectRows?.addEventListener('click', async (event) => {
     const button = event.target.closest('[data-link-biz-project-action]');
     if (!button) return;
@@ -1286,6 +1323,8 @@
           jira_title: button.dataset.jiraTitle || '',
           suggested_bpmis_id: suggestedBpmisId,
           suggested_project_title: button.dataset.suggestedProjectTitle || '',
+          selected_bpmis_id: suggestedBpmisId,
+          selected_project_title: button.dataset.suggestedProjectTitle || '',
         }),
       });
       await readJson(response, 'Could not link Jira ticket to BPMIS Biz Project.');

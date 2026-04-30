@@ -7165,9 +7165,16 @@ select:focus {
 
 .team-dashboard-link-biz-table th:nth-child(2),
 .team-dashboard-link-biz-table td:nth-child(2),
+.team-dashboard-link-biz-table th:nth-child(4),
+.team-dashboard-link-biz-table td:nth-child(4),
 .team-dashboard-link-biz-table th:nth-child(5),
 .team-dashboard-link-biz-table td:nth-child(5) {
   min-width: 220px;
+}
+
+.team-dashboard-link-biz-select {
+  min-width: 220px;
+  max-width: 320px;
 }
 
 .team-dashboard-link-biz-row-status {

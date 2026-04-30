@@ -1850,6 +1850,12 @@ class WebPortalFeatureTests(unittest.TestCase):
                         ]
                     return []
 
+                def list_jira_tasks_created_by_emails(self, emails, **kwargs):
+                    return []
+
+                def list_jira_tasks_for_project_created_by_email(self, project_issue_id, email):
+                    return []
+
                 def search_biz_projects_by_title_keywords(self, keywords, *, max_pages=None):
                     self.keyword_calls.append((keywords, max_pages))
                     if "regional onboarding" in keywords:
@@ -1902,6 +1908,9 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertEqual(payload["keyword_search_count"], 1)
         self.assertEqual(fake_client.keyword_calls[0][1], 2)
         self.assertGreater(suggestions["AF-1"]["match_score"], 0.8)
+        option_titles = [item["project_name"] for item in payload["select_biz_project_options"]]
+        self.assertIn("Fraud Alert Revamp", option_titles)
+        self.assertIn("Credit Scoring Improvements", option_titles)
 
     def test_team_dashboard_link_biz_project_links_real_bpmis_and_updates_portal_cache(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
@@ -1947,14 +1956,16 @@ class WebPortalFeatureTests(unittest.TestCase):
                             "jira_title": "Fraud Alert Revamp",
                             "suggested_bpmis_id": "225159",
                             "suggested_project_title": "Fraud Alert Revamp",
+                            "selected_bpmis_id": "225200",
+                            "selected_project_title": "Selected Credit Project",
                         },
                     )
 
             projects = app.config["BPMIS_PROJECT_STORE"].list_projects(user_key="google:xiaodong.zheng@npt.sg")
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(fake_client.link_calls, [("AF-1", "225159")])
-        self.assertEqual(projects[0]["bpmis_id"], "225159")
+        self.assertEqual(fake_client.link_calls, [("AF-1", "225200")])
+        self.assertEqual(projects[0]["bpmis_id"], "225200")
         self.assertEqual(projects[0]["jira_tickets"][0]["ticket_key"], "AF-1")
         self.assertEqual(projects[0]["jira_tickets"][0]["status"], "linked")
 
