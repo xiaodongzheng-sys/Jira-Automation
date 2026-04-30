@@ -169,7 +169,10 @@ class PRDBriefingRouteTests(unittest.TestCase):
             self.assertIn(b"data-briefing-language", response.data)
             self.assertIn(b"PRD Details", response.data)
             self.assertIn(b"Output Language", response.data)
+            self.assertIn(b"developer walkthrough or an AI PRD review", response.data)
+            self.assertIn(b"No PRD output yet", response.data)
             self.assertNotIn(b"data-prd-review-language", response.data)
+            self.assertNotIn(b"No walkthrough yet", response.data)
             self.assertNotIn("3 分钟".encode("utf-8"), response.data)
             self.assertNotIn(b"Team Knowledge Base", response.data)
 

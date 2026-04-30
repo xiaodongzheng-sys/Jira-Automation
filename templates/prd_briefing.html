@@ -69,14 +69,14 @@
         <div class="panel-head">
           <div>
             <h2>PRD Details</h2>
-            <p class="help-text">Paste a Confluence PRD link to generate a developer-oriented walkthrough while preserving the original content for comparison.</p>
+            <p class="help-text">Paste a Confluence PRD link, choose an output language, then generate either a developer walkthrough or an AI PRD review from the same source.</p>
           </div>
         </div>
         <form class="stack" data-briefing-session-form>
           <div>
             <label for="page_ref">Confluence Page URL</label>
             <input id="page_ref" name="page_ref" value="https://confluence.shopee.io/display/SPDB/8.1+Part+1+of+PRD" placeholder="https://your-domain.atlassian.net/wiki/spaces/..." required>
-            <p class="help-text briefing-form-help">Paste the PRD page link directly. After generation, the tool splits it into sections for reading and narration.</p>
+            <p class="help-text briefing-form-help">Paste the PRD page link directly. The walkthrough creates section-based reading and narration; the review checks execution logic, blockers, edge cases, and operational fallback.</p>
           </div>
           <div class="briefing-review-controls">
             <label for="briefing_language">Output Language</label>
@@ -94,7 +94,7 @@
           </div>
         </form>
         <div class="empty-state briefing-status" data-briefing-status>
-          <p>No walkthrough yet. Enter a PRD link to begin.</p>
+          <p>No PRD output yet. Enter a PRD link, then choose an action to begin.</p>
         </div>
         <div class="briefing-review-panel" data-prd-review-panel hidden></div>
       </section>
