@@ -3364,20 +3364,14 @@ select {
   margin: -2px 0 10px;
 }
 
-.briefing-source-render-button {
+.briefing-source-render-status {
   border: 1px solid rgba(22, 119, 255, 0.2);
   border-radius: 8px;
   background: rgba(22, 119, 255, 0.08);
   color: #0b5ed7;
-  cursor: pointer;
   font-size: 0.86rem;
   font-weight: 700;
   padding: 7px 10px;
-}
-
-.briefing-source-render-button:disabled {
-  cursor: default;
-  opacity: 0.72;
 }
 
 .briefing-confluence-frame {

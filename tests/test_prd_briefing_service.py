@@ -22,6 +22,7 @@ from prd_briefing.service import (
     build_pm_briefing_blocks,
     build_heuristic_session_overview,
     overview_is_low_signal,
+    optimize_tts_text,
     parse_session_overview,
     select_sections_for_overview,
 )
@@ -455,6 +456,14 @@ class PRDBriefingServiceTests(unittest.TestCase):
 
         self.assertEqual(result["language"], "en")
         self.assertEqual(self.voice_service.synthesize_calls[-1]["language_code"], "en")
+
+    def test_tts_text_is_not_truncated_for_edge_voice(self):
+        long_text = " ".join([f"Sentence {index} keeps implementation detail." for index in range(80)])
+
+        optimized = optimize_tts_text(long_text, language_code="en")
+
+        self.assertEqual(optimized, long_text)
+        self.assertGreater(len(optimized), 520)
 
     def test_pm_briefing_blocks_filter_metadata_and_merge_related_sections(self):
         sections = [

@@ -2026,15 +2026,4 @@ def build_sections_from_text(text: str, chunk_size: int = 1400) -> list[ParsedSe
 
 
 def optimize_tts_text(text: str, *, language_code: str) -> str:
-    normalized = re.sub(r"\s+", " ", text).strip()
-    if not normalized:
-        return normalized
-    max_chars = 420 if language_code.startswith("zh") else 520
-    if len(normalized) <= max_chars:
-        return normalized
-    truncated = normalized[:max_chars]
-    for separator in ("。", ".", "！", "!", "？", "?"):
-        index = truncated.rfind(separator)
-        if index >= max_chars * 0.6:
-            return truncated[: index + 1].strip()
-    return truncated.rstrip(",;: ") + ("。" if language_code.startswith("zh") else ".")
+    return re.sub(r"\s+", " ", text).strip()
