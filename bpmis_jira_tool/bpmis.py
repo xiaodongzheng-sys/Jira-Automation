@@ -845,10 +845,12 @@ class BPMISDirectApiClient(BPMISClient):
         issue_row = self._find_bpmis_task_row_for_jira_key(normalized_ticket_key)
         issue_id = self._extract_issue_identifier(issue_row)
         if not issue_id:
-            raise BPMISError(
-                "Could not link Jira task to BPMIS Biz Project through BPMIS. "
-                "BPMIS does not have a synced task row for this Jira ticket yet."
-            )
+            self._add_existing_jira_ticket_to_project(normalized_ticket_key, normalized_project_id)
+            if not self._issue_is_linked_to_parent(normalized_ticket_key, normalized_project_id):
+                raise BPMISError(
+                    "BPMIS accepted the Add Existing Jira request, but the Jira task is still not linked to this Biz Project."
+                )
+            return self._verified_linked_jira_detail(normalized_ticket_key, normalized_project_id)
 
         existing_parent_ids = self._extract_parent_issue_ids(issue_row)
         parent_ids = [int(parent_id) for parent_id in existing_parent_ids if str(parent_id).strip().isdigit()]
@@ -876,6 +878,91 @@ class BPMISDirectApiClient(BPMISClient):
         if not self._issue_is_linked_to_parent(normalized_ticket_key, normalized_project_id):
             raise BPMISError("BPMIS accepted the link request, but the Jira task is still not linked to this Biz Project.")
         return self._verified_linked_jira_detail(normalized_ticket_key, normalized_project_id)
+
+    def _add_existing_jira_ticket_to_project(self, ticket_key: str, project_issue_id: str | int) -> None:
+        normalized_ticket_key = self._extract_issue_key(str(ticket_key or "")) or str(ticket_key or "").strip()
+        normalized_project_id = str(project_issue_id or "").strip()
+        if not normalized_ticket_key:
+            raise BPMISError("Jira ticket key is required.")
+        if not normalized_project_id or not normalized_project_id.isdigit():
+            raise BPMISError("BPMIS project issue ID must be numeric before adding an existing Jira ticket.")
+
+        project_parent_id = int(normalized_project_id)
+        ticket_link = self._normalize_ticket_link(normalized_ticket_key)
+        payloads = [
+            {
+                "typeId": self.TASK_TYPE_ID,
+                "parentIssueId": project_parent_id,
+                "jiraLink": ticket_link,
+            },
+            {
+                "typeId": self.TASK_TYPE_ID,
+                "parentIssueId": project_parent_id,
+                "jiraLink": normalized_ticket_key,
+            },
+            {
+                "typeId": self.TASK_TYPE_ID,
+                "parentIssueId": project_parent_id,
+                "jiraKey": normalized_ticket_key,
+            },
+            {
+                "typeId": self.TASK_TYPE_ID,
+                "parentIssueId": project_parent_id,
+                "key": normalized_ticket_key,
+            },
+        ]
+        last_error: Exception | None = None
+        for payload in payloads:
+            try:
+                response = self._api_request(
+                    "/api/v1/issues/batchCreateJiraIssue",
+                    method="POST",
+                    body=[payload],
+                )
+                self._write_debug_capture(payload, response)
+                batch_error = self._extract_batch_jira_issue_error(response)
+                if batch_error:
+                    last_error = BPMISError(batch_error)
+                    continue
+                if self._wait_until_jira_ticket_is_linked(normalized_ticket_key, normalized_project_id):
+                    return
+                last_error = BPMISError(
+                    "BPMIS accepted the Add Existing Jira request, but verification did not find the Jira task under this Biz Project."
+                )
+            except (BPMISError, ValueError) as error:
+                last_error = error
+        detail = f" Last error: {last_error}" if last_error else ""
+        raise BPMISError(
+            "Could not add existing Jira task to BPMIS Biz Project through BPMIS."
+            f"{detail}"
+        )
+
+    def _extract_batch_jira_issue_error(self, response: dict[str, Any]) -> str:
+        data = response.get("data") or {}
+        errors: list[str] = []
+        for bucket_name in ("created", "add", "update", "failed", "errors"):
+            bucket = data.get(bucket_name)
+            if isinstance(bucket, dict):
+                bucket = [bucket]
+            if not isinstance(bucket, list):
+                continue
+            for item in bucket:
+                if not isinstance(item, dict):
+                    continue
+                item_errors = item.get("errors") or item.get("error")
+                if isinstance(item_errors, dict):
+                    errors.extend(f"{key}: {value}" for key, value in item_errors.items())
+                elif item_errors:
+                    errors.append(str(item_errors))
+        return "; ".join(error for error in errors if error)
+
+    def _wait_until_jira_ticket_is_linked(self, ticket_key: str, project_issue_id: str | int) -> bool:
+        for attempt in range(3):
+            if self._issue_is_linked_to_parent(ticket_key, project_issue_id):
+                return True
+            if attempt < 2:
+                time.sleep(0.5)
+        return False
 
     def delink_jira_ticket_from_project(self, ticket_key: str, project_issue_id: str | int) -> dict[str, Any]:
         normalized_ticket_key = self._extract_issue_key(str(ticket_key or "")) or str(ticket_key or "").strip()

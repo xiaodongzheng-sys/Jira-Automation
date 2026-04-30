@@ -1151,6 +1151,73 @@ class BPMISClientTests(unittest.TestCase):
             self.assertEqual(detail["parentIds"], ["225159"])
             self.assertEqual(detail["summary"], "Direct Jira task detail")
 
+    def test_link_jira_ticket_to_project_adds_existing_jira_when_task_row_missing(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings = Settings(
+                flask_secret_key="secret",
+                google_oauth_client_secret_file=Path(temp_dir) / "client.json",
+                google_oauth_redirect_uri=None,
+                team_portal_host="127.0.0.1",
+                team_portal_port=5000,
+                team_portal_base_url=None,
+                team_allowed_emails=(),
+                team_allowed_email_domains=(),
+                team_portal_data_dir=Path(temp_dir),
+                spreadsheet_id="sheet",
+                common_tab_name="Common",
+                input_tab_name="Input",
+                bpmis_base_url="https://example.com",
+                bpmis_api_access_token="token",
+            )
+
+            client = BPMISDirectApiClient(settings)
+            calls: list[tuple[str, str, dict | None, object | None]] = []
+            state = {"linked": False}
+
+            def fake_api_request(path, method="GET", params=None, body=None):
+                calls.append((path, method, params, body))
+                if path == "/api/v1/issues/detail":
+                    return {
+                        "data": {
+                            "row": {
+                                "id": 9002,
+                                "jiraKey": "AF-102",
+                                "summary": "Added AF task",
+                                "parentIds": [225159] if state["linked"] else [],
+                            }
+                        }
+                    }
+                if path == "/api/v1/issues/list":
+                    search = json.loads(params["search"])
+                    sub_queries = search.get("subQueries") or []
+                    if len(sub_queries) > 1 and sub_queries[1] == {"parentIds": [225159]}:
+                        return {"data": {"rows": [{"id": 9002, "jiraKey": "AF-102"}] if state["linked"] else []}}
+                    if state["linked"]:
+                        return {"data": {"rows": [{"id": 9002, "jiraKey": "AF-102", "parentIds": [225159]}]}}
+                    return {"data": {"rows": []}}
+                if path == "/api/v1/issues/batchCreateJiraIssue":
+                    self.assertEqual(method, "POST")
+                    self.assertEqual(body[0]["typeId"], BPMISDirectApiClient.TASK_TYPE_ID)
+                    self.assertEqual(body[0]["parentIssueId"], 225159)
+                    self.assertEqual(body[0]["jiraLink"], "https://jira.shopee.io/browse/AF-102")
+                    state["linked"] = True
+                    return {"data": {"add": [{"jiraLink": "https://jira.shopee.io/browse/AF-102"}]}}
+                raise AssertionError(path)
+
+            client._api_request = fake_api_request  # type: ignore[method-assign]
+            client._get_jira_ticket_detail_via_jira = lambda _ticket_key: {  # type: ignore[method-assign]
+                "jiraKey": "AF-102",
+                "summary": "Direct Jira task detail",
+                "raw_jira": {"key": "AF-102"},
+            }
+
+            detail = client.link_jira_ticket_to_project("AF-102", "225159")
+
+            add_call = next(call for call in calls if call[0] == "/api/v1/issues/batchCreateJiraIssue")
+            self.assertEqual(add_call[1], "POST")
+            self.assertEqual(detail["parentIds"], [225159])
+            self.assertEqual(detail["summary"], "Added AF task")
+
     def test_get_jira_ticket_detail_uses_direct_jira_api_when_token_configured(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             settings = Settings(
