@@ -10,7 +10,7 @@
     data-query-url="{{ url_for('source_code_qa_query_api') }}"
     data-attachment-url="{{ url_for('source_code_qa_attachments_api') }}"
     data-runtime-evidence-url="{{ url_for('source_code_qa_runtime_evidence_api') }}"
-    data-jobs-url="{{ url_for('get_job', job_id='__JOB_ID__') }}"
+    data-jobs-url="{{ url_for('source_code_qa_query_job_api', job_id='__JOB_ID__') }}"
     data-feedback-url="{{ url_for('source_code_qa_feedback_api') }}"
     data-sessions-url="{{ url_for('source_code_qa_sessions_api') }}"
     data-model-availability-url="{{ url_for('source_code_qa_model_availability_api') }}"

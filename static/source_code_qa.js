@@ -135,6 +135,30 @@
   };
   const sleep = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms));
   const jobStatusUrl = (jobId) => jobsUrlTemplate.replace('__JOB_ID__', encodeURIComponent(jobId));
+  const jobEventsUrl = (jobId) => `${jobStatusUrl(jobId)}/events`;
+  const sourceQaJobErrorMessage = (payloadOrError) => {
+    const category = String(payloadOrError?.error_category || '').toLowerCase();
+    const rawMessage = String(payloadOrError?.message || payloadOrError?.error || '').trim();
+    if (category === 'local_agent_offline') {
+      return 'Mac local-agent 当前不可用。请确认 host stack 在线后点击 Reconnect。';
+    }
+    if (category === 'gateway_disconnected') {
+      return '网关连接中断，但后台任务可能仍在运行。点击 Reconnect 恢复状态。';
+    }
+    if (category === 'job_running') {
+      return '后台仍在分析代码，连接刚才中断了。点击 Reconnect 恢复状态。';
+    }
+    if (category === 'job_not_found') {
+      return '这个后台任务状态已经找不到了，请重新提交问题。';
+    }
+    if (category === 'codex_timeout_or_rate_limit') {
+      return 'Codex 推理超时或被限流。可以重试，或者先缩小问题范围。';
+    }
+    if (/failed to fetch|load failed|networkerror|internet connection appears to be offline/i.test(rawMessage)) {
+      return '浏览器和后台状态接口断开了。后台任务可能仍在运行，点击 Reconnect 恢复状态。';
+    }
+    return rawMessage || 'Source Code Q&A failed.';
+  };
   const isTransientJobStatusError = (error) => {
     const message = String(error?.message || '').toLowerCase();
     return Boolean(error?.transientPortalHtml)
@@ -170,7 +194,7 @@
   };
   const readJobStatus = async (jobId) => {
     let lastError = null;
-    for (let attempt = 0; attempt < 30; attempt += 1) {
+    for (let attempt = 0; attempt < 5; attempt += 1) {
       try {
         return await apiFetchJson(jobStatusUrl(jobId), { method: 'GET' });
       } catch (error) {
@@ -182,8 +206,8 @@
       }
     }
     throw new Error(lastError?.message
-      ? `Could not reconnect to the job status API after retrying. Last error: ${lastError.message}`
-      : 'Could not reconnect to the job status API after retrying.');
+      ? `Job status connection interrupted. Last error: ${lastError.message}`
+      : 'Job status connection interrupted.');
   };
 
   const currentCountry = () => country.value || 'All';
@@ -667,6 +691,8 @@
         created_at: liveAssistantMessage.created_at || '',
         live: true,
         stopped: Boolean(liveAssistantMessage.stopped),
+        job_id: liveAssistantMessage.job_id || '',
+        retry_question: liveAssistantMessage.retry_question || '',
         payload: {
           llm_provider: selectedLlmProvider(),
           llm_model: liveAssistantMessage.meta || 'streaming CLI output',
@@ -690,6 +716,12 @@
         .slice(0, 4)
         .map((item) => typeof item === 'string' ? item : item.path)
         .filter(Boolean);
+      const liveActions = message.live && message.job_id ? `
+        <div class="source-qa-live-actions">
+          <button class="button button-secondary" type="button" data-source-reconnect-job="${escapeHtml(message.job_id)}" data-source-retry-question="${escapeHtml(message.retry_question || '')}">Reconnect</button>
+          ${message.retry_question ? `<button class="button button-secondary" type="button" data-source-retry-question="${escapeHtml(message.retry_question)}">Retry query</button>` : ''}
+        </div>
+      ` : '';
       return `
         <article class="source-qa-message source-qa-message-${escapeHtml(message.role || 'assistant')}${message.live ? ' is-live' : ''}">
           <div class="source-qa-message-head">
@@ -701,6 +733,7 @@
           <div class="source-qa-message-body">
             ${message.live ? `<pre>${escapeHtml(text)}</pre>` : (message.role === 'assistant' ? renderReadableAnswerBody(payload, text) : `<p>${escapeHtml(text)}</p>`)}
             ${renderAttachmentChips(attachmentItems)}
+            ${liveActions}
           </div>
           ${citations.length ? `<div class="source-qa-message-citations">${citations.map((item) => `<span>${escapeHtml(item)}</span>`).join('')}</div>` : ''}
         </article>
@@ -719,6 +752,22 @@
       attachments: attachments.map((item) => ({ ...item })),
     };
     renderSessionMessages(activeSession);
+  };
+
+  const pendingJobFromSession = (session) => {
+    const messages = Array.isArray(session?.messages) ? session.messages : [];
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index];
+      const jobId = String(message?.pending_job_id || '').trim();
+      if (message?.pending && jobId) {
+        return {
+          jobId,
+          question: String(message.text || '').trim(),
+          attachments: Array.isArray(message.attachments) ? message.attachments : [],
+        };
+      }
+    }
+    return null;
   };
 
   const applyActiveSession = (session) => {
@@ -766,6 +815,9 @@
       if (!options.preserveLive) liveAssistantMessage = null;
       if (!options.preservePending) pendingUserMessage = null;
       applyActiveSession(payload.session || null);
+      if (!options.skipJobResume) {
+        resumePendingJobFromSession(payload.session || null);
+      }
       return payload.session || null;
     } catch (error) {
       if (queryStatus) queryStatus.textContent = error.message || 'Session could not be loaded.';
@@ -1693,6 +1745,8 @@
       meta: options.meta || 'read-only investigation',
       created_at: new Date().toISOString(),
       stopped: Boolean(options.stopped),
+      job_id: options.jobId || '',
+      retry_question: options.retryQuestion || '',
     };
     if (liveAnswer) {
       liveAnswer.hidden = true;
@@ -1778,6 +1832,65 @@
     }
   };
 
+  const applyQueryJobStatus = (payload, progress) => {
+    const progressText = payload.total
+      ? `${payload.message || 'Processing source-code question.'} (${payload.current || 0}/${payload.total})`
+      : (payload.message || 'Processing source-code question.');
+    progress?.setMessage(progressText);
+    if (payload.stage === 'codex_stream' && payload.message) {
+      renderLiveAnswer(payload.message, { title: 'Codex Live', meta: 'streaming CLI output', jobId: payload.job_id });
+    }
+  };
+
+  const watchQueryJobEvents = (jobId, progress, control) => new Promise((resolve, reject) => {
+    if (!window.EventSource) {
+      reject(new Error('EventSource is not supported by this browser.'));
+      return;
+    }
+    const source = new EventSource(jobEventsUrl(jobId));
+    let settled = false;
+    const close = () => {
+      source.close();
+    };
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      close();
+      callback(value);
+    };
+    const handlePayload = (event) => {
+      if (control?.stopped) {
+        const error = new Error('Stopped by user.');
+        error.stoppedByUser = true;
+        finish(reject, error);
+        return;
+      }
+      try {
+        const payload = JSON.parse(event.data || '{}');
+        applyQueryJobStatus(payload, progress);
+        if (payload.state === 'completed') {
+          finish(resolve, (payload.results || [])[0] || {});
+        } else if (payload.state === 'failed') {
+          const error = new Error(sourceQaJobErrorMessage(payload));
+          error.jobPayload = payload;
+          finish(reject, error);
+        }
+      } catch (error) {
+        finish(reject, error);
+      }
+    };
+    source.addEventListener('message', handlePayload);
+    source.addEventListener('completed', handlePayload);
+    source.addEventListener('failed', handlePayload);
+    source.onerror = () => {
+      if (settled) return;
+      close();
+      const error = new Error('SSE connection interrupted.');
+      error.gatewayDisconnected = true;
+      reject(error);
+    };
+  });
+
   const pollQueryJob = async (jobId, progress, control) => {
     while (jobId) {
       if (control?.stopped) {
@@ -1791,22 +1904,103 @@
         error.stoppedByUser = true;
         throw error;
       }
-      const progressText = payload.total
-        ? `${payload.message || 'Processing source-code question.'} (${payload.current || 0}/${payload.total})`
-        : (payload.message || 'Processing source-code question.');
-      progress.setMessage(progressText);
-      if (payload.stage === 'codex_stream' && payload.message) {
-        renderLiveAnswer(payload.message, { title: 'Codex Live', meta: 'streaming CLI output' });
-      }
+      applyQueryJobStatus(payload, progress);
       if (payload.state === 'completed') {
         return (payload.results || [])[0] || {};
       }
       if (payload.state === 'failed') {
-        throw new Error(payload.error || payload.message || 'Source Code Q&A failed.');
+        const error = new Error(sourceQaJobErrorMessage(payload));
+        error.jobPayload = payload;
+        throw error;
       }
       await sleep(700);
     }
     return {};
+  };
+
+  const runQueryJob = async (jobId, progress, control) => {
+    try {
+      return await watchQueryJobEvents(jobId, progress, control);
+    } catch (error) {
+      if (error?.stoppedByUser) throw error;
+      progress?.setMessage('Live status stream disconnected; falling back to status polling...');
+      return pollQueryJob(jobId, progress, control);
+    }
+  };
+
+  const resumeQueryJob = async (jobId, question = '') => {
+    const normalizedJobId = String(jobId || '').trim();
+    if (!normalizedJobId || (activeQueryControl && !activeQueryControl.stopped)) return;
+    const progress = startQueryProgress('Reconnecting to Source Code Q&A job...');
+    const queryControl = { stopped: false, jobId: normalizedJobId };
+    activeQueryControl = queryControl;
+    updateQueryButtonState(true);
+    renderLiveAnswer('Reconnecting to the background Source Code Q&A job...', {
+      title: 'Codex Live',
+      meta: 'reconnecting',
+      jobId: normalizedJobId,
+      retryQuestion: question,
+    });
+    try {
+      const payload = await runQueryJob(normalizedJobId, progress, queryControl);
+      if (queryControl.stopped) return;
+      lastPayload = payload;
+      if (activeSessionId) {
+        await loadSession(activeSessionId, { preserveLive: true, preservePending: true, skipJobResume: true });
+      }
+      if (payload.session) {
+        activeSession = payload.session;
+        activeSessionId = payload.session.id || activeSessionId;
+        sourceSessions = [payload.session, ...sourceSessions.filter((item) => item.id !== payload.session.id)].slice(0, 30);
+        applyActiveSession(payload.session);
+      } else if (activeSessionId) {
+        await loadSession(activeSessionId, { skipJobResume: true });
+      }
+      conversationContext = buildConversationContext(payload, question || conversationContext?.question || '');
+      if (queryStatus) queryStatus.textContent = `Reconnected and completed in ${formatElapsed(progress.startedAt)}.`;
+      renderUsageBadges(payload);
+      renderFallbackNotice(payload);
+      renderStatus(payload.repo_status || []);
+      await finalizeLiveAnswer(payload, 0, selectedLlmProvider());
+      if (selectedLlmProvider() === 'codex_cli_bridge') {
+        renderLlmAnswer({});
+      } else {
+        renderLlmAnswer(payload);
+      }
+    } catch (error) {
+      if (error?.stoppedByUser) {
+        if (queryStatus) queryStatus.textContent = `Stopped after ${formatElapsed(progress.startedAt)}.`;
+        return;
+      }
+      const message = sourceQaJobErrorMessage(error.jobPayload || error);
+      if (queryStatus) queryStatus.textContent = `${message} elapsed ${formatElapsed(progress.startedAt)}`;
+      renderLiveAnswer(message, {
+        title: 'Codex Live',
+        meta: 'status disconnected',
+        stopped: true,
+        jobId: normalizedJobId,
+        retryQuestion: question,
+      });
+    } finally {
+      stopQueryProgress();
+      if (activeQueryControl === queryControl) {
+        activeQueryControl = null;
+        updateQueryButtonState(false);
+      }
+    }
+  };
+
+  const resumePendingJobFromSession = (session) => {
+    if (activeQueryControl && !activeQueryControl.stopped) return;
+    const pending = pendingJobFromSession(session);
+    if (!pending?.jobId) return;
+    renderLiveAnswer('A previous Source Code Q&A job is still pending. Reconnecting to status...', {
+      title: 'Codex Live',
+      meta: 'pending job',
+      jobId: pending.jobId,
+      retryQuestion: pending.question,
+    });
+    resumeQueryJob(pending.jobId, pending.question);
   };
 
   const queryCode = async () => {
@@ -1831,7 +2025,7 @@
       updateQueryButtonState(false);
       return;
     }
-    const queryControl = { stopped: false };
+    const queryControl = { stopped: false, jobId: '', question: submittedQuestion };
     activeQueryControl = queryControl;
     updateQueryButtonState(true);
     if (questionInput) questionInput.value = '';
@@ -1860,8 +2054,11 @@
         }),
       }, { attempts: 3 });
       if (queryControl.stopped) return;
+      if (initialPayload.job_id) {
+        queryControl.jobId = initialPayload.job_id;
+      }
       const payload = initialPayload.status === 'queued' && initialPayload.job_id
-        ? await pollQueryJob(initialPayload.job_id, progress, queryControl)
+        ? await runQueryJob(initialPayload.job_id, progress, queryControl)
         : initialPayload;
       if (queryControl.stopped) return;
       lastPayload = payload;
@@ -1912,11 +2109,18 @@
         if (queryStatus) queryStatus.textContent = `Stopped after ${formatElapsed(progress.startedAt)}.`;
         return;
       }
-      if (queryStatus) queryStatus.textContent = `${error.message || 'Search failed.'} elapsed ${formatElapsed(progress.startedAt)}`;
+      const message = sourceQaJobErrorMessage(error.jobPayload || error);
+      if (queryStatus) queryStatus.textContent = `${message} elapsed ${formatElapsed(progress.startedAt)}`;
       renderUsageBadges({});
       renderFallbackNotice({});
       if (selectedProvider === 'codex_cli_bridge') {
-        renderLiveAnswer(error.message || 'Source Code Q&A failed.', { title: 'Codex Live', meta: 'error', stopped: true });
+        renderLiveAnswer(message, {
+          title: 'Codex Live',
+          meta: 'error',
+          stopped: true,
+          jobId: queryControl.jobId,
+          retryQuestion: submittedQuestion,
+        });
       } else {
         renderLiveAnswer('');
       }
@@ -2029,7 +2233,22 @@
     handleAttachmentPreviewEvent(event);
   });
   attachmentsList?.addEventListener('keydown', handleAttachmentPreviewEvent);
-  sessionMessages?.addEventListener('click', handleAttachmentPreviewEvent);
+  sessionMessages?.addEventListener('click', (event) => {
+    const reconnectButton = event.target.closest('[data-source-reconnect-job]');
+    if (reconnectButton) {
+      const jobId = reconnectButton.dataset.sourceReconnectJob || '';
+      const retryQuestion = reconnectButton.dataset.sourceRetryQuestion || '';
+      resumeQueryJob(jobId, retryQuestion);
+      return;
+    }
+    const retryButton = event.target.closest('[data-source-retry-question]');
+    if (retryButton) {
+      if (questionInput) questionInput.value = retryButton.dataset.sourceRetryQuestion || '';
+      queryCode();
+      return;
+    }
+    handleAttachmentPreviewEvent(event);
+  });
   sessionMessages?.addEventListener('keydown', handleAttachmentPreviewEvent);
   viewTabs.forEach((tab) => {
     tab.addEventListener('click', () => setSourceView(tab.dataset.sourceViewTab));

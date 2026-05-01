@@ -24,7 +24,7 @@ from typing import Any
 import uuid
 import zipfile
 
-from flask import Flask, current_app, flash, g, has_app_context, jsonify, redirect, render_template, request, send_file, session, url_for
+from flask import Flask, Response, current_app, flash, g, has_app_context, jsonify, redirect, render_template, request, send_file, session, stream_with_context, url_for
 from dotenv import load_dotenv
 from google.oauth2.credentials import Credentials
 from openpyxl import Workbook
@@ -180,6 +180,9 @@ class JobState:
     total: int = 0
     estimated_prompt_tokens: int = 0
     token_risk: str = ""
+    error_category: str = ""
+    error_code: str = ""
+    error_retryable: bool = False
     results: list[dict[str, Any]] = field(default_factory=list)
     notice: dict[str, Any] | None = None
     error: str | None = None
@@ -304,7 +307,15 @@ class JobStore:
             job.updated_at = time.time()
             self._persist_locked()
 
-    def fail(self, job_id: str, error: str) -> None:
+    def fail(
+        self,
+        job_id: str,
+        error: str,
+        *,
+        error_category: str = "",
+        error_code: str = "",
+        error_retryable: bool = True,
+    ) -> None:
         with self._lock:
             if job_id not in self._jobs:
                 self._refresh_locked()
@@ -313,6 +324,9 @@ class JobStore:
             job.stage = "failed"
             job.message = error
             job.error = error
+            job.error_category = error_category
+            job.error_code = error_code
+            job.error_retryable = error_retryable
             job.updated_at = time.time()
             self._persist_locked()
 
@@ -1083,11 +1097,21 @@ class SourceCodeQASessionStore:
             session_payload["last_context"] = next_context
             session_payload["last_trace_id"] = str(result.get("trace_id") or "")
             messages = list(session_payload.get("messages") or [])
+            normalized_question = str(question or "").strip()
+            messages = [
+                message for message in messages
+                if not (
+                    isinstance(message, dict)
+                    and message.get("role") == "user"
+                    and message.get("pending")
+                    and str(message.get("text") or "").strip() == normalized_question
+                )
+            ]
             messages.extend(
                 [
                     {
                         "role": "user",
-                        "text": str(question or ""),
+                        "text": normalized_question,
                         "created_at": now,
                         "attachments": [
                             SourceCodeQAAttachmentStore.public_metadata(item)
@@ -1102,6 +1126,64 @@ class SourceCodeQASessionStore:
                         "payload": _compact_source_code_qa_session_payload(result),
                     },
                 ]
+            )
+            session_payload["messages"] = messages[-80:]
+            self._persist_locked()
+            return self._public_session(session_payload, include_messages=True)
+
+    def append_pending_question(
+        self,
+        session_id: str,
+        *,
+        owner_email: str,
+        pm_team: str,
+        country: str,
+        llm_provider: str,
+        question: str,
+        job_id: str,
+        attachments: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any] | None:
+        owner = str(owner_email or "").strip().lower()
+        now = self._now()
+        normalized_question = str(question or "").strip()
+        normalized_job_id = str(job_id or "").strip()
+        if not normalized_question or not normalized_job_id:
+            return None
+        with self._lock:
+            session_payload = self._sessions.get(str(session_id or ""))
+            if not session_payload:
+                return None
+            if str(session_payload.get("owner_email") or "").strip().lower() != owner:
+                return None
+            title = str(session_payload.get("title") or "").strip()
+            if not title or title == "New Source Code Chat":
+                session_payload["title"] = self._title_from_question(normalized_question)
+            session_payload["pm_team"] = str(pm_team or "").strip() or str(session_payload.get("pm_team") or "AF")
+            session_payload["country"] = str(country or "").strip() or str(session_payload.get("country") or ALL_COUNTRY)
+            session_payload["llm_provider"] = SourceCodeQAService.normalize_query_llm_provider(llm_provider)
+            session_payload["updated_at"] = now
+            messages = [
+                message for message in list(session_payload.get("messages") or [])
+                if not (
+                    isinstance(message, dict)
+                    and message.get("role") == "user"
+                    and message.get("pending")
+                    and str(message.get("pending_job_id") or "") == normalized_job_id
+                )
+            ]
+            messages.append(
+                {
+                    "role": "user",
+                    "text": normalized_question,
+                    "created_at": now,
+                    "attachments": [
+                        SourceCodeQAAttachmentStore.public_metadata(item)
+                        for item in (attachments or [])
+                        if isinstance(item, dict)
+                    ],
+                    "pending": True,
+                    "pending_job_id": normalized_job_id,
+                }
             )
             session_payload["messages"] = messages[-80:]
             self._persist_locked()
@@ -2554,14 +2636,33 @@ def create_app() -> Flask:
             job = job_store.create("source-code-qa-query", title="Source Code Q&A Query")
             app_obj = current_app._get_current_object()
             async_payload = dict(payload)
-            async_payload["_session_owner_email"] = _current_google_email() or "local"
+            owner_email = _current_google_email() or "local"
+            async_payload["_session_owner_email"] = owner_email
+            session_id = str(payload.get("session_id") or "").strip()
+            if session_id:
+                try:
+                    attachments = _resolve_source_code_qa_query_attachments(payload, owner_email=owner_email, session_id=session_id)
+                    session_payload = _get_source_code_qa_session_store().append_pending_question(
+                        session_id,
+                        owner_email=owner_email,
+                        pm_team=str(payload.get("pm_team") or ""),
+                        country=str(payload.get("country") or ""),
+                        llm_provider=str(payload.get("llm_provider") or ""),
+                        question=str(payload.get("question") or ""),
+                        job_id=job.job_id,
+                        attachments=attachments,
+                    )
+                    if session_payload is not None:
+                        async_payload["_resolved_attachments"] = attachments
+                except ToolError:
+                    pass
             thread = threading.Thread(
                 target=_run_source_code_qa_query_job,
                 args=(app_obj, job.job_id, async_payload),
                 daemon=True,
             )
             thread.start()
-            return jsonify({"status": "queued", "job_id": job.job_id})
+            return jsonify({"status": "queued", "job_id": job.job_id, "session_id": session_id})
         try:
             if not _source_code_qa_provider_available(payload.get("llm_provider")):
                 raise ToolError("Selected Source Code Q&A model is unavailable.")
@@ -2572,7 +2673,10 @@ def create_app() -> Flask:
             conversation_context = payload.get("conversation_context") if isinstance(payload.get("conversation_context"), dict) else None
             if conversation_context is None and session_id:
                 conversation_context = session_store.get_context(session_id, owner_email=owner_email)
-            attachments = _resolve_source_code_qa_query_attachments(payload, owner_email=owner_email, session_id=session_id)
+            if isinstance(payload.get("_resolved_attachments"), list):
+                attachments = payload.get("_resolved_attachments") or []
+            else:
+                attachments = _resolve_source_code_qa_query_attachments(payload, owner_email=owner_email, session_id=session_id)
             pm_team = str(payload.get("pm_team") or "")
             country = str(payload.get("country") or "")
             runtime_evidence = _resolve_source_code_qa_runtime_evidence(pm_team=pm_team, country=country)
@@ -4720,6 +4824,72 @@ def create_app() -> Flask:
             return jsonify({"status": "error", "message": "Job not found."}), 404
         return jsonify(snapshot)
 
+    @app.get("/api/source-code-qa/query-jobs/<job_id>")
+    def source_code_qa_query_job_api(job_id: str):
+        access_gate = _require_source_code_qa_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        snapshot = current_app.config["JOB_STORE"].snapshot(job_id)
+        if snapshot is None or snapshot.get("action") != "source-code-qa-query":
+            return jsonify(
+                {
+                    "status": "error",
+                    "message": "Source Code Q&A job was not found.",
+                    "error_category": "job_not_found",
+                    "error_code": "job_not_found",
+                    "error_retryable": False,
+                }
+            ), HTTPStatus.NOT_FOUND
+        return jsonify(_public_source_code_qa_job_snapshot(snapshot))
+
+    @app.get("/api/source-code-qa/query-jobs/<job_id>/events")
+    def source_code_qa_query_job_events_api(job_id: str):
+        access_gate = _require_source_code_qa_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+
+        def event_stream():
+            last_payload = ""
+            deadline = time.time() + 900
+            while time.time() < deadline:
+                snapshot = current_app.config["JOB_STORE"].snapshot(job_id)
+                if snapshot is None or snapshot.get("action") != "source-code-qa-query":
+                    payload = {
+                        "status": "error",
+                        "state": "failed",
+                        "message": "Source Code Q&A job was not found.",
+                        "error": "Source Code Q&A job was not found.",
+                        "error_category": "job_not_found",
+                        "error_code": "job_not_found",
+                        "error_retryable": False,
+                    }
+                    yield f"event: failed\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                    return
+                payload = _public_source_code_qa_job_snapshot(snapshot)
+                payload_text = json.dumps(payload, ensure_ascii=False)
+                if payload_text != last_payload:
+                    event_name = "message"
+                    if payload.get("state") == "completed":
+                        event_name = "completed"
+                    elif payload.get("state") == "failed":
+                        event_name = "failed"
+                    yield f"event: {event_name}\ndata: {payload_text}\n\n"
+                    last_payload = payload_text
+                    if payload.get("state") in {"completed", "failed"}:
+                        return
+                else:
+                    yield ": keepalive\n\n"
+                time.sleep(0.9)
+
+        return Response(
+            stream_with_context(event_stream()),
+            mimetype="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
     @app.post("/api/spreadsheets/create-template")
     def create_template_spreadsheet():
         login_gate = _require_google_login(settings, api=True)
@@ -5959,6 +6129,41 @@ def _results_for_display(results: list[dict[str, Any]] | list[object], *, includ
     return filtered
 
 
+def _classify_source_code_qa_job_error(message: str) -> dict[str, Any]:
+    normalized = str(message or "").lower()
+    if "local-agent" in normalized or "local agent" in normalized or "connection refused" in normalized:
+        return {"error_category": "local_agent_offline", "error_code": "local_agent_unavailable", "error_retryable": True}
+    if "ngrok" in normalized or "err_ngrok_3200" in normalized or "gateway" in normalized or "html error" in normalized:
+        return {"error_category": "gateway_disconnected", "error_code": "gateway_disconnected", "error_retryable": True}
+    if "rate limit" in normalized or "quota" in normalized:
+        return {"error_category": "codex_timeout_or_rate_limit", "error_code": "llm_rate_limited", "error_retryable": True}
+    if "timeout" in normalized or "timed out" in normalized:
+        return {"error_category": "codex_timeout_or_rate_limit", "error_code": "llm_timeout", "error_retryable": True}
+    return {"error_category": "job_failed", "error_code": "source_code_qa_job_failed", "error_retryable": True}
+
+
+def _public_source_code_qa_job_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(snapshot)
+    payload.setdefault("status", "ok")
+    payload["progress"] = snapshot.get("progress") if isinstance(snapshot.get("progress"), dict) else {
+        "stage": snapshot.get("stage") or "",
+        "current": snapshot.get("current") or 0,
+        "total": snapshot.get("total") or 0,
+        "message": snapshot.get("message") or "",
+    }
+    state = str(payload.get("state") or "")
+    if state == "running":
+        payload.setdefault("error_category", "job_running")
+        payload.setdefault("error_code", "")
+        payload.setdefault("error_retryable", True)
+    if state == "failed":
+        classification = _classify_source_code_qa_job_error(str(payload.get("error") or payload.get("message") or ""))
+        for key, value in classification.items():
+            if not payload.get(key):
+                payload[key] = value
+    return payload
+
+
 def _serialize_results(results: list[object], *, include_skipped: bool = True) -> list[dict[str, Any]]:
     return _results_for_display(results, include_skipped=include_skipped)
 
@@ -6028,7 +6233,10 @@ def _run_source_code_qa_query_job(app: Flask, job_id: str, payload: dict[str, An
             conversation_context = payload.get("conversation_context") if isinstance(payload.get("conversation_context"), dict) else None
             if conversation_context is None and session_id:
                 conversation_context = session_store.get_context(session_id, owner_email=owner_email)
-            attachments = _resolve_source_code_qa_query_attachments(payload, owner_email=owner_email, session_id=session_id)
+            if isinstance(payload.get("_resolved_attachments"), list):
+                attachments = payload.get("_resolved_attachments") or []
+            else:
+                attachments = _resolve_source_code_qa_query_attachments(payload, owner_email=owner_email, session_id=session_id)
             runtime_evidence = _resolve_source_code_qa_runtime_evidence(pm_team=pm_team, country=country)
             auto_sync = _prepare_source_code_qa_auto_sync(
                 service,
@@ -6085,10 +6293,11 @@ def _run_source_code_qa_query_job(app: Flask, job_id: str, payload: dict[str, An
                 },
             )
         except ToolError as error:
-            job_store.fail(job_id, str(error))
+            job_store.fail(job_id, str(error), **_classify_source_code_qa_job_error(str(error)))
         except Exception as error:  # pragma: no cover - defensive guard for background worker failures.
             app.logger.exception("Source code QA query job failed unexpectedly.")
-            job_store.fail(job_id, f"Unexpected error: {error}")
+            message = f"Unexpected error: {error}"
+            job_store.fail(job_id, message, **_classify_source_code_qa_job_error(message))
 
 
 def _run_team_dashboard_monthly_report_draft_job(

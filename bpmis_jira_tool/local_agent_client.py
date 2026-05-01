@@ -390,6 +390,11 @@ class LocalAgentClient:
         session = payload.get("session")
         return session if isinstance(session, dict) else None
 
+    def source_code_qa_session_pending(self, **pending: Any) -> dict[str, Any] | None:
+        payload = self._request("POST", "/api/local-agent/source-code-qa/sessions/pending", pending)
+        session = payload.get("session")
+        return session if isinstance(session, dict) else None
+
     def source_code_qa_attachment_save(
         self,
         *,
@@ -884,6 +889,9 @@ class RemoteSourceCodeQASessionStore:
 
     def append_exchange(self, session_id: str, **kwargs: Any) -> dict[str, Any] | None:
         return self.client.source_code_qa_session_append(session_id=session_id, **kwargs)
+
+    def append_pending_question(self, session_id: str, **kwargs: Any) -> dict[str, Any] | None:
+        return self.client.source_code_qa_session_pending(session_id=session_id, **kwargs)
 
 
 class RemoteSourceCodeQAAttachmentStore:

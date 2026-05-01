@@ -407,6 +407,21 @@ def create_local_agent_app() -> Flask:
         )
         return jsonify({"status": "ok", "session": session})
 
+    @app.post("/api/local-agent/source-code-qa/sessions/pending")
+    def source_code_qa_session_pending():
+        payload = request.get_json(silent=True) or {}
+        session = _build_source_code_qa_session_store(settings).append_pending_question(
+            str(payload.get("session_id") or ""),
+            owner_email=str(payload.get("owner_email") or ""),
+            pm_team=str(payload.get("pm_team") or ""),
+            country=str(payload.get("country") or ""),
+            llm_provider=str(payload.get("llm_provider") or ""),
+            question=str(payload.get("question") or ""),
+            job_id=str(payload.get("job_id") or ""),
+            attachments=payload.get("attachments") if isinstance(payload.get("attachments"), list) else None,
+        )
+        return jsonify({"status": "ok", "session": session})
+
     @app.post("/api/local-agent/source-code-qa/attachments/save")
     def source_code_qa_attachment_save():
         payload = request.get_json(silent=True) or {}

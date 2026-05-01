@@ -1082,9 +1082,17 @@ class SourceCodeQARouteTests(unittest.TestCase):
                     if snapshot.get("state") == "completed":
                         break
                     time.sleep(0.05)
+                source_job_response = client.get(f"/api/source-code-qa/query-jobs/{payload['job_id']}")
+                source_job_payload = source_job_response.get_json()
+                events_response = client.get(f"/api/source-code-qa/query-jobs/{payload['job_id']}/events")
 
         self.assertEqual(snapshot.get("state"), "completed")
         self.assertEqual(snapshot["results"][0]["summary"], "done")
+        self.assertEqual(source_job_response.status_code, 200)
+        self.assertEqual(source_job_payload["state"], "completed")
+        self.assertEqual(source_job_payload["progress"]["stage"], "completed")
+        self.assertIn(b"event: completed", events_response.data)
+        self.assertIn(b'"state": "completed"', events_response.data)
         self.assertIn("progress_callback", captured)
         self.assertIn("codex_cli_bridge", selected)
         ensure_synced.assert_called_once_with(pm_team="AF", country="All")

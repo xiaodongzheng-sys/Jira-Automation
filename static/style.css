@@ -6103,6 +6103,19 @@ select:focus {
   font-family: inherit;
 }
 
+.source-qa-live-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.source-qa-live-actions .button {
+  min-height: 34px;
+  padding: 7px 12px;
+  font-size: 0.86rem;
+}
+
 .source-qa-answer-list {
   display: grid;
   gap: 10px;
