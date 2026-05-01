@@ -78,6 +78,10 @@ def walkthrough_language_from_session(session: dict[str, Any]) -> str:
     return "en" if str(session.get("audience") or "").strip() == DEVELOPER_AUDIENCE_EN else "zh"
 
 
+def presentation_prompt_version(language: str | None = "zh") -> str:
+    return f"{PRESENTATION_PROMPT_VERSION}_en" if normalize_walkthrough_language(language) == "en" else PRESENTATION_PROMPT_VERSION
+
+
 def build_walkthrough_section_system_prompt(language: str | None = "zh") -> str:
     language = normalize_walkthrough_language(language)
     base = (
@@ -585,7 +589,8 @@ class PRDBriefingService:
             )
         return payload
 
-    def process_prd_for_presentation(self, *, owner_key: str, page_ref: str = "", text: str = "") -> dict[str, Any]:
+    def process_prd_for_presentation(self, *, owner_key: str, page_ref: str = "", text: str = "", language: str = "zh") -> dict[str, Any]:
+        language = normalize_walkthrough_language(language)
         page_ref = str(page_ref or "").strip()
         source_text = str(text or "").strip()
         title = "PRD"
@@ -597,6 +602,7 @@ class PRDBriefingService:
         cached = False
         presentation_cache_key = ""
         image_urls: list[str] = []
+        prompt_version = presentation_prompt_version(language)
 
         if page_ref:
             page = self.confluence.ingest_page(page_ref, "prd-briefing-presentation")
@@ -625,7 +631,7 @@ class PRDBriefingService:
                 owner_key=owner_key,
                 page_id=page_id,
                 version_number=version_number,
-                prompt_version=PRESENTATION_PROMPT_VERSION,
+                prompt_version=prompt_version,
                 model_id=self.text_client.model_id,
             )
             if cached_outline:
@@ -636,12 +642,13 @@ class PRDBriefingService:
                     source_text=source_text,
                     image_urls=image_urls,
                     media_dict=media_dict,
+                    language=language,
                 )
                 self.store.save_presentation_outline_cache(
                     owner_key=owner_key,
                     page_id=page_id,
                     version_number=version_number,
-                    prompt_version=PRESENTATION_PROMPT_VERSION,
+                    prompt_version=prompt_version,
                     model_id=self.text_client.model_id,
                     title=title,
                     source_url=source_url,
@@ -655,21 +662,23 @@ class PRDBriefingService:
                 source_text=source_text,
                 image_urls=image_urls,
                 media_dict=media_dict,
+                language=language,
             )
 
         session_id = self.store.create_session(
             owner_key=owner_key,
             confluence_page_id=page_id,
             confluence_page_url=source_url or "manual",
-            audience=DEVELOPER_AUDIENCE,
+            audience=walkthrough_audience(language),
             mode="presentation",
             title=title,
             metadata={
                 "page_id": page_id,
                 "version_number": version_number,
                 "presentation_cache_key": presentation_cache_key,
-                "prompt_version": PRESENTATION_PROMPT_VERSION,
+                "prompt_version": prompt_version,
                 "model_id": self.text_client.model_id,
+                "language": language,
             },
         )
         for chunk in chunks:
@@ -717,9 +726,10 @@ class PRDBriefingService:
         source_text: str,
         image_urls: list[str],
         media_dict: dict[str, dict[str, str]] | None = None,
+        language: str = "zh",
     ) -> list[dict[str, Any]]:
-        prompt = build_presentation_system_prompt()
-        body = build_presentation_user_prompt(source_text=source_text, image_urls=image_urls)
+        prompt = build_presentation_system_prompt(language)
+        body = build_presentation_user_prompt(source_text=source_text, image_urls=image_urls, language=language)
         try:
             raw = self.text_client.create_answer(system_prompt=prompt, user_prompt=body)
             chunks = parse_presentation_chunks(raw)
@@ -2286,7 +2296,20 @@ def build_presentation_source_text(sections: list[ParsedSection]) -> str:
     return text
 
 
-def build_presentation_system_prompt() -> str:
+def build_presentation_system_prompt(language: str | None = "zh") -> str:
+    if normalize_walkthrough_language(language) == "en":
+        return (
+            "You are Codex using ChatGPT 5.5. Convert a Confluence PRD into a concise English briefing outline for software engineers. "
+            "Return only a strict JSON array, with no markdown fences and no explanation. "
+            "Each object must contain: id, title, content, and optional imageUrls and media_ref. "
+            "id must be stable like chunk-1, chunk-2. title must be short English. "
+            "content must be polished spoken English for PM-to-engineering briefing, 4 to 7 sentences, focused on user flow, system behavior, fields, validation, state changes, dependencies, edge cases, and QA attention points. "
+            "If the input has [IMAGE] lines that are relevant to the chunk, include those exact URLs in imageUrls. "
+            "The source may also contain markers like [MEDIA_ID_1]. Each marker represents one important image or table from the PRD. "
+            "If one marker is important for the current chunk, output that marker id in media_ref, for example \"media_ref\":\"MEDIA_ID_1\". "
+            "Each chunk can bind at most one primary media_ref. Do not invent media ids that are not in the source. "
+            "Do not invent requirements."
+        )
     return (
         "You are Codex using ChatGPT 5.5. Convert a Confluence PRD into a concise Mandarin briefing outline for software engineers. "
         "Return only a strict JSON array, with no markdown fences and no explanation. "
@@ -2301,8 +2324,16 @@ def build_presentation_system_prompt() -> str:
     )
 
 
-def build_presentation_user_prompt(*, source_text: str, image_urls: list[str]) -> str:
+def build_presentation_user_prompt(*, source_text: str, image_urls: list[str], language: str | None = "zh") -> str:
     image_hint = "\n".join(f"- {url}" for url in image_urls[:24]) or "- None"
+    if normalize_walkthrough_language(language) == "en":
+        return (
+            "Create 4 to 10 English presentation chunks from this PRD. Merge tiny or metadata-only sections. "
+            "Make each chunk useful for developers and QA to understand what to build and verify. "
+            "Preserve useful [MEDIA_ID_x] references by assigning at most one media_ref to the chunk where that image or table helps the briefing.\n\n"
+            f"Known image URLs:\n{image_hint}\n\n"
+            f"PRD source:\n{source_text}"
+        )
     return (
         "Create 4 to 10 presentation chunks from this PRD. Merge tiny or metadata-only sections. "
         "Make each chunk useful for developers and QA to understand what to build and verify. "

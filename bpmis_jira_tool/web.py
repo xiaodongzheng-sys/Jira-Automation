@@ -81,7 +81,7 @@ from bpmis_jira_tool.user_config import (
 )
 from prd_briefing import create_prd_briefing_blueprint
 from prd_briefing.confluence import ConfluenceConnector
-from prd_briefing.reviewer import PRDReviewRequest, PRDReviewService
+from prd_briefing.reviewer import PRDBriefingReviewRequest, PRDReviewRequest, PRDReviewService
 from prd_briefing.storage import BriefingStore
 
 
@@ -2284,6 +2284,7 @@ def create_app() -> Flask:
     )
     app.config["GET_USER_IDENTITY"] = lambda: _get_user_identity(settings)
     app.config["CAN_ACCESS_PRD_BRIEFING"] = lambda: _can_access_prd_briefing(settings)
+    app.config["CAN_ACCESS_PRD_SELF_ASSESSMENT"] = lambda: _can_access_prd_self_assessment(settings)
     app.config["CAN_ACCESS_GMAIL_SEATALK_DEMO"] = lambda: _can_access_gmail_seatalk_demo(settings)
     app.register_blueprint(create_prd_briefing_blueprint())
 
@@ -2295,6 +2296,7 @@ def create_app() -> Flask:
                 "site_tabs": [],
                 "site_requires_google_login": True,
                 "can_access_prd_briefing": False,
+                "can_access_prd_self_assessment": False,
                 "can_access_gmail_seatalk_demo": False,
                 "can_access_source_code_qa": False,
                 "can_manage_source_code_qa": False,
@@ -2319,7 +2321,14 @@ def create_app() -> Flask:
                 }
             )
         prd_tab = None
+        prd_self_assessment_tab = None
         seatalk_tab = None
+        if _can_access_prd_self_assessment(settings):
+            prd_self_assessment_tab = {
+                "label": "PRD Self-Assessment",
+                "href": url_for("prd_self_assessment_page"),
+                "active": current_endpoint == "prd_self_assessment_page",
+            }
         if _can_access_prd_briefing(settings):
             prd_tab = {
                 "label": "PRD Briefing Tool",
@@ -2332,6 +2341,8 @@ def create_app() -> Flask:
                 "href": url_for("gmail_seatalk_demo"),
                 "active": request.path.startswith("/gmail-sea-talk-demo"),
             }
+        if prd_self_assessment_tab:
+            site_tabs.append(prd_self_assessment_tab)
         if prd_tab:
             site_tabs.append(prd_tab)
         if can_access_team_dashboard:
@@ -2348,6 +2359,7 @@ def create_app() -> Flask:
             "site_tabs": site_tabs,
             "site_requires_google_login": _site_requires_google_login(settings),
             "can_access_prd_briefing": _can_access_prd_briefing(settings),
+            "can_access_prd_self_assessment": _can_access_prd_self_assessment(settings),
             "can_access_gmail_seatalk_demo": _can_access_gmail_seatalk_demo(settings),
             "can_access_source_code_qa": _can_access_source_code_qa(settings),
             "can_manage_source_code_qa": _can_manage_source_code_qa(settings),
@@ -2532,6 +2544,21 @@ def create_app() -> Flask:
             can_view_team_dashboard_monthly_report=_can_access_team_dashboard_monthly_report(
                 _get_user_identity(settings)
             ),
+        )
+
+    @app.get("/prd-self-assessment")
+    @app.get("/prd-self-assessment/")
+    def prd_self_assessment_page():
+        access_gate = _require_prd_self_assessment_access(settings)
+        if access_gate is not None:
+            return access_gate
+        return render_template(
+            "prd_self_assessment.html",
+            page_title="PRD Self-Assessment",
+            user_identity=_get_user_identity(settings),
+            review_url=url_for("prd_self_assessment_review_api"),
+            summary_url=url_for("prd_self_assessment_summary_api"),
+            asset_revision=_current_release_revision(),
         )
 
     @app.get("/healthz")
@@ -4547,6 +4574,14 @@ def create_app() -> Flask:
                 HTTPStatus.INTERNAL_SERVER_ERROR,
             )
 
+    @app.post("/api/prd-self-assessment/review")
+    def prd_self_assessment_review_api():
+        return _run_prd_self_assessment_action(settings, action="review")
+
+    @app.post("/api/prd-self-assessment/summary")
+    def prd_self_assessment_summary_api():
+        return _run_prd_self_assessment_action(settings, action="summary")
+
     @app.get("/download/default-sheet-template.csv")
     def download_default_sheet_template():
         sample_row = [
@@ -5549,6 +5584,16 @@ def _google_session_is_connected() -> bool:
 
 def _can_access_prd_briefing(settings: Settings) -> bool:
     email = _current_google_email()
+    allowed_emails = {
+        str(settings.prd_briefing_owner_email or "").strip().lower(),
+        "xiaodong.zheng@npt.sg",
+        "xiaodong.zheng1991@gmail.com",
+    }
+    return bool(email and email in {item for item in allowed_emails if item})
+
+
+def _can_access_prd_self_assessment(settings: Settings) -> bool:
+    email = _current_google_email()
     return bool(
         email
         and (
@@ -6154,6 +6199,88 @@ def _require_team_dashboard_access(settings: Settings, *, api: bool = False):
         flash(message, "error")
         return redirect(url_for("access_denied"))
     return None
+
+
+def _require_prd_self_assessment_access(settings: Settings, *, api: bool = False):
+    login_gate = _require_google_login(settings, api=api)
+    if login_gate is not None:
+        return login_gate
+    message = "PRD Self-Assessment is available to signed-in npt.sg users and the configured test account."
+    if not _can_access_prd_self_assessment(settings):
+        if api:
+            return jsonify({"status": "error", "message": message}), HTTPStatus.FORBIDDEN
+        flash(message, "error")
+        return redirect(url_for("access_denied"))
+    return None
+
+
+def _run_prd_self_assessment_action(settings: Settings, *, action: str):
+    access_gate = _require_prd_self_assessment_access(settings, api=True)
+    if access_gate is not None:
+        return access_gate
+    payload = request.get_json(silent=True) or {}
+    user_identity = _get_user_identity(settings)
+    request_payload = {
+        "owner_key": str(user_identity.get("config_key") or ""),
+        "prd_url": str(payload.get("prd_url") or payload.get("page_ref") or ""),
+        "language": str(payload.get("language") or "zh"),
+        "force_refresh": bool(payload.get("force_refresh")),
+    }
+    event_prefix = f"prd_self_assessment_{action}"
+    try:
+        if _local_agent_source_code_qa_enabled(settings):
+            client = _build_local_agent_client(settings)
+            data = (
+                client.prd_self_assessment_summary(request_payload)
+                if action == "summary"
+                else client.prd_self_assessment_review(request_payload)
+            )
+        else:
+            service = _build_prd_review_service(settings)
+            request_model = PRDBriefingReviewRequest(**request_payload)
+            data = service.summarize_url(request_model) if action == "summary" else service.review_url(request_model)
+        _log_portal_event(
+            f"{event_prefix}_success",
+            **_build_request_log_context(
+                settings,
+                user_identity=user_identity,
+                extra={
+                    "prd_url_hash": hashlib.sha256(request_payload["prd_url"].encode("utf-8")).hexdigest()[:12],
+                    "language": request_payload["language"],
+                    "cached": bool(data.get("cached")),
+                },
+            ),
+        )
+        return jsonify(data)
+    except ToolError as error:
+        error_details = _classify_portal_error(error)
+        _log_portal_event(
+            f"{event_prefix}_tool_error",
+            level=logging.WARNING,
+            **_build_request_log_context(
+                settings,
+                user_identity=user_identity,
+                extra={**error_details, "language": request_payload["language"]},
+            ),
+        )
+        return jsonify({"status": "error", "message": str(error), **error_details}), HTTPStatus.BAD_REQUEST
+    except Exception as error:  # noqa: BLE001
+        _log_portal_event(
+            f"{event_prefix}_unexpected_error",
+            level=logging.ERROR,
+            **_build_request_log_context(settings, user_identity=user_identity, extra=_classify_portal_error(error)),
+        )
+        current_app.logger.exception("PRD Self-Assessment %s failed.", action)
+        return (
+            jsonify(
+                {
+                    "status": "error",
+                    "message": f"PRD {action} failed unexpectedly. Please retry or share the request ID.",
+                    **_classify_portal_error(error),
+                }
+            ),
+            HTTPStatus.INTERNAL_SERVER_ERROR,
+        )
 
 
 def _require_team_dashboard_monthly_report_access(settings: Settings, *, api: bool = False):

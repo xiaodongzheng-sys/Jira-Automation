@@ -27,19 +27,23 @@
         <form class="stack" data-briefing-session-form>
           <div>
             <label for="page_ref">Confluence Page URL</label>
-            <input id="page_ref" name="page_ref" value="https://confluence.shopee.io/display/SPDB/V3.03+%5BPRD%5D+SME+RCF+Drawdown+Underwriting" placeholder="https://your-domain.atlassian.net/wiki/spaces/..." required>
+            <input id="page_ref" name="page_ref" value="https://confluence.shopee.io/display/SPDB/V3.03+%5BPRD%5D+SME+RCF+Drawdown+Underwriting" placeholder="https://your-domain.atlassian.net/wiki/spaces/..." required data-briefing-page-ref>
             <p class="help-text briefing-form-help">Generating the outline may take 30-40 seconds for long PRDs. Audio is generated progressively, starting with the opening chunk.</p>
           </div>
-          <input type="hidden" name="briefing_language" value="zh" data-briefing-language>
+          <div>
+            <label for="briefing_language">Briefing Language</label>
+            <select id="briefing_language" name="briefing_language" data-briefing-language>
+              <option value="zh">Chinese</option>
+              <option value="en">English</option>
+            </select>
+          </div>
           <div class="button-row briefing-action-buttons">
             <button class="button" type="submit">生成宣讲</button>
-            <button class="button button-secondary" type="button" data-prd-review-generate>Generate AI PRD Review</button>
           </div>
         </form>
         <div class="empty-state briefing-status" data-briefing-status>
           <p>No PRD output yet. Enter a PRD link, then generate the briefing outline.</p>
         </div>
-        <div class="briefing-review-panel" data-prd-review-panel hidden></div>
       </section>
     </div>
 

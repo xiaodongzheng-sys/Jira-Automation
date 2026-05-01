@@ -75,6 +75,7 @@ DEFAULT_CODEX_TIMEOUT_SECONDS = 240
 DEFAULT_CODEX_TOP_PATH_LIMIT = 30
 FAST_QUERY_DEADLINE_SECONDS = 60
 FAST_CODEX_TIMEOUT_SECONDS = 55
+FAST_CODEX_FOLLOWUP_TIMEOUT_SECONDS = 70
 FAST_CODEX_TOP_PATH_LIMIT = 10
 CODEX_INVESTIGATION_PROMPT_MODE = "codex_investigation_brief_v5"
 CODEX_SESSION_MODE_EPHEMERAL = "ephemeral"
@@ -3111,6 +3112,7 @@ class SourceCodeQAService:
             bool(tokens & english_followup_markers)
             or any(re.search(rf"\b{re.escape(marker)}\b", lowered) for marker in english_followup_phrases)
             or any(marker in lowered for marker in chinese_followup_markers)
+            or self._is_relationship_followup_question(question)
         )
         english_clarification_phrases = (
             "i mean",
@@ -15065,6 +15067,13 @@ class SourceCodeQAService:
         candidate_paths = self._codex_candidate_paths(entries=entries, key=key, matches=candidate_matches)
         candidate_paths = self._merge_codex_followup_candidate_paths(candidate_paths, followup_context)
         candidate_path_layers = self._codex_candidate_path_layers(candidate_paths, followup_context)
+        fast_timeout_seconds = self._fast_followup_timeout_seconds(question, followup_context) if fast_mode else 0
+        fast_fallback_matches, fast_inherited_focus_terms = self._fast_followup_fallback_matches(
+            selected_matches=candidate_matches,
+            followup_context=followup_context,
+            question=question,
+            limit=candidate_limit,
+        ) if fast_mode else (candidate_matches, [])
         llm_route = {
             **llm_route,
             "answer_model": selected_model,
@@ -15078,6 +15087,9 @@ class SourceCodeQAService:
             "codex_fast_path_enabled": self.codex_fast_path_enabled,
             "query_mode": query_mode,
             "deadline_seconds": FAST_QUERY_DEADLINE_SECONDS if fast_mode else 0,
+            "fast_timeout_seconds": fast_timeout_seconds,
+            "fast_adaptive_timeout": bool(fast_mode and fast_timeout_seconds > FAST_CODEX_TIMEOUT_SECONDS),
+            "fast_inherited_focus_terms": fast_inherited_focus_terms[:10],
             "fast_candidate_path_limit": candidate_limit if fast_mode else 0,
             "codex_session_mode": self.codex_session_mode,
             "codex_session_max_turns": self.codex_session_max_turns,
@@ -15203,7 +15215,7 @@ class SourceCodeQAService:
             image_paths=self._attachment_image_paths(attachments or []),
         )
         if fast_mode:
-            payload["_timeout_seconds"] = FAST_CODEX_TIMEOUT_SECONDS
+            payload["_timeout_seconds"] = fast_timeout_seconds or FAST_CODEX_TIMEOUT_SECONDS
         try:
             result = self.llm_provider.generate(
                 payload=payload,
@@ -15215,7 +15227,7 @@ class SourceCodeQAService:
                 raise
             return self._build_fast_llm_fallback_answer(
                 question=question,
-                selected_matches=candidate_matches,
+                selected_matches=fast_fallback_matches,
                 evidence_summary=evidence_summary,
                 quality_gate=quality_gate,
                 evidence_pack=evidence_pack,
@@ -15228,6 +15240,8 @@ class SourceCodeQAService:
                 },
                 selected_model=selected_model,
                 reason=str(error),
+                timeout_seconds=fast_timeout_seconds or FAST_CODEX_TIMEOUT_SECONDS,
+                focus_terms=fast_inherited_focus_terms,
             )
         answer = self.llm_provider.extract_text(result.payload)
         structured_answer = self._parse_structured_answer(answer)
@@ -15449,6 +15463,8 @@ class SourceCodeQAService:
         llm_route: dict[str, Any],
         selected_model: str,
         reason: str,
+        timeout_seconds: int = FAST_CODEX_TIMEOUT_SECONDS,
+        focus_terms: list[str] | None = None,
     ) -> dict[str, Any]:
         structured_answer = self._build_fast_evidence_first_answer(
             question=question,
@@ -15456,6 +15472,7 @@ class SourceCodeQAService:
             evidence_summary=evidence_summary,
             quality_gate=quality_gate,
             evidence_pack=evidence_pack,
+            focus_terms=focus_terms,
         )
         claim_check = self._trusted_provider_check()
         answer_judge = self._trusted_provider_judge()
@@ -15485,14 +15502,14 @@ class SourceCodeQAService:
             "llm_model": selected_model,
             "llm_thinking_budget": 0,
             "llm_attempts": 1,
-            "llm_latency_ms": FAST_CODEX_TIMEOUT_SECONDS * 1000,
+            "llm_latency_ms": int(timeout_seconds or FAST_CODEX_TIMEOUT_SECONDS) * 1000,
             "llm_attempt_log": [
                 {
                     "model": selected_model,
                     "attempt": 1,
                     "status": "timeout",
                     "retryable": True,
-                    "latency_ms": FAST_CODEX_TIMEOUT_SECONDS * 1000,
+                    "latency_ms": int(timeout_seconds or FAST_CODEX_TIMEOUT_SECONDS) * 1000,
                     "provider": self.llm_provider.name,
                     "timeout": True,
                 }
@@ -15523,9 +15540,10 @@ class SourceCodeQAService:
         evidence_summary: dict[str, Any],
         quality_gate: dict[str, Any],
         evidence_pack: dict[str, Any],
+        focus_terms: list[str] | None = None,
     ) -> dict[str, Any]:
         citations = self._build_citations(selected_matches)
-        focus_terms = self._fast_answer_focus_terms(question)
+        focus_terms = list(dict.fromkeys([*(focus_terms or []), *self._fast_answer_focus_terms(question)]))[:8]
         claims: list[dict[str, Any]] = []
         used_citations: set[str] = set()
 
@@ -16227,6 +16245,223 @@ class SourceCodeQAService:
             )
             seen.add(key)
         return merged
+
+    @staticmethod
+    def _is_relationship_followup_question(question: str) -> bool:
+        lowered = f" {str(question or '').lower()} "
+        phrase_markers = (
+            "two fields",
+            "relationship",
+            "relation",
+            "between the two",
+            "between them",
+            "deeper",
+            "continue",
+            "cross-field",
+            "cross file",
+            "cross-file",
+            "any relationship",
+            "关系",
+            "继续分析",
+            "深入",
+            "这两个字段",
+            "两个字段",
+            "关联",
+            "链路",
+        )
+        return any(marker in lowered for marker in phrase_markers)
+
+    @staticmethod
+    def _fast_followup_low_value_terms() -> set[str]:
+        return {
+            "there",
+            "their",
+            "them",
+            "this",
+            "that",
+            "any",
+            "between",
+            "field",
+            "fields",
+            "deeper",
+            "relationship",
+            "relation",
+            "understand",
+            "continue",
+            "about",
+            "with",
+            "from",
+            "what",
+            "where",
+            "which",
+            "java",
+            "tsx",
+            "jsx",
+            "src",
+            "main",
+            "config",
+            "resources",
+            "component",
+            "components",
+            "service",
+            "controller",
+            "repository",
+            "common",
+        }
+
+    def _followup_core_terms(self, question: str, followup_context: dict[str, Any] | None) -> list[str]:
+        if not followup_context or not self._is_relationship_followup_question(question):
+            return []
+        low_value = self._fast_followup_low_value_terms()
+        texts: list[str] = [
+            str(followup_context.get("previous_question") or ""),
+            str(followup_context.get("question") or ""),
+            str(followup_context.get("summary") or ""),
+            str(followup_context.get("answer") or ""),
+            str(followup_context.get("rendered_answer") or ""),
+            " ".join(str(item) for item in followup_context.get("terms") or []),
+        ]
+        for match in followup_context.get("matches_snapshot") or followup_context.get("matches") or []:
+            if isinstance(match, dict):
+                texts.extend([str(match.get("path") or ""), str(match.get("reason") or ""), str(match.get("snippet") or "")])
+        for item in followup_context.get("codex_candidate_paths") or []:
+            if isinstance(item, dict):
+                texts.extend([str(item.get("path") or ""), str(item.get("reason") or "")])
+        route = followup_context.get("llm_route") if isinstance(followup_context.get("llm_route"), dict) else {}
+        for item in route.get("candidate_paths") or []:
+            if isinstance(item, dict):
+                texts.extend([str(item.get("path") or ""), str(item.get("reason") or "")])
+        for turn in followup_context.get("recent_turns") or []:
+            if not isinstance(turn, dict):
+                continue
+            texts.extend([str(turn.get("question") or ""), str(turn.get("answer") or "")])
+            for match in turn.get("matches_snapshot") or []:
+                if isinstance(match, dict):
+                    texts.extend([str(match.get("path") or ""), str(match.get("reason") or ""), str(match.get("snippet") or "")])
+            for item in turn.get("codex_candidate_paths") or []:
+                if isinstance(item, dict):
+                    texts.extend([str(item.get("path") or ""), str(item.get("reason") or "")])
+
+        scored: dict[str, tuple[str, int]] = {}
+        for index, text in enumerate(texts):
+            weight = 5 if index <= 1 else 1
+            for token in IDENTIFIER_PATTERN.findall(text):
+                clean = token.strip("._/-:")
+                lowered = clean.lower()
+                if len(lowered) < 4 or lowered in STOPWORDS or lowered in LOW_VALUE_CALL_SYMBOLS or lowered in low_value:
+                    continue
+                if re.fullmatch(r"s\d+", lowered):
+                    continue
+                score = weight
+                if any(char.isupper() for char in clean[1:]) or "_" in clean:
+                    score += 3
+                if any(marker in lowered for marker in ("uid", "id", "merchant", "shopee", "identifier")):
+                    score += 3
+                if "/" in clean or "." in clean:
+                    score -= 2
+                existing = scored.get(lowered)
+                if existing:
+                    scored[lowered] = (existing[0], existing[1] + score)
+                else:
+                    scored[lowered] = (clean, score)
+        ordered = sorted(scored.values(), key=lambda item: (-item[1], item[0].lower()))
+        return [term for term, _score in ordered[:10]]
+
+    def _fast_followup_timeout_seconds(self, question: str, followup_context: dict[str, Any] | None) -> int:
+        if not self._is_relationship_followup_question(question):
+            return FAST_CODEX_TIMEOUT_SECONDS
+        if not isinstance(followup_context, dict) or not followup_context.get("used"):
+            return FAST_CODEX_TIMEOUT_SECONDS
+        core_terms = self._followup_core_terms(question, followup_context)
+        candidate_paths = [
+            *((followup_context.get("codex_candidate_paths") or []) if isinstance(followup_context.get("codex_candidate_paths"), list) else []),
+            *(((followup_context.get("llm_route") or {}).get("candidate_paths") or []) if isinstance(followup_context.get("llm_route"), dict) else []),
+        ]
+        has_prior_candidate = any(isinstance(item, dict) and item.get("path") for item in candidate_paths)
+        if core_terms and has_prior_candidate:
+            return FAST_CODEX_FOLLOWUP_TIMEOUT_SECONDS
+        return FAST_CODEX_TIMEOUT_SECONDS
+
+    def _fast_followup_fallback_matches(
+        self,
+        *,
+        selected_matches: list[dict[str, Any]],
+        followup_context: dict[str, Any] | None,
+        question: str,
+        limit: int,
+    ) -> tuple[list[dict[str, Any]], list[str]]:
+        core_terms = self._followup_core_terms(question, followup_context)
+        if not core_terms:
+            return selected_matches[:limit], []
+        core_lowers = [term.lower() for term in core_terms]
+        low_value = self._fast_followup_low_value_terms()
+        prioritized: list[dict[str, Any]] = []
+        seen: set[tuple[str, str, Any, Any]] = set()
+
+        def add(match: dict[str, Any] | None) -> None:
+            if not match or len(prioritized) >= limit:
+                return
+            key = (
+                str(match.get("repo") or ""),
+                str(match.get("path") or ""),
+                match.get("line_start"),
+                match.get("line_end"),
+            )
+            if key in seen:
+                return
+            prioritized.append(match)
+            seen.add(key)
+
+        def match_text(item: dict[str, Any]) -> str:
+            return " ".join(str(item.get(key) or "") for key in ("path", "reason", "snippet", "retrieval", "trace_stage")).lower()
+
+        def has_core(item: dict[str, Any]) -> bool:
+            text = match_text(item)
+            return any(term in text for term in core_lowers)
+
+        def low_value_only(item: dict[str, Any]) -> bool:
+            text = match_text(item)
+            if has_core(item):
+                return False
+            tokens = {token.lower() for token in IDENTIFIER_PATTERN.findall(text)}
+            if not tokens:
+                return False
+            useful = [token for token in tokens if token not in low_value and token not in STOPWORDS and len(token) >= 4]
+            return not useful or bool(tokens & low_value)
+
+        prior_items: list[dict[str, Any]] = []
+        if isinstance(followup_context, dict):
+            prior_items.extend(item for item in (followup_context.get("codex_candidate_paths") or []) if isinstance(item, dict))
+            route = followup_context.get("llm_route") if isinstance(followup_context.get("llm_route"), dict) else {}
+            prior_items.extend(item for item in (route.get("candidate_paths") or []) if isinstance(item, dict))
+            for turn in followup_context.get("recent_turns") or []:
+                if isinstance(turn, dict):
+                    prior_items.extend(item for item in (turn.get("codex_candidate_paths") or []) if isinstance(item, dict))
+                    prior_items.extend(item for item in (turn.get("matches_snapshot") or []) if isinstance(item, dict))
+
+        for item in prior_items:
+            if not has_core(item):
+                continue
+            add(
+                {
+                    "repo": item.get("repo") or "",
+                    "path": item.get("path") or "",
+                    "line_start": item.get("line_start"),
+                    "line_end": item.get("line_end"),
+                    "retrieval": item.get("retrieval") or "previous_codex_context",
+                    "trace_stage": item.get("trace_stage") or "followup_memory",
+                    "reason": item.get("reason") or "previous high-signal candidate path matched inherited follow-up entities",
+                    "snippet": item.get("snippet") or "",
+                    "score": item.get("score") or 0,
+                }
+            )
+        for match in selected_matches:
+            if has_core(match):
+                add(match)
+        for match in selected_matches:
+            if not low_value_only(match):
+                add(match)
+        return prioritized[:limit], core_terms
 
     def _repo_relative_root(self, repo_root: Path) -> str:
         try:

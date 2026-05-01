@@ -11,10 +11,13 @@ from prd_briefing.confluence import IngestedConfluencePage, ParsedSection
 from prd_briefing.reviewer import (
     PRD_BRIEFING_REVIEW_CACHE_KEY,
     PRD_REVIEW_PROMPT_VERSION,
+    PRD_URL_SUMMARY_CACHE_KEY,
     PRDBriefingReviewRequest,
     PRDReviewService,
     build_prd_review_prompt,
+    build_prd_summary_prompt,
     prd_briefing_review_prompt_version,
+    prd_summary_prompt_version,
 )
 from prd_briefing.service import (
     PRDBriefingService,
@@ -465,6 +468,22 @@ class PRDBriefingServiceTests(unittest.TestCase):
         self.assertIn("Logic Rigor Assessment", prompt)
         self.assertNotIn("逻辑严密度评估", prompt)
 
+    def test_prd_summary_english_prompt_requests_english_output(self):
+        page = self.service.confluence.page
+
+        prompt = build_prd_summary_prompt(
+            jira_id="",
+            jira_link="",
+            prd_url=page.source_url,
+            page=page,
+            language="en",
+        )
+
+        self.assertIn("concise but complete English summary", prompt)
+        self.assertIn("Jira ID: -", prompt)
+        self.assertIn("PRD Summary", prompt)
+        self.assertNotIn("中文摘要", prompt)
+
     @patch("prd_briefing.reviewer.generate_prd_review_with_codex")
     def test_prd_briefing_review_cache_varies_by_language_and_updated_at(self, mock_generate):
         mock_generate.return_value = {
@@ -515,6 +534,59 @@ class PRDBriefingServiceTests(unittest.TestCase):
             prd_url=self.service.confluence.page.source_url,
             prd_updated_at="2026-04-16T10:00:00Z",
             prompt_version=prd_briefing_review_prompt_version("zh"),
+        )
+        self.assertIsNone(stale)
+
+    @patch("prd_briefing.reviewer.generate_prd_summary_with_codex")
+    def test_prd_url_summary_cache_varies_by_language_and_updated_at(self, mock_generate):
+        mock_generate.return_value = {
+            "result_markdown": "### Summary",
+            "model_id": "codex-cli",
+            "trace": {"session_id": "s1"},
+        }
+        service = PRDReviewService(
+            store=self.store,
+            confluence=self.service.confluence,
+            settings=self._settings(),
+            workspace_root=Path(self.temp_dir.name),
+        )
+
+        first = service.summarize_url(
+            PRDBriefingReviewRequest(
+                owner_key="anon:test",
+                prd_url="https://example.atlassian.net/wiki/pages/123",
+                language="zh",
+            )
+        )
+        cached = service.summarize_url(
+            PRDBriefingReviewRequest(
+                owner_key="anon:test",
+                prd_url="https://example.atlassian.net/wiki/pages/123",
+                language="zh",
+            )
+        )
+        english = service.summarize_url(
+            PRDBriefingReviewRequest(
+                owner_key="anon:test",
+                prd_url="https://example.atlassian.net/wiki/pages/123",
+                language="en",
+            )
+        )
+
+        self.assertFalse(first["cached"])
+        self.assertTrue(cached["cached"])
+        self.assertFalse(english["cached"])
+        self.assertEqual(mock_generate.call_count, 2)
+        self.assertEqual(first["summary"]["jira_id"], PRD_URL_SUMMARY_CACHE_KEY)
+        self.assertEqual(first["summary"]["prompt_version"], prd_summary_prompt_version("zh"))
+        self.assertEqual(english["summary"]["prompt_version"], prd_summary_prompt_version("en"))
+
+        stale = self.store.get_prd_review_result(
+            owner_key="anon:test",
+            jira_id=PRD_URL_SUMMARY_CACHE_KEY,
+            prd_url=self.service.confluence.page.source_url,
+            prd_updated_at="2026-04-16T10:00:00Z",
+            prompt_version=prd_summary_prompt_version("zh"),
         )
         self.assertIsNone(stale)
 

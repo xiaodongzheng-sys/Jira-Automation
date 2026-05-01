@@ -6765,6 +6765,11 @@ select:focus {
   color: #1d4ed8;
 }
 
+.source-qa-deep-continue {
+  justify-self: start;
+  margin-top: 4px;
+}
+
 .source-qa-answer-section {
   min-width: 0;
   padding: 14px;

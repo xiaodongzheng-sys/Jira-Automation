@@ -151,6 +151,14 @@ class LocalAgentClient:
         result = self._request("POST", "/api/local-agent/prd-briefing-review", payload)
         return result if isinstance(result, dict) else {}
 
+    def prd_self_assessment_review(self, payload: dict[str, Any]) -> dict[str, Any]:
+        result = self._request("POST", "/api/local-agent/prd-self-assessment/review", payload)
+        return result if isinstance(result, dict) else {}
+
+    def prd_self_assessment_summary(self, payload: dict[str, Any]) -> dict[str, Any]:
+        result = self._request("POST", "/api/local-agent/prd-self-assessment/summary", payload)
+        return result if isinstance(result, dict) else {}
+
     def prd_briefing_process_prd(self, payload: dict[str, Any]) -> dict[str, Any]:
         result = self._request("POST", "/api/local-agent/prd-briefing/process-prd", payload)
         return result if isinstance(result, dict) else {}

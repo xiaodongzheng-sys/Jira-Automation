@@ -2145,6 +2145,45 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertIn("authorizationcontent", augmented)
         self.assertIn("incidentapprove", augmented)
 
+    def test_followup_relationship_question_inherits_previous_entities(self):
+        service = SourceCodeQAService(
+            data_root=Path(self.temp_dir.name),
+            team_profiles=TEAM_PROFILE_DEFAULTS,
+            llm_provider="codex_cli_bridge",
+            gitlab_token="secret-token",
+            git_timeout_seconds=5,
+            max_file_bytes=200_000,
+        )
+        augmented, followup = service._apply_conversation_context(
+            "Understand deeper if there is any relationship between the two fields",
+            {
+                "key": "AF:All",
+                "question": "merchantUId and shopeeUid difference",
+                "answer": "Previous answer mentioned merchantUId and shopeeUid.",
+                "matches": [],
+                "trace_paths": [],
+                "structured_answer": {},
+                "answer_contract": {},
+                "evidence_pack": {},
+                "codex_candidate_paths": [
+                    {
+                        "repo": "AF FE",
+                        "repo_root": "/tmp/af-fe",
+                        "path": "src/components/ShopeeUid.tsx",
+                        "reason": "matched shopeeUid and merchantUId",
+                    }
+                ],
+            },
+            current_key="AF:All",
+        )
+
+        self.assertTrue(followup["used"])
+        self.assertFalse(followup["implicit"])
+        self.assertIn("Previous Source Code Q&A context terms", augmented)
+        self.assertIn("merchantuid", augmented)
+        self.assertIn("shopeeuid", augmented)
+        self.assertNotIn("between fields there", augmented)
+
     def test_followup_context_does_not_pollute_specific_short_lookup(self):
         augmented, followup = self.service._apply_conversation_context(
             "Is fdMaturityDate used in any function?",
@@ -8170,6 +8209,158 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         }
         self.assertIn("S1", cited)
         self.assertIn("S2", cited)
+
+    def test_codex_fast_followup_relationship_uses_adaptive_timeout(self):
+        service = SourceCodeQAService(
+            data_root=Path(self.temp_dir.name),
+            team_profiles=TEAM_PROFILE_DEFAULTS,
+            llm_provider="codex_cli_bridge",
+            gitlab_token="secret-token",
+            git_timeout_seconds=5,
+            max_file_bytes=200_000,
+        )
+        entry = RepositoryEntry("AF FE", "https://git.example.com/team/af-fe.git")
+        key = "AF:All"
+        repo_path = service._repo_path(key, entry)
+        source_file = repo_path / "src/components/ShopeeUid.tsx"
+        source_file.parent.mkdir(parents=True)
+        source_file.write_text("const shopeeUid = shopInfo.shopeeUid;\n", encoding="utf-8")
+        calls = []
+
+        def fake_run(command, **kwargs):
+            calls.append((command, kwargs))
+            if "login" in command and "status" in command:
+                return SimpleNamespace(returncode=0, stdout="Logged in using ChatGPT\n", stderr="")
+            output_path = command[command.index("--output-last-message") + 1]
+            Path(output_path).write_text(
+                '{"direct_answer":"shopeeUid and merchantUId relationship still needs verification.",'
+                '"claims":[{"text":"ShopeeUid component displays shopeeUid","citations":["S1"]}],'
+                '"missing_evidence":["merchantUId upstream source"],"confidence":"medium"}',
+                encoding="utf-8",
+            )
+            return SimpleNamespace(returncode=0, stdout='{"type":"done"}\n', stderr="")
+
+        with patch("bpmis_jira_tool.source_code_qa.shutil.which", return_value="/usr/local/bin/codex"), patch(
+            "bpmis_jira_tool.source_code_qa.subprocess.run",
+            side_effect=fake_run,
+        ):
+            payload = service._build_llm_answer(
+                entries=[entry],
+                key=key,
+                pm_team="AF",
+                country="All",
+                question="Understand deeper if there is any relationship between the two fields",
+                matches=[
+                    {
+                        "repo": "AF FE",
+                        "path": "admin/infra/exception/BizErrorType.java",
+                        "line_start": 1,
+                        "line_end": 1,
+                        "retrieval": "semantic_chunk",
+                        "trace_stage": "semantic",
+                        "reason": "semantic chunk matched: between, fields, there",
+                        "snippet": 'NLA_QUERY_NODES_TOO_MANY(4470026, "Query too many nodes.")',
+                    }
+                ],
+                llm_budget_mode="auto",
+                query_mode="fast",
+                requested_answer_mode="auto",
+                followup_context={
+                    "used": True,
+                    "question": "merchantUId and shopeeUid difference",
+                    "answer": "Previous answer explained merchantUId and shopeeUid.",
+                    "codex_candidate_paths": [
+                        {
+                            "repo": "AF FE",
+                            "repo_root": str(repo_path),
+                            "path": "src/components/ShopeeUid.tsx",
+                            "line_start": 1,
+                            "line_end": 1,
+                            "reason": "matched shopeeUid field and merchantUId related UI",
+                        }
+                    ],
+                },
+            )
+
+        exec_calls = [item for item in calls if "exec" in item[0]]
+        self.assertEqual(exec_calls[0][1]["timeout"], 70)
+        self.assertTrue(payload["llm_route"]["fast_adaptive_timeout"])
+        self.assertIn("merchantUId", payload["llm_route"]["fast_inherited_focus_terms"])
+        self.assertIn("shopeeUid", payload["llm_route"]["fast_inherited_focus_terms"])
+
+    def test_codex_fast_followup_timeout_prioritizes_inherited_entities(self):
+        service = SourceCodeQAService(
+            data_root=Path(self.temp_dir.name),
+            team_profiles=TEAM_PROFILE_DEFAULTS,
+            llm_provider="codex_cli_bridge",
+            gitlab_token="secret-token",
+            git_timeout_seconds=5,
+            max_file_bytes=200_000,
+        )
+        entry = RepositoryEntry("AF FE", "https://git.example.com/team/af-fe.git")
+        repo_path = service._repo_path("AF:All", entry)
+        followup_context = {
+            "used": True,
+            "question": "merchantUId and shopeeUid difference",
+            "answer": "Previous answer explained merchantUId and shopeeUid.",
+            "codex_candidate_paths": [
+                {
+                    "repo": "AF FE",
+                    "repo_root": str(repo_path),
+                    "path": "src/components/ShopeeUid.tsx",
+                    "line_start": 35,
+                    "line_end": 40,
+                    "reason": "matched shopeeUid field",
+                },
+                {
+                    "repo": "AF FE",
+                    "repo_root": str(repo_path),
+                    "path": "src/config/identifier.json",
+                    "line_start": 1,
+                    "line_end": 6,
+                    "reason": "matched merchantUId and shopeeUid identifier mapping",
+                },
+            ],
+        }
+        matches = [
+            {
+                "repo": "AF FE",
+                "path": "admin/infra/exception/BizErrorType.java",
+                "line_start": 1,
+                "line_end": 1,
+                "retrieval": "semantic_chunk",
+                "trace_stage": "semantic",
+                "reason": "semantic chunk matched: between, fields, there",
+                "snippet": 'NLA_QUERY_NODES_TOO_MANY(4470026, "Query too many nodes.")',
+            }
+        ]
+        with patch.object(service.llm_provider, "ready", return_value=True), patch.object(
+            service.llm_provider,
+            "generate",
+            side_effect=ToolError("Codex CLI timed out after 70s."),
+        ):
+            payload = service._build_llm_answer(
+                entries=[entry],
+                key="AF:All",
+                pm_team="AF",
+                country="All",
+                question="Understand deeper if there is any relationship between the two fields",
+                matches=matches,
+                llm_budget_mode="auto",
+                query_mode="fast",
+                requested_answer_mode="auto",
+                followup_context=followup_context,
+            )
+
+        self.assertTrue(payload["deadline_hit"])
+        self.assertTrue(payload["fallback_used"])
+        self.assertEqual(payload["llm_latency_ms"], 70000)
+        first_claim = payload["structured_answer"]["claims"][0]["text"]
+        self.assertIn("ShopeeUid.tsx", first_claim)
+        self.assertNotIn("BizErrorType", first_claim)
+        answer_text = json.dumps(payload["structured_answer"], ensure_ascii=False)
+        self.assertIn("merchantUId", answer_text)
+        self.assertIn("shopeeUid", answer_text)
 
     def test_codex_cli_bridge_requires_chatgpt_login(self):
         provider = CodexCliBridgeSourceCodeQALLMProvider(

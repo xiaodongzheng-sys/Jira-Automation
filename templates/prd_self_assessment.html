@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+
+{% block page_shell_class %} page-shell-briefing{% endblock %}
+
+{% block body %}
+  <section
+    class="briefing-shell prd-self-assessment-shell"
+    data-prd-self-assessment
+    data-review-url="{{ review_url }}"
+    data-summary-url="{{ summary_url }}"
+  >
+    <div class="portal-compact-hero briefing-compact-hero">
+      <div class="portal-compact-title">
+        <p class="showcase-kicker">AI PRD Review</p>
+        <h1>PRD Self-Assessment</h1>
+      </div>
+      <div class="portal-compact-meta">
+        <span>Confluence PRD</span>
+        <span>AI Summary</span>
+        <span>AI PRD Review</span>
+      </div>
+    </div>
+
+    <div class="briefing-grid briefing-grid-single">
+      <section class="panel glass-panel briefing-panel briefing-start-panel">
+        <div class="panel-head">
+          <div>
+            <h2>PRD Details</h2>
+            <p class="help-text">Paste a Confluence PRD link, choose the output language, then generate a summary or a delivery-logic review.</p>
+          </div>
+        </div>
+        <form class="stack" data-prd-self-assessment-form>
+          <div>
+            <label for="prd_self_assessment_url">Confluence Page URL</label>
+            <input id="prd_self_assessment_url" name="prd_url" value="https://confluence.shopee.io/display/SPDB/V3.03+%5BPRD%5D+SME+RCF+Drawdown+Underwriting" placeholder="https://your-domain.atlassian.net/wiki/spaces/..." required data-prd-self-assessment-url>
+            <p class="help-text briefing-form-help">Long PRDs may take 30-40 seconds while Codex reads the Confluence content.</p>
+          </div>
+          <div>
+            <label for="prd_self_assessment_language">Output Language</label>
+            <select id="prd_self_assessment_language" name="language" data-prd-self-assessment-language>
+              <option value="zh">Chinese</option>
+              <option value="en">English</option>
+            </select>
+          </div>
+          <div class="button-row briefing-action-buttons">
+            <button class="button" type="button" data-prd-self-assessment-action="summary">Generate PRD Summary</button>
+            <button class="button button-secondary" type="button" data-prd-self-assessment-action="review">Generate AI PRD Review</button>
+          </div>
+        </form>
+        <div class="empty-state briefing-status" data-prd-self-assessment-status>
+          <p>No PRD output yet. Enter a PRD link, then generate a summary or review.</p>
+        </div>
+        <div class="briefing-review-panel" data-prd-self-assessment-result hidden></div>
+      </section>
+    </div>
+  </section>
+{% endblock %}
+
+{% block extra_scripts %}
+  <script src="{{ url_for('static', filename='prd_self_assessment.js', v=asset_revision) }}"></script>
+{% endblock %}

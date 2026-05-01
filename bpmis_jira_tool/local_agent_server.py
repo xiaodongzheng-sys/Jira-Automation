@@ -269,6 +269,34 @@ def create_local_agent_app() -> Flask:
         )
         return jsonify(result)
 
+    @app.post("/api/local-agent/prd-self-assessment/review")
+    def prd_self_assessment_review():
+        payload = request.get_json(silent=True) or {}
+        service = _build_prd_review_service(settings)
+        result = service.review_url(
+            PRDBriefingReviewRequest(
+                owner_key=str(payload.get("owner_key") or ""),
+                prd_url=str(payload.get("prd_url") or ""),
+                language=str(payload.get("language") or "zh"),
+                force_refresh=bool(payload.get("force_refresh")),
+            )
+        )
+        return jsonify(result)
+
+    @app.post("/api/local-agent/prd-self-assessment/summary")
+    def prd_self_assessment_summary():
+        payload = request.get_json(silent=True) or {}
+        service = _build_prd_review_service(settings)
+        result = service.summarize_url(
+            PRDBriefingReviewRequest(
+                owner_key=str(payload.get("owner_key") or ""),
+                prd_url=str(payload.get("prd_url") or ""),
+                language=str(payload.get("language") or "zh"),
+                force_refresh=bool(payload.get("force_refresh")),
+            )
+        )
+        return jsonify(result)
+
     @app.post("/api/local-agent/prd-briefing/process-prd")
     def prd_briefing_process_prd():
         payload = request.get_json(silent=True) or {}
@@ -277,6 +305,7 @@ def create_local_agent_app() -> Flask:
             owner_key=str(payload.get("owner_key") or ""),
             page_ref=str(payload.get("page_ref") or payload.get("prd_url") or ""),
             text=str(payload.get("text") or ""),
+            language=str(payload.get("language") or "zh"),
         )
         return jsonify(result)
 

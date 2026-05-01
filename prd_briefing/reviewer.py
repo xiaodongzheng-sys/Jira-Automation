@@ -17,6 +17,7 @@ PRD_REVIEW_PROMPT_VERSION = "v3_strict_delivery_logic_review_codex"
 PRD_SUMMARY_PROMPT_VERSION = "v1_prd_summary_codex"
 PRD_REVIEW_MAX_SOURCE_CHARS = 90_000
 PRD_BRIEFING_REVIEW_CACHE_KEY = "__prd_briefing_url_review__"
+PRD_URL_SUMMARY_CACHE_KEY = "__prd_url_summary__"
 
 
 @dataclass(frozen=True)
@@ -216,6 +217,64 @@ class PRDReviewService:
         )
         return {"status": "ok", "cached": False, "summary": summary, "prd": self._page_metadata(page)}
 
+    def summarize_url(self, request: PRDBriefingReviewRequest) -> dict[str, Any]:
+        normalized = self._normalize_briefing_review_request(request)
+        page = self.confluence.ingest_page(normalized.prd_url, "prd-self-assessment-summary")
+        if not page.sections:
+            raise ToolError("PRD page did not contain readable sections.")
+        prompt_version = prd_summary_prompt_version(normalized.language)
+        cached = None if normalized.force_refresh else self.store.get_prd_review_result(
+            owner_key=normalized.owner_key,
+            jira_id=PRD_URL_SUMMARY_CACHE_KEY,
+            prd_url=page.source_url,
+            prd_updated_at=page.updated_at,
+            prompt_version=prompt_version,
+        )
+        if cached and cached.get("status") == "completed" and cached.get("result_markdown"):
+            return {"status": "ok", "cached": True, "summary": cached, "prd": self._page_metadata(page), "language": normalized.language}
+
+        prompt = build_prd_summary_prompt(
+            jira_id="",
+            jira_link="",
+            prd_url=page.source_url,
+            page=page,
+            language=normalized.language,
+        )
+        try:
+            generated = generate_prd_summary_with_codex(
+                prompt=prompt,
+                settings=self.settings,
+                workspace_root=self.workspace_root,
+                language=normalized.language,
+                prompt_version=prompt_version,
+            )
+        except Exception as error:  # noqa: BLE001 - persist the failure for visible retry context.
+            self.store.save_prd_review_result(
+                owner_key=normalized.owner_key,
+                jira_id=PRD_URL_SUMMARY_CACHE_KEY,
+                jira_link="",
+                prd_url=page.source_url,
+                prd_updated_at=page.updated_at,
+                prompt_version=prompt_version,
+                status="failed",
+                error=str(error),
+            )
+            raise ToolError(str(error)) from error
+
+        summary = self.store.save_prd_review_result(
+            owner_key=normalized.owner_key,
+            jira_id=PRD_URL_SUMMARY_CACHE_KEY,
+            jira_link="",
+            prd_url=page.source_url,
+            prd_updated_at=page.updated_at,
+            prompt_version=prompt_version,
+            status="completed",
+            result_markdown=generated["result_markdown"],
+            model_id=generated["model_id"],
+            trace=generated["trace"],
+        )
+        return {"status": "ok", "cached": False, "summary": summary, "prd": self._page_metadata(page), "language": normalized.language}
+
     @staticmethod
     def _normalize_request(request: PRDReviewRequest) -> PRDReviewRequest:
         owner_key = str(request.owner_key or "").strip()
@@ -294,6 +353,10 @@ def normalize_prd_review_language(language: str | None) -> str:
 
 def prd_briefing_review_prompt_version(language: str | None) -> str:
     return f"{PRD_REVIEW_PROMPT_VERSION}_briefing_{normalize_prd_review_language(language)}"
+
+
+def prd_summary_prompt_version(language: str | None) -> str:
+    return f"{PRD_SUMMARY_PROMPT_VERSION}_{normalize_prd_review_language(language)}"
 
 
 def build_prd_review_prompt(
@@ -420,8 +483,47 @@ def build_prd_summary_prompt(
     jira_link: str,
     prd_url: str,
     page: IngestedConfluencePage,
+    language: str = "zh",
 ) -> str:
     source = _build_prd_source(page)
+    if normalize_prd_review_language(language) == "en":
+        return f"""# Role
+You are a senior product manager who turns PRDs into concise summaries that business, product, and engineering readers can use immediately.
+
+# Task
+Read the PRD content and produce a concise but complete English summary. Focus on:
+1. Background and objective.
+2. User/business flow.
+3. Main functional scope.
+4. Key rules, data definitions, and status transitions.
+5. Launch dependencies and open questions.
+
+# Output Format
+Return only Markdown:
+---
+### PRD Summary
+[3-5 sentence overview]
+
+### Scope
+- ...
+
+### Key Logic
+- ...
+
+### Dependencies / Open Questions
+- ...
+---
+
+# Context
+- Jira ID: {jira_id or "-"}
+- Jira Link: {jira_link or "-"}
+- PRD Title: {page.title}
+- PRD Link: {prd_url}
+- PRD Updated At: {page.updated_at or "-"}
+
+# PRD Content
+{source}
+"""
     return f"""# Role
 你是一位资深产品经理，擅长把 PRD 快速整理成业务、产品、研发都能直接阅读的摘要。
 
@@ -450,7 +552,7 @@ def build_prd_summary_prompt(
 ---
 
 # Context
-- Jira ID: {jira_id}
+- Jira ID: {jira_id or "-"}
 - Jira Link: {jira_link or "-"}
 - PRD Title: {page.title}
 - PRD Link: {prd_url}
@@ -495,16 +597,19 @@ def generate_prd_summary_with_codex(
     prompt: str,
     settings: Settings,
     workspace_root: Path,
+    language: str = "zh",
+    prompt_version: str = PRD_SUMMARY_PROMPT_VERSION,
 ) -> dict[str, Any]:
+    output_language = "English" if normalize_prd_review_language(language) == "en" else "Chinese"
     return _generate_with_codex(
         prompt=prompt,
         settings=settings,
         workspace_root=workspace_root,
         system_text=(
             "You are a senior product manager. "
-            "Return only the requested Markdown PRD summary. Do not include tool logs."
+            f"Return only the requested Markdown PRD summary in {output_language}. Do not include tool logs."
         ),
-        prompt_mode=PRD_SUMMARY_PROMPT_VERSION,
+        prompt_mode=prompt_version,
     )
 
 

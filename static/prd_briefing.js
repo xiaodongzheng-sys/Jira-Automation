@@ -3,9 +3,8 @@
   const statusNode = document.querySelector('[data-briefing-status]');
   const presenterView = document.querySelector('[data-presenter-view]');
   const sessionSubmitButton = sessionForm?.querySelector('button[type="submit"]');
+  const pageRefInput = document.querySelector('[data-briefing-page-ref]');
   const briefingLanguage = document.querySelector('[data-briefing-language]');
-  const prdReviewButton = document.querySelector('[data-prd-review-generate]');
-  const prdReviewPanel = document.querySelector('[data-prd-review-panel]');
   const imageLightbox = document.querySelector('[data-image-lightbox]');
   const imageLightboxMedia = document.querySelector('[data-image-lightbox-media]');
   const imageLightboxClose = document.querySelector('[data-image-lightbox-close]');
@@ -31,6 +30,7 @@
    */
 
   const PREFETCH_WINDOW_SIZE = 2;
+  const FORM_STORAGE_KEY = 'prd-briefing:last-form:v1';
 
   let state = {
     sessionId: null,
@@ -64,6 +64,32 @@
     .replaceAll("'", '&#39;');
 
   const isValidHttpUrl = (value) => /^https?:\/\/\S+/i.test(String(value || '').trim());
+
+  const readSavedForm = () => {
+    try {
+      const parsed = JSON.parse(window.localStorage.getItem(FORM_STORAGE_KEY) || '{}');
+      return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch {
+      return {};
+    }
+  };
+
+  const saveFormDefaults = () => {
+    try {
+      window.localStorage.setItem(FORM_STORAGE_KEY, JSON.stringify({
+        page_ref: String(pageRefInput?.value || '').trim(),
+        language: briefingLanguage?.value === 'en' ? 'en' : 'zh',
+      }));
+    } catch {
+      // Local persistence is optional; generation should continue without it.
+    }
+  };
+
+  const restoreFormDefaults = () => {
+    const saved = readSavedForm();
+    if (pageRefInput && saved.page_ref) pageRefInput.value = String(saved.page_ref);
+    if (briefingLanguage) briefingLanguage.value = saved.language === 'en' ? 'en' : 'zh';
+  };
 
   const setStatus = (message, tone = 'neutral') => {
     if (!statusNode) return;
@@ -155,121 +181,6 @@
     if (status === 'audio-failed') return 'Manual read';
     if (status === 'editing') return 'Editing';
     return 'Draft';
-  };
-
-  const renderMarkdown = (value) => {
-    const lines = String(value || '').split(/\r?\n/);
-    let inList = false;
-    const html = [];
-    const closeList = () => {
-      if (inList) {
-        html.push('</ul>');
-        inList = false;
-      }
-    };
-    const inline = (text) => escapeHtml(text)
-      .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-      .replace(/`(.+?)`/g, '<code>$1</code>');
-    lines.forEach((line) => {
-      const trimmed = line.trim();
-      if (!trimmed) {
-        closeList();
-        return;
-      }
-      const heading = trimmed.match(/^(#{2,4})\s+(.+)$/);
-      if (heading) {
-        closeList();
-        html.push(`<h4>${inline(heading[2])}</h4>`);
-        return;
-      }
-      const listItem = trimmed.match(/^(\d+[.)]|[-*])\s+(.+)$/);
-      if (listItem) {
-        if (!inList) {
-          html.push('<ul>');
-          inList = true;
-        }
-        html.push(`<li>${inline(listItem[2])}</li>`);
-        return;
-      }
-      closeList();
-      html.push(`<p>${inline(trimmed)}</p>`);
-    });
-    closeList();
-    return html.join('');
-  };
-
-  const setPrdReviewLoading = (isLoading) => {
-    if (!prdReviewButton) return;
-    prdReviewButton.disabled = isLoading;
-    prdReviewButton.textContent = isLoading ? 'Generating Review...' : 'Generate AI PRD Review';
-  };
-
-  const renderPrdReview = (payload) => {
-    if (!prdReviewPanel) return;
-    const review = payload.review || {};
-    const prd = payload.prd || {};
-    const language = payload.language === 'en' ? 'English' : 'Chinese';
-    prdReviewPanel.hidden = false;
-    prdReviewPanel.dataset.tone = 'success';
-    prdReviewPanel.innerHTML = `
-      <div class="briefing-review-meta">
-        <div>
-          <strong>${escapeHtml(payload.cached ? 'Cached AI PRD Review' : 'AI PRD Review')}</strong>
-          <span>${escapeHtml(language)} · ${escapeHtml(prd.title || 'PRD')}</span>
-        </div>
-        <span>${escapeHtml(review.updated_at || '')}</span>
-      </div>
-      <div class="briefing-review-markdown">${renderMarkdown(review.result_markdown || '')}</div>
-      <div class="briefing-review-actions">
-        <button class="button button-secondary" type="button" data-prd-review-regenerate>Regenerate</button>
-      </div>
-    `;
-    prdReviewPanel.querySelector('[data-prd-review-regenerate]')?.addEventListener('click', () => {
-      generatePrdReview({ forceRefresh: true });
-    });
-  };
-
-  const renderPrdReviewError = (message) => {
-    if (!prdReviewPanel) return;
-    prdReviewPanel.hidden = false;
-    prdReviewPanel.dataset.tone = 'error';
-    prdReviewPanel.innerHTML = `<p>${escapeHtml(message || 'Could not generate AI PRD Review right now.')}</p>`;
-  };
-
-  const generatePrdReview = async ({ forceRefresh = false } = {}) => {
-    const formData = sessionForm ? new FormData(sessionForm) : new FormData();
-    const pageRef = String(formData.get('page_ref') || '').trim();
-    if (!isValidHttpUrl(pageRef)) {
-      setStatus('Enter a valid Confluence page URL.', 'error');
-      renderPrdReviewError('Enter a valid Confluence page URL.');
-      return;
-    }
-    setPrdReviewLoading(true);
-    if (prdReviewPanel) {
-      prdReviewPanel.hidden = false;
-      prdReviewPanel.dataset.tone = 'neutral';
-      prdReviewPanel.innerHTML = '<div class="briefing-review-loading">Reading the PRD and generating an AI PRD Review with Codex...</div>';
-    }
-    try {
-      const response = await fetch('/prd-briefing/api/review', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          prd_url: pageRef,
-          language: briefingLanguage?.value || 'zh',
-          force_refresh: forceRefresh,
-        }),
-      });
-      const payload = await parseJsonResponse(response);
-      if (!response.ok) throw new Error(payload.message || 'Could not generate AI PRD Review right now.');
-      renderPrdReview(payload);
-    } catch (error) {
-      const message = error.message || 'Could not generate AI PRD Review right now.';
-      setStatus(message, 'error');
-      renderPrdReviewError(message);
-    } finally {
-      setPrdReviewLoading(false);
-    }
   };
 
   const stopCurrentAudio = ({ reset = false } = {}) => {
@@ -782,6 +693,8 @@
   const generatePresentation = async () => {
     const formData = sessionForm ? new FormData(sessionForm) : new FormData();
     const pageRef = String(formData.get('page_ref') || '').trim();
+    const language = briefingLanguage?.value === 'en' ? 'en' : 'zh';
+    saveFormDefaults();
     if (!isValidHttpUrl(pageRef)) {
       setStatus('Enter a valid Confluence page URL.', 'error');
       return;
@@ -816,7 +729,7 @@
       const response = await fetch('/prd-briefing/api/process-prd', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ page_ref: pageRef }),
+        body: JSON.stringify({ page_ref: pageRef, language }),
       });
       const payload = await parseJsonResponse(response);
       if (!response.ok) throw new Error(payload.message || 'Could not process this PRD.');
@@ -857,16 +770,14 @@
     }
   };
 
+  restoreFormDefaults();
+  pageRefInput?.addEventListener('input', saveFormDefaults);
+  briefingLanguage?.addEventListener('change', saveFormDefaults);
+
   if (sessionForm) {
     sessionForm.addEventListener('submit', (event) => {
       event.preventDefault();
       generatePresentation();
-    });
-  }
-
-  if (prdReviewButton) {
-    prdReviewButton.addEventListener('click', () => {
-      generatePrdReview();
     });
   }
 

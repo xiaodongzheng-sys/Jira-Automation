@@ -34,12 +34,12 @@ def create_prd_briefing_blueprint() -> Blueprint:
         if request.path.startswith("/prd-briefing/api/"):
             if not email:
                 return jsonify({"status": "error", "message": "Sign in with your NPT Google account first."}), 401
-            return jsonify({"status": "error", "message": "PRD Briefing Tool is available to signed-in npt.sg users and the configured test account."}), 403
+            return jsonify({"status": "error", "message": "PRD Briefing Tool is restricted to the configured owner and test account."}), 403
 
         if not email:
             return redirect(url_for("index"))
-        flash("PRD Briefing Tool is available to signed-in npt.sg users and the configured test account.", "error")
-        return redirect(url_for("index"))
+        flash("PRD Briefing Tool is restricted to the configured owner and test account.", "error")
+        return redirect(url_for("access_denied"))
 
     @blueprint.get("/")
     def portal() -> str:
@@ -92,6 +92,7 @@ def create_prd_briefing_blueprint() -> Blueprint:
                 "owner_key": owner_key,
                 "page_ref": str(payload.get("page_ref") or payload.get("prd_url") or "").strip(),
                 "text": str(payload.get("text") or "").strip(),
+                "language": str(payload.get("language") or "zh").strip() or "zh",
             }
             settings = current_app.config["SETTINGS"]
             if _local_agent_prd_briefing_enabled(settings):

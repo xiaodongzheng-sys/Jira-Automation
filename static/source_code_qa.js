@@ -611,6 +611,7 @@
     llm_provider: payload.llm_provider || '',
     llm_model: payload.llm_model || '',
     llm_route: payload.llm_route || {},
+    codex_candidate_paths: (payload.llm_route?.candidate_paths || []).slice(0, 30),
     llm_finish_reason: payload.llm_finish_reason || '',
     summary: payload.summary || '',
     rendered_answer: payload.llm_answer || '',
@@ -1772,7 +1773,10 @@
       return `
         <section class="source-qa-answer-quality source-qa-answer-quality-fast">
           <strong>Fast mode reached the 1-minute limit</strong>
-          <span>This answer is based on retrieved evidence. Use deep mode for full cross-file verification.</span>
+          <span>Fast 已给出基于检索证据的第一版判断；完整关系链路建议用 Deep 模式继续确认。</span>
+          <button type="button" class="button button-secondary source-qa-deep-continue" data-source-deep-continue>
+            用 Deep 模式继续验证
+          </button>
         </section>
       `;
     }
@@ -2315,6 +2319,31 @@
     }
   };
 
+  const latestUserQuestion = () => {
+    const messages = Array.isArray(activeSession?.messages) ? activeSession.messages : [];
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index] || {};
+      if (message.role === 'user' && String(message.content || '').trim()) {
+        return String(message.content || '').trim();
+      }
+    }
+    return String(conversationContext?.question || lastPayload?.original_question || questionInput?.value || '').trim();
+  };
+
+  const continueWithDeepMode = () => {
+    const question = latestUserQuestion();
+    if (!question) {
+      if (queryStatus) queryStatus.textContent = 'No question found for deep verification.';
+      return;
+    }
+    if (selectHasValue(queryMode, 'deep')) {
+      queryMode.value = 'deep';
+      updateQueryModeHelp();
+    }
+    if (questionInput) questionInput.value = question;
+    queryCode();
+  };
+
   const feedbackReasonLabels = {
     deprecated_class: '引用了已废弃类',
     opposite_logic: '逻辑与实际表现相反',
@@ -2447,6 +2476,11 @@
   });
   attachmentsList?.addEventListener('keydown', handleAttachmentPreviewEvent);
   sessionMessages?.addEventListener('click', (event) => {
+    const deepContinueButton = event.target.closest('[data-source-deep-continue]');
+    if (deepContinueButton) {
+      continueWithDeepMode();
+      return;
+    }
     const reconnectButton = event.target.closest('[data-source-reconnect-job]');
     if (reconnectButton) {
       const jobId = reconnectButton.dataset.sourceReconnectJob || '';
@@ -2461,6 +2495,11 @@
       return;
     }
     handleAttachmentPreviewEvent(event);
+  });
+  llmAnswer?.addEventListener('click', (event) => {
+    const deepContinueButton = event.target.closest('[data-source-deep-continue]');
+    if (!deepContinueButton) return;
+    continueWithDeepMode();
   });
   sessionMessages?.addEventListener('keydown', handleAttachmentPreviewEvent);
   viewTabs.forEach((tab) => {
