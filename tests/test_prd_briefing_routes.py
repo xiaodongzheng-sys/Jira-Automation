@@ -79,14 +79,19 @@ class FakeBriefingService:
                 "session_id": "session-1",
                 "title": "PRD",
                 "model_id": "codex:gpt-5.5",
-                "prompt_version": "v1_codex_gpt55_prd_presentation_chunks",
+                "prompt_version": "v3_codex_gpt55_prd_presentation_chunks_media",
+                "page_id": "123",
+                "version_number": "5",
             },
+            "cached": False,
             "chunks": [
                 {
                     "id": "chunk-1",
                     "title": "开场",
                     "content": "这一段给开发说明主流程。",
                     "imageUrls": ["/prd-briefing/image-proxy?src=x"],
+                    "media": {"type": "image", "content": "/prd-briefing/image-proxy?src=x"},
+                    "cacheKey": "123_5",
                     "audioStatus": "draft",
                 }
             ],
@@ -103,6 +108,8 @@ class FakeBriefingService:
                 "duration": 3.2,
                 "timestamps": [{"sentence": kwargs["chunk"]["content"], "start": 0, "end": 3.2}],
                 "imageUrls": kwargs["chunk"].get("imageUrls") or [],
+                "media": kwargs["chunk"].get("media") or {"type": "none", "content": ""},
+                "cacheKey": kwargs["chunk"].get("cacheKey") or "",
             },
         }
 
@@ -263,8 +270,10 @@ class PRDBriefingRouteTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         payload = response.get_json()
         self.assertEqual(payload["session"]["model_id"], "codex:gpt-5.5")
+        self.assertFalse(payload["cached"])
         self.assertEqual(payload["chunks"][0]["id"], "chunk-1")
         self.assertEqual(payload["chunks"][0]["imageUrls"], ["/prd-briefing/image-proxy?src=x"])
+        self.assertEqual(payload["chunks"][0]["media"]["type"], "image")
 
     @patch("prd_briefing.blueprint._build_service", return_value=FakeBriefingService())
     def test_generate_audio_endpoint_returns_presentation_chunk(self, _mock_service):
@@ -276,7 +285,12 @@ class PRDBriefingRouteTests(unittest.TestCase):
                 "/prd-briefing/api/generate-audio",
                 json={
                     "session_id": "session-1",
-                    "chunk": {"id": "chunk-1", "title": "开场", "content": "这一段给开发说明主流程。"},
+                    "chunk": {
+                        "id": "chunk-1",
+                        "title": "开场",
+                        "content": "这一段给开发说明主流程。",
+                        "media": {"type": "table", "content": "<table><tr><th>A</th></tr></table>"},
+                    },
                 },
             )
 
@@ -284,6 +298,7 @@ class PRDBriefingRouteTests(unittest.TestCase):
         payload = response.get_json()
         self.assertEqual(payload["chunk"]["audioUrl"], "/prd-briefing/assets/audio/session-1/mock.mp3")
         self.assertEqual(payload["chunk"]["timestamps"][0]["start"], 0)
+        self.assertEqual(payload["chunk"]["media"]["type"], "table")
 
     @patch("prd_briefing.blueprint._build_service", return_value=FakeBriefingService())
     def test_create_session_endpoint_returns_payload(self, mock_service):

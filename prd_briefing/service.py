@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 import re
 import threading
@@ -30,7 +31,7 @@ WALKTHROUGH_SCRIPT_PROMPT_VERSION = "v2_codex_pm_briefing"
 WALKTHROUGH_BLOCK_PROMPT_VERSION = "v2_codex_pm_briefing_block"
 SESSION_BRIEF_PROMPT_VERSION = "v7_two_part_chinese_summary"
 WALKTHROUGH_PREWARM_LIMIT = 12
-PRESENTATION_PROMPT_VERSION = "v1_codex_gpt55_prd_presentation_chunks"
+PRESENTATION_PROMPT_VERSION = "v3_codex_gpt55_prd_presentation_chunks_media"
 PRESENTATION_MAX_SOURCE_CHARS = 52000
 
 STOPWORDS = {
@@ -318,20 +319,24 @@ class VoiceService:
         owner_key: str,
         chunk: dict[str, Any],
         language_code: str = "zh",
+        presentation_cache_key: str | None = None,
     ) -> dict[str, Any]:
         content = str(chunk.get("content") or "").strip()
         if not content:
             raise ValueError("Chunk content is required.")
         normalized_text = optimize_tts_text(content, language_code=language_code)
+        text_hash = hashlib.sha256(normalized_text.encode("utf-8")).hexdigest()
         voice_id = self._edge_voice_for_language(language_code)
         provider = "edge"
         model_id = f"edge-tts:{self.edge_rate}:timed"
+        chunk_id = str(chunk.get("id") or "chunk")
+        cache_model_id = f"{model_id}:{presentation_cache_key}:{chunk_id}" if presentation_cache_key else model_id
         audio_path = self.store.get_cached_audio(
             owner_key=owner_key,
             provider=provider,
             voice_id=voice_id,
             language_code=language_code,
-            model_id=model_id,
+            model_id=cache_model_id,
             text=normalized_text,
         )
         boundaries: list[dict[str, Any]] = []
@@ -342,13 +347,22 @@ class VoiceService:
             )
             if not audio_bytes:
                 raise RuntimeError("Edge TTS did not return audio.")
-            audio_path = self.store.save_audio_blob(session_id, "mp3", audio_bytes)
+            if presentation_cache_key:
+                audio_path = self.store.save_versioned_audio_blob(
+                    presentation_cache_key,
+                    chunk_id,
+                    text_hash,
+                    "mp3",
+                    audio_bytes,
+                )
+            else:
+                audio_path = self.store.save_audio_blob(session_id, "mp3", audio_bytes)
             self.store.cache_audio(
                 owner_key=owner_key,
                 provider=provider,
                 voice_id=voice_id,
                 language_code=language_code,
-                model_id=model_id,
+                model_id=cache_model_id,
                 text=normalized_text,
                 asset_path=audio_path,
             )
@@ -363,6 +377,8 @@ class VoiceService:
             "duration": duration,
             "timestamps": timestamps,
             "imageUrls": normalize_image_urls(chunk.get("imageUrls") or chunk.get("image_urls") or []),
+            "media": normalize_presentation_media(chunk.get("media")),
+            "cacheKey": str(chunk.get("cacheKey") or presentation_cache_key or ""),
         }
 
     def get_cached_audio_for_text(self, *, owner_key: str, text: str, language_code: str) -> str | None:
@@ -576,6 +592,10 @@ class PRDBriefingService:
         source_url = page_ref
         page_id = f"manual:{uuid.uuid4().hex}"
         updated_at = ""
+        version_number = ""
+        media_dict: dict[str, dict[str, str]] = {}
+        cached = False
+        presentation_cache_key = ""
         image_urls: list[str] = []
 
         if page_ref:
@@ -584,17 +604,58 @@ class PRDBriefingService:
             source_url = page.source_url
             page_id = page.page_id
             updated_at = page.updated_at
+            version_number = page.version_number or updated_at or "unknown"
+            media_dict = page.media_dict or {}
+            presentation_cache_key = build_presentation_cache_key(page_id, version_number)
             image_urls = [
                 f"/prd-briefing/image-proxy?src={quote(ref, safe='')}" if ref.startswith("http") else f"/prd-briefing/assets/{ref}"
                 for section in page.sections
                 for ref in section.image_refs
             ]
-            source_text = build_presentation_source_text(page.sections)
+            source_text = page.presentation_source_text or build_presentation_source_text(page.sections)
 
         if not source_text:
             raise ValueError("PRD text or Confluence page URL is required.")
         if not self.text_client.is_configured():
             raise RuntimeError("PRD presentation generation requires Codex to be configured on this server.")
+
+        chunks: list[dict[str, Any]]
+        if page_ref and page_id and version_number:
+            cached_outline = self.store.get_presentation_outline_cache(
+                owner_key=owner_key,
+                page_id=page_id,
+                version_number=version_number,
+                prompt_version=PRESENTATION_PROMPT_VERSION,
+                model_id=self.text_client.model_id,
+            )
+            if cached_outline:
+                chunks = [dict(chunk) for chunk in (cached_outline.get("chunks") or []) if isinstance(chunk, dict)]
+                cached = True
+            else:
+                chunks = self._compose_presentation_chunks(
+                    source_text=source_text,
+                    image_urls=image_urls,
+                    media_dict=media_dict,
+                )
+                self.store.save_presentation_outline_cache(
+                    owner_key=owner_key,
+                    page_id=page_id,
+                    version_number=version_number,
+                    prompt_version=PRESENTATION_PROMPT_VERSION,
+                    model_id=self.text_client.model_id,
+                    title=title,
+                    source_url=source_url,
+                    updated_at=updated_at,
+                    chunks=chunks,
+                    media=media_dict,
+                    page_metadata={"page_id": page_id, "version_number": version_number},
+                )
+        else:
+            chunks = self._compose_presentation_chunks(
+                source_text=source_text,
+                image_urls=image_urls,
+                media_dict=media_dict,
+            )
 
         session_id = self.store.create_session(
             owner_key=owner_key,
@@ -603,18 +664,29 @@ class PRDBriefingService:
             audience=DEVELOPER_AUDIENCE,
             mode="presentation",
             title=title,
+            metadata={
+                "page_id": page_id,
+                "version_number": version_number,
+                "presentation_cache_key": presentation_cache_key,
+                "prompt_version": PRESENTATION_PROMPT_VERSION,
+                "model_id": self.text_client.model_id,
+            },
         )
-        chunks = self._compose_presentation_chunks(source_text=source_text, image_urls=image_urls)
         for chunk in chunks:
             chunk["imageUrls"] = [proxy_confluence_image_url(url) for url in normalize_image_urls(chunk.get("imageUrls") or [])]
+            chunk["media"] = normalize_presentation_media(chunk.get("media"))
+            chunk["cacheKey"] = presentation_cache_key
         return {
             "status": "ok",
+            "cached": cached,
             "session": {
                 "session_id": session_id,
                 "title": title,
                 "source_url": source_url,
                 "model_id": self.text_client.model_id,
                 "prompt_version": PRESENTATION_PROMPT_VERSION,
+                "page_id": page_id,
+                "version_number": version_number,
             },
             "chunks": chunks,
         }
@@ -626,6 +698,8 @@ class PRDBriefingService:
         session = self.store.get_session(session_id, owner_key)
         if not session:
             raise ValueError("Briefing session was not found.")
+        metadata = session.get("metadata") if isinstance(session.get("metadata"), dict) else {}
+        presentation_cache_key = str(chunk.get("cacheKey") or metadata.get("presentation_cache_key") or "")
         return {
             "status": "ok",
             "chunk": self.voice_service.synthesize_presentation_chunk(
@@ -633,10 +707,17 @@ class PRDBriefingService:
                 owner_key=owner_key,
                 chunk=chunk,
                 language_code="zh",
+                presentation_cache_key=presentation_cache_key or None,
             ),
         }
 
-    def _compose_presentation_chunks(self, *, source_text: str, image_urls: list[str]) -> list[dict[str, Any]]:
+    def _compose_presentation_chunks(
+        self,
+        *,
+        source_text: str,
+        image_urls: list[str],
+        media_dict: dict[str, dict[str, str]] | None = None,
+    ) -> list[dict[str, Any]]:
         prompt = build_presentation_system_prompt()
         body = build_presentation_user_prompt(source_text=source_text, image_urls=image_urls)
         try:
@@ -644,7 +725,7 @@ class PRDBriefingService:
             chunks = parse_presentation_chunks(raw)
         except Exception as first_error:  # noqa: BLE001
             repair_prompt = (
-                "Return only a strict JSON array. Each object must contain id, title, content, and optional imageUrls. "
+                "Return only a strict JSON array. Each object must contain id, title, content, and optional imageUrls/media_ref. "
                 "Do not include markdown fences, explanations, or trailing commentary."
             )
             try:
@@ -655,7 +736,8 @@ class PRDBriefingService:
                 chunks = parse_presentation_chunks(repaired)
             except Exception as repair_error:  # noqa: BLE001
                 raise RuntimeError(f"Codex did not return valid presentation JSON: {repair_error}") from first_error
-        return normalize_presentation_chunks(chunks)
+        normalized = normalize_presentation_chunks(chunks)
+        return attach_presentation_media(normalized, media_dict or {})
 
     def get_session_payload(self, *, session_id: str, owner_key: str) -> dict[str, Any]:
         session = self.store.get_session(session_id, owner_key)
@@ -2208,10 +2290,13 @@ def build_presentation_system_prompt() -> str:
     return (
         "You are Codex using ChatGPT 5.5. Convert a Confluence PRD into a concise Mandarin briefing outline for software engineers. "
         "Return only a strict JSON array, with no markdown fences and no explanation. "
-        "Each object must contain: id, title, content, and optional imageUrls. "
+        "Each object must contain: id, title, content, and optional imageUrls and media_ref. "
         "id must be stable like chunk-1, chunk-2. title must be short Chinese. "
         "content must be polished spoken Mandarin for PM-to-engineering briefing, 4 to 7 sentences, focused on user flow, system behavior, fields, validation, state changes, dependencies, edge cases, and QA attention points. "
         "If the input has [IMAGE] lines that are relevant to the chunk, include those exact URLs in imageUrls. "
+        "The source may also contain markers like [MEDIA_ID_1]. Each marker represents one important image or table from the PRD. "
+        "If one marker is important for the current chunk, output that marker id in media_ref, for example \"media_ref\":\"MEDIA_ID_1\". "
+        "Each chunk can bind at most one primary media_ref. Do not invent media ids that are not in the source. "
         "Do not invent requirements. Do not include English unless the source has unavoidable system names."
     )
 
@@ -2220,7 +2305,8 @@ def build_presentation_user_prompt(*, source_text: str, image_urls: list[str]) -
     image_hint = "\n".join(f"- {url}" for url in image_urls[:24]) or "- None"
     return (
         "Create 4 to 10 presentation chunks from this PRD. Merge tiny or metadata-only sections. "
-        "Make each chunk useful for developers and QA to understand what to build and verify.\n\n"
+        "Make each chunk useful for developers and QA to understand what to build and verify. "
+        "Preserve useful [MEDIA_ID_x] references by assigning at most one media_ref to the chunk where that image or table helps the briefing.\n\n"
         f"Known image URLs:\n{image_hint}\n\n"
         f"PRD source:\n{source_text}"
     )
@@ -2260,6 +2346,39 @@ def normalize_image_urls(value: Any) -> list[str]:
     return dedupe_non_empty(urls)[:6]
 
 
+def normalize_presentation_media(value: Any) -> dict[str, str]:
+    if isinstance(value, dict):
+        media_type = str(value.get("type") or "none").strip().lower()
+        if media_type in {"image", "table"}:
+            return {"type": media_type, "content": str(value.get("content") or "")}
+    return {"type": "none", "content": ""}
+
+
+def attach_presentation_media(chunks: list[dict[str, Any]], media_dict: dict[str, dict[str, str]]) -> list[dict[str, Any]]:
+    for chunk in chunks:
+        media_ref = normalize_media_ref(chunk.get("media_ref") or chunk.get("mediaRef"))
+        media = media_dict.get(media_ref) if media_ref else None
+        if isinstance(media, dict) and media.get("type") in {"image", "table"} and media.get("content"):
+            chunk["media_ref"] = media_ref
+            chunk["media"] = {"type": str(media["type"]), "content": str(media["content"])}
+            if media["type"] == "image":
+                existing = normalize_image_urls(chunk.get("imageUrls") or [])
+                chunk["imageUrls"] = dedupe_non_empty([str(media["content"]), *existing])[:6]
+        else:
+            chunk["media_ref"] = ""
+            chunk["media"] = {"type": "none", "content": ""}
+    return chunks
+
+
+def normalize_media_ref(value: Any) -> str:
+    match = re.search(r"MEDIA_ID_\d+", str(value or ""))
+    return match.group(0) if match else ""
+
+
+def build_presentation_cache_key(page_id: str, version_number: str) -> str:
+    return f"{page_id}_{version_number}".strip("_")
+
+
 def proxy_confluence_image_url(url: str) -> str:
     clean = str(url or "").strip()
     if clean.startswith("http://") or clean.startswith("https://"):
@@ -2280,6 +2399,8 @@ def normalize_presentation_chunks(chunks: list[dict[str, Any]]) -> list[dict[str
                 "title": title or f"宣讲段落 {index}",
                 "content": content,
                 "imageUrls": normalize_image_urls(chunk.get("imageUrls") or chunk.get("image_urls") or []),
+                "media_ref": normalize_media_ref(chunk.get("media_ref") or chunk.get("mediaRef")),
+                "media": normalize_presentation_media(chunk.get("media")),
                 "audioStatus": "draft",
             }
         )

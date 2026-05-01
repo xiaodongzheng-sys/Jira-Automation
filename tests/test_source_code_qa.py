@@ -987,7 +987,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertEqual(payload["llm_provider"], "codex_cli_bridge")
         self.assertEqual(payload["llm_policy"]["provider"]["provider"], "codex_cli_bridge")
         self.assertEqual(payload["llm_policy"]["router"]["version"], 7)
-        self.assertEqual(payload["llm_policy"]["versions"]["cache"], 15)
+        self.assertEqual(payload["llm_policy"]["versions"]["cache"], 16)
         self.assertEqual(payload["llm_policy"]["versions"]["runtime"], 2)
         self.assertEqual(payload["llm_policy"]["runtime"]["max_retries"], 2)
         self.assertEqual(payload["llm_policy"]["model_policy"]["answer"]["model"], os.getenv("SOURCE_CODE_QA_CODEX_MODEL", "codex-cli"))
@@ -6599,7 +6599,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertEqual(telemetry["llm_model"], "gemini-2.5-flash")
         self.assertIn(telemetry["llm_thinking_budget"], {512, 2048})
         self.assertEqual(telemetry["llm_route"]["mode"], "manual")
-        self.assertEqual(telemetry["versions"]["cache"], 15)
+        self.assertEqual(telemetry["versions"]["cache"], 16)
         self.assertIn("llm_latency_ms", telemetry)
         self.assertIn("llm_attempt_log", telemetry)
         self.assertIn("answer_contract", telemetry)
@@ -6945,7 +6945,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         )
         cached = service._load_cached_answer(cache_key)
         self.assertIsNotNone(cached)
-        self.assertEqual(cached["versions"]["cache"], 15)
+        self.assertEqual(cached["versions"]["cache"], 16)
         cache_path = service.answer_cache_root / f"{cache_key}.json"
         stale_payload = json.loads(cache_path.read_text(encoding="utf-8"))
         stale_payload["versions"]["router"] = -1
@@ -7869,7 +7869,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
 
         exec_calls = [item for item in calls if "exec" in item[0]]
         self.assertEqual(len(exec_calls), 2)
-        self.assertEqual(payload["llm_route"]["prompt_mode"], "codex_investigation_brief_v4")
+        self.assertEqual(payload["llm_route"]["prompt_mode"], "codex_investigation_brief_v5")
         self.assertIn("candidate_path_layers", payload["llm_route"])
         self.assertTrue(payload["llm_route"]["codex_repair_attempted"])
         self.assertEqual(payload["answer_claim_check"]["status"], "ok")

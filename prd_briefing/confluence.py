@@ -13,6 +13,18 @@ from bs4 import BeautifulSoup, NavigableString, Tag
 
 from .storage import BriefingStore
 
+try:
+    import bleach
+except ImportError:  # pragma: no cover - requirements should install bleach in runtime.
+    bleach = None
+
+
+TABLE_ALLOWED_TAGS = ["table", "thead", "tbody", "tr", "th", "td", "p", "br", "b", "i", "strong", "em"]
+NOISE_IMAGE_URL_RE = re.compile(
+    r"(/images/icons/|/profilepics/|emoticons|avatar|tracking|pixel|spacer|blank\.gif|transparent)",
+    re.IGNORECASE,
+)
+
 
 @dataclass
 class ParsedSection:
@@ -21,6 +33,7 @@ class ParsedSection:
     content: str
     html_content: str = ""
     image_refs: list[str] = field(default_factory=list)
+    media_refs: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -31,6 +44,9 @@ class IngestedConfluencePage:
     updated_at: str
     language: str
     sections: list[ParsedSection]
+    version_number: str = ""
+    media_dict: dict[str, dict[str, str]] = field(default_factory=dict)
+    presentation_source_text: str = ""
 
 
 @dataclass
@@ -61,16 +77,21 @@ class ConfluenceConnector:
     def ingest_page(self, page_ref: str, session_id: str) -> IngestedConfluencePage:
         resolved = self._resolve_page(page_ref)
         payload = self._fetch_page_payload(resolved)
-        html = payload.get("body", {}).get("export_view", {}).get("value", "")
+        body = payload.get("body", {}) if isinstance(payload.get("body"), dict) else {}
+        html = body.get("storage", {}).get("value") or body.get("export_view", {}).get("value", "")
         page_id = str(payload.get("id") or resolved.page_id or "")
         title = payload.get("title") or f"Confluence Page {page_id or 'unknown'}"
-        updated_at = payload.get("version", {}).get("when") or ""
+        version = payload.get("version", {}) if isinstance(payload.get("version"), dict) else {}
+        updated_at = version.get("when") or ""
+        version_number = str(version.get("number") or "")
+        media_dict: dict[str, dict[str, str]] = {}
 
         sections = self._parse_sections(
             html=html,
             base_url=resolved.base_url,
             source_url=resolved.source_url,
             session_id=session_id,
+            media_dict=media_dict,
         )
         return IngestedConfluencePage(
             page_id=page_id,
@@ -79,6 +100,9 @@ class ConfluenceConnector:
             updated_at=str(updated_at),
             language="en",
             sections=sections,
+            version_number=version_number,
+            media_dict=media_dict,
+            presentation_source_text=self._build_source_text_with_media(sections),
         )
 
     def _resolve_page(self, page_ref: str) -> ResolvedPageRef:
@@ -140,7 +164,7 @@ class ConfluenceConnector:
                 try:
                     response = self._request(
                         f"{rest_base}/content/{resolved.page_id}",
-                        params={"expand": "body.export_view,version"},
+                        params={"expand": "body.storage,body.export_view,version"},
                     )
                     return response.json()
                 except Exception as error:  # noqa: BLE001
@@ -156,7 +180,7 @@ class ConfluenceConnector:
                         params={
                             "spaceKey": resolved.space_key,
                             "title": resolved.title_hint,
-                            "expand": "body.export_view,version",
+                            "expand": "body.storage,body.export_view,version",
                         },
                     )
                     payload = response.json()
@@ -269,7 +293,15 @@ class ConfluenceConnector:
         candidates.append(f"{base_url.rstrip('/')}/wiki/rest/api")
         return list(dict.fromkeys(candidates))
 
-    def _parse_sections(self, *, html: str, base_url: str, source_url: str, session_id: str) -> list[ParsedSection]:
+    def _parse_sections(
+        self,
+        *,
+        html: str,
+        base_url: str,
+        source_url: str,
+        session_id: str,
+        media_dict: dict[str, dict[str, str]] | None = None,
+    ) -> list[ParsedSection]:
         soup = BeautifulSoup(html, "html.parser")
         wrapper = soup.body or soup
         self._drop_struck_content(wrapper)
@@ -279,11 +311,12 @@ class ConfluenceConnector:
         current_lines: list[str] = []
         current_blocks: list[str] = []
         current_images: list[str] = []
+        current_media_refs: list[str] = []
 
         def flush_section() -> None:
             body = "\n".join(self._dedupe_lines(current_lines)).strip()
             html_body = "\n".join(block for block in current_blocks if block).strip()
-            if not body and not current_images and not html_body:
+            if not body and not current_images and not html_body and not current_media_refs:
                 return
             sections.append(
                 ParsedSection(
@@ -292,11 +325,13 @@ class ConfluenceConnector:
                     content=body,
                     html_content=html_body,
                     image_refs=list(dict.fromkeys(current_images)),
+                    media_refs=list(dict.fromkeys(current_media_refs)),
                 )
             )
             current_lines.clear()
             current_blocks.clear()
             current_images.clear()
+            current_media_refs.clear()
 
         for node in wrapper.children:
             if isinstance(node, NavigableString):
@@ -312,10 +347,16 @@ class ConfluenceConnector:
                 flush_section()
                 current_title = heading
                 continue
-            lines, blocks, images = self._extract_block_content(node, base_url=base_url)
+            lines, blocks, images, media_refs = self._extract_block_content(
+                node,
+                base_url=base_url,
+                media_dict=media_dict,
+                section_path=current_title,
+            )
             current_lines.extend(lines)
             current_blocks.extend(blocks)
             current_images.extend(images)
+            current_media_refs.extend(media_refs)
 
         flush_section()
         filtered = [section for section in sections if section.content.strip() or section.image_refs]
@@ -326,25 +367,142 @@ class ConfluenceConnector:
                 content=self._clean_text(wrapper.get_text(" ", strip=True)),
                 html_content="".join(str(child) for child in wrapper.contents).strip(),
                 image_refs=[],
+                media_refs=[],
             )
         ]
 
     def _resolve_image_ref(self, src: str, *, base_url: str) -> str:
         return urljoin(base_url, src)
 
-    def _extract_block_content(self, node: Tag, *, base_url: str) -> tuple[list[str], list[str], list[str]]:
+    def _register_image_media(
+        self,
+        image: Tag,
+        *,
+        base_url: str,
+        media_dict: dict[str, dict[str, str]] | None,
+        section_path: str,
+    ) -> str | None:
+        if media_dict is None or self._is_noise_image(image):
+            return None
+        src = (image.get("src") or "").strip()
+        if not src:
+            return None
+        resolved_src = self._resolve_image_ref(src, base_url=base_url)
+        media_id = f"MEDIA_ID_{len(media_dict) + 1}"
+        media_dict[media_id] = {
+            "type": "image",
+            "content": f"/prd-briefing/image-proxy?src={quote(resolved_src, safe='')}",
+            "source_url": resolved_src,
+            "section_path": section_path,
+        }
+        return media_id
+
+    def _register_table_media(
+        self,
+        table: Tag,
+        *,
+        media_dict: dict[str, dict[str, str]] | None,
+        section_path: str,
+    ) -> str | None:
+        if media_dict is None or not self._is_presentation_table(table):
+            return None
+        sanitized = self._sanitize_table_html(table)
+        if not sanitized:
+            return None
+        media_id = f"MEDIA_ID_{len(media_dict) + 1}"
+        media_dict[media_id] = {
+            "type": "table",
+            "content": sanitized,
+            "source_url": "",
+            "section_path": section_path,
+        }
+        return media_id
+
+    def _is_noise_image(self, image: Tag) -> bool:
+        src = str(image.get("src") or "")
+        if NOISE_IMAGE_URL_RE.search(src):
+            return True
+        width = self._dimension_px(image.get("width") or image.get("data-width"))
+        height = self._dimension_px(image.get("height") or image.get("data-height"))
+        style = str(image.get("style") or "")
+        if width is None:
+            width_match = re.search(r"width\s*:\s*(\d+(?:\.\d+)?)px", style, flags=re.IGNORECASE)
+            width = float(width_match.group(1)) if width_match else None
+        if height is None:
+            height_match = re.search(r"height\s*:\s*(\d+(?:\.\d+)?)px", style, flags=re.IGNORECASE)
+            height = float(height_match.group(1)) if height_match else None
+        return (width is not None and width < 50) or (height is not None and height < 50)
+
+    def _is_presentation_table(self, table: Tag) -> bool:
+        text = self._clean_text(table.get_text(" ", strip=True))
+        if len(text) < 20:
+            return False
+        rows = table.find_all("tr")
+        has_header = table.find("th") is not None
+        if not has_header and len(rows) == 1:
+            cells = rows[0].find_all(["td", "th"], recursive=False)
+            if len(cells) == 2:
+                return False
+        return True
+
+    def _sanitize_table_html(self, table: Tag) -> str:
+        fragment = BeautifulSoup(str(table), "html.parser")
+        for unwanted in fragment.find_all(["script", "style"]):
+            unwanted.decompose()
+        raw = str(fragment.find("table") or fragment)
+        if bleach is not None:
+            return bleach.clean(raw, tags=TABLE_ALLOWED_TAGS, attributes={}, strip=True).strip()
+        fallback = BeautifulSoup(raw, "html.parser")
+        for tag in list(fallback.find_all(True)):
+            if tag.name not in TABLE_ALLOWED_TAGS:
+                tag.unwrap()
+                continue
+            tag.attrs = {}
+        return str(fallback.find("table") or fallback).strip()
+
+    @staticmethod
+    def _dimension_px(value: Any) -> float | None:
+        match = re.search(r"(\d+(?:\.\d+)?)", str(value or ""))
+        return float(match.group(1)) if match else None
+
+    @staticmethod
+    def _build_source_text_with_media(sections: list[ParsedSection]) -> str:
+        blocks: list[str] = []
+        for index, section in enumerate(sections, start=1):
+            blocks.append(
+                f"## Section {index}: {section.section_path}\n"
+                f"{section.content.strip()}".strip()
+            )
+        return "\n\n".join(blocks).strip()
+
+    def _extract_block_content(
+        self,
+        node: Tag,
+        *,
+        base_url: str,
+        media_dict: dict[str, dict[str, str]] | None = None,
+        section_path: str = "",
+    ) -> tuple[list[str], list[str], list[str], list[str]]:
         if self._is_struck_node(node) or self._is_toc_block(node) or node.name in {"style", "script"}:
-            return [], [], []
+            return [], [], [], []
 
         if node.name == "img":
             src = (node.get("src") or "").strip()
             image_ref = self._resolve_image_ref(src, base_url=base_url) if src else None
             block = self._render_html_fragment(node, base_url=base_url)
-            return [], ([block] if block else []), ([image_ref] if image_ref else [])
+            media_ref = self._register_image_media(
+                node,
+                base_url=base_url,
+                media_dict=media_dict,
+                section_path=section_path,
+            )
+            lines = [f"[{media_ref}]"] if media_ref else []
+            return lines, ([block] if block else []), ([image_ref] if image_ref else []), ([media_ref] if media_ref else [])
 
         if node.name in {"ul", "ol"}:
             lines = []
             images = []
+            media_refs: list[str] = []
             for li in node.find_all("li", recursive=False):
                 text = self._clean_text(li.get_text(" ", strip=True))
                 if text:
@@ -352,30 +510,59 @@ class ConfluenceConnector:
                 for image in li.find_all("img"):
                     src = (image.get("src") or "").strip()
                     if src:
-                        images.append(self._resolve_image_ref(src, base_url=base_url))
+                        image_ref = self._resolve_image_ref(src, base_url=base_url)
+                        images.append(image_ref)
+                        media_ref = self._register_image_media(
+                            image,
+                            base_url=base_url,
+                            media_dict=media_dict,
+                            section_path=section_path,
+                        )
+                        if media_ref:
+                            lines.append(f"[{media_ref}]")
+                            media_refs.append(media_ref)
             block = self._render_html_fragment(node, base_url=base_url)
-            return lines, ([block] if block else []), images
+            return lines, ([block] if block else []), images, media_refs
 
         if node.name == "table" or "table-wrap" in (node.get("class") or []):
             table = node if node.name == "table" else node.find("table")
             if table and not self._table_has_displayable_content(table):
-                return [], [], []
+                return [], [], [], []
             block = self._render_html_fragment(node, base_url=base_url)
-            return (self._extract_table_lines(table) if table else []), ([block] if block else []), []
+            media_ref = self._register_table_media(
+                table,
+                media_dict=media_dict,
+                section_path=section_path,
+            ) if table else None
+            if media_ref:
+                return [f"[{media_ref}]"], ([block] if block else []), [], [media_ref]
+            return (self._extract_table_lines(table) if table else []), ([block] if block else []), [], []
 
         if node.name in {"p", "blockquote", "pre"}:
             text = self._clean_text(node.get_text(" ", strip=True))
             images = []
+            media_refs: list[str] = []
+            lines = [text] if text else []
             for image in node.find_all("img"):
                 src = (image.get("src") or "").strip()
                 if src:
                     images.append(self._resolve_image_ref(src, base_url=base_url))
+                    media_ref = self._register_image_media(
+                        image,
+                        base_url=base_url,
+                        media_dict=media_dict,
+                        section_path=section_path,
+                    )
+                    if media_ref:
+                        lines.append(f"[{media_ref}]")
+                        media_refs.append(media_ref)
             block = self._render_html_fragment(node, base_url=base_url)
-            return ([text] if text else []), ([block] if block else []), images
+            return lines, ([block] if block else []), images, media_refs
 
         lines: list[str] = []
         blocks: list[str] = []
         images: list[str] = []
+        media_refs: list[str] = []
         for child in node.children:
             if isinstance(child, NavigableString):
                 text = self._clean_text(str(child))
@@ -384,11 +571,17 @@ class ConfluenceConnector:
                 continue
             if not isinstance(child, Tag):
                 continue
-            child_lines, child_blocks, child_images = self._extract_block_content(child, base_url=base_url)
+            child_lines, child_blocks, child_images, child_media_refs = self._extract_block_content(
+                child,
+                base_url=base_url,
+                media_dict=media_dict,
+                section_path=section_path,
+            )
             lines.extend(child_lines)
             blocks.extend(child_blocks)
             images.extend(child_images)
-        return lines, blocks, images
+            media_refs.extend(child_media_refs)
+        return lines, blocks, images, media_refs
 
     def _extract_table_lines(self, table: Tag) -> list[str]:
         if not self._table_has_displayable_content(table):

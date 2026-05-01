@@ -78,8 +78,11 @@ class ConfluenceConnectorTests(unittest.TestCase):
                 {
                     "id": "12345",
                     "title": "8.1 Part 1 of PRD",
-                    "version": {"when": "2026-04-15T12:00:00Z"},
-                    "body": {"export_view": {"value": "<h1>Overview</h1><p>Hello PRD</p>"}},
+                    "version": {"when": "2026-04-15T12:00:00Z", "number": 7},
+                    "body": {
+                        "storage": {"value": "<h1>Overview</h1><p>Hello Storage PRD</p>"},
+                        "export_view": {"value": "<h1>Overview</h1><p>Hello Export PRD</p>"},
+                    },
                 }
             ]
         }
@@ -91,10 +94,63 @@ class ConfluenceConnectorTests(unittest.TestCase):
         page = self.connector.ingest_page("https://confluence.shopee.io/display/SPDB/8.1+Part+1+of+PRD", "session-1")
 
         self.assertEqual(page.page_id, "12345")
+        self.assertEqual(page.version_number, "7")
         self.assertEqual(page.title, "8.1 Part 1 of PRD")
-        self.assertEqual(page.sections[0].content, "Hello PRD")
+        self.assertEqual(page.sections[0].content, "Hello Storage PRD")
         request_url = mock_get.call_args.kwargs.get("url") or mock_get.call_args.args[0]
         self.assertTrue(request_url.endswith("/rest/api/content"))
+
+    @patch("prd_briefing.confluence.requests.get")
+    def test_ingest_falls_back_to_export_view_when_storage_missing(self, mock_get):
+        response = Mock()
+        response.json.return_value = {
+            "id": "12345",
+            "title": "Fallback PRD",
+            "version": {"when": "2026-04-15T12:00:00Z", "number": 3},
+            "body": {"export_view": {"value": "<h1>Overview</h1><p>Export body</p>"}},
+        }
+        response.raise_for_status.return_value = None
+        mock_get.return_value = response
+
+        page = self.connector.ingest_page("https://confluence.shopee.io/pages/viewpage.action?pageId=12345", "session-1")
+
+        self.assertEqual(page.version_number, "3")
+        self.assertEqual(page.sections[0].content, "Export body")
+
+    def test_media_extraction_filters_noise_and_sanitizes_tables(self):
+        media = {}
+        sections = self.connector._parse_sections(
+            html="""
+            <h1>Media</h1>
+            <p>Useful diagram below</p>
+            <img src="/download/attachments/1/flow.png" width="640" height="360" />
+            <img src="/images/icons/comment_16.png" width="16" height="16" />
+            <img src="/profilepics/avatar.png" width="120" height="120" />
+            <table><tr><td>Left</td><td>Right</td></tr></table>
+            <table class="x" onclick="bad()">
+              <tr><th class="c">Field</th><th style="color:red">Rule</th></tr>
+              <tr><td>Assessment Status</td><td><script>alert(1)</script>Must be Draft before submit.</td></tr>
+            </table>
+            """,
+            base_url="https://confluence.shopee.io",
+            source_url="https://confluence.shopee.io/pages/viewpage.action?pageId=1",
+            session_id="session-1",
+            media_dict=media,
+        )
+
+        self.assertEqual(len(media), 2)
+        self.assertIn("[MEDIA_ID_1]", sections[0].content)
+        self.assertIn("[MEDIA_ID_2]", sections[0].content)
+        self.assertEqual(media["MEDIA_ID_1"]["type"], "image")
+        self.assertEqual(media["MEDIA_ID_2"]["type"], "table")
+        self.assertIn("/prd-briefing/image-proxy?src=", media["MEDIA_ID_1"]["content"])
+        table_html = media["MEDIA_ID_2"]["content"]
+        self.assertIn("<table>", table_html)
+        self.assertIn("<th>Field</th>", table_html)
+        self.assertNotIn("script", table_html)
+        self.assertNotIn("class=", table_html)
+        self.assertNotIn("style=", table_html)
+        self.assertNotIn("onclick", table_html)
 
     @patch("prd_briefing.confluence.requests.get")
     def test_ingest_display_url_follows_confluence_renamed_page_suggestion(self, mock_get):

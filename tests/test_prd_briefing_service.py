@@ -19,6 +19,8 @@ from prd_briefing.reviewer import (
 from prd_briefing.service import (
     PRDBriefingService,
     WALKTHROUGH_SCRIPT_PROMPT_VERSION,
+    VoiceService,
+    attach_presentation_media,
     build_pm_briefing_blocks,
     build_heuristic_session_overview,
     overview_is_low_signal,
@@ -36,6 +38,8 @@ class FakeOpenAIClient:
         self.last_user_prompt = None
         self.answer_calls = 0
         self.chat_model = "gpt-4.1-mini"
+        self.model_id = "fake:gpt-4.1-mini"
+        self.answer_response = "LLM answer"
 
     def is_configured(self):
         return False
@@ -47,7 +51,7 @@ class FakeOpenAIClient:
         self.last_system_prompt = system_prompt
         self.last_user_prompt = user_prompt
         self.answer_calls += 1
-        return "LLM answer"
+        return self.answer_response
 
 
 class FakeVoiceService:
@@ -61,6 +65,21 @@ class FakeVoiceService:
 
     def get_cached_audio_for_text(self, *, owner_key, text, language_code):
         return "audio/cached.mp3" if text in self.cached_texts else None
+
+    def synthesize_presentation_chunk(self, **kwargs):
+        chunk = kwargs["chunk"]
+        self.synthesize_calls.append(kwargs)
+        return {
+            "id": chunk["id"],
+            "title": chunk["title"],
+            "content": chunk["content"],
+            "audioUrl": "/prd-briefing/assets/audio/test.mp3",
+            "duration": 1.5,
+            "timestamps": [{"sentence": chunk["content"], "start": 0, "end": 1.5}],
+            "imageUrls": chunk.get("imageUrls") or [],
+            "media": chunk.get("media") or {"type": "none", "content": ""},
+            "cacheKey": kwargs.get("presentation_cache_key") or "",
+        }
 
 
 @dataclass
@@ -101,6 +120,14 @@ class PRDBriefingServiceTests(unittest.TestCase):
                     image_refs=[],
                 ),
             ],
+            version_number="5",
+            media_dict={
+                "MEDIA_ID_1": {
+                    "type": "table",
+                    "content": "<table><tr><th>Field</th></tr><tr><td>Status</td></tr></table>",
+                }
+            },
+            presentation_source_text="## Section 1: Overview\nThis PRD introduces approval workflow.\n[MEDIA_ID_1]",
         )
         self.service = PRDBriefingService(
             store=self.store,
@@ -121,6 +148,149 @@ class PRDBriefingServiceTests(unittest.TestCase):
     def test_parse_presentation_chunks_rejects_invalid_json(self):
         with self.assertRaises(ValueError):
             parse_presentation_chunks('{"id":"chunk-1"}')
+
+    def test_presentation_cache_hit_reuses_outline_without_second_llm_call(self):
+        self.openai_client.is_configured = lambda: True
+        self.openai_client.answer_response = json.dumps([
+            {
+                "id": "chunk-1",
+                "title": "主流程",
+                "content": "这一段说明审批主流程。",
+                "media_ref": "MEDIA_ID_1",
+            }
+        ])
+
+        first = self.service.process_prd_for_presentation(
+            owner_key="anon:presentation",
+            page_ref="https://example.atlassian.net/wiki/pages/123",
+        )
+        calls_after_first = self.openai_client.answer_calls
+        second = self.service.process_prd_for_presentation(
+            owner_key="anon:presentation",
+            page_ref="https://example.atlassian.net/wiki/pages/123",
+        )
+
+        self.assertFalse(first["cached"])
+        self.assertTrue(second["cached"])
+        self.assertEqual(calls_after_first, 1)
+        self.assertEqual(self.openai_client.answer_calls, 1)
+        self.assertEqual(second["chunks"][0]["media"]["type"], "table")
+        self.assertEqual(second["session"]["version_number"], "5")
+
+    def test_presentation_cache_misses_when_page_version_changes(self):
+        self.openai_client.is_configured = lambda: True
+        self.openai_client.answer_response = json.dumps([
+            {"id": "chunk-1", "title": "主流程", "content": "这一段说明审批主流程。"}
+        ])
+
+        self.service.process_prd_for_presentation(
+            owner_key="anon:presentation",
+            page_ref="https://example.atlassian.net/wiki/pages/123",
+        )
+        self.service.confluence.page.version_number = "6"
+        second = self.service.process_prd_for_presentation(
+            owner_key="anon:presentation",
+            page_ref="https://example.atlassian.net/wiki/pages/123",
+        )
+
+        self.assertFalse(second["cached"])
+        self.assertEqual(self.openai_client.answer_calls, 2)
+
+    def test_media_ref_restores_image_table_or_none(self):
+        chunks = attach_presentation_media(
+            [
+                {"id": "chunk-1", "title": "图", "content": "看图。", "media_ref": "MEDIA_ID_1", "imageUrls": []},
+                {"id": "chunk-2", "title": "表", "content": "看表。", "media_ref": "MEDIA_ID_2", "imageUrls": []},
+                {"id": "chunk-3", "title": "无", "content": "无媒体。", "media_ref": "MEDIA_ID_99", "imageUrls": []},
+            ],
+            {
+                "MEDIA_ID_1": {"type": "image", "content": "/prd-briefing/image-proxy?src=x"},
+                "MEDIA_ID_2": {"type": "table", "content": "<table><tr><th>A</th></tr></table>"},
+            },
+        )
+
+        self.assertEqual(chunks[0]["media"]["type"], "image")
+        self.assertEqual(chunks[0]["imageUrls"], ["/prd-briefing/image-proxy?src=x"])
+        self.assertEqual(chunks[1]["media"]["type"], "table")
+        self.assertEqual(chunks[2]["media"], {"type": "none", "content": ""})
+
+    def test_generate_audio_preserves_chunk_media_and_uses_version_cache_key(self):
+        self.openai_client.is_configured = lambda: True
+        self.openai_client.answer_response = json.dumps([
+            {
+                "id": "chunk-1",
+                "title": "主流程",
+                "content": "这一段说明审批主流程。",
+                "media_ref": "MEDIA_ID_1",
+            }
+        ])
+        payload = self.service.process_prd_for_presentation(
+            owner_key="anon:presentation",
+            page_ref="https://example.atlassian.net/wiki/pages/123",
+        )
+        edited_chunk = dict(payload["chunks"][0])
+        edited_chunk["content"] = "这一段编辑后只需要重新生成本段音频。"
+
+        result = self.service.generate_presentation_audio(
+            owner_key="anon:presentation",
+            session_id=payload["session"]["session_id"],
+            chunk=edited_chunk,
+        )
+
+        self.assertEqual(result["chunk"]["media"]["type"], "table")
+        self.assertEqual(self.voice_service.synthesize_calls[-1]["presentation_cache_key"], "123_5")
+
+    def test_presentation_audio_cache_is_scoped_by_page_version_and_chunk(self):
+        voice = VoiceService(
+            store=self.store,
+            openai_client=self.openai_client,
+            tts_provider="edge",
+            edge_mandarin_voice="zh-CN-XiaozhenNeural",
+            edge_english_voice="en-US-JennyNeural",
+            edge_rate="-12%",
+            openai_mandarin_voice="alloy",
+            openai_voice_speed=1.0,
+            openai_custom_voice_enabled=False,
+            openai_tts_fallback_enabled=False,
+            elevenlabs_api_key=None,
+            elevenlabs_mandarin_model_id="eleven_multilingual_v2",
+            elevenlabs_mandarin_voice_id=None,
+        )
+        calls = []
+        voice._synthesize_with_edge_tts_with_boundaries = lambda **kwargs: (calls.append(kwargs) or (b"mp3", []))
+        chunk = {
+            "id": "chunk-1",
+            "title": "主流程",
+            "content": "同一段文本用于验证缓存隔离。",
+            "media": {"type": "none", "content": ""},
+        }
+
+        first = voice.synthesize_presentation_chunk(
+            session_id="session-1",
+            owner_key="anon:presentation-audio",
+            chunk=chunk,
+            language_code="zh",
+            presentation_cache_key="123_5",
+        )
+        second = voice.synthesize_presentation_chunk(
+            session_id="session-2",
+            owner_key="anon:presentation-audio",
+            chunk=chunk,
+            language_code="zh",
+            presentation_cache_key="123_6",
+        )
+        third = voice.synthesize_presentation_chunk(
+            session_id="session-3",
+            owner_key="anon:presentation-audio",
+            chunk=chunk,
+            language_code="zh",
+            presentation_cache_key="123_5",
+        )
+
+        self.assertEqual(len(calls), 2)
+        self.assertIn("audio/123_5/chunk-1-", first["audioUrl"])
+        self.assertIn("audio/123_6/chunk-1-", second["audioUrl"])
+        self.assertEqual(third["audioUrl"], first["audioUrl"])
 
     def _settings(self) -> Settings:
         return Settings(

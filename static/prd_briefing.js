@@ -26,6 +26,7 @@
    * @property {number=} duration
    * @property {PresentationTimestamp[]=} timestamps
    * @property {string[]=} imageUrls
+   * @property {{type:'image'|'table'|'none',content:string}=} media
    * @property {'draft'|'editing'|'audio-loading'|'ready'|'playing'|'audio-failed'=} audioStatus
    */
 
@@ -110,6 +111,15 @@
     });
   };
 
+  const sanitizeMedia = (media) => {
+    if (!media || typeof media !== 'object') return { type: 'none', content: '' };
+    const type = String(media.type || 'none').toLowerCase();
+    if ((type === 'image' || type === 'table') && media.content) {
+      return { type, content: String(media.content || '') };
+    }
+    return { type: 'none', content: '' };
+  };
+
   const sanitizeChunk = (chunk, index) => ({
     id: String(chunk.id || `chunk-${index + 1}`),
     title: String(chunk.title || `宣讲段落 ${index + 1}`),
@@ -118,6 +128,8 @@
     duration: Number(chunk.duration || 0),
     timestamps: Array.isArray(chunk.timestamps) ? chunk.timestamps : [],
     imageUrls: Array.isArray(chunk.imageUrls) ? chunk.imageUrls.filter(Boolean) : [],
+    media: sanitizeMedia(chunk.media),
+    cacheKey: String(chunk.cacheKey || ''),
     audioStatus: chunk.audioStatus || (chunk.audioUrl ? 'ready' : 'draft'),
     errorMessage: '',
   });
@@ -368,6 +380,8 @@
     chunk.duration = Number(generated.duration || 0);
     chunk.timestamps = Array.isArray(generated.timestamps) ? generated.timestamps : [];
     chunk.imageUrls = Array.isArray(generated.imageUrls) && generated.imageUrls.length ? generated.imageUrls : chunk.imageUrls;
+    chunk.media = generated.media ? sanitizeMedia(generated.media) : sanitizeMedia(chunk.media);
+    chunk.cacheKey = generated.cacheKey || chunk.cacheKey || '';
     chunk.audioStatus = chunk.audioUrl ? 'ready' : 'audio-failed';
     chunk.errorMessage = chunk.audioUrl ? '' : 'No audio URL returned.';
     if (index === state.currentIndex) {
@@ -402,6 +416,8 @@
               title: chunk.title,
               content: chunk.content,
               imageUrls: chunk.imageUrls || [],
+              media: chunk.media || { type: 'none', content: '' },
+              cacheKey: chunk.cacheKey || '',
             },
           }),
           signal: controller.signal,
@@ -655,11 +671,22 @@
     const progressPercent = state.chunks.length
       ? Math.min(100, Math.max(0, ((state.currentIndex + Math.max(0, state.activeSentenceIndex + 1) / Math.max(1, timestamps.length)) / state.chunks.length) * 100))
       : 0;
-    const images = (chunk.imageUrls || []).map((src) => `
+    const media = sanitizeMedia(chunk.media);
+    const mediaHtml = media.type === 'image' ? `
+      <button class="briefing-presenter-media briefing-presenter-media-image" type="button" data-preview-image="${escapeHtml(media.content)}">
+        <img src="${escapeHtml(media.content)}" alt="${escapeHtml(chunk.title)}">
+      </button>
+    ` : media.type === 'table' ? `
+      <div class="briefing-presenter-media briefing-presenter-media-table">
+        ${media.content}
+      </div>
+    ` : '';
+    const images = mediaHtml ? '' : (chunk.imageUrls || []).map((src) => `
       <button class="briefing-presenter-image" type="button" data-preview-image="${escapeHtml(src)}">
         <img src="${escapeHtml(src)}" alt="${escapeHtml(chunk.title)}">
       </button>
     `).join('');
+    const hasMedia = Boolean(mediaHtml || images);
     const isPlaying = chunk.audioStatus === 'playing';
     const isEditing = chunk.audioStatus === 'editing';
     const canPlay = chunk.audioStatus === 'ready';
@@ -667,7 +694,7 @@
     const hasFailed = chunk.audioStatus === 'audio-failed';
 
     presenterView.innerHTML = `
-      <div class="briefing-presenter-layout ${state.theaterMode ? 'is-theater' : ''} ${images ? 'has-images' : 'has-no-images'}">
+      <div class="briefing-presenter-layout ${state.theaterMode ? 'is-theater' : ''} ${hasMedia ? 'has-media has-images' : 'has-no-media has-no-images'} media-${escapeHtml(media.type)}">
         ${state.theaterMode ? `
           <div class="briefing-theater-chrome">
             <span>Chapter ${state.currentIndex + 1} / ${state.chunks.length}</span>
@@ -691,6 +718,7 @@
             </div>
             <span class="briefing-presenter-status" data-status="${escapeHtml(chunk.audioStatus || 'draft')}">${escapeHtml(statusLabel(chunk))}</span>
           </div>
+          ${mediaHtml ? `<div class="briefing-presenter-media-pane">${mediaHtml}</div>` : ''}
           ${images ? `<div class="briefing-presenter-images">${images}</div>` : ''}
           ${isEditing ? `
             <div class="briefing-presenter-editor">

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 import uuid
 from contextlib import contextmanager
@@ -50,6 +51,7 @@ class BriefingStore:
                     mode text not null,
                     title text not null,
                     status text not null,
+                    metadata_json text not null default '{}',
                     created_at text not null,
                     updated_at text not null
                 );
@@ -147,8 +149,36 @@ class BriefingStore:
 
                 create unique index if not exists idx_prd_review_results_lookup
                     on prd_review_results(owner_key, jira_id, prd_url, prd_updated_at, prompt_version);
+
+                create table if not exists presentation_outline_cache (
+                    id integer primary key autoincrement,
+                    owner_key text not null,
+                    page_id text not null,
+                    version_number text not null,
+                    prompt_version text not null,
+                    model_id text not null,
+                    title text not null,
+                    source_url text not null,
+                    page_updated_at text not null,
+                    chunks_json text not null,
+                    media_json text not null default '{}',
+                    page_metadata_json text not null default '{}',
+                    created_at text not null,
+                    updated_at text not null
+                );
+
+                create unique index if not exists idx_presentation_outline_cache_lookup
+                    on presentation_outline_cache(owner_key, page_id, version_number, prompt_version, model_id);
                 """
             )
+            session_columns = {
+                row["name"]
+                for row in conn.execute("pragma table_info(briefing_sessions)").fetchall()
+            }
+            if "metadata_json" not in session_columns:
+                conn.execute(
+                    "alter table briefing_sessions add column metadata_json text not null default '{}'"
+                )
             chunk_columns = {
                 row["name"]
                 for row in conn.execute("pragma table_info(briefing_chunks)").fetchall()
@@ -167,18 +197,31 @@ class BriefingStore:
         audience: str,
         mode: str,
         title: str,
+        metadata: dict[str, Any] | None = None,
     ) -> str:
         session_id = uuid.uuid4().hex
         now = utc_now()
+        metadata_json = json.dumps(metadata or {}, ensure_ascii=False, sort_keys=True)
         with self.connect() as conn:
             conn.execute(
                 """
                 insert into briefing_sessions (
                     session_id, owner_key, confluence_page_id, confluence_page_url,
-                    audience, mode, title, status, created_at, updated_at
-                ) values (?, ?, ?, ?, ?, ?, ?, 'ready', ?, ?)
+                    audience, mode, title, status, metadata_json, created_at, updated_at
+                ) values (?, ?, ?, ?, ?, ?, ?, 'ready', ?, ?, ?)
                 """,
-                (session_id, owner_key, confluence_page_id, confluence_page_url, audience, mode, title, now, now),
+                (
+                    session_id,
+                    owner_key,
+                    confluence_page_id,
+                    confluence_page_url,
+                    audience,
+                    mode,
+                    title,
+                    metadata_json,
+                    now,
+                    now,
+                ),
             )
         return session_id
 
@@ -188,7 +231,15 @@ class BriefingStore:
                 "select * from briefing_sessions where session_id = ? and owner_key = ?",
                 (session_id, owner_key),
             ).fetchone()
-            return dict(row) if row else None
+            if not row:
+                return None
+            payload = dict(row)
+            try:
+                metadata = json.loads(payload.get("metadata_json") or "{}")
+            except (TypeError, json.JSONDecodeError):
+                metadata = {}
+            payload["metadata"] = metadata if isinstance(metadata, dict) else {}
+            return payload
 
     def upsert_source(
         self,
@@ -328,6 +379,16 @@ class BriefingStore:
         path.write_bytes(audio_bytes)
         return str(path.relative_to(self.root_dir))
 
+    def save_versioned_audio_blob(self, cache_key: str, chunk_id: str, text_hash: str, suffix: str, audio_bytes: bytes) -> str:
+        safe_cache_key = re_safe_filename(cache_key)
+        safe_chunk_id = re_safe_filename(chunk_id or "chunk")
+        cache_dir = self.audio_root / safe_cache_key
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        filename = f"{safe_chunk_id}-{text_hash[:16]}.{suffix}"
+        path = cache_dir / filename
+        path.write_bytes(audio_bytes)
+        return str(path.relative_to(self.root_dir))
+
     def get_cached_audio(
         self,
         *,
@@ -374,6 +435,80 @@ class BriefingStore:
                 ) values (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (owner_key, provider, voice_id, language_code, model_id, text_hash, asset_path, utc_now()),
+            )
+
+    def get_presentation_outline_cache(
+        self,
+        *,
+        owner_key: str,
+        page_id: str,
+        version_number: str,
+        prompt_version: str,
+        model_id: str,
+    ) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                select * from presentation_outline_cache
+                where owner_key = ? and page_id = ? and version_number = ?
+                    and prompt_version = ? and model_id = ?
+                limit 1
+                """,
+                (owner_key, page_id, version_number, prompt_version, model_id),
+            ).fetchone()
+        if not row:
+            return None
+        return self._row_to_presentation_cache(row)
+
+    def save_presentation_outline_cache(
+        self,
+        *,
+        owner_key: str,
+        page_id: str,
+        version_number: str,
+        prompt_version: str,
+        model_id: str,
+        title: str,
+        source_url: str,
+        updated_at: str,
+        chunks: list[dict[str, Any]],
+        media: dict[str, Any],
+        page_metadata: dict[str, Any] | None = None,
+    ) -> None:
+        now = utc_now()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                insert into presentation_outline_cache (
+                    owner_key, page_id, version_number, prompt_version, model_id,
+                    title, source_url, page_updated_at, chunks_json, media_json,
+                    page_metadata_json, created_at, updated_at
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                on conflict(owner_key, page_id, version_number, prompt_version, model_id)
+                do update set
+                    title = excluded.title,
+                    source_url = excluded.source_url,
+                    page_updated_at = excluded.page_updated_at,
+                    chunks_json = excluded.chunks_json,
+                    media_json = excluded.media_json,
+                    page_metadata_json = excluded.page_metadata_json,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    owner_key,
+                    page_id,
+                    version_number,
+                    prompt_version,
+                    model_id,
+                    title,
+                    source_url,
+                    updated_at,
+                    json.dumps(chunks, ensure_ascii=False, sort_keys=True),
+                    json.dumps(media, ensure_ascii=False, sort_keys=True),
+                    json.dumps(page_metadata or {}, ensure_ascii=False, sort_keys=True),
+                    now,
+                    now,
+                ),
             )
 
     def get_cached_script(
@@ -578,6 +713,36 @@ class BriefingStore:
             "created_at": str(row["created_at"]),
             "updated_at": str(row["updated_at"]),
         }
+
+    def _row_to_presentation_cache(self, row: sqlite3.Row) -> dict[str, Any]:
+        def load_json(value: str, fallback: Any) -> Any:
+            try:
+                parsed = json.loads(value or "")
+            except (TypeError, json.JSONDecodeError):
+                return fallback
+            return parsed if parsed is not None else fallback
+
+        return {
+            "id": int(row["id"]),
+            "owner_key": str(row["owner_key"]),
+            "page_id": str(row["page_id"]),
+            "version_number": str(row["version_number"]),
+            "prompt_version": str(row["prompt_version"]),
+            "model_id": str(row["model_id"]),
+            "title": str(row["title"]),
+            "source_url": str(row["source_url"]),
+            "updated_at": str(row["page_updated_at"]),
+            "chunks": load_json(row["chunks_json"], []),
+            "media": load_json(row["media_json"], {}),
+            "page_metadata": load_json(row["page_metadata_json"], {}),
+            "created_at": str(row["created_at"]),
+            "cache_updated_at": str(row["updated_at"]),
+        }
+
+
+def re_safe_filename(value: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", str(value or "").strip())
+    return safe.strip("._")[:180] or "cache"
 
 def citation_from_chunk(chunk: ChunkRecord) -> Citation:
     return Citation(
