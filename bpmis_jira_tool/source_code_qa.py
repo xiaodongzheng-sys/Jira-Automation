@@ -15083,17 +15083,30 @@ class SourceCodeQAService:
             "codex_session_max_turns": self.codex_session_max_turns,
             "codex_cache_followups": self.codex_cache_followups,
         }
-        prompt_context = self._codex_investigation_brief(
-            pm_team=pm_team,
-            country=country,
-            question=question,
-            candidate_paths=candidate_paths,
-            evidence_pack=evidence_pack,
-            quality_gate=quality_gate,
-            followup_context=followup_context,
-            attachments=attachments or [],
-            runtime_evidence=runtime_evidence or [],
-        )
+        if fast_mode:
+            prompt_context = self._codex_fast_investigation_brief(
+                pm_team=pm_team,
+                country=country,
+                question=question,
+                candidate_paths=candidate_paths,
+                evidence_pack=evidence_pack,
+                quality_gate=quality_gate,
+                followup_context=followup_context,
+                attachments=attachments or [],
+                runtime_evidence=runtime_evidence or [],
+            )
+        else:
+            prompt_context = self._codex_investigation_brief(
+                pm_team=pm_team,
+                country=country,
+                question=question,
+                candidate_paths=candidate_paths,
+                evidence_pack=evidence_pack,
+                quality_gate=quality_gate,
+                followup_context=followup_context,
+                attachments=attachments or [],
+                runtime_evidence=runtime_evidence or [],
+            )
         is_followup = bool(followup_context and (followup_context.get("used") or followup_context.get("question") or followup_context.get("recent_turns")))
         cache_key = self._answer_cache_key(
             provider=self.llm_provider.name,
@@ -15437,42 +15450,13 @@ class SourceCodeQAService:
         selected_model: str,
         reason: str,
     ) -> dict[str, Any]:
-        citations = self._build_citations(selected_matches)
-        evidence_lines = []
-        for citation, match in zip(citations[:5], selected_matches[:5]):
-            label = f"{citation['id']} {match.get('repo')}:{match.get('path')}"
-            line_start = match.get("line_start")
-            if line_start:
-                label = f"{label}:L{line_start}"
-            reason_text = str(match.get("reason") or match.get("trace_stage") or "ranked evidence").strip()
-            evidence_lines.append(f"- {label} — {reason_text}")
-        if evidence_lines:
-            answer = (
-                "Fast mode hit the 1-minute deadline before Codex finished the full reasoning pass.\n\n"
-                "Direct answer: 当前只能给出基于检索证据的第一版判断，不能把未验证链路当成已确认结论。\n\n"
-                "Key evidence:\n"
-                + "\n".join(evidence_lines)
-                + "\n\nMissing evidence: 需要深度模式继续验证跨文件调用链、上游/下游数据来源，以及是否存在反向逻辑。\n\n"
-                "Confidence: low-to-medium, because this is a deadline fallback answer."
-            )
-        else:
-            answer = (
-                "Fast mode hit the 1-minute deadline and current evidence is insufficient.\n\n"
-                "Direct answer: 当前证据不足，不能给出可靠代码结论。\n\n"
-                "Missing evidence: 未找到可引用的文件、行号或 repo revision 证据。\n\n"
-                "Confidence: low."
-            )
-        structured_answer = {
-            "direct_answer": "当前只能给出基于检索证据的第一版判断。" if evidence_lines else "当前证据不足，不能给出可靠代码结论。",
-            "claims": [
-                {
-                    "text": "Fast mode returned a deadline fallback based only on retrieved evidence.",
-                    "citations": [item.get("id") for item in citations[:5]],
-                }
-            ],
-            "missing_evidence": ["Deep mode is needed for cross-file chain verification and ambiguity resolution."],
-            "confidence": "low" if not evidence_lines else "medium",
-        }
+        structured_answer = self._build_fast_evidence_first_answer(
+            question=question,
+            selected_matches=selected_matches,
+            evidence_summary=evidence_summary,
+            quality_gate=quality_gate,
+            evidence_pack=evidence_pack,
+        )
         claim_check = self._trusted_provider_check()
         answer_judge = self._trusted_provider_judge()
         answer_contract = {
@@ -15480,7 +15464,12 @@ class SourceCodeQAService:
             "confidence": structured_answer["confidence"],
             "policies": [],
             "missing_evidence": structured_answer["missing_evidence"],
+            "confirmed_from_code": structured_answer.get("confirmed_from_code") or [],
+            "inferred_from_code": structured_answer.get("inferred_from_code") or [],
+            "missing_links": structured_answer.get("missing_evidence") or [],
         }
+        answer = self._render_structured_answer(structured_answer, answer_contract)
+        fallback_claim_count = len(structured_answer.get("claims") or [])
         return {
             "llm_answer": answer,
             "llm_budget_mode": routed_budget_mode,
@@ -15519,8 +15508,199 @@ class SourceCodeQAService:
             "cache_metadata": {},
             "deadline_hit": True,
             "fallback_used": True,
+            "fallback_answer_quality": structured_answer["confidence"],
+            "fallback_evidence_count": len(selected_matches),
+            "fallback_claim_count": fallback_claim_count,
+            "deadline_fallback_reason": str(reason or "")[:500],
             "background_deep_job_id": "",
         }
+
+    def _build_fast_evidence_first_answer(
+        self,
+        *,
+        question: str,
+        selected_matches: list[dict[str, Any]],
+        evidence_summary: dict[str, Any],
+        quality_gate: dict[str, Any],
+        evidence_pack: dict[str, Any],
+    ) -> dict[str, Any]:
+        citations = self._build_citations(selected_matches)
+        focus_terms = self._fast_answer_focus_terms(question)
+        claims: list[dict[str, Any]] = []
+        used_citations: set[str] = set()
+
+        def add_claim(text: str, citation_ids: list[str]) -> None:
+            clean_text = re.sub(r"\s+", " ", str(text or "")).strip()
+            clean_citations = [item for item in dict.fromkeys(citation_ids) if item]
+            if not clean_text or not clean_citations:
+                return
+            if any(existing.get("text") == clean_text for existing in claims):
+                return
+            claims.append({"text": clean_text[:520], "citations": clean_citations[:3]})
+            used_citations.update(clean_citations)
+
+        match_by_id = {citation["id"]: match for citation, match in zip(citations, selected_matches)}
+        for item in evidence_pack.get("items") or []:
+            if len(claims) >= 5:
+                break
+            source_id = str(item.get("source_id") or "").strip()
+            if not source_id or source_id not in match_by_id:
+                continue
+            claim = str(item.get("claim") or "").strip()
+            if claim and str(item.get("support_level") or "") != "missing":
+                add_claim(claim, [source_id])
+        for citation, match in zip(citations, selected_matches):
+            if len(claims) >= 5:
+                break
+            if citation["id"] in used_citations:
+                continue
+            claim = self._fast_claim_from_match(citation, match, focus_terms)
+            add_claim(claim, [citation["id"]])
+
+        coverage = self._fast_focus_coverage(focus_terms, selected_matches)
+        confirmed = [
+            str(item).strip()
+            for item in [
+                *(evidence_pack.get("confirmed_facts") or []),
+                *(evidence_summary.get("data_sources") or []),
+                *(evidence_summary.get("api_or_config") or []),
+            ]
+            if str(item).strip()
+        ][:6]
+        inferred = [
+            str(item).strip()
+            for item in [
+                *(evidence_pack.get("inferred_facts") or []),
+                *(evidence_summary.get("data_carriers") or []),
+                *(evidence_summary.get("field_population") or []),
+                *(evidence_summary.get("entry_points") or []),
+            ]
+            if str(item).strip()
+        ][:6]
+        missing = [
+            str(item).strip()
+            for item in [
+                *(evidence_pack.get("missing_facts") or []),
+                *(evidence_pack.get("evidence_limits") or []),
+                *(quality_gate.get("missing") or []),
+            ]
+            if str(item).strip()
+        ]
+        missing.extend(
+            f"Fast mode did not find enough evidence for `{term}`." for term in focus_terms if term.lower() not in coverage
+        )
+        if selected_matches:
+            missing.append("Fast mode did not complete Codex cross-file verification before the 1-minute deadline; use deep mode for full caller/callee and upstream-source validation.")
+        else:
+            missing.append("No code evidence was retrieved within the fast-mode window.")
+        missing = list(dict.fromkeys(missing))[:6]
+
+        confidence = "medium" if claims and (confirmed or coverage) else "low"
+        direct_answer = self._fast_direct_answer(
+            question=question,
+            focus_terms=focus_terms,
+            claims=claims,
+            missing=missing,
+            confidence=confidence,
+        )
+        return {
+            "direct_answer": direct_answer,
+            "investigation_steps": {
+                "candidate_evidence": [claim["text"] for claim in claims[:3]],
+                "gap_verification": missing[:3],
+                "certainty_split": [
+                    "Confirmed facts are limited to cited retrieved evidence.",
+                    "Unverified cross-file flow remains in Missing Evidence.",
+                ],
+            },
+            "attachment_facts": [],
+            "screenshot_evidence": [],
+            "source_code_evidence": [claim["text"] for claim in claims[:5]],
+            "confirmed_from_code": confirmed[:5],
+            "inferred_from_code": inferred[:5],
+            "not_found": missing[:5],
+            "missing_production_evidence": [],
+            "next_checks": ["Run deep mode if the answer needs complete cross-file chain verification."],
+            "claims": claims or [
+                {
+                    "text": "Fast mode could not produce a code-backed claim from the retrieved evidence.",
+                    "citations": [item.get("id") for item in citations[:1] if item.get("id")],
+                }
+            ],
+            "missing_evidence": missing,
+            "confidence": confidence,
+            "format": "json",
+        }
+
+    @staticmethod
+    def _fast_answer_focus_terms(question: str) -> list[str]:
+        terms: list[str] = []
+        for token in re.findall(r"[A-Za-z][A-Za-z0-9_]{2,}", str(question or "")):
+            lowered = token.lower()
+            if lowered in STOPWORDS or lowered in {"explain", "what", "where", "which", "does", "with", "and", "the"}:
+                continue
+            if token not in terms:
+                terms.append(token)
+        return terms[:8]
+
+    @staticmethod
+    def _fast_focus_coverage(focus_terms: list[str], matches: list[dict[str, Any]]) -> set[str]:
+        coverage: set[str] = set()
+        for match in matches:
+            haystack = " ".join(
+                str(match.get(key) or "")
+                for key in ("path", "reason", "snippet", "retrieval", "trace_stage")
+            ).lower()
+            for term in focus_terms:
+                if term.lower() in haystack:
+                    coverage.add(term.lower())
+        return coverage
+
+    @classmethod
+    def _fast_claim_from_match(cls, citation: dict[str, Any], match: dict[str, Any], focus_terms: list[str]) -> str:
+        path = str(match.get("path") or "").strip()
+        reason = str(match.get("reason") or "").strip()
+        snippet = str(match.get("snippet") or "")
+        matched_terms = [
+            term for term in focus_terms
+            if term.lower() in f"{path}\n{reason}\n{snippet}".lower()
+        ][:3]
+        evidence_line = ""
+        for raw_line in snippet.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            lowered = line.lower()
+            if matched_terms and any(term.lower() in lowered for term in matched_terms):
+                evidence_line = line
+                break
+            if not evidence_line and any(hint in lowered for hint in ("class ", "interface ", "enum ", "public ", "private ", "select ", "from ", "return ", "set", "get")):
+                evidence_line = line
+        if evidence_line:
+            return f"{cls._compact_path(path)} shows `{', '.join(matched_terms) if matched_terms else Path(path).name}` near: {evidence_line}"
+        if reason:
+            return f"{cls._compact_path(path)} was selected because {reason}"
+        return f"{cls._compact_path(path)} is one of the strongest retrieved code references for this question."
+
+    @staticmethod
+    def _fast_direct_answer(
+        *,
+        question: str,
+        focus_terms: list[str],
+        claims: list[dict[str, Any]],
+        missing: list[str],
+        confidence: str,
+    ) -> str:
+        if not claims:
+            return "当前证据不足，fast mode 无法在 1 分钟内给出可靠代码结论。"
+        term_text = "、".join(focus_terms[:4])
+        if term_text and re.search(r"\b(explain|difference|diff|区别|是什么意思|什么是|解释)\b", question, flags=re.IGNORECASE):
+            return f"基于已检索到的代码证据，下面是 `{term_text}` 的第一版解释；尚未完成跨文件链路验证，所以未确认部分放在 Missing Evidence。"
+        if confidence == "medium":
+            return "基于已检索到的代码证据，fast mode 可以给出第一版结论；但跨文件链路仍需 deep mode 做完整确认。"
+        if missing:
+            return "当前只能给出低置信度的第一版判断；关键缺口已列在 Missing Evidence。"
+        return "当前只能给出基于检索证据的第一版判断。"
 
     def _codex_deep_investigation_needed(
         self,
@@ -16086,6 +16266,79 @@ class SourceCodeQAService:
             else:
                 layers["maybe_relevant_paths"].append(item)
         return layers
+
+    def _codex_fast_investigation_brief(
+        self,
+        *,
+        pm_team: str,
+        country: str,
+        question: str,
+        candidate_paths: list[dict[str, Any]],
+        evidence_pack: dict[str, Any],
+        quality_gate: dict[str, Any],
+        followup_context: dict[str, Any] | None,
+        attachments: list[dict[str, Any]] | None = None,
+        runtime_evidence: list[dict[str, Any]] | None = None,
+    ) -> str:
+        candidate_path_layers = self._codex_candidate_path_layers(candidate_paths, followup_context)
+        lines = [
+            f"Prompt mode: {CODEX_INVESTIGATION_PROMPT_MODE}:fast",
+            f"PM Team: {pm_team}",
+            f"Country: {country}",
+            f"Question: {question}",
+            "",
+            "Fast-mode deadline contract:",
+            "- Return within 45 seconds. Prefer a short correct JSON answer over a complete investigation.",
+            "- Read only the highest-signal candidate files. Do not run broad multi-step exploration.",
+            "- Do not repair, do not perform deep investigation, and do not write files.",
+            "- Answer only from verified file reads or the candidate evidence below.",
+            "- If a chain is not verified, put it in missing_evidence instead of guessing.",
+            "",
+            "Candidate paths, ordered by priority:",
+        ]
+        ordered_layers = (
+            "confirmed_previous_paths",
+            "current_high_confidence_paths",
+            "current_supporting_paths",
+            "maybe_relevant_paths",
+        )
+        emitted = 0
+        for layer_name in ordered_layers:
+            for item in candidate_path_layers.get(layer_name) or []:
+                if emitted >= FAST_CODEX_TOP_PATH_LIMIT:
+                    break
+                lines.append(
+                    f"- {item.get('id')} repo={item.get('repo')} root={item.get('repo_root')} "
+                    f"relative_root={item.get('repo_relative_root')} path={item.get('path')} "
+                    f"file_exists={item.get('file_exists')} lines={item.get('line_start')}-{item.get('line_end')} "
+                    f"reason={item.get('reason')}"
+                )
+                emitted += 1
+            if emitted >= FAST_CODEX_TOP_PATH_LIMIT:
+                break
+        attachment_section = self._context_attachment_section(attachments or [], runtime_evidence or [])
+        if attachment_section:
+            lines.extend(["", attachment_section])
+        lines.extend(["", "Evidence hints:"])
+        for key_name in ("confirmed_facts", "inferred_facts", "entry_points", "read_write_points", "tables", "apis", "configs", "missing_facts", "evidence_limits"):
+            values = evidence_pack.get(key_name) or []
+            if values:
+                lines.append(f"- {key_name}: {values[:4]}")
+        lines.append(
+            f"- Local narrowing status: {quality_gate.get('status')} "
+            f"confidence={quality_gate.get('confidence')} missing={quality_gate.get('missing') or []}"
+        )
+        lines.extend(
+            [
+                "",
+                "Return JSON only:",
+                '{"direct_answer":"one short answer","investigation_steps":{"candidate_evidence":["checked file/path"],"gap_verification":["missing link"],"certainty_split":["confirmed vs missing"]},"source_code_evidence":["file/function/field evidence"],"confirmed_from_code":["confirmed fact"],"inferred_from_code":["weak deduction"],"not_found":["missing hop"],"claims":[{"text":"claim","citations":["S1"]}],"missing_evidence":["gap"],"confidence":"medium|low"}',
+                "- Include 3-5 citation-backed claims at most.",
+                "- Fast mode may return medium or low confidence only.",
+                "- Cite S ids from candidate paths for concrete claims.",
+            ]
+        )
+        return "\n".join(lines)
 
     def _codex_investigation_brief(
         self,
@@ -17972,6 +18225,10 @@ class SourceCodeQAService:
                 "retrieval_latency_ms": payload.get("retrieval_latency_ms"),
                 "codex_latency_ms": payload.get("codex_latency_ms"),
                 "fallback_used": bool(payload.get("fallback_used")),
+                "fallback_answer_quality": payload.get("fallback_answer_quality") or "",
+                "fallback_evidence_count": payload.get("fallback_evidence_count") or 0,
+                "fallback_claim_count": payload.get("fallback_claim_count") or 0,
+                "deadline_fallback_reason": payload.get("deadline_fallback_reason") or "",
                 "background_deep_job_id": payload.get("background_deep_job_id") or "",
                 "requested_llm_budget_mode": llm_budget_mode,
                 "llm_budget_mode": payload.get("llm_budget_mode") or llm_budget_mode,

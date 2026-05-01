@@ -8099,7 +8099,77 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertTrue(payload["deadline_hit"])
         self.assertTrue(payload["fallback_used"])
         self.assertEqual(payload["llm_finish_reason"], "fast_deadline_fallback")
-        self.assertIn("Fast mode hit the 1-minute deadline", payload["llm_answer"])
+        self.assertIn("IssueRepository", payload["llm_answer"])
+        self.assertIn("Missing", payload["llm_answer"])
+        self.assertEqual(payload["structured_answer"]["confidence"], "medium")
+        self.assertTrue(payload["structured_answer"]["claims"])
+        self.assertIn("S1", payload["structured_answer"]["claims"][0]["citations"])
+        self.assertEqual(payload["fallback_answer_quality"], "medium")
+        self.assertEqual(payload["fallback_evidence_count"], 1)
+        self.assertGreaterEqual(payload["fallback_claim_count"], 1)
+
+    def test_codex_fast_query_timeout_preserves_multiple_focus_terms(self):
+        service = SourceCodeQAService(
+            data_root=Path(self.temp_dir.name),
+            team_profiles=TEAM_PROFILE_DEFAULTS,
+            llm_provider="codex_cli_bridge",
+            gitlab_token="secret-token",
+            git_timeout_seconds=5,
+            max_file_bytes=200_000,
+        )
+        entry = RepositoryEntry("AF FE", "https://git.example.com/team/af-fe.git")
+        matches = [
+            {
+                "repo": "AF FE",
+                "path": "src/components/ShopInfo.tsx",
+                "line_start": 10,
+                "line_end": 18,
+                "retrieval": "persistent_index",
+                "trace_stage": "direct",
+                "reason": "matched shopeeUid field",
+                "score": 20,
+                "snippet": "const shopeeUid = shopInfo.shopeeUid;",
+            },
+            {
+                "repo": "AF FE",
+                "path": "src/components/MerchantInfo.tsx",
+                "line_start": 22,
+                "line_end": 30,
+                "retrieval": "persistent_index",
+                "trace_stage": "direct",
+                "reason": "matched merchantUId field",
+                "score": 18,
+                "snippet": "const merchantUId = merchantInfo.merchantUId;",
+            },
+        ]
+        with patch.object(service.llm_provider, "ready", return_value=True), patch.object(
+            service.llm_provider,
+            "generate",
+            side_effect=ToolError("Codex CLI timed out after 55s."),
+        ):
+            payload = service._build_llm_answer(
+                entries=[entry],
+                key="AF:All",
+                pm_team="AF",
+                country="All",
+                question="explain merchantUId and shopeeUid",
+                matches=matches,
+                llm_budget_mode="auto",
+                query_mode="fast",
+                requested_answer_mode="auto",
+            )
+
+        answer_text = json.dumps(payload["structured_answer"], ensure_ascii=False)
+        self.assertIn("merchantUId", answer_text)
+        self.assertIn("shopeeUid", answer_text)
+        self.assertEqual(payload["structured_answer"]["confidence"], "medium")
+        cited = {
+            citation
+            for claim in payload["structured_answer"]["claims"]
+            for citation in claim.get("citations", [])
+        }
+        self.assertIn("S1", cited)
+        self.assertIn("S2", cited)
 
     def test_codex_cli_bridge_requires_chatgpt_login(self):
         provider = CodexCliBridgeSourceCodeQALLMProvider(

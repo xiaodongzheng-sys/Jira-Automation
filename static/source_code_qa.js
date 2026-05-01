@@ -1704,6 +1704,7 @@
   };
 
   const renderRawModelAnswer = (payload, answer, directAnswer, hasStructuredSections) => {
+    if (payload?.deadline_hit && payload?.fallback_used) return '';
     const rawAnswer = String(payload?.llm_answer || answer || '').trim();
     if (!hasStructuredSections || !rawAnswer) return '';
     const normalizedDirect = String(directAnswer || '').trim();
@@ -1726,6 +1727,7 @@
       .map((item) => String(item || '').trim())
       .filter(Boolean)
       .slice(0, 6);
+    const confidence = String(structured.confidence || payload?.answer_contract?.confidence || '').trim();
     const directAnswer = cleanDirectAnswer(structured.direct_answer, answer, Boolean(claims.length || missing.length));
     if (directAnswer || claims.length || missing.length) {
       return `
@@ -1752,6 +1754,12 @@
             <ul>${missing.slice(0, 6).map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</ul>
           </section>
         ` : ''}
+        ${confidence ? `
+          <section class="source-qa-answer-section">
+            <strong>Confidence</strong>
+            <p>${escapeHtml(confidence)}</p>
+          </section>
+        ` : ''}
         ${renderRawModelAnswer(payload, answer, directAnswer, Boolean(claims.length || missing.length))}
       `;
     }
@@ -1760,6 +1768,14 @@
   };
 
   const renderAnswerQualityBanner = (payload) => {
+    if (payload?.deadline_hit && payload?.fallback_used) {
+      return `
+        <section class="source-qa-answer-quality source-qa-answer-quality-fast">
+          <strong>Fast mode reached the 1-minute limit</strong>
+          <span>This answer is based on retrieved evidence. Use deep mode for full cross-file verification.</span>
+        </section>
+      `;
+    }
     const quality = payload?.answer_quality || {};
     const contract = payload?.answer_contract || {};
     const judge = payload?.answer_judge || {};

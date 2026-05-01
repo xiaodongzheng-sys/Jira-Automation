@@ -6754,6 +6754,17 @@ select:focus {
   word-break: break-word;
 }
 
+.source-qa-answer-quality-fast {
+  border-color: #bfdbfe;
+  background: #eff6ff;
+  color: #1e3a8a;
+}
+
+.source-qa-answer-quality-fast strong,
+.source-qa-answer-quality-fast span {
+  color: #1d4ed8;
+}
+
 .source-qa-answer-section {
   min-width: 0;
   padding: 14px;
