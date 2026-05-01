@@ -74,6 +74,18 @@ CLOUD_RUN_DEPLOY_ACCOUNT=vertex-ai-user@civil-partition-492805-v7.iam.gserviceac
 ./scripts/deploy_cloud_run_uat.sh
 ```
 
+- After Cloud Run UAT deploy succeeds, the script syncs the Mac host workspace to the same Git commit, installs host dependencies, initializes the PRD Briefing SQLite schema under the Mac data root, restarts the Mac local-agent, and verifies public local-agent health. This keeps UAT's Cloud Run frontend and local-agent-backed backend/cache code aligned.
+
+- The default Mac host workspace is `~/Workspace/jira-creation-stack-host`. Override it only when the running local-agent checkout is elsewhere:
+
+```bash
+CLOUD_RUN_UAT_HOST_WORKSPACE=/path/to/jira-creation-stack-host \
+CLOUD_RUN_DEPLOY_ACCOUNT=vertex-ai-user@civil-partition-492805-v7.iam.gserviceaccount.com \
+./scripts/deploy_cloud_run_uat.sh
+```
+
+- Do not skip the post-deploy local-agent sync for PRD Briefing, BPMIS proxy, Source Code Q&A, SeaTalk, or other local-agent-backed changes. If you must skip it for a Cloud Run-only dry check, set `CLOUD_RUN_UAT_SYNC_LOCAL_AGENT_AFTER_DEPLOY=0` and treat UAT as not fully validated for local-agent-backed workflows.
+
 - If the active personal `gcloud` account works for the current shell, the account override can be omitted. If not, keep the configured deploy service account:
 
 ```bash
@@ -91,10 +103,12 @@ curl https://<uat-tag-url>/api/local-agent/healthz
 - Confirm these before treating UAT as passed:
   - UAT URL opens and shows the `UAT` environment badge.
   - UAT `/healthz/` revision equals the intended Git commit.
+  - The Mac host workspace `git rev-parse HEAD` equals the intended Git commit.
+  - UAT `/api/local-agent/healthz` succeeds through the public Mac local-agent path.
   - The fixed-ngrok Live `/healthz` still serves the old Live revision until promotion.
   - Any changed workflow passes the expected manual smoke checks.
 
-UAT intentionally shares the existing Mac local-agent public path for Mac-only capabilities. It isolates code and traffic, not all downstream data or external write effects. If a change touches local-agent code, restart and smoke-test the local-agent path separately before approval.
+UAT intentionally shares the existing Mac local-agent public path for Mac-only capabilities. For local-agent-backed workflows, durable SQLite/cache state is on the Mac host, not inside the Cloud Run UAT container. UAT isolates Cloud Run code and traffic, but it does not isolate downstream data or external write effects such as BPMIS, Trello, Jira, Gmail, or SeaTalk actions.
 
 If Google OAuth login must be tested on UAT, add the UAT callback URL in Google Cloud Console:
 
@@ -147,6 +161,8 @@ LOCAL_AGENT_BPMIS_ENABLED=true
 - Do not point Cloud Run at a localhost local-agent URL. Cloud Run needs the public Mac local-agent URL, normally from `LOCAL_AGENT_PUBLIC_URL` or `CLOUD_RUN_LOCAL_AGENT_BASE_URL`. If those are not set and `LOCAL_AGENT_BASE_URL` is localhost, the deploy scripts fall back to non-localhost `TEAM_PORTAL_BASE_URL` because the Mac portal exposes `/api/local-agent/*` as a proxy.
 
 ## 4. Mac Local-Agent Release
+
+UAT deploys run this automatically by default. Run it manually only when fixing the Mac host outside the UAT script, when the UAT guard was intentionally skipped, or when preparing the fixed-ngrok Live portal.
 
 - Update the host workspace that actually runs the Mac-local services, usually:
 
@@ -234,7 +250,7 @@ Only when the user explicitly requested Cloud Run live deployment or validation,
 
 ## 7. Easy-To-Miss Release Surfaces
 
-- UAT deploys do not restart the Mac local-agent by default. Local-agent code changes need an explicit local-agent restart/smoke before UAT is considered complete.
+- UAT deploys restart and verify the Mac local-agent by default. If `CLOUD_RUN_UAT_SYNC_LOCAL_AGENT_AFTER_DEPLOY=0` is used, local-agent-backed UAT workflows are not validated until the host workspace is synced, dependencies are installed, PRD cache schema is initialized, local-agent is restarted, and public health passes.
 - UAT deploys must not be promoted if `origin/main` has advanced beyond the tagged UAT commit. Re-deploy UAT from the latest commit instead.
 - Source Code Q&A index/retrieval changes need the Mac-hosted portal restarted because the Mac owns both the primary web request path and durable repos/indexes.
 - Local-agent code changes still need the Mac local-agent restarted when Cloud Run backup mode or local-agent-only features are in use.

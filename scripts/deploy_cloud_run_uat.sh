@@ -83,6 +83,151 @@ describe_service() {
     --format=json
 }
 
+resolve_uat_host_workspace() {
+  local configured="${CLOUD_RUN_UAT_HOST_WORKSPACE:-}"
+  if [[ -z "$configured" ]]; then
+    configured="${TEAM_STACK_HOST_WORKSPACE:-}"
+  fi
+  if [[ -z "$configured" ]]; then
+    configured="$(read_env_value TEAM_STACK_HOST_WORKSPACE)"
+  fi
+  if [[ -z "$configured" ]]; then
+    configured="$HOME/Workspace/jira-creation-stack-host"
+  fi
+  printf '%s\n' "$configured"
+}
+
+ensure_host_prd_store_schema() {
+  local host_workspace="$1"
+  local host_python="$host_workspace/.venv/bin/python"
+  if [[ ! -x "$host_python" ]]; then
+    echo "Mac local-agent venv is missing: $host_python"
+    echo "Create the host venv first, or set CLOUD_RUN_UAT_SYNC_LOCAL_AGENT_AFTER_DEPLOY=0 to skip this guard."
+    exit 1
+  fi
+
+  HOST_WORKSPACE="$host_workspace" "$host_python" - <<'PY'
+import os
+from pathlib import Path
+
+
+def _read_env_file(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    if not path.exists():
+        return values
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip("'").strip('"')
+        if key:
+            values[key] = value
+    return values
+
+
+host = Path(os.environ["HOST_WORKSPACE"]).expanduser().resolve()
+env_values = _read_env_file(host / ".env")
+data_dir = (
+    os.environ.get("LOCAL_AGENT_TEAM_PORTAL_DATA_DIR")
+    or env_values.get("LOCAL_AGENT_TEAM_PORTAL_DATA_DIR")
+    or os.environ.get("TEAM_PORTAL_DATA_DIR")
+    or env_values.get("TEAM_PORTAL_DATA_DIR")
+    or ".team-portal"
+)
+data_path = Path(data_dir).expanduser()
+if not data_path.is_absolute():
+    data_path = host / data_path
+
+from prd_briefing.storage import BriefingStore
+
+BriefingStore(data_path / "prd_briefing")
+print(data_path / "prd_briefing")
+PY
+}
+
+sync_mac_local_agent_for_uat() {
+  if [[ "${CLOUD_RUN_UAT_SYNC_LOCAL_AGENT_AFTER_DEPLOY:-1}" == "0" ]]; then
+    echo "Skipping Mac local-agent sync because CLOUD_RUN_UAT_SYNC_LOCAL_AGENT_AFTER_DEPLOY=0."
+    return 0
+  fi
+
+  local host_workspace
+  host_workspace="$(resolve_uat_host_workspace)"
+  if [[ ! -d "$host_workspace/.git" ]]; then
+    echo "Mac local-agent host workspace was not found: $host_workspace"
+    echo "Set CLOUD_RUN_UAT_HOST_WORKSPACE to the checkout that runs local-agent, or set CLOUD_RUN_UAT_SYNC_LOCAL_AGENT_AFTER_DEPLOY=0 to skip this guard."
+    exit 1
+  fi
+
+  local host_branch
+  host_branch="$(git -C "$host_workspace" rev-parse --abbrev-ref HEAD)"
+  if [[ "$host_branch" != "main" ]]; then
+    echo "Mac local-agent host workspace must be on main before UAT sync."
+    echo "Workspace: $host_workspace"
+    echo "Branch:    $host_branch"
+    exit 1
+  fi
+
+  if ! git -C "$host_workspace" diff --quiet --no-ext-diff --exit-code || ! git -C "$host_workspace" diff --cached --quiet --no-ext-diff --exit-code; then
+    echo "Mac local-agent host workspace has tracked changes; refusing to overwrite them."
+    echo "Workspace: $host_workspace"
+    echo "Commit/stash the host changes, or set CLOUD_RUN_UAT_SYNC_LOCAL_AGENT_AFTER_DEPLOY=0 only if you intentionally accept stale local-agent risk."
+    exit 1
+  fi
+
+  echo "Syncing Mac local-agent host workspace for UAT: $host_workspace"
+  git -C "$host_workspace" fetch origin main >/dev/null
+  git -C "$host_workspace" merge --ff-only "$GIT_SHA" >/dev/null
+
+  local host_head
+  host_head="$(git -C "$host_workspace" rev-parse HEAD)"
+  if [[ "$host_head" != "$GIT_SHA" ]]; then
+    echo "Mac local-agent host workspace did not reach the UAT commit."
+    echo "Expected: $GIT_SHA"
+    echo "Actual:   $host_head"
+    exit 1
+  fi
+
+  if [[ "${CLOUD_RUN_UAT_INSTALL_HOST_DEPS:-1}" != "0" ]]; then
+    if [[ ! -x "$host_workspace/.venv/bin/pip" ]]; then
+      echo "Mac local-agent venv pip is missing: $host_workspace/.venv/bin/pip"
+      exit 1
+    fi
+    echo "Installing Mac local-agent Python dependencies from requirements.txt"
+    "$host_workspace/.venv/bin/pip" install -r "$host_workspace/requirements.txt" >/dev/null
+  fi
+
+  local prd_store_path
+  prd_store_path="$(ensure_host_prd_store_schema "$host_workspace")"
+  echo "Mac local-agent PRD briefing store ready: $prd_store_path"
+
+  if [[ "${CLOUD_RUN_UAT_RESTART_LOCAL_AGENT:-1}" != "0" ]]; then
+    if [[ ! -x "$host_workspace/scripts/run_local_agent.sh" ]]; then
+      echo "Mac local-agent restart script is missing: $host_workspace/scripts/run_local_agent.sh"
+      exit 1
+    fi
+    echo "Restarting Mac local-agent for UAT-backed local storage"
+    (cd "$host_workspace" && ./scripts/run_local_agent.sh restart >/dev/null)
+  fi
+
+  if [[ "${CLOUD_RUN_UAT_VERIFY_PUBLIC_LOCAL_AGENT:-1}" != "0" && -n "$LOCAL_AGENT_URL" ]]; then
+    local local_agent_base="${LOCAL_AGENT_URL%/}"
+    echo "Verifying public Mac local-agent health: $local_agent_base"
+    if curl -fsS --max-time 10 "$local_agent_base/api/local-agent/healthz" >/dev/null; then
+      :
+    elif curl -fsS --max-time 10 "$local_agent_base/healthz" >/dev/null; then
+      :
+    else
+      echo "Mac local-agent public health check failed for $local_agent_base"
+      exit 1
+    fi
+  fi
+
+  echo "Mac local-agent revision aligned with UAT commit: $GIT_SHA"
+}
+
 require_clean_pushed_main
 
 GIT_SHA="$(git -C "$ROOT_DIR" rev-parse HEAD)"
@@ -208,6 +353,8 @@ if [[ -z "$UAT_REVISION" ]]; then
   echo "Cloud Run UAT deploy finished, but tag '$UAT_TAG' was not found in service traffic status."
   exit 1
 fi
+
+sync_mac_local_agent_for_uat
 
 SCRIPT_FINISHED_AT="$(date +%s)"
 echo "Cloud Run UAT revision: $UAT_REVISION"

@@ -182,6 +182,7 @@ exit 0
                     "PYTHON_BIN": sys.executable,
                     "FAKE_GCLOUD_CALLS": str(calls_path),
                     "CLOUD_RUN_UAT_SKIP_GIT_CHECK": "1",
+                    "CLOUD_RUN_UAT_SYNC_LOCAL_AGENT_AFTER_DEPLOY": "0",
                     "CLOUD_RUN_LOCAL_AGENT_BASE_URL": "https://agent.example.ngrok.app",
                     "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg",
                     "BPMIS_BASE_URL": "https://bpmis.example.test",
@@ -208,6 +209,18 @@ exit 0
             self.assertIn("TRELLO_DAILY_LIST_NAME=Daily Summary Email", deploy_calls[0])
             self.assertIn("Cloud Run UAT revision: team-portal-00091-uat", completed.stdout)
             self.assertIn("keeps live traffic unchanged", completed.stdout)
+
+    def test_cloud_run_uat_deploy_syncs_mac_local_agent_by_default(self):
+        deploy_script = PROJECT_ROOT / "scripts/deploy_cloud_run_uat.sh"
+        contents = deploy_script.read_text(encoding="utf-8")
+
+        self.assertIn("CLOUD_RUN_UAT_SYNC_LOCAL_AGENT_AFTER_DEPLOY:-1", contents)
+        self.assertIn("CLOUD_RUN_UAT_HOST_WORKSPACE", contents)
+        self.assertIn("git -C \"$host_workspace\" merge --ff-only \"$GIT_SHA\"", contents)
+        self.assertIn("pip\" install -r \"$host_workspace/requirements.txt\"", contents)
+        self.assertIn("BriefingStore(data_path / \"prd_briefing\")", contents)
+        self.assertIn("./scripts/run_local_agent.sh restart", contents)
+        self.assertIn("/api/local-agent/healthz", contents)
 
     def test_promote_uat_to_live_fails_when_origin_main_differs_from_uat_commit(self):
         promote_script = PROJECT_ROOT / "scripts/promote_uat_to_live.sh"
