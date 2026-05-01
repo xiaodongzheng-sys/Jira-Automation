@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from collections import deque
 from dataclasses import asdict, dataclass, field
 import difflib
 from functools import lru_cache
@@ -183,6 +184,14 @@ class JobState:
     error_category: str = ""
     error_code: str = ""
     error_retryable: bool = False
+    owner_email: str = ""
+    queued_position: int = 0
+    eta_seconds_range: list[int] = field(default_factory=list)
+    running_user_count: int = 0
+    last_progress_at: float = 0
+    stalled_retryable: bool = False
+    started_at: float = 0
+    completed_at: float = 0
     results: list[dict[str, Any]] = field(default_factory=list)
     notice: dict[str, Any] | None = None
     error: str | None = None
@@ -261,6 +270,36 @@ class JobStore:
             self._persist_locked()
             return job
 
+    def set_owner(self, job_id: str, owner_email: str) -> None:
+        with self._lock:
+            if job_id not in self._jobs:
+                self._refresh_locked()
+            job = self._jobs[job_id]
+            job.owner_email = str(owner_email or "").strip().lower()
+            job.updated_at = time.time()
+            self._persist_locked()
+
+    def update_queue_metadata(
+        self,
+        job_id: str,
+        *,
+        queued_position: int = 0,
+        eta_seconds_range: list[int] | None = None,
+        running_user_count: int = 0,
+        message: str | None = None,
+    ) -> None:
+        with self._lock:
+            if job_id not in self._jobs:
+                self._refresh_locked()
+            job = self._jobs[job_id]
+            job.queued_position = max(0, int(queued_position or 0))
+            job.eta_seconds_range = [max(0, int(value or 0)) for value in (eta_seconds_range or [])[:2]]
+            job.running_user_count = max(0, int(running_user_count or 0))
+            if message is not None:
+                job.message = message
+            job.updated_at = time.time()
+            self._persist_locked()
+
     def update(
         self,
         job_id: str,
@@ -278,6 +317,10 @@ class JobStore:
                 self._refresh_locked()
             job = self._jobs[job_id]
             if state is not None:
+                if state == "running" and job.state != "running":
+                    job.started_at = job.started_at or time.time()
+                    job.queued_position = 0
+                    job.eta_seconds_range = []
                 job.state = state
             if stage is not None:
                 job.stage = stage
@@ -291,6 +334,8 @@ class JobStore:
                 job.estimated_prompt_tokens = estimated_prompt_tokens
             if token_risk is not None:
                 job.token_risk = token_risk
+            job.last_progress_at = time.time()
+            job.stalled_retryable = False
             job.updated_at = time.time()
             self._persist_locked()
 
@@ -304,6 +349,11 @@ class JobStore:
             job.message = "Finished."
             job.results = results
             job.notice = notice
+            job.completed_at = time.time()
+            job.queued_position = 0
+            job.eta_seconds_range = []
+            job.last_progress_at = job.completed_at
+            job.stalled_retryable = False
             job.updated_at = time.time()
             self._persist_locked()
 
@@ -327,6 +377,11 @@ class JobStore:
             job.error_category = error_category
             job.error_code = error_code
             job.error_retryable = error_retryable
+            job.completed_at = time.time()
+            job.queued_position = 0
+            job.eta_seconds_range = []
+            job.last_progress_at = job.completed_at
+            job.stalled_retryable = False
             job.updated_at = time.time()
             self._persist_locked()
 
@@ -343,6 +398,12 @@ class JobStore:
         if not job:
             return None
         payload = asdict(job)
+        if payload.get("state") == "running":
+            last_progress_at = float(payload.get("last_progress_at") or payload.get("updated_at") or 0)
+            stalled = bool(last_progress_at and time.time() - last_progress_at > 180)
+            payload["stalled_retryable"] = stalled
+            if stalled:
+                payload["error_retryable"] = True
         payload["progress"] = {
             "stage": job.stage,
             "current": job.current,
@@ -352,6 +413,23 @@ class JobStore:
             "token_risk": job.token_risk,
         }
         return payload
+
+    def p95_duration_seconds(self, action: str, *, default_seconds: int = 212) -> int:
+        with self._lock:
+            self._refresh_locked()
+            durations = []
+            for job in self._jobs.values():
+                if job.action != action or job.state != "completed":
+                    continue
+                started_at = float(job.started_at or job.created_at or 0)
+                completed_at = float(job.completed_at or job.updated_at or 0)
+                if started_at and completed_at and completed_at >= started_at:
+                    durations.append(completed_at - started_at)
+            if not durations:
+                return default_seconds
+            durations.sort()
+            index = min(len(durations) - 1, int(round(0.95 * (len(durations) - 1))))
+            return max(30, int(durations[index]))
 
     def latest_completed_result(self, action: str) -> dict[str, Any] | None:
         with self._lock:
@@ -372,6 +450,119 @@ class JobStore:
                 "job_id": latest.job_id,
                 "generated_at": latest.updated_at,
             }
+
+
+class SourceCodeQAQueryScheduler:
+    def __init__(self, *, job_store: JobStore, max_running: int = 2) -> None:
+        self.job_store = job_store
+        self.max_running = max(1, int(max_running or 2))
+        self._lock = threading.Lock()
+        self._user_queues: dict[str, deque[tuple[str, Flask, dict[str, Any]]]] = {}
+        self._user_order: deque[str] = deque()
+        self._running: set[str] = set()
+        self._running_users: dict[str, int] = {}
+
+    def submit(self, *, app: Flask, job_id: str, payload: dict[str, Any], owner_email: str) -> None:
+        user_key = str(owner_email or "local").strip().lower() or "local"
+        with self._lock:
+            if user_key not in self._user_queues:
+                self._user_queues[user_key] = deque()
+                self._user_order.append(user_key)
+            self._user_queues[user_key].append((job_id, app, dict(payload)))
+            self.job_store.set_owner(job_id, user_key)
+            self._refresh_queue_metadata_locked()
+            self._start_available_locked()
+
+    def finish(self, job_id: str, owner_email: str) -> None:
+        user_key = str(owner_email or "local").strip().lower() or "local"
+        with self._lock:
+            self._running.discard(job_id)
+            if user_key in self._running_users:
+                self._running_users[user_key] = max(0, self._running_users[user_key] - 1)
+                if self._running_users[user_key] <= 0:
+                    self._running_users.pop(user_key, None)
+            self._refresh_queue_metadata_locked()
+            self._start_available_locked()
+
+    def _start_available_locked(self) -> None:
+        while len(self._running) < self.max_running:
+            next_item = self._pop_next_locked()
+            if next_item is None:
+                break
+            user_key, job_id, app, payload = next_item
+            self._running.add(job_id)
+            self._running_users[user_key] = self._running_users.get(user_key, 0) + 1
+            self.job_store.update_queue_metadata(
+                job_id,
+                queued_position=0,
+                eta_seconds_range=[],
+                running_user_count=len(self._running_users),
+                message="Starting Source Code Q&A job.",
+            )
+            thread = threading.Thread(
+                target=self._run_job,
+                args=(app, job_id, payload, user_key),
+                daemon=True,
+            )
+            thread.start()
+        self._refresh_queue_metadata_locked()
+
+    def _pop_next_locked(self) -> tuple[str, str, Flask, dict[str, Any]] | None:
+        self._user_order = deque(user_key for user_key in self._user_order if self._user_queues.get(user_key))
+        if not self._user_order:
+            return None
+        ordered = list(self._user_order)
+        selected_user = min(ordered, key=lambda user_key: (self._running_users.get(user_key, 0), ordered.index(user_key)))
+        self._user_order.remove(selected_user)
+        queue = self._user_queues.get(selected_user)
+        if not queue:
+            self._user_queues.pop(selected_user, None)
+            return None
+        job_id, app, payload = queue.popleft()
+        if queue:
+            self._user_order.append(selected_user)
+        else:
+            self._user_queues.pop(selected_user, None)
+        return selected_user, job_id, app, payload
+
+    def _refresh_queue_metadata_locked(self) -> None:
+        ordered_jobs = self._simulated_round_robin_locked()
+        p95_seconds = self.job_store.p95_duration_seconds("source-code-qa-query", default_seconds=212)
+        for index, (job_id, _user_key) in enumerate(ordered_jobs, start=1):
+            waves_ahead = max(0, (index - 1) // self.max_running)
+            lower = waves_ahead * p95_seconds
+            upper = max(lower + 60, (waves_ahead + 1) * p95_seconds)
+            self.job_store.update_queue_metadata(
+                job_id,
+                queued_position=index,
+                eta_seconds_range=[lower, upper],
+                running_user_count=len(self._running_users),
+                message=f"Queued behind {max(0, index - 1)} Source Code Q&A job(s).",
+            )
+
+    def _simulated_round_robin_locked(self) -> list[tuple[str, str]]:
+        queues = {
+            user_key: deque((job_id, user_key) for job_id, _app, _payload in queue)
+            for user_key, queue in self._user_queues.items()
+            if queue
+        }
+        order = deque(user_key for user_key in self._user_order if user_key in queues)
+        result: list[tuple[str, str]] = []
+        while order:
+            user_key = order.popleft()
+            queue = queues.get(user_key)
+            if not queue:
+                continue
+            result.append(queue.popleft())
+            if queue:
+                order.append(user_key)
+        return result
+
+    def _run_job(self, app: Flask, job_id: str, payload: dict[str, Any], owner_email: str) -> None:
+        try:
+            _run_source_code_qa_query_job(app, job_id, payload)
+        finally:
+            self.finish(job_id, owner_email)
 
 
 class TeamDashboardConfigStore:
@@ -2008,6 +2199,10 @@ def create_app() -> Flask:
     app.config["BPMIS_PROJECT_STORE"] = BPMISProjectStore(config_store.db_path)
     app.config["TEAM_DASHBOARD_CONFIG_STORE"] = TeamDashboardConfigStore(config_store.db_path)
     app.config["JOB_STORE"] = JobStore(data_root / "run" / "jobs.json")
+    app.config["SOURCE_CODE_QA_QUERY_SCHEDULER"] = SourceCodeQAQueryScheduler(
+        job_store=app.config["JOB_STORE"],
+        max_running=settings.source_code_qa_codex_concurrency,
+    )
     app.config["SEATALK_TODO_STORE"] = SeaTalkTodoStore(data_root / "seatalk" / "completed_todos.json")
     app.config["SEATALK_NAME_MAPPING_STORE"] = SeaTalkNameMappingStore(data_root / "seatalk" / "name_overrides.json")
     app.config["SEATALK_DAILY_CACHE_DIR"] = data_root / "seatalk" / "cache"
@@ -2656,13 +2851,10 @@ def create_app() -> Flask:
                         async_payload["_resolved_attachments"] = attachments
                 except ToolError:
                     pass
-            thread = threading.Thread(
-                target=_run_source_code_qa_query_job,
-                args=(app_obj, job.job_id, async_payload),
-                daemon=True,
-            )
-            thread.start()
-            return jsonify({"status": "queued", "job_id": job.job_id, "session_id": session_id})
+            scheduler: SourceCodeQAQueryScheduler = current_app.config["SOURCE_CODE_QA_QUERY_SCHEDULER"]
+            scheduler.submit(app=app_obj, job_id=job.job_id, payload=async_payload, owner_email=owner_email)
+            snapshot = _public_source_code_qa_job_snapshot(job_store.snapshot(job.job_id) or {})
+            return jsonify({**snapshot, "status": "queued", "job_id": job.job_id, "session_id": session_id})
         try:
             if not _source_code_qa_provider_available(payload.get("llm_provider")):
                 raise ToolError("Selected Source Code Q&A model is unavailable.")
@@ -6152,8 +6344,23 @@ def _public_source_code_qa_job_snapshot(snapshot: dict[str, Any]) -> dict[str, A
         "message": snapshot.get("message") or "",
     }
     state = str(payload.get("state") or "")
+    payload["queued_position"] = int(payload.get("queued_position") or 0)
+    payload["eta_seconds_range"] = [
+        max(0, int(value or 0))
+        for value in (payload.get("eta_seconds_range") if isinstance(payload.get("eta_seconds_range"), list) else [])
+    ][:2]
+    payload["running_user_count"] = int(payload.get("running_user_count") or 0)
+    payload["last_progress_at"] = float(payload.get("last_progress_at") or payload.get("updated_at") or 0)
+    if payload.get("stalled_retryable"):
+        payload["error_category"] = payload.get("error_category") or "job_stalled"
+        payload["error_code"] = payload.get("error_code") or "job_stalled_retryable"
+        payload["error_retryable"] = True
     if state == "running":
         payload.setdefault("error_category", "job_running")
+        payload.setdefault("error_code", "")
+        payload.setdefault("error_retryable", True)
+    if state == "queued":
+        payload.setdefault("error_category", "job_queued")
         payload.setdefault("error_code", "")
         payload.setdefault("error_retryable", True)
     if state == "failed":
@@ -6282,6 +6489,16 @@ def _run_source_code_qa_query_job(app: Flask, job_id: str, payload: dict[str, An
                     result["session"] = session_payload
                     result["session_id"] = session_id
             status = str(result.get("status") or "ok")
+            started_at = float((job_store.snapshot(job_id) or {}).get("started_at") or time.time())
+            elapsed_seconds = max(0.0, time.time() - started_at)
+            if elapsed_seconds > 120:
+                current_app.logger.warning(
+                    "source_code_qa_slow_query job_id=%s owner=%s elapsed_seconds=%.1f stage=%s",
+                    job_id,
+                    owner_email,
+                    elapsed_seconds,
+                    str((job_store.snapshot(job_id) or {}).get("stage") or ""),
+                )
             job_store.complete(
                 job_id,
                 results=[result],

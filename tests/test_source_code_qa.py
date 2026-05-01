@@ -5,6 +5,7 @@ from datetime import date, timedelta
 from pathlib import Path
 import sqlite3
 import tempfile
+import threading
 import time
 import unittest
 import zipfile
@@ -22,7 +23,7 @@ from bpmis_jira_tool.source_code_qa import (
     VertexAISourceCodeQALLMProvider,
 )
 from bpmis_jira_tool.user_config import TEAM_PROFILE_DEFAULTS
-from bpmis_jira_tool.web import JobStore, SourceCodeQASessionStore, create_app
+from bpmis_jira_tool.web import JobStore, SourceCodeQAQueryScheduler, SourceCodeQASessionStore, create_app
 from scripts.promote_source_code_qa_eval_candidates import promote_candidates
 from scripts.run_source_code_qa_evals import _build_fixture_repositories, _evaluate_case, _guard_fixture_data_root
 from scripts.source_code_qa_feedback_to_eval import build_eval_candidates
@@ -1139,13 +1140,50 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertEqual(snapshot["stage"], "failed")
         self.assertIn("interrupted by a server restart", snapshot["error"])
 
+    def test_source_code_qa_scheduler_fairly_rotates_between_users(self):
+        path = Path(self.temp_dir.name) / "run" / "jobs.json"
+        store = JobStore(path)
+        scheduler = SourceCodeQAQueryScheduler(job_store=store, max_running=2)
+        jobs = [store.create("source-code-qa-query", f"job-{index}") for index in range(4)]
+        release_events = {job.job_id: threading.Event() for job in jobs}
+        started: list[str] = []
+
+        def fake_run(_app, job_id, _payload):
+            started.append(job_id)
+            store.update(job_id, state="running", stage="test", message="running")
+            release_events[job_id].wait(timeout=2)
+            store.complete(job_id, results=[{"status": "ok"}], notice={"summary": "done"})
+
+        with patch("bpmis_jira_tool.web._run_source_code_qa_query_job", side_effect=fake_run):
+            scheduler.submit(app=self.app, job_id=jobs[0].job_id, payload={}, owner_email="a@npt.sg")
+            scheduler.submit(app=self.app, job_id=jobs[1].job_id, payload={}, owner_email="a@npt.sg")
+            scheduler.submit(app=self.app, job_id=jobs[2].job_id, payload={}, owner_email="a@npt.sg")
+            scheduler.submit(app=self.app, job_id=jobs[3].job_id, payload={}, owner_email="b@npt.sg")
+            self.assertEqual(started[:2], [jobs[0].job_id, jobs[1].job_id])
+            release_events[jobs[0].job_id].set()
+            for _ in range(20):
+                if jobs[3].job_id in started:
+                    break
+                time.sleep(0.05)
+            for event in release_events.values():
+                event.set()
+            for _ in range(20):
+                snapshots = [store.snapshot(job.job_id) for job in jobs]
+                if all(snapshot and snapshot.get("state") == "completed" for snapshot in snapshots):
+                    break
+                time.sleep(0.05)
+
+        self.assertIn(jobs[3].job_id, started[:3])
+        self.assertNotEqual(started[:3], [jobs[0].job_id, jobs[1].job_id, jobs[2].job_id])
+
     def test_feedback_api_saves_user_signal(self):
         with self.app.test_client() as client:
             self._login(client, "teammate@npt.sg")
             response = client.post(
                 "/api/source-code-qa/feedback",
                 json={
-                    "rating": "too_vague",
+                    "rating": "incorrect",
+                    "reason": "opposite_logic",
                     "pm_team": "AF",
                     "country": "All",
                     "question": "where is createIssue",
@@ -1175,7 +1213,8 @@ class SourceCodeQARouteTests(unittest.TestCase):
         feedback_path = Path(self.temp_dir.name) / "source_code_qa" / "feedback.jsonl"
         self.assertTrue(feedback_path.exists())
         feedback = json.loads(feedback_path.read_text(encoding="utf-8").strip())
-        self.assertEqual(feedback["rating"], "too_vague")
+        self.assertEqual(feedback["rating"], "incorrect")
+        self.assertEqual(feedback["reason"], "opposite_logic")
         self.assertEqual(feedback["trace_id"], "trace-123")
         self.assertEqual(feedback["replay_context"]["answer_contract"]["status"], "satisfied")
         self.assertEqual(feedback["replay_context"]["matches_snapshot"][0]["path"], "controller/IssueController.java")

@@ -10,7 +10,7 @@ from typing import Any
 from bpmis_jira_tool.config import Settings
 
 
-NEGATIVE_FEEDBACK_RATINGS = {"not_useful", "wrong_file", "too_vague", "hallucinated", "missing_repo", "needs_deeper_trace"}
+NEGATIVE_FEEDBACK_RATINGS = {"not_useful", "wrong_file", "too_vague", "hallucinated", "missing_repo", "needs_deeper_trace", "incorrect", "missing_evidence", "stale_code"}
 REVIEW_ONLY_RATINGS = NEGATIVE_FEEDBACK_RATINGS
 
 
@@ -88,6 +88,7 @@ def build_eval_candidates(records: list[dict[str, Any]], *, include_useful: bool
             "answer_mode": "retrieval_only",
             "required_terms": [],
             "source_feedback_rating": rating,
+            "source_feedback_reason": str(record.get("reason") or "").strip(),
             "comment": str(record.get("comment") or "").strip()[:500],
             "source_feedback_timestamp": str(record.get("timestamp") or "").strip(),
             "observed_paths": observed_paths[:8],

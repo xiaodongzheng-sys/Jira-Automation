@@ -6517,6 +6517,18 @@ select:focus {
   margin-bottom: 14px;
 }
 
+.source-qa-feedback-reasons {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: -6px 0 14px;
+  padding: 10px;
+  border: 1px solid #dbeafe;
+  border-radius: 12px;
+  background: #eff6ff;
+}
+
 .source-qa-evidence {
   display: grid;
   gap: 12px;

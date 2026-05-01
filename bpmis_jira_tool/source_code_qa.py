@@ -4358,14 +4358,26 @@ class SourceCodeQAService:
 
     def save_feedback(self, *, user_email: str, payload: dict[str, Any]) -> dict[str, Any]:
         rating = str(payload.get("rating") or "").strip().lower()
-        if rating not in {"useful", "not_useful", "wrong_file", "too_vague", "hallucinated", "missing_repo", "needs_deeper_trace"}:
+        if rating not in {"useful", "not_useful", "wrong_file", "too_vague", "hallucinated", "missing_repo", "needs_deeper_trace", "incorrect", "missing_evidence", "stale_code"}:
             raise ToolError("Unknown feedback rating.")
         question = str(payload.get("question") or "").strip()
         replay_context = self._feedback_replay_context(payload)
+        reason = str(payload.get("reason") or "").strip()
+        allowed_reasons = {
+            "",
+            "deprecated_class",
+            "opposite_logic",
+            "off_topic",
+            "missing_key_flow",
+            "wrong_scope",
+        }
+        if reason not in allowed_reasons:
+            raise ToolError("Unknown feedback reason.")
         record = {
             "timestamp": self._now_iso(),
             "user_email": str(user_email or "").strip().lower(),
             "rating": rating,
+            "reason": reason,
             "pm_team": str(payload.get("pm_team") or "").strip().upper(),
             "country": str(payload.get("country") or "").strip(),
             "trace_id": replay_context.get("trace_id") or str(payload.get("trace_id") or "").strip(),
@@ -14522,6 +14534,7 @@ class SourceCodeQAService:
                 "structured_answer": cached_final["structured_answer"],
                 "answer_contract": cached_final["answer_contract"],
                 "evidence_pack": evidence_pack,
+                "cache_metadata": self._answer_cache_metadata(cache_key, cached),
             }
         draft_answer = ""
         draft_usage: dict[str, Any] = {}
@@ -14737,6 +14750,7 @@ class SourceCodeQAService:
                 "structured_answer": structured_answer,
                 "answer_contract": answer_contract,
                 "evidence_pack": evidence_pack,
+                "cache_metadata": self._answer_cache_metadata(cache_key),
             }
         if self._finish_reason_needs_generation_repair(finish_reason):
             issues = list(answer_check.get("issues") or [])
@@ -14942,6 +14956,7 @@ class SourceCodeQAService:
             "structured_answer": structured_answer,
             "answer_contract": answer_contract,
             "evidence_pack": evidence_pack,
+            "cache_metadata": self._answer_cache_metadata(cache_key),
         }
 
     def _build_codex_llm_answer(
@@ -15087,6 +15102,7 @@ class SourceCodeQAService:
                 "answer_contract": answer_contract,
                 "evidence_pack": evidence_pack,
                 "codex_cli_summary": cached_summary,
+                "cache_metadata": self._answer_cache_metadata(cache_key, cached),
             }
         codex_cli_session_id = ""
         if self.codex_session_mode == CODEX_SESSION_MODE_RESUME and isinstance(followup_context, dict):
@@ -15305,6 +15321,7 @@ class SourceCodeQAService:
             "evidence_pack": evidence_pack,
             "codex_cli_summary": codex_cli_summary,
             "codex_cli_trace": codex_cli_trace,
+            "cache_metadata": self._answer_cache_metadata(cache_key),
         }
 
     def _codex_deep_investigation_needed(
@@ -17632,12 +17649,13 @@ class SourceCodeQAService:
         return deduped[:36]
 
     def _answer_cache_key(self, *, provider: str, model: str, question: str, answer_mode: str, llm_budget_mode: str, context: str) -> str:
+        normalized_question = " ".join(str(question or "").strip().lower().split())
         digest = hashlib.sha1(
             json.dumps(
                 {
                     "provider": provider,
                     "model": model,
-                    "question": question,
+                    "question": normalized_question,
                     "answer_mode": answer_mode,
                     "llm_budget_mode": llm_budget_mode,
                     "versions": self._llm_versions(),
@@ -17665,6 +17683,19 @@ class SourceCodeQAService:
             return None
         return payload
 
+    @staticmethod
+    def _answer_cache_metadata(key: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        payload = payload if isinstance(payload, dict) else {}
+        return {
+            "cache_key": key,
+            "cached_at": payload.get("stored_at") or "",
+            "generated_at": payload.get("stored_at") or "",
+            "expire_at": payload.get("expire_at") or 0,
+            "provider": payload.get("provider") or "",
+            "model": payload.get("model") or "",
+            "source": "answer_cache",
+        }
+
     def _store_cached_answer(
         self,
         key: str,
@@ -17682,6 +17713,7 @@ class SourceCodeQAService:
             "versions": self._llm_versions(),
             "provider": provider,
             "model": model,
+            "stored_at": self._now_iso(),
             "thinking_budget": int(thinking_budget or 0),
             "finish_reason": str(finish_reason or ""),
             "answer": answer,

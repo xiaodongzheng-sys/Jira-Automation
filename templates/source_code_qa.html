@@ -133,11 +133,19 @@
           <div class="source-qa-evidence-summary" data-source-evidence-summary hidden></div>
           <div class="source-qa-debug-trace" data-source-debug-trace hidden></div>
           <div class="source-qa-feedback" data-source-feedback hidden>
-            <button class="button button-secondary" type="button" data-source-feedback-rating="useful">Useful</button>
-            <button class="button button-secondary" type="button" data-source-feedback-rating="wrong_file">Wrong File</button>
-            <button class="button button-secondary" type="button" data-source-feedback-rating="too_vague">Too Vague</button>
-            <button class="button button-secondary" type="button" data-source-feedback-rating="needs_deeper_trace">Needs Deeper Trace</button>
+            <button class="button button-secondary" type="button" data-source-feedback-rating="useful">有帮助</button>
+            <button class="button button-secondary" type="button" data-source-feedback-rating="incorrect">答案不准</button>
+            <button class="button button-secondary" type="button" data-source-feedback-rating="missing_evidence">缺少代码证据</button>
+            <button class="button button-secondary" type="button" data-source-feedback-rating="stale_code">代码已过期</button>
+            <button class="button button-secondary" type="button" data-source-copy-answer>复制带引用答案</button>
             <span class="microcopy" data-source-feedback-status></span>
+          </div>
+          <div class="source-qa-feedback-reasons" data-source-feedback-reasons hidden>
+            <button class="button button-secondary" type="button" data-source-feedback-reason="deprecated_class">引用了已废弃类</button>
+            <button class="button button-secondary" type="button" data-source-feedback-reason="opposite_logic">逻辑与实际表现相反</button>
+            <button class="button button-secondary" type="button" data-source-feedback-reason="off_topic">答非所问</button>
+            <button class="button button-secondary" type="button" data-source-feedback-reason="missing_key_flow">缺少关键链路</button>
+            <button class="button button-secondary" type="button" data-source-feedback-reason="wrong_scope">国家/团队范围错了</button>
           </div>
           <div class="source-qa-results" data-source-results>
             <div class="source-qa-empty">Ask a question to generate an answer. Retrieval details stay in the background unless Codex is unavailable.</div>

@@ -13,7 +13,7 @@ from typing import Any
 from bpmis_jira_tool.config import Settings
 
 
-NEGATIVE_RATINGS = {"not_useful", "wrong_file", "too_vague", "hallucinated", "missing_repo", "needs_deeper_trace"}
+NEGATIVE_RATINGS = {"not_useful", "wrong_file", "too_vague", "hallucinated", "missing_repo", "needs_deeper_trace", "incorrect", "missing_evidence", "stale_code"}
 TELEMETRY_REVIEW_STATUSES = {"no_match", "weak_question", "empty_config", "error"}
 
 
@@ -77,8 +77,9 @@ def build_review_queue(data_root: Path, *, limit: int = 500) -> list[dict[str, A
         item = {
             "id": _stable_id("feedback", trace_id, record.get("question_sha1"), rating),
             "source": "feedback",
-            "priority": "high" if rating in {"wrong_file", "hallucinated", "missing_repo"} else "medium",
+            "priority": "high" if rating in {"wrong_file", "hallucinated", "missing_repo", "incorrect", "missing_evidence", "stale_code"} else "medium",
             "rating": rating,
+            "reason": str(record.get("reason") or "").strip(),
             "pm_team": str(record.get("pm_team") or "").strip(),
             "country": str(record.get("country") or "All").strip() or "All",
             "question": str(record.get("question_preview") or "").strip(),

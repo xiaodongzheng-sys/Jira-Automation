@@ -70,7 +70,7 @@ class ConfigTests(unittest.TestCase):
         self.assertTrue(settings.source_code_qa_llm_judge_enabled)
         self.assertEqual(settings.source_code_qa_llm_timeout_seconds, 90)
         self.assertEqual(settings.source_code_qa_codex_timeout_seconds, 240)
-        self.assertEqual(settings.source_code_qa_codex_concurrency, 1)
+        self.assertEqual(settings.source_code_qa_codex_concurrency, 2)
         self.assertEqual(settings.source_code_qa_codex_top_path_limit, 30)
         self.assertTrue(settings.source_code_qa_codex_repair_enabled)
         self.assertEqual(settings.source_code_qa_codex_session_mode, "ephemeral")

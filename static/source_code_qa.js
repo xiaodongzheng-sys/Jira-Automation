@@ -42,7 +42,9 @@
   const fallbackNotice = document.querySelector('[data-source-fallback-notice]');
   const liveAnswer = document.querySelector('[data-source-live-answer]');
   const feedback = document.querySelector('[data-source-feedback]');
+  const feedbackReasons = document.querySelector('[data-source-feedback-reasons]');
   const feedbackStatus = document.querySelector('[data-source-feedback-status]');
+  const copyAnswerButton = document.querySelector('[data-source-copy-answer]');
   const evidenceSummary = document.querySelector('[data-source-evidence-summary]');
   const debugTrace = document.querySelector('[data-source-debug-trace]');
   const indexHealth = document.querySelector('[data-source-index-health]');
@@ -87,7 +89,16 @@
   let nextAttachmentUploadToken = 0;
   let attachmentPreview = null;
   let activeQueryControl = null;
+  let pendingFeedbackRating = '';
+  let notificationPermissionAsked = (() => {
+    try {
+      return window.localStorage.getItem('source-code-qa:notification-permission-asked:v1') === '1';
+    } catch (_error) {
+      return false;
+    }
+  })();
   const preferenceKey = 'source-code-qa:last-query-config:v1';
+  const notificationPreferenceKey = 'source-code-qa:notification-permission-asked:v1';
 
   const setSourceView = (view) => {
     const nextView = view === 'admin' && canManage ? 'admin' : 'chat';
@@ -147,6 +158,12 @@
     }
     if (category === 'job_running') {
       return '后台仍在分析代码，连接刚才中断了。点击 Reconnect 恢复状态。';
+    }
+    if (category === 'job_queued') {
+      return '任务已进入队列，后台会按用户公平轮转调度。';
+    }
+    if (category === 'job_stalled') {
+      return '后台任务暂时没有进展，可能仍在 Codex 推理。可以 Reconnect 或 Retry。';
     }
     if (category === 'job_not_found') {
       return '这个后台任务状态已经找不到了，请重新提交问题。';
@@ -234,6 +251,42 @@
   const formatElapsed = (startedAt) => {
     const seconds = Math.max(0, (performance.now() - startedAt) / 1000);
     return seconds < 10 ? `${seconds.toFixed(1)}s` : `${Math.round(seconds)}s`;
+  };
+  const formatDuration = (seconds) => {
+    const value = Math.max(0, Number(seconds || 0));
+    if (value < 60) return `${Math.round(value)} 秒`;
+    return `${Math.max(1, Math.round(value / 60))} 分钟`;
+  };
+  const formatEtaRange = (range) => {
+    if (!Array.isArray(range) || range.length < 2) return '';
+    const lower = Number(range[0] || 0);
+    const upper = Number(range[1] || 0);
+    if (upper <= 0) return '即将开始';
+    return `预计等待约 ${formatDuration(lower)}-${formatDuration(upper)}`;
+  };
+  const notificationSupported = () => 'Notification' in window;
+  const requestNotificationPermission = async () => {
+    if (!notificationSupported() || Notification.permission !== 'default') return;
+    if (notificationPermissionAsked) return;
+    notificationPermissionAsked = true;
+    try {
+      window.localStorage.setItem(notificationPreferenceKey, '1');
+    } catch (_error) {
+      // Ignore storage failures; permission itself is the source of truth.
+    }
+    try {
+      await Notification.requestPermission();
+    } catch (_error) {
+      // Notification permission prompts can be blocked by browser policy.
+    }
+  };
+  const notifyJobFinished = (title, body) => {
+    if (!notificationSupported() || Notification.permission !== 'granted') return;
+    try {
+      new Notification(title, { body });
+    } catch (_error) {
+      // Notifications are best-effort and must not block the chat flow.
+    }
   };
   const formatAttachmentSize = (bytes) => {
     const size = Number(bytes || 0);
@@ -604,11 +657,13 @@
     sessionList.innerHTML = visibleSessions.map((item) => {
       const activeClass = item.id === activeSessionId ? ' is-active' : '';
       const scope = [item.pm_team || '', item.country || 'All', providerLabel(item.llm_provider)].filter(Boolean).join(' · ');
+      const pending = pendingJobFromSession(item);
+      const stateLabel = pending?.jobId ? ' · queued/running' : '';
       return `
         <div class="source-qa-session-row${activeClass}">
           <button class="source-qa-session-item" type="button" data-source-session-id="${escapeHtml(item.id)}">
             <span>${escapeHtml(item.title || 'New Source Code Chat')}</span>
-            <small>${escapeHtml(scope)} · ${escapeHtml(formatSessionTime(item.updated_at))}</small>
+            <small>${escapeHtml(scope)} · ${escapeHtml(formatSessionTime(item.updated_at))}${escapeHtml(stateLabel)}</small>
           </button>
           <button class="source-qa-session-archive" type="button" data-source-session-archive="${escapeHtml(item.id)}" aria-label="Archive chat">Archive</button>
         </div>
@@ -1709,6 +1764,9 @@
         ? `Running current question: ${trimmedQuestion.slice(0, 180)}${trimmedQuestion.length > 180 ? '...' : ''}`
         : 'Running current question.';
     }
+    if (queryStatus && notificationSupported()) {
+      queryStatus.textContent = '请保持当前标签页开启以接收通知。';
+    }
     if (results) {
       results.hidden = true;
       results.innerHTML = '';
@@ -1725,6 +1783,7 @@
     renderEvidenceSummary(null);
     renderDebugTrace(null);
     if (feedback) feedback.hidden = true;
+    if (feedbackReasons) feedbackReasons.hidden = true;
     if (feedbackStatus) feedbackStatus.textContent = '';
   };
 
@@ -1813,7 +1872,9 @@
     if (activeCache) {
       if (llmAnswered) {
         activeCache.hidden = false;
-        activeCache.textContent = payload?.llm_cached ? 'cache hit' : 'live LLM';
+        const cacheMeta = payload?.cache_metadata || {};
+        const cachedAt = cacheMeta.cached_at ? ` · ${formatSessionTime(cacheMeta.cached_at)}` : '';
+        activeCache.textContent = payload?.llm_cached ? `cache hit${cachedAt}` : 'live LLM';
       } else {
         activeCache.hidden = true;
         activeCache.textContent = 'live';
@@ -1833,10 +1894,24 @@
   };
 
   const applyQueryJobStatus = (payload, progress) => {
+    const etaText = payload.queued_position
+      ? `排队第 ${payload.queued_position} 位${payload.eta_seconds_range?.length ? `，${formatEtaRange(payload.eta_seconds_range)}` : ''}`
+      : '';
+    const stageLabels = {
+      queued: '排队中',
+      auto_sync: '同步检查',
+      evidence_pack: '构建证据',
+      llm_generation: 'Codex 推理',
+      codex_session_lock: '等待 Codex 会话',
+      codex_deep_investigation: '补充深挖',
+      completed: '质量校验完成',
+    };
+    const stageLabel = stageLabels[payload.stage] || '';
     const progressText = payload.total
-      ? `${payload.message || 'Processing source-code question.'} (${payload.current || 0}/${payload.total})`
-      : (payload.message || 'Processing source-code question.');
-    progress?.setMessage(progressText);
+      ? `${stageLabel ? `${stageLabel}: ` : ''}${payload.message || 'Processing source-code question.'} (${payload.current || 0}/${payload.total})`
+      : `${stageLabel ? `${stageLabel}: ` : ''}${payload.message || 'Processing source-code question.'}`;
+    const stalledText = payload.stalled_retryable ? ' 后台超过 3 分钟无新进展，可重连或重试。' : '';
+    progress?.setMessage([progressText, etaText, stalledText].filter(Boolean).join(' '));
     if (payload.stage === 'codex_stream' && payload.message) {
       renderLiveAnswer(payload.message, { title: 'Codex Live', meta: 'streaming CLI output', jobId: payload.job_id });
     }
@@ -1958,6 +2033,7 @@
       }
       conversationContext = buildConversationContext(payload, question || conversationContext?.question || '');
       if (queryStatus) queryStatus.textContent = `Reconnected and completed in ${formatElapsed(progress.startedAt)}.`;
+      notifyJobFinished('Source Code Q&A completed', (question || payload.summary || 'Your code question is ready.').slice(0, 180));
       renderUsageBadges(payload);
       renderFallbackNotice(payload);
       renderStatus(payload.repo_status || []);
@@ -1974,6 +2050,7 @@
       }
       const message = sourceQaJobErrorMessage(error.jobPayload || error);
       if (queryStatus) queryStatus.textContent = `${message} elapsed ${formatElapsed(progress.startedAt)}`;
+      notifyJobFinished('Source Code Q&A failed', (question || message).slice(0, 180));
       renderLiveAnswer(message, {
         title: 'Codex Live',
         meta: 'status disconnected',
@@ -2025,6 +2102,7 @@
       updateQueryButtonState(false);
       return;
     }
+    requestNotificationPermission();
     const queryControl = { stopped: false, jobId: '', question: submittedQuestion };
     activeQueryControl = queryControl;
     updateQueryButtonState(true);
@@ -2056,6 +2134,7 @@
       if (queryControl.stopped) return;
       if (initialPayload.job_id) {
         queryControl.jobId = initialPayload.job_id;
+        applyQueryJobStatus(initialPayload, progress);
       }
       const payload = initialPayload.status === 'queued' && initialPayload.job_id
         ? await runQueryJob(initialPayload.job_id, progress, queryControl)
@@ -2082,6 +2161,7 @@
           ? `Search completed in ${formatElapsed(progress.startedAt)}.`
           : `${payload.status} after ${formatElapsed(progress.startedAt)}.`;
       }
+      notifyJobFinished('Source Code Q&A completed', submittedQuestion.slice(0, 180));
       if (activeMode) activeMode.textContent = payload.answer_mode || effectiveAnswerMode;
       renderUsageBadges(payload);
       renderFallbackNotice(payload);
@@ -2101,6 +2181,7 @@
       if (feedback) {
         feedback.hidden = payload.status !== 'ok';
       }
+      if (feedbackReasons) feedbackReasons.hidden = true;
       if (feedbackStatus) {
         feedbackStatus.textContent = '';
       }
@@ -2111,6 +2192,7 @@
       }
       const message = sourceQaJobErrorMessage(error.jobPayload || error);
       if (queryStatus) queryStatus.textContent = `${message} elapsed ${formatElapsed(progress.startedAt)}`;
+      notifyJobFinished('Source Code Q&A failed', submittedQuestion.slice(0, 180) || message);
       renderUsageBadges({});
       renderFallbackNotice({});
       if (selectedProvider === 'codex_cli_bridge') {
@@ -2128,6 +2210,7 @@
       renderEvidenceSummary(null);
       renderDebugTrace(null);
       if (feedback) feedback.hidden = true;
+      if (feedbackReasons) feedbackReasons.hidden = true;
     } finally {
       stopQueryProgress();
       if (activeQueryControl === queryControl) {
@@ -2137,7 +2220,15 @@
     }
   };
 
-  const sendFeedback = async (rating) => {
+  const feedbackReasonLabels = {
+    deprecated_class: '引用了已废弃类',
+    opposite_logic: '逻辑与实际表现相反',
+    off_topic: '答非所问',
+    missing_key_flow: '缺少关键链路',
+    wrong_scope: '国家/团队范围错了',
+  };
+
+  const sendFeedback = async (rating, reason = '') => {
     if (!lastPayload || !feedbackUrl) return;
     if (feedbackStatus) feedbackStatus.textContent = 'Saving feedback...';
     try {
@@ -2146,6 +2237,8 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           rating,
+          reason,
+          comment: reason ? feedbackReasonLabels[reason] || reason : '',
           pm_team: pmTeam.value,
           country: currentCountry(),
           question: lastPayload.original_question || conversationContext?.question || questionInput.value,
@@ -2158,8 +2251,29 @@
         }),
       }).then(readJson);
       if (feedbackStatus) feedbackStatus.textContent = 'Feedback saved.';
+      pendingFeedbackRating = '';
+      if (feedbackReasons) feedbackReasons.hidden = true;
     } catch (error) {
       if (feedbackStatus) feedbackStatus.textContent = error.message || 'Feedback failed.';
+    }
+  };
+
+  const copyAnswerWithCitations = async () => {
+    if (!lastPayload) return;
+    const answer = finalAnswerTextFromPayload(lastPayload) || lastPayload.summary || '';
+    const citations = (lastPayload.citations || lastPayload.matches || [])
+      .slice(0, 8)
+      .map((item) => {
+        if (typeof item === 'string') return item;
+        return [item.repo, item.path, item.line_start ? `L${item.line_start}` : ''].filter(Boolean).join(':');
+      })
+      .filter(Boolean);
+    const text = `${answer}${citations.length ? `\n\nReferences:\n${citations.map((item) => `- ${item}`).join('\n')}` : ''}`;
+    try {
+      await navigator.clipboard.writeText(text);
+      if (feedbackStatus) feedbackStatus.textContent = 'Answer copied with citations.';
+    } catch (_error) {
+      if (feedbackStatus) feedbackStatus.textContent = 'Copy failed. Please copy from the answer manually.';
     }
   };
 
@@ -2194,6 +2308,7 @@
       renderEvidenceSummary(null);
       renderDebugTrace(null);
       if (feedback) feedback.hidden = true;
+      if (feedbackReasons) feedbackReasons.hidden = true;
       if (queryStatus) queryStatus.textContent = 'New chat ready.';
     } catch (error) {
       if (queryStatus) queryStatus.textContent = error.message || 'Could not start a new chat.';
@@ -2260,8 +2375,23 @@
     }
   });
   document.querySelectorAll('[data-source-feedback-rating]').forEach((button) => {
-    button.addEventListener('click', () => sendFeedback(button.dataset.sourceFeedbackRating));
+    button.addEventListener('click', () => {
+      const rating = button.dataset.sourceFeedbackRating || '';
+      if (rating === 'incorrect') {
+        pendingFeedbackRating = rating;
+        if (feedbackReasons) feedbackReasons.hidden = false;
+        if (feedbackStatus) feedbackStatus.textContent = '请选择一个原因标签；也可以直接点其它反馈按钮。';
+        return;
+      }
+      sendFeedback(rating);
+    });
   });
+  document.querySelectorAll('[data-source-feedback-reason]').forEach((button) => {
+    button.addEventListener('click', () => {
+      sendFeedback(pendingFeedbackRating || 'incorrect', button.dataset.sourceFeedbackReason || '');
+    });
+  });
+  copyAnswerButton?.addEventListener('click', copyAnswerWithCitations);
 
   setSourceView('chat');
   restoreLastQueryConfig();
