@@ -632,6 +632,67 @@ class GmailDashboardServiceTests(unittest.TestCase):
         self.assertIn("message bodies were truncated", content)
         self.assertIn("[body truncated]", content)
 
+    def test_export_thread_history_excludes_self_sent_daily_briefs(self):
+        since = datetime(2026, 5, 1, 8, 0).astimezone()
+        now = datetime(2026, 5, 1, 13, 0).astimezone()
+        thread_query = _build_thread_export_query(since, now)
+        list_payloads = {
+            (thread_query, None): {
+                "messages": [{"id": "brief", "threadId": "daily"}, {"id": "keep", "threadId": "project"}],
+            },
+        }
+        message_payloads = {}
+        thread_payloads = {
+            "daily": {
+                "messages": [
+                    {
+                        "id": "brief",
+                        "threadId": "daily",
+                        "internalDate": str(int(datetime(2026, 5, 1, 12, 30).timestamp() * 1000)),
+                        "labelIds": ["SENT"],
+                        "payload": {
+                            "headers": [
+                                {"name": "From", "value": "Xiaodong Zheng <xiaodong.zheng@npt.sg>"},
+                                {"name": "To", "value": "xiaodong.zheng@npt.sg"},
+                                {"name": "Subject", "value": "Daily Brief - 2026-05-01"},
+                            ],
+                            "parts": [{"mimeType": "text/plain", "body": {"data": base64.urlsafe_b64encode(b"Repeated brief item").decode("utf-8")}}],
+                        },
+                    }
+                ],
+            },
+            "project": {
+                "messages": [
+                    {
+                        "id": "keep",
+                        "threadId": "project",
+                        "internalDate": str(int(datetime(2026, 5, 1, 10, 0).timestamp() * 1000)),
+                        "labelIds": ["INBOX"],
+                        "payload": {
+                            "headers": [
+                                {"name": "From", "value": "Alice Example <alice@example.com>"},
+                                {"name": "To", "value": "xiaodong.zheng@npt.sg"},
+                                {"name": "Subject", "value": "Project update"},
+                            ],
+                            "parts": [{"mimeType": "text/plain", "body": {"data": base64.urlsafe_b64encode(b"Fresh project signal").decode("utf-8")}}],
+                        },
+                    }
+                ],
+            },
+        }
+        service = GmailDashboardService(
+            credentials=object(),
+            gmail_service=_FakeGmailService(list_payloads, message_payloads, thread_payloads),
+        )
+
+        content = service.export_thread_history_since(since=since, now=now)
+
+        self.assertIn("Subject: Project update", content)
+        self.assertIn("Fresh project signal", content)
+        self.assertNotIn("Subject: Daily Brief - 2026-05-01", content)
+        self.assertNotIn("Repeated brief item", content)
+        self.assertNotIn("Thread ID: daily", content)
+
     def test_export_manifest_and_batching_exclude_configured_senders(self):
         now = datetime(2026, 4, 21, 16, 0).astimezone()
         period_start = datetime.combine(now.date() - timedelta(days=6), datetime.min.time(), tzinfo=now.tzinfo)

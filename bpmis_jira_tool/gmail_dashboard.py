@@ -76,6 +76,9 @@ GMAIL_EXPORT_CALENDAR_SUBJECT_HINTS = (
     "invitation:",
     "updated invitation:",
 )
+GMAIL_EXPORT_SELF_DAILY_BRIEF_SENDERS = (
+    "xiaodong.zheng@npt.sg",
+)
 
 
 @dataclass
@@ -267,6 +270,8 @@ def _clean_export_body_text(value: str) -> str:
 def _is_export_noise(headers: dict[str, str]) -> bool:
     sender = _first_contact_address(headers.get("from", ""))
     subject = str(headers.get("subject") or "").strip().lower()
+    if sender in GMAIL_EXPORT_SELF_DAILY_BRIEF_SENDERS and subject.startswith("daily brief"):
+        return True
     if sender in GMAIL_EXPORT_EXCLUDED_SENDERS:
         return True
     if sender == "drive-shares-dm-noreply@google.com":
