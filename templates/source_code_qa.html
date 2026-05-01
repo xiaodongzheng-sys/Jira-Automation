@@ -42,7 +42,7 @@
               <option value="{{ country }}">{{ country }}</option>
             {% endfor %}
           </select>
-          <small class="field-help">AF/GRC code uses shared repos; country selects runtime evidence.</small>
+          <small class="field-help" data-source-country-help>AF/GRC code uses shared repos; country selects runtime evidence.</small>
         </label>
         <label class="field-group">
           <span>Model</span>
@@ -51,6 +51,14 @@
               <option value="{{ provider.value }}" {% if provider.disabled %}disabled{% endif %}>{{ provider.label }}</option>
             {% endfor %}
           </select>
+        </label>
+        <label class="field-group">
+          <span>Answer Speed</span>
+          <select data-source-query-mode>
+            <option value="fast" selected>快速模式 · &lt;1 min</option>
+            <option value="deep">深度模式 · 2-6 min</option>
+          </select>
+          <small class="field-help" data-source-query-mode-help>目标：不排队时 1 分钟内返回第一版答案。</small>
         </label>
       </div>
       <div class="source-qa-status" data-source-config-status>

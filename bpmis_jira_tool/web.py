@@ -185,6 +185,7 @@ class JobState:
     error_code: str = ""
     error_retryable: bool = False
     owner_email: str = ""
+    query_mode: str = ""
     queued_position: int = 0
     eta_seconds_range: list[int] = field(default_factory=list)
     running_user_count: int = 0
@@ -276,6 +277,15 @@ class JobStore:
                 self._refresh_locked()
             job = self._jobs[job_id]
             job.owner_email = str(owner_email or "").strip().lower()
+            job.updated_at = time.time()
+            self._persist_locked()
+
+    def set_query_mode(self, job_id: str, query_mode: str) -> None:
+        with self._lock:
+            if job_id not in self._jobs:
+                self._refresh_locked()
+            job = self._jobs[job_id]
+            job.query_mode = str(query_mode or "").strip().lower()
             job.updated_at = time.time()
             self._persist_locked()
 
@@ -470,6 +480,7 @@ class SourceCodeQAQueryScheduler:
                 self._user_order.append(user_key)
             self._user_queues[user_key].append((job_id, app, dict(payload)))
             self.job_store.set_owner(job_id, user_key)
+            self.job_store.set_query_mode(job_id, _source_code_qa_query_mode(payload.get("query_mode")))
             self._refresh_queue_metadata_locked()
             self._start_available_locked()
 
@@ -2565,6 +2576,7 @@ def create_app() -> Flask:
                 {
                     "status": "ok",
                     "answer_mode": "auto",
+                    "query_mode": "fast",
                     "can_manage": _can_manage_source_code_qa(settings),
                     "auth": _source_code_qa_auth_payload(settings),
                     "git_auth_ready": _source_code_qa_git_auth_ready(service, settings),
@@ -2831,6 +2843,7 @@ def create_app() -> Flask:
             job = job_store.create("source-code-qa-query", title="Source Code Q&A Query")
             app_obj = current_app._get_current_object()
             async_payload = dict(payload)
+            async_payload["query_mode"] = _source_code_qa_query_mode(payload.get("query_mode"))
             owner_email = _current_google_email() or "local"
             async_payload["_session_owner_email"] = owner_email
             session_id = str(payload.get("session_id") or "").strip()
@@ -2871,6 +2884,7 @@ def create_app() -> Flask:
                 attachments = _resolve_source_code_qa_query_attachments(payload, owner_email=owner_email, session_id=session_id)
             pm_team = str(payload.get("pm_team") or "")
             country = str(payload.get("country") or "")
+            query_mode = _source_code_qa_query_mode(payload.get("query_mode"))
             runtime_evidence = _resolve_source_code_qa_runtime_evidence(pm_team=pm_team, country=country)
             auto_sync = _prepare_source_code_qa_auto_sync(service, pm_team=pm_team, country=country)
             def run_query() -> dict[str, Any]:
@@ -2879,7 +2893,8 @@ def create_app() -> Flask:
                     country=country,
                     question=str(payload.get("question") or ""),
                     answer_mode=_source_code_qa_public_answer_mode(payload.get("answer_mode")),
-                    llm_budget_mode="auto",
+                    llm_budget_mode="fast" if query_mode == "fast" else "auto",
+                    query_mode=query_mode,
                     conversation_context=conversation_context,
                     attachments=attachments,
                     runtime_evidence=runtime_evidence,
@@ -5768,7 +5783,37 @@ def _source_code_qa_options_payload(service: SourceCodeQAService) -> dict[str, A
         provider_payload["label"] = base_label if available else f"{base_label} (Unavailable)"
         providers.append(provider_payload)
     options["llm_providers"] = providers
+    options["runtime_capabilities"] = _source_code_qa_runtime_capabilities_payload()
     return options
+
+
+def _source_code_qa_runtime_capabilities_payload() -> dict[str, dict[str, dict[str, bool]]]:
+    teams = ("AF", "GRC", "CRMS")
+    countries = tuple(CRMS_COUNTRIES)
+    capabilities = {
+        team: {
+            country: {"hasConfig": False, "hasDB": False}
+            for country in countries
+        }
+        for team in teams
+    }
+    try:
+        store = _get_source_code_qa_runtime_evidence_store()
+        for team in teams:
+            for country in countries:
+                try:
+                    evidence_items = store.list(pm_team=team, country=country)
+                except ToolError:
+                    evidence_items = []
+                for item in evidence_items:
+                    source_type = str(item.get("source_type") or "").strip().lower()
+                    if source_type == "apollo":
+                        capabilities[team][country]["hasConfig"] = True
+                    elif source_type == "db":
+                        capabilities[team][country]["hasDB"] = True
+    except Exception:  # noqa: BLE001 - capability badges are advisory only.
+        return capabilities
+    return capabilities
 
 
 def _source_code_qa_provider_available(llm_provider: str | None) -> bool:
@@ -5779,6 +5824,11 @@ def _source_code_qa_provider_available(llm_provider: str | None) -> bool:
 def _source_code_qa_public_answer_mode(answer_mode: str | None) -> str:
     mode = str(answer_mode or "auto").strip()
     return mode if mode in {"auto", "gemini_flash"} else "auto"
+
+
+def _source_code_qa_query_mode(query_mode: str | None) -> str:
+    mode = str(query_mode or "deep").strip().lower()
+    return mode if mode in {"fast", "deep"} else "deep"
 
 
 def _source_code_qa_attachment_ids(payload: dict[str, Any]) -> list[str]:
@@ -5848,12 +5898,17 @@ def _compact_source_code_qa_session_payload(result: dict[str, Any]) -> dict[str,
     return {
         "status": result.get("status") or "",
         "trace_id": result.get("trace_id") or "",
+        "query_mode": result.get("query_mode") or "",
+        "deadline_seconds": result.get("deadline_seconds") or 0,
+        "deadline_hit": bool(result.get("deadline_hit")),
+        "fallback_used": bool(result.get("fallback_used")),
         "summary": result.get("summary") or "",
         "llm_answer": result.get("llm_answer") or "",
         "llm_provider": result.get("llm_provider") or "",
         "llm_model": result.get("llm_model") or "",
         "llm_route": {
             "mode": llm_route.get("mode") or "",
+            "query_mode": llm_route.get("query_mode") or "",
             "provider": llm_route.get("provider") or "",
             "prompt_mode": llm_route.get("prompt_mode") or "",
             "candidate_paths": (llm_route.get("candidate_paths") or [])[:30],
@@ -6344,6 +6399,7 @@ def _public_source_code_qa_job_snapshot(snapshot: dict[str, Any]) -> dict[str, A
         "message": snapshot.get("message") or "",
     }
     state = str(payload.get("state") or "")
+    payload["query_mode"] = _source_code_qa_query_mode(payload.get("query_mode"))
     payload["queued_position"] = int(payload.get("queued_position") or 0)
     payload["eta_seconds_range"] = [
         max(0, int(value or 0))
@@ -6434,6 +6490,7 @@ def _run_source_code_qa_query_job(app: Flask, job_id: str, payload: dict[str, An
             service = _build_source_code_qa_service(payload.get("llm_provider"))
             pm_team = str(payload.get("pm_team") or "")
             country = str(payload.get("country") or "")
+            query_mode = _source_code_qa_query_mode(payload.get("query_mode"))
             session_store = _get_source_code_qa_session_store()
             session_id = str(payload.get("session_id") or "").strip()
             owner_email = str(payload.get("_session_owner_email") or "").strip().lower() or "local"
@@ -6457,7 +6514,8 @@ def _run_source_code_qa_query_job(app: Flask, job_id: str, payload: dict[str, An
                     country=country,
                     question=str(payload.get("question") or ""),
                     answer_mode=_source_code_qa_public_answer_mode(payload.get("answer_mode")),
-                    llm_budget_mode="auto",
+                    llm_budget_mode="fast" if query_mode == "fast" else "auto",
+                    query_mode=query_mode,
                     conversation_context=conversation_context,
                     attachments=attachments,
                     runtime_evidence=runtime_evidence,

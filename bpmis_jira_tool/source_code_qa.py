@@ -33,6 +33,9 @@ CRMS_COUNTRIES = ("SG", "ID", "PH")
 ANSWER_MODE_AUTO = "auto"
 ANSWER_MODE = "retrieval_only"
 ANSWER_MODE_GEMINI = "gemini_flash"
+QUERY_MODE_FAST = "fast"
+QUERY_MODE_DEEP = "deep"
+QUERY_MODES = {QUERY_MODE_FAST, QUERY_MODE_DEEP}
 CONFIG_VERSION = 1
 CODE_INDEX_VERSION = 29
 LLM_PROVIDER_GEMINI = "gemini"
@@ -70,6 +73,9 @@ DEFAULT_LLM_MAX_BACKOFF_SECONDS = 8.0
 DEFAULT_CODEX_CLI_MODEL = "codex-cli"
 DEFAULT_CODEX_TIMEOUT_SECONDS = 240
 DEFAULT_CODEX_TOP_PATH_LIMIT = 30
+FAST_QUERY_DEADLINE_SECONDS = 60
+FAST_CODEX_TIMEOUT_SECONDS = 55
+FAST_CODEX_TOP_PATH_LIMIT = 10
 CODEX_INVESTIGATION_PROMPT_MODE = "codex_investigation_brief_v5"
 CODEX_SESSION_MODE_EPHEMERAL = "ephemeral"
 CODEX_SESSION_MODE_RESUME = "resume"
@@ -83,6 +89,14 @@ MAX_TARGETED_INDEX_LINES = 1_200
 MAX_TARGETED_SEMANTIC_CHUNKS = 320
 SYNC_JOB_LOCK_TIMEOUT_SECONDS = 5.0
 DEFAULT_LLM_BUDGETS = {
+    "fast": {
+        "match_limit": 8,
+        "snippet_line_budget": 80,
+        "snippet_char_budget": 12_000,
+        "thinking_budget": 0,
+        "max_output_tokens": 900,
+        "model": "gemini-2.5-flash-lite",
+    },
     "cheap": {
         "match_limit": 4,
         "snippet_line_budget": 40,
@@ -955,6 +969,7 @@ class CodexCliBridgeSourceCodeQALLMProvider(SourceCodeQALLMProvider):
         started_at = time.time()
         attempt_started = time.time()
         model = str(primary_model or "codex-cli").strip() or "codex-cli"
+        timeout_seconds = max(10, int(payload.get("_timeout_seconds") or self.timeout_seconds))
         with tempfile.NamedTemporaryFile("w+", encoding="utf-8", delete=True) as output_file:
             prompt_mode = str(payload.get("codex_prompt_mode") or "").strip()
             codex_cli_session_id = str(payload.get("codex_cli_session_id") or "").strip()
@@ -990,6 +1005,7 @@ class CodexCliBridgeSourceCodeQALLMProvider(SourceCodeQALLMProvider):
                             command=command,
                             prompt=prompt,
                             progress_callback=progress_callback,
+                            timeout_seconds=timeout_seconds,
                         )
                     else:
                         result = subprocess.run(
@@ -999,13 +1015,13 @@ class CodexCliBridgeSourceCodeQALLMProvider(SourceCodeQALLMProvider):
                             text=True,
                             capture_output=True,
                             env=self._codex_env(),
-                            timeout=self.timeout_seconds,
+                            timeout=timeout_seconds,
                             check=False,
                         )
                 finally:
                     semaphore.release()
             except subprocess.TimeoutExpired as error:
-                raise ToolError(f"Codex unavailable; used code search fallback. Codex CLI timed out after {self.timeout_seconds}s.") from error
+                raise ToolError(f"Codex unavailable; used code search fallback. Codex CLI timed out after {timeout_seconds}s.") from error
             except OSError as error:
                 raise ToolError(f"Codex unavailable; used code search fallback. {error}") from error
             output_file.seek(0)
@@ -1127,7 +1143,7 @@ class CodexCliBridgeSourceCodeQALLMProvider(SourceCodeQALLMProvider):
             command[insert_at:insert_at] = image_args
         return command, "ephemeral"
 
-    def _run_codex_streaming(self, *, command: list[str], prompt: str, progress_callback: Any) -> Any:
+    def _run_codex_streaming(self, *, command: list[str], prompt: str, progress_callback: Any, timeout_seconds: int | None = None) -> Any:
         process = subprocess.Popen(
             command,
             cwd=str(self.workspace_root),
@@ -1159,13 +1175,14 @@ class CodexCliBridgeSourceCodeQALLMProvider(SourceCodeQALLMProvider):
             process.stdin.close()
 
         started_at = time.time()
+        timeout_seconds = max(10, int(timeout_seconds or self.timeout_seconds))
         stdout_lines: list[str] = []
         stderr_lines: list[str] = []
         last_message = ""
         while process.poll() is None or not output_queue.empty():
-            if time.time() - started_at > self.timeout_seconds:
+            if time.time() - started_at > timeout_seconds:
                 process.kill()
-                raise subprocess.TimeoutExpired(command, self.timeout_seconds)
+                raise subprocess.TimeoutExpired(command, timeout_seconds)
             try:
                 stream_name, line = output_queue.get(timeout=0.1)
             except queue.Empty:
@@ -1458,6 +1475,7 @@ class GeminiSourceCodeQALLMProvider(SourceCodeQALLMProvider):
         attempt_log: list[dict[str, Any]] = []
         started_at = time.time()
         delays = self._retry_delays()
+        timeout_seconds = max(5, int(payload.get("_timeout_seconds") or self.timeout_seconds))
         for model in models:
             model_delays = list(delays)
             for attempt_index, delay in enumerate(model_delays):
@@ -1471,7 +1489,7 @@ class GeminiSourceCodeQALLMProvider(SourceCodeQALLMProvider):
                         params={"key": self.api_key},
                         headers={"Content-Type": "application/json"},
                         json=payload,
-                        timeout=self.timeout_seconds,
+                        timeout=timeout_seconds,
                     )
                 except requests.Timeout as error:
                     last_error = self._sanitize_error_detail(str(error))
@@ -2253,6 +2271,11 @@ class SourceCodeQAService:
         provider = str(llm_provider or LLM_PROVIDER_CODEX_CLI_BRIDGE).strip().lower() or LLM_PROVIDER_CODEX_CLI_BRIDGE
         return provider if provider in LLM_PROVIDER_ALLOWED_QUERY_CHOICES else LLM_PROVIDER_CODEX_CLI_BRIDGE
 
+    @staticmethod
+    def normalize_query_mode(query_mode: str | None) -> str:
+        mode = str(query_mode or QUERY_MODE_DEEP).strip().lower() or QUERY_MODE_DEEP
+        return mode if mode in QUERY_MODES else QUERY_MODE_DEEP
+
     def options_payload(self) -> dict[str, Any]:
         return {
             "pm_teams": [
@@ -2263,6 +2286,10 @@ class SourceCodeQAService:
             "all_country": ALL_COUNTRY,
             "answer_modes": [
                 {"value": ANSWER_MODE_AUTO, "label": "Smart Answer"},
+            ],
+            "query_modes": [
+                {"value": QUERY_MODE_FAST, "label": "快速模式", "description": "目标：不排队时 1 分钟内返回第一版答案"},
+                {"value": QUERY_MODE_DEEP, "label": "深度模式", "description": "更完整，可能需要 2-6 分钟"},
             ],
             "llm_providers": [
                 {"value": LLM_PROVIDER_CODEX_CLI_BRIDGE, "label": "Codex"},
@@ -2430,12 +2457,14 @@ class SourceCodeQAService:
     def _build_llm_budgets(self) -> dict[str, dict[str, Any]]:
         budgets = json.loads(json.dumps(DEFAULT_LLM_BUDGETS))
         if self.llm_provider_name == LLM_PROVIDER_OPENAI_COMPATIBLE:
+            budgets["fast"]["model"] = self.openai_fast_model
             budgets["cheap"]["model"] = self.openai_fast_model
             budgets["balanced"]["model"] = self.openai_model
             budgets["deep"]["model"] = self.openai_deep_model
             budgets[COMPACT_DEEP_BUDGET_MODE]["model"] = self.openai_deep_model
         elif self.llm_provider_name == LLM_PROVIDER_CODEX_CLI_BRIDGE:
             codex_model = self._codex_cli_model()
+            budgets["fast"]["model"] = codex_model
             budgets["cheap"]["model"] = codex_model
             budgets["balanced"]["model"] = codex_model
             budgets["deep"]["model"] = codex_model
@@ -2443,11 +2472,13 @@ class SourceCodeQAService:
         elif self.llm_provider_name == LLM_PROVIDER_VERTEX_AI:
             for budget_name, overrides in VERTEX_QUALITY_LLM_BUDGETS.items():
                 budgets[budget_name].update(overrides)
+            budgets["fast"]["model"] = self.vertex_fast_model
             budgets["cheap"]["model"] = self.vertex_fast_model
             budgets["balanced"]["model"] = self.vertex_model
             budgets["deep"]["model"] = self.vertex_deep_model
             budgets[COMPACT_DEEP_BUDGET_MODE]["model"] = self.vertex_deep_model
         else:
+            budgets["fast"]["model"] = self.gemini_fast_model
             budgets["cheap"]["model"] = self.gemini_fast_model
             budgets["balanced"]["model"] = self.gemini_model
             budgets["deep"]["model"] = self.gemini_deep_model
@@ -3538,6 +3569,7 @@ class SourceCodeQAService:
         limit: int = 12,
         answer_mode: str = ANSWER_MODE,
         llm_budget_mode: str = "cheap",
+        query_mode: str = QUERY_MODE_DEEP,
         conversation_context: dict[str, Any] | None = None,
         attachments: list[dict[str, Any]] | None = None,
         runtime_evidence: list[dict[str, Any]] | None = None,
@@ -3545,6 +3577,7 @@ class SourceCodeQAService:
     ) -> dict[str, Any]:
         key = self.mapping_key(pm_team, country)
         question = str(question or "").strip()
+        query_mode = self.normalize_query_mode(query_mode)
         started_at = time.time()
         trace_id = uuid.uuid4().hex
 
@@ -4083,10 +4116,12 @@ class SourceCodeQAService:
                 question=question,
                 answer_mode=answer_mode,
                 llm_budget_mode=llm_budget_mode,
+                query_mode=query_mode,
                 payload=payload,
                 started_at=started_at,
             )
             return payload
+        retrieval_latency_ms = int((time.time() - started_at) * 1000)
         normalized_answer_mode = str(answer_mode or ANSWER_MODE).strip() or ANSWER_MODE
         if normalized_answer_mode not in {ANSWER_MODE, ANSWER_MODE_GEMINI, ANSWER_MODE_AUTO}:
             normalized_answer_mode = ANSWER_MODE_AUTO
@@ -4154,10 +4189,17 @@ class SourceCodeQAService:
             "repository_scope": repository_scope,
             "original_question": original_question,
             "trace_id": trace_id,
+            "query_mode": query_mode,
+            "deadline_seconds": FAST_QUERY_DEADLINE_SECONDS if query_mode == QUERY_MODE_FAST else 0,
+            "deadline_hit": False,
+            "retrieval_latency_ms": retrieval_latency_ms,
+            "codex_latency_ms": 0,
+            "fallback_used": False,
+            "background_deep_job_id": "",
         }
         if normalized_answer_mode in {ANSWER_MODE_GEMINI, ANSWER_MODE_AUTO}:
             payload["llm_provider"] = self.llm_provider.name
-            report("llm_generation", "Calling LLM with retrieved evidence.", 0, 0)
+            report("llm_generation", "Calling fast Codex with retrieved evidence." if query_mode == QUERY_MODE_FAST else "Calling LLM with retrieved evidence.", 0, 0)
             llm_payload = self._build_llm_answer(
                 entries=query_entries,
                 key=key,
@@ -4166,6 +4208,7 @@ class SourceCodeQAService:
                 question=question,
                 matches=top_matches,
                 llm_budget_mode=llm_budget_mode,
+                query_mode=query_mode,
                 followup_context=followup_context,
                 requested_answer_mode=normalized_answer_mode,
                 request_cache=request_cache,
@@ -4174,6 +4217,11 @@ class SourceCodeQAService:
                 runtime_evidence=runtime_evidence or [],
             )
             payload.update(llm_payload)
+            payload["query_mode"] = query_mode
+            payload["deadline_seconds"] = FAST_QUERY_DEADLINE_SECONDS if query_mode == QUERY_MODE_FAST else 0
+            payload["retrieval_latency_ms"] = retrieval_latency_ms
+            payload["codex_latency_ms"] = payload.get("llm_latency_ms") if self.llm_provider.name == LLM_PROVIDER_CODEX_CLI_BRIDGE else 0
+            payload["background_deep_job_id"] = payload.get("background_deep_job_id") or ""
             payload["evidence_outline"] = self._build_evidence_outline(payload.get("evidence_pack") or evidence_pack, top_matches)
             payload["answer_mode"] = normalized_answer_mode
             report("completed", "LLM answer generated.", 0, 0)
@@ -4184,6 +4232,7 @@ class SourceCodeQAService:
             question=question,
             answer_mode=answer_mode,
             llm_budget_mode=llm_budget_mode,
+            query_mode=query_mode,
             payload=payload,
             started_at=started_at,
         )
@@ -14309,6 +14358,7 @@ class SourceCodeQAService:
         question: str,
         matches: list[dict[str, Any]],
         llm_budget_mode: str,
+        query_mode: str = QUERY_MODE_DEEP,
         followup_context: dict[str, Any] | None = None,
         requested_answer_mode: str = ANSWER_MODE_GEMINI,
         request_cache: dict[str, Any] | None = None,
@@ -14318,7 +14368,15 @@ class SourceCodeQAService:
     ) -> dict[str, Any]:
         if not self.llm_ready():
             raise ToolError(self.llm_unavailable_message())
+        query_mode = self.normalize_query_mode(query_mode)
+        if query_mode == QUERY_MODE_FAST and str(llm_budget_mode or "").strip().lower() == "auto":
+            llm_budget_mode = QUERY_MODE_FAST
         routed_budget_mode, budget, llm_route = self._resolve_llm_budget(llm_budget_mode, question, matches)
+        llm_route = {
+            **llm_route,
+            "query_mode": query_mode,
+            "deadline_seconds": FAST_QUERY_DEADLINE_SECONDS if query_mode == QUERY_MODE_FAST else 0,
+        }
         selected_model = self._model_for_role_or_budget("answer", budget)
         selected_matches = self._select_llm_matches(matches, int(budget["match_limit"]), question=question)
         evidence_summary = self._compress_evidence_cached(question, selected_matches, request_cache=request_cache)
@@ -14346,6 +14404,7 @@ class SourceCodeQAService:
                 quality_gate=quality_gate,
                 evidence_pack=evidence_pack,
                 llm_budget_mode=llm_budget_mode,
+                query_mode=query_mode,
                 routed_budget_mode=routed_budget_mode,
                 budget=budget,
                 llm_route=llm_route,
@@ -14573,6 +14632,8 @@ class SourceCodeQAService:
                     "thinkingConfig": answer_thinking_config,
                 },
             }
+            if query_mode == QUERY_MODE_FAST:
+                draft_payload["_timeout_seconds"] = FAST_CODEX_TIMEOUT_SECONDS
             draft_result = self.llm_provider.generate(
                 payload=draft_payload,
                 primary_model=selected_model,
@@ -14686,6 +14747,8 @@ class SourceCodeQAService:
                 "thinkingConfig": answer_thinking_config,
             },
         }
+        if query_mode == QUERY_MODE_FAST:
+            payload["_timeout_seconds"] = FAST_CODEX_TIMEOUT_SECONDS
         result = self.llm_provider.generate(
             payload=payload,
             primary_model=selected_model,
@@ -14728,6 +14791,8 @@ class SourceCodeQAService:
                 model=effective_model,
                 thinking_budget=llm_route.get("repair_thinking_budget", answer_thinking_budget),
                 finish_reason=finish_reason,
+                query_mode=query_mode,
+                llm_budget_mode=routed_budget_mode,
             )
             return {
                 "llm_answer": answer,
@@ -14934,6 +14999,8 @@ class SourceCodeQAService:
             model=effective_model,
             thinking_budget=llm_route.get("repair_thinking_budget", answer_thinking_budget),
             finish_reason=finish_reason,
+            query_mode=query_mode,
+            llm_budget_mode=routed_budget_mode,
         )
         return {
             "llm_answer": answer,
@@ -14979,14 +15046,18 @@ class SourceCodeQAService:
         selected_model: str,
         followup_context: dict[str, Any] | None,
         requested_answer_mode: str,
+        query_mode: str = QUERY_MODE_DEEP,
         request_cache: dict[str, Any] | None = None,
         progress_callback: Any | None = None,
         attachments: list[dict[str, Any]] | None = None,
         runtime_evidence: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
+        query_mode = self.normalize_query_mode(query_mode)
+        fast_mode = query_mode == QUERY_MODE_FAST
+        candidate_limit = FAST_CODEX_TOP_PATH_LIMIT if fast_mode else self.codex_top_path_limit
         candidate_matches = self._select_llm_matches(
             matches,
-            self.codex_top_path_limit,
+            candidate_limit,
             question=question,
         )
         if not candidate_matches:
@@ -15003,7 +15074,11 @@ class SourceCodeQAService:
             "candidate_repo_count": len({item.get("repo") for item in candidate_paths}),
             "candidate_path_count": len(candidate_paths),
             "codex_repair_enabled": self.codex_repair_enabled,
+            "codex_repair_allowed": bool(self.codex_repair_enabled and not fast_mode),
             "codex_fast_path_enabled": self.codex_fast_path_enabled,
+            "query_mode": query_mode,
+            "deadline_seconds": FAST_QUERY_DEADLINE_SECONDS if fast_mode else 0,
+            "fast_candidate_path_limit": candidate_limit if fast_mode else 0,
             "codex_session_mode": self.codex_session_mode,
             "codex_session_max_turns": self.codex_session_max_turns,
             "codex_cache_followups": self.codex_cache_followups,
@@ -15114,11 +15189,33 @@ class SourceCodeQAService:
             codex_cli_session_id=codex_cli_session_id,
             image_paths=self._attachment_image_paths(attachments or []),
         )
-        result = self.llm_provider.generate(
-            payload=payload,
-            primary_model=selected_model,
-            fallback_model=self._llm_fallback_model(),
-        )
+        if fast_mode:
+            payload["_timeout_seconds"] = FAST_CODEX_TIMEOUT_SECONDS
+        try:
+            result = self.llm_provider.generate(
+                payload=payload,
+                primary_model=selected_model,
+                fallback_model=self._llm_fallback_model(),
+            )
+        except ToolError as error:
+            if not fast_mode:
+                raise
+            return self._build_fast_llm_fallback_answer(
+                question=question,
+                selected_matches=candidate_matches,
+                evidence_summary=evidence_summary,
+                quality_gate=quality_gate,
+                evidence_pack=evidence_pack,
+                llm_budget_mode=llm_budget_mode,
+                routed_budget_mode=routed_budget_mode,
+                llm_route={
+                    **llm_route,
+                    "codex_repair_attempted": False,
+                    "codex_deadline_hit": True,
+                },
+                selected_model=selected_model,
+                reason=str(error),
+            )
         answer = self.llm_provider.extract_text(result.payload)
         structured_answer = self._parse_structured_answer(answer)
         usage = self._normalize_llm_usage(result.usage or result.payload.get("usageMetadata") or {})
@@ -15145,7 +15242,7 @@ class SourceCodeQAService:
             answer_judge=answer_judge,
             codex_validation=codex_validation,
         )
-        if self.codex_repair_enabled and (repair_issues or deep_needed):
+        if self.codex_repair_enabled and not fast_mode and (repair_issues or deep_needed):
             repair_attempted = True
             if deep_needed:
                 if progress_callback:
@@ -15279,6 +15376,8 @@ class SourceCodeQAService:
                 model=effective_model,
                 thinking_budget=0,
                 finish_reason=finish_reason,
+                query_mode=query_mode,
+                llm_budget_mode=routed_budget_mode,
             )
         codex_cli_summary = {
             "prompt_mode": llm_route.get("prompt_mode"),
@@ -15322,6 +15421,105 @@ class SourceCodeQAService:
             "codex_cli_summary": codex_cli_summary,
             "codex_cli_trace": codex_cli_trace,
             "cache_metadata": self._answer_cache_metadata(cache_key),
+        }
+
+    def _build_fast_llm_fallback_answer(
+        self,
+        *,
+        question: str,
+        selected_matches: list[dict[str, Any]],
+        evidence_summary: dict[str, Any],
+        quality_gate: dict[str, Any],
+        evidence_pack: dict[str, Any],
+        llm_budget_mode: str,
+        routed_budget_mode: str,
+        llm_route: dict[str, Any],
+        selected_model: str,
+        reason: str,
+    ) -> dict[str, Any]:
+        citations = self._build_citations(selected_matches)
+        evidence_lines = []
+        for citation, match in zip(citations[:5], selected_matches[:5]):
+            label = f"{citation['id']} {match.get('repo')}:{match.get('path')}"
+            line_start = match.get("line_start")
+            if line_start:
+                label = f"{label}:L{line_start}"
+            reason_text = str(match.get("reason") or match.get("trace_stage") or "ranked evidence").strip()
+            evidence_lines.append(f"- {label} — {reason_text}")
+        if evidence_lines:
+            answer = (
+                "Fast mode hit the 1-minute deadline before Codex finished the full reasoning pass.\n\n"
+                "Direct answer: 当前只能给出基于检索证据的第一版判断，不能把未验证链路当成已确认结论。\n\n"
+                "Key evidence:\n"
+                + "\n".join(evidence_lines)
+                + "\n\nMissing evidence: 需要深度模式继续验证跨文件调用链、上游/下游数据来源，以及是否存在反向逻辑。\n\n"
+                "Confidence: low-to-medium, because this is a deadline fallback answer."
+            )
+        else:
+            answer = (
+                "Fast mode hit the 1-minute deadline and current evidence is insufficient.\n\n"
+                "Direct answer: 当前证据不足，不能给出可靠代码结论。\n\n"
+                "Missing evidence: 未找到可引用的文件、行号或 repo revision 证据。\n\n"
+                "Confidence: low."
+            )
+        structured_answer = {
+            "direct_answer": "当前只能给出基于检索证据的第一版判断。" if evidence_lines else "当前证据不足，不能给出可靠代码结论。",
+            "claims": [
+                {
+                    "text": "Fast mode returned a deadline fallback based only on retrieved evidence.",
+                    "citations": [item.get("id") for item in citations[:5]],
+                }
+            ],
+            "missing_evidence": ["Deep mode is needed for cross-file chain verification and ambiguity resolution."],
+            "confidence": "low" if not evidence_lines else "medium",
+        }
+        claim_check = self._trusted_provider_check()
+        answer_judge = self._trusted_provider_judge()
+        answer_contract = {
+            "status": "deadline_fallback",
+            "confidence": structured_answer["confidence"],
+            "policies": [],
+            "missing_evidence": structured_answer["missing_evidence"],
+        }
+        return {
+            "llm_answer": answer,
+            "llm_budget_mode": routed_budget_mode,
+            "llm_requested_budget_mode": llm_budget_mode,
+            "llm_route": {
+                **llm_route,
+                "reason": f"{llm_route.get('reason') or ''},fast_deadline_fallback".strip(","),
+                "fast_timeout_reason": str(reason or "")[:500],
+            },
+            "llm_provider": self.llm_provider.name,
+            "llm_cached": False,
+            "llm_usage": {},
+            "llm_model": selected_model,
+            "llm_thinking_budget": 0,
+            "llm_attempts": 1,
+            "llm_latency_ms": FAST_CODEX_TIMEOUT_SECONDS * 1000,
+            "llm_attempt_log": [
+                {
+                    "model": selected_model,
+                    "attempt": 1,
+                    "status": "timeout",
+                    "retryable": True,
+                    "latency_ms": FAST_CODEX_TIMEOUT_SECONDS * 1000,
+                    "provider": self.llm_provider.name,
+                    "timeout": True,
+                }
+            ],
+            "llm_finish_reason": "fast_deadline_fallback",
+            "answer_quality": quality_gate,
+            "answer_self_check": self._skipped_codex_answer_check(),
+            "answer_claim_check": claim_check,
+            "answer_judge": answer_judge,
+            "structured_answer": structured_answer,
+            "answer_contract": answer_contract,
+            "evidence_pack": evidence_pack,
+            "cache_metadata": {},
+            "deadline_hit": True,
+            "fallback_used": True,
+            "background_deep_job_id": "",
         }
 
     def _codex_deep_investigation_needed(
@@ -17693,6 +17891,8 @@ class SourceCodeQAService:
             "expire_at": payload.get("expire_at") or 0,
             "provider": payload.get("provider") or "",
             "model": payload.get("model") or "",
+            "query_mode": payload.get("query_mode") or "",
+            "llm_budget_mode": payload.get("llm_budget_mode") or "",
             "source": "answer_cache",
         }
 
@@ -17707,12 +17907,16 @@ class SourceCodeQAService:
         model: str,
         thinking_budget: int | None = None,
         finish_reason: str | None = None,
+        query_mode: str = "",
+        llm_budget_mode: str = "",
     ) -> None:
         self.answer_cache_root.mkdir(parents=True, exist_ok=True)
         payload = {
             "versions": self._llm_versions(),
             "provider": provider,
             "model": model,
+            "query_mode": self.normalize_query_mode(query_mode) if query_mode else "",
+            "llm_budget_mode": str(llm_budget_mode or ""),
             "stored_at": self._now_iso(),
             "thinking_budget": int(thinking_budget or 0),
             "finish_reason": str(finish_reason or ""),
@@ -17737,6 +17941,7 @@ class SourceCodeQAService:
         question: str,
         answer_mode: str,
         llm_budget_mode: str,
+        query_mode: str = QUERY_MODE_DEEP,
         payload: dict[str, Any],
         started_at: float,
     ) -> None:
@@ -17761,6 +17966,13 @@ class SourceCodeQAService:
                 "question_preview": question[:180],
                 "requested_answer_mode": answer_mode,
                 "answer_mode": payload.get("answer_mode"),
+                "query_mode": payload.get("query_mode") or self.normalize_query_mode(query_mode),
+                "deadline_seconds": payload.get("deadline_seconds") or 0,
+                "deadline_hit": bool(payload.get("deadline_hit")),
+                "retrieval_latency_ms": payload.get("retrieval_latency_ms"),
+                "codex_latency_ms": payload.get("codex_latency_ms"),
+                "fallback_used": bool(payload.get("fallback_used")),
+                "background_deep_job_id": payload.get("background_deep_job_id") or "",
                 "requested_llm_budget_mode": llm_budget_mode,
                 "llm_budget_mode": payload.get("llm_budget_mode") or llm_budget_mode,
                 "llm_requested_budget_mode": payload.get("llm_requested_budget_mode") or llm_budget_mode,

@@ -18,8 +18,11 @@
   const pmTeam = document.querySelector('[data-source-pm-team]');
   const country = document.querySelector('[data-source-country]');
   const answerMode = document.querySelector('[data-source-answer-mode]');
+  const queryMode = document.querySelector('[data-source-query-mode]');
+  const queryModeHelp = document.querySelector('[data-source-query-mode-help]');
   const llmProvider = document.querySelector('[data-source-llm-provider]');
   const countryWrap = document.querySelector('[data-source-country-wrap]');
+  const countryHelp = document.querySelector('[data-source-country-help]');
   const configStatus = document.querySelector('[data-source-config-status]');
   const adminStatus = document.querySelector('[data-source-admin-status]');
   const reposInput = document.querySelector('[data-source-repos-input]');
@@ -227,8 +230,45 @@
       : 'Job status connection interrupted.');
   };
 
-  const currentCountry = () => country.value || 'All';
-  const currentRepositoryCountry = () => (pmTeam.value === 'CRMS' ? currentCountry() : 'All');
+  const allCountryValue = () => options.all_country || 'All';
+  const sharedCodeTeams = ['AF', 'GRC'];
+  const countrySpecificTeams = ['CRMS'];
+  const runtimeCountries = () => (
+    Array.isArray(options.countries) && options.countries.length
+      ? options.countries.map((item) => String(item || '').trim()).filter(Boolean)
+      : ['SG', 'ID', 'PH']
+  );
+  const isCountrySpecificTeam = (team = pmTeam?.value) => countrySpecificTeams.includes(String(team || '').trim());
+  const isSharedCodeTeam = (team = pmTeam?.value) => sharedCodeTeams.includes(String(team || '').trim());
+  const runtimeCapabilities = () => options.runtime_capabilities || {};
+  const countryCapability = (team, countryCode) => {
+    const teamCapabilities = runtimeCapabilities()?.[team] || {};
+    return teamCapabilities?.[countryCode] || { hasConfig: false, hasDB: false };
+  };
+  const capabilityLabel = (team, countryCode) => {
+    if (countryCode === allCountryValue()) return 'Common code only';
+    const capability = countryCapability(team, countryCode);
+    if (capability.hasConfig && capability.hasDB) return 'Apollo + DB';
+    if (capability.hasConfig) return 'Apollo only';
+    if (capability.hasDB) return 'DB only';
+    return 'No runtime evidence';
+  };
+  const runtimeContextHelp = () => {
+    const team = pmTeam?.value || 'AF';
+    const selectedCountry = currentCountry();
+    if (isCountrySpecificTeam(team)) {
+      return `国家独立代码，必须选择具体国家；运行上下文：${team}:${selectedCountry} (${capabilityLabel(team, selectedCountry)}).`;
+    }
+    if (selectedCountry === allCountryValue()) {
+      return '仅查通用代码，不加载国家运行时数据。';
+    }
+    if (isSharedCodeTeam(team)) {
+      return `代码范围：${team}:${allCountryValue()}；运行上下文：${team}:${selectedCountry} (${capabilityLabel(team, selectedCountry)}).`;
+    }
+    return `运行上下文：${team}:${selectedCountry} (${capabilityLabel(team, selectedCountry)}).`;
+  };
+  const currentCountry = () => country.value || (isCountrySpecificTeam() ? runtimeCountries()[0] || 'SG' : allCountryValue());
+  const currentRepositoryCountry = () => (pmTeam.value === 'CRMS' ? currentCountry() : allCountryValue());
   const currentKey = () => `${pmTeam.value}:${currentRepositoryCountry()}`;
   const currentRepoCount = () => (config.mappings?.[currentKey()] || []).length;
   const defaultLlmProvider = () => {
@@ -566,6 +606,7 @@
   const buildFeedbackReplayContext = (payload) => ({
     trace_id: payload.trace_id || '',
     answer_mode: payload.answer_mode || '',
+    query_mode: payload.query_mode || '',
     llm_budget_mode: payload.llm_budget_mode || payload.llm_requested_budget_mode || '',
     llm_provider: payload.llm_provider || '',
     llm_model: payload.llm_model || '',
@@ -615,6 +656,12 @@
     if (selectHasValue(answerMode, saved.answer_mode)) {
       answerMode.value = saved.answer_mode;
     }
+    if (selectHasValue(queryMode, saved.query_mode)) {
+      queryMode.value = saved.query_mode;
+    } else if (selectHasValue(queryMode, 'fast')) {
+      queryMode.value = 'fast';
+    }
+    updateQueryModeHelp();
     if (providerOptionIsEnabled(saved.llm_provider)) {
       llmProvider.value = saved.llm_provider;
     } else if (providerOptionIsEnabled('codex_cli_bridge')) {
@@ -628,10 +675,20 @@
         pm_team: pmTeam.value,
         country: currentCountry(),
         answer_mode: selectedAnswerMode,
+        query_mode: queryMode?.value || 'fast',
         llm_provider: selectedProvider,
       }));
     } catch (_error) {
       // Local storage can be blocked in private/browser-managed contexts.
+    }
+  };
+
+  const updateQueryModeHelp = () => {
+    if (!queryModeHelp) return;
+    if ((queryMode?.value || 'fast') === 'deep') {
+      queryModeHelp.textContent = '更完整，允许 Codex 深挖和修复，可能需要 2-6 分钟。';
+    } else {
+      queryModeHelp.textContent = '目标：不排队时 1 分钟内返回第一版答案；复杂问题会标注缺口。';
     }
   };
 
@@ -932,14 +989,28 @@
   };
 
   const updateCountryVisibility = () => {
-    const isCreditRisk = pmTeam.value === 'CRMS';
+    if (!country) return;
+    const team = pmTeam?.value || 'AF';
+    const countries = runtimeCountries();
+    const allValue = allCountryValue();
+    const previous = country.value || '';
+    const allowedCountries = isCountrySpecificTeam(team) ? countries : [allValue, ...countries];
+    const nextValue = allowedCountries.includes(previous)
+      ? previous
+      : (isCountrySpecificTeam(team) ? countries[0] || 'SG' : allValue);
+    country.innerHTML = '';
+    allowedCountries.forEach((countryCode) => {
+      const option = document.createElement('option');
+      option.value = countryCode;
+      option.textContent = countryCode === allValue
+        ? `${allValue} · ${capabilityLabel(team, countryCode)}`
+        : `${countryCode} · ${capabilityLabel(team, countryCode)}`;
+      country.appendChild(option);
+    });
+    country.value = nextValue;
     country.disabled = false;
-    countryWrap.classList.remove('source-qa-country-disabled');
-    if (!country.value) {
-      country.value = isCreditRisk && Array.isArray(options.countries) && options.countries.length ? options.countries[0] : 'All';
-    } else if (isCreditRisk && country.value === 'All' && Array.isArray(options.countries) && options.countries.length) {
-      country.value = options.countries[0];
-    }
+    countryWrap?.classList.remove('source-qa-country-disabled');
+    if (countryHelp) countryHelp.textContent = runtimeContextHelp();
   };
 
   const updateQueryButtonState = (running = Boolean(activeQueryControl && !activeQueryControl.stopped)) => {
@@ -1056,12 +1127,10 @@
     }
     const entries = config.mappings?.[currentKey()] || [];
     const count = entries.length;
-    const runtimeScopeNote = currentCountry() !== currentRepositoryCountry()
-      ? ` Runtime evidence scope: ${pmTeam.value}:${currentCountry()}.`
-      : '';
+    const runtimeScopeNote = runtimeContextHelp();
     configStatus.textContent = count
-      ? `${count} repositories configured for ${currentKey()}.${runtimeScopeNote}`
-      : `No repositories configured for ${currentKey()} yet.${runtimeScopeNote}`;
+      ? `${count} repositories configured for ${currentKey()}. ${runtimeScopeNote}`
+      : `No repositories configured for ${currentKey()} yet. ${runtimeScopeNote}`;
     if (reposInput) {
       reposInput.value = entries.map((entry) => `${entry.display_name} | ${entry.url}`).join('\n');
       reposInput.disabled = false;
@@ -1104,6 +1173,12 @@
       modelAvailabilityPayload = payload.model_availability || {};
       llmPolicy = payload.llm_policy || {};
       indexHealthPayload = payload.index_health || {};
+      if (payload.options) {
+        options.countries = payload.options.countries || options.countries;
+        options.all_country = payload.options.all_country || options.all_country;
+        options.runtime_capabilities = payload.options.runtime_capabilities || options.runtime_capabilities || {};
+      }
+      updateCountryVisibility();
       updateLlmProviderOptions(payload.options?.llm_providers || []);
       renderModelAvailability();
       if (!gitAuthReady && adminStatus) {
@@ -1874,7 +1949,8 @@
         activeCache.hidden = false;
         const cacheMeta = payload?.cache_metadata || {};
         const cachedAt = cacheMeta.cached_at ? ` · ${formatSessionTime(cacheMeta.cached_at)}` : '';
-        activeCache.textContent = payload?.llm_cached ? `cache hit${cachedAt}` : 'live LLM';
+        const modeMeta = payload?.query_mode || cacheMeta.query_mode ? ` · ${payload?.query_mode || cacheMeta.query_mode}` : '';
+        activeCache.textContent = payload?.llm_cached ? `cache hit${cachedAt}${modeMeta}` : `live LLM${modeMeta}`;
       } else {
         activeCache.hidden = true;
         activeCache.textContent = 'live';
@@ -1906,12 +1982,13 @@
       codex_deep_investigation: '补充深挖',
       completed: '质量校验完成',
     };
+    const modeText = payload.query_mode === 'fast' ? '快速模式' : (payload.query_mode === 'deep' ? '深度模式' : '');
     const stageLabel = stageLabels[payload.stage] || '';
     const progressText = payload.total
       ? `${stageLabel ? `${stageLabel}: ` : ''}${payload.message || 'Processing source-code question.'} (${payload.current || 0}/${payload.total})`
       : `${stageLabel ? `${stageLabel}: ` : ''}${payload.message || 'Processing source-code question.'}`;
     const stalledText = payload.stalled_retryable ? ' 后台超过 3 分钟无新进展，可重连或重试。' : '';
-    progress?.setMessage([progressText, etaText, stalledText].filter(Boolean).join(' '));
+    progress?.setMessage([modeText, progressText, etaText, stalledText].filter(Boolean).join(' '));
     if (payload.stage === 'codex_stream' && payload.message) {
       renderLiveAnswer(payload.message, { title: 'Codex Live', meta: 'streaming CLI output', jobId: payload.job_id });
     }
@@ -2086,10 +2163,11 @@
       return;
     }
     const selectedAnswerMode = answerMode?.value || 'auto';
+    const selectedQueryMode = queryMode?.value || 'fast';
     const selectedProvider = selectedLlmProvider();
     const effectiveAnswerMode = selectedAnswerMode;
-    if (activeMode) activeMode.textContent = effectiveAnswerMode;
-    const progress = startQueryProgress('Submitting query to server...');
+    if (activeMode) activeMode.textContent = `${effectiveAnswerMode} · ${selectedQueryMode}`;
+    const progress = startQueryProgress(selectedQueryMode === 'fast' ? 'Submitting fast query to server...' : 'Submitting deep query to server...');
     const submittedQuestion = String(questionInput?.value || '').trim();
     if (!submittedQuestion) {
       stopQueryProgress();
@@ -2124,8 +2202,9 @@
           country: currentCountry(),
           question: submittedQuestion,
           answer_mode: effectiveAnswerMode,
+          query_mode: selectedQueryMode,
           llm_provider: selectedProvider,
-          llm_budget_mode: 'auto',
+          llm_budget_mode: selectedQueryMode === 'fast' ? 'fast' : 'auto',
           attachment_ids: attachmentsForQuestion.map((item) => item.id).filter(Boolean),
           conversation_context: conversationContext,
           async: true,
@@ -2162,7 +2241,7 @@
           : `${payload.status} after ${formatElapsed(progress.startedAt)}.`;
       }
       notifyJobFinished('Source Code Q&A completed', submittedQuestion.slice(0, 180));
-      if (activeMode) activeMode.textContent = payload.answer_mode || effectiveAnswerMode;
+      if (activeMode) activeMode.textContent = `${payload.answer_mode || effectiveAnswerMode} · ${payload.query_mode || selectedQueryMode}`;
       renderUsageBadges(payload);
       renderFallbackNotice(payload);
       renderStatus(payload.repo_status || []);
@@ -2244,6 +2323,7 @@
           question: lastPayload.original_question || conversationContext?.question || questionInput.value,
           trace_id: lastPayload.trace_id || '',
           answer_mode: lastPayload.answer_mode || '',
+          query_mode: lastPayload.query_mode || '',
           llm_budget_mode: lastPayload.llm_budget_mode || lastPayload.llm_requested_budget_mode || '',
           top_paths: (lastPayload.matches || []).slice(0, 5).map((match) => match.path),
           answer_quality: lastPayload.answer_quality || {},
@@ -2285,10 +2365,12 @@
   });
   country.addEventListener('change', () => {
     conversationContext = null;
+    if (countryHelp) countryHelp.textContent = runtimeContextHelp();
     if (sessionScope) sessionScope.textContent = [pmTeam.value, currentCountry()].filter(Boolean).join(' · ');
     renderSelectedConfig();
   });
   answerMode?.addEventListener('change', updateAnswerModeState);
+  queryMode?.addEventListener('change', updateQueryModeHelp);
   llmProvider?.addEventListener('change', () => {
     updateAnswerModeState();
     if (sessionProvider) sessionProvider.textContent = providerLabel(selectedLlmProvider());

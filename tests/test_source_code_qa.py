@@ -563,6 +563,41 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertTrue(any("apollo.sg.rule.enabled" in item.get("text", "") for item in captured["runtime_evidence"]))
         self.assertEqual(response.get_json()["runtime_evidence"][0]["pm_team"], "AF")
 
+    def test_source_code_qa_config_includes_runtime_capabilities(self):
+        with self.app.test_client() as client:
+            self._login(client, "xiaodong.zheng@npt.sg")
+            apollo_upload = client.post(
+                "/api/source-code-qa/runtime-evidence",
+                data={
+                    "pm_team": "AF",
+                    "country": "SG",
+                    "source_type": "apollo",
+                    "file": (io.BytesIO(b"apollo.sg.rule.enabled=true"), "apollo.properties"),
+                },
+                content_type="multipart/form-data",
+            )
+            db_upload = client.post(
+                "/api/source-code-qa/runtime-evidence",
+                data={
+                    "pm_team": "AF",
+                    "country": "SG",
+                    "source_type": "db",
+                    "file": (io.BytesIO(b"rule_id,status\nC0204v2,online"), "rules.csv"),
+                },
+                content_type="multipart/form-data",
+            )
+            self._login(client, "teammate@npt.sg")
+            response = client.get("/api/source-code-qa/config")
+
+        self.assertEqual(apollo_upload.status_code, 200)
+        self.assertEqual(db_upload.status_code, 200)
+        self.assertEqual(response.status_code, 200)
+        capabilities = response.get_json()["options"]["runtime_capabilities"]
+        self.assertTrue(capabilities["AF"]["SG"]["hasConfig"])
+        self.assertTrue(capabilities["AF"]["SG"]["hasDB"])
+        self.assertFalse(capabilities["AF"]["PH"]["hasConfig"])
+        self.assertFalse(capabilities["CRMS"]["ID"]["hasDB"])
+
     def test_runtime_evidence_prompt_marks_apollo_as_uat_reference_only(self):
         section = SourceCodeQAService._runtime_evidence_prompt_section(
             [
@@ -885,6 +920,35 @@ class SourceCodeQARouteTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(captured["llm_budget_mode"], "auto")
+
+    def test_query_api_passes_fast_query_mode_as_fast_budget(self):
+        captured = {}
+
+        def fake_query(**kwargs):
+            captured.update(kwargs)
+            return {"status": "ok", "answer_mode": "auto", "query_mode": kwargs["query_mode"], "matches": []}
+
+        with patch("bpmis_jira_tool.source_code_qa.SourceCodeQAService.query", side_effect=fake_query), patch(
+            "bpmis_jira_tool.source_code_qa.SourceCodeQAService.ensure_synced_today",
+            return_value={"attempted": False, "status": "fresh"},
+        ):
+            with self.app.test_client() as client:
+                self._login(client, "teammate@npt.sg")
+                response = client.post(
+                    "/api/source-code-qa/query",
+                    json={
+                        "pm_team": "AF",
+                        "country": "All",
+                        "question": "where is createIssue",
+                        "answer_mode": "auto",
+                        "query_mode": "fast",
+                    },
+                )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(captured["query_mode"], "fast")
+        self.assertEqual(captured["llm_budget_mode"], "fast")
+        self.assertEqual(response.get_json()["query_mode"], "fast")
 
     def test_query_api_returns_json_for_unexpected_failures(self):
         with patch(
@@ -7923,6 +7987,119 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertEqual(payload["codex_cli_summary"]["citation_validation_status"], "ok")
         self.assertEqual(payload["answer_contract"]["status"], "model_answer")
         self.assertIn("IssueRepository reads issue_table", payload["llm_answer"])
+
+    def test_codex_fast_query_mode_skips_repair_and_caps_candidates(self):
+        service = SourceCodeQAService(
+            data_root=Path(self.temp_dir.name),
+            team_profiles=TEAM_PROFILE_DEFAULTS,
+            llm_provider="codex_cli_bridge",
+            gitlab_token="secret-token",
+            codex_top_path_limit=30,
+            codex_repair_enabled=True,
+            git_timeout_seconds=5,
+            max_file_bytes=200_000,
+        )
+        entry = RepositoryEntry("Portal Repo", "https://git.example.com/team/portal.git")
+        key = "AF:All"
+        repo_path = service._repo_path(key, entry)
+        source_file = repo_path / "repository" / "IssueRepository.java"
+        source_file.parent.mkdir(parents=True)
+        source_file.write_text("class IssueRepository {\n  void find(){ jdbc.query(\"select * from issue_table\"); }\n}\n", encoding="utf-8")
+        matches = [
+            {
+                "repo": "Portal Repo",
+                "path": "repository/IssueRepository.java",
+                "line_start": 1,
+                "line_end": 3,
+                "retrieval": "persistent_index",
+                "trace_stage": "direct",
+                "reason": "repository and table matched",
+                "score": 10 + index,
+                "snippet": "class IssueRepository { void find(){ jdbc.query(\"select * from issue_table\"); } }",
+            }
+            for index in range(14)
+        ]
+        calls = []
+
+        def fake_run(command, **kwargs):
+            calls.append((command, kwargs))
+            if "login" in command and "status" in command:
+                return SimpleNamespace(returncode=0, stdout="Logged in using ChatGPT\n", stderr="")
+            output_path = command[command.index("--output-last-message") + 1]
+            Path(output_path).write_text(
+                '{"direct_answer":"IssueRepository reads issue_table.",'
+                '"claims":[{"text":"IssueRepository reads issue_table","citations":[]}],'
+                '"missing_evidence":["caller"],"confidence":"medium"}',
+                encoding="utf-8",
+            )
+            return SimpleNamespace(returncode=0, stdout='{"type":"done"}\n', stderr="")
+
+        with patch("bpmis_jira_tool.source_code_qa.shutil.which", return_value="/usr/local/bin/codex"), patch(
+            "bpmis_jira_tool.source_code_qa.subprocess.run",
+            side_effect=fake_run,
+        ):
+            payload = service._build_llm_answer(
+                entries=[entry],
+                key=key,
+                pm_team="AF",
+                country="All",
+                question="what table does IssueRepository read",
+                matches=matches,
+                llm_budget_mode="auto",
+                query_mode="fast",
+                requested_answer_mode="auto",
+            )
+
+        exec_calls = [item for item in calls if "exec" in item[0]]
+        self.assertEqual(len(exec_calls), 1)
+        self.assertEqual(exec_calls[0][1]["timeout"], 55)
+        self.assertEqual(payload["llm_route"]["query_mode"], "fast")
+        self.assertEqual(payload["llm_budget_mode"], "fast")
+        self.assertFalse(payload["llm_route"]["codex_repair_attempted"])
+        self.assertLessEqual(payload["llm_route"]["candidate_path_count"], 10)
+
+    def test_codex_fast_query_timeout_returns_deadline_fallback(self):
+        service = SourceCodeQAService(
+            data_root=Path(self.temp_dir.name),
+            team_profiles=TEAM_PROFILE_DEFAULTS,
+            llm_provider="codex_cli_bridge",
+            gitlab_token="secret-token",
+            git_timeout_seconds=5,
+            max_file_bytes=200_000,
+        )
+        entry = RepositoryEntry("Portal Repo", "https://git.example.com/team/portal.git")
+        match = {
+            "repo": "Portal Repo",
+            "path": "repository/IssueRepository.java",
+            "line_start": 1,
+            "line_end": 1,
+            "retrieval": "persistent_index",
+            "trace_stage": "direct",
+            "reason": "repository and table matched",
+            "score": 10,
+            "snippet": "class IssueRepository {}",
+        }
+        with patch.object(service.llm_provider, "ready", return_value=True), patch.object(
+            service.llm_provider,
+            "generate",
+            side_effect=ToolError("Codex CLI timed out after 55s."),
+        ):
+            payload = service._build_llm_answer(
+                entries=[entry],
+                key="AF:All",
+                pm_team="AF",
+                country="All",
+                question="what table does IssueRepository read",
+                matches=[match],
+                llm_budget_mode="auto",
+                query_mode="fast",
+                requested_answer_mode="auto",
+            )
+
+        self.assertTrue(payload["deadline_hit"])
+        self.assertTrue(payload["fallback_used"])
+        self.assertEqual(payload["llm_finish_reason"], "fast_deadline_fallback")
+        self.assertIn("Fast mode hit the 1-minute deadline", payload["llm_answer"])
 
     def test_codex_cli_bridge_requires_chatgpt_login(self):
         provider = CodexCliBridgeSourceCodeQALLMProvider(
