@@ -18,8 +18,6 @@
   const pmTeam = document.querySelector('[data-source-pm-team]');
   const country = document.querySelector('[data-source-country]');
   const answerMode = document.querySelector('[data-source-answer-mode]');
-  const queryMode = document.querySelector('[data-source-query-mode]');
-  const queryModeHelp = document.querySelector('[data-source-query-mode-help]');
   const llmProvider = document.querySelector('[data-source-llm-provider]');
   const countryWrap = document.querySelector('[data-source-country-wrap]');
   const countryHelp = document.querySelector('[data-source-country-help]');
@@ -657,12 +655,6 @@
     if (selectHasValue(answerMode, saved.answer_mode)) {
       answerMode.value = saved.answer_mode;
     }
-    if (selectHasValue(queryMode, saved.query_mode)) {
-      queryMode.value = saved.query_mode;
-    } else if (selectHasValue(queryMode, 'fast')) {
-      queryMode.value = 'fast';
-    }
-    updateQueryModeHelp();
     if (providerOptionIsEnabled(saved.llm_provider)) {
       llmProvider.value = saved.llm_provider;
     } else if (providerOptionIsEnabled('codex_cli_bridge')) {
@@ -676,20 +668,11 @@
         pm_team: pmTeam.value,
         country: currentCountry(),
         answer_mode: selectedAnswerMode,
-        query_mode: queryMode?.value || 'fast',
+        query_mode: 'deep',
         llm_provider: selectedProvider,
       }));
     } catch (_error) {
       // Local storage can be blocked in private/browser-managed contexts.
-    }
-  };
-
-  const updateQueryModeHelp = () => {
-    if (!queryModeHelp) return;
-    if ((queryMode?.value || 'fast') === 'deep') {
-      queryModeHelp.textContent = 'More complete. Allows Codex deep investigation and repair; may take 2-6 minutes.';
-    } else {
-      queryModeHelp.textContent = 'Returns an evidence-backed draft within 1 minute. Use Deep for complex chain verification.';
     }
   };
 
@@ -822,13 +805,10 @@
         ? [payload.llm_provider ? providerLabel(payload.llm_provider) : '', payload.llm_model || '', payload.trace_id ? `trace ${payload.trace_id}` : ''].filter(Boolean).join(' · ')
         : formatSessionTime(message.created_at);
       const text = message.role === 'assistant'
-        ? (message.text || payload.llm_answer || payload.structured_answer?.direct_answer || payload.summary || 'Answer completed.')
+        ? (message.text || payload.llm_answer || payload.summary || 'Answer completed.')
         : message.text;
       const attachmentItems = Array.isArray(message.attachments) ? message.attachments : (Array.isArray(payload.attachments) ? payload.attachments : []);
-      const citations = (payload.structured_answer?.citations || payload.matches || [])
-        .slice(0, 4)
-        .map((item) => typeof item === 'string' ? item : item.path)
-        .filter(Boolean);
+      const citations = [];
       const liveActions = message.live && message.job_id ? `
         <div class="source-qa-live-actions">
           <button class="button button-secondary" type="button" data-source-reconnect-job="${escapeHtml(message.job_id)}" data-source-retry-question="${escapeHtml(message.retry_question || '')}">Reconnect</button>
@@ -844,7 +824,7 @@
             <span>${escapeHtml(meta)}</span>
           </div>
           <div class="source-qa-message-body">
-            ${message.live ? `<pre>${escapeHtml(text)}</pre>` : (message.role === 'assistant' ? renderReadableAnswerBody(payload, text) : `<p>${escapeHtml(text)}</p>`)}
+            ${message.live || message.role === 'assistant' ? `<pre class="source-qa-raw-codex-answer">${escapeHtml(text)}</pre>` : `<p>${escapeHtml(text)}</p>`}
             ${renderAttachmentChips(attachmentItems)}
             ${liveActions}
           </div>
@@ -1651,243 +1631,6 @@
     `;
   };
 
-  const renderInlineCitationList = (citations = []) => {
-    const values = (citations || [])
-      .map((item) => normalizeCitation(item))
-      .filter(Boolean)
-      .slice(0, 6);
-    if (!values.length) return '';
-    return `<span class="source-qa-citations" aria-label="Citations">${values.map((item) => `<span>${escapeHtml(item)}</span>`).join('')}</span>`;
-  };
-
-  const normalizeCitation = (value) => {
-    const raw = String(value || '').trim();
-    if (!raw) return '';
-    const match = raw.match(/S?\s*(\d+)/i);
-    return match ? `S${match[1]}` : raw.replace(/^\[|\]$/g, '');
-  };
-
-  const stripCitationTags = (text) => String(text || '')
-    .replace(/\s*\[S\d+\]/gi, '')
-    .replace(/\s{2,}/g, ' ')
-    .trim();
-
-  const extractCitationTags = (text) => {
-    const tags = [];
-    String(text || '').replace(/\[S(\d+)\]/gi, (_match, id) => {
-      const tag = `S${id}`;
-      if (!tags.includes(tag)) tags.push(tag);
-      return '';
-    });
-    return tags;
-  };
-
-  const isCitationOnlyText = (text) => {
-    const normalized = String(text || '').trim();
-    return Boolean(normalized) && /^(?:\[?S\d+\]?\s*)+$/i.test(normalized);
-  };
-
-  const containsMachineRetrievalText = (text) => {
-    const normalized = String(text || '').toLowerCase();
-    return normalized.includes('was selected because')
-      || normalized.includes('path matched')
-      || normalized.includes('symbol matched')
-      || normalized.includes('content matched')
-      || /\bpackage\s+[a-z0-9_.]+/.test(normalized)
-      || (/ shows `/.test(normalized) && / near: /.test(normalized));
-  };
-
-  const normalizedStructuredList = (items = [], { filterMachineText = false } = {}) => {
-    const seen = new Set();
-    const normalizedItems = [];
-    for (const item of items || []) {
-      const rawText = typeof item === 'string' ? item : item?.text;
-      if (isCitationOnlyText(rawText)) continue;
-      const text = stripCitationTags(rawText);
-      if (!text || (filterMachineText && containsMachineRetrievalText(text))) continue;
-      const key = text.toLowerCase();
-      if (seen.has(key)) continue;
-      const citationTags = [
-        ...(Array.isArray(item?.citations) ? item.citations : []),
-        ...extractCitationTags(rawText),
-      ];
-      normalizedItems.push({ text, citations: Array.from(new Set(citationTags.map(normalizeCitation).filter(Boolean))) });
-      seen.add(key);
-      if (normalizedItems.length >= 8) break;
-    }
-    return normalizedItems;
-  };
-
-  const normalizedEvidenceCards = (cards = [], { filterMachineText = false } = {}) => {
-    const seen = new Set();
-    const items = [];
-    for (const card of cards || []) {
-      const title = stripCitationTags(card?.title || 'Evidence');
-      const detail = stripCitationTags(card?.detail || card?.text || '');
-      if (!detail || (filterMachineText && containsMachineRetrievalText(detail))) continue;
-      const key = `${title}:${detail}`.toLowerCase();
-      if (seen.has(key)) continue;
-      const citationTags = [
-        ...(Array.isArray(card?.citations) ? card.citations : []),
-        ...extractCitationTags(card?.detail || ''),
-      ];
-      items.push({
-        title,
-        detail,
-        role: String(card?.role || '').trim(),
-        citations: Array.from(new Set(citationTags.map(normalizeCitation).filter(Boolean))),
-      });
-      seen.add(key);
-      if (items.length >= 8) break;
-    }
-    return items;
-  };
-
-  const cleanDirectAnswer = (directAnswer, fallbackAnswer, hasStructuredSections) => {
-    let text = String(directAnswer || fallbackAnswer || '').trim();
-    if (!text) return '';
-    if (hasStructuredSections) {
-      text = text.split(/\n\s*(?:[-*]\s+|Missing evidence:)/i)[0].trim();
-      text = text.split(/\s+-\s+(?=(?:The|If|Missing evidence|Specific details|Specific API|Confirmed|Missing)\b)/i)[0].trim();
-    }
-    return stripCitationTags(text);
-  };
-
-  const normalizedClaimsForDisplay = (claims = [], { filterMachineText = false } = {}) => {
-    return normalizedStructuredList(claims, { filterMachineText });
-  };
-
-  const renderRawModelAnswer = (payload, answer, directAnswer, hasStructuredSections) => {
-    if (payload?.deadline_hit && payload?.fallback_used) return '';
-    const rawAnswer = String(payload?.llm_answer || answer || '').trim();
-    if (!hasStructuredSections || !rawAnswer) return '';
-    const normalizedDirect = String(directAnswer || '').trim();
-    const shouldShow = rawAnswer.length > normalizedDirect.length + 80 || /\n\s*(?:Conclusion|Evidence|Source-code Evidence|Missing|Next Checks|Confidence)\b/i.test(rawAnswer);
-    if (!shouldShow) return '';
-    const provider = String(payload?.llm_provider || '').toLowerCase();
-    const label = provider.includes('codex') ? 'Raw Codex Answer' : 'Raw Model Answer';
-    return `
-      <details class="source-qa-raw-answer">
-        <summary>${escapeHtml(label)}</summary>
-        <pre>${escapeHtml(rawAnswer)}</pre>
-      </details>
-    `;
-  };
-
-  const renderReadableAnswerBody = (payload, answer) => {
-    const structured = payload?.structured_answer || {};
-    const isFastFallback = Boolean(payload?.deadline_hit && payload?.fallback_used);
-    const confirmed = normalizedStructuredList(
-      Array.isArray(structured.confirmed_points) ? structured.confirmed_points : [],
-      { filterMachineText: isFastFallback },
-    );
-    const claims = normalizedClaimsForDisplay(Array.isArray(structured.claims) ? structured.claims : [], { filterMachineText: isFastFallback });
-    const evidenceCards = normalizedEvidenceCards(Array.isArray(structured.evidence_cards) ? structured.evidence_cards : [], { filterMachineText: false });
-    const missingSource = Array.isArray(structured.missing_points) && structured.missing_points.length
-      ? structured.missing_points
-      : (Array.isArray(structured.missing_evidence) ? structured.missing_evidence : []);
-    const missing = normalizedStructuredList(missingSource, { filterMachineText: true }).slice(0, 6);
-    const confidence = String(structured.confidence || payload?.answer_contract?.confidence || '').trim();
-    const directAnswer = cleanDirectAnswer(structured.direct_answer, answer, Boolean(confirmed.length || claims.length || missing.length || evidenceCards.length));
-    const displayConfirmed = confirmed.length ? confirmed : claims.filter((claim) => !containsMachineRetrievalText(claim.text)).slice(0, 5);
-    if (directAnswer || displayConfirmed.length || claims.length || missing.length || evidenceCards.length) {
-      return `
-        <section class="source-qa-answer-section source-qa-answer-direct">
-          <strong>Direct Answer</strong>
-          ${directAnswer ? `<p>${escapeHtml(directAnswer)}</p>` : '<p>No direct answer returned.</p>'}
-        </section>
-        ${displayConfirmed.length ? `
-          <section class="source-qa-answer-section">
-            <strong>Confirmed by Code</strong>
-            <div class="source-qa-claim-list">
-              ${displayConfirmed.map((claim) => `
-                <div class="source-qa-claim-item">
-                  <p>${escapeHtml(claim.text)}</p>
-                  ${renderInlineCitationList(claim.citations || [])}
-                </div>
-              `).join('')}
-            </div>
-          </section>
-        ` : ''}
-        ${missing.length ? `
-          <section class="source-qa-answer-section source-qa-answer-missing">
-            <strong>Not Verified in Fast Mode</strong>
-            <ul>${missing.slice(0, 6).map((item) => `<li>${escapeHtml(item.text || item)}</li>`).join('')}</ul>
-          </section>
-        ` : ''}
-        ${(evidenceCards.length || (claims.length && !displayConfirmed.length)) ? `
-          <section class="source-qa-answer-section">
-            <details class="source-qa-evidence-cards" ${isFastFallback ? '' : 'open'}>
-              <summary>Evidence</summary>
-              <div class="source-qa-claim-list">
-                ${(evidenceCards.length ? evidenceCards : claims).slice(0, 8).map((item) => `
-                  <div class="source-qa-claim-item">
-                    <p><strong>${escapeHtml(item.title || item.role || 'Evidence')}</strong>${item.detail ? ` ${escapeHtml(item.detail)}` : escapeHtml(item.text || '')}</p>
-                    ${renderInlineCitationList(item.citations || [])}
-                  </div>
-                `).join('')}
-              </div>
-            </details>
-          </section>
-        ` : ''}
-        ${confidence ? `
-          <section class="source-qa-answer-section">
-            <strong>Confidence</strong>
-            <p>${escapeHtml(confidence)}</p>
-          </section>
-        ` : ''}
-        ${renderRawModelAnswer(payload, answer, directAnswer, Boolean(claims.length || missing.length))}
-      `;
-    }
-    const paragraphs = answer.split(/\n{2,}/).map((part) => part.trim()).filter(Boolean);
-    return paragraphs.map((part) => `<p>${escapeHtml(part)}</p>`).join('');
-  };
-
-  const renderAnswerQualityBanner = (payload) => {
-    if (payload?.deadline_hit && payload?.fallback_used) {
-      return `
-        <section class="source-qa-answer-quality source-qa-answer-quality-fast">
-          <strong>Fast evidence-limited draft</strong>
-          <span>Fast draft based on local evidence. Use Deep Mode to verify the full chain.</span>
-          <button type="button" class="button button-secondary source-qa-deep-continue" data-source-deep-continue>
-            Continue with Deep Mode
-          </button>
-        </section>
-      `;
-    }
-    const quality = payload?.answer_quality || {};
-    const contract = payload?.answer_contract || {};
-    const judge = payload?.answer_judge || {};
-    const validation = payload?.answer_claim_check?.codex_citation_validation || {};
-    const issues = [
-      ...(quality.missing || []),
-      ...(contract.missing_links || []),
-      ...(judge.issues || []),
-      ...(validation.issues || []),
-    ].map((item) => String(item || '').trim()).filter(Boolean);
-    const status = String(quality.status || contract.status || '').toLowerCase();
-    const confidence = String(contract.confidence || quality.confidence || '').toLowerCase();
-    const judgeStatus = String(judge.status || '').toLowerCase();
-    const validationStatus = String(validation.status || '').toLowerCase();
-    const show = status === 'needs_more_trace'
-      || confidence === 'low'
-      || ['repair', 'warn', 'insufficient_evidence'].includes(judgeStatus)
-      || (validationStatus && !['ok', 'skipped'].includes(validationStatus))
-      || contract.status === 'blocked_missing_source'
-      || contract.status === 'unreliable_llm_answer';
-    if (!show) return '';
-    const label = confidence === 'low' || contract.status === 'unreliable_llm_answer'
-      ? 'Low confidence'
-      : 'Needs more evidence';
-    return `
-      <section class="source-qa-answer-quality">
-        <strong>${escapeHtml(label)}</strong>
-        <span>${escapeHtml(status || contract.status || judgeStatus || validationStatus || 'review needed')}</span>
-        ${issues.length ? `<ul>${issues.slice(0, 4).map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</ul>` : ''}
-      </section>
-    `;
-  };
-
   const renderLlmAnswer = (payload) => {
     if (!llmAnswer) return;
     const answer = String(payload?.llm_answer || '').trim();
@@ -1896,32 +1639,22 @@
       llmAnswer.innerHTML = '';
       return;
     }
-    const usage = payload?.llm_usage || {};
     const meta = [
-      payload?.llm_budget_mode ? `budget: ${payload.llm_budget_mode}` : '',
       payload?.llm_provider ? `provider: ${payload.llm_provider}` : '',
       payload?.llm_model ? `model: ${payload.llm_model}` : '',
-      payload?.llm_thinking_budget !== undefined ? `thinking: ${payload.llm_thinking_budget}` : '',
-      payload?.llm_route?.mode === 'auto' ? `route: ${payload.llm_route.reason}` : '',
       payload?.llm_cached ? 'cache hit' : 'live call',
-      usage?.promptTokenCount || usage?.prompt_tokens ? `prompt: ${usage.promptTokenCount || usage.prompt_tokens}` : '',
-      usage?.candidatesTokenCount || usage?.completion_tokens ? `output: ${usage.candidatesTokenCount || usage.completion_tokens}` : '',
-      usage?.totalTokenCount || usage?.total_tokens ? `total: ${usage.totalTokenCount || usage.total_tokens}` : '',
     ].filter(Boolean).join(' · ');
-    const confidence = payload?.structured_answer?.confidence || payload?.answer_contract?.confidence || payload?.answer_quality?.confidence;
     llmAnswer.hidden = false;
     llmAnswer.innerHTML = `
       <div class="source-qa-llm-card">
         <div class="source-qa-llm-head">
           <div>
             <strong>Answer</strong>
-            ${confidence ? `<em>${escapeHtml(confidence)} confidence</em>` : ''}
           </div>
           <span>${escapeHtml(meta)}</span>
         </div>
-        ${renderAnswerQualityBanner(payload)}
         <div class="source-qa-answer-body">
-          ${renderReadableAnswerBody(payload, answer)}
+          <pre class="source-qa-raw-codex-answer">${escapeHtml(answer)}</pre>
         </div>
       </div>
     `;
@@ -2072,14 +1805,13 @@
       queued: 'Queued',
       auto_sync: 'Sync Check',
       evidence_pack: 'Building Evidence',
-      fast_quality_gate: 'Fast Evidence Check',
       auto_deep: 'Deep Verification',
       llm_generation: 'Codex Reasoning',
       codex_session_lock: 'Waiting for Codex Session',
       codex_deep_investigation: 'Deep Investigation',
       completed: 'Quality Check Complete',
     };
-    const modeText = payload.query_mode === 'fast' ? 'Fast Mode' : (payload.query_mode === 'deep' ? 'Deep Mode' : '');
+    const modeText = payload.query_mode === 'deep' ? 'Deep Mode' : '';
     const stageLabel = stageLabels[payload.stage] || '';
     const progressText = payload.total
       ? `${stageLabel ? `${stageLabel}: ` : ''}${payload.message || 'Processing source-code question.'} (${payload.current || 0}/${payload.total})`
@@ -2212,11 +1944,7 @@
       renderFallbackNotice(payload);
       renderStatus(payload.repo_status || []);
       await finalizeLiveAnswer(payload, 0, selectedLlmProvider());
-      if (selectedLlmProvider() === 'codex_cli_bridge') {
-        renderLlmAnswer({});
-      } else {
-        renderLlmAnswer(payload);
-      }
+      renderLlmAnswer(payload);
     } catch (error) {
       if (error?.stoppedByUser) {
         if (queryStatus) queryStatus.textContent = `Stopped after ${formatElapsed(progress.startedAt)}.`;
@@ -2260,11 +1988,10 @@
       return;
     }
     const selectedAnswerMode = answerMode?.value || 'auto';
-    const selectedQueryMode = queryMode?.value || 'fast';
     const selectedProvider = selectedLlmProvider();
     const effectiveAnswerMode = selectedAnswerMode;
-    if (activeMode) activeMode.textContent = `${effectiveAnswerMode} · ${selectedQueryMode}`;
-    const progress = startQueryProgress(selectedQueryMode === 'fast' ? 'Submitting fast query to server...' : 'Submitting deep query to server...');
+    if (activeMode) activeMode.textContent = `${effectiveAnswerMode} · deep`;
+    const progress = startQueryProgress('Submitting deep query to server...');
     const submittedQuestion = String(questionInput?.value || '').trim();
     if (!submittedQuestion) {
       stopQueryProgress();
@@ -2299,9 +2026,9 @@
           country: currentCountry(),
           question: submittedQuestion,
           answer_mode: effectiveAnswerMode,
-          query_mode: selectedQueryMode,
+          query_mode: 'deep',
           llm_provider: selectedProvider,
-          llm_budget_mode: selectedQueryMode === 'fast' ? 'fast' : 'auto',
+          llm_budget_mode: 'auto',
           attachment_ids: attachmentsForQuestion.map((item) => item.id).filter(Boolean),
           conversation_context: currentConversationContext(),
           async: true,
@@ -2338,16 +2065,12 @@
           : `${payload.status} after ${formatElapsed(progress.startedAt)}.`;
       }
       notifyJobFinished('Source Code Q&A completed', submittedQuestion.slice(0, 180));
-      if (activeMode) activeMode.textContent = `${payload.answer_mode || effectiveAnswerMode} · ${payload.query_mode || selectedQueryMode}`;
+      if (activeMode) activeMode.textContent = `${payload.answer_mode || effectiveAnswerMode} · deep`;
       renderUsageBadges(payload);
       renderFallbackNotice(payload);
       renderStatus(payload.repo_status || []);
       await finalizeLiveAnswer(payload, previousAssistantCount, selectedProvider);
-      if (selectedProvider === 'codex_cli_bridge') {
-        renderLlmAnswer({});
-      } else {
-        renderLlmAnswer(payload);
-      }
+      renderLlmAnswer(payload);
       renderEvidenceSummary(null);
       renderDebugTrace(null);
       if (results) {
@@ -2394,31 +2117,6 @@
         updateQueryButtonState(false);
       }
     }
-  };
-
-  const latestUserQuestion = () => {
-    const messages = Array.isArray(activeSession?.messages) ? activeSession.messages : [];
-    for (let index = messages.length - 1; index >= 0; index -= 1) {
-      const message = messages[index] || {};
-      if (message.role === 'user' && String(message.content || '').trim()) {
-        return String(message.content || '').trim();
-      }
-    }
-    return String(conversationContext?.question || lastPayload?.original_question || questionInput?.value || '').trim();
-  };
-
-  const continueWithDeepMode = () => {
-    const question = latestUserQuestion();
-    if (!question) {
-      if (queryStatus) queryStatus.textContent = 'No question found for deep verification.';
-      return;
-    }
-    if (selectHasValue(queryMode, 'deep')) {
-      queryMode.value = 'deep';
-      updateQueryModeHelp();
-    }
-    if (questionInput) questionInput.value = question;
-    queryCode();
   };
 
   const feedbackReasonLabels = {
@@ -2492,7 +2190,6 @@
     renderSelectedConfig();
   });
   answerMode?.addEventListener('change', updateAnswerModeState);
-  queryMode?.addEventListener('change', updateQueryModeHelp);
   llmProvider?.addEventListener('change', () => {
     updateAnswerModeState();
     if (sessionProvider) sessionProvider.textContent = providerLabel(selectedLlmProvider());
@@ -2553,11 +2250,6 @@
   });
   attachmentsList?.addEventListener('keydown', handleAttachmentPreviewEvent);
   sessionMessages?.addEventListener('click', (event) => {
-    const deepContinueButton = event.target.closest('[data-source-deep-continue]');
-    if (deepContinueButton) {
-      continueWithDeepMode();
-      return;
-    }
     const reconnectButton = event.target.closest('[data-source-reconnect-job]');
     if (reconnectButton) {
       const jobId = reconnectButton.dataset.sourceReconnectJob || '';
@@ -2572,11 +2264,6 @@
       return;
     }
     handleAttachmentPreviewEvent(event);
-  });
-  llmAnswer?.addEventListener('click', (event) => {
-    const deepContinueButton = event.target.closest('[data-source-deep-continue]');
-    if (!deepContinueButton) return;
-    continueWithDeepMode();
   });
   sessionMessages?.addEventListener('keydown', handleAttachmentPreviewEvent);
   viewTabs.forEach((tab) => {

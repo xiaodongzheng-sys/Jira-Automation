@@ -134,6 +134,23 @@ class MeetingRecorderParsingTests(unittest.TestCase):
         self.assertIn("-an", command)
         self.assertEqual(command[-1], "/tmp/preflight.mp4")
 
+    def test_screen_preflight_uses_configured_timeout(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime = MeetingRecorderRuntime(
+                store=MeetingRecordStore(Path(temp_dir)),
+                config=MeetingRecorderConfig(screen_preflight_timeout_seconds=30),
+            )
+
+            def fake_run(command, *_args, **_kwargs):
+                Path(command[-1]).write_bytes(b"video")
+                return Mock(stdout="", stderr="")
+
+            with patch("bpmis_jira_tool.meeting_recorder._run_command", side_effect=fake_run) as run_command:
+                result = runtime._screen_capture_preflight(ffmpeg_path="/opt/homebrew/bin/ffmpeg")
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(run_command.call_args.kwargs["timeout_seconds"], 30)
+
     def test_ffmpeg_audio_recording_command_uses_audio_input_only(self):
         command = _build_ffmpeg_audio_recording_command(
             ffmpeg_path="/opt/homebrew/bin/ffmpeg",
@@ -782,7 +799,8 @@ class MeetingRecorderRouteTests(unittest.TestCase):
         )
         active["status"] = "recording"
         store.save_record(active)
-        start = datetime.now(ZoneInfo("Asia/Singapore")) + timedelta(seconds=90)
+        fixed_now = datetime(2026, 5, 2, 12, 38, 30, tzinfo=ZoneInfo("Asia/Singapore"))
+        start = fixed_now + timedelta(seconds=90)
 
         fake_calendar = Mock()
         fake_calendar.upcoming_meetings.return_value = [
@@ -797,6 +815,9 @@ class MeetingRecorderRouteTests(unittest.TestCase):
         ]
 
         with patch("bpmis_jira_tool.web._build_calendar_meeting_service", return_value=fake_calendar), patch(
+            "bpmis_jira_tool.web.reminder_eligible_meetings",
+            side_effect=lambda meetings, **kwargs: reminder_eligible_meetings(meetings, now=fixed_now, **kwargs),
+        ), patch(
             "bpmis_jira_tool.web._meeting_recorder_diagnostics_payload",
             return_value={"audio_capture_label": "Aggregate device configured", "system_audio_configured": True},
         ):

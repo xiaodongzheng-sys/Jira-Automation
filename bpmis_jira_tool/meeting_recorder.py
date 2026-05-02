@@ -80,6 +80,7 @@ class MeetingRecorderConfig:
     video_max_width: int = 1920
     video_max_height: int = 1080
     avfoundation_pixel_format: str = "bgr0"
+    screen_preflight_timeout_seconds: int = 20
     frame_interval_seconds: int = 60
     vision_model: str = "gpt-4.1-mini"
     transcribe_provider: str = "whisper_cpp"
@@ -659,7 +660,11 @@ class MeetingRecorderRuntime:
                 avfoundation_pixel_format=self.config.avfoundation_pixel_format,
             )
             try:
-                _run_command(command, "Could not verify meeting screen capture.", timeout_seconds=8)
+                _run_command(
+                    command,
+                    "Could not verify meeting screen capture.",
+                    timeout_seconds=max(8, int(self.config.screen_preflight_timeout_seconds or 20)),
+                )
                 if not video_path.exists() or video_path.stat().st_size <= 0:
                     raise ToolError("Screen preflight produced no video bytes.")
             except Exception as error:  # noqa: BLE001

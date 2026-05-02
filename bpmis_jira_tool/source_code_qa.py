@@ -33,9 +33,8 @@ CRMS_COUNTRIES = ("SG", "ID", "PH")
 ANSWER_MODE_AUTO = "auto"
 ANSWER_MODE = "retrieval_only"
 ANSWER_MODE_GEMINI = "gemini_flash"
-QUERY_MODE_FAST = "fast"
 QUERY_MODE_DEEP = "deep"
-QUERY_MODES = {QUERY_MODE_FAST, QUERY_MODE_DEEP}
+QUERY_MODES = {QUERY_MODE_DEEP}
 CONFIG_VERSION = 1
 CODE_INDEX_VERSION = 29
 LLM_PROVIDER_GEMINI = "gemini"
@@ -73,10 +72,6 @@ DEFAULT_LLM_MAX_BACKOFF_SECONDS = 8.0
 DEFAULT_CODEX_CLI_MODEL = "codex-cli"
 DEFAULT_CODEX_TIMEOUT_SECONDS = 240
 DEFAULT_CODEX_TOP_PATH_LIMIT = 30
-FAST_QUERY_DEADLINE_SECONDS = 60
-FAST_CODEX_TIMEOUT_SECONDS = 55
-FAST_CODEX_FOLLOWUP_TIMEOUT_SECONDS = 55
-FAST_CODEX_TOP_PATH_LIMIT = 10
 CODEX_INVESTIGATION_PROMPT_MODE = "codex_investigation_brief_v5"
 CODEX_SESSION_MODE_EPHEMERAL = "ephemeral"
 CODEX_SESSION_MODE_RESUME = "resume"
@@ -90,14 +85,6 @@ MAX_TARGETED_INDEX_LINES = 1_200
 MAX_TARGETED_SEMANTIC_CHUNKS = 320
 SYNC_JOB_LOCK_TIMEOUT_SECONDS = 5.0
 DEFAULT_LLM_BUDGETS = {
-    "fast": {
-        "match_limit": 8,
-        "snippet_line_budget": 80,
-        "snippet_char_budget": 12_000,
-        "thinking_budget": 0,
-        "max_output_tokens": 900,
-        "model": "gemini-2.5-flash-lite",
-    },
     "cheap": {
         "match_limit": 4,
         "snippet_line_budget": 40,
@@ -2092,18 +2079,18 @@ class SourceCodeQAService:
         openai_api_key: str | None = None,
         openai_api_base_url: str = OPENAI_COMPATIBLE_API_BASE_URL,
         openai_model: str = "gpt-4.1-mini",
-        openai_fast_model: str = "gpt-4.1-mini",
+        openai_cheap_model: str = "gpt-4.1-mini",
         openai_deep_model: str = "gpt-4.1",
         openai_fallback_model: str = "gpt-4.1-mini",
         gemini_model: str = "gemini-2.5-flash",
-        gemini_fast_model: str = "gemini-2.5-flash-lite",
+        gemini_cheap_model: str = "gemini-2.5-flash-lite",
         gemini_deep_model: str = "gemini-2.5-flash",
         gemini_fallback_model: str = "gemini-2.5-flash-lite",
         vertex_credentials_file: str | None = None,
         vertex_project_id: str | None = None,
         vertex_location: str = "global",
         vertex_model: str = "gemini-2.5-flash",
-        vertex_fast_model: str = "gemini-2.5-flash-lite",
+        vertex_cheap_model: str = "gemini-2.5-flash-lite",
         vertex_deep_model: str = "gemini-2.5-flash",
         vertex_fallback_model: str = "gemini-2.5-flash-lite",
         query_rewrite_model: str | None = None,
@@ -2125,7 +2112,6 @@ class SourceCodeQAService:
         codex_repair_enabled: bool = True,
         codex_session_mode: str = CODEX_SESSION_MODE_EPHEMERAL,
         codex_session_max_turns: int = 8,
-        codex_fast_path_enabled: bool = True,
         codex_cache_followups: bool = False,
         llm_max_retries: int = DEFAULT_LLM_MAX_RETRIES,
         llm_backoff_seconds: float = DEFAULT_LLM_BACKOFF_SECONDS,
@@ -2154,18 +2140,18 @@ class SourceCodeQAService:
         self.openai_api_key = str(openai_api_key or "").strip()
         self.openai_api_base_url = str(openai_api_base_url or OPENAI_COMPATIBLE_API_BASE_URL).strip() or OPENAI_COMPATIBLE_API_BASE_URL
         self.openai_model = str(openai_model or "gpt-4.1-mini").strip() or "gpt-4.1-mini"
-        self.openai_fast_model = str(openai_fast_model or self.openai_model).strip() or self.openai_model
+        self.openai_cheap_model = str(openai_cheap_model or self.openai_model).strip() or self.openai_model
         self.openai_deep_model = str(openai_deep_model or self.openai_model).strip() or self.openai_model
-        self.openai_fallback_model = str(openai_fallback_model or self.openai_fast_model).strip() or self.openai_fast_model
+        self.openai_fallback_model = str(openai_fallback_model or self.openai_cheap_model).strip() or self.openai_cheap_model
         self.gemini_model = str(gemini_model or "gemini-2.5-flash").strip() or "gemini-2.5-flash"
-        self.gemini_fast_model = str(gemini_fast_model or "gemini-2.5-flash-lite").strip() or "gemini-2.5-flash-lite"
+        self.gemini_cheap_model = str(gemini_cheap_model or "gemini-2.5-flash-lite").strip() or "gemini-2.5-flash-lite"
         self.gemini_deep_model = str(gemini_deep_model or self.gemini_model).strip() or self.gemini_model
         self.gemini_fallback_model = str(gemini_fallback_model or "gemini-2.5-flash-lite").strip() or "gemini-2.5-flash-lite"
         self.vertex_credentials_file = str(vertex_credentials_file or "").strip()
         self.vertex_project_id = str(vertex_project_id or "").strip()
         self.vertex_location = str(vertex_location or "global").strip() or "global"
         self.vertex_model = str(vertex_model or "gemini-2.5-flash").strip() or "gemini-2.5-flash"
-        self.vertex_fast_model = str(vertex_fast_model or "gemini-2.5-flash-lite").strip() or "gemini-2.5-flash-lite"
+        self.vertex_cheap_model = str(vertex_cheap_model or "gemini-2.5-flash-lite").strip() or "gemini-2.5-flash-lite"
         self.vertex_deep_model = str(vertex_deep_model or self.vertex_model).strip() or self.vertex_model
         self.vertex_fallback_model = str(vertex_fallback_model or "gemini-2.5-flash-lite").strip() or "gemini-2.5-flash-lite"
         self.query_rewrite_model = str(query_rewrite_model or "").strip()
@@ -2192,7 +2178,6 @@ class SourceCodeQAService:
         normalized_codex_session_mode = str(codex_session_mode or CODEX_SESSION_MODE_EPHEMERAL).strip().lower()
         self.codex_session_mode = normalized_codex_session_mode if normalized_codex_session_mode in {CODEX_SESSION_MODE_EPHEMERAL, CODEX_SESSION_MODE_RESUME} else CODEX_SESSION_MODE_EPHEMERAL
         self.codex_session_max_turns = max(1, min(int(codex_session_max_turns or 8), 30))
-        self.codex_fast_path_enabled = bool(codex_fast_path_enabled)
         self.codex_cache_followups = bool(codex_cache_followups)
         self.llm_max_retries = max(0, int(llm_max_retries or 0))
         self.llm_backoff_seconds = max(0.0, float(llm_backoff_seconds or 0.0))
@@ -2225,18 +2210,18 @@ class SourceCodeQAService:
             openai_api_key=self.openai_api_key,
             openai_api_base_url=self.openai_api_base_url,
             openai_model=self.openai_model,
-            openai_fast_model=self.openai_fast_model,
+            openai_cheap_model=self.openai_cheap_model,
             openai_deep_model=self.openai_deep_model,
             openai_fallback_model=self.openai_fallback_model,
             gemini_model=self.gemini_model,
-            gemini_fast_model=self.gemini_fast_model,
+            gemini_cheap_model=self.gemini_cheap_model,
             gemini_deep_model=self.gemini_deep_model,
             gemini_fallback_model=self.gemini_fallback_model,
             vertex_credentials_file=self.vertex_credentials_file,
             vertex_project_id=self.vertex_project_id,
             vertex_location=self.vertex_location,
             vertex_model=self.vertex_model,
-            vertex_fast_model=self.vertex_fast_model,
+            vertex_cheap_model=self.vertex_cheap_model,
             vertex_deep_model=self.vertex_deep_model,
             vertex_fallback_model=self.vertex_fallback_model,
             query_rewrite_model=self.query_rewrite_model,
@@ -2258,7 +2243,6 @@ class SourceCodeQAService:
             codex_repair_enabled=self.codex_repair_enabled,
             codex_session_mode=self.codex_session_mode,
             codex_session_max_turns=self.codex_session_max_turns,
-            codex_fast_path_enabled=self.codex_fast_path_enabled,
             codex_cache_followups=self.codex_cache_followups,
             llm_max_retries=self.llm_max_retries,
             llm_backoff_seconds=self.llm_backoff_seconds,
@@ -2274,8 +2258,7 @@ class SourceCodeQAService:
 
     @staticmethod
     def normalize_query_mode(query_mode: str | None) -> str:
-        mode = str(query_mode or QUERY_MODE_DEEP).strip().lower() or QUERY_MODE_DEEP
-        return mode if mode in QUERY_MODES else QUERY_MODE_DEEP
+        return QUERY_MODE_DEEP
 
     def options_payload(self) -> dict[str, Any]:
         return {
@@ -2289,8 +2272,7 @@ class SourceCodeQAService:
                 {"value": ANSWER_MODE_AUTO, "label": "Smart Answer"},
             ],
             "query_modes": [
-                {"value": QUERY_MODE_FAST, "label": "Fast Mode", "description": "Returns an evidence-backed draft within 1 minute. Use Deep for complex chain verification."},
-                {"value": QUERY_MODE_DEEP, "label": "Deep Mode", "description": "More complete; may take 2-6 minutes."},
+                {"value": QUERY_MODE_DEEP, "label": "Deep Mode", "description": "Codex deep investigation is the default source-code answer path."},
             ],
             "llm_providers": [
                 {"value": LLM_PROVIDER_CODEX_CLI_BRIDGE, "label": "Codex"},
@@ -2458,14 +2440,12 @@ class SourceCodeQAService:
     def _build_llm_budgets(self) -> dict[str, dict[str, Any]]:
         budgets = json.loads(json.dumps(DEFAULT_LLM_BUDGETS))
         if self.llm_provider_name == LLM_PROVIDER_OPENAI_COMPATIBLE:
-            budgets["fast"]["model"] = self.openai_fast_model
-            budgets["cheap"]["model"] = self.openai_fast_model
+            budgets["cheap"]["model"] = self.openai_cheap_model
             budgets["balanced"]["model"] = self.openai_model
             budgets["deep"]["model"] = self.openai_deep_model
             budgets[COMPACT_DEEP_BUDGET_MODE]["model"] = self.openai_deep_model
         elif self.llm_provider_name == LLM_PROVIDER_CODEX_CLI_BRIDGE:
             codex_model = self._codex_cli_model()
-            budgets["fast"]["model"] = codex_model
             budgets["cheap"]["model"] = codex_model
             budgets["balanced"]["model"] = codex_model
             budgets["deep"]["model"] = codex_model
@@ -2473,14 +2453,12 @@ class SourceCodeQAService:
         elif self.llm_provider_name == LLM_PROVIDER_VERTEX_AI:
             for budget_name, overrides in VERTEX_QUALITY_LLM_BUDGETS.items():
                 budgets[budget_name].update(overrides)
-            budgets["fast"]["model"] = self.vertex_fast_model
-            budgets["cheap"]["model"] = self.vertex_fast_model
+            budgets["cheap"]["model"] = self.vertex_cheap_model
             budgets["balanced"]["model"] = self.vertex_model
             budgets["deep"]["model"] = self.vertex_deep_model
             budgets[COMPACT_DEEP_BUDGET_MODE]["model"] = self.vertex_deep_model
         else:
-            budgets["fast"]["model"] = self.gemini_fast_model
-            budgets["cheap"]["model"] = self.gemini_fast_model
+            budgets["cheap"]["model"] = self.gemini_cheap_model
             budgets["balanced"]["model"] = self.gemini_model
             budgets["deep"]["model"] = self.gemini_deep_model
             budgets[COMPACT_DEEP_BUDGET_MODE]["model"] = self.gemini_deep_model
@@ -3227,7 +3205,7 @@ class SourceCodeQAService:
 
     @staticmethod
     def _conversation_title_terms(title: str) -> list[str]:
-        low_value = SourceCodeQAService._fast_followup_low_value_terms()
+        low_value = SourceCodeQAService._followup_low_value_terms()
         terms: list[str] = []
         seen: set[str] = set()
         for token in IDENTIFIER_PATTERN.findall(str(title or "")):
@@ -3610,7 +3588,6 @@ class SourceCodeQAService:
         key = self.mapping_key(pm_team, country)
         question = str(question or "").strip()
         query_mode = self.normalize_query_mode(query_mode)
-        fast_query_mode = query_mode == QUERY_MODE_FAST
         started_at = time.time()
         trace_id = uuid.uuid4().hex
 
@@ -3847,19 +3824,10 @@ class SourceCodeQAService:
                 report("focused_search", f"Checked domain-specific symbols in {entry.display_name}.", index, len(synced_entries))
         if not exact_lookup_sufficient:
             report("direct_search", f"Searching direct matches across {len(synced_entries)} repos.", 0, len(synced_entries))
-            skip_broad_query_decomposition = fast_query_mode
+            skip_broad_query_decomposition = False
             for index, (entry, repo_path) in enumerate(synced_entries, start=1):
                 matches.extend(self._search_repo(entry, repo_path, tokens, question=question, request_cache=request_cache))
                 report("direct_search", f"Searching direct matches in {entry.display_name}.", index, len(synced_entries))
-                if fast_query_mode and matches and (len(matches) >= max(24, result_limit * 2) or time.time() - started_at >= 8.0):
-                    self._increment_retrieval_stat(request_cache, "fast_direct_scan_early_stops")
-                    report(
-                        "quality_gate",
-                        "Fast mode has enough candidate evidence; stopping local retrieval to preserve the 1-minute SLA.",
-                        index,
-                        len(synced_entries),
-                    )
-                    break
                 if matches and simple_quality_trace and index >= 3 and (len(matches) >= 80 or time.time() - started_at >= 4.0):
                     direct_ranked = self._rank_matches(question, matches, request_cache=request_cache)
                     direct_top = self._select_result_matches(direct_ranked, max(1, min(int(limit or 12), 30)), question=question)
@@ -3977,7 +3945,7 @@ class SourceCodeQAService:
             if exact_matches
             else matches[:result_limit]
         )
-        should_expand_matches = not exact_lookup_sufficient and not fast_query_mode
+        should_expand_matches = not exact_lookup_sufficient
         if top_matches and should_expand_matches and simple_quality_trace:
             early_evidence_summary = self._compress_evidence_cached(question, top_matches, request_cache=request_cache)
             early_quality_gate = self._quality_gate_cached(question, early_evidence_summary, request_cache=request_cache)
@@ -4167,19 +4135,14 @@ class SourceCodeQAService:
         normalized_answer_mode = str(answer_mode or ANSWER_MODE).strip() or ANSWER_MODE
         if normalized_answer_mode not in {ANSWER_MODE, ANSWER_MODE_GEMINI, ANSWER_MODE_AUTO}:
             normalized_answer_mode = ANSWER_MODE_AUTO
-        codex_fast_path = self._codex_fast_path_active(normalized_answer_mode)
         report(
             "evidence_pack",
-            "Preparing Codex navigation hints." if codex_fast_path else "Building evidence pack and answer context.",
+            "Building evidence pack and answer context.",
             0,
             0,
         )
-        if codex_fast_path:
-            evidence_summary = self._codex_fast_evidence_summary(question, top_matches)
-            quality_gate = self._codex_fast_quality_gate(top_matches)
-        else:
-            evidence_summary = self._compress_evidence_cached(question, top_matches, request_cache=request_cache)
-            quality_gate = self._quality_gate_cached(question, evidence_summary, request_cache=request_cache)
+        evidence_summary = self._compress_evidence_cached(question, top_matches, request_cache=request_cache)
+        quality_gate = self._quality_gate_cached(question, evidence_summary, request_cache=request_cache)
         trace_paths = [] if exact_lookup_sufficient or not should_expand_matches else self._build_trace_paths(entries=query_entries, key=key, matches=top_matches, question=question, request_cache=request_cache)
         if trace_paths:
             evidence_summary["trace_paths"] = trace_paths
@@ -4193,16 +4156,12 @@ class SourceCodeQAService:
             if exact_lookup_sufficient or not should_expand_matches
             else self._build_repo_dependency_graph(key=key, entries=query_entries, request_cache=request_cache)
         )
-        evidence_pack = (
-            self._codex_fast_evidence_pack(top_matches, trace_paths)
-            if codex_fast_path
-            else self._build_evidence_pack(
-                question=question,
-                evidence_summary=evidence_summary,
-                matches=top_matches,
-                trace_paths=trace_paths,
-                quality_gate=quality_gate,
-            )
+        evidence_pack = self._build_evidence_pack(
+            question=question,
+            evidence_summary=evidence_summary,
+            matches=top_matches,
+            trace_paths=trace_paths,
+            quality_gate=quality_gate,
         )
         payload = {
             "status": "ok",
@@ -4232,7 +4191,7 @@ class SourceCodeQAService:
             "original_question": original_question,
             "trace_id": trace_id,
             "query_mode": query_mode,
-            "deadline_seconds": FAST_QUERY_DEADLINE_SECONDS if query_mode == QUERY_MODE_FAST else 0,
+            "deadline_seconds": 0,
             "deadline_hit": False,
             "retrieval_latency_ms": retrieval_latency_ms,
             "codex_latency_ms": 0,
@@ -4240,10 +4199,9 @@ class SourceCodeQAService:
             "background_deep_job_id": "",
         }
         if normalized_answer_mode in {ANSWER_MODE_GEMINI, ANSWER_MODE_AUTO}:
-            llm_service = self.with_llm_provider(LLM_PROVIDER_CODEX_CLI_BRIDGE) if fast_query_mode else self
+            llm_service = self
             payload["llm_provider"] = llm_service.llm_provider.name
-            report("llm_generation", "Calling fast Codex with retrieved evidence." if query_mode == QUERY_MODE_FAST else "Calling LLM with retrieved evidence.", 0, 0)
-            fast_deadline_remaining_seconds = max(0, int(FAST_QUERY_DEADLINE_SECONDS - (time.time() - started_at))) if fast_query_mode else 0
+            report("llm_generation", "Calling LLM with retrieved evidence.", 0, 0)
             llm_payload = llm_service._build_llm_answer(
                 entries=query_entries,
                 key=key,
@@ -4259,12 +4217,11 @@ class SourceCodeQAService:
                 progress_callback=progress_callback,
                 attachments=attachments or [],
                 runtime_evidence=runtime_evidence or [],
-                fast_deadline_remaining_seconds=fast_deadline_remaining_seconds,
             )
             payload.update(llm_payload)
             payload["query_mode"] = query_mode
             payload["requested_query_mode"] = payload.get("requested_query_mode") or ""
-            payload["deadline_seconds"] = FAST_QUERY_DEADLINE_SECONDS if fast_query_mode else 0
+            payload["deadline_seconds"] = 0
             payload["retrieval_latency_ms"] = retrieval_latency_ms
             payload["codex_latency_ms"] = payload.get("llm_latency_ms") if llm_service.llm_provider.name == LLM_PROVIDER_CODEX_CLI_BRIDGE else 0
             payload["background_deep_job_id"] = payload.get("background_deep_job_id") or ""
@@ -4307,66 +4264,6 @@ class SourceCodeQAService:
                 }
             )
         return statuses
-
-    def _codex_fast_path_active(self, answer_mode: str | None = None) -> bool:
-        normalized_answer_mode = str(answer_mode or "").strip() or ANSWER_MODE
-        return (
-            self.llm_provider_name == LLM_PROVIDER_CODEX_CLI_BRIDGE
-            and self.codex_fast_path_enabled
-            and normalized_answer_mode in {ANSWER_MODE_AUTO, ANSWER_MODE_GEMINI}
-        )
-
-    @staticmethod
-    def _codex_fast_quality_gate(matches: list[dict[str, Any]]) -> dict[str, Any]:
-        return {
-            "status": "codex_fast_path_skipped",
-            "confidence": "unknown",
-            "reason": "Codex reads the candidate files directly; Gemini-style answer quality gate is skipped.",
-            "missing": [] if matches else ["candidate paths"],
-        }
-
-    @staticmethod
-    def _codex_fast_evidence_summary(question: str, matches: list[dict[str, Any]]) -> dict[str, Any]:
-        return {
-            "version": 1,
-            "mode": "codex_fast_path",
-            "question": str(question or "")[:500],
-            "supporting_count": len(matches),
-            "top_paths": [
-                {
-                    "source_id": f"S{index}",
-                    "repo": match.get("repo"),
-                    "path": match.get("path"),
-                    "line_start": match.get("line_start"),
-                    "line_end": match.get("line_end"),
-                    "retrieval": match.get("retrieval"),
-                    "trace_stage": match.get("trace_stage"),
-                    "reason": match.get("reason"),
-                }
-                for index, match in enumerate(matches[:30], start=1)
-                if isinstance(match, dict)
-            ],
-        }
-
-    @staticmethod
-    def _codex_fast_evidence_pack(matches: list[dict[str, Any]], trace_paths: list[dict[str, Any]]) -> dict[str, Any]:
-        top_paths = [
-            f"{match.get('repo')}:{match.get('path')}:{match.get('line_start')}-{match.get('line_end')} [S{index}]"
-            for index, match in enumerate(matches[:12], start=1)
-            if isinstance(match, dict)
-        ]
-        return {
-            "version": 2,
-            "mode": "codex_navigation_hints",
-            "entry_points": top_paths[:6],
-            "call_chain": top_paths[6:10],
-            "read_write_points": [],
-            "tables": [],
-            "apis": [],
-            "configs": [],
-            "missing_hops": [],
-            "trace_paths": trace_paths[:5],
-        }
 
     def index_health_payload(self) -> dict[str, Any]:
         config = self.load_config()
@@ -13215,6 +13112,17 @@ class SourceCodeQAService:
                 score += 35
             if any(term in snippet for term in ("jdbctemplate", "resttemplate", "webclient", "feign")):
                 score += 22
+            if self._match_answer_grade(match, intent_label="data_source"):
+                score += 150
+            else:
+                role = self._evidence_role(path, snippet, str(match.get("reason") or ""))
+                if role in {"logic", "definition", "supporting", "test"}:
+                    score -= 90
+                if self._match_is_definition_only(match, list(specific_terms or question_tokens)):
+                    score -= 60
+                reason = str(match.get("reason") or "").lower()
+                if any(marker in reason for marker in ("bm25 content match", "structure matched", "path matched")):
+                    score -= 45
         if intent.get("api"):
             if any(term in path for term in ("controller", "client", "api")):
                 score += 24
@@ -14255,6 +14163,14 @@ class SourceCodeQAService:
         }
         for bucket in buckets.values():
             bucket.sort(key=lambda item: item.get("rerank_score", item["score"]), reverse=True)
+        buckets["exact_lookup"].sort(
+            key=lambda item: (
+                1 if str(item.get("path") or "").lower().endswith((".java", ".kt", ".go", ".py", ".ts", ".js")) else 0,
+                item.get("rerank_score", item.get("score", 0)),
+                item.get("score", 0),
+            ),
+            reverse=True,
+        )
         selected: list[dict[str, Any]] = []
         seen: set[tuple[Any, Any, Any, Any]] = set()
         exact_terms_seen: set[str] = set()
@@ -14353,6 +14269,8 @@ class SourceCodeQAService:
             priority = 0
             if trace_stage == "exact_lookup" or retrieval == "exact_table_path_lookup":
                 priority = max(priority, 70)
+                if path.endswith((".java", ".kt", ".go", ".py", ".ts", ".js")):
+                    priority = max(priority, 75)
             if intent.get("static_qa") and (retrieval == "static_qa" or item.get("static_qa")):
                 priority = max(priority, 60)
             if intent.get("test_coverage") and (retrieval == "test_coverage" or item.get("test_coverage") or self._is_test_file_path(path)):
@@ -14411,18 +14329,15 @@ class SourceCodeQAService:
         progress_callback: Any | None = None,
         attachments: list[dict[str, Any]] | None = None,
         runtime_evidence: list[dict[str, Any]] | None = None,
-        fast_deadline_remaining_seconds: int | None = None,
     ) -> dict[str, Any]:
         if not self.llm_ready():
             raise ToolError(self.llm_unavailable_message())
         query_mode = self.normalize_query_mode(query_mode)
-        if query_mode == QUERY_MODE_FAST and str(llm_budget_mode or "").strip().lower() == "auto":
-            llm_budget_mode = QUERY_MODE_FAST
         routed_budget_mode, budget, llm_route = self._resolve_llm_budget(llm_budget_mode, question, matches)
         llm_route = {
             **llm_route,
             "query_mode": query_mode,
-            "deadline_seconds": FAST_QUERY_DEADLINE_SECONDS if query_mode == QUERY_MODE_FAST else 0,
+            "deadline_seconds": 0,
         }
         selected_model = self._model_for_role_or_budget("answer", budget)
         selected_matches = self._select_llm_matches(matches, int(budget["match_limit"]), question=question)
@@ -14462,7 +14377,6 @@ class SourceCodeQAService:
                 progress_callback=progress_callback,
                 attachments=attachments or [],
                 runtime_evidence=runtime_evidence or [],
-                fast_deadline_remaining_seconds=fast_deadline_remaining_seconds,
             )
         attachment_section = self._context_attachment_section(attachments or [], runtime_evidence or [])
         domain_context = self._llm_domain_context(
@@ -14680,8 +14594,6 @@ class SourceCodeQAService:
                     "thinkingConfig": answer_thinking_config,
                 },
             }
-            if query_mode == QUERY_MODE_FAST:
-                draft_payload["_timeout_seconds"] = FAST_CODEX_TIMEOUT_SECONDS
             draft_result = self.llm_provider.generate(
                 payload=draft_payload,
                 primary_model=selected_model,
@@ -14795,8 +14707,6 @@ class SourceCodeQAService:
                 "thinkingConfig": answer_thinking_config,
             },
         }
-        if query_mode == QUERY_MODE_FAST:
-            payload["_timeout_seconds"] = FAST_CODEX_TIMEOUT_SECONDS
         result = self.llm_provider.generate(
             payload=payload,
             primary_model=selected_model,
@@ -15099,11 +15009,9 @@ class SourceCodeQAService:
         progress_callback: Any | None = None,
         attachments: list[dict[str, Any]] | None = None,
         runtime_evidence: list[dict[str, Any]] | None = None,
-        fast_deadline_remaining_seconds: int | None = None,
     ) -> dict[str, Any]:
         query_mode = self.normalize_query_mode(query_mode)
-        fast_mode = query_mode == QUERY_MODE_FAST
-        candidate_limit = FAST_CODEX_TOP_PATH_LIMIT if fast_mode else self.codex_top_path_limit
+        candidate_limit = self.codex_top_path_limit
         candidate_matches = self._select_llm_matches(
             matches,
             candidate_limit,
@@ -15114,18 +15022,6 @@ class SourceCodeQAService:
         candidate_paths = self._codex_candidate_paths(entries=entries, key=key, matches=candidate_matches)
         candidate_paths = self._merge_codex_followup_candidate_paths(candidate_paths, followup_context)
         candidate_path_layers = self._codex_candidate_path_layers(candidate_paths, followup_context)
-        fast_timeout_ceiling = self._fast_followup_timeout_seconds(question, followup_context) if fast_mode else 0
-        if fast_mode:
-            remaining = int(fast_deadline_remaining_seconds if fast_deadline_remaining_seconds is not None else FAST_CODEX_TIMEOUT_SECONDS)
-            fast_timeout_seconds = max(0, min(fast_timeout_ceiling or FAST_CODEX_TIMEOUT_SECONDS, remaining))
-        else:
-            fast_timeout_seconds = 0
-        fast_fallback_matches, fast_inherited_focus_terms = self._fast_followup_fallback_matches(
-            selected_matches=candidate_matches,
-            followup_context=followup_context,
-            question=question,
-            limit=candidate_limit,
-        ) if fast_mode else (candidate_matches, [])
         llm_route = {
             **llm_route,
             "answer_model": selected_model,
@@ -15135,62 +15031,24 @@ class SourceCodeQAService:
             "candidate_repo_count": len({item.get("repo") for item in candidate_paths}),
             "candidate_path_count": len(candidate_paths),
             "codex_repair_enabled": self.codex_repair_enabled,
-            "codex_repair_allowed": bool(self.codex_repair_enabled and not fast_mode),
-            "codex_fast_path_enabled": self.codex_fast_path_enabled,
+            "codex_repair_allowed": bool(self.codex_repair_enabled),
             "query_mode": query_mode,
-            "deadline_seconds": FAST_QUERY_DEADLINE_SECONDS if fast_mode else 0,
-            "fast_timeout_seconds": fast_timeout_seconds,
-            "fast_deadline_remaining_seconds": fast_deadline_remaining_seconds if fast_mode and fast_deadline_remaining_seconds is not None else 0,
-            "fast_adaptive_timeout": False,
-            "fast_inherited_focus_terms": fast_inherited_focus_terms[:10],
-            "fast_candidate_path_limit": candidate_limit if fast_mode else 0,
+            "deadline_seconds": 0,
             "codex_session_mode": self.codex_session_mode,
             "codex_session_max_turns": self.codex_session_max_turns,
             "codex_cache_followups": self.codex_cache_followups,
         }
-        if fast_mode and fast_timeout_seconds <= 0:
-            return self._build_fast_llm_fallback_answer(
-                question=question,
-                selected_matches=fast_fallback_matches,
-                evidence_summary=evidence_summary,
-                quality_gate=quality_gate,
-                evidence_pack=evidence_pack,
-                llm_budget_mode=llm_budget_mode,
-                routed_budget_mode=routed_budget_mode,
-                llm_route={
-                    **llm_route,
-                    "codex_repair_attempted": False,
-                    "codex_deadline_hit": True,
-                },
-                selected_model=selected_model,
-                reason="Fast mode deadline was reached during local retrieval.",
-                timeout_seconds=0,
-                focus_terms=fast_inherited_focus_terms,
-            )
-        if fast_mode:
-            prompt_context = self._codex_fast_investigation_brief(
-                pm_team=pm_team,
-                country=country,
-                question=question,
-                candidate_paths=candidate_paths,
-                evidence_pack=evidence_pack,
-                quality_gate=quality_gate,
-                followup_context=followup_context,
-                attachments=attachments or [],
-                runtime_evidence=runtime_evidence or [],
-            )
-        else:
-            prompt_context = self._codex_investigation_brief(
-                pm_team=pm_team,
-                country=country,
-                question=question,
-                candidate_paths=candidate_paths,
-                evidence_pack=evidence_pack,
-                quality_gate=quality_gate,
-                followup_context=followup_context,
-                attachments=attachments or [],
-                runtime_evidence=runtime_evidence or [],
-            )
+        prompt_context = self._codex_investigation_brief(
+            pm_team=pm_team,
+            country=country,
+            question=question,
+            candidate_paths=candidate_paths,
+            evidence_pack=evidence_pack,
+            quality_gate=quality_gate,
+            followup_context=followup_context,
+            attachments=attachments or [],
+            runtime_evidence=runtime_evidence or [],
+        )
         is_followup = bool(followup_context and (followup_context.get("used") or followup_context.get("question") or followup_context.get("recent_turns")))
         cache_key = self._answer_cache_key(
             provider=self.llm_provider.name,
@@ -15200,7 +15058,7 @@ class SourceCodeQAService:
             llm_budget_mode=routed_budget_mode,
             context=prompt_context,
         )
-        cached = None if (is_followup and not self.codex_cache_followups) else self._load_cached_answer(cache_key)
+        cached = None
         if cached is not None:
             cached_answer = str(cached["answer"])
             cached_structured = self._parse_structured_answer(cached_answer)
@@ -15242,13 +15100,6 @@ class SourceCodeQAService:
                 selected_matches=candidate_matches,
             )
             answer_contract = cached_final["answer_contract"]
-            fast_gate = self._fast_answer_quality_gate(
-                question=question,
-                selected_matches=candidate_matches,
-                structured_answer=cached_final["structured_answer"],
-                answer_contract=answer_contract,
-            ) if fast_mode else {}
-            fast_gate_public = {key: value for key, value in fast_gate.items() if key != "usable_matches"}
             cached_summary = {
                 "prompt_mode": llm_route.get("prompt_mode"),
                 "candidate_repo_count": llm_route.get("candidate_repo_count"),
@@ -15282,8 +15133,6 @@ class SourceCodeQAService:
                 "evidence_pack": evidence_pack,
                 "codex_cli_summary": cached_summary,
                 "cache_metadata": self._answer_cache_metadata(cache_key, cached),
-                "fast_quality_gate": fast_gate_public,
-                "fast_insufficient_evidence": bool(fast_gate.get("needs_deep")) if fast_mode else False,
             }
         codex_cli_session_id = ""
         if self.codex_session_mode == CODEX_SESSION_MODE_RESUME and isinstance(followup_context, dict):
@@ -15295,8 +15144,6 @@ class SourceCodeQAService:
             codex_cli_session_id=codex_cli_session_id,
             image_paths=self._attachment_image_paths(attachments or []),
         )
-        if fast_mode:
-            payload["_timeout_seconds"] = fast_timeout_seconds or FAST_CODEX_TIMEOUT_SECONDS
         try:
             result = self.llm_provider.generate(
                 payload=payload,
@@ -15304,26 +15151,7 @@ class SourceCodeQAService:
                 fallback_model=self._llm_fallback_model(),
             )
         except ToolError as error:
-            if not fast_mode:
-                raise
-            return self._build_fast_llm_fallback_answer(
-                question=question,
-                selected_matches=fast_fallback_matches,
-                evidence_summary=evidence_summary,
-                quality_gate=quality_gate,
-                evidence_pack=evidence_pack,
-                llm_budget_mode=llm_budget_mode,
-                routed_budget_mode=routed_budget_mode,
-                llm_route={
-                    **llm_route,
-                    "codex_repair_attempted": False,
-                    "codex_deadline_hit": True,
-                },
-                selected_model=selected_model,
-                reason=str(error),
-                timeout_seconds=fast_timeout_seconds or FAST_CODEX_TIMEOUT_SECONDS,
-                focus_terms=fast_inherited_focus_terms,
-            )
+            raise
         answer = self.llm_provider.extract_text(result.payload)
         structured_answer = self._parse_structured_answer(answer)
         usage = self._normalize_llm_usage(result.usage or result.payload.get("usageMetadata") or {})
@@ -15350,7 +15178,7 @@ class SourceCodeQAService:
             answer_judge=answer_judge,
             codex_validation=codex_validation,
         )
-        if self.codex_repair_enabled and not fast_mode and (repair_issues or deep_needed):
+        if self.codex_repair_enabled and (repair_issues or deep_needed):
             repair_attempted = True
             if deep_needed:
                 if progress_callback:
@@ -15465,13 +15293,6 @@ class SourceCodeQAService:
             selected_matches=candidate_matches,
         )
         answer_contract = final["answer_contract"]
-        fast_gate = self._fast_answer_quality_gate(
-            question=question,
-            selected_matches=candidate_matches,
-            structured_answer=final["structured_answer"],
-            answer_contract=answer_contract,
-        ) if fast_mode else {}
-        fast_gate_public = {key: value for key, value in fast_gate.items() if key != "usable_matches"}
         llm_route = {
             **llm_route,
             "codex_citation_validation_status": codex_validation.get("status"),
@@ -15536,841 +15357,45 @@ class SourceCodeQAService:
             "codex_cli_summary": codex_cli_summary,
             "codex_cli_trace": codex_cli_trace,
             "cache_metadata": self._answer_cache_metadata(cache_key),
-            "fast_quality_gate": fast_gate_public,
-            "fast_insufficient_evidence": bool(fast_gate.get("needs_deep")) if fast_mode else False,
-        }
-
-    def _build_fast_llm_fallback_answer(
-        self,
-        *,
-        question: str,
-        selected_matches: list[dict[str, Any]],
-        evidence_summary: dict[str, Any],
-        quality_gate: dict[str, Any],
-        evidence_pack: dict[str, Any],
-        llm_budget_mode: str,
-        routed_budget_mode: str,
-        llm_route: dict[str, Any],
-        selected_model: str,
-        reason: str,
-        timeout_seconds: int = FAST_CODEX_TIMEOUT_SECONDS,
-        focus_terms: list[str] | None = None,
-    ) -> dict[str, Any]:
-        structured_answer = self._build_fast_evidence_first_answer(
-            question=question,
-            selected_matches=selected_matches,
-            evidence_summary=evidence_summary,
-            quality_gate=quality_gate,
-            evidence_pack=evidence_pack,
-            focus_terms=focus_terms,
-        )
-        fast_gate = structured_answer.get("fast_quality_gate") or self._fast_answer_quality_gate(
-            question=question,
-            selected_matches=selected_matches,
-            structured_answer=structured_answer,
-        )
-        claim_check = self._trusted_provider_check()
-        answer_judge = self._trusted_provider_judge()
-        answer_contract = {
-            "status": "deadline_fallback",
-            "confidence": structured_answer["confidence"],
-            "policies": [],
-            "missing_evidence": structured_answer["missing_evidence"],
-            "confirmed_from_code": structured_answer.get("confirmed_from_code") or [],
-            "inferred_from_code": structured_answer.get("inferred_from_code") or [],
-            "missing_links": structured_answer.get("missing_evidence") or [],
-        }
-        answer = self._render_structured_answer(structured_answer, answer_contract)
-        fallback_claim_count = len(structured_answer.get("claims") or [])
-        effective_timeout_seconds = max(0, int(timeout_seconds if timeout_seconds is not None else FAST_CODEX_TIMEOUT_SECONDS))
-        return {
-            "llm_answer": answer,
-            "llm_budget_mode": routed_budget_mode,
-            "llm_requested_budget_mode": llm_budget_mode,
-            "llm_route": {
-                **llm_route,
-                "reason": f"{llm_route.get('reason') or ''},fast_deadline_fallback".strip(","),
-                "fast_timeout_reason": str(reason or "")[:500],
-            },
-            "llm_provider": self.llm_provider.name,
-            "llm_cached": False,
-            "llm_usage": {},
-            "llm_model": selected_model,
-            "llm_thinking_budget": 0,
-            "llm_attempts": 1,
-            "llm_latency_ms": effective_timeout_seconds * 1000,
-            "llm_attempt_log": [
-                {
-                    "model": selected_model,
-                    "attempt": 1,
-                    "status": "timeout",
-                    "retryable": True,
-                    "latency_ms": effective_timeout_seconds * 1000,
-                    "provider": self.llm_provider.name,
-                    "timeout": True,
-                }
-            ],
-            "llm_finish_reason": "fast_deadline_fallback",
-            "answer_quality": quality_gate,
-            "answer_self_check": self._skipped_codex_answer_check(),
-            "answer_claim_check": claim_check,
-            "answer_judge": answer_judge,
-            "structured_answer": structured_answer,
-            "answer_contract": answer_contract,
-            "evidence_pack": evidence_pack,
-            "cache_metadata": {},
-            "deadline_hit": True,
-            "fallback_used": True,
-            "fallback_answer_quality": structured_answer["confidence"],
-            "fallback_evidence_count": len(selected_matches),
-            "fallback_claim_count": fallback_claim_count,
-            "deadline_fallback_reason": str(reason or "")[:500],
-            "background_deep_job_id": "",
-            "fast_quality_gate": fast_gate,
-            "fast_insufficient_evidence": bool(fast_gate.get("needs_deep")),
-        }
-
-    def _build_fast_evidence_first_answer(
-        self,
-        *,
-        question: str,
-        selected_matches: list[dict[str, Any]],
-        evidence_summary: dict[str, Any],
-        quality_gate: dict[str, Any],
-        evidence_pack: dict[str, Any],
-        focus_terms: list[str] | None = None,
-    ) -> dict[str, Any]:
-        focus_terms = list(dict.fromkeys([*(focus_terms or []), *self._fast_answer_focus_terms(question)]))[:8]
-        fast_gate = self._fast_answer_quality_gate(
-            question=question,
-            selected_matches=selected_matches,
-            structured_answer={},
-            focus_terms=focus_terms,
-            require_claim=False,
-        )
-        usable_matches = fast_gate.get("usable_matches") if isinstance(fast_gate.get("usable_matches"), list) else []
-        claim_matches = usable_matches
-        citations = self._build_citations(claim_matches)
-        language = self._fast_answer_language(question)
-        intent_label = self._fast_answer_intent_label(question)
-        evidence_cards = [
-            self._fast_evidence_card_from_match(citation, match, focus_terms, language=language)
-            for citation, match in zip(citations, claim_matches)
-        ][:8]
-        confirmed_points = self._fast_confirmed_points_from_cards(
-            question=question,
-            intent_label=intent_label,
-            cards=evidence_cards,
-            language=language,
-        )
-        claims: list[dict[str, Any]] = []
-        used_citations: set[str] = set()
-
-        def add_claim(text: str, citation_ids: list[str]) -> None:
-            clean_text = re.sub(r"\s+", " ", str(text or "")).strip()
-            clean_citations = [item for item in dict.fromkeys(citation_ids) if item]
-            if not clean_text or not clean_citations:
-                return
-            if any(existing.get("text") == clean_text for existing in claims):
-                return
-            claims.append({"text": clean_text[:520], "citations": clean_citations[:3]})
-            used_citations.update(clean_citations)
-
-        match_by_id = {citation["id"]: match for citation, match in zip(citations, claim_matches)}
-        for item in evidence_pack.get("items") or []:
-            if len(claims) >= 5:
-                break
-            source_id = str(item.get("source_id") or "").strip()
-            if not source_id or source_id not in match_by_id:
-                continue
-            claim = str(item.get("claim") or "").strip()
-            if claim and str(item.get("support_level") or "") != "missing":
-                add_claim(claim, [source_id])
-        for citation, match in zip(citations, claim_matches):
-            if len(claims) >= 5:
-                break
-            if citation["id"] in used_citations:
-                continue
-            claim = self._fast_claim_from_match(citation, match, focus_terms)
-            add_claim(claim, [citation["id"]])
-
-        for point in confirmed_points:
-            if len(claims) >= 5:
-                break
-            add_claim(str(point.get("text") or ""), [str(item) for item in (point.get("citations") or [])])
-
-        coverage = self._fast_focus_coverage(focus_terms, claim_matches)
-        confirmed = [
-            str(item).strip()
-            for item in [
-                *(evidence_pack.get("confirmed_facts") or []),
-                *(evidence_summary.get("data_sources") or []),
-                *(evidence_summary.get("api_or_config") or []),
-            ]
-            if str(item).strip()
-        ][:6]
-        inferred = [
-            str(item).strip()
-            for item in [
-                *(evidence_pack.get("inferred_facts") or []),
-                *(evidence_summary.get("data_carriers") or []),
-                *(evidence_summary.get("field_population") or []),
-                *(evidence_summary.get("entry_points") or []),
-            ]
-            if str(item).strip()
-        ][:6]
-        missing = [
-            str(item).strip()
-            for item in [
-                *(evidence_pack.get("missing_facts") or []),
-                *(evidence_pack.get("evidence_limits") or []),
-                *(quality_gate.get("missing") or []),
-            ]
-            if str(item).strip()
-        ]
-        missing.extend(
-            f"Fast mode did not find enough evidence for `{term}`." for term in focus_terms if term.lower() not in coverage
-        )
-        if fast_gate.get("status") == "definition_only":
-            missing.append("Definition found, but usage flow is not yet confirmed from code.")
-        elif fast_gate.get("needs_deep"):
-            missing.append(str(fast_gate.get("reason") or "Fast evidence did not pass the quality gate."))
-        if selected_matches:
-            missing.append("Fast mode did not complete reliable cross-file verification; deep mode is needed for full caller/callee and upstream-source validation.")
-        else:
-            missing.append("No code evidence was retrieved within the fast-mode window.")
-        missing = list(dict.fromkeys(missing))[:6]
-
-        missing_points = self._fast_missing_points(
-            raw_missing=missing,
-            focus_terms=focus_terms,
-            fast_gate=fast_gate,
-            selected_matches=selected_matches,
-            language=language,
-        )
-        if not confirmed_points and claims:
-            for claim in claims[:3]:
-                text = self._fast_humanize_code_text(str(claim.get("text") or ""))
-                if not text or self._fast_machine_retrieval_text(text):
-                    continue
-                confirmed_points.append({"text": text, "citations": list(claim.get("citations") or [])[:3]})
-
-        confidence = "medium" if confirmed_points and (confirmed or coverage) and not fast_gate.get("needs_deep") else "low"
-        direct_answer = self._fast_compose_human_answer(
-            question=question,
-            intent_label=intent_label,
-            focus_terms=focus_terms,
-            confirmed_points=confirmed_points,
-            missing_points=missing_points,
-            confidence=confidence,
-            language=language,
-        )
-        return {
-            "direct_answer": direct_answer,
-            "investigation_steps": {
-                "candidate_evidence": [point["text"] for point in confirmed_points[:3]],
-                "gap_verification": missing_points[:3],
-                "certainty_split": [
-                    "Confirmed facts are limited to cited retrieved evidence.",
-                    "Unverified cross-file flow remains in Not Verified.",
-                ],
-            },
-            "attachment_facts": [],
-            "screenshot_evidence": [],
-            "source_code_evidence": [card["detail"] for card in evidence_cards[:5]],
-            "confirmed_from_code": confirmed[:5],
-            "inferred_from_code": inferred[:5],
-            "not_found": missing_points[:5],
-            "missing_production_evidence": [],
-            "next_checks": ["Run deep mode if the answer needs complete cross-file chain verification."],
-            "claims": confirmed_points or claims or [
-                {
-                    "text": "Fast mode could not produce a code-backed claim from the retrieved evidence.",
-                    "citations": [item.get("id") for item in citations[:1] if item.get("id")],
-                }
-            ],
-            "confirmed_points": confirmed_points,
-            "missing_points": missing_points,
-            "evidence_cards": evidence_cards,
-            "missing_evidence": missing_points,
-            "confidence": confidence,
-            "fast_quality_gate": {key: value for key, value in fast_gate.items() if key != "usable_matches"},
-            "format": "json",
         }
 
     @staticmethod
-    def _fast_answer_focus_terms(question: str) -> list[str]:
-        terms: list[str] = []
-        low_value = SourceCodeQAService._fast_low_value_query_terms()
-        text = str(question or "")
-        phrase_patterns = [
-            r"\bTerm\s+Loan\s+Pre[-\s]?check\s+\d+\b",
-            r"\bdata\s+sources?\b",
-            r"\bmerchantU?id\s+(?:vs|versus|and)\s+shopeeU?id\b",
-        ]
-        for pattern in phrase_patterns:
-            for match in re.findall(pattern, text, flags=re.IGNORECASE):
-                phrase = re.sub(r"\s+", " ", str(match or "")).strip()
-                if phrase and phrase.lower() not in {item.lower() for item in terms}:
-                    terms.append(phrase)
-        for token in re.findall(r"[A-Za-z][A-Za-z0-9_]{2,}", str(question or "")):
-            lowered = token.lower()
-            if lowered in low_value:
-                continue
-            if token not in terms:
-                terms.append(token)
-        return terms[:8]
-
-    @staticmethod
-    def _fast_low_value_query_terms() -> set[str]:
-        return {
-            *STOPWORDS,
-            *LOW_VALUE_FOCUS_TERMS,
-            *SourceCodeQAService._fast_followup_low_value_terms(),
-            "can",
-            "could",
-            "help",
-            "how",
-            "i",
-            "please",
-            "tell",
-            "what",
-            "when",
-            "where",
-            "which",
-            "you",
-            "your",
-            "show",
-            "me",
-            "used",
-            "use",
-            "uses",
-            "using",
-            "source",
-            "sources",
-            "explain",
-            "describe",
-            "give",
-            "find",
-            "search",
-        }
-
-    @staticmethod
-    def _fast_focus_coverage(focus_terms: list[str], matches: list[dict[str, Any]]) -> set[str]:
-        coverage: set[str] = set()
-        for match in matches:
-            haystack = " ".join(
-                str(match.get(key) or "")
-                for key in ("path", "reason", "snippet", "retrieval", "trace_stage")
-            ).lower()
-            for term in focus_terms:
-                if term.lower() in haystack:
-                    coverage.add(term.lower())
-        return coverage
-
-    @classmethod
-    def _fast_answer_quality_gate(
-        cls,
-        *,
-        question: str,
-        selected_matches: list[dict[str, Any]],
-        structured_answer: dict[str, Any] | None,
-        answer_contract: dict[str, Any] | None = None,
-        focus_terms: list[str] | None = None,
-        require_claim: bool = True,
-    ) -> dict[str, Any]:
-        focus = list(dict.fromkeys([*(focus_terms or []), *cls._fast_answer_focus_terms(question)]))[:8]
-        usage_question = cls._fast_usage_question(question)
-        usable: list[dict[str, Any]] = []
-        definition_only = 0
-        stale_or_generic = 0
-        for match in selected_matches or []:
-            signal = cls._fast_match_signal(match, focus_terms=focus, usage_question=usage_question)
-            if signal["usable"]:
-                usable.append(match)
-                if signal["definition_only"]:
-                    definition_only += 1
-            else:
-                stale_or_generic += 1
-
-        claims = []
-        if isinstance(structured_answer, dict):
-            claims.extend(structured_answer.get("claims") or [])
-        if isinstance(answer_contract, dict):
-            claims.extend(answer_contract.get("claims") or [])
-        has_focus_claim = any(
-            isinstance(item, dict)
-            and item.get("citations")
-            and cls._fast_claim_mentions_focus(item, focus)
-            for item in claims
-        )
-        coverage = cls._fast_focus_coverage(focus, usable)
-        if not focus:
-            return {
-                "status": "insufficient",
-                "confidence": "low",
-                "reason": "fast query has no meaningful focus term after filtering low-value words",
-                "needs_deep": True,
-                "focus_terms": focus,
-                "meaningful_match_count": len(usable),
-                "definition_only_count": definition_only,
-                "stale_or_generic_count": stale_or_generic,
-                "usable_matches": usable,
-            }
-        if not usable:
-            return {
-                "status": "insufficient",
-                "confidence": "low",
-                "reason": "fast evidence only matched generic, stale, or unrelated terms",
-                "needs_deep": True,
-                "focus_terms": focus,
-                "meaningful_match_count": 0,
-                "definition_only_count": 0,
-                "stale_or_generic_count": stale_or_generic,
-                "usable_matches": [],
-            }
-        if usage_question and definition_only >= len(usable):
-            return {
-                "status": "definition_only",
-                "confidence": "low",
-                "reason": "definition found, usage flow not yet confirmed",
-                "needs_deep": True,
-                "focus_terms": focus,
-                "meaningful_match_count": len(usable),
-                "definition_only_count": definition_only,
-                "stale_or_generic_count": stale_or_generic,
-                "usable_matches": usable,
-            }
-        missing_focus = [term for term in focus if term.lower() not in coverage]
-        if len(coverage) == 0 or (require_claim and not has_focus_claim):
-            return {
-                "status": "insufficient",
-                "confidence": "low",
-                "reason": "fast answer did not produce a meaningful cited claim tied to the core term",
-                "needs_deep": True,
-                "focus_terms": focus,
-                "meaningful_match_count": len(usable),
-                "definition_only_count": definition_only,
-                "stale_or_generic_count": stale_or_generic,
-                "missing_focus_terms": missing_focus[:6],
-                "usable_matches": usable,
-            }
-        return {
-            "status": "sufficient",
-            "confidence": "medium",
-            "reason": "fast evidence contains focused, non-stale code support",
-            "needs_deep": False,
-            "focus_terms": focus,
-            "meaningful_match_count": len(usable),
-            "definition_only_count": definition_only,
-            "stale_or_generic_count": stale_or_generic,
-            "missing_focus_terms": missing_focus[:6],
-            "usable_matches": usable,
-        }
-
-    @staticmethod
-    def _fast_usage_question(question: str) -> bool:
-        lowered = f" {str(question or '').lower()} "
-        return bool(
-            re.search(r"\b(how|where|which|what|tell|can|could)\b.*\b(use|used|uses|using)\b", lowered)
-            or re.search(r"\b(use|used|uses|using)\b", lowered)
-            or any(marker in lowered for marker in ("怎么用", "如何使用", "哪里使用", "怎么使用", "被怎么用", "使用链路", "调用链路"))
-        )
-
-    @classmethod
-    def _fast_match_signal(cls, match: dict[str, Any], *, focus_terms: list[str], usage_question: bool) -> dict[str, Any]:
-        text = " ".join(str(match.get(key) or "") for key in ("path", "reason", "snippet", "retrieval", "trace_stage"))
-        lowered = text.lower()
-        if cls._fast_match_is_stale_or_backup(match):
-            return {"usable": False, "definition_only": False, "reason": "stale_or_backup"}
-        matched_focus = [term for term in focus_terms if term.lower() in lowered]
-        if not matched_focus:
-            return {"usable": False, "definition_only": False, "reason": "no_focus_term"}
-        definition_only = cls._fast_match_is_definition_only(match, matched_focus)
-        return {
-            "usable": True,
-            "definition_only": bool(usage_question and definition_only),
-            "reason": "definition_only" if definition_only else "focused_code",
-            "matched_focus": matched_focus[:5],
-        }
-
-    @staticmethod
-    def _fast_match_is_stale_or_backup(match: dict[str, Any]) -> bool:
+    def _match_is_definition_only(match: dict[str, Any], focus_terms: list[str]) -> bool:
         path = str(match.get("path") or "").lower()
-        parts = [part for part in re.split(r"[\\/]+", path) if part]
-        if any(part in {"backup", "backups", "archive", "archives", "snapshot", "snapshots", "old"} for part in parts):
+        snippet = str(match.get("snippet") or "").lower()
+        if any(term in path for term in ("enum", "constant", "constants")):
             return True
-        if re.search(r"\bv?\d+\.\d+(?:\.\d+)?[_-]\d{6,8}\b", path):
+        if re.search(r"\b(enum|interface)\s+\w+", snippet):
             return True
-        reason = str(match.get("reason") or "").lower()
-        return "backup" in reason or "snapshot" in reason or "old version" in reason
+        if re.search(r"\b(class|public|private|protected)\s+\w+", snippet) and not any(marker in snippet for marker in ("select ", "insert ", "update ", "delete ", "repository", "mapper", "client", "controller")):
+            return True
+        return False
 
     @staticmethod
-    def _fast_match_is_definition_only(match: dict[str, Any], focus_terms: list[str]) -> bool:
-        path = str(match.get("path") or "").lower()
-        snippet = str(match.get("snippet") or "")
-        lowered = snippet.lower()
-        if "enum" in path or re.search(r"\benum\s+[A-Za-z_][A-Za-z0-9_]*", snippet):
-            return True
-        focus_lowers = [term.lower() for term in focus_terms]
-        focus_lines = [
-            line.strip()
-            for line in snippet.splitlines()
-            if any(term in line.lower() for term in focus_lowers)
-        ]
-        if not focus_lines:
-            focus_lines = [snippet.strip()]
-        usage_hints = ("(", ".", "=", "return", "if ", "switch", "case ", "get", "set", "query", "select", "insert", "update", "delete")
-        for line in focus_lines:
-            line_lower = line.lower()
-            if re.search(r"\b(class|interface|enum)\s+[A-Za-z_][A-Za-z0-9_]*", line):
-                return True
-            if re.fullmatch(r"[A-Z0-9_]+\s*\([^)]*\)\s*,?", line.strip()):
-                return True
-            if any(hint in line_lower for hint in usage_hints) and not re.fullmatch(r"[A-Z0-9_]+\s*\([^)]*\)\s*,?", line.strip()):
-                return False
-        return bool(re.search(r"\b[A-Z0-9_]+\s*\([^)]*\)\s*,?", snippet) and not any(hint in lowered for hint in ("service", "controller", "mapper", "repository")))
-
-    @staticmethod
-    def _fast_claim_mentions_focus(claim: dict[str, Any], focus_terms: list[str]) -> bool:
-        text = str((claim or {}).get("text") or "").lower()
-        return any(term.lower() in text for term in focus_terms)
-
-    @staticmethod
-    def _fast_answer_language(question: str) -> str:
-        return "zh" if re.search(r"[\u4e00-\u9fff]", str(question or "")) else "en"
-
-    def _fast_answer_intent_label(self, question: str) -> str:
-        intent = self._question_intent(question)
-        lowered = f" {str(question or '').lower()} "
-        if intent.get("data_source") or "data source" in lowered or "数据源" in lowered:
+    def _evidence_role(path: str, snippet: str, reason: str) -> str:
+        lowered_path = str(path or "").lower()
+        lowered = f"{snippet or ''} {reason or ''}".lower()
+        if any(marker in lowered_path for marker in ("mapper", "repository", "dao")) or re.search(r"\bselect\b.+\bfrom\b", lowered):
             return "data_source"
-        if self._fast_usage_question(question):
-            return "usage_flow"
-        if any(marker in lowered for marker in (" difference", " diff", " vs ", " versus ", "区别", "差异", "不同")):
-            return "difference"
-        if intent.get("api") or intent.get("config") or any(marker in lowered for marker in (" api", "config", "配置", "接口")):
-            return "config_api"
-        if intent.get("error") or any(marker in lowered for marker in ("why", "root cause", "failed", "failure", "issue", "bug", "原因", "报错", "失败")):
-            return "error_root_cause"
-        return "general"
-
-    @staticmethod
-    def _fast_machine_retrieval_text(text: str) -> bool:
-        lowered = str(text or "").lower()
-        return bool(
-            " was selected because " in lowered
-            or "path matched" in lowered
-            or "symbol matched" in lowered
-            or "content matched" in lowered
-            or (" shows `" in lowered and " near: " in lowered)
-            or re.search(r"\bpackage\s+[a-z0-9_.]+", lowered)
-        )
-
-    @staticmethod
-    def _fast_humanize_code_text(text: str) -> str:
-        cleaned = str(text or "")
-        cleaned = re.sub(r"\s*\[[Ss]\d+\]\s*", " ", cleaned)
-        cleaned = re.sub(r"\b(?:public|private|protected|static|final|abstract)\s+", " ", cleaned)
-        cleaned = re.sub(r"\bpackage\s+[a-zA-Z0-9_.]+;?", " ", cleaned)
-        cleaned = re.sub(r"\b(?:symbol|content|path)\s+matched\s*:\s*", " ", cleaned, flags=re.IGNORECASE)
-        cleaned = re.sub(r"\bwas selected because\b", " ", cleaned, flags=re.IGNORECASE)
-        cleaned = re.sub(r"\s+", " ", cleaned).strip(" ;,.")
-        return cleaned[:320]
-
-    @staticmethod
-    def _fast_evidence_role(path: str, snippet: str, reason: str) -> str:
-        text = f"{path}\n{snippet}\n{reason}".lower()
-        if any(marker in text for marker in ("mapper.xml", "select ", " from ", " insert ", " update ", " delete ", "repository", "dao", " table ")):
-            return "data_source"
-        if any(marker in text for marker in ("client", "feign", "http", "controller", "endpoint", "api", "resttemplate")):
+        if any(marker in lowered_path for marker in ("client", "controller", "api")) or any(marker in lowered for marker in ("requestmapping", "postmapping", "getmapping", "resttemplate", "webclient", "feign")):
             return "api"
-        if any(marker in text for marker in ("application.yml", ".properties", "apollo", "config", "configuration")):
+        if "config" in lowered_path or "properties" in lowered_path or "apollo" in lowered:
             return "config"
-        if any(marker in text for marker in ("service", "strategy", "engine", "manager", "processor")):
-            return "logic"
-        if any(marker in text for marker in ("enum", "constant")):
-            return "definition"
-        if any(marker in text for marker in ("util", "switch", "case ", " if ", " return ")):
-            return "usage"
-        if "/test/" in text or "test" in Path(path).name.lower():
+        if "test" in lowered_path:
             return "test"
-        return "supporting"
-
-    @staticmethod
-    def _fast_evidence_role_label(role: str, *, language: str = "en") -> str:
-        if language == "zh":
-            return {
-                "data_source": "数据来源",
-                "api": "API/客户端",
-                "config": "配置",
-                "logic": "业务逻辑",
-                "definition": "定义",
-                "usage": "使用逻辑",
-                "test": "测试",
-            }.get(role, "辅助证据")
-        return {
-            "data_source": "data source",
-            "api": "API/client",
-            "config": "configuration",
-            "logic": "business logic",
-            "definition": "definition",
-            "usage": "usage logic",
-            "test": "test",
-        }.get(role, "supporting evidence")
+        if any(marker in lowered for marker in ("enum", "constant")):
+            return "definition"
+        return "logic"
 
     @classmethod
-    def _fast_evidence_card_from_match(
-        cls,
-        citation: dict[str, Any],
-        match: dict[str, Any],
-        focus_terms: list[str],
-        *,
-        language: str = "en",
-    ) -> dict[str, Any]:
-        path = str(match.get("path") or "")
+    def _match_answer_grade(cls, match: dict[str, Any], *, intent_label: str = "general") -> bool:
+        path = str(match.get("path") or "").lower()
+        snippet = str(match.get("snippet") or "")
         reason = str(match.get("reason") or "")
-        snippet = str(match.get("snippet") or "")
-        role = cls._fast_evidence_role(path, snippet, reason)
-        best_line = ""
-        focus_lowers = [term.lower() for term in focus_terms]
-        for raw_line in snippet.splitlines():
-            line = raw_line.strip()
-            if not line:
-                continue
-            lowered = line.lower()
-            if focus_lowers and any(term in lowered for term in focus_lowers):
-                best_line = line
-                break
-            if not best_line and any(marker in lowered for marker in ("select ", "from ", "return ", "if ", "case ", "set", "get", "query", "client", "config")):
-                best_line = line
-        detail_source = best_line or reason or Path(path).name
-        title = f"{cls._fast_evidence_role_label(role, language=language).capitalize()}: {Path(path).name or cls._compact_path(path)}"
-        detail = cls._fast_humanize_code_text(detail_source)
-        if not detail or cls._fast_machine_retrieval_text(detail_source):
-            detail = cls._fast_humanize_code_text(reason)
-        if not detail and not cls._fast_machine_retrieval_text(Path(path).name):
-            detail = cls._fast_humanize_code_text(Path(path).name)
-        return {
-            "title": title[:120],
-            "detail": detail,
-            "role": role,
-            "citations": [str(citation.get("id") or "").strip()] if citation.get("id") else [],
-        }
-
-    @classmethod
-    def _fast_confirmed_points_from_cards(
-        cls,
-        *,
-        question: str,
-        intent_label: str,
-        cards: list[dict[str, Any]],
-        language: str,
-    ) -> list[dict[str, Any]]:
-        by_role: dict[str, list[dict[str, Any]]] = {}
-        for card in cards:
-            by_role.setdefault(str(card.get("role") or "supporting"), []).append(card)
-        priority = {
-            "data_source": ("data_source", "api", "config", "logic", "usage", "definition", "supporting"),
-            "usage_flow": ("definition", "config", "data_source", "usage", "logic", "api", "supporting"),
-            "config_api": ("config", "api", "data_source", "logic", "usage", "definition", "supporting"),
-            "difference": ("data_source", "logic", "usage", "api", "config", "definition", "supporting"),
-            "error_root_cause": ("logic", "data_source", "api", "config", "usage", "definition", "supporting"),
-        }.get(intent_label, ("data_source", "api", "config", "logic", "usage", "definition", "supporting"))
-        points: list[dict[str, Any]] = []
-        used: set[str] = set()
-        for role in priority:
-            for card in by_role.get(role) or []:
-                if len(points) >= 5:
-                    break
-                detail = str(card.get("detail") or "").strip()
-                if not detail or cls._fast_machine_retrieval_text(detail):
-                    continue
-                key = f"{role}:{detail}".lower()
-                if key in used:
-                    continue
-                used.add(key)
-                label = cls._fast_evidence_role_label(role, language=language)
-                if language == "zh":
-                    text = f"代码确认了一个{label}相关点：{detail}"
-                else:
-                    text = f"Code confirms a {label} point: {detail}"
-                points.append({"text": text[:360], "citations": list(card.get("citations") or [])[:3]})
-            if len(points) >= 5:
-                break
-        return points
-
-    @classmethod
-    def _fast_missing_points(
-        cls,
-        *,
-        raw_missing: list[str],
-        focus_terms: list[str],
-        fast_gate: dict[str, Any],
-        selected_matches: list[dict[str, Any]],
-        language: str,
-    ) -> list[str]:
-        missing: list[str] = []
-        for item in raw_missing:
-            text = cls._fast_humanize_code_text(item)
-            if not text:
-                continue
-            if "fast mode did not find enough evidence for" in text.lower():
-                continue
-            missing.append(text)
-        if fast_gate.get("status") == "definition_only":
-            missing.append("已找到定义，但 Fast Mode 尚未确认完整使用链路。" if language == "zh" else "Definition was found, but Fast Mode did not verify the full usage flow.")
-        elif fast_gate.get("needs_deep"):
-            missing.append("Fast Mode 证据不足以确认完整链路。" if language == "zh" else "Fast Mode evidence was not enough to verify the complete chain.")
-        if selected_matches:
-            missing.append(
-                "Fast Mode 没有完成完整的跨文件调用链和上游来源验证。"
-                if language == "zh"
-                else "Fast Mode did not complete full cross-file caller/callee and upstream-source verification."
-            )
-        else:
-            missing.append("Fast Mode 没有检索到可用代码证据。" if language == "zh" else "Fast Mode did not retrieve usable code evidence.")
-        return list(dict.fromkeys([item for item in missing if item]))[:6]
-
-    @classmethod
-    def _fast_compose_human_answer(
-        cls,
-        *,
-        question: str,
-        intent_label: str,
-        focus_terms: list[str],
-        confirmed_points: list[dict[str, Any]],
-        missing_points: list[str],
-        confidence: str,
-        language: str,
-    ) -> str:
-        term_text = " / ".join(focus_terms[:3]) or ("这个问题" if language == "zh" else "this question")
-        point_texts = [str(point.get("text") or "").strip() for point in confirmed_points if str(point.get("text") or "").strip()]
-        if not point_texts:
-            return (
-                f"Fast Mode 暂时不足以确认 `{term_text}` 的结论；缺口已列在 Not Verified。"
-                if language == "zh"
-                else f"Fast Mode does not have enough verified code evidence to answer `{term_text}` yet; the missing checks are listed under Not Verified."
-            )
-        compact_points = [re.sub(r"^Code confirms an? [^:]+ point:\s*", "", item) for item in point_texts[:3]]
-        compact_points = [re.sub(r"^代码确认了一个[^：]+相关点：", "", item) for item in compact_points]
-        joined = "; ".join(compact_points)
-        if language == "zh":
-            prefix = {
-                "data_source": "Fast Mode 找到的第一版数据来源结论是",
-                "usage_flow": "Fast Mode 找到的第一版使用链路是",
-                "difference": "Fast Mode 找到的第一版差异结论是",
-                "config_api": "Fast Mode 找到的第一版配置/API 结论是",
-                "error_root_cause": "Fast Mode 尚未完成根因验证，但找到的可疑代码面是",
-            }.get(intent_label, "Fast Mode 找到的第一版代码结论是")
-            suffix = "；完整跨文件链路仍需要 Deep Mode 验证。" if confidence == "low" or missing_points else "。"
-            return f"{prefix}：{joined}{suffix}"
-        prefix = {
-            "data_source": "Fast Mode found this first-pass data-source answer",
-            "usage_flow": "Fast Mode found this first-pass usage flow",
-            "difference": "Fast Mode found this first-pass difference summary",
-            "config_api": "Fast Mode found these first-pass config/API surfaces",
-            "error_root_cause": "Fast Mode has not fully verified root cause, but found these likely code surfaces",
-        }.get(intent_label, "Fast Mode found these code-backed points")
-        suffix = " Full cross-file verification still needs Deep Mode." if confidence == "low" or missing_points else ""
-        return f"{prefix}: {joined}.{suffix}"
-
-    @staticmethod
-    def _fast_direct_claim_summary(claims: list[dict[str, Any]], *, limit: int = 4) -> str:
-        fragments: list[str] = []
-        seen: set[str] = set()
-        for claim in claims or []:
-            text = re.sub(r"\s+", " ", str((claim or {}).get("text") or "")).strip()
-            if not text:
-                continue
-            text = re.sub(r"\s*\[[Ss]\d+\]\s*", " ", text).strip()
-            if " shows `" in text and " near: " in text:
-                path_part, evidence_line = text.split(" near: ", 1)
-                path_part = path_part.split(" shows `", 1)[0].strip()
-                filename = Path(path_part).name or path_part
-                compact = f"{filename} ({evidence_line.strip()})"
-            else:
-                compact = text
-            compact = re.sub(r"\s+", " ", compact).strip(" ;,.")
-            if not compact:
-                continue
-            key = compact.lower()
-            if key in seen:
-                continue
-            seen.add(key)
-            fragments.append(compact[:180])
-            if len(fragments) >= max(1, int(limit or 4)):
-                break
-        if not fragments:
-            return ""
-        if len(fragments) == 1:
-            return fragments[0]
-        return "; ".join(fragments[:-1]) + f"; and {fragments[-1]}"
-
-    @classmethod
-    def _fast_claim_from_match(cls, citation: dict[str, Any], match: dict[str, Any], focus_terms: list[str]) -> str:
-        path = str(match.get("path") or "").strip()
-        reason = str(match.get("reason") or "").strip()
-        snippet = str(match.get("snippet") or "")
-        matched_terms = [
-            term for term in focus_terms
-            if term.lower() in f"{path}\n{reason}\n{snippet}".lower()
-        ][:3]
-        evidence_line = ""
-        for raw_line in snippet.splitlines():
-            line = raw_line.strip()
-            if not line:
-                continue
-            lowered = line.lower()
-            if matched_terms and any(term.lower() in lowered for term in matched_terms):
-                evidence_line = line
-                break
-            if not evidence_line and any(hint in lowered for hint in ("class ", "interface ", "enum ", "public ", "private ", "select ", "from ", "return ", "set", "get")):
-                evidence_line = line
-        role = cls._fast_evidence_role(path, snippet, reason)
-        role_label = cls._fast_evidence_role_label(role)
-        term_text = ", ".join(matched_terms) if matched_terms else Path(path).stem
-        if evidence_line:
-            detail = cls._fast_humanize_code_text(evidence_line)
-            if detail:
-                return f"Code supports a {role_label} point for {term_text}: {detail}"
-        if reason:
-            detail = cls._fast_humanize_code_text(reason)
-            if detail:
-                return f"Code supports a {role_label} point for {term_text}: {detail}"
-        return f"Code retrieved a {role_label} reference for {term_text}."
-
-    @staticmethod
-    def _fast_direct_answer(
-        *,
-        question: str,
-        focus_terms: list[str],
-        claims: list[dict[str, Any]],
-        missing: list[str],
-        confidence: str,
-        fast_quality_gate: dict[str, Any] | None = None,
-    ) -> str:
-        gate = fast_quality_gate or {}
-        if gate.get("status") == "definition_only":
-            term_text = "、".join(focus_terms[:4]) or "the core term"
-            return f"Fast mode found the definition of `{term_text}`, but did not confirm the usage flow from code; use Deep verification for the complete chain."
-        if gate.get("needs_deep"):
-            return "Fast mode did not find reliable enough code evidence for a meaningful answer; use Deep verification for the complete chain."
-        if not claims:
-            return "Fast mode did not find reliable enough code evidence for a meaningful answer; use Deep verification for the complete chain."
-        term_text = "、".join(focus_terms[:4])
-        claim_summary = SourceCodeQAService._fast_direct_claim_summary(claims)
-        if term_text and re.search(r"\b(explain|difference|diff|区别|是什么意思|什么是|解释)\b", question, flags=re.IGNORECASE):
-            if claim_summary:
-                return f"Fast mode reached the 1-minute limit before Codex completed full reasoning. Based on retrieved code, `{term_text}` is mainly connected to: {claim_summary}. Cross-file chain verification is not complete, so unresolved parts are listed in Missing Evidence."
-            return f"Based on the retrieved code evidence, this is the first-pass explanation for `{term_text}`. Cross-file chain verification is not complete, so unresolved parts are listed in Missing Evidence."
-        if confidence == "medium":
-            if claim_summary:
-                return f"Fast mode reached the 1-minute limit before Codex completed full reasoning. Based on retrieved code, `{term_text or 'the core term'}` is used around: {claim_summary}. Treat this as a first-pass map; unresolved cross-file links remain in Missing Evidence."
-            return "Fast mode reached the 1-minute limit before Codex completed full reasoning. Retrieved code evidence is focused, but unresolved cross-file links remain in Missing Evidence."
-        if missing:
-            return "Fast mode can only provide a low-confidence first-pass answer; key gaps are listed in Missing Evidence."
-        return "Fast mode can only provide a first-pass answer based on retrieved evidence."
+        role = cls._evidence_role(path, snippet, reason)
+        if intent_label == "data_source":
+            return role in {"data_source", "api", "config"}
+        return role not in {"definition", "test"}
 
     def _codex_deep_investigation_needed(
         self,
@@ -16924,7 +15949,7 @@ class SourceCodeQAService:
         return any(marker in lowered for marker in phrase_markers)
 
     @staticmethod
-    def _fast_followup_low_value_terms() -> set[str]:
+    def _followup_low_value_terms() -> set[str]:
         return {
             "there",
             "their",
@@ -16964,7 +15989,7 @@ class SourceCodeQAService:
     def _followup_core_terms(self, question: str, followup_context: dict[str, Any] | None) -> list[str]:
         if not followup_context or not self._is_relationship_followup_question(question):
             return []
-        low_value = self._fast_followup_low_value_terms()
+        low_value = self._followup_low_value_terms()
         texts: list[str] = [
             str(followup_context.get("previous_question") or ""),
             str(followup_context.get("question") or ""),
@@ -17019,101 +16044,6 @@ class SourceCodeQAService:
         ordered = sorted(scored.values(), key=lambda item: (-item[1], item[0].lower()))
         return [term for term, _score in ordered[:10]]
 
-    def _fast_followup_timeout_seconds(self, question: str, followup_context: dict[str, Any] | None) -> int:
-        if not self._is_relationship_followup_question(question):
-            return FAST_CODEX_TIMEOUT_SECONDS
-        if not isinstance(followup_context, dict) or not followup_context.get("used"):
-            return FAST_CODEX_TIMEOUT_SECONDS
-        core_terms = self._followup_core_terms(question, followup_context)
-        candidate_paths = [
-            *((followup_context.get("codex_candidate_paths") or []) if isinstance(followup_context.get("codex_candidate_paths"), list) else []),
-            *(((followup_context.get("llm_route") or {}).get("candidate_paths") or []) if isinstance(followup_context.get("llm_route"), dict) else []),
-        ]
-        has_prior_candidate = any(isinstance(item, dict) and item.get("path") for item in candidate_paths)
-        if core_terms and has_prior_candidate:
-            return FAST_CODEX_FOLLOWUP_TIMEOUT_SECONDS
-        return FAST_CODEX_TIMEOUT_SECONDS
-
-    def _fast_followup_fallback_matches(
-        self,
-        *,
-        selected_matches: list[dict[str, Any]],
-        followup_context: dict[str, Any] | None,
-        question: str,
-        limit: int,
-    ) -> tuple[list[dict[str, Any]], list[str]]:
-        core_terms = self._followup_core_terms(question, followup_context)
-        if not core_terms:
-            return selected_matches[:limit], []
-        core_lowers = [term.lower() for term in core_terms]
-        low_value = self._fast_followup_low_value_terms()
-        prioritized: list[dict[str, Any]] = []
-        seen: set[tuple[str, str, Any, Any]] = set()
-
-        def add(match: dict[str, Any] | None) -> None:
-            if not match or len(prioritized) >= limit:
-                return
-            key = (
-                str(match.get("repo") or ""),
-                str(match.get("path") or ""),
-                match.get("line_start"),
-                match.get("line_end"),
-            )
-            if key in seen:
-                return
-            prioritized.append(match)
-            seen.add(key)
-
-        def match_text(item: dict[str, Any]) -> str:
-            return " ".join(str(item.get(key) or "") for key in ("path", "reason", "snippet", "retrieval", "trace_stage")).lower()
-
-        def has_core(item: dict[str, Any]) -> bool:
-            text = match_text(item)
-            return any(term in text for term in core_lowers)
-
-        def low_value_only(item: dict[str, Any]) -> bool:
-            text = match_text(item)
-            if has_core(item):
-                return False
-            tokens = {token.lower() for token in IDENTIFIER_PATTERN.findall(text)}
-            if not tokens:
-                return False
-            useful = [token for token in tokens if token not in low_value and token not in STOPWORDS and len(token) >= 4]
-            return not useful or bool(tokens & low_value)
-
-        prior_items: list[dict[str, Any]] = []
-        if isinstance(followup_context, dict):
-            prior_items.extend(item for item in (followup_context.get("codex_candidate_paths") or []) if isinstance(item, dict))
-            route = followup_context.get("llm_route") if isinstance(followup_context.get("llm_route"), dict) else {}
-            prior_items.extend(item for item in (route.get("candidate_paths") or []) if isinstance(item, dict))
-            for turn in followup_context.get("recent_turns") or []:
-                if isinstance(turn, dict):
-                    prior_items.extend(item for item in (turn.get("codex_candidate_paths") or []) if isinstance(item, dict))
-                    prior_items.extend(item for item in (turn.get("matches_snapshot") or []) if isinstance(item, dict))
-
-        for item in prior_items:
-            if not has_core(item):
-                continue
-            add(
-                {
-                    "repo": item.get("repo") or "",
-                    "path": item.get("path") or "",
-                    "line_start": item.get("line_start"),
-                    "line_end": item.get("line_end"),
-                    "retrieval": item.get("retrieval") or "previous_codex_context",
-                    "trace_stage": item.get("trace_stage") or "followup_memory",
-                    "reason": item.get("reason") or "previous high-signal candidate path matched inherited follow-up entities",
-                    "snippet": item.get("snippet") or "",
-                    "score": item.get("score") or 0,
-                }
-            )
-        for match in selected_matches:
-            if has_core(match):
-                add(match)
-        for match in selected_matches:
-            if not low_value_only(match):
-                add(match)
-        return prioritized[:limit], core_terms
 
     def _repo_relative_root(self, repo_root: Path) -> str:
         try:
@@ -17153,83 +16083,6 @@ class SourceCodeQAService:
             else:
                 layers["maybe_relevant_paths"].append(item)
         return layers
-
-    def _codex_fast_investigation_brief(
-        self,
-        *,
-        pm_team: str,
-        country: str,
-        question: str,
-        candidate_paths: list[dict[str, Any]],
-        evidence_pack: dict[str, Any],
-        quality_gate: dict[str, Any],
-        followup_context: dict[str, Any] | None,
-        attachments: list[dict[str, Any]] | None = None,
-        runtime_evidence: list[dict[str, Any]] | None = None,
-    ) -> str:
-        candidate_path_layers = self._codex_candidate_path_layers(candidate_paths, followup_context)
-        lines = [
-            f"Prompt mode: {CODEX_INVESTIGATION_PROMPT_MODE}:fast",
-            f"PM Team: {pm_team}",
-            f"Country: {country}",
-            f"Question: {question}",
-            "",
-            "Fast-mode deadline contract:",
-            "- Return within 45 seconds. Prefer a short correct JSON answer over a complete investigation.",
-            "- Read only the highest-signal candidate files. Do not run broad multi-step exploration.",
-            "- Do not repair, do not perform deep investigation, and do not write files.",
-            "- Answer only from verified file reads or the candidate evidence below.",
-            "- If a chain is not verified, put it in missing_evidence instead of guessing.",
-            "",
-            "Candidate paths, ordered by priority:",
-        ]
-        ordered_layers = (
-            "confirmed_previous_paths",
-            "current_high_confidence_paths",
-            "current_supporting_paths",
-            "maybe_relevant_paths",
-        )
-        emitted = 0
-        for layer_name in ordered_layers:
-            for item in candidate_path_layers.get(layer_name) or []:
-                if emitted >= FAST_CODEX_TOP_PATH_LIMIT:
-                    break
-                lines.append(
-                    f"- {item.get('id')} repo={item.get('repo')} root={item.get('repo_root')} "
-                    f"relative_root={item.get('repo_relative_root')} path={item.get('path')} "
-                    f"file_exists={item.get('file_exists')} lines={item.get('line_start')}-{item.get('line_end')} "
-                    f"reason={item.get('reason')}"
-                )
-                emitted += 1
-            if emitted >= FAST_CODEX_TOP_PATH_LIMIT:
-                break
-        attachment_section = self._context_attachment_section(attachments or [], runtime_evidence or [])
-        if attachment_section:
-            lines.extend(["", attachment_section])
-        lines.extend(["", "Evidence hints:"])
-        for key_name in ("confirmed_facts", "inferred_facts", "entry_points", "read_write_points", "tables", "apis", "configs", "missing_facts", "evidence_limits"):
-            values = evidence_pack.get(key_name) or []
-            if values:
-                lines.append(f"- {key_name}: {values[:4]}")
-        lines.append(
-            f"- Local narrowing status: {quality_gate.get('status')} "
-            f"confidence={quality_gate.get('confidence')} missing={quality_gate.get('missing') or []}"
-        )
-        lines.extend(
-            [
-                "",
-                "Return JSON only:",
-                '{"direct_answer":"human-readable conclusion first, not a file list","investigation_steps":{"candidate_evidence":["checked code surface"],"gap_verification":["missing link"],"certainty_split":["confirmed vs missing"]},"source_code_evidence":["file/function/field evidence"],"confirmed_from_code":["confirmed fact"],"inferred_from_code":["weak deduction"],"not_found":["missing hop"],"confirmed_points":[{"text":"human-readable confirmed point","citations":["S1"]}],"missing_points":["human-readable missing check"],"evidence_cards":[{"title":"short evidence title","detail":"concise detail","role":"data_source|api|config|logic|definition|usage|supporting","citations":["S1"]}],"claims":[{"text":"claim","citations":["S1"]}],"missing_evidence":["gap"],"confidence":"medium|low"}',
-                "- Include 3-5 citation-backed claims at most.",
-                "- Write direct_answer for a PM/engineer reader: start with the business/code conclusion, then mention uncertainty.",
-                "- Do not make direct_answer a raw path list, package declaration, snippet dump, or retrieval-reason list.",
-                "- Do not output phrases like 'path matched', 'symbol matched', 'content matched', 'was selected because', or 'shows near'.",
-                "- For data-source questions, prioritize actual tables, SQL mappers, repositories, API clients, or config sources over strategy class names.",
-                "- Fast mode may return medium or low confidence only.",
-                "- Cite S ids from candidate paths for concrete claims.",
-            ]
-        )
-        return "\n".join(lines)
 
     def _codex_investigation_brief(
         self,
@@ -18087,7 +16940,7 @@ class SourceCodeQAService:
     def _skipped_codex_answer_check() -> dict[str, Any]:
         return {
             "status": "skipped",
-            "reason": "codex_fast_path_passthrough",
+            "reason": "codex_raw_answer_passthrough",
             "issues": [],
             "missing": [],
         }
@@ -18163,8 +17016,6 @@ class SourceCodeQAService:
             "passthrough": True,
         }
         final_answer = str(answer or "").strip()
-        if structured_answer.get("format") == "json" and structured_answer.get("direct_answer"):
-            final_answer = self._render_structured_answer(structured_answer, contract)
         return {
             "answer": final_answer,
             "structured_answer": structured_answer,
@@ -19254,6 +18105,14 @@ class SourceCodeQAService:
             stage_order = ("exact_lookup", "direct", "test_coverage", "query_decomposition", "tool_loop", "dependency", "two_hop", "agent_trace", "agent_plan", "quality_gate")
         if intent.get("operational_boundary"):
             stage_order = ("exact_lookup", "direct", "operational_boundary", "query_decomposition", "tool_loop", "dependency", "two_hop", "agent_trace", "agent_plan", "quality_gate")
+        if intent.get("data_source"):
+            for match in buckets["exact_lookup"]:
+                add(match)
+            for match in matches:
+                if self._match_answer_grade(match, intent_label="data_source"):
+                    add(match)
+                if len(selected) >= min(limit, 6):
+                    break
         for stage in stage_order:
             stage_take = 1 if intent.get("data_source") else 2
             for match in buckets[stage][:stage_take]:

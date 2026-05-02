@@ -2342,18 +2342,18 @@ def create_app() -> Flask:
         openai_api_key=settings.source_code_qa_openai_api_key,
         openai_api_base_url=settings.source_code_qa_openai_api_base_url,
         openai_model=settings.source_code_qa_openai_model,
-        openai_fast_model=settings.source_code_qa_openai_fast_model,
+        openai_cheap_model=settings.source_code_qa_openai_fast_model,
         openai_deep_model=settings.source_code_qa_openai_deep_model,
         openai_fallback_model=settings.source_code_qa_openai_fallback_model,
         gemini_model=settings.source_code_qa_gemini_model,
-        gemini_fast_model=settings.source_code_qa_gemini_fast_model,
+        gemini_cheap_model=settings.source_code_qa_gemini_fast_model,
         gemini_deep_model=settings.source_code_qa_gemini_deep_model,
         gemini_fallback_model=settings.source_code_qa_gemini_fallback_model,
         vertex_credentials_file=settings.source_code_qa_vertex_credentials_file,
         vertex_project_id=settings.source_code_qa_vertex_project_id,
         vertex_location=settings.source_code_qa_vertex_location,
         vertex_model=settings.source_code_qa_vertex_model,
-        vertex_fast_model=settings.source_code_qa_vertex_fast_model,
+        vertex_cheap_model=settings.source_code_qa_vertex_fast_model,
         vertex_deep_model=settings.source_code_qa_vertex_deep_model,
         vertex_fallback_model=settings.source_code_qa_vertex_fallback_model,
         query_rewrite_model=settings.source_code_qa_query_rewrite_model,
@@ -2375,7 +2375,6 @@ def create_app() -> Flask:
         codex_repair_enabled=settings.source_code_qa_codex_repair_enabled,
         codex_session_mode=settings.source_code_qa_codex_session_mode,
         codex_session_max_turns=settings.source_code_qa_codex_session_max_turns,
-        codex_fast_path_enabled=settings.source_code_qa_codex_fast_path_enabled,
         codex_cache_followups=settings.source_code_qa_codex_cache_followups,
         llm_max_retries=settings.source_code_qa_llm_max_retries,
         llm_backoff_seconds=settings.source_code_qa_llm_backoff_seconds,
@@ -2724,7 +2723,7 @@ def create_app() -> Flask:
                 {
                     "status": "ok",
                     "answer_mode": "auto",
-                    "query_mode": "fast",
+                    "query_mode": "deep",
                     "can_manage": _can_manage_source_code_qa(settings),
                     "auth": _source_code_qa_auth_payload(settings),
                     "git_auth_ready": _source_code_qa_git_auth_ready(service, settings),
@@ -2736,7 +2735,7 @@ def create_app() -> Flask:
                         "vertex_ai": {"ready": vertex_service.llm_ready(), "label": "Vertex AI", "available": model_availability["vertex_ai"]},
                     },
                     "llm_model": service.llm_budgets["balanced"]["model"],
-                    "llm_fast_model": service.llm_budgets["cheap"]["model"],
+                    "llm_cheap_model": service.llm_budgets["cheap"]["model"],
                     "llm_deep_model": service.llm_budgets["deep"]["model"],
                     "llm_fallback_model": service._llm_fallback_model(),
                     "llm_policy": service.llm_policy_payload(),
@@ -3041,7 +3040,7 @@ def create_app() -> Flask:
                     country=country,
                     question=str(payload.get("question") or ""),
                     answer_mode=_source_code_qa_public_answer_mode(payload.get("answer_mode")),
-                    llm_budget_mode="fast" if query_mode == "fast" else "auto",
+                    llm_budget_mode="auto",
                     query_mode=query_mode,
                     conversation_context=conversation_context,
                     attachments=attachments,
@@ -5859,6 +5858,7 @@ def _meeting_recorder_config(settings: Settings) -> MeetingRecorderConfig:
         video_max_width=settings.meeting_recorder_video_max_width,
         video_max_height=settings.meeting_recorder_video_max_height,
         avfoundation_pixel_format=settings.meeting_recorder_avfoundation_pixel_format,
+        screen_preflight_timeout_seconds=settings.meeting_recorder_screen_preflight_timeout_seconds,
         frame_interval_seconds=settings.meeting_recorder_frame_interval_seconds,
         vision_model=settings.meeting_recorder_vision_model,
         transcribe_provider=settings.meeting_recorder_transcribe_provider,
@@ -6441,8 +6441,7 @@ def _source_code_qa_public_answer_mode(answer_mode: str | None) -> str:
 
 
 def _source_code_qa_query_mode(query_mode: str | None) -> str:
-    mode = str(query_mode or "deep").strip().lower()
-    return mode if mode in {"fast", "deep"} else "deep"
+    return "deep"
 
 
 def _source_code_qa_attachment_ids(payload: dict[str, Any]) -> list[str]:
@@ -7237,7 +7236,7 @@ def _run_source_code_qa_query_job(app: Flask, job_id: str, payload: dict[str, An
                     country=country,
                     question=str(payload.get("question") or ""),
                     answer_mode=_source_code_qa_public_answer_mode(payload.get("answer_mode")),
-                    llm_budget_mode="fast" if query_mode == "fast" else "auto",
+                    llm_budget_mode="auto",
                     query_mode=query_mode,
                     conversation_context=conversation_context,
                     attachments=attachments,

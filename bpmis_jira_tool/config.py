@@ -62,6 +62,7 @@ class Settings:
     meeting_recorder_video_max_width: int = 1920
     meeting_recorder_video_max_height: int = 1080
     meeting_recorder_avfoundation_pixel_format: str = "bgr0"
+    meeting_recorder_screen_preflight_timeout_seconds: int = 20
     meeting_recorder_frame_interval_seconds: int = 60
     meeting_recorder_vision_model: str = "gpt-4.1-mini"
     meeting_recorder_transcribe_provider: str = "whisper_cpp"
@@ -113,7 +114,6 @@ class Settings:
     source_code_qa_codex_repair_enabled: bool = True
     source_code_qa_codex_session_mode: str = "ephemeral"
     source_code_qa_codex_session_max_turns: int = 8
-    source_code_qa_codex_fast_path_enabled: bool = True
     source_code_qa_codex_cache_followups: bool = False
     source_code_qa_llm_max_retries: int = 2
     source_code_qa_llm_backoff_seconds: float = 1.0
@@ -197,6 +197,7 @@ class Settings:
             meeting_recorder_video_max_width=int(_env_str("MEETING_RECORDER_VIDEO_MAX_WIDTH", "1920")),
             meeting_recorder_video_max_height=int(_env_str("MEETING_RECORDER_VIDEO_MAX_HEIGHT", "1080")),
             meeting_recorder_avfoundation_pixel_format=_env_str("MEETING_RECORDER_AVFOUNDATION_PIXEL_FORMAT", "bgr0"),
+            meeting_recorder_screen_preflight_timeout_seconds=int(_env_str("MEETING_RECORDER_SCREEN_PREFLIGHT_TIMEOUT_SECONDS", "20")),
             meeting_recorder_frame_interval_seconds=int(_env_str("MEETING_RECORDER_FRAME_INTERVAL_SECONDS", "60")),
             meeting_recorder_vision_model=_env_str("MEETING_RECORDER_VISION_MODEL", "gpt-4.1-mini"),
             meeting_recorder_transcribe_provider=_env_str("MEETING_RECORDER_TRANSCRIBE_PROVIDER", "whisper_cpp"),
@@ -248,7 +249,6 @@ class Settings:
             source_code_qa_codex_repair_enabled=_env_bool("SOURCE_CODE_QA_CODEX_REPAIR_ENABLED", True),
             source_code_qa_codex_session_mode=_env_str("SOURCE_CODE_QA_CODEX_SESSION_MODE", "ephemeral"),
             source_code_qa_codex_session_max_turns=int(_env_str("SOURCE_CODE_QA_CODEX_SESSION_MAX_TURNS", "8")),
-            source_code_qa_codex_fast_path_enabled=_env_bool("SOURCE_CODE_QA_CODEX_FAST_PATH_ENABLED", True),
             source_code_qa_codex_cache_followups=_env_bool("SOURCE_CODE_QA_CODEX_CACHE_FOLLOWUPS", False),
             source_code_qa_llm_max_retries=int(_env_str("SOURCE_CODE_QA_LLM_MAX_RETRIES", "2")),
             source_code_qa_llm_backoff_seconds=float(_env_str("SOURCE_CODE_QA_LLM_BACKOFF_SECONDS", "1.0")),
