@@ -391,12 +391,17 @@ class MeetingRecorderRuntime:
         ffmpeg_path = _resolve_ffmpeg_bin(self.config.ffmpeg_bin)
         if not ffmpeg_path:
             raise ConfigError("ffmpeg is required for local meeting recording. Install ffmpeg or set MEETING_RECORDER_FFMPEG_BIN.")
-        devices = _avfoundation_devices(ffmpeg_path)
-        audio_input = _effective_audio_input(self.config.audio_input, devices.get("audio_devices") or [])
-        audio_status = _audio_capture_status(audio_input, devices.get("audio_devices") or [])
-        preflight = self._audio_preflight(ffmpeg_path=ffmpeg_path, audio_input=audio_input)
         requested_mode = str(recording_mode or "").strip().lower().replace("-", "_")
         effective_mode = _normalize_recording_mode(recording_mode=recording_mode, meeting_link=meeting_link)
+        devices = _avfoundation_devices(ffmpeg_path)
+        audio_input = _effective_recording_audio_input(
+            self.config.audio_input,
+            devices.get("audio_devices") or [],
+            recording_mode=effective_mode,
+            meeting_link=meeting_link,
+        )
+        audio_status = _audio_capture_status(audio_input, devices.get("audio_devices") or [])
+        preflight = self._audio_preflight(ffmpeg_path=ffmpeg_path, audio_input=audio_input)
         screen_preflight: dict[str, Any] | None = None
         if effective_mode == MEETING_RECORDING_MODE_SCREEN_AUDIO:
             screen_preflight = self._screen_capture_preflight(ffmpeg_path=ffmpeg_path)
@@ -438,6 +443,7 @@ class MeetingRecorderRuntime:
             "audio_capture_mode": audio_status.get("audio_capture_mode"),
             "audio_capture_label": audio_status.get("audio_capture_label"),
             "system_audio_configured": audio_status.get("system_audio_configured"),
+            "configured_audio_input": self.config.audio_input,
             "audio_signal_verified": preflight.get("status") == "ok",
             "audio_devices": devices.get("audio_devices") or [],
         }
@@ -679,11 +685,26 @@ class MeetingRecorderRuntime:
         if not media_path.exists():
             return {"status": "missing", "checked_at": _utc_now(), "warning": f"Recorded {noun} file is missing."}
         byte_key = "audio_bytes" if is_audio_only else "video_bytes"
+        media_bytes = media_path.stat().st_size
+        media_duration_seconds = _audio_duration_seconds(media_path) if is_audio_only else None
+        elapsed_seconds = _recording_elapsed_seconds(record)
+        status = "ok" if media_bytes > 0 else "warning"
+        warning = "" if media_bytes > 0 else f"Recorded {noun} file is empty."
+        if is_audio_only and media_duration_seconds is not None and elapsed_seconds:
+            minimum_expected_seconds = max(10.0, elapsed_seconds * 0.7)
+            if media_duration_seconds < minimum_expected_seconds:
+                status = "warning"
+                warning = (
+                    f"Recorded audio is only {media_duration_seconds:.0f}s for a {elapsed_seconds:.0f}s recording. "
+                    "Check the microphone input and start a new recording."
+                )
         return {
-            "status": "ok" if media_path.stat().st_size > 0 else "warning",
+            "status": status,
             "checked_at": _utc_now(),
-            byte_key: media_path.stat().st_size,
-            "warning": "" if media_path.stat().st_size > 0 else f"Recorded {noun} file is empty.",
+            byte_key: media_bytes,
+            "duration_seconds": media_duration_seconds,
+            "elapsed_seconds": elapsed_seconds,
+            "warning": warning,
         }
 
 
@@ -1290,6 +1311,28 @@ def _audio_duration_seconds(audio_path: Path) -> float:
         return 0.0
 
 
+def _recording_elapsed_seconds(record: dict[str, Any]) -> float | None:
+    started_at = _parse_utc_timestamp(str(record.get("recording_started_at") or ""))
+    stopped_at = _parse_utc_timestamp(str(record.get("recording_stopped_at") or ""))
+    if not started_at or not stopped_at:
+        return None
+    elapsed = (stopped_at - started_at).total_seconds()
+    return max(0.0, elapsed)
+
+
+def _parse_utc_timestamp(value: str) -> datetime | None:
+    normalized = str(value or "").strip()
+    if not normalized:
+        return None
+    try:
+        parsed = datetime.fromisoformat(normalized.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
 def _parse_whisper_language(output: str, fallback: str = "auto") -> str:
     match = re.search(r"auto-detected language:\s*([a-zA-Z_-]+)", str(output or ""))
     return (match.group(1).lower() if match else fallback) or "auto"
@@ -1620,6 +1663,31 @@ def _effective_audio_input(configured_audio_input: str, audio_devices: list[str]
         if str(name or "").strip().lower() == "meeting recorder aggregate":
             return str(name).strip()
     return configured
+
+
+def _effective_recording_audio_input(
+    configured_audio_input: str,
+    audio_devices: list[str],
+    *,
+    recording_mode: str,
+    meeting_link: str,
+) -> str:
+    if (
+        str(recording_mode or "").strip() == MEETING_RECORDING_MODE_AUDIO_ONLY
+        and not str(meeting_link or "").strip()
+    ):
+        microphone = _preferred_microphone_input(audio_devices)
+        if microphone:
+            return microphone
+    return _effective_audio_input(configured_audio_input, audio_devices)
+
+
+def _preferred_microphone_input(audio_devices: list[str]) -> str:
+    for device in audio_devices:
+        name = str(device or "").strip()
+        if name and "microphone" in name.lower():
+            return name
+    return ""
 
 
 def _audio_capture_status(audio_input: str, audio_devices: list[str]) -> dict[str, Any]:

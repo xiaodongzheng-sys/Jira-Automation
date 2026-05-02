@@ -18,6 +18,7 @@ from bpmis_jira_tool.meeting_recorder import (
     _build_ffmpeg_recording_command,
     _build_ffmpeg_screen_preflight_command,
     _effective_audio_input,
+    _effective_recording_audio_input,
     _parse_avfoundation_devices,
     _parse_srt_transcript,
     extract_meeting_links,
@@ -87,6 +88,24 @@ class MeetingRecorderParsingTests(unittest.TestCase):
         aggregate_status = _audio_capture_status("Meeting Recorder Aggregate", devices["audio_devices"])
         self.assertTrue(aggregate_status["system_audio_configured"])
         self.assertFalse(aggregate_status["audio_signal_verified"])
+        self.assertEqual(
+            _effective_recording_audio_input(
+                "Meeting Recorder Aggregate",
+                devices["audio_devices"],
+                recording_mode="audio_only",
+                meeting_link="",
+            ),
+            "MacBook Air Microphone",
+        )
+        self.assertEqual(
+            _effective_recording_audio_input(
+                "Meeting Recorder Aggregate",
+                devices["audio_devices"],
+                recording_mode="screen_audio",
+                meeting_link="https://zoom.us/j/123",
+            ),
+            "Meeting Recorder Aggregate",
+        )
 
     def test_ffmpeg_recording_command_uses_browser_safe_video_encoding(self):
         command = _build_ffmpeg_recording_command(
@@ -288,6 +307,92 @@ class MeetingRecordStoreTests(unittest.TestCase):
 
 
 class MeetingRecorderRuntimeTests(unittest.TestCase):
+    def test_audio_only_blank_link_prefers_microphone_over_aggregate(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = MeetingRecordStore(root)
+            runtime = MeetingRecorderRuntime(
+                store=store,
+                config=MeetingRecorderConfig(
+                    ffmpeg_bin="/opt/homebrew/bin/ffmpeg",
+                    audio_input="Meeting Recorder Aggregate",
+                ),
+            )
+            fake_process = Mock()
+            fake_process.poll.return_value = None
+
+            with patch("bpmis_jira_tool.meeting_recorder._resolve_ffmpeg_bin", return_value="/opt/homebrew/bin/ffmpeg"), patch(
+                "bpmis_jira_tool.meeting_recorder._avfoundation_devices",
+                return_value={
+                    "video_devices": ["Capture screen 0"],
+                    "audio_devices": ["MacBook Air Microphone", "Meeting Recorder Aggregate"],
+                },
+            ), patch.object(
+                runtime,
+                "_audio_preflight",
+                return_value={"status": "ok", "checked_at": "2026-05-02T10:00:00+00:00", "warning": ""},
+            ), patch(
+                "bpmis_jira_tool.meeting_recorder.subprocess.Popen",
+                return_value=fake_process,
+            ) as popen:
+                record = runtime.start_recording(
+                    owner_email="owner@npt.sg",
+                    title="Face to face",
+                    platform="unknown",
+                    meeting_link="",
+                    recording_mode="audio_only",
+                )
+
+        self.assertEqual(record["media"]["recording_mode"], "audio_only")
+        self.assertEqual(record["diagnostics_snapshot"]["audio_input"], "MacBook Air Microphone")
+        self.assertEqual(record["diagnostics_snapshot"]["configured_audio_input"], "Meeting Recorder Aggregate")
+        command = popen.call_args.args[0]
+        self.assertIn(":MacBook Air Microphone", command)
+        self.assertNotIn(":Meeting Recorder Aggregate", command)
+
+    def test_audio_only_linked_fallback_keeps_aggregate_input(self):
+        self.assertEqual(
+            _effective_recording_audio_input(
+                "Meeting Recorder Aggregate",
+                ["MacBook Air Microphone", "Meeting Recorder Aggregate"],
+                recording_mode="audio_only",
+                meeting_link="https://zoom.us/j/123",
+            ),
+            "Meeting Recorder Aggregate",
+        )
+
+    def test_audio_only_recording_health_warns_when_media_duration_is_short(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = MeetingRecordStore(root)
+            runtime = MeetingRecorderRuntime(store=store, config=MeetingRecorderConfig())
+            record = store.create_record(
+                owner_email="owner@npt.sg",
+                title="Face to face",
+                platform="unknown",
+                meeting_link="",
+            )
+            audio_path = store.record_dir(record["record_id"]) / "meeting.wav"
+            audio_path.write_bytes(b"audio")
+            record.update(
+                {
+                    "recording_started_at": "2026-05-02T13:27:28+00:00",
+                    "recording_stopped_at": "2026-05-02T13:28:29+00:00",
+                    "media": {
+                        "recording_mode": "audio_only",
+                        "audio_path": str(audio_path.relative_to(store.root_dir)),
+                    },
+                }
+            )
+
+            with patch("bpmis_jira_tool.meeting_recorder._audio_duration_seconds", return_value=16.0):
+                health = runtime._recording_health(record)
+
+        self.assertEqual(health["status"], "warning")
+        self.assertEqual(health["duration_seconds"], 16.0)
+        self.assertEqual(health["elapsed_seconds"], 61.0)
+        self.assertIn("only 16s for a 61s recording", health["warning"])
+
     def test_screen_recording_falls_back_to_audio_only_when_screen_capture_fails(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
