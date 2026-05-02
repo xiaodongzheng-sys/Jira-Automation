@@ -253,6 +253,52 @@ class MeetingRecordStoreTests(unittest.TestCase):
 
 
 class MeetingRecorderRuntimeTests(unittest.TestCase):
+    def test_screen_recording_falls_back_to_audio_only_when_screen_capture_fails(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = MeetingRecordStore(root)
+            runtime = MeetingRecorderRuntime(
+                store=store,
+                config=MeetingRecorderConfig(ffmpeg_bin="/opt/homebrew/bin/ffmpeg"),
+            )
+            fake_process = Mock()
+            fake_process.poll.return_value = None
+
+            with patch("bpmis_jira_tool.meeting_recorder._resolve_ffmpeg_bin", return_value="/opt/homebrew/bin/ffmpeg"), patch(
+                "bpmis_jira_tool.meeting_recorder._avfoundation_devices",
+                return_value={
+                    "video_devices": ["Capture screen 0"],
+                    "audio_devices": ["Meeting Recorder Aggregate"],
+                },
+            ), patch.object(
+                runtime,
+                "_audio_preflight",
+                return_value={"status": "ok", "checked_at": "2026-05-02T10:00:00+00:00", "warning": ""},
+            ), patch.object(
+                runtime,
+                "_screen_capture_preflight",
+                return_value={"status": "unavailable", "warning": "screen failed"},
+            ), patch(
+                "bpmis_jira_tool.meeting_recorder.subprocess.Popen",
+                return_value=fake_process,
+            ) as popen:
+                record = runtime.start_recording(
+                    owner_email="owner@npt.sg",
+                    title="Zoom review",
+                    platform="zoom",
+                    meeting_link="https://zoom.us/j/123",
+                    recording_mode="screen_audio",
+                )
+
+        self.assertEqual(record["media"]["recording_mode"], "audio_only")
+        self.assertIn("audio_path", record["media"])
+        self.assertNotIn("video_path", record["media"])
+        self.assertTrue(record["diagnostics_snapshot"]["screen_capture_fallback"])
+        self.assertEqual(record["recording_health"]["warning"], "screen failed")
+        command = popen.call_args.args[0]
+        self.assertIn(":Meeting Recorder Aggregate", command)
+        self.assertNotIn("Capture screen 0:Meeting Recorder Aggregate", command)
+
     def test_repair_video_playback_creates_browser_playback_asset(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

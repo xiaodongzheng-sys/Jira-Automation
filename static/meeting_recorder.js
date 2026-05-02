@@ -603,7 +603,7 @@
       await startRecording({
         title: data.get('title') || 'Untitled meeting',
         meeting_link: meetingLink,
-        recording_mode: meetingLink ? 'screen_audio' : 'audio_only',
+        recording_mode: 'audio_only',
       });
     } catch (error) {
       nodes.recordingStatus.textContent = error.message;

@@ -417,6 +417,18 @@ class MeetingRecorderRuntime:
             "warning": preflight.get("warning", ""),
             "checked_at": preflight.get("checked_at", ""),
         }
+        if effective_mode == MEETING_RECORDING_MODE_SCREEN_AUDIO:
+            screen_preflight = self._screen_capture_preflight(ffmpeg_path=ffmpeg_path)
+            if screen_preflight.get("status") != "ok":
+                effective_mode = MEETING_RECORDING_MODE_AUDIO_ONLY
+                record["recording_health"] = {
+                    **record["recording_health"],
+                    "status": "warning",
+                    "warning": screen_preflight.get("warning") or "Screen capture is unavailable; recording audio only.",
+                    "screen_capture_status": screen_preflight.get("status") or "unknown",
+                }
+                record["diagnostics_snapshot"]["screen_capture_fallback"] = True
+                record["diagnostics_snapshot"]["screen_capture_warning"] = record["recording_health"]["warning"]
         self.store.save_record(record)
         if effective_mode == MEETING_RECORDING_MODE_AUDIO_ONLY:
             command = _build_ffmpeg_audio_recording_command(
@@ -610,6 +622,41 @@ class MeetingRecorderRuntime:
             "max_volume_db": metrics.get("max_volume_db"),
             "warning": warning,
         }
+
+    def _screen_capture_preflight(self, *, ffmpeg_path: str) -> dict[str, Any]:
+        checked_at = _utc_now()
+        with _temporary_path("meeting-screen-preflight", ".mp4") as video_path:
+            command = [
+                ffmpeg_path,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-f",
+                "avfoundation",
+                "-framerate",
+                "5",
+                "-pixel_format",
+                _safe_avfoundation_pixel_format(self.config.avfoundation_pixel_format),
+                "-i",
+                self.config.video_input,
+                "-t",
+                "2",
+                "-frames:v",
+                "1",
+                "-f",
+                "null",
+                "-",
+            ]
+            try:
+                _run_command(command, "Could not verify meeting screen capture.", timeout_seconds=8)
+            except Exception as error:  # noqa: BLE001
+                return {
+                    "status": "unavailable",
+                    "checked_at": checked_at,
+                    "warning": f"Screen capture is unavailable; recording audio only. {error}",
+                }
+        return {"status": "ok", "checked_at": checked_at, "warning": ""}
 
     def _recording_health(self, record: dict[str, Any]) -> dict[str, Any]:
         media = record.get("media") if isinstance(record.get("media"), dict) else {}
