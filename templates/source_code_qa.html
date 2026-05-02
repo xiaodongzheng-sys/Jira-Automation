@@ -55,10 +55,10 @@
         <label class="field-group">
           <span>Answer Speed</span>
           <select data-source-query-mode>
-            <option value="fast" selected>快速模式 · ≤1 min</option>
-            <option value="deep">深度模式 · 2-6 min</option>
+            <option value="fast" selected>Fast Mode · ≤1 min</option>
+            <option value="deep">Deep Mode · 2-6 min</option>
           </select>
-          <small class="field-help" data-source-query-mode-help>1 分钟内返回证据版草稿；复杂链路请手动用 Deep 验证。</small>
+          <small class="field-help" data-source-query-mode-help>Returns an evidence-backed draft within 1 minute. Use Deep for complex chain verification.</small>
         </label>
       </div>
       <div class="source-qa-status" data-source-config-status>
@@ -141,19 +141,19 @@
           <div class="source-qa-evidence-summary" data-source-evidence-summary hidden></div>
           <div class="source-qa-debug-trace" data-source-debug-trace hidden></div>
           <div class="source-qa-feedback" data-source-feedback hidden>
-            <button class="button button-secondary" type="button" data-source-feedback-rating="useful">有帮助</button>
-            <button class="button button-secondary" type="button" data-source-feedback-rating="incorrect">答案不准</button>
-            <button class="button button-secondary" type="button" data-source-feedback-rating="missing_evidence">缺少代码证据</button>
-            <button class="button button-secondary" type="button" data-source-feedback-rating="stale_code">代码已过期</button>
-            <button class="button button-secondary" type="button" data-source-copy-answer>复制带引用答案</button>
+            <button class="button button-secondary" type="button" data-source-feedback-rating="useful">Helpful</button>
+            <button class="button button-secondary" type="button" data-source-feedback-rating="incorrect">Incorrect</button>
+            <button class="button button-secondary" type="button" data-source-feedback-rating="missing_evidence">Missing Code Evidence</button>
+            <button class="button button-secondary" type="button" data-source-feedback-rating="stale_code">Stale Code</button>
+            <button class="button button-secondary" type="button" data-source-copy-answer>Copy Answer with Citations</button>
             <span class="microcopy" data-source-feedback-status></span>
           </div>
           <div class="source-qa-feedback-reasons" data-source-feedback-reasons hidden>
-            <button class="button button-secondary" type="button" data-source-feedback-reason="deprecated_class">引用了已废弃类</button>
-            <button class="button button-secondary" type="button" data-source-feedback-reason="opposite_logic">逻辑与实际表现相反</button>
-            <button class="button button-secondary" type="button" data-source-feedback-reason="off_topic">答非所问</button>
-            <button class="button button-secondary" type="button" data-source-feedback-reason="missing_key_flow">缺少关键链路</button>
-            <button class="button button-secondary" type="button" data-source-feedback-reason="wrong_scope">国家/团队范围错了</button>
+            <button class="button button-secondary" type="button" data-source-feedback-reason="deprecated_class">Cited Deprecated Class</button>
+            <button class="button button-secondary" type="button" data-source-feedback-reason="opposite_logic">Opposite Logic</button>
+            <button class="button button-secondary" type="button" data-source-feedback-reason="off_topic">Off Topic</button>
+            <button class="button button-secondary" type="button" data-source-feedback-reason="missing_key_flow">Missing Key Flow</button>
+            <button class="button button-secondary" type="button" data-source-feedback-reason="wrong_scope">Wrong Country or Team Scope</button>
           </div>
           <div class="source-qa-results" data-source-results>
             <div class="source-qa-empty">Ask a question to generate an answer. Retrieval details stay in the background unless Codex is unavailable.</div>

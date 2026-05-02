@@ -2289,8 +2289,8 @@ class SourceCodeQAService:
                 {"value": ANSWER_MODE_AUTO, "label": "Smart Answer"},
             ],
             "query_modes": [
-                {"value": QUERY_MODE_FAST, "label": "快速模式", "description": "1 分钟内返回证据版草稿；复杂链路请手动用 Deep 验证"},
-                {"value": QUERY_MODE_DEEP, "label": "深度模式", "description": "更完整，可能需要 2-6 分钟"},
+                {"value": QUERY_MODE_FAST, "label": "Fast Mode", "description": "Returns an evidence-backed draft within 1 minute. Use Deep for complex chain verification."},
+                {"value": QUERY_MODE_DEEP, "label": "Deep Mode", "description": "More complete; may take 2-6 minutes."},
             ],
             "llm_providers": [
                 {"value": LLM_PROVIDER_CODEX_CLI_BRIDGE, "label": "Codex"},
@@ -16024,12 +16024,12 @@ class SourceCodeQAService:
             return "Fast mode did not find reliable enough code evidence for a meaningful answer; use Deep verification for the complete chain."
         term_text = "、".join(focus_terms[:4])
         if term_text and re.search(r"\b(explain|difference|diff|区别|是什么意思|什么是|解释)\b", question, flags=re.IGNORECASE):
-            return f"基于已检索到的代码证据，下面是 `{term_text}` 的第一版解释；尚未完成跨文件链路验证，所以未确认部分放在 Missing Evidence。"
+            return f"Based on the retrieved code evidence, this is the first-pass explanation for `{term_text}`. Cross-file chain verification is not complete, so unresolved parts are listed in Missing Evidence."
         if confidence == "medium":
             return "Fast mode found focused code evidence for the core term and can return a cited answer; unresolved cross-file links remain in Missing Evidence."
         if missing:
-            return "当前只能给出低置信度的第一版判断；关键缺口已列在 Missing Evidence。"
-        return "当前只能给出基于检索证据的第一版判断。"
+            return "Fast mode can only provide a low-confidence first-pass answer; key gaps are listed in Missing Evidence."
+        return "Fast mode can only provide a first-pass answer based on retrieved evidence."
 
     def _codex_deep_investigation_needed(
         self,

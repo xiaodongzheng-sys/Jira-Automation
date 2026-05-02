@@ -154,28 +154,28 @@
     const category = String(payloadOrError?.error_category || '').toLowerCase();
     const rawMessage = String(payloadOrError?.message || payloadOrError?.error || '').trim();
     if (category === 'local_agent_offline') {
-      return 'Mac local-agent 当前不可用。请确认 host stack 在线后点击 Reconnect。';
+      return 'Mac local-agent is unavailable. Confirm the host stack is online, then click Reconnect.';
     }
     if (category === 'gateway_disconnected') {
-      return '网关连接中断，但后台任务可能仍在运行。点击 Reconnect 恢复状态。';
+      return 'The gateway connection was interrupted, but the background job may still be running. Click Reconnect to restore status.';
     }
     if (category === 'job_running') {
-      return '后台仍在分析代码，连接刚才中断了。点击 Reconnect 恢复状态。';
+      return 'The background job is still analyzing code and the connection was interrupted. Click Reconnect to restore status.';
     }
     if (category === 'job_queued') {
-      return '任务已进入队列，后台会按用户公平轮转调度。';
+      return 'The job is queued and will be scheduled fairly across users.';
     }
     if (category === 'job_stalled') {
-      return '后台任务暂时没有进展，可能仍在 Codex 推理。可以 Reconnect 或 Retry。';
+      return 'The background job has no recent progress and may still be running Codex. You can Reconnect or Retry.';
     }
     if (category === 'job_not_found') {
-      return '这个后台任务状态已经找不到了，请重新提交问题。';
+      return 'This background job can no longer be found. Please submit the question again.';
     }
     if (category === 'codex_timeout_or_rate_limit') {
-      return 'Codex 推理超时或被限流。可以重试，或者先缩小问题范围。';
+      return 'Codex timed out or was rate-limited. Retry, or narrow the question scope first.';
     }
     if (/failed to fetch|load failed|networkerror|internet connection appears to be offline/i.test(rawMessage)) {
-      return '浏览器和后台状态接口断开了。后台任务可能仍在运行，点击 Reconnect 恢复状态。';
+      return 'The browser lost connection to the background status API. The job may still be running; click Reconnect to restore status.';
     }
     return rawMessage || 'Source Code Q&A failed.';
   };
@@ -257,15 +257,15 @@
     const team = pmTeam?.value || 'AF';
     const selectedCountry = currentCountry();
     if (isCountrySpecificTeam(team)) {
-      return `国家独立代码，必须选择具体国家；运行上下文：${team}:${selectedCountry} (${capabilityLabel(team, selectedCountry)}).`;
+      return `Country-specific code requires a specific country. Runtime context: ${team}:${selectedCountry} (${capabilityLabel(team, selectedCountry)}).`;
     }
     if (selectedCountry === allCountryValue()) {
-      return '仅查通用代码，不加载国家运行时数据。';
+      return 'Searches common code only; no country runtime evidence is loaded.';
     }
     if (isSharedCodeTeam(team)) {
-      return `代码范围：${team}:${allCountryValue()}；运行上下文：${team}:${selectedCountry} (${capabilityLabel(team, selectedCountry)}).`;
+      return `Code scope: ${team}:${allCountryValue()}; runtime context: ${team}:${selectedCountry} (${capabilityLabel(team, selectedCountry)}).`;
     }
-    return `运行上下文：${team}:${selectedCountry} (${capabilityLabel(team, selectedCountry)}).`;
+    return `Runtime context: ${team}:${selectedCountry} (${capabilityLabel(team, selectedCountry)}).`;
   };
   const currentCountry = () => country.value || (isCountrySpecificTeam() ? runtimeCountries()[0] || 'SG' : allCountryValue());
   const currentRepositoryCountry = () => (pmTeam.value === 'CRMS' ? currentCountry() : allCountryValue());
@@ -294,15 +294,15 @@
   };
   const formatDuration = (seconds) => {
     const value = Math.max(0, Number(seconds || 0));
-    if (value < 60) return `${Math.round(value)} 秒`;
-    return `${Math.max(1, Math.round(value / 60))} 分钟`;
+    if (value < 60) return `${Math.round(value)}s`;
+    return `${Math.max(1, Math.round(value / 60))} min`;
   };
   const formatEtaRange = (range) => {
     if (!Array.isArray(range) || range.length < 2) return '';
     const lower = Number(range[0] || 0);
     const upper = Number(range[1] || 0);
-    if (upper <= 0) return '即将开始';
-    return `预计等待约 ${formatDuration(lower)}-${formatDuration(upper)}`;
+    if (upper <= 0) return 'starting soon';
+    return `estimated wait ${formatDuration(lower)}-${formatDuration(upper)}`;
   };
   const notificationSupported = () => 'Notification' in window;
   const requestNotificationPermission = async () => {
@@ -687,9 +687,9 @@
   const updateQueryModeHelp = () => {
     if (!queryModeHelp) return;
     if ((queryMode?.value || 'fast') === 'deep') {
-      queryModeHelp.textContent = '更完整，允许 Codex 深挖和修复，可能需要 2-6 分钟。';
+      queryModeHelp.textContent = 'More complete. Allows Codex deep investigation and repair; may take 2-6 minutes.';
     } else {
-      queryModeHelp.textContent = '1 分钟内返回证据版草稿；复杂链路请手动用 Deep 验证。';
+      queryModeHelp.textContent = 'Returns an evidence-backed draft within 1 minute. Use Deep for complex chain verification.';
     }
   };
 
@@ -1785,9 +1785,9 @@
       return `
         <section class="source-qa-answer-quality source-qa-answer-quality-fast">
           <strong>Fast evidence-limited draft</strong>
-          <span>Fast 已在 1 分钟 SLA 内返回基于本地检索证据的草稿；完整关系链路请手动用 Deep 模式继续确认。</span>
+          <span>Fast returned a local-retrieval evidence draft within the 1-minute SLA. Use Deep Mode to verify the complete chain.</span>
           <button type="button" class="button button-secondary source-qa-deep-continue" data-source-deep-continue>
-            用 Deep 模式继续验证
+            Continue with Deep Mode
           </button>
         </section>
       `;
@@ -1872,7 +1872,7 @@
         : 'Running current question.';
     }
     if (queryStatus && notificationSupported()) {
-      queryStatus.textContent = '请保持当前标签页开启以接收通知。';
+      queryStatus.textContent = 'Keep this tab open to receive notifications.';
     }
     if (results) {
       results.hidden = true;
@@ -2003,25 +2003,25 @@
 
   const applyQueryJobStatus = (payload, progress) => {
     const etaText = payload.queued_position
-      ? `排队第 ${payload.queued_position} 位${payload.eta_seconds_range?.length ? `，${formatEtaRange(payload.eta_seconds_range)}` : ''}`
+      ? `queue position ${payload.queued_position}${payload.eta_seconds_range?.length ? `, ${formatEtaRange(payload.eta_seconds_range)}` : ''}`
       : '';
     const stageLabels = {
-      queued: '排队中',
-      auto_sync: '同步检查',
-      evidence_pack: '构建证据',
-      fast_quality_gate: 'Fast 证据校验',
-      auto_deep: 'Deep 验证',
-      llm_generation: 'Codex 推理',
-      codex_session_lock: '等待 Codex 会话',
-      codex_deep_investigation: '补充深挖',
-      completed: '质量校验完成',
+      queued: 'Queued',
+      auto_sync: 'Sync Check',
+      evidence_pack: 'Building Evidence',
+      fast_quality_gate: 'Fast Evidence Check',
+      auto_deep: 'Deep Verification',
+      llm_generation: 'Codex Reasoning',
+      codex_session_lock: 'Waiting for Codex Session',
+      codex_deep_investigation: 'Deep Investigation',
+      completed: 'Quality Check Complete',
     };
-    const modeText = payload.query_mode === 'fast' ? '快速模式' : (payload.query_mode === 'deep' ? '深度模式' : '');
+    const modeText = payload.query_mode === 'fast' ? 'Fast Mode' : (payload.query_mode === 'deep' ? 'Deep Mode' : '');
     const stageLabel = stageLabels[payload.stage] || '';
     const progressText = payload.total
       ? `${stageLabel ? `${stageLabel}: ` : ''}${payload.message || 'Processing source-code question.'} (${payload.current || 0}/${payload.total})`
       : `${stageLabel ? `${stageLabel}: ` : ''}${payload.message || 'Processing source-code question.'}`;
-    const stalledText = payload.stalled_retryable ? ' 后台超过 3 分钟无新进展，可重连或重试。' : '';
+    const stalledText = payload.stalled_retryable ? ' No background progress for more than 3 minutes; reconnect or retry.' : '';
     progress?.setMessage([modeText, progressText, etaText, stalledText].filter(Boolean).join(' '));
     if (payload.stage === 'codex_stream' && payload.message) {
       renderLiveAnswer(payload.message, { title: 'Codex Live', meta: 'streaming CLI output', jobId: payload.job_id });
@@ -2359,11 +2359,11 @@
   };
 
   const feedbackReasonLabels = {
-    deprecated_class: '引用了已废弃类',
-    opposite_logic: '逻辑与实际表现相反',
-    off_topic: '答非所问',
-    missing_key_flow: '缺少关键链路',
-    wrong_scope: '国家/团队范围错了',
+    deprecated_class: 'Cited Deprecated Class',
+    opposite_logic: 'Opposite Logic',
+    off_topic: 'Off Topic',
+    missing_key_flow: 'Missing Key Flow',
+    wrong_scope: 'Wrong Country or Team Scope',
   };
 
   const sendFeedback = async (rating, reason = '') => {
@@ -2531,7 +2531,7 @@
       if (rating === 'incorrect') {
         pendingFeedbackRating = rating;
         if (feedbackReasons) feedbackReasons.hidden = false;
-        if (feedbackStatus) feedbackStatus.textContent = '请选择一个原因标签；也可以直接点其它反馈按钮。';
+        if (feedbackStatus) feedbackStatus.textContent = 'Select a reason tag, or click another feedback button directly.';
         return;
       }
       sendFeedback(rating);
