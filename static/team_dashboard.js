@@ -60,7 +60,7 @@
   };
   const teamOrder = ['AF', 'CRMS', 'GRC'];
   const jiraPageSize = 10;
-  const taskCacheKey = 'team-dashboard:jira-tasks:v6';
+  const taskCacheKey = 'team-dashboard:jira-tasks:v7';
   const monthlyReportDraftCacheKey = 'team-dashboard:monthly-report-draft:v1';
 
   let initialConfig = (() => {

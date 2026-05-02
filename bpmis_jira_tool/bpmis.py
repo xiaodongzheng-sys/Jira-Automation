@@ -172,6 +172,7 @@ class BPMISDirectApiClient(BPMISClient):
         self._group_options_cache: dict[str, list[dict[str, Any]]] = {}
         self._bpmis_user_ids_by_email_cache: dict[str, list[int]] = {}
         self._issue_detail_cache: dict[str, dict[str, Any]] = {}
+        self._team_dashboard_release_versions_by_id: dict[int, dict[str, Any]] = {}
         self.event_logger = BPMIS_LOGGER
         self.request_stats: dict[str, int] = {
             "api_call_count": 0,
@@ -678,6 +679,8 @@ class BPMISDirectApiClient(BPMISClient):
                     max_pages=max_pages,
                     created_cutoff=created_cutoff,
                 )
+        if release_version_ids:
+            rows = [self._with_team_dashboard_release_version_detail(row) for row in rows]
 
         candidate_task_rows: list[tuple[dict[str, Any], str, str]] = []
         seen_issue_ids: set[str] = set()
@@ -912,6 +915,7 @@ class BPMISDirectApiClient(BPMISClient):
         }
 
     def _team_dashboard_release_version_ids(self, release_cutoff: datetime | None) -> list[int]:
+        self._team_dashboard_release_versions_by_id = {}
         if not release_cutoff:
             return []
         rows: list[dict[str, Any]] = []
@@ -955,9 +959,53 @@ class BPMISDirectApiClient(BPMISClient):
             if version_id in seen_ids:
                 continue
             seen_ids.add(version_id)
+            self._team_dashboard_release_versions_by_id[version_id] = row
             version_ids.append(version_id)
         self.request_stats["release_version_count"] += len(version_ids)
         return version_ids
+
+    def _with_team_dashboard_release_version_detail(self, row: dict[str, Any]) -> dict[str, Any]:
+        if not self._team_dashboard_release_versions_by_id:
+            return row
+        fix_version_value = self._find_first_value(row, "fixVersionId")
+        enriched = self._enrich_team_dashboard_fix_version_value(fix_version_value)
+        if enriched is fix_version_value:
+            return row
+        merged = dict(row)
+        merged["fixVersionId"] = enriched
+        return merged
+
+    def _enrich_team_dashboard_fix_version_value(self, value: Any) -> Any:
+        if value is None:
+            return value
+        if isinstance(value, list):
+            enriched_items = [self._enrich_team_dashboard_fix_version_value(item) for item in value]
+            return enriched_items
+        version_id = self._extract_team_dashboard_version_id(value)
+        if version_id is None:
+            return value
+        version_detail = self._team_dashboard_release_versions_by_id.get(version_id)
+        if not version_detail:
+            return value
+        if isinstance(value, dict):
+            enriched = dict(version_detail)
+            enriched.update(value)
+            return enriched
+        return dict(version_detail)
+
+    @staticmethod
+    def _extract_team_dashboard_version_id(value: Any) -> int | None:
+        if isinstance(value, dict):
+            for key in ("id", "value", "versionId", "fixVersionId"):
+                parsed = BPMISDirectApiClient._extract_team_dashboard_version_id(value.get(key))
+                if parsed is not None:
+                    return parsed
+            return None
+        try:
+            text = str(value or "").strip()
+            return int(text) if text.isdigit() else None
+        except (TypeError, ValueError):
+            return None
 
     def _extract_issue_rows_from_response(self, response: dict[str, Any]) -> list[dict[str, Any]]:
         if not isinstance(response, dict):
@@ -2429,7 +2477,7 @@ class BPMISDirectApiClient(BPMISClient):
             "jira_status": self._extract_jira_status_label(row),
             "created_at": self._extract_issue_created_at_text(row),
             "release_date": self._extract_issue_release_date_text(row),
-            "version": self._issue_first_text(row, "fixVersionId", "fixVersion", "fixVersions", "version", "versions"),
+            "version": self._extract_issue_version_text(row),
             "prd_links": prd_links,
             "parent_project": parent_project or self._normalize_team_dashboard_parent_project({}),
             "raw_response": row,
@@ -2483,6 +2531,17 @@ class BPMISDirectApiClient(BPMISClient):
                 return text
         return ""
 
+    def _extract_issue_version_text(self, row: dict[str, Any]) -> str:
+        fallback = ""
+        for key in ("fixVersions", "fixVersion", "version", "versions", "fixVersionId"):
+            text = self._issue_first_text(row, key)
+            if not text:
+                continue
+            if not text.isdigit():
+                return text
+            fallback = fallback or text
+        return fallback
+
     def _extract_release_date_from_version_value(self, value: Any) -> str:
         if value is None:
             return ""
@@ -2494,13 +2553,25 @@ class BPMISDirectApiClient(BPMISClient):
             return ""
         if not isinstance(value, dict):
             return ""
-        for key in ("release", "releaseDate", "release_date", "goliveDate", "goLiveDate", "golive"):
+        for key in (
+            "release",
+            "releaseDate",
+            "release_date",
+            "goliveDate",
+            "goLiveDate",
+            "golive",
+            "timelineEnd",
+            "timelineEndDate",
+            "timeline_end",
+            "endDate",
+            "end",
+        ):
             text = self._stringify_value(value.get(key))
             if text:
                 return text
         timeline = value.get("timeline")
         if isinstance(timeline, dict):
-            for key in ("release", "golive", "goLive", "releaseDate", "goliveDate"):
+            for key in ("release", "golive", "goLive", "releaseDate", "goliveDate", "timelineEnd", "endDate", "end"):
                 text = self._stringify_value(timeline.get(key))
                 if text:
                     return text

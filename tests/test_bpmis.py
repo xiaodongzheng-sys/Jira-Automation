@@ -2351,7 +2351,15 @@ class BPMISClientTests(unittest.TestCase):
                     self.assertEqual(search["timelineEndAfter"], "2026-03-01")
                     self.assertEqual(search["timelineEndBefore"], "2028-02-29")
                     self.assertEqual(search["pageSize"], 1000)
-                    return {"data": {"rows": [{"id": 321}, {"id": 322}, {"id": 321}]}}
+                    return {
+                        "data": {
+                            "rows": [
+                                {"id": 321, "fullName": "Planning_26Q2", "timelineEnd": "2026-03-01"},
+                                {"id": 322, "fullName": "Planning_TBD"},
+                                {"id": 321, "fullName": "Planning_26Q2", "timelineEnd": "2026-03-01"},
+                            ]
+                        }
+                    }
                 self.assertEqual(path, "/api/v1/issues/tree")
                 self.assertEqual(search.get("fixVersionId"), [321, 322])
                 if "jiraRegionalPmPicId" in search:
@@ -2364,7 +2372,7 @@ class BPMISClientTests(unittest.TestCase):
                                 "jiraKey": "AF-991",
                                 "summary": "March task",
                                 "reporter": {"id": 101},
-                                "fixVersionId": [{"fullName": "Planning_26Q2", "timeline": {"release": "2026-03-01"}}],
+                                "fixVersionId": 321,
                                 "status": {"label": "Testing"},
                             },
                             {
@@ -2372,7 +2380,7 @@ class BPMISClientTests(unittest.TestCase):
                                 "jiraKey": "AF-992",
                                 "summary": "No release date task",
                                 "reporter": {"id": 101},
-                                "fixVersionId": [{"fullName": "Planning_TBD"}],
+                                "fixVersionId": 322,
                                 "status": {"label": "Testing"},
                             },
                             {
@@ -2399,6 +2407,8 @@ class BPMISClientTests(unittest.TestCase):
             self.assertEqual(searches[0]["timelineEndAfter"], "2026-03-01")
             self.assertEqual(searches[-1]["fixVersionId"], [321, 322])
             self.assertEqual(tasks[0]["release_date"], "2026-03-01")
+            self.assertEqual(tasks[0]["version"], "Planning_26Q2")
+            self.assertEqual(tasks[1]["version"], "Planning_TBD")
             self.assertEqual(tasks[1]["release_date"], "")
             self.assertEqual(client.request_stats["release_version_lookup_count"], 1)
             self.assertEqual(client.request_stats["release_version_count"], 2)

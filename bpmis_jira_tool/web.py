@@ -148,6 +148,7 @@ TEAM_DASHBOARD_UNDER_PRD_STATUSES = {"waiting", "prd in progress", "prd reviewed
 TEAM_DASHBOARD_EXCLUDED_PENDING_STATUSES = {"icebox", "closed", "done"}
 TEAM_DASHBOARD_UNDER_PRD_BIZ_PROJECT_STATUSES = {"pending review", "confirmed"}
 TEAM_DASHBOARD_PENDING_LIVE_BIZ_PROJECT_STATUSES = {"developing", "testing", "uat"}
+TEAM_DASHBOARD_TASK_CACHE_VERSION = 2
 TEAM_DASHBOARD_LINK_BIZ_EXCLUDED_TITLE_PHRASES = (
     "sync af productization",
     "productisation upgrade",
@@ -681,6 +682,13 @@ class TeamDashboardConfigStore:
         }
 
     def _normalize_task_cache(self, task_cache: dict[str, Any]) -> dict[str, Any]:
+        version = int(task_cache.get("version") or 1)
+        if version != TEAM_DASHBOARD_TASK_CACHE_VERSION:
+            return {
+                "version": TEAM_DASHBOARD_TASK_CACHE_VERSION,
+                "updated_at": "",
+                "teams": {},
+            }
         raw_teams = task_cache.get("teams") if isinstance(task_cache.get("teams"), dict) else {}
         teams: dict[str, dict[str, Any]] = {}
         for team_key in TEAM_DASHBOARD_TEAMS:
@@ -700,7 +708,7 @@ class TeamDashboardConfigStore:
                 "pending_live": raw_team.get("pending_live") if isinstance(raw_team.get("pending_live"), list) else [],
             }
         return {
-            "version": int(task_cache.get("version") or 1),
+            "version": TEAM_DASHBOARD_TASK_CACHE_VERSION,
             "updated_at": str(task_cache.get("updated_at") or "").strip(),
             "teams": teams,
         }
@@ -7811,6 +7819,8 @@ def _team_dashboard_task_cache_signature(emails: list[str]) -> str:
 
 def _cached_team_dashboard_task_payload(config: dict[str, Any], team_key: str, emails: list[str]) -> dict[str, Any] | None:
     task_cache = config.get("task_cache") if isinstance(config.get("task_cache"), dict) else {}
+    if int(task_cache.get("version") or 1) != TEAM_DASHBOARD_TASK_CACHE_VERSION:
+        return None
     cached_teams = task_cache.get("teams") if isinstance(task_cache.get("teams"), dict) else {}
     cached_team = cached_teams.get(team_key)
     if not isinstance(cached_team, dict):
@@ -7859,7 +7869,7 @@ def _store_team_dashboard_task_payload(
     }
     cached_teams[team_key] = cached_team
     config["task_cache"] = {
-        "version": 1,
+        "version": TEAM_DASHBOARD_TASK_CACHE_VERSION,
         "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "teams": cached_teams,
     }
