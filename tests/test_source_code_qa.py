@@ -140,6 +140,16 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertIn("data-source-preview-attachment", script)
         self.assertIn("Please wait for image upload to finish.", script)
 
+    def test_frontend_fast_fallback_uses_readable_answer_sections(self):
+        script = Path("static/source_code_qa.js").read_text(encoding="utf-8")
+
+        self.assertIn("Direct Answer", script)
+        self.assertIn("Confirmed by Code", script)
+        self.assertIn("Not Verified in Fast Mode", script)
+        self.assertIn("Fast draft based on local evidence", script)
+        self.assertIn("evidence_cards", script)
+        self.assertIn("containsMachineRetrievalText", script)
+
     def test_source_code_qa_admin_allowlist_does_not_grant_portal_admin(self):
         with patch.dict(
             os.environ,
@@ -8375,7 +8385,8 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertIn("usage flow not yet confirmed", payload["fast_quality_gate"]["reason"])
         self.assertNotIn("fast mode 可以给出第一版结论", payload["llm_answer"])
         claim_text = json.dumps(payload["structured_answer"]["claims"], ensure_ascii=False)
-        self.assertIn("BioDevBlackWhiteListTypeEnum", claim_text)
+        evidence_text = json.dumps(payload["structured_answer"].get("evidence_cards") or [], ensure_ascii=False)
+        self.assertIn("BioDevBlackWhiteListTypeEnum", evidence_text)
         self.assertNotIn("iml-es.sh", claim_text)
         self.assertIn("Definition found, but usage flow is not yet confirmed", json.dumps(payload["structured_answer"], ensure_ascii=False))
 
@@ -8444,11 +8455,102 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertTrue(payload["deadline_hit"])
         self.assertTrue(payload["fallback_used"])
         direct_answer = payload["structured_answer"]["direct_answer"]
-        self.assertIn("Fast mode reached the 1-minute limit", direct_answer)
-        self.assertIn("TreatmentTypeEnum.java", direct_answer)
-        self.assertIn("SceneDOMapper.xml", direct_answer)
+        self.assertIn("Fast Mode found this first-pass usage flow", direct_answer)
+        self.assertIn("Blacklist", json.dumps(payload["structured_answer"], ensure_ascii=False))
+        self.assertNotIn("TreatmentTypeEnum.java", direct_answer)
+        self.assertNotIn("SceneDOMapper.xml", direct_answer)
+        self.assertNotIn("was selected because", direct_answer)
+        self.assertNotIn("path matched", direct_answer)
+        self.assertTrue(payload["structured_answer"]["confirmed_points"])
+        self.assertTrue(payload["structured_answer"]["missing_points"])
+        self.assertTrue(payload["structured_answer"]["evidence_cards"])
         self.assertNotIn("can return a cited answer", direct_answer)
         self.assertNotIn("`you`", json.dumps(payload["structured_answer"], ensure_ascii=False))
+
+    def test_codex_fast_data_source_fallback_prefers_source_surfaces(self):
+        service = SourceCodeQAService(
+            data_root=Path(self.temp_dir.name),
+            team_profiles=TEAM_PROFILE_DEFAULTS,
+            llm_provider="codex_cli_bridge",
+            gitlab_token="secret-token",
+            git_timeout_seconds=5,
+            max_file_bytes=200_000,
+        )
+        entry = RepositoryEntry("CRMS", "https://git.example.com/team/crms.git")
+        matches = [
+            {
+                "repo": "CRMS",
+                "path": "resources/mapper/main/UnderwritingRecordMapper.xml",
+                "line_start": 20,
+                "line_end": 45,
+                "retrieval": "persistent_index",
+                "trace_stage": "direct",
+                "reason": "content matched: Term Loan Pre-check 1 underwriting table",
+                "score": 40,
+                "snippet": "select * from crms_underwriting_record where pre_check_type = 'TERM_LOAN_PRE_CHECK_1'",
+            },
+            {
+                "repo": "CRMS",
+                "path": "src/main/java/com/shopee/banking/crms/service/GetEcInfoService.java",
+                "line_start": 31,
+                "line_end": 80,
+                "retrieval": "persistent_index",
+                "trace_stage": "direct",
+                "reason": "service method matched underwriting",
+                "score": 30,
+                "snippet": "private boolean isTermLoanPreCheck2(UnderwritingRecordDO record) { return record != null; }",
+            },
+            {
+                "repo": "CRMS",
+                "path": "src/main/java/com/shopee/banking/crms/underwriting/decision/engine/strategy/termLoan/Layer5TD1TermLoanPreCheckEngineStrategy.java",
+                "line_start": 1,
+                "line_end": 20,
+                "retrieval": "persistent_index",
+                "trace_stage": "direct",
+                "reason": "path matched: term loan underwriting strategy",
+                "score": 10,
+                "snippet": "package com.shopee.banking.crms.underwriting.decision.engine.strategy.termLoan;",
+            },
+        ]
+        with patch.object(service.llm_provider, "ready", return_value=True), patch.object(
+            service.llm_provider,
+            "generate",
+            side_effect=ToolError("Codex CLI timed out after 55s."),
+        ):
+            payload = service._build_llm_answer(
+                entries=[entry],
+                key="CRMS:ID",
+                pm_team="CRMS",
+                country="ID",
+                question="What are the data sources used in Term Loan Pre-check 1 underwriting?",
+                matches=matches,
+                llm_budget_mode="auto",
+                query_mode="fast",
+                requested_answer_mode="auto",
+            )
+
+        direct_answer = payload["structured_answer"]["direct_answer"]
+        self.assertTrue(payload["deadline_hit"])
+        self.assertTrue(payload["fallback_used"])
+        self.assertIn("data-source", direct_answer)
+        self.assertIn("crms_underwriting_record", direct_answer)
+        self.assertNotIn("package com.shopee", direct_answer)
+        self.assertNotIn("path matched", direct_answer)
+        self.assertNotIn("Layer5TD1TermLoanPreCheckEngineStrategy.java", direct_answer)
+        self.assertTrue(payload["structured_answer"]["evidence_cards"])
+
+    def test_fast_answer_focus_terms_keep_phrases_and_drop_fillers(self):
+        blacklist_terms = SourceCodeQAService._fast_answer_focus_terms("Can you tell me how blacklist is used?")
+        self.assertEqual(blacklist_terms, ["blacklist"])
+
+        term_loan_terms = SourceCodeQAService._fast_answer_focus_terms(
+            "What are the data sources used in Term Loan Pre-check 1 underwriting?"
+        )
+        self.assertIn("Term Loan Pre-check 1", term_loan_terms)
+        self.assertIn("data sources", [term.lower() for term in term_loan_terms])
+        self.assertIn("underwriting", [term.lower() for term in term_loan_terms])
+        self.assertNotIn("what", [term.lower() for term in term_loan_terms])
+        self.assertNotIn("used", [term.lower() for term in term_loan_terms])
 
     def test_codex_fast_timeout_with_weak_evidence_returns_draft_without_auto_deep(self):
         service = SourceCodeQAService(
@@ -8725,7 +8827,8 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertTrue(payload["fallback_used"])
         self.assertEqual(payload["llm_latency_ms"], 55000)
         first_claim = payload["structured_answer"]["claims"][0]["text"]
-        self.assertIn("ShopeeUid.tsx", first_claim)
+        evidence_text = json.dumps(payload["structured_answer"].get("evidence_cards") or [], ensure_ascii=False)
+        self.assertIn("ShopeeUid.tsx", evidence_text)
         self.assertNotIn("BizErrorType", first_claim)
         answer_text = json.dumps(payload["structured_answer"], ensure_ascii=False)
         self.assertIn("merchantUId", answer_text)

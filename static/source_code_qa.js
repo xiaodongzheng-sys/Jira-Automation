@@ -1687,6 +1687,62 @@
     return Boolean(normalized) && /^(?:\[?S\d+\]?\s*)+$/i.test(normalized);
   };
 
+  const containsMachineRetrievalText = (text) => {
+    const normalized = String(text || '').toLowerCase();
+    return normalized.includes('was selected because')
+      || normalized.includes('path matched')
+      || normalized.includes('symbol matched')
+      || normalized.includes('content matched')
+      || /\bpackage\s+[a-z0-9_.]+/.test(normalized)
+      || (/ shows `/.test(normalized) && / near: /.test(normalized));
+  };
+
+  const normalizedStructuredList = (items = [], { filterMachineText = false } = {}) => {
+    const seen = new Set();
+    const normalizedItems = [];
+    for (const item of items || []) {
+      const rawText = typeof item === 'string' ? item : item?.text;
+      if (isCitationOnlyText(rawText)) continue;
+      const text = stripCitationTags(rawText);
+      if (!text || (filterMachineText && containsMachineRetrievalText(text))) continue;
+      const key = text.toLowerCase();
+      if (seen.has(key)) continue;
+      const citationTags = [
+        ...(Array.isArray(item?.citations) ? item.citations : []),
+        ...extractCitationTags(rawText),
+      ];
+      normalizedItems.push({ text, citations: Array.from(new Set(citationTags.map(normalizeCitation).filter(Boolean))) });
+      seen.add(key);
+      if (normalizedItems.length >= 8) break;
+    }
+    return normalizedItems;
+  };
+
+  const normalizedEvidenceCards = (cards = [], { filterMachineText = false } = {}) => {
+    const seen = new Set();
+    const items = [];
+    for (const card of cards || []) {
+      const title = stripCitationTags(card?.title || 'Evidence');
+      const detail = stripCitationTags(card?.detail || card?.text || '');
+      if (!detail || (filterMachineText && containsMachineRetrievalText(detail))) continue;
+      const key = `${title}:${detail}`.toLowerCase();
+      if (seen.has(key)) continue;
+      const citationTags = [
+        ...(Array.isArray(card?.citations) ? card.citations : []),
+        ...extractCitationTags(card?.detail || ''),
+      ];
+      items.push({
+        title,
+        detail,
+        role: String(card?.role || '').trim(),
+        citations: Array.from(new Set(citationTags.map(normalizeCitation).filter(Boolean))),
+      });
+      seen.add(key);
+      if (items.length >= 8) break;
+    }
+    return items;
+  };
+
   const cleanDirectAnswer = (directAnswer, fallbackAnswer, hasStructuredSections) => {
     let text = String(directAnswer || fallbackAnswer || '').trim();
     if (!text) return '';
@@ -1697,23 +1753,8 @@
     return stripCitationTags(text);
   };
 
-  const normalizedClaimsForDisplay = (claims = []) => {
-    const seen = new Set();
-    const items = [];
-    for (const claim of claims || []) {
-      const rawText = typeof claim === 'string' ? claim : claim?.text;
-      if (isCitationOnlyText(rawText)) continue;
-      const text = stripCitationTags(rawText);
-      if (!text || seen.has(text.toLowerCase())) continue;
-      const citationTags = [
-        ...(Array.isArray(claim?.citations) ? claim.citations : []),
-        ...extractCitationTags(rawText),
-      ];
-      items.push({ text, citations: Array.from(new Set(citationTags.map(normalizeCitation).filter(Boolean))) });
-      seen.add(text.toLowerCase());
-      if (items.length >= 8) break;
-    }
-    return items;
+  const normalizedClaimsForDisplay = (claims = [], { filterMachineText = false } = {}) => {
+    return normalizedStructuredList(claims, { filterMachineText });
   };
 
   const renderRawModelAnswer = (payload, answer, directAnswer, hasStructuredSections) => {
@@ -1735,24 +1776,31 @@
 
   const renderReadableAnswerBody = (payload, answer) => {
     const structured = payload?.structured_answer || {};
-    const claims = normalizedClaimsForDisplay(Array.isArray(structured.claims) ? structured.claims : []);
-    const missing = (Array.isArray(structured.missing_evidence) ? structured.missing_evidence : [])
-      .map((item) => String(item || '').trim())
-      .filter(Boolean)
-      .slice(0, 6);
+    const isFastFallback = Boolean(payload?.deadline_hit && payload?.fallback_used);
+    const confirmed = normalizedStructuredList(
+      Array.isArray(structured.confirmed_points) ? structured.confirmed_points : [],
+      { filterMachineText: isFastFallback },
+    );
+    const claims = normalizedClaimsForDisplay(Array.isArray(structured.claims) ? structured.claims : [], { filterMachineText: isFastFallback });
+    const evidenceCards = normalizedEvidenceCards(Array.isArray(structured.evidence_cards) ? structured.evidence_cards : [], { filterMachineText: false });
+    const missingSource = Array.isArray(structured.missing_points) && structured.missing_points.length
+      ? structured.missing_points
+      : (Array.isArray(structured.missing_evidence) ? structured.missing_evidence : []);
+    const missing = normalizedStructuredList(missingSource, { filterMachineText: true }).slice(0, 6);
     const confidence = String(structured.confidence || payload?.answer_contract?.confidence || '').trim();
-    const directAnswer = cleanDirectAnswer(structured.direct_answer, answer, Boolean(claims.length || missing.length));
-    if (directAnswer || claims.length || missing.length) {
+    const directAnswer = cleanDirectAnswer(structured.direct_answer, answer, Boolean(confirmed.length || claims.length || missing.length || evidenceCards.length));
+    const displayConfirmed = confirmed.length ? confirmed : claims.filter((claim) => !containsMachineRetrievalText(claim.text)).slice(0, 5);
+    if (directAnswer || displayConfirmed.length || claims.length || missing.length || evidenceCards.length) {
       return `
         <section class="source-qa-answer-section source-qa-answer-direct">
-          <strong>Answer</strong>
+          <strong>Direct Answer</strong>
           ${directAnswer ? `<p>${escapeHtml(directAnswer)}</p>` : '<p>No direct answer returned.</p>'}
         </section>
-        ${claims.length ? `
+        ${displayConfirmed.length ? `
           <section class="source-qa-answer-section">
-            <strong>Evidence</strong>
+            <strong>Confirmed by Code</strong>
             <div class="source-qa-claim-list">
-              ${claims.map((claim) => `
+              ${displayConfirmed.map((claim) => `
                 <div class="source-qa-claim-item">
                   <p>${escapeHtml(claim.text)}</p>
                   ${renderInlineCitationList(claim.citations || [])}
@@ -1763,8 +1811,23 @@
         ` : ''}
         ${missing.length ? `
           <section class="source-qa-answer-section source-qa-answer-missing">
-            <strong>Missing Evidence</strong>
-            <ul>${missing.slice(0, 6).map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</ul>
+            <strong>Not Verified in Fast Mode</strong>
+            <ul>${missing.slice(0, 6).map((item) => `<li>${escapeHtml(item.text || item)}</li>`).join('')}</ul>
+          </section>
+        ` : ''}
+        ${(evidenceCards.length || (claims.length && !displayConfirmed.length)) ? `
+          <section class="source-qa-answer-section">
+            <details class="source-qa-evidence-cards" ${isFastFallback ? '' : 'open'}>
+              <summary>Evidence</summary>
+              <div class="source-qa-claim-list">
+                ${(evidenceCards.length ? evidenceCards : claims).slice(0, 8).map((item) => `
+                  <div class="source-qa-claim-item">
+                    <p><strong>${escapeHtml(item.title || item.role || 'Evidence')}</strong>${item.detail ? ` ${escapeHtml(item.detail)}` : escapeHtml(item.text || '')}</p>
+                    ${renderInlineCitationList(item.citations || [])}
+                  </div>
+                `).join('')}
+              </div>
+            </details>
           </section>
         ` : ''}
         ${confidence ? `
@@ -1785,7 +1848,7 @@
       return `
         <section class="source-qa-answer-quality source-qa-answer-quality-fast">
           <strong>Fast evidence-limited draft</strong>
-          <span>Fast returned a local-retrieval evidence draft within the 1-minute SLA. Use Deep Mode to verify the complete chain.</span>
+          <span>Fast draft based on local evidence. Use Deep Mode to verify the full chain.</span>
           <button type="button" class="button button-secondary source-qa-deep-continue" data-source-deep-continue>
             Continue with Deep Mode
           </button>

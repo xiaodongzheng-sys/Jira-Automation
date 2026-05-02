@@ -15651,6 +15651,18 @@ class SourceCodeQAService:
         usable_matches = fast_gate.get("usable_matches") if isinstance(fast_gate.get("usable_matches"), list) else []
         claim_matches = usable_matches
         citations = self._build_citations(claim_matches)
+        language = self._fast_answer_language(question)
+        intent_label = self._fast_answer_intent_label(question)
+        evidence_cards = [
+            self._fast_evidence_card_from_match(citation, match, focus_terms, language=language)
+            for citation, match in zip(citations, claim_matches)
+        ][:8]
+        confirmed_points = self._fast_confirmed_points_from_cards(
+            question=question,
+            intent_label=intent_label,
+            cards=evidence_cards,
+            language=language,
+        )
         claims: list[dict[str, Any]] = []
         used_citations: set[str] = set()
 
@@ -15681,6 +15693,11 @@ class SourceCodeQAService:
                 continue
             claim = self._fast_claim_from_match(citation, match, focus_terms)
             add_claim(claim, [citation["id"]])
+
+        for point in confirmed_points:
+            if len(claims) >= 5:
+                break
+            add_claim(str(point.get("text") or ""), [str(item) for item in (point.get("citations") or [])])
 
         coverage = self._fast_focus_coverage(focus_terms, claim_matches)
         confirmed = [
@@ -15724,40 +15741,58 @@ class SourceCodeQAService:
             missing.append("No code evidence was retrieved within the fast-mode window.")
         missing = list(dict.fromkeys(missing))[:6]
 
-        confidence = "medium" if claims and (confirmed or coverage) and not fast_gate.get("needs_deep") else "low"
-        direct_answer = self._fast_direct_answer(
-            question=question,
+        missing_points = self._fast_missing_points(
+            raw_missing=missing,
             focus_terms=focus_terms,
-            claims=claims,
-            missing=missing,
+            fast_gate=fast_gate,
+            selected_matches=selected_matches,
+            language=language,
+        )
+        if not confirmed_points and claims:
+            for claim in claims[:3]:
+                text = self._fast_humanize_code_text(str(claim.get("text") or ""))
+                if not text or self._fast_machine_retrieval_text(text):
+                    continue
+                confirmed_points.append({"text": text, "citations": list(claim.get("citations") or [])[:3]})
+
+        confidence = "medium" if confirmed_points and (confirmed or coverage) and not fast_gate.get("needs_deep") else "low"
+        direct_answer = self._fast_compose_human_answer(
+            question=question,
+            intent_label=intent_label,
+            focus_terms=focus_terms,
+            confirmed_points=confirmed_points,
+            missing_points=missing_points,
             confidence=confidence,
-            fast_quality_gate=fast_gate,
+            language=language,
         )
         return {
             "direct_answer": direct_answer,
             "investigation_steps": {
-                "candidate_evidence": [claim["text"] for claim in claims[:3]],
-                "gap_verification": missing[:3],
+                "candidate_evidence": [point["text"] for point in confirmed_points[:3]],
+                "gap_verification": missing_points[:3],
                 "certainty_split": [
                     "Confirmed facts are limited to cited retrieved evidence.",
-                    "Unverified cross-file flow remains in Missing Evidence.",
+                    "Unverified cross-file flow remains in Not Verified.",
                 ],
             },
             "attachment_facts": [],
             "screenshot_evidence": [],
-            "source_code_evidence": [claim["text"] for claim in claims[:5]],
+            "source_code_evidence": [card["detail"] for card in evidence_cards[:5]],
             "confirmed_from_code": confirmed[:5],
             "inferred_from_code": inferred[:5],
-            "not_found": missing[:5],
+            "not_found": missing_points[:5],
             "missing_production_evidence": [],
             "next_checks": ["Run deep mode if the answer needs complete cross-file chain verification."],
-            "claims": claims or [
+            "claims": confirmed_points or claims or [
                 {
                     "text": "Fast mode could not produce a code-backed claim from the retrieved evidence.",
                     "citations": [item.get("id") for item in citations[:1] if item.get("id")],
                 }
             ],
-            "missing_evidence": missing,
+            "confirmed_points": confirmed_points,
+            "missing_points": missing_points,
+            "evidence_cards": evidence_cards,
+            "missing_evidence": missing_points,
             "confidence": confidence,
             "fast_quality_gate": {key: value for key, value in fast_gate.items() if key != "usable_matches"},
             "format": "json",
@@ -15767,6 +15802,17 @@ class SourceCodeQAService:
     def _fast_answer_focus_terms(question: str) -> list[str]:
         terms: list[str] = []
         low_value = SourceCodeQAService._fast_low_value_query_terms()
+        text = str(question or "")
+        phrase_patterns = [
+            r"\bTerm\s+Loan\s+Pre[-\s]?check\s+\d+\b",
+            r"\bdata\s+sources?\b",
+            r"\bmerchantU?id\s+(?:vs|versus|and)\s+shopeeU?id\b",
+        ]
+        for pattern in phrase_patterns:
+            for match in re.findall(pattern, text, flags=re.IGNORECASE):
+                phrase = re.sub(r"\s+", " ", str(match or "")).strip()
+                if phrase and phrase.lower() not in {item.lower() for item in terms}:
+                    terms.append(phrase)
         for token in re.findall(r"[A-Za-z][A-Za-z0-9_]{2,}", str(question or "")):
             lowered = token.lower()
             if lowered in low_value:
@@ -15800,6 +15846,8 @@ class SourceCodeQAService:
             "use",
             "uses",
             "using",
+            "source",
+            "sources",
             "explain",
             "describe",
             "give",
@@ -15989,6 +16037,245 @@ class SourceCodeQAService:
         return any(term.lower() in text for term in focus_terms)
 
     @staticmethod
+    def _fast_answer_language(question: str) -> str:
+        return "zh" if re.search(r"[\u4e00-\u9fff]", str(question or "")) else "en"
+
+    def _fast_answer_intent_label(self, question: str) -> str:
+        intent = self._question_intent(question)
+        lowered = f" {str(question or '').lower()} "
+        if intent.get("data_source") or "data source" in lowered or "数据源" in lowered:
+            return "data_source"
+        if self._fast_usage_question(question):
+            return "usage_flow"
+        if any(marker in lowered for marker in (" difference", " diff", " vs ", " versus ", "区别", "差异", "不同")):
+            return "difference"
+        if intent.get("api") or intent.get("config") or any(marker in lowered for marker in (" api", "config", "配置", "接口")):
+            return "config_api"
+        if intent.get("error") or any(marker in lowered for marker in ("why", "root cause", "failed", "failure", "issue", "bug", "原因", "报错", "失败")):
+            return "error_root_cause"
+        return "general"
+
+    @staticmethod
+    def _fast_machine_retrieval_text(text: str) -> bool:
+        lowered = str(text or "").lower()
+        return bool(
+            " was selected because " in lowered
+            or "path matched" in lowered
+            or "symbol matched" in lowered
+            or "content matched" in lowered
+            or (" shows `" in lowered and " near: " in lowered)
+            or re.search(r"\bpackage\s+[a-z0-9_.]+", lowered)
+        )
+
+    @staticmethod
+    def _fast_humanize_code_text(text: str) -> str:
+        cleaned = str(text or "")
+        cleaned = re.sub(r"\s*\[[Ss]\d+\]\s*", " ", cleaned)
+        cleaned = re.sub(r"\b(?:public|private|protected|static|final|abstract)\s+", " ", cleaned)
+        cleaned = re.sub(r"\bpackage\s+[a-zA-Z0-9_.]+;?", " ", cleaned)
+        cleaned = re.sub(r"\b(?:symbol|content|path)\s+matched\s*:\s*", " ", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\bwas selected because\b", " ", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip(" ;,.")
+        return cleaned[:320]
+
+    @staticmethod
+    def _fast_evidence_role(path: str, snippet: str, reason: str) -> str:
+        text = f"{path}\n{snippet}\n{reason}".lower()
+        if any(marker in text for marker in ("mapper.xml", "select ", " from ", " insert ", " update ", " delete ", "repository", "dao", " table ")):
+            return "data_source"
+        if any(marker in text for marker in ("client", "feign", "http", "controller", "endpoint", "api", "resttemplate")):
+            return "api"
+        if any(marker in text for marker in ("application.yml", ".properties", "apollo", "config", "configuration")):
+            return "config"
+        if any(marker in text for marker in ("service", "strategy", "engine", "manager", "processor")):
+            return "logic"
+        if any(marker in text for marker in ("enum", "constant")):
+            return "definition"
+        if any(marker in text for marker in ("util", "switch", "case ", " if ", " return ")):
+            return "usage"
+        if "/test/" in text or "test" in Path(path).name.lower():
+            return "test"
+        return "supporting"
+
+    @staticmethod
+    def _fast_evidence_role_label(role: str, *, language: str = "en") -> str:
+        if language == "zh":
+            return {
+                "data_source": "数据来源",
+                "api": "API/客户端",
+                "config": "配置",
+                "logic": "业务逻辑",
+                "definition": "定义",
+                "usage": "使用逻辑",
+                "test": "测试",
+            }.get(role, "辅助证据")
+        return {
+            "data_source": "data source",
+            "api": "API/client",
+            "config": "configuration",
+            "logic": "business logic",
+            "definition": "definition",
+            "usage": "usage logic",
+            "test": "test",
+        }.get(role, "supporting evidence")
+
+    @classmethod
+    def _fast_evidence_card_from_match(
+        cls,
+        citation: dict[str, Any],
+        match: dict[str, Any],
+        focus_terms: list[str],
+        *,
+        language: str = "en",
+    ) -> dict[str, Any]:
+        path = str(match.get("path") or "")
+        reason = str(match.get("reason") or "")
+        snippet = str(match.get("snippet") or "")
+        role = cls._fast_evidence_role(path, snippet, reason)
+        best_line = ""
+        focus_lowers = [term.lower() for term in focus_terms]
+        for raw_line in snippet.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            lowered = line.lower()
+            if focus_lowers and any(term in lowered for term in focus_lowers):
+                best_line = line
+                break
+            if not best_line and any(marker in lowered for marker in ("select ", "from ", "return ", "if ", "case ", "set", "get", "query", "client", "config")):
+                best_line = line
+        detail_source = best_line or reason or Path(path).name
+        title = f"{cls._fast_evidence_role_label(role, language=language).capitalize()}: {Path(path).name or cls._compact_path(path)}"
+        detail = cls._fast_humanize_code_text(detail_source)
+        if not detail or cls._fast_machine_retrieval_text(detail_source):
+            detail = cls._fast_humanize_code_text(reason)
+        if not detail and not cls._fast_machine_retrieval_text(Path(path).name):
+            detail = cls._fast_humanize_code_text(Path(path).name)
+        return {
+            "title": title[:120],
+            "detail": detail,
+            "role": role,
+            "citations": [str(citation.get("id") or "").strip()] if citation.get("id") else [],
+        }
+
+    @classmethod
+    def _fast_confirmed_points_from_cards(
+        cls,
+        *,
+        question: str,
+        intent_label: str,
+        cards: list[dict[str, Any]],
+        language: str,
+    ) -> list[dict[str, Any]]:
+        by_role: dict[str, list[dict[str, Any]]] = {}
+        for card in cards:
+            by_role.setdefault(str(card.get("role") or "supporting"), []).append(card)
+        priority = {
+            "data_source": ("data_source", "api", "config", "logic", "usage", "definition", "supporting"),
+            "usage_flow": ("definition", "config", "data_source", "usage", "logic", "api", "supporting"),
+            "config_api": ("config", "api", "data_source", "logic", "usage", "definition", "supporting"),
+            "difference": ("data_source", "logic", "usage", "api", "config", "definition", "supporting"),
+            "error_root_cause": ("logic", "data_source", "api", "config", "usage", "definition", "supporting"),
+        }.get(intent_label, ("data_source", "api", "config", "logic", "usage", "definition", "supporting"))
+        points: list[dict[str, Any]] = []
+        used: set[str] = set()
+        for role in priority:
+            for card in by_role.get(role) or []:
+                if len(points) >= 5:
+                    break
+                detail = str(card.get("detail") or "").strip()
+                if not detail or cls._fast_machine_retrieval_text(detail):
+                    continue
+                key = f"{role}:{detail}".lower()
+                if key in used:
+                    continue
+                used.add(key)
+                label = cls._fast_evidence_role_label(role, language=language)
+                if language == "zh":
+                    text = f"代码确认了一个{label}相关点：{detail}"
+                else:
+                    text = f"Code confirms a {label} point: {detail}"
+                points.append({"text": text[:360], "citations": list(card.get("citations") or [])[:3]})
+            if len(points) >= 5:
+                break
+        return points
+
+    @classmethod
+    def _fast_missing_points(
+        cls,
+        *,
+        raw_missing: list[str],
+        focus_terms: list[str],
+        fast_gate: dict[str, Any],
+        selected_matches: list[dict[str, Any]],
+        language: str,
+    ) -> list[str]:
+        missing: list[str] = []
+        for item in raw_missing:
+            text = cls._fast_humanize_code_text(item)
+            if not text:
+                continue
+            if "fast mode did not find enough evidence for" in text.lower():
+                continue
+            missing.append(text)
+        if fast_gate.get("status") == "definition_only":
+            missing.append("已找到定义，但 Fast Mode 尚未确认完整使用链路。" if language == "zh" else "Definition was found, but Fast Mode did not verify the full usage flow.")
+        elif fast_gate.get("needs_deep"):
+            missing.append("Fast Mode 证据不足以确认完整链路。" if language == "zh" else "Fast Mode evidence was not enough to verify the complete chain.")
+        if selected_matches:
+            missing.append(
+                "Fast Mode 没有完成完整的跨文件调用链和上游来源验证。"
+                if language == "zh"
+                else "Fast Mode did not complete full cross-file caller/callee and upstream-source verification."
+            )
+        else:
+            missing.append("Fast Mode 没有检索到可用代码证据。" if language == "zh" else "Fast Mode did not retrieve usable code evidence.")
+        return list(dict.fromkeys([item for item in missing if item]))[:6]
+
+    @classmethod
+    def _fast_compose_human_answer(
+        cls,
+        *,
+        question: str,
+        intent_label: str,
+        focus_terms: list[str],
+        confirmed_points: list[dict[str, Any]],
+        missing_points: list[str],
+        confidence: str,
+        language: str,
+    ) -> str:
+        term_text = " / ".join(focus_terms[:3]) or ("这个问题" if language == "zh" else "this question")
+        point_texts = [str(point.get("text") or "").strip() for point in confirmed_points if str(point.get("text") or "").strip()]
+        if not point_texts:
+            return (
+                f"Fast Mode 暂时不足以确认 `{term_text}` 的结论；缺口已列在 Not Verified。"
+                if language == "zh"
+                else f"Fast Mode does not have enough verified code evidence to answer `{term_text}` yet; the missing checks are listed under Not Verified."
+            )
+        compact_points = [re.sub(r"^Code confirms an? [^:]+ point:\s*", "", item) for item in point_texts[:3]]
+        compact_points = [re.sub(r"^代码确认了一个[^：]+相关点：", "", item) for item in compact_points]
+        joined = "; ".join(compact_points)
+        if language == "zh":
+            prefix = {
+                "data_source": "Fast Mode 找到的第一版数据来源结论是",
+                "usage_flow": "Fast Mode 找到的第一版使用链路是",
+                "difference": "Fast Mode 找到的第一版差异结论是",
+                "config_api": "Fast Mode 找到的第一版配置/API 结论是",
+                "error_root_cause": "Fast Mode 尚未完成根因验证，但找到的可疑代码面是",
+            }.get(intent_label, "Fast Mode 找到的第一版代码结论是")
+            suffix = "；完整跨文件链路仍需要 Deep Mode 验证。" if confidence == "low" or missing_points else "。"
+            return f"{prefix}：{joined}{suffix}"
+        prefix = {
+            "data_source": "Fast Mode found this first-pass data-source answer",
+            "usage_flow": "Fast Mode found this first-pass usage flow",
+            "difference": "Fast Mode found this first-pass difference summary",
+            "config_api": "Fast Mode found these first-pass config/API surfaces",
+            "error_root_cause": "Fast Mode has not fully verified root cause, but found these likely code surfaces",
+        }.get(intent_label, "Fast Mode found these code-backed points")
+        suffix = " Full cross-file verification still needs Deep Mode." if confidence == "low" or missing_points else ""
+        return f"{prefix}: {joined}.{suffix}"
+
+    @staticmethod
     def _fast_direct_claim_summary(claims: list[dict[str, Any]], *, limit: int = 4) -> str:
         fragments: list[str] = []
         seen: set[str] = set()
@@ -16040,11 +16327,18 @@ class SourceCodeQAService:
                 break
             if not evidence_line and any(hint in lowered for hint in ("class ", "interface ", "enum ", "public ", "private ", "select ", "from ", "return ", "set", "get")):
                 evidence_line = line
+        role = cls._fast_evidence_role(path, snippet, reason)
+        role_label = cls._fast_evidence_role_label(role)
+        term_text = ", ".join(matched_terms) if matched_terms else Path(path).stem
         if evidence_line:
-            return f"{cls._compact_path(path)} shows `{', '.join(matched_terms) if matched_terms else Path(path).name}` near: {evidence_line}"
+            detail = cls._fast_humanize_code_text(evidence_line)
+            if detail:
+                return f"Code supports a {role_label} point for {term_text}: {detail}"
         if reason:
-            return f"{cls._compact_path(path)} was selected because {reason}"
-        return f"{cls._compact_path(path)} is one of the strongest retrieved code references for this question."
+            detail = cls._fast_humanize_code_text(reason)
+            if detail:
+                return f"Code supports a {role_label} point for {term_text}: {detail}"
+        return f"Code retrieved a {role_label} reference for {term_text}."
 
     @staticmethod
     def _fast_direct_answer(
@@ -16925,8 +17219,12 @@ class SourceCodeQAService:
             [
                 "",
                 "Return JSON only:",
-                '{"direct_answer":"one short answer","investigation_steps":{"candidate_evidence":["checked file/path"],"gap_verification":["missing link"],"certainty_split":["confirmed vs missing"]},"source_code_evidence":["file/function/field evidence"],"confirmed_from_code":["confirmed fact"],"inferred_from_code":["weak deduction"],"not_found":["missing hop"],"claims":[{"text":"claim","citations":["S1"]}],"missing_evidence":["gap"],"confidence":"medium|low"}',
+                '{"direct_answer":"human-readable conclusion first, not a file list","investigation_steps":{"candidate_evidence":["checked code surface"],"gap_verification":["missing link"],"certainty_split":["confirmed vs missing"]},"source_code_evidence":["file/function/field evidence"],"confirmed_from_code":["confirmed fact"],"inferred_from_code":["weak deduction"],"not_found":["missing hop"],"confirmed_points":[{"text":"human-readable confirmed point","citations":["S1"]}],"missing_points":["human-readable missing check"],"evidence_cards":[{"title":"short evidence title","detail":"concise detail","role":"data_source|api|config|logic|definition|usage|supporting","citations":["S1"]}],"claims":[{"text":"claim","citations":["S1"]}],"missing_evidence":["gap"],"confidence":"medium|low"}',
                 "- Include 3-5 citation-backed claims at most.",
+                "- Write direct_answer for a PM/engineer reader: start with the business/code conclusion, then mention uncertainty.",
+                "- Do not make direct_answer a raw path list, package declaration, snippet dump, or retrieval-reason list.",
+                "- Do not output phrases like 'path matched', 'symbol matched', 'content matched', 'was selected because', or 'shows near'.",
+                "- For data-source questions, prioritize actual tables, SQL mappers, repositories, API clients, or config sources over strategy class names.",
                 "- Fast mode may return medium or low confidence only.",
                 "- Cite S ids from candidate paths for concrete claims.",
             ]
