@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 from collections import deque
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 import difflib
 from functools import lru_cache
 import hashlib
@@ -1199,7 +1200,11 @@ class SourceCodeQASessionStore:
     def get_context(self, session_id: str, *, owner_email: str) -> dict[str, Any] | None:
         session_payload = self.get(session_id, owner_email=owner_email)
         context = session_payload.get("last_context") if session_payload else None
-        return context if isinstance(context, dict) else None
+        if not isinstance(context, dict):
+            return None
+        enriched = dict(context)
+        enriched.setdefault("session_title", session_payload.get("title") or "")
+        return enriched
 
     @staticmethod
     def _recent_turn_from_context(context: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -1419,6 +1424,11 @@ class SourceCodeQASessionStore:
             "message_count": len(session_payload.get("messages") or []),
         }
         if include_messages:
+            if isinstance(public_payload["last_context"], dict):
+                public_payload["last_context"] = {
+                    **public_payload["last_context"],
+                    "session_title": public_payload["title"],
+                }
             public_payload["messages"] = list(session_payload.get("messages") or [])
         return public_payload
 
@@ -2044,7 +2054,11 @@ def _meeting_record_summary(record: dict[str, Any]) -> dict[str, Any]:
         "created_at": record.get("created_at"),
         "updated_at": record.get("updated_at"),
         "media": record.get("media") or {},
+        "diagnostics_snapshot": record.get("diagnostics_snapshot") or {},
+        "audio_preflight": record.get("audio_preflight") or {},
+        "recording_health": record.get("recording_health") or {},
         "transcript_status": (record.get("transcript") or {}).get("status"),
+        "transcript_quality": (record.get("transcript") or {}).get("quality") or {},
         "minutes_status": (record.get("minutes") or {}).get("status"),
         "email_status": (record.get("email") or {}).get("status"),
         "error": record.get("error") or "",
@@ -2061,6 +2075,39 @@ def _meeting_recorder_record_summaries_for_current_user(settings: Settings) -> l
     if _local_agent_meeting_recorder_enabled(settings):
         return _build_local_agent_client(settings).meeting_recorder_records(owner_email=_current_google_email())
     return [_meeting_record_summary(record) for record in _get_meeting_record_store().list_records(owner_email=_current_google_email())]
+
+
+def _meeting_recorder_reminder_debug(
+    *,
+    reason: str,
+    calendar_connected: bool,
+    meeting_count: int = 0,
+    active_recording: dict[str, Any] | None = None,
+    diagnostics: dict[str, Any] | None = None,
+    error: Exception | None = None,
+) -> dict[str, Any]:
+    diagnostics = diagnostics or {}
+    return {
+        "reason": reason,
+        "checked_at": datetime.now(timezone.utc).isoformat(),
+        "poll_seconds": 60,
+        "timezone": "Asia/Singapore",
+        "eligible_window": {"lead_seconds": 120, "grace_seconds": 600, "workday_start_hour": 9, "workday_end_hour": 20},
+        "calendar_connected": calendar_connected,
+        "eligible_meeting_count": meeting_count,
+        "active_recording": bool(active_recording),
+        "diagnostics": {
+            "audio_capture_label": diagnostics.get("audio_capture_label", ""),
+            "audio_capture_mode": diagnostics.get("audio_capture_mode", ""),
+            "audio_signal_verified": bool(diagnostics.get("audio_signal_verified")),
+            "system_audio_configured": bool(diagnostics.get("system_audio_configured")),
+            "ffmpeg_configured": bool(diagnostics.get("ffmpeg_configured")),
+            "whisper_cpp_configured": bool(diagnostics.get("whisper_cpp_configured")),
+            "whisper_model_exists": bool(diagnostics.get("whisper_model_exists")),
+        },
+        "error_category": _classify_portal_error(error).get("error_category") if error else "",
+        "error_code": _classify_portal_error(error).get("error_code") if error else "",
+    }
 
 
 def _try_acquire_gmail_export_lock(email: str) -> bool:
@@ -2426,7 +2473,7 @@ def create_app() -> Flask:
             "can_access_prd_self_assessment": _can_access_prd_self_assessment(settings),
             "can_access_gmail_seatalk_demo": _can_access_gmail_seatalk_demo(settings),
             "can_access_meeting_recorder": _can_access_meeting_recorder(settings),
-            "meeting_recorder_reminder_enabled": _can_access_meeting_recorder(settings) and _google_credentials_have_scopes(CALENDAR_READONLY_SCOPE),
+            "meeting_recorder_reminder_enabled": _can_access_meeting_recorder(settings),
             "can_access_source_code_qa": _can_access_source_code_qa(settings),
             "can_manage_source_code_qa": _can_manage_source_code_qa(settings),
             "asset_revision": _current_release_revision(),
@@ -3732,6 +3779,7 @@ def create_app() -> Flask:
         if access_gate is not None:
             return access_gate
         if not _google_credentials_have_scopes(CALENDAR_READONLY_SCOPE):
+            debug = _meeting_recorder_reminder_debug(reason="calendar_not_connected", calendar_connected=False)
             return jsonify(
                 {
                     "status": "ok",
@@ -3740,6 +3788,7 @@ def create_app() -> Flask:
                     "active_recording": None,
                     "poll_seconds": 60,
                     "timezone": "Asia/Singapore",
+                    "debug": debug,
                 }
             )
         try:
@@ -3747,7 +3796,24 @@ def create_app() -> Flask:
             eligible = reminder_eligible_meetings(meetings, timezone_name="Asia/Singapore")
             records = _meeting_recorder_record_summaries_for_current_user(settings)
             active_recording = next((record for record in records if str(record.get("status") or "") == "recording"), None)
-            diagnostics = _meeting_recorder_diagnostics_payload(settings)
+            diagnostics: dict[str, Any] = {}
+            diagnostics_error: Exception | None = None
+            try:
+                diagnostics = _meeting_recorder_diagnostics_payload(settings)
+            except Exception as error:  # noqa: BLE001
+                diagnostics_error = error
+                diagnostics = {}
+            reason = "diagnostics_failed" if diagnostics_error else "eligible_meetings_found" if eligible else "no_eligible_meetings"
+            if active_recording:
+                reason = "active_recording"
+            debug = _meeting_recorder_reminder_debug(
+                reason=reason,
+                calendar_connected=True,
+                meeting_count=len(eligible),
+                active_recording=active_recording,
+                diagnostics=diagnostics,
+                error=diagnostics_error,
+            )
             return jsonify(
                 {
                     "status": "ok",
@@ -3757,6 +3823,7 @@ def create_app() -> Flask:
                     "diagnostics": diagnostics,
                     "poll_seconds": 60,
                     "timezone": "Asia/Singapore",
+                    "debug": debug,
                 }
             )
         except Exception as error:  # noqa: BLE001
@@ -3766,7 +3833,35 @@ def create_app() -> Flask:
                 **_build_request_log_context(settings, user_identity=_get_user_identity(settings), extra=_classify_portal_error(error)),
             )
             current_app.logger.exception("Meeting Recorder reminders failed.")
-            return jsonify({"status": "error", "message": "Meeting reminders could not be loaded right now."}), HTTPStatus.INTERNAL_SERVER_ERROR
+            debug = _meeting_recorder_reminder_debug(reason="api_error", calendar_connected=True, error=error)
+            return (
+                jsonify({"status": "error", "message": "Meeting reminders could not be loaded right now.", "debug": debug}),
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+
+    @app.post("/api/meeting-recorder/reminder-telemetry")
+    def meeting_recorder_reminder_telemetry_api():
+        access_gate = _require_meeting_recorder_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        payload = request.get_json(silent=True) or {}
+        allowed_event = str(payload.get("event") or "unknown").strip()[:80]
+        extra = {
+            "telemetry_event": allowed_event,
+            "reason": str(payload.get("reason") or "").strip()[:80],
+            "outcome": str(payload.get("outcome") or "").strip()[:80],
+            "page_path": str(payload.get("page_path") or "").strip()[:240],
+            "meeting_count": int(payload.get("meeting_count") or 0),
+            "suppressed_count": int(payload.get("suppressed_count") or 0),
+            "active_recording": bool(payload.get("active_recording")),
+            "error_category": str(payload.get("error_category") or "").strip()[:120],
+            "error_message": str(payload.get("error_message") or "").strip()[:500],
+        }
+        _log_portal_event(
+            "meeting_recorder_reminder_telemetry",
+            **_build_request_log_context(settings, user_identity=_get_user_identity(settings), extra=extra),
+        )
+        return jsonify({"status": "ok"})
 
     @app.get("/api/meeting-recorder/records")
     def meeting_recorder_records_api():
@@ -3864,6 +3959,26 @@ def create_app() -> Flask:
                 )
                 return jsonify({"status": "ok", "record": result.get("record") or {}})
             record = _build_meeting_processing_service(settings).process_recording(
+                record_id=record_id,
+                owner_email=_current_google_email(),
+            )
+            return jsonify({"status": "ok", "record": _meeting_record_summary(record)})
+        except (ConfigError, ToolError, requests.RequestException) as error:
+            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
+
+    @app.post("/api/meeting-recorder/records/<record_id>/repair-video")
+    def meeting_recorder_repair_video_api(record_id: str):
+        access_gate = _require_meeting_recorder_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        try:
+            if _local_agent_meeting_recorder_enabled(settings):
+                result = _build_local_agent_client(settings).meeting_recorder_repair_video(
+                    record_id=record_id,
+                    owner_email=_current_google_email(),
+                )
+                return jsonify({"status": "ok", "record": result.get("record") or {}})
+            record = _get_meeting_recorder_runtime().repair_video_playback(
                 record_id=record_id,
                 owner_email=_current_google_email(),
             )
@@ -4260,6 +4375,8 @@ def create_app() -> Flask:
         access_gate = _require_team_dashboard_monthly_report_access(settings, api=True)
         if access_gate is not None:
             return access_gate
+        if _remote_bpmis_config_enabled(settings):
+            return jsonify(_build_local_agent_client(settings).team_dashboard_monthly_report_latest_draft())
         result = current_app.config["JOB_STORE"].latest_completed_result("team-dashboard-monthly-report-draft")
         draft_markdown = str((result or {}).get("draft_markdown") or "").strip()
         if not draft_markdown:
@@ -4703,6 +4820,16 @@ def create_app() -> Flask:
                 "template": normalize_monthly_report_template(config.get("monthly_report_template")),
                 "team_payloads": team_payloads,
             }
+            if _remote_bpmis_config_enabled(settings):
+                data = _build_local_agent_client(settings).team_dashboard_monthly_report_draft_start(request_payload)
+                job_id = str(data.get("job_id") or "").strip()
+                if not job_id:
+                    raise ToolError("Mac local-agent did not return a Monthly Report job id.")
+                _log_portal_event(
+                    "team_dashboard_monthly_report_draft_queued",
+                    **_build_request_log_context(settings, user_identity=user_identity, extra={"job_id": job_id, "job_backend": "local_agent"}),
+                )
+                return jsonify({"status": "queued", "job_id": job_id, "job_backend": "local_agent"})
             job_store: JobStore = current_app.config["JOB_STORE"]
             job = job_store.create("team-dashboard-monthly-report-draft", title="Generate Monthly Report Draft")
             app_obj = current_app._get_current_object()
@@ -5422,6 +5549,13 @@ def create_app() -> Flask:
     def get_job(job_id: str):
         snapshot = current_app.config["JOB_STORE"].snapshot(job_id)
         if snapshot is None:
+            if _remote_bpmis_config_enabled(settings):
+                try:
+                    remote_snapshot = _build_local_agent_client(settings).team_dashboard_monthly_report_job(job_id)
+                    if isinstance(remote_snapshot, dict) and str(remote_snapshot.get("state") or ""):
+                        return jsonify(remote_snapshot)
+                except ToolError:
+                    pass
             return jsonify({"status": "error", "message": "Job not found."}), 404
         return jsonify(snapshot)
 

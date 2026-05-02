@@ -41,6 +41,7 @@ from bpmis_jira_tool.seatalk_dashboard import SeaTalkDashboardService
 from bpmis_jira_tool.source_code_qa import SourceCodeQAService
 from bpmis_jira_tool.user_config import TEAM_PROFILE_DEFAULTS, WebConfigStore
 from bpmis_jira_tool.web import (
+    JobStore,
     SeaTalkNameMappingStore,
     SeaTalkTodoStore,
     SourceCodeQAAttachmentStore,
@@ -93,6 +94,7 @@ def create_local_agent_app() -> Flask:
     app.config["SOURCE_CODE_QA_SERVICE"] = _build_source_code_qa_service(settings)
     app.config["SOURCE_CODE_QA_QUERY_JOBS"] = {}
     app.config["SOURCE_CODE_QA_QUERY_JOBS_LOCK"] = threading.Lock()
+    app.config["TEAM_DASHBOARD_JOB_STORE"] = JobStore(_data_root(settings) / "run" / "jobs.json")
     meeting_store = MeetingRecordStore(_data_root(settings) / "meeting_records")
     app.config["MEETING_RECORD_STORE"] = meeting_store
     app.config["MEETING_RECORDER_RUNTIME"] = MeetingRecorderRuntime(
@@ -351,31 +353,40 @@ def create_local_agent_app() -> Flask:
     @app.post("/api/local-agent/team-dashboard/monthly-report/draft-async")
     def team_dashboard_monthly_report_draft_async():
         payload = request.get_json(silent=True) or {}
-        job_id = uuid.uuid4().hex
-        _update_query_job(
-            job_id,
-            state="queued",
-            stage="queued",
-            message="Queued Monthly Report draft generation on Mac local-agent.",
-            current=0,
-            total=0,
-            estimated_prompt_tokens=0,
-            token_risk="",
-        )
+        job_store: JobStore = current_app.config["TEAM_DASHBOARD_JOB_STORE"]
+        job = job_store.create("team-dashboard-monthly-report-draft", title="Generate Monthly Report Draft")
         thread = threading.Thread(
             target=_run_monthly_report_draft_job,
-            args=(app, job_id, payload),
+            args=(app, job.job_id, payload),
             daemon=True,
         )
         thread.start()
-        return jsonify({"status": "ok", "job_id": job_id})
+        return jsonify({"status": "ok", "job_id": job.job_id})
 
     @app.get("/api/local-agent/team-dashboard/monthly-report/jobs/<job_id>")
     def team_dashboard_monthly_report_job_status(job_id: str):
-        snapshot = _snapshot_query_job(job_id)
+        job_store: JobStore = current_app.config["TEAM_DASHBOARD_JOB_STORE"]
+        snapshot = job_store.snapshot(job_id)
         if snapshot is None:
             return jsonify({"status": "error", "message": "Monthly Report local-agent job was not found."}), HTTPStatus.NOT_FOUND
         return jsonify({"status": "ok", **snapshot})
+
+    @app.get("/api/local-agent/team-dashboard/monthly-report/latest-draft")
+    def team_dashboard_monthly_report_latest_draft():
+        job_store: JobStore = current_app.config["TEAM_DASHBOARD_JOB_STORE"]
+        result = job_store.latest_completed_result("team-dashboard-monthly-report-draft")
+        draft_markdown = str((result or {}).get("draft_markdown") or "").strip()
+        if not draft_markdown:
+            return jsonify({"status": "empty", "draft_markdown": ""})
+        return jsonify(
+            {
+                "status": "ok",
+                "draft_markdown": draft_markdown,
+                "subject": monthly_report_subject(),
+                "job_id": (result or {}).get("job_id") or "",
+                "generated_at": (result or {}).get("generated_at") or 0,
+            }
+        )
 
     @app.post("/api/local-agent/team-dashboard/monthly-report/send")
     def team_dashboard_monthly_report_send():
@@ -437,6 +448,15 @@ def create_local_agent_app() -> Flask:
     def meeting_recorder_process():
         payload = request.get_json(silent=True) or {}
         record = _build_meeting_processing_service(settings).process_recording(
+            record_id=str(payload.get("record_id") or ""),
+            owner_email=str(payload.get("owner_email") or ""),
+        )
+        return jsonify({"status": "ok", "record": _meeting_record_summary(record)})
+
+    @app.post("/api/local-agent/meeting-recorder/repair-video")
+    def meeting_recorder_repair_video():
+        payload = request.get_json(silent=True) or {}
+        record = _get_meeting_recorder_runtime().repair_video_playback(
             record_id=str(payload.get("record_id") or ""),
             owner_email=str(payload.get("owner_email") or ""),
         )
@@ -1303,6 +1323,8 @@ def _run_source_code_qa_query_job(app: Flask, job_id: str, payload: dict[str, An
 
 def _run_monthly_report_draft_job(app: Flask, job_id: str, payload: dict[str, Any]) -> None:
     with app.app_context():
+        job_store: JobStore = current_app.config["TEAM_DASHBOARD_JOB_STORE"]
+
         def progress_callback(
             stage: str,
             message: str,
@@ -1312,7 +1334,7 @@ def _run_monthly_report_draft_job(app: Flask, job_id: str, payload: dict[str, An
             estimated_prompt_tokens: int = 0,
             token_risk: str = "",
         ) -> None:
-            _update_query_job(
+            job_store.update(
                 job_id,
                 state="running",
                 stage=stage,
@@ -1331,35 +1353,32 @@ def _run_monthly_report_draft_job(app: Flask, job_id: str, payload: dict[str, An
                 team_payloads=[item for item in (payload.get("team_payloads") or []) if isinstance(item, dict)],
                 progress_callback=progress_callback,
             )
-            _update_query_job(
+            job_store.complete(
                 job_id,
-                state="completed",
-                stage="completed",
-                message="Monthly Report draft completed on Mac local-agent.",
-                current=1,
-                total=1,
-                result=result,
+                results=[result],
+                notice={
+                    "title": "Monthly Report",
+                    "tone": "success",
+                    "summary": "Monthly Report draft generated on Mac local-agent.",
+                    "details": [],
+                },
             )
         except ToolError as error:
-            _update_query_job(
+            job_store.fail(
                 job_id,
-                state="failed",
-                stage="failed",
-                message=str(error),
-                error=str(error),
-                current=0,
-                total=0,
+                str(error),
+                error_category="tool_error",
+                error_code="monthly_report_failed",
+                error_retryable=True,
             )
         except Exception as error:  # noqa: BLE001 - keep async status JSON-readable for Cloud Run.
             current_app.logger.exception("Monthly Report local-agent async job failed unexpectedly.")
-            _update_query_job(
+            job_store.fail(
                 job_id,
-                state="failed",
-                stage="failed",
-                message=f"Mac local-agent Monthly Report job failed unexpectedly: {error}",
-                error=f"Mac local-agent Monthly Report job failed unexpectedly: {error}",
-                current=0,
-                total=0,
+                f"Mac local-agent Monthly Report job failed unexpectedly: {error}",
+                error_category="unexpected_internal",
+                error_code="server_error",
+                error_retryable=True,
             )
 
 

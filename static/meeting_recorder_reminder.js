@@ -3,6 +3,16 @@
   const STORAGE_PREFIX = 'meeting-recorder-reminders:v1';
   let visibleMeeting = null;
   let polling = false;
+  let lastPayload = null;
+  let lastError = null;
+
+  const nodes = {
+    indicator: document.querySelector('[data-meeting-recorder-indicator]'),
+    indicatorDot: document.querySelector('[data-meeting-recorder-indicator-dot]'),
+    indicatorLabel: document.querySelector('[data-meeting-recorder-indicator-label]'),
+    indicatorDetail: document.querySelector('[data-meeting-recorder-indicator-detail]'),
+    indicatorPoll: document.querySelector('[data-meeting-recorder-indicator-poll]'),
+  };
 
   const escapeHtml = (value) => String(value ?? '')
     .replaceAll('&', '&amp;')
@@ -17,8 +27,25 @@
       ...options,
     });
     const payload = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(payload.message || 'Request failed.');
+    if (!response.ok) {
+      const error = new Error(payload.message || 'Request failed.');
+      error.payload = payload;
+      throw error;
+    }
     return payload;
+  };
+
+  const telemetry = (event, data = {}) => {
+    fetch('/api/meeting-recorder/reminder-telemetry', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        event,
+        page_path: window.location.pathname,
+        suppressed_count: Object.keys(readSuppressed()).length,
+        ...data,
+      }),
+    }).catch(() => {});
   };
 
   const storageDateKey = () => {
@@ -38,7 +65,7 @@
       const parsed = raw ? JSON.parse(raw) : {};
       return parsed && typeof parsed === 'object' ? parsed : {};
     } catch (_error) {
-      return {};
+      return { '__storage_unavailable__': { reason: 'localStorage unavailable', at: new Date().toISOString() } };
     }
   };
 
@@ -49,8 +76,9 @@
     try {
       window.localStorage.setItem(storageDateKey(), JSON.stringify(suppressed));
     } catch (_error) {
-      // localStorage can be unavailable in private browsing; reminders still work for the current page.
+      // Indicator debug will show storage unavailable through readSuppressed().
     }
+    telemetry('suppressed', { reason, outcome: key });
   };
 
   const isSuppressed = (meeting) => Boolean(readSuppressed()[meeting?.suppression_key || '']);
@@ -90,6 +118,43 @@
     return lateMinutes <= 1 ? 'Started 1 min ago' : `Started ${lateMinutes} min ago`;
   };
 
+  const indicatorState = (label, state) => {
+    if (!nodes.indicator) return;
+    nodes.indicator.dataset.state = state;
+    if (nodes.indicatorLabel) nodes.indicatorLabel.textContent = label;
+  };
+
+  const updateIndicator = (payload, error = null) => {
+    lastPayload = payload || lastPayload;
+    lastError = error;
+    const suppressed = readSuppressed();
+    const meetings = Array.isArray(payload?.meetings) ? payload.meetings : [];
+    const nextMeeting = meetings.find((meeting) => !isSuppressed(meeting));
+    if (error) {
+      indicatorState('Reminder failed', 'error');
+    } else if (payload?.active_recording) {
+      indicatorState('Recording', 'recording');
+    } else if (nextMeeting) {
+      indicatorState('Meeting found', 'found');
+    } else {
+      indicatorState(payload?.calendar_connected === false ? 'Calendar not connected' : 'Watching calendar', 'watching');
+    }
+    if (!nodes.indicatorDetail) return;
+    const debug = payload?.debug || {};
+    nodes.indicatorDetail.innerHTML = `
+      <dl class="meeting-recorder-indicator-debug">
+        <div><dt>Last poll</dt><dd>${escapeHtml(debug.checked_at || new Date().toISOString())}</dd></div>
+        <div><dt>Reason</dt><dd>${escapeHtml(debug.reason || (error ? 'api_error' : 'unknown'))}</dd></div>
+        <div><dt>Calendar</dt><dd>${escapeHtml(String(Boolean(payload?.calendar_connected)))}</dd></div>
+        <div><dt>Eligible</dt><dd>${escapeHtml(String(meetings.length))}</dd></div>
+        <div><dt>Active</dt><dd>${escapeHtml(payload?.active_recording?.title || (payload?.active_recording ? 'Recording' : 'No'))}</dd></div>
+        <div><dt>Suppressed</dt><dd>${escapeHtml(Object.entries(suppressed).map(([key, value]) => `${key}: ${value?.reason || 'set'}`).join(' | ') || 'None')}</dd></div>
+        <div><dt>Audio</dt><dd>${escapeHtml(debug.diagnostics?.audio_capture_label || payload?.diagnostics?.audio_capture_label || 'Unknown')}</dd></div>
+        <div><dt>Error</dt><dd>${escapeHtml(error?.message || debug.error_code || 'None')}</dd></div>
+      </dl>
+    `;
+  };
+
   const removeReminder = () => {
     document.querySelector('[data-meeting-reminder-backdrop]')?.remove();
     visibleMeeting = null;
@@ -100,6 +165,7 @@
     const audioReady = diagnostics?.system_audio_configured;
     removeReminder();
     visibleMeeting = meeting;
+    telemetry('reminder_rendered', { meeting_count: 1, reason: meeting.suppression_key || '' });
     document.body.insertAdjacentHTML('beforeend', `
       <div class="meeting-reminder-backdrop" data-meeting-reminder-backdrop>
         <section class="meeting-reminder-card" role="dialog" aria-modal="true" aria-labelledby="meeting-reminder-title">
@@ -130,18 +196,21 @@
       node.addEventListener('click', () => {
         markSuppressed(meeting.suppression_key, 'dismissed');
         removeReminder();
+        updateIndicator(lastPayload, lastError);
       });
     });
     backdrop.addEventListener('click', (event) => {
       if (event.target === backdrop) {
         markSuppressed(meeting.suppression_key, 'dismissed');
         removeReminder();
+        updateIndicator(lastPayload, lastError);
       }
     });
     backdrop.querySelector('[data-meeting-reminder-start]')?.addEventListener('click', async (event) => {
       const button = event.currentTarget;
       button.disabled = true;
       status.textContent = 'Starting recording...';
+      telemetry('start_clicked', { reason: meeting.suppression_key || '' });
       try {
         const payload = await api('/api/meeting-recorder/start', {
           method: 'POST',
@@ -156,22 +225,34 @@
           }),
         });
         markSuppressed(meeting.suppression_key, 'started');
+        telemetry('start_success', { active_recording: true, reason: meeting.suppression_key || '' });
         status.textContent = `Recording started: ${payload.record?.title || meeting.title || 'Meeting'}`;
         window.setTimeout(removeReminder, 1800);
+        pollReminders('manual');
       } catch (error) {
         button.disabled = false;
+        telemetry('start_failed', { error_message: error.message || '', error_category: error.payload?.debug?.error_category || '' });
         status.textContent = error.message || 'Could not start recording.';
         status.classList.add('inline-status-error');
       }
     });
   };
 
-  const pollReminders = async () => {
+  const pollReminders = async (reason = 'interval') => {
     if (polling) return;
     polling = true;
+    indicatorState('Checking', 'checking');
+    telemetry('poll_started', { reason });
     try {
       const payload = await api('/api/meeting-recorder/reminders');
       const meetings = Array.isArray(payload.meetings) ? payload.meetings : [];
+      updateIndicator(payload);
+      telemetry('poll_success', {
+        reason,
+        outcome: payload.debug?.reason || '',
+        meeting_count: meetings.length,
+        active_recording: Boolean(payload.active_recording),
+      });
       if (!payload.calendar_connected || payload.active_recording) {
         meetings.filter((meeting) => sameEvent(meeting, payload.active_recording)).forEach((meeting) => {
           markSuppressed(meeting.suppression_key, 'started');
@@ -187,17 +268,29 @@
       if (!visibleMeeting || visibleMeeting.suppression_key !== nextMeeting.suppression_key) {
         renderReminder(nextMeeting, payload.diagnostics || {});
       }
-    } catch (_error) {
-      // Global reminders should not interrupt other portal workflows when the calendar/local-agent path is unavailable.
+    } catch (error) {
+      updateIndicator(lastPayload || {}, error);
+      telemetry('poll_failed', {
+        reason,
+        error_message: error.message || '',
+        error_category: error.payload?.debug?.error_category || 'api_error',
+      });
     } finally {
       polling = false;
     }
   };
 
   const startPolling = async () => {
-    await pollReminders();
-    window.setInterval(pollReminders, POLL_FALLBACK_MS);
+    telemetry('script_loaded', { outcome: nodes.indicator ? 'indicator_present' : 'indicator_missing' });
+    await pollReminders('initial');
+    window.setInterval(() => pollReminders('interval'), POLL_FALLBACK_MS);
   };
+
+  nodes.indicatorPoll?.addEventListener('click', () => pollReminders('manual'));
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') pollReminders('visible');
+  });
+  window.addEventListener('focus', () => pollReminders('focus'));
 
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', startPolling, { once: true });

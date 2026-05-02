@@ -130,6 +130,9 @@ class LocalAgentClient:
             state = str(status.get("state") or "")
             if state == "completed":
                 result = status.get("result")
+                if not isinstance(result, dict):
+                    results = status.get("results")
+                    result = results[0] if isinstance(results, list) and results and isinstance(results[0], dict) else {}
                 return result if isinstance(result, dict) else {}
             if state == "failed":
                 raise ToolError(str(status.get("error") or message or "Mac local-agent Source Code Q&A job failed."))
@@ -199,10 +202,25 @@ class LocalAgentClient:
             state = str(status.get("state") or "")
             if state == "completed":
                 result = status.get("result")
+                if not isinstance(result, dict):
+                    results = status.get("results")
+                    result = results[0] if isinstance(results, list) and results and isinstance(results[0], dict) else {}
                 return result if isinstance(result, dict) else {}
             if state == "failed":
                 raise ToolError(str(status.get("error") or message or "Mac local-agent Monthly Report job failed."))
             time.sleep(0.7)
+
+    def team_dashboard_monthly_report_draft_start(self, payload: dict[str, Any]) -> dict[str, Any]:
+        result = self._request("POST", "/api/local-agent/team-dashboard/monthly-report/draft-async", payload)
+        return result if isinstance(result, dict) else {}
+
+    def team_dashboard_monthly_report_job(self, job_id: str) -> dict[str, Any]:
+        result = self._request("GET", f"/api/local-agent/team-dashboard/monthly-report/jobs/{job_id}", signed=True)
+        return result if isinstance(result, dict) else {}
+
+    def team_dashboard_monthly_report_latest_draft(self) -> dict[str, Any]:
+        result = self._request("GET", "/api/local-agent/team-dashboard/monthly-report/latest-draft", signed=True)
+        return result if isinstance(result, dict) else {}
 
     def team_dashboard_monthly_report_send(self, payload: dict[str, Any]) -> dict[str, Any]:
         result = self._request("POST", "/api/local-agent/team-dashboard/monthly-report/send", payload)
@@ -227,6 +245,9 @@ class LocalAgentClient:
 
     def meeting_recorder_process(self, *, record_id: str, owner_email: str) -> dict[str, Any]:
         return self._request("POST", "/api/local-agent/meeting-recorder/process", {"record_id": record_id, "owner_email": owner_email})
+
+    def meeting_recorder_repair_video(self, *, record_id: str, owner_email: str) -> dict[str, Any]:
+        return self._request("POST", "/api/local-agent/meeting-recorder/repair-video", {"record_id": record_id, "owner_email": owner_email})
 
     def meeting_recorder_send_email(self, *, record_id: str, owner_email: str, recipient: str) -> dict[str, Any]:
         return self._request(

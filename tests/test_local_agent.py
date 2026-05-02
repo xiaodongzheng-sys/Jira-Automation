@@ -3,7 +3,7 @@ import os
 import tempfile
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from bpmis_jira_tool.errors import ToolError
 from bpmis_jira_tool.local_agent_client import LocalAgentClient
@@ -292,6 +292,7 @@ class LocalAgentServerTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 206)
         self.assertEqual(response.headers.get("Accept-Ranges"), "bytes")
+        self.assertEqual(response.headers.get("Content-Type"), "video/mp4")
         self.assertEqual(response.headers.get("Content-Range"), f"bytes 0-99/{asset_path.stat().st_size}")
         self.assertEqual(len(response.data), 100)
         self.assertEqual(response.data, asset_path.read_bytes()[:100])
@@ -322,6 +323,27 @@ class LocalAgentServerTests(unittest.TestCase):
         self.assertEqual(head_response.headers.get("Content-Length"), str(asset_path.stat().st_size))
         get_response.close()
         head_response.close()
+
+    def test_signed_meeting_recorder_repair_video_delegates_to_runtime(self):
+        fake_runtime = Mock()
+        fake_runtime.repair_video_playback.return_value = {
+            "record_id": "meeting-1",
+            "title": "Playback",
+            "platform": "zoom",
+            "meeting_link": "https://zoom.us/j/123",
+            "status": "completed",
+            "media": {"playback_video_url": "/meeting-recorder/assets/meeting-1/meeting.playback.mp4"},
+        }
+        self.app.config["MEETING_RECORDER_RUNTIME"] = fake_runtime
+
+        response = self._post_signed(
+            "/api/local-agent/meeting-recorder/repair-video",
+            {"record_id": "meeting-1", "owner_email": "owner@npt.sg"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["record"]["media"]["playback_video_url"], "/meeting-recorder/assets/meeting-1/meeting.playback.mp4")
+        fake_runtime.repair_video_playback.assert_called_once_with(record_id="meeting-1", owner_email="owner@npt.sg")
 
     def test_signed_bpmis_config_save_and_load_use_agent_data_dir(self):
         save_response = self._post_signed(

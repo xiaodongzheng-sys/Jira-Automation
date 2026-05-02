@@ -39,6 +39,18 @@
     return payload;
   };
 
+  const telemetry = (event, data = {}) => {
+    fetch('/api/meeting-recorder/reminder-telemetry', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        event,
+        page_path: window.location.pathname,
+        ...data,
+      }),
+    }).catch(() => {});
+  };
+
   const platformLabel = (platform) => {
     if (platform === 'google_meet') return 'Google Meet';
     if (platform === 'zoom') return 'Zoom';
@@ -123,10 +135,34 @@
     return html.join('');
   };
 
+  const renderTranscriptQuality = (transcript) => {
+    const quality = transcript?.quality || {};
+    const segments = Array.isArray(transcript?.segments) ? transcript.segments : [];
+    if (!quality.possible_incomplete && !segments.length) return '';
+    const warnings = Array.isArray(quality.warnings) ? quality.warnings : [];
+    const segmentTags = segments
+      .filter((segment) => segment.quality === 'low_audio' || segment.possible_missed_speech)
+      .slice(0, 8)
+      .map((segment) => `low audio ${formatTimestamp(segment.start_seconds || 0)}-${formatTimestamp(segment.end_seconds || 0)} language=${segment.language || 'auto'}`);
+    return `
+      <div class="meeting-transcript-quality ${quality.possible_incomplete ? 'is-warning' : ''}">
+        <strong>${quality.possible_incomplete ? 'Transcript may be incomplete' : 'Transcript quality'}</strong>
+        <span>${escapeHtml([
+          quality.language ? `language=${quality.language}` : '',
+          quality.low_audio_segment_count ? `${quality.low_audio_segment_count} low-audio segment(s)` : '',
+          quality.no_audio_segment_count ? `${quality.no_audio_segment_count} no-audio segment(s)` : '',
+        ].filter(Boolean).join(' · ') || 'No quality warnings')}</span>
+        ${warnings.length || segmentTags.length ? `<ul>${[...warnings, ...segmentTags].map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</ul>` : ''}
+      </div>
+    `;
+  };
+
   const renderTranscript = (transcript) => {
+    const qualityMarkup = renderTranscriptQuality(transcript);
     const chunks = Array.isArray(transcript?.chunks) ? transcript.chunks.filter((chunk) => String(chunk?.text || '').trim()) : [];
     if (chunks.length) {
       return `
+        ${qualityMarkup}
         <div class="meeting-transcript-list">
           ${chunks.map((chunk) => `
             <div class="meeting-transcript-row">
@@ -138,8 +174,9 @@
       `;
     }
     const text = String(transcript?.text || '').trim();
-    if (!text) return '<p class="empty-state">Transcript is not generated yet.</p>';
+    if (!text) return `${qualityMarkup}<p class="empty-state">Transcript is not generated yet.</p>`;
     return `
+      ${qualityMarkup}
       <div class="meeting-transcript-list">
         ${text.split(/\n+/).filter(Boolean).map((line) => `
           <div class="meeting-transcript-row">
@@ -322,9 +359,13 @@
     const record = payload.record || {};
     const transcript = record.transcript || {};
     const minutes = record.minutes || {};
-    const videoUrl = record.media?.video_url || '';
+    const media = record.media || {};
+    const videoUrl = media.playback_video_url || media.video_url || '';
+    const usingPlaybackCopy = Boolean(media.playback_video_url);
     const visualEvidence = Array.isArray(record.visual_evidence) ? record.visual_evidence : [];
     const audioLabel = state.diagnostics?.audio_capture_label || '';
+    const audioPreflight = record.audio_preflight || {};
+    const recordingHealth = record.recording_health || {};
     state.selectedRecordId = recordId;
     updateRecordSelection();
     nodes.detail.innerHTML = `
@@ -347,6 +388,11 @@
         </div>
       </div>
       ${record.error ? `<div class="inline-status inline-status-error">${escapeHtml(record.error)}</div>` : ''}
+      ${audioPreflight.warning || recordingHealth.warning ? `
+        <div class="inline-status inline-status-error">
+          ${escapeHtml(audioPreflight.warning || recordingHealth.warning)}
+        </div>
+      ` : ''}
       <section class="meeting-output">
         <h3>Minutes</h3>
         <div class="meeting-markdown">${renderMarkdown(minutes.markdown || '')}</div>
@@ -357,7 +403,15 @@
           ${audioLabel ? `<span>${escapeHtml(audioLabel)}</span>` : ''}
         </div>
         ${videoUrl ? `<video controls preload="metadata" class="meeting-video" src="${escapeHtml(videoUrl)}"></video>` : '<p class="empty-state">Video is not available yet.</p>'}
-        <div class="inline-status" data-video-status>Loading video metadata…</div>
+        <div class="inline-status" data-video-status>${usingPlaybackCopy ? 'Loading browser-compatible playback copy…' : 'Loading video metadata…'}</div>
+        ${videoUrl ? `
+          <div class="button-row meeting-video-actions">
+            <button class="button button-secondary" type="button" data-record-repair-video="${escapeHtml(record.record_id)}">
+              ${usingPlaybackCopy ? 'Rebuild playback copy' : 'Repair playback'}
+            </button>
+            ${usingPlaybackCopy ? '<span class="inline-status">Using browser-compatible playback copy.</span>' : ''}
+          </div>
+        ` : ''}
         ${visualEvidence.length ? `
           <div class="meeting-snapshots">
             ${visualEvidence.map((item) => `
@@ -375,19 +429,55 @@
       </section>
     `;
     bindDetailActions(record.record_id);
-    bindVideoStatus();
+    bindVideoStatus(record.record_id);
   };
 
-  const bindVideoStatus = () => {
+  const bindVideoStatus = (recordId) => {
     const video = nodes.detail.querySelector('video.meeting-video');
     const status = nodes.detail.querySelector('[data-video-status]');
     if (!video || !status) return;
+    const repairButton = nodes.detail.querySelector('[data-record-repair-video]');
+    const showRepairHint = (message) => {
+      status.textContent = `${message} Repairing creates a browser-compatible playback copy and keeps the original recording.`;
+      status.classList.add('inline-status-error');
+      if (repairButton) repairButton.classList.add('is-attention');
+    };
+    const metadataTimeout = window.setTimeout(() => {
+      if (Number.isNaN(video.duration) || !Number.isFinite(video.duration) || video.readyState < 1) {
+        showRepairHint('Video metadata is still loading after 10 seconds.');
+        telemetry('video_metadata_timeout', { outcome: 'timeout', reason: recordId || '' });
+      }
+    }, 10000);
     video.addEventListener('loadedmetadata', () => {
+      window.clearTimeout(metadataTimeout);
       status.textContent = `Duration: ${formatTimestamp(video.duration || 0)}. Seeking is available when the browser receives byte-range video responses.`;
+      status.classList.remove('inline-status-error');
+      telemetry('video_loadedmetadata', { outcome: 'ok', reason: recordId || '' });
+    });
+    video.addEventListener('loadeddata', () => {
+      window.clearTimeout(metadataTimeout);
+      status.textContent = `Video data loaded. Duration: ${formatTimestamp(video.duration || 0)}.`;
+      status.classList.remove('inline-status-error');
+      telemetry('video_loadeddata', { outcome: 'ok', reason: recordId || '' });
+    });
+    video.addEventListener('canplay', () => {
+      window.clearTimeout(metadataTimeout);
+      status.textContent = `Video can play. Duration: ${formatTimestamp(video.duration || 0)}.`;
+      status.classList.remove('inline-status-error');
+      telemetry('video_canplay', { outcome: 'ok', reason: recordId || '' });
+    });
+    video.addEventListener('waiting', () => {
+      status.textContent = 'Video is waiting for data from the recorder asset proxy.';
+      telemetry('video_waiting', { outcome: 'waiting', reason: recordId || '' });
+    });
+    video.addEventListener('stalled', () => {
+      showRepairHint('Video loading stalled while reading from the recorder asset proxy.');
+      telemetry('video_stalled', { outcome: 'stalled', reason: recordId || '' });
     });
     video.addEventListener('error', () => {
-      status.textContent = 'Video could not be loaded. Refresh the page or try again after the local recorder service is reachable.';
-      status.classList.add('inline-status-error');
+      const code = video.error?.code ? ` Error code: ${video.error.code}.` : '';
+      showRepairHint(`Video could not be loaded.${code}`);
+      telemetry('video_error', { outcome: 'error', reason: recordId || '', error_message: code });
     });
     video.addEventListener('seeking', () => {
       status.textContent = `Seeking to ${formatTimestamp(video.currentTime || 0)}…`;
@@ -414,6 +504,21 @@
           await loadRecords();
         } catch (error) {
           button.textContent = error.message;
+        }
+      });
+    });
+    nodes.detail.querySelectorAll('[data-record-repair-video]').forEach((button) => {
+      button.addEventListener('click', async () => {
+        button.disabled = true;
+        const originalText = button.textContent;
+        button.textContent = 'Repairing…';
+        try {
+          await api(`/api/meeting-recorder/records/${encodeURIComponent(recordId)}/repair-video`, { method: 'POST' });
+          await loadRecord(recordId);
+          await loadRecords();
+        } catch (error) {
+          button.disabled = false;
+          button.textContent = error.message || originalText;
         }
       });
     });

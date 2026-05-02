@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -9,6 +10,7 @@ import re
 import shutil
 import signal
 import subprocess
+import tempfile
 import threading
 import time
 from typing import Any
@@ -37,6 +39,12 @@ MEETING_LINK_PATTERN = re.compile(
     r"https?://(?:meet\.google\.com/[a-z0-9-]+|(?:[\w.-]+\.)?zoom\.us/[^\s<>\"')]+)",
     re.IGNORECASE,
 )
+MEETING_AUDIO_PREFLIGHT_SECONDS = 5
+MEETING_AUDIO_LOW_MEAN_DB = -45.0
+MEETING_TRANSCRIPT_SEGMENT_SECONDS = 60
+MEETING_PLAYBACK_PROFILE = "browser_compatible_v1"
+MEETING_PLAYBACK_AUDIO_CHANNELS = 2
+MEETING_PLAYBACK_AUDIO_SAMPLE_RATE = 48000
 
 
 @dataclass(frozen=True)
@@ -236,6 +244,9 @@ class MeetingRecordStore:
             "created_at": now,
             "updated_at": now,
             "media": {},
+            "diagnostics_snapshot": {},
+            "audio_preflight": {},
+            "recording_health": {},
             "transcript": {"status": "pending", "text": "", "chunks": []},
             "visual_evidence": [],
             "minutes": {"status": "pending", "markdown": "", "prompt_version": MEETING_RECORDER_PROMPT_VERSION},
@@ -338,6 +349,8 @@ class MeetingRecorderRuntime:
             "audio_devices": devices.get("audio_devices") or [],
             "video_devices": devices.get("video_devices") or [],
             **audio_status,
+            "audio_signal_verified": False,
+            "audio_signal_note": "Signal is verified only during the recording preflight because device presence alone does not prove Zoom output or microphone audio is flowing.",
             "frame_interval_seconds": self.config.frame_interval_seconds,
             "transcribe_provider": self.config.transcribe_provider,
             "whisper_cpp_configured": bool(whisper_path),
@@ -367,6 +380,8 @@ class MeetingRecorderRuntime:
             raise ConfigError("ffmpeg is required for local meeting recording. Install ffmpeg or set MEETING_RECORDER_FFMPEG_BIN.")
         devices = _avfoundation_devices(ffmpeg_path)
         audio_input = _effective_audio_input(self.config.audio_input, devices.get("audio_devices") or [])
+        audio_status = _audio_capture_status(audio_input, devices.get("audio_devices") or [])
+        preflight = self._audio_preflight(ffmpeg_path=ffmpeg_path, audio_input=audio_input)
         record = self.store.create_record(
             owner_email=owner_email,
             title=title,
@@ -380,6 +395,23 @@ class MeetingRecorderRuntime:
         record_dir = self.store.record_dir(record["record_id"])
         video_path = record_dir / "meeting.mp4"
         log_path = record_dir / "ffmpeg.log"
+        record["audio_preflight"] = preflight
+        record["diagnostics_snapshot"] = {
+            "ffmpeg_path": ffmpeg_path,
+            "video_input": self.config.video_input,
+            "audio_input": audio_input,
+            "audio_capture_mode": audio_status.get("audio_capture_mode"),
+            "audio_capture_label": audio_status.get("audio_capture_label"),
+            "system_audio_configured": audio_status.get("system_audio_configured"),
+            "audio_signal_verified": preflight.get("status") == "ok",
+            "audio_devices": devices.get("audio_devices") or [],
+        }
+        record["recording_health"] = {
+            "status": "warning" if preflight.get("status") == "too_quiet" else preflight.get("status", "unknown"),
+            "warning": preflight.get("warning", ""),
+            "checked_at": preflight.get("checked_at", ""),
+        }
+        self.store.save_record(record)
         command = _build_ffmpeg_recording_command(
             ffmpeg_path=ffmpeg_path,
             video_input=self.config.video_input,
@@ -424,6 +456,9 @@ class MeetingRecorderRuntime:
             "video_path": str(video_path.relative_to(self.store.root_dir)),
             "video_url": f"/meeting-recorder/assets/{record['record_id']}/meeting.mp4",
             "recorder_command": _redact_command(command),
+            "playback_profile": MEETING_PLAYBACK_PROFILE,
+            "playback_audio_channels": MEETING_PLAYBACK_AUDIO_CHANNELS,
+            "playback_audio_sample_rate": MEETING_PLAYBACK_AUDIO_SAMPLE_RATE,
         }
         self.store.save_record(record)
         return record
@@ -445,8 +480,118 @@ class MeetingRecorderRuntime:
                 process.wait(timeout=5)
         record["status"] = "recorded"
         record["recording_stopped_at"] = _utc_now()
+        record["recording_health"] = self._recording_health(record)
         self.store.save_record(record)
         return record
+
+    def repair_video_playback(self, *, record_id: str, owner_email: str) -> dict[str, Any]:
+        ffmpeg_path = _resolve_ffmpeg_bin(self.config.ffmpeg_bin)
+        if not ffmpeg_path:
+            raise ConfigError("ffmpeg is required to repair meeting video playback.")
+        record = self.store.get_record(record_id)
+        _assert_record_owner(record, owner_email)
+        media = record.get("media") if isinstance(record.get("media"), dict) else {}
+        relative = str(media.get("video_path") or "").strip()
+        if not relative:
+            raise ToolError("Recorded meeting video is missing.")
+        record_dir = self.store.record_dir(record_id)
+        source_path = (self.store.root_dir / relative).resolve()
+        if not source_path.exists() or not source_path.is_file():
+            raise ToolError("Recorded meeting video file was not found.")
+        output_path = record_dir / "meeting.playback.mp4"
+        command = _build_ffmpeg_playback_repair_command(
+            ffmpeg_path=ffmpeg_path,
+            source_path=source_path,
+            output_path=output_path,
+        )
+        _run_command(command, "Could not repair meeting video playback.", timeout_seconds=7200)
+        if not output_path.exists() or output_path.stat().st_size <= 0:
+            raise ToolError("Meeting video playback repair produced no playable file.")
+        media = dict(media)
+        media.update(
+            {
+                "playback_video_path": str(output_path.relative_to(self.store.root_dir)),
+                "playback_video_url": f"/meeting-recorder/assets/{record_id}/meeting.playback.mp4",
+                "playback_repair_command": _redact_command(command),
+                "playback_profile": MEETING_PLAYBACK_PROFILE,
+                "playback_audio_channels": MEETING_PLAYBACK_AUDIO_CHANNELS,
+                "playback_audio_sample_rate": MEETING_PLAYBACK_AUDIO_SAMPLE_RATE,
+                "playback_repaired_at": _utc_now(),
+                "playback_bytes": output_path.stat().st_size,
+            }
+        )
+        record["media"] = media
+        record["recording_health"] = {
+            **(record.get("recording_health") if isinstance(record.get("recording_health"), dict) else {}),
+            "status": "ok",
+            "checked_at": _utc_now(),
+            "playback_bytes": output_path.stat().st_size,
+            "warning": "",
+        }
+        self.store.save_record(record)
+        return record
+
+    def _audio_preflight(self, *, ffmpeg_path: str, audio_input: str) -> dict[str, Any]:
+        checked_at = _utc_now()
+        with _temporary_path("meeting-audio-preflight", ".wav") as audio_path:
+            command = [
+                ffmpeg_path,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-f",
+                "avfoundation",
+                "-i",
+                f":{audio_input}",
+                "-t",
+                str(MEETING_AUDIO_PREFLIGHT_SECONDS),
+                "-acodec",
+                "pcm_s16le",
+                "-ar",
+                "16000",
+                "-ac",
+                "1",
+                str(audio_path),
+            ]
+            try:
+                _run_command(command, "Could not verify meeting audio input.", timeout_seconds=15)
+                metrics = _audio_volume_metrics(audio_path)
+            except Exception as error:  # noqa: BLE001
+                return {
+                    "status": "unavailable",
+                    "checked_at": checked_at,
+                    "duration_seconds": MEETING_AUDIO_PREFLIGHT_SECONDS,
+                    "warning": f"Audio preflight failed: {error}",
+                }
+        status = "ok"
+        warning = ""
+        mean_db = metrics.get("mean_volume_db")
+        if mean_db is None or mean_db <= MEETING_AUDIO_LOW_MEAN_DB:
+            status = "too_quiet"
+            warning = "Too quiet - Zoom/system audio or microphone may not be captured."
+        return {
+            "status": status,
+            "checked_at": checked_at,
+            "duration_seconds": MEETING_AUDIO_PREFLIGHT_SECONDS,
+            "mean_volume_db": mean_db,
+            "max_volume_db": metrics.get("max_volume_db"),
+            "warning": warning,
+        }
+
+    def _recording_health(self, record: dict[str, Any]) -> dict[str, Any]:
+        relative = str((record.get("media") or {}).get("video_path") or "").strip()
+        if not relative:
+            return {"status": "unknown", "checked_at": _utc_now(), "warning": "Recorded video path is missing."}
+        video_path = (self.store.root_dir / relative).resolve()
+        if not video_path.exists():
+            return {"status": "missing", "checked_at": _utc_now(), "warning": "Recorded video file is missing."}
+        return {
+            "status": "ok" if video_path.stat().st_size > 0 else "warning",
+            "checked_at": _utc_now(),
+            "video_bytes": video_path.stat().st_size,
+            "warning": "" if video_path.stat().st_size > 0 else "Recorded video file is empty.",
+        }
 
 
 class MeetingProcessingService:
@@ -479,11 +624,17 @@ class MeetingProcessingService:
             transcript = self._transcribe_audio(audio_path)
             transcript_text = str(transcript.get("text") or "").strip()
             snapshots = self._extract_visual_evidence(record, video_path)
-            minutes = self._generate_minutes(record=record, transcript_text=transcript_text)
+            minutes = self._generate_minutes(
+                record=record,
+                transcript_text=transcript_text,
+                transcript_quality=transcript.get("quality") or {},
+            )
             record["transcript"] = {
                 "status": "completed",
                 "text": transcript_text,
                 "chunks": transcript.get("chunks") or [{"start_seconds": 0, "text": transcript_text}],
+                "segments": transcript.get("segments") or [],
+                "quality": transcript.get("quality") or {},
                 "asset_url": f"/meeting-recorder/assets/{record_id}/transcript.txt",
             }
             (self.store.record_dir(record_id) / "transcript.txt").write_text(transcript_text, encoding="utf-8")
@@ -586,7 +737,40 @@ class MeetingProcessingService:
             raise ConfigError(f"whisper.cpp model was not found at {model_path}. Set MEETING_RECORDER_WHISPER_MODEL.")
         if ".en" in model_path.name.lower():
             raise ConfigError("Use a multilingual whisper.cpp model for Chinese/English mixed meetings, not a .en model.")
+        duration = _audio_duration_seconds(audio_path)
+        if duration > MEETING_TRANSCRIPT_SEGMENT_SECONDS:
+            return self._transcribe_audio_by_segments(
+                audio_path=audio_path,
+                duration_seconds=duration,
+                whisper_bin=whisper_bin,
+                model_path=model_path,
+            )
         output_base = self.store.record_dir(audio_path.parent.name) / "whisper-transcript"
+        transcript = self._transcribe_audio_once(
+            audio_path=audio_path,
+            output_base=output_base,
+            whisper_bin=whisper_bin,
+            model_path=model_path,
+            language=str(self.config.whisper_language or "auto").strip().lower(),
+            offset_seconds=0,
+        )
+        segments, quality = self._transcript_quality(
+            audio_path=audio_path,
+            chunks=transcript["chunks"],
+            detected_language=transcript["language"],
+        )
+        return {"text": transcript["text"], "chunks": transcript["chunks"], "segments": segments, "quality": quality}
+
+    def _transcribe_audio_once(
+        self,
+        *,
+        audio_path: Path,
+        output_base: Path,
+        whisper_bin: str,
+        model_path: Path,
+        language: str,
+        offset_seconds: float,
+    ) -> dict[str, Any]:
         command = [
             whisper_bin,
             "-m",
@@ -598,10 +782,10 @@ class MeetingProcessingService:
             "-of",
             str(output_base),
         ]
-        language = str(self.config.whisper_language or "auto").strip().lower()
         if language:
             command.extend(["-l", language])
         completed = _run_command(command, "whisper.cpp transcription failed.", timeout_seconds=7200)
+        detected_language = _parse_whisper_language(f"{completed.stderr}\n{completed.stdout}", fallback=language or "auto")
         transcript_path = output_base.with_suffix(".txt")
         if transcript_path.exists():
             transcript = transcript_path.read_text(encoding="utf-8").strip()
@@ -612,7 +796,90 @@ class MeetingProcessingService:
         chunks = _parse_srt_transcript(output_base.with_suffix(".srt"))
         if not chunks:
             chunks = [{"start_seconds": 0, "end_seconds": 0, "text": transcript}]
-        return {"text": transcript, "chunks": chunks}
+        if offset_seconds:
+            for chunk in chunks:
+                chunk["start_seconds"] = float(chunk.get("start_seconds") or 0) + offset_seconds
+                chunk["end_seconds"] = float(chunk.get("end_seconds") or 0) + offset_seconds
+        return {"text": transcript, "chunks": chunks, "language": detected_language}
+
+    def _transcribe_audio_by_segments(
+        self,
+        *,
+        audio_path: Path,
+        duration_seconds: float,
+        whisper_bin: str,
+        model_path: Path,
+    ) -> dict[str, Any]:
+        ffmpeg_path = _resolve_ffmpeg_bin(self.config.ffmpeg_bin)
+        if not ffmpeg_path:
+            raise ConfigError("ffmpeg is required to split meeting audio for mixed-language transcription.")
+        record_dir = self.store.record_dir(audio_path.parent.name)
+        segment_seconds = MEETING_TRANSCRIPT_SEGMENT_SECONDS
+        all_chunks: list[dict[str, Any]] = []
+        text_parts: list[str] = []
+        segment_metadata: list[dict[str, Any]] = []
+        configured_language = str(self.config.whisper_language or "auto").strip().lower()
+        for index, start in enumerate(range(0, int(duration_seconds + segment_seconds - 1), segment_seconds)):
+            remaining = max(0.0, duration_seconds - start)
+            if remaining <= 0:
+                continue
+            current_duration = min(segment_seconds, remaining)
+            segment_audio = record_dir / f"audio-segment-{index:04d}.wav"
+            output_base = record_dir / f"whisper-segment-{index:04d}"
+            extract_command = [
+                ffmpeg_path,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-ss",
+                str(start),
+                "-t",
+                str(current_duration),
+                "-i",
+                str(audio_path),
+                "-acodec",
+                "pcm_s16le",
+                "-ar",
+                "16000",
+                "-ac",
+                "1",
+                str(segment_audio),
+            ]
+            _run_command(extract_command, "Could not split meeting audio for transcription.")
+            transcript = self._transcribe_audio_once(
+                audio_path=segment_audio,
+                output_base=output_base,
+                whisper_bin=whisper_bin,
+                model_path=model_path,
+                language=configured_language or "auto",
+                offset_seconds=float(start),
+            )
+            text_parts.append(str(transcript.get("text") or "").strip())
+            chunks = transcript.get("chunks") or []
+            all_chunks.extend(chunks)
+            metrics = _audio_volume_metrics(audio_path, start_seconds=float(start), duration_seconds=current_duration)
+            has_no_audio = any("[no audio]" in str(chunk.get("text") or "").lower() for chunk in chunks)
+            low_audio = bool(metrics.get("low_audio")) or has_no_audio
+            segment_metadata.append(
+                {
+                    "index": index,
+                    "start_seconds": float(start),
+                    "end_seconds": float(start + current_duration),
+                    "language": transcript.get("language") or configured_language or "auto",
+                    "language_confidence": None,
+                    "mean_volume_db": metrics.get("mean_volume_db"),
+                    "max_volume_db": metrics.get("max_volume_db"),
+                    "quality": "low_audio" if low_audio else "ok",
+                    "possible_missed_speech": low_audio,
+                    "chunk_count": len(chunks),
+                }
+            )
+        text = "\n".join(part for part in text_parts if part).strip()
+        if not text:
+            raise ToolError("whisper.cpp transcription produced no text.")
+        quality = self._quality_from_segments(segment_metadata)
+        return {"text": text, "chunks": all_chunks, "segments": segment_metadata, "quality": quality}
 
     def _extract_visual_evidence(self, record: dict[str, Any], video_path: Path) -> list[dict[str, Any]]:
         ffmpeg_path = _resolve_ffmpeg_bin(self.config.ffmpeg_bin)
@@ -649,21 +916,82 @@ class MeetingProcessingService:
             )
         return evidence
 
-    def _generate_minutes(self, *, record: dict[str, Any], transcript_text: str) -> str:
+    def _transcript_quality(self, *, audio_path: Path, chunks: list[dict[str, Any]], detected_language: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        duration = _audio_duration_seconds(audio_path)
+        if duration <= 0:
+            duration = max((float(chunk.get("end_seconds") or 0) for chunk in chunks), default=0.0)
+        segment_seconds = MEETING_TRANSCRIPT_SEGMENT_SECONDS
+        segment_count = max(1, int((duration + segment_seconds - 1) // segment_seconds)) if duration else 1
+        segments: list[dict[str, Any]] = []
+        low_audio_count = 0
+        no_audio_count = 0
+        for index in range(segment_count):
+            start = index * segment_seconds
+            end = min(duration, start + segment_seconds) if duration else start + segment_seconds
+            metrics = _audio_volume_metrics(audio_path, start_seconds=start, duration_seconds=max(1, end - start))
+            segment_chunks = [
+                chunk
+                for chunk in chunks
+                if float(chunk.get("start_seconds") or 0) < end and float(chunk.get("end_seconds") or 0) >= start
+            ]
+            has_no_audio = any("[no audio]" in str(chunk.get("text") or "").lower() for chunk in segment_chunks)
+            low_audio = bool(metrics.get("low_audio")) or has_no_audio
+            low_audio_count += 1 if low_audio else 0
+            no_audio_count += 1 if has_no_audio else 0
+            segments.append(
+                {
+                    "index": index,
+                    "start_seconds": start,
+                    "end_seconds": end,
+                    "language": detected_language or "auto",
+                    "language_confidence": None,
+                    "mean_volume_db": metrics.get("mean_volume_db"),
+                    "max_volume_db": metrics.get("max_volume_db"),
+                    "quality": "low_audio" if low_audio else "ok",
+                    "possible_missed_speech": low_audio,
+                    "chunk_count": len(segment_chunks),
+                }
+            )
+        quality = self._quality_from_segments(segments, default_language=detected_language or "auto")
+        return segments, quality
+
+    def _quality_from_segments(self, segments: list[dict[str, Any]], *, default_language: str = "auto") -> dict[str, Any]:
+        low_audio_count = sum(1 for segment in segments if segment.get("quality") == "low_audio")
+        no_audio_count = sum(1 for segment in segments if segment.get("possible_missed_speech") and segment.get("chunk_count"))
+        languages = sorted({str(segment.get("language") or "").strip() for segment in segments if segment.get("language")})
+        warnings = []
+        if low_audio_count:
+            warnings.append("Some transcript segments have low audio and may miss Zoom/system audio or microphone speech.")
+        if no_audio_count:
+            warnings.append("One or more transcript segments may contain [no audio] or missed speech.")
+        return {
+            "language": ",".join(languages) or default_language,
+            "segment_seconds": MEETING_TRANSCRIPT_SEGMENT_SECONDS,
+            "segment_count": len(segments),
+            "low_audio_segment_count": low_audio_count,
+            "no_audio_segment_count": no_audio_count,
+            "possible_incomplete": bool(low_audio_count or no_audio_count),
+            "warnings": warnings,
+        }
+
+    def _generate_minutes(self, *, record: dict[str, Any], transcript_text: str, transcript_quality: dict[str, Any] | None = None) -> str:
+        quality = transcript_quality or {}
         system_prompt = (
             "You write concise, evidence-grounded English meeting minutes for product managers. "
             "Use only the provided spoken transcript and meeting metadata. "
             "Do not use screen recordings, screenshots, keyframes, or visual context. "
-            "Do not invent owners, decisions, dates, or follow-ups."
+            "Do not invent owners, decisions, dates, or follow-ups. "
+            "If transcript quality warnings are present, include a short warning before the Summary section and do not infer decisions or action items from repeated low-audio text."
         )
         user_prompt = (
             f"Meeting title: {record.get('title')}\n"
             f"Platform: {record.get('platform')}\n"
             f"Scheduled start: {record.get('scheduled_start')}\n"
-            f"Attendees from calendar: {json.dumps(record.get('attendees') or [], ensure_ascii=False)}\n\n"
+            f"Attendees from calendar: {json.dumps(record.get('attendees') or [], ensure_ascii=False)}\n"
+            f"Transcript quality: {json.dumps(quality, ensure_ascii=False)}\n\n"
             "# Transcript\n"
             f"{transcript_text or 'No transcript text was produced.'}\n\n"
-            "Return Markdown with exactly these sections: Summary, Decisions, Action Items, Risks/Blockers, Open Questions, Follow-ups."
+            "Return Markdown with these sections: Warning if needed, Summary, Decisions, Action Items, Risks/Blockers, Open Questions, Follow-ups."
         )
         return self.text_client.create_answer(system_prompt=system_prompt, user_prompt=user_prompt).strip()
 
@@ -683,6 +1011,66 @@ def _run_command(command: list[str], error_message: str, *, timeout_seconds: int
         detail = (completed.stderr or completed.stdout or "").strip()[-1200:]
         raise ToolError(f"{error_message} {detail}".strip())
     return completed
+
+
+@contextmanager
+def _temporary_path(prefix: str, suffix: str):
+    handle = tempfile.NamedTemporaryFile(prefix=prefix, suffix=suffix, delete=False)
+    path = Path(handle.name)
+    handle.close()
+    try:
+        yield path
+    finally:
+        path.unlink(missing_ok=True)
+
+
+def _audio_volume_metrics(audio_path: Path, *, start_seconds: float | None = None, duration_seconds: float | None = None) -> dict[str, Any]:
+    ffmpeg_path = _resolve_ffmpeg_bin("ffmpeg")
+    if not ffmpeg_path or not audio_path.exists():
+        return {"status": "unavailable"}
+    command = [ffmpeg_path, "-hide_banner", "-nostats"]
+    if start_seconds is not None:
+        command.extend(["-ss", str(max(0.0, float(start_seconds)))])
+    if duration_seconds is not None:
+        command.extend(["-t", str(max(0.1, float(duration_seconds)))])
+    command.extend(["-i", str(audio_path), "-af", "volumedetect", "-f", "null", "-"])
+    try:
+        completed = _run_command(command, "Could not inspect meeting audio volume.", timeout_seconds=60)
+    except ToolError as error:
+        return {"status": "unavailable", "warning": str(error)}
+    output = f"{completed.stderr}\n{completed.stdout}"
+    mean_match = re.search(r"mean_volume:\s*(-?\d+(?:\.\d+)?)\s*dB", output)
+    max_match = re.search(r"max_volume:\s*(-?\d+(?:\.\d+)?)\s*dB", output)
+    mean_db = float(mean_match.group(1)) if mean_match else None
+    max_db = float(max_match.group(1)) if max_match else None
+    status = "low_audio" if mean_db is None or mean_db <= MEETING_AUDIO_LOW_MEAN_DB else "ok"
+    return {"status": status, "mean_volume_db": mean_db, "max_volume_db": max_db, "low_audio": status == "low_audio"}
+
+
+def _audio_duration_seconds(audio_path: Path) -> float:
+    ffprobe_path = _resolve_executable("ffprobe", ("/opt/homebrew/bin/ffprobe", "/usr/local/bin/ffprobe"))
+    if not ffprobe_path or not audio_path.exists():
+        return 0.0
+    command = [
+        ffprobe_path,
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        str(audio_path),
+    ]
+    try:
+        completed = _run_command(command, "Could not inspect meeting audio duration.", timeout_seconds=30)
+        return max(0.0, float((completed.stdout or "").strip() or 0))
+    except (ToolError, ValueError):
+        return 0.0
+
+
+def _parse_whisper_language(output: str, fallback: str = "auto") -> str:
+    match = re.search(r"auto-detected language:\s*([a-zA-Z_-]+)", str(output or ""))
+    return (match.group(1).lower() if match else fallback) or "auto"
 
 
 def _parse_srt_transcript(path: Path) -> list[dict[str, Any]]:
@@ -805,11 +1193,40 @@ def _build_ffmpeg_recording_command(
         "yuv420p",
         "-c:a",
         "aac",
+        "-ac",
+        str(MEETING_PLAYBACK_AUDIO_CHANNELS),
+        "-ar",
+        str(MEETING_PLAYBACK_AUDIO_SAMPLE_RATE),
         "-b:a",
         "128k",
         "-movflags",
         "+faststart",
         str(video_path),
+    ]
+
+
+def _build_ffmpeg_playback_repair_command(*, ffmpeg_path: str, source_path: Path, output_path: Path) -> list[str]:
+    return [
+        ffmpeg_path,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-i",
+        str(source_path),
+        "-c:v",
+        "copy",
+        "-c:a",
+        "aac",
+        "-ac",
+        str(MEETING_PLAYBACK_AUDIO_CHANNELS),
+        "-ar",
+        str(MEETING_PLAYBACK_AUDIO_SAMPLE_RATE),
+        "-b:a",
+        "128k",
+        "-movflags",
+        "+faststart",
+        str(output_path),
     ]
 
 
@@ -867,7 +1284,7 @@ def _audio_capture_status(audio_input: str, audio_devices: list[str]) -> dict[st
     aggregate_available = any("aggregate" in name for name in normalized_devices)
     if "aggregate" in normalized_input:
         mode = "aggregate_device"
-        label = "Aggregate device configured"
+        label = "Aggregate device configured; signal not yet verified"
         configured = True
     elif _looks_like_system_audio_device(normalized_input):
         mode = "system_audio"
@@ -891,6 +1308,8 @@ def _audio_capture_status(audio_input: str, audio_devices: list[str]) -> dict[st
         "audio_capture_mode": mode,
         "audio_capture_label": label,
         "system_audio_configured": configured,
+        "audio_device_configured": configured,
+        "audio_signal_verified": False,
         "system_audio_available": system_audio_available,
         "aggregate_audio_available": aggregate_available,
         "recommended_audio_input": "Meeting Recorder Aggregate",

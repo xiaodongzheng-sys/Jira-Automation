@@ -27,6 +27,19 @@
             </div>
           </div>
           <div class="session-actions">
+            {% if meeting_recorder_reminder_enabled %}
+              <details class="meeting-recorder-indicator" data-meeting-recorder-indicator>
+                <summary>
+                  <span class="meeting-recorder-indicator-dot" data-meeting-recorder-indicator-dot></span>
+                  <span data-meeting-recorder-indicator-label>Checking</span>
+                </summary>
+                <div class="meeting-recorder-indicator-panel">
+                  <div data-meeting-recorder-indicator-detail>Waiting for first reminder check.</div>
+                  <button class="button button-secondary" type="button" data-meeting-recorder-indicator-poll>Check now</button>
+                  <a class="button button-secondary" href="{{ url_for('meeting_recorder_page') }}">Open Recorder</a>
+                </div>
+              </details>
+            {% endif %}
             {% if user_identity.mode == "google" %}
               <form method="post" action="{{ url_for('google_logout') }}">
                 <button class="button button-secondary" type="submit">Logout</button>
