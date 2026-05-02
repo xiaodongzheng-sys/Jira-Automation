@@ -13,7 +13,7 @@ import bpmis_jira_tool.web as web_module
 from bpmis_jira_tool.config import Settings
 from bpmis_jira_tool.errors import BPMISError, ToolError
 from bpmis_jira_tool.models import CreatedTicket
-from bpmis_jira_tool.monthly_report import MonthlyReportSendResult
+from bpmis_jira_tool.monthly_report import DEFAULT_MONTHLY_REPORT_TEMPLATE, MonthlyReportSendResult
 from bpmis_jira_tool.user_config import WebConfigStore
 from bpmis_jira_tool.web import (
     _build_team_profiles_for_display,
@@ -218,6 +218,13 @@ class _FakeMonthlyReportLocalAgentClient(_FakePRDReviewLocalAgentClient):
     def __init__(self):
         self.draft_payload = None
         self.send_payload = None
+        self.started_payload = None
+
+    def team_dashboard_config_load(self):
+        return {}
+
+    def team_dashboard_config_save(self, config):
+        return config
 
     def team_dashboard_monthly_report_draft(self, payload, *, progress_callback=None):
         self.draft_payload = payload
@@ -234,6 +241,29 @@ class _FakeMonthlyReportLocalAgentClient(_FakePRDReviewLocalAgentClient):
                 "elapsed_seconds": 1.0,
             },
             "evidence_summary": {"key_project_count": 1, "jira_ticket_count": 1},
+        }
+
+    def team_dashboard_monthly_report_draft_start(self, payload):
+        self.started_payload = payload
+        return {"status": "ok", "job_id": "remote-job-1"}
+
+    def team_dashboard_monthly_report_job(self, job_id):
+        return {
+            "status": "ok",
+            "job_id": job_id,
+            "action": "team-dashboard-monthly-report-draft",
+            "state": "completed",
+            "progress": {"stage": "completed", "current": 1, "total": 1, "message": "Finished."},
+            "results": [{"draft_markdown": "## Shared Remote Monthly Report"}],
+        }
+
+    def team_dashboard_monthly_report_latest_draft(self):
+        return {
+            "status": "ok",
+            "draft_markdown": "## Shared Remote Monthly Report",
+            "subject": "Monthly Report - 2026-04",
+            "job_id": "remote-job-1",
+            "generated_at": 1770000000,
         }
 
     def team_dashboard_monthly_report_send(self, payload):
@@ -3683,6 +3713,44 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertEqual(job_payload["results"][0]["draft_markdown"], "## Remote Monthly Report")
         self.assertEqual(fake_client.draft_payload["template"], "# Template")
         self.assertEqual(fake_client.draft_payload["team_payloads"], [{"team_key": "AF"}])
+
+    @patch("bpmis_jira_tool.web._load_all_team_dashboard_task_payloads", return_value=[{"team_key": "AF"}])
+    def test_team_dashboard_monthly_report_uses_shared_local_agent_jobs_when_remote_config_enabled(self, _mock_payloads):
+        fake_client = _FakeMonthlyReportLocalAgentClient()
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_BASE_URL": "https://uat.example.test",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "LOCAL_AGENT_MODE": "sync",
+                "LOCAL_AGENT_BASE_URL": "https://agent.example.test",
+                "LOCAL_AGENT_HMAC_SECRET": "secret",
+                "LOCAL_AGENT_BPMIS_ENABLED": "true",
+            },
+            clear=False,
+        ), patch("bpmis_jira_tool.web._build_local_agent_client", return_value=fake_client):
+            app = create_app()
+            app.testing = True
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong Zheng"}
+                    session["google_credentials"] = {"token": "x"}
+                response = client.post("/api/team-dashboard/monthly-report/draft", json={})
+                job_payload = client.get("/api/jobs/remote-job-1").get_json()
+                latest_payload = client.get("/api/team-dashboard/monthly-report/latest-draft").get_json()
+
+        payload = response.get_json()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["status"], "queued")
+        self.assertEqual(payload["job_id"], "remote-job-1")
+        self.assertEqual(payload["job_backend"], "local_agent")
+        self.assertEqual(job_payload["state"], "completed")
+        self.assertEqual(job_payload["results"][0]["draft_markdown"], "## Shared Remote Monthly Report")
+        self.assertEqual(latest_payload["draft_markdown"], "## Shared Remote Monthly Report")
+        self.assertEqual(fake_client.started_payload["template"], DEFAULT_MONTHLY_REPORT_TEMPLATE)
+        self.assertEqual(fake_client.started_payload["team_payloads"], [{"team_key": "AF"}])
 
     @patch("bpmis_jira_tool.web._build_prd_review_service", return_value=_FakePRDReviewService())
     def test_team_dashboard_prd_summary_returns_portal_result(self, _mock_service):

@@ -108,7 +108,7 @@ curl https://<uat-tag-url>/api/local-agent/healthz
   - The fixed-ngrok Live `/healthz` still serves the old Live revision until promotion.
   - Any changed workflow passes the expected manual smoke checks.
 
-UAT intentionally shares the existing Mac local-agent public path for Mac-only capabilities. For local-agent-backed workflows, durable SQLite/cache state is on the Mac host, not inside the Cloud Run UAT container. UAT isolates Cloud Run code and traffic, but it does not isolate downstream data or external write effects such as BPMIS, Trello, Jira, Gmail, or SeaTalk actions.
+UAT intentionally shares the existing Mac local-agent public path for Mac-only capabilities. For local-agent-backed workflows, durable SQLite/cache state is on the Mac host, not inside the Cloud Run UAT container. Team Dashboard server-side state such as member/config rows, Jira/BPMIS task cache, and Monthly Report job/latest-draft state should be treated as shared with fixed-ngrok Live when UAT runs through the Mac local-agent. UAT isolates Cloud Run code and traffic, but it does not isolate downstream data, shared Team Dashboard cache refreshes, or external write effects such as BPMIS, Trello, Jira, Gmail, or SeaTalk actions.
 
 If Google OAuth login must be tested on UAT, add the UAT callback URL in Google Cloud Console:
 

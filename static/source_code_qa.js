@@ -689,7 +689,7 @@
     if ((queryMode?.value || 'fast') === 'deep') {
       queryModeHelp.textContent = '更完整，允许 Codex 深挖和修复，可能需要 2-6 分钟。';
     } else {
-      queryModeHelp.textContent = '目标：不排队时 1 分钟内返回第一版答案；复杂问题会标注缺口。';
+      queryModeHelp.textContent = '1 分钟内返回证据版草稿；复杂链路请手动用 Deep 验证。';
     }
   };
 
@@ -894,7 +894,10 @@
     if (sessionProvider) sessionProvider.textContent = providerLabel(session?.llm_provider || selectedLlmProvider());
     if (sessionScope) sessionScope.textContent = [session?.pm_team || pmTeam.value, session?.country || currentCountry()].filter(Boolean).join(' · ');
     if (session?.last_context && typeof session.last_context === 'object') {
-      conversationContext = session.last_context;
+      conversationContext = {
+        ...session.last_context,
+        session_title: session.title || session.last_context.session_title || '',
+      };
     } else if (!session) {
       conversationContext = null;
     }
@@ -1427,10 +1430,19 @@
     results.innerHTML = body;
   };
 
+  const activeSessionTitle = () => String(activeSession?.title || sessionTitle?.textContent || '').trim();
+
+  const currentConversationContext = () => (
+    conversationContext && typeof conversationContext === 'object'
+      ? { ...conversationContext, session_title: activeSessionTitle() || conversationContext.session_title || '' }
+      : null
+  );
+
   const buildConversationContext = (payload, questionOverride = '') => ({
     key: currentKey(),
     pm_team: pmTeam.value,
     country: currentCountry(),
+    session_title: activeSessionTitle(),
     question: questionOverride || questionInput.value,
     trace_id: payload?.trace_id || '',
     summary: payload?.summary || '',
@@ -1772,8 +1784,8 @@
     if (payload?.deadline_hit && payload?.fallback_used) {
       return `
         <section class="source-qa-answer-quality source-qa-answer-quality-fast">
-          <strong>Fast mode reached the 1-minute limit</strong>
-          <span>Fast 已给出基于检索证据的第一版判断；完整关系链路建议用 Deep 模式继续确认。</span>
+          <strong>Fast evidence-limited draft</strong>
+          <span>Fast 已在 1 分钟 SLA 内返回基于本地检索证据的草稿；完整关系链路请手动用 Deep 模式继续确认。</span>
           <button type="button" class="button button-secondary source-qa-deep-continue" data-source-deep-continue>
             用 Deep 模式继续验证
           </button>
@@ -1997,6 +2009,8 @@
       queued: '排队中',
       auto_sync: '同步检查',
       evidence_pack: '构建证据',
+      fast_quality_gate: 'Fast 证据校验',
+      auto_deep: 'Deep 验证',
       llm_generation: 'Codex 推理',
       codex_session_lock: '等待 Codex 会话',
       codex_deep_investigation: '补充深挖',
@@ -2226,7 +2240,7 @@
           llm_provider: selectedProvider,
           llm_budget_mode: selectedQueryMode === 'fast' ? 'fast' : 'auto',
           attachment_ids: attachmentsForQuestion.map((item) => item.id).filter(Boolean),
-          conversation_context: conversationContext,
+          conversation_context: currentConversationContext(),
           async: true,
         }),
       }, { attempts: 3 });

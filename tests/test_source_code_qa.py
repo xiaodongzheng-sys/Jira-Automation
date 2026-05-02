@@ -2180,6 +2180,29 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertIn("shopeeuid", augmented)
         self.assertNotIn("between fields there", augmented)
 
+    def test_followup_relationship_question_prefers_session_title_fields_over_stale_context(self):
+        augmented, followup = self.service._apply_conversation_context(
+            "Understand deeper if there is any relationship between the two fields",
+            {
+                "key": "AF:All",
+                "session_title": "merchantUId and shopeeUid difference",
+                "question": "operationPosition and gpsHex relationship",
+                "answer": "operationPosition is used to derive gpsHex fields.",
+                "matches": [{"path": "LocationService.java", "snippet": "operationPosition gpsHex action_location"}],
+                "trace_paths": [],
+                "structured_answer": {},
+                "answer_contract": {},
+                "evidence_pack": {},
+            },
+            current_key="AF:All",
+        )
+
+        self.assertTrue(followup["used"])
+        self.assertIn("merchantuid", augmented)
+        self.assertIn("shopeeuid", augmented)
+        self.assertNotIn("operationposition", augmented)
+        self.assertNotIn("gpshex", augmented)
+
     def test_followup_context_does_not_pollute_specific_short_lookup(self):
         augmented, followup = self.service._apply_conversation_context(
             "Is fdMaturityDate used in any function?",
@@ -8063,7 +8086,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             output_path = command[command.index("--output-last-message") + 1]
             Path(output_path).write_text(
                 '{"direct_answer":"IssueRepository reads issue_table.",'
-                '"claims":[{"text":"IssueRepository reads issue_table","citations":[]}],'
+                '"claims":[{"text":"IssueRepository reads issue_table","citations":["S1"]}],'
                 '"missing_evidence":["caller"],"confidence":"medium"}',
                 encoding="utf-8",
             )
@@ -8092,6 +8115,118 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertEqual(payload["llm_budget_mode"], "fast")
         self.assertFalse(payload["llm_route"]["codex_repair_attempted"])
         self.assertLessEqual(payload["llm_route"]["candidate_path_count"], 10)
+
+    def test_codex_fast_query_caps_timeout_to_remaining_deadline(self):
+        service = SourceCodeQAService(
+            data_root=Path(self.temp_dir.name),
+            team_profiles=TEAM_PROFILE_DEFAULTS,
+            llm_provider="codex_cli_bridge",
+            gitlab_token="secret-token",
+            git_timeout_seconds=5,
+            max_file_bytes=200_000,
+        )
+        entry = RepositoryEntry("Portal Repo", "https://git.example.com/team/portal.git")
+        key = "AF:All"
+        repo_path = service._repo_path(key, entry)
+        source_file = repo_path / "repository" / "IssueRepository.java"
+        source_file.parent.mkdir(parents=True)
+        source_file.write_text("class IssueRepository { void find(){ jdbc.query(\"select * from issue_table\"); } }\n", encoding="utf-8")
+        match = {
+            "repo": "Portal Repo",
+            "path": "repository/IssueRepository.java",
+            "line_start": 1,
+            "line_end": 1,
+            "retrieval": "persistent_index",
+            "trace_stage": "direct",
+            "reason": "repository and table matched",
+            "score": 10,
+            "snippet": "class IssueRepository { void find(){ jdbc.query(\"select * from issue_table\"); } }",
+        }
+        calls = []
+
+        def fake_run(command, **kwargs):
+            calls.append((command, kwargs))
+            if "login" in command and "status" in command:
+                return SimpleNamespace(returncode=0, stdout="Logged in using ChatGPT\n", stderr="")
+            output_path = command[command.index("--output-last-message") + 1]
+            Path(output_path).write_text(
+                '{"direct_answer":"IssueRepository reads issue_table.",'
+                '"claims":[{"text":"IssueRepository reads issue_table","citations":["S1"]}],'
+                '"missing_evidence":[],"confidence":"high"}',
+                encoding="utf-8",
+            )
+            return SimpleNamespace(returncode=0, stdout='{"type":"done"}\n', stderr="")
+
+        with patch("bpmis_jira_tool.source_code_qa.shutil.which", return_value="/usr/local/bin/codex"), patch(
+            "bpmis_jira_tool.source_code_qa.subprocess.run",
+            side_effect=fake_run,
+        ):
+            payload = service._build_llm_answer(
+                entries=[entry],
+                key=key,
+                pm_team="AF",
+                country="All",
+                question="what table does IssueRepository read",
+                matches=[match],
+                llm_budget_mode="auto",
+                query_mode="fast",
+                requested_answer_mode="auto",
+                fast_deadline_remaining_seconds=12,
+            )
+
+        exec_calls = [item for item in calls if "exec" in item[0]]
+        self.assertEqual(len(exec_calls), 1)
+        self.assertEqual(exec_calls[0][1]["timeout"], 12)
+        self.assertEqual(payload["llm_route"]["fast_timeout_seconds"], 12)
+        self.assertEqual(payload["llm_route"]["fast_deadline_remaining_seconds"], 12)
+
+    def test_fast_query_forces_codex_provider_even_when_service_provider_is_gemini(self):
+        service = SourceCodeQAService(
+            data_root=Path(self.temp_dir.name),
+            team_profiles=TEAM_PROFILE_DEFAULTS,
+            llm_provider="gemini",
+            gemini_api_key="gemini-key",
+            gitlab_token="secret-token",
+            git_timeout_seconds=5,
+            max_file_bytes=200_000,
+        )
+        entry = RepositoryEntry("Portal Repo", "https://git.example.com/team/portal.git")
+        service.save_mapping(pm_team="AF", country="All", repositories=[{"display_name": entry.display_name, "url": entry.url}])
+        repo_path = service._repo_path("AF:All", entry)
+        (repo_path / ".git").mkdir(parents=True)
+        source_file = repo_path / "repository" / "IssueRepository.java"
+        source_file.parent.mkdir(parents=True)
+        source_file.write_text("class IssueRepository { void find(){ jdbc.query(\"select * from issue_table\"); } }\n", encoding="utf-8")
+        service._build_repo_index("AF:All", entry, repo_path)
+        providers = []
+
+        def fake_build_llm_answer(service_instance, **kwargs):
+            providers.append(service_instance.llm_provider.name)
+            return {
+                "llm_answer": "fast codex draft",
+                "llm_finish_reason": "stop",
+                "deadline_hit": False,
+                "fallback_used": False,
+                "answer_quality": {"status": "sufficient"},
+                "structured_answer": {"direct_answer": "fast codex draft", "claims": []},
+                "answer_contract": {"status": "model_answer"},
+                "evidence_pack": {},
+                "llm_provider": service_instance.llm_provider.name,
+            }
+
+        with patch.object(SourceCodeQAService, "_build_llm_answer", autospec=True, side_effect=fake_build_llm_answer):
+            payload = service.query(
+                pm_team="AF",
+                country="All",
+                question="what table does IssueRepository read",
+                answer_mode="auto",
+                llm_budget_mode="fast",
+                query_mode="fast",
+            )
+
+        self.assertEqual(providers, ["codex_cli_bridge"])
+        self.assertEqual(payload["llm_provider"], "codex_cli_bridge")
+        self.assertEqual(payload["query_mode"], "fast")
 
     def test_codex_fast_query_timeout_returns_deadline_fallback(self):
         service = SourceCodeQAService(
@@ -8142,6 +8277,132 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertEqual(payload["fallback_answer_quality"], "medium")
         self.assertEqual(payload["fallback_evidence_count"], 1)
         self.assertGreaterEqual(payload["fallback_claim_count"], 1)
+
+    def test_codex_fast_blacklist_usage_rejects_generic_backup_and_enum_only(self):
+        service = SourceCodeQAService(
+            data_root=Path(self.temp_dir.name),
+            team_profiles=TEAM_PROFILE_DEFAULTS,
+            llm_provider="codex_cli_bridge",
+            gitlab_token="secret-token",
+            git_timeout_seconds=5,
+            max_file_bytes=200_000,
+        )
+        entry = RepositoryEntry("AF Auth", "https://git.example.com/team/auth.git")
+        matches = [
+            {
+                "repo": "AF Auth",
+                "path": "authentication/app/enumeration/BioDevBlackWhiteListTypeEnum.java",
+                "line_start": 1,
+                "line_end": 4,
+                "retrieval": "persistent_index",
+                "trace_stage": "direct",
+                "reason": "matched blacklist enum",
+                "score": 20,
+                "snippet": 'public enum BioDevBlackWhiteListTypeEnum {\n  BLACK(1, "Blacklist"),\n}',
+            },
+            {
+                "repo": "AF Auth",
+                "path": "backup/v1.0.37_20240202/es/iml-es.sh",
+                "line_start": 12,
+                "line_end": 12,
+                "retrieval": "persistent_index",
+                "trace_stage": "direct",
+                "reason": "matched used",
+                "score": 19,
+                "snippet": '"description": "used for live ivlog"',
+            },
+        ]
+        with patch.object(service.llm_provider, "ready", return_value=True), patch.object(
+            service.llm_provider,
+            "generate",
+            side_effect=ToolError("Codex CLI timed out after 55s."),
+        ):
+            payload = service._build_llm_answer(
+                entries=[entry],
+                key="AF:All",
+                pm_team="AF",
+                country="All",
+                question="Can you tell me how blacklist is used?",
+                matches=matches,
+                llm_budget_mode="auto",
+                query_mode="fast",
+                requested_answer_mode="auto",
+            )
+
+        self.assertTrue(payload["fast_insufficient_evidence"])
+        self.assertEqual(payload["fast_quality_gate"]["status"], "definition_only")
+        self.assertIn("usage flow not yet confirmed", payload["fast_quality_gate"]["reason"])
+        self.assertNotIn("fast mode 可以给出第一版结论", payload["llm_answer"])
+        claim_text = json.dumps(payload["structured_answer"]["claims"], ensure_ascii=False)
+        self.assertIn("BioDevBlackWhiteListTypeEnum", claim_text)
+        self.assertNotIn("iml-es.sh", claim_text)
+        self.assertIn("Definition found, but usage flow is not yet confirmed", json.dumps(payload["structured_answer"], ensure_ascii=False))
+
+    def test_codex_fast_timeout_with_weak_evidence_returns_draft_without_auto_deep(self):
+        service = SourceCodeQAService(
+            data_root=Path(self.temp_dir.name),
+            team_profiles=TEAM_PROFILE_DEFAULTS,
+            llm_provider="codex_cli_bridge",
+            gitlab_token="secret-token",
+            git_timeout_seconds=5,
+            max_file_bytes=200_000,
+        )
+        entry = RepositoryEntry("AF Auth", "https://git.example.com/team/auth.git")
+        service.save_mapping(pm_team="AF", country="All", repositories=[{"display_name": entry.display_name, "url": entry.url}])
+        repo_path = service._repo_path("AF:All", entry)
+        (repo_path / ".git").mkdir(parents=True)
+        source_file = repo_path / "src/BlacklistService.java"
+        source_file.parent.mkdir(parents=True)
+        source_file.write_text(
+            "class BlacklistService {\n"
+            "  boolean isBlocked(User user) { return blacklistRepository.exists(user.id()); }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        service._build_repo_index("AF:All", entry, repo_path)
+        calls = []
+        progress = []
+
+        def fake_build_llm_answer(**kwargs):
+            calls.append(kwargs)
+            return {
+                "llm_answer": "bad fast fallback",
+                "llm_finish_reason": "fast_deadline_fallback",
+                "deadline_hit": True,
+                "fallback_used": True,
+                "answer_quality": {"status": "insufficient"},
+                "fast_quality_gate": {"status": "insufficient", "reason": "weak evidence", "needs_deep": True},
+                "fast_insufficient_evidence": True,
+                "deadline_fallback_reason": "Codex CLI timed out after 55s.",
+            }
+
+        def capture_progress(stage, message, current, total):
+            progress.append((stage, message, current, total))
+
+        with patch.object(service, "_build_llm_answer", side_effect=fake_build_llm_answer):
+            payload = service.query(
+                pm_team="AF",
+                country="All",
+                question="Can you tell me how blacklist is used?",
+                answer_mode="auto",
+                llm_budget_mode="fast",
+                query_mode="fast",
+                conversation_context={"used": True, "question": "previous blacklist question"},
+                attachments=[{"id": "att-1", "path": "/tmp/screen.png"}],
+                runtime_evidence=[{"kind": "note", "text": "runtime hint"}],
+                progress_callback=capture_progress,
+            )
+
+        self.assertEqual([call["query_mode"] for call in calls], ["fast"])
+        self.assertEqual(calls[0]["attachments"], [{"id": "att-1", "path": "/tmp/screen.png"}])
+        self.assertEqual(calls[0]["runtime_evidence"], [{"kind": "note", "text": "runtime hint"}])
+        self.assertTrue(calls[0]["followup_context"].get("used"))
+        self.assertEqual(payload["query_mode"], "fast")
+        self.assertEqual(payload.get("requested_query_mode") or "", "")
+        self.assertNotIn("fast_auto_deep_triggered", payload)
+        self.assertEqual(payload["llm_answer"], "bad fast fallback")
+        self.assertTrue(payload["deadline_hit"])
+        self.assertNotIn("auto_deep", [stage for stage, _message, _current, _total in progress])
 
     def test_codex_fast_query_timeout_preserves_multiple_focus_terms(self):
         service = SourceCodeQAService(
@@ -8279,8 +8540,8 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             )
 
         exec_calls = [item for item in calls if "exec" in item[0]]
-        self.assertEqual(exec_calls[0][1]["timeout"], 70)
-        self.assertTrue(payload["llm_route"]["fast_adaptive_timeout"])
+        self.assertEqual(exec_calls[0][1]["timeout"], 55)
+        self.assertFalse(payload["llm_route"]["fast_adaptive_timeout"])
         self.assertIn("merchantUId", payload["llm_route"]["fast_inherited_focus_terms"])
         self.assertIn("shopeeUid", payload["llm_route"]["fast_inherited_focus_terms"])
 
@@ -8333,7 +8594,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         with patch.object(service.llm_provider, "ready", return_value=True), patch.object(
             service.llm_provider,
             "generate",
-            side_effect=ToolError("Codex CLI timed out after 70s."),
+            side_effect=ToolError("Codex CLI timed out after 55s."),
         ):
             payload = service._build_llm_answer(
                 entries=[entry],
@@ -8350,7 +8611,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
 
         self.assertTrue(payload["deadline_hit"])
         self.assertTrue(payload["fallback_used"])
-        self.assertEqual(payload["llm_latency_ms"], 70000)
+        self.assertEqual(payload["llm_latency_ms"], 55000)
         first_claim = payload["structured_answer"]["claims"][0]["text"]
         self.assertIn("ShopeeUid.tsx", first_claim)
         self.assertNotIn("BizErrorType", first_claim)
