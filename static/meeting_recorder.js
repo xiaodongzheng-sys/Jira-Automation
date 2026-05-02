@@ -395,7 +395,10 @@
     const transcriptDownloadUrl = downloadUrl(transcriptUrl);
     const usingPlaybackCopy = Boolean(media.playback_video_url);
     const visualEvidence = Array.isArray(record.visual_evidence) ? record.visual_evidence : [];
-    const audioLabel = state.diagnostics?.audio_capture_label || '';
+    const recordDiagnostics = record.diagnostics_snapshot || {};
+    const audioLabel = recordDiagnostics.audio_capture_label || state.diagnostics?.audio_capture_label || '';
+    const audioInputLabel = recordDiagnostics.audio_input || '';
+    const audioSummary = [audioLabel, audioInputLabel ? `input: ${audioInputLabel}` : ''].filter(Boolean).join(' · ');
     const audioPreflight = record.audio_preflight || {};
     const recordingHealth = record.recording_health || {};
     state.selectedRecordId = recordId;
@@ -432,7 +435,7 @@
       <section class="meeting-output">
         <div class="meeting-output-head">
           <h3>${isAudioOnly ? 'Audio Recording' : 'Screen Recording'}</h3>
-          ${audioLabel ? `<span>${escapeHtml(audioLabel)}</span>` : ''}
+          ${audioSummary ? `<span>${escapeHtml(audioSummary)}</span>` : ''}
         </div>
         ${recordingUrl ? `
           <div class="button-row meeting-video-actions">
