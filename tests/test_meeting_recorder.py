@@ -8,6 +8,7 @@ from bpmis_jira_tool.meeting_recorder import (
     MeetingProcessingService,
     MeetingRecorderConfig,
     MeetingRecordStore,
+    _parse_srt_transcript,
     extract_meeting_links,
     meeting_platform_from_link,
     normalize_calendar_event,
@@ -89,7 +90,7 @@ class FakeTextClient:
 
 
 class MeetingProcessingServiceTests(unittest.TestCase):
-    def test_generate_minutes_uses_text_client_not_openai_chat_api(self):
+    def test_generate_minutes_uses_audio_transcript_only(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             text_client = FakeTextClient()
             service = MeetingProcessingService(
@@ -101,12 +102,33 @@ class MeetingProcessingServiceTests(unittest.TestCase):
             minutes = service._generate_minutes(
                 record={"title": "Review", "platform": "zoom", "scheduled_start": "", "attendees": []},
                 transcript_text="Alice: approve the launch.",
-                visual_evidence=[{"timestamp_seconds": 0, "summary": "Screen keyframe captured around 00:00."}],
             )
 
         self.assertIn("Codex minutes", minutes)
         self.assertEqual(len(text_client.calls), 1)
         self.assertIn("Alice: approve the launch.", text_client.calls[0]["user_prompt"])
+        self.assertNotIn("Screen Evidence", text_client.calls[0]["user_prompt"])
+        self.assertNotIn("keyframe", text_client.calls[0]["user_prompt"])
+        self.assertNotIn("screen evidence", text_client.calls[0]["system_prompt"].lower())
+
+    def test_parse_srt_transcript_chunks(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            srt_path = Path(temp_dir) / "whisper-transcript.srt"
+            srt_path.write_text(
+                "1\n00:00:01,500 --> 00:00:03,000\n你好，今天开始。\n\n"
+                "2\n00:00:05,000 --> 00:00:07,250\nWe approve launch.\n",
+                encoding="utf-8",
+            )
+
+            chunks = _parse_srt_transcript(srt_path)
+
+        self.assertEqual(
+            chunks,
+            [
+                {"start_seconds": 1.5, "end_seconds": 3.0, "text": "你好，今天开始。"},
+                {"start_seconds": 5.0, "end_seconds": 7.25, "text": "We approve launch."},
+            ],
+        )
 
     def test_transcribe_audio_uses_whisper_cpp(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -118,6 +140,10 @@ class MeetingProcessingServiceTests(unittest.TestCase):
             audio_path = record_dir / "audio.wav"
             audio_path.write_bytes(b"audio")
             (record_dir / "whisper-transcript.txt").write_text("hello 中文", encoding="utf-8")
+            (record_dir / "whisper-transcript.srt").write_text(
+                "1\n00:00:00,000 --> 00:00:02,000\nhello 中文\n",
+                encoding="utf-8",
+            )
             service = MeetingProcessingService(
                 store=MeetingRecordStore(root),
                 config=MeetingRecorderConfig(whisper_cpp_bin="whisper-cli", whisper_model=str(model_path)),
@@ -130,10 +156,12 @@ class MeetingProcessingServiceTests(unittest.TestCase):
                 run_command.return_value = Mock(stdout="")
                 transcript = service._transcribe_audio(audio_path)
 
-        self.assertEqual(transcript, "hello 中文")
+        self.assertEqual(transcript["text"], "hello 中文")
+        self.assertEqual(transcript["chunks"], [{"start_seconds": 0.0, "end_seconds": 2.0, "text": "hello 中文"}])
         command = run_command.call_args.args[0]
         self.assertIn("/usr/local/bin/whisper-cli", command)
         self.assertIn(str(model_path), command)
+        self.assertIn("-osrt", command)
         self.assertIn("-l", command)
         self.assertIn("auto", command)
 

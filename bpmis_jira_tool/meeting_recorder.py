@@ -22,7 +22,7 @@ from bpmis_jira_tool.gmail_sender import credentials_from_payload, send_gmail_me
 
 
 CALENDAR_READONLY_SCOPE = "https://www.googleapis.com/auth/calendar.readonly"
-MEETING_RECORDER_PROMPT_VERSION = "v1_screen_aware_english_minutes"
+MEETING_RECORDER_PROMPT_VERSION = "v2_audio_only_english_minutes"
 MEETING_RECORD_STATUSES = {
     "scheduled",
     "recording",
@@ -424,17 +424,18 @@ class MeetingProcessingService:
         try:
             video_path = self._video_path(record)
             audio_path = self._extract_audio(record, video_path)
-            transcript_text = self._transcribe_audio(audio_path)
-            evidence = self._extract_visual_evidence(record, video_path)
-            minutes = self._generate_minutes(record=record, transcript_text=transcript_text, visual_evidence=evidence)
+            transcript = self._transcribe_audio(audio_path)
+            transcript_text = str(transcript.get("text") or "").strip()
+            snapshots = self._extract_visual_evidence(record, video_path)
+            minutes = self._generate_minutes(record=record, transcript_text=transcript_text)
             record["transcript"] = {
                 "status": "completed",
                 "text": transcript_text,
-                "chunks": [{"start_seconds": 0, "text": transcript_text}],
+                "chunks": transcript.get("chunks") or [{"start_seconds": 0, "text": transcript_text}],
                 "asset_url": f"/meeting-recorder/assets/{record_id}/transcript.txt",
             }
             (self.store.record_dir(record_id) / "transcript.txt").write_text(transcript_text, encoding="utf-8")
-            record["visual_evidence"] = evidence
+            record["visual_evidence"] = snapshots
             record["minutes"] = {
                 "status": "completed",
                 "markdown": minutes,
@@ -521,7 +522,7 @@ class MeetingProcessingService:
         _run_command(command, "Could not extract audio from meeting video.")
         return audio_path
 
-    def _transcribe_audio(self, audio_path: Path) -> str:
+    def _transcribe_audio(self, audio_path: Path) -> dict[str, Any]:
         provider = str(self.config.transcribe_provider or "whisper_cpp").strip().lower()
         if provider != "whisper_cpp":
             raise ConfigError("Meeting Recorder transcription is restricted to whisper.cpp.")
@@ -541,6 +542,7 @@ class MeetingProcessingService:
             "-f",
             str(audio_path),
             "-otxt",
+            "-osrt",
             "-of",
             str(output_base),
         ]
@@ -555,7 +557,10 @@ class MeetingProcessingService:
             transcript = (completed.stdout or "").strip()
         if not transcript:
             raise ToolError("whisper.cpp transcription produced no text.")
-        return transcript
+        chunks = _parse_srt_transcript(output_base.with_suffix(".srt"))
+        if not chunks:
+            chunks = [{"start_seconds": 0, "end_seconds": 0, "text": transcript}]
+        return {"text": transcript, "chunks": chunks}
 
     def _extract_visual_evidence(self, record: dict[str, Any], video_path: Path) -> list[dict[str, Any]]:
         ffmpeg_path = _resolve_ffmpeg_bin(self.config.ffmpeg_bin)
@@ -587,19 +592,17 @@ class MeetingProcessingService:
                 {
                     "timestamp_seconds": timestamp,
                     "image_url": f"/meeting-recorder/assets/{record['record_id']}/keyframes/{frame_path.name}",
-                    "summary": f"Screen keyframe captured around {timestamp // 60:02d}:{timestamp % 60:02d}.",
+                    "summary": f"Video snapshot captured around {timestamp // 60:02d}:{timestamp % 60:02d}.",
                 }
             )
         return evidence
 
-    def _generate_minutes(self, *, record: dict[str, Any], transcript_text: str, visual_evidence: list[dict[str, Any]]) -> str:
-        visual_lines = "\n".join(
-            f"- {item.get('timestamp_seconds', 0)}s: {item.get('summary') or item.get('image_url')}"
-            for item in visual_evidence
-        ) or "No screen evidence was extracted."
+    def _generate_minutes(self, *, record: dict[str, Any], transcript_text: str) -> str:
         system_prompt = (
             "You write concise, evidence-grounded English meeting minutes for product managers. "
-            "Use only the provided transcript and screen evidence. Do not invent owners, decisions, or dates."
+            "Use only the provided spoken transcript and meeting metadata. "
+            "Do not use screen recordings, screenshots, keyframes, or visual context. "
+            "Do not invent owners, decisions, dates, or follow-ups."
         )
         user_prompt = (
             f"Meeting title: {record.get('title')}\n"
@@ -608,9 +611,7 @@ class MeetingProcessingService:
             f"Attendees from calendar: {json.dumps(record.get('attendees') or [], ensure_ascii=False)}\n\n"
             "# Transcript\n"
             f"{transcript_text or 'No transcript text was produced.'}\n\n"
-            "# Screen Evidence\n"
-            f"{visual_lines}\n\n"
-            "Return Markdown with exactly these sections: Summary, Decisions, Action Items, Risks/Blockers, Open Questions, Follow-ups, Screen Evidence."
+            "Return Markdown with exactly these sections: Summary, Decisions, Action Items, Risks/Blockers, Open Questions, Follow-ups."
         )
         return self.text_client.create_answer(system_prompt=system_prompt, user_prompt=user_prompt).strip()
 
@@ -630,6 +631,49 @@ def _run_command(command: list[str], error_message: str, *, timeout_seconds: int
         detail = (completed.stderr or completed.stdout or "").strip()[-1200:]
         raise ToolError(f"{error_message} {detail}".strip())
     return completed
+
+
+def _parse_srt_transcript(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    try:
+        payload = path.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    chunks: list[dict[str, Any]] = []
+    for block in re.split(r"\n\s*\n", payload.strip()):
+        lines = [line.strip() for line in block.splitlines() if line.strip()]
+        if len(lines) < 2:
+            continue
+        time_line_index = 0
+        if re.fullmatch(r"\d+", lines[0]) and len(lines) >= 3:
+            time_line_index = 1
+        time_match = re.match(
+            r"(?P<start>\d{2}:\d{2}:\d{2}[,.]\d{3})\s*-->\s*(?P<end>\d{2}:\d{2}:\d{2}[,.]\d{3})",
+            lines[time_line_index],
+        )
+        if not time_match:
+            continue
+        text = " ".join(lines[time_line_index + 1 :]).strip()
+        if not text:
+            continue
+        chunks.append(
+            {
+                "start_seconds": _srt_timestamp_seconds(time_match.group("start")),
+                "end_seconds": _srt_timestamp_seconds(time_match.group("end")),
+                "text": text,
+            }
+        )
+    return chunks
+
+
+def _srt_timestamp_seconds(value: str) -> float:
+    normalized = str(value or "").replace(",", ".")
+    match = re.fullmatch(r"(\d{2}):(\d{2}):(\d{2})\.(\d{3})", normalized)
+    if not match:
+        return 0
+    hours, minutes, seconds, millis = (int(part) for part in match.groups())
+    return hours * 3600 + minutes * 60 + seconds + millis / 1000
 
 
 def _safe_record_id(record_id: str) -> str:
