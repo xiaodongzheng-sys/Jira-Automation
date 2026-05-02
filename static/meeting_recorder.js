@@ -35,6 +35,25 @@
     return `${url}${separator}download=1`;
   };
 
+  const filenameFromUrl = (url, fallback = 'meeting-recording.mp4') => {
+    try {
+      const pathname = new URL(url, window.location.origin).pathname;
+      return decodeURIComponent(pathname.split('/').filter(Boolean).pop() || fallback);
+    } catch (_error) {
+      return fallback;
+    }
+  };
+
+  const filenameFromDisposition = (header) => {
+    const value = String(header || '');
+    const utf8Match = value.match(/filename\*=UTF-8''([^;]+)/i);
+    if (utf8Match) return decodeURIComponent(utf8Match[1]);
+    const quotedMatch = value.match(/filename="([^"]+)"/i);
+    if (quotedMatch) return quotedMatch[1];
+    const plainMatch = value.match(/filename=([^;]+)/i);
+    return plainMatch ? plainMatch[1].trim() : '';
+  };
+
   const api = async (url, options = {}) => {
     const response = await fetch(url, {
       headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
@@ -411,8 +430,8 @@
         </div>
         ${videoUrl ? `
           <div class="button-row meeting-video-actions">
-            <a class="button" href="${escapeHtml(videoDownloadUrl)}" download>Download video file</a>
-            ${usingPlaybackCopy ? '<span class="inline-status">Downloading browser-compatible playback copy.</span>' : '<span class="inline-status">Download the original recording and play it locally.</span>'}
+            <button class="button" type="button" data-record-download-video="${escapeHtml(videoDownloadUrl)}" data-download-filename="${escapeHtml(filenameFromUrl(videoUrl))}">Download video file</button>
+            <span class="inline-status" data-video-download-status>${usingPlaybackCopy ? 'Downloads the browser-compatible playback copy.' : 'Downloads the original recording for local playback.'}</span>
           </div>
         ` : '<p class="empty-state">Video is not available yet.</p>'}
         ${videoUrl ? `
@@ -496,6 +515,50 @@
         await api(`/api/meeting-recorder/records/${encodeURIComponent(recordId)}`, { method: 'DELETE' });
         nodes.detail.innerHTML = '<p class="empty-state">Select a recorded meeting to view transcript, minutes, and video.</p>';
         await loadRecords();
+      });
+    });
+    nodes.detail.querySelectorAll('[data-record-download-video]').forEach((button) => {
+      button.addEventListener('click', async () => {
+        const status = nodes.detail.querySelector('[data-video-download-status]');
+        const originalText = button.textContent;
+        button.disabled = true;
+        button.textContent = 'Preparing download...';
+        if (status) {
+          status.textContent = 'Checking video file...';
+          status.classList.remove('inline-status-error');
+        }
+        try {
+          const response = await fetch(button.dataset.recordDownloadVideo || '', { credentials: 'same-origin' });
+          const contentType = response.headers.get('Content-Type') || '';
+          if (!response.ok) throw new Error(`Download failed with HTTP ${response.status}.`);
+          if (contentType.includes('text/html')) {
+            throw new Error('Download returned an HTML page instead of a video file. Refresh the page and sign in again, then retry.');
+          }
+          const blob = await response.blob();
+          if (!blob.size) throw new Error('Downloaded video file is empty.');
+          const filename = filenameFromDisposition(response.headers.get('Content-Disposition'))
+            || button.dataset.downloadFilename
+            || 'meeting-recording.mp4';
+          const objectUrl = URL.createObjectURL(blob);
+          const link = document.createElement('a');
+          link.href = objectUrl;
+          link.download = filename;
+          document.body.appendChild(link);
+          link.click();
+          link.remove();
+          window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+          if (status) status.textContent = `Download started: ${filename}`;
+          telemetry('video_download_started', { outcome: 'ok', reason: recordId || '' });
+        } catch (error) {
+          if (status) {
+            status.textContent = error.message || 'Could not download video.';
+            status.classList.add('inline-status-error');
+          }
+          telemetry('video_download_failed', { outcome: 'error', reason: recordId || '', error_message: error.message || '' });
+        } finally {
+          button.disabled = false;
+          button.textContent = originalText;
+        }
       });
     });
   };

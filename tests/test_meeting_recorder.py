@@ -668,6 +668,7 @@ class MeetingRecorderRouteTests(unittest.TestCase):
             relative_path="meeting.mp4",
             range_header="bytes=0-99",
             method="GET",
+            download=False,
         )
 
     def test_meeting_asset_download_sets_attachment_header_for_local_agent(self):
@@ -694,6 +695,34 @@ class MeetingRecorderRouteTests(unittest.TestCase):
         self.assertIn("meeting.mp4", response.headers.get("Content-Disposition", ""))
         self.assertEqual(response.data, b"video-bytes")
         self.assertTrue(fake_response.closed)
+        fake_client.meeting_recorder_asset_response.assert_called_once_with(
+            record_id="meeting-1",
+            owner_email="xiaodong.zheng@npt.sg",
+            relative_path="meeting.mp4",
+            range_header="",
+            method="GET",
+            download=True,
+        )
+
+    def test_meeting_asset_download_rejects_html_from_local_agent(self):
+        fake_response = FakeStreamingResponse(
+            status_code=200,
+            headers={"Content-Type": "text/html; charset=utf-8"},
+            chunks=[b"<html>not video</html>"],
+        )
+        fake_client = Mock()
+        fake_client.meeting_recorder_asset_response.return_value = fake_response
+
+        with patch("bpmis_jira_tool.web._local_agent_meeting_recorder_enabled", return_value=True):
+            with patch("bpmis_jira_tool.web._build_local_agent_client", return_value=fake_client):
+                with self.app.test_client() as client:
+                    self._login(client, email="xiaodong.zheng@npt.sg")
+                    response = client.get("/meeting-recorder/assets/meeting-1/meeting.mp4?download=1")
+
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(response.headers.get("Content-Type"), "application/json")
+        self.assertNotIn("attachment", response.headers.get("Content-Disposition", ""))
+        self.assertTrue(fake_response.closed)
 
     def test_base_template_renders_meeting_indicator_and_reminder_script(self):
         with self.app.test_client() as client:
@@ -718,6 +747,8 @@ class MeetingRecorderRouteTests(unittest.TestCase):
 
         self.assertIn("Download video file", source)
         self.assertIn("download=1", source)
+        self.assertIn("data-record-download-video", source)
+        self.assertIn("Download returned an HTML page", source)
         self.assertIn("Build downloadable playback copy", source)
         self.assertIn("/repair-video", source)
         self.assertIn("Transcript may be incomplete", source)

@@ -267,10 +267,14 @@ class LocalAgentClient:
         relative_path: str,
         range_header: str = "",
         method: str = "GET",
+        download: bool = False,
     ) -> requests.Response:
         safe_record_id = quote(str(record_id or ""), safe="")
         safe_relative_path = quote(str(relative_path or "").strip().lstrip("/"), safe="/")
-        query = urlencode({"owner_email": str(owner_email or "")})
+        query_values = {"owner_email": str(owner_email or "")}
+        if download:
+            query_values["download"] = "1"
+        query = urlencode(query_values)
         headers = {"Range": range_header} if str(range_header or "").strip() else None
         return self._request_raw(
             method,

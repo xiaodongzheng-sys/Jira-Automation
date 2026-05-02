@@ -4040,7 +4040,15 @@ def create_app() -> Flask:
                     relative_path=relative_path,
                     range_header=str(request.headers.get("Range") or ""),
                     method=request.method,
+                    download=as_download,
                 )
+                content_type = str(upstream.headers.get("Content-Type") or "")
+                if as_download and "text/html" in content_type.lower():
+                    upstream.close()
+                    return jsonify({
+                        "status": "error",
+                        "message": "Meeting video download returned an HTML response instead of a video file. Refresh the page and sign in again, then retry.",
+                    }), HTTPStatus.BAD_GATEWAY
                 excluded_headers = {"content-encoding", "connection", "transfer-encoding"}
                 headers = [
                     (key, value)
