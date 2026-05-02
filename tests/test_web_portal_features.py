@@ -277,6 +277,24 @@ class _FakeMonthlyReportLocalAgentClient(_FakePRDReviewLocalAgentClient):
 
 
 class WebPortalFeatureTests(unittest.TestCase):
+    def test_team_dashboard_fetch_stats_exposes_bulk_and_probe_counters(self):
+        class FakeBPMISClient:
+            request_stats = {
+                "jira_live_bulk_lookup_count": 3,
+                "jira_live_bulk_issue_count": 220,
+                "jira_live_detail_lookup_count": 0,
+                "bpmis_release_query_filter_probe_count": 1,
+                "bpmis_release_query_filter_enabled_count": 1,
+            }
+
+        stats = web_module._team_dashboard_fetch_stats(FakeBPMISClient())
+
+        self.assertEqual(stats["jira_live_bulk_lookup_count"], 3)
+        self.assertEqual(stats["jira_live_bulk_issue_count"], 220)
+        self.assertEqual(stats["jira_live_detail_lookup_count"], 0)
+        self.assertEqual(stats["bpmis_release_query_filter_probe_count"], 1)
+        self.assertEqual(stats["bpmis_release_query_filter_enabled_count"], 1)
+
     def test_classify_portal_error_categorizes_duplicate_route_rule(self):
         details = _classify_portal_error(
             ToolError(

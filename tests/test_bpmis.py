@@ -1738,7 +1738,7 @@ class BPMISClientTests(unittest.TestCase):
             self.assertEqual(tasks[1]["version"], "Planning_26Q3")
             self.assertEqual(tasks[1]["parent_project"]["bpmis_id"], "225160")
 
-    def test_list_jira_tasks_created_by_emails_uses_live_jira_status_when_available(self):
+    def test_list_jira_tasks_created_by_emails_uses_bulk_live_jira_status_when_available(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             settings = Settings(
                 flask_secret_key="secret",
@@ -1788,18 +1788,24 @@ class BPMISClientTests(unittest.TestCase):
                 }
 
             def fake_request(**kwargs):
-                self.assertTrue(kwargs["url"].endswith("/rest/api/2/issue/SGDB-68363"))
+                self.assertTrue(kwargs["url"].endswith("/rest/api/2/search"))
+                self.assertEqual(kwargs["json"]["fields"], ["summary", "status", "fixVersions", "components"])
+                self.assertEqual(kwargs["json"]["jql"], 'key in ("SGDB-68363")')
                 return self._FakeResponse(
                     200,
                     {
-                        "id": "10001",
-                        "key": "SGDB-68363",
-                        "fields": {
-                            "summary": "[Feature] AF - DFP upgrade trojan malware detection",
-                            "status": {"name": "Closed"},
-                            "fixVersions": [],
-                            "components": [],
-                        },
+                        "issues": [
+                            {
+                                "id": "10001",
+                                "key": "SGDB-68363",
+                                "fields": {
+                                    "summary": "[Feature] AF - DFP upgrade trojan malware detection",
+                                    "status": {"name": "Closed"},
+                                    "fixVersions": [],
+                                    "components": [],
+                                },
+                            }
+                        ],
                     },
                 )
 
@@ -1818,8 +1824,137 @@ class BPMISClientTests(unittest.TestCase):
             self.assertEqual(tasks[0]["issue_id"], "991")
             self.assertEqual(tasks[0]["jira_status"], "Closed")
             self.assertEqual(tasks[0]["jira_title"], "[Feature] AF - DFP upgrade trojan malware detection")
-            self.assertEqual(client.request_stats["jira_live_detail_lookup_count"], 1)
+            self.assertEqual(client.request_stats["jira_live_bulk_lookup_count"], 1)
+            self.assertEqual(client.request_stats["jira_live_bulk_issue_count"], 1)
+            self.assertEqual(client.request_stats["jira_live_detail_lookup_count"], 0)
             self.assertEqual(client.request_stats["jira_live_status_override_count"], 1)
+
+    def test_list_jira_tasks_created_by_emails_bulk_live_jira_chunks_large_loads(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            client = BPMISDirectApiClient(self._settings(temp_dir))
+            client._resolve_bpmis_user_ids_by_emails = lambda emails: {"pm@npt.sg": [101]}  # type: ignore[method-assign]
+
+            def fake_api_request(path, method="GET", params=None, body=None):
+                self.assertEqual(path, "/api/v1/issues/list")
+                search = json.loads((params or {}).get("search") or "{}")
+                page = int(search.get("page") or 1)
+                start = 0 if page == 1 else 200
+                count = 200 if page == 1 else 20
+                return {
+                    "data": {
+                        "rows": [
+                            {
+                                "id": 1000 + index,
+                                "jiraKey": f"AF-{index}",
+                                "summary": f"Stale task {index}",
+                                "reporter": {"id": 101},
+                                "status": {"label": "Waiting"},
+                            }
+                            for index in range(start, start + count)
+                        ]
+                    }
+                }
+
+            bulk_jqls: list[str] = []
+
+            def fake_request(**kwargs):
+                self.assertTrue(kwargs["url"].endswith("/rest/api/2/search"))
+                jql = kwargs["json"]["jql"]
+                bulk_jqls.append(jql)
+                keys = [item.strip().strip('"') for item in jql.removeprefix("key in (").removesuffix(")").split(",")]
+                return self._FakeResponse(
+                    200,
+                    {
+                        "issues": [
+                            {
+                                "id": str(9000 + index),
+                                "key": key,
+                                "fields": {
+                                    "summary": f"Live {key}",
+                                    "status": {"name": "Closed"},
+                                    "fixVersions": [],
+                                    "components": [],
+                                },
+                            }
+                            for index, key in enumerate(keys)
+                        ]
+                    },
+                )
+
+            env = {
+                "JIRA_API_TOKEN": "dXNlcjp0b2tlbg==",
+                "JIRA_AUTH_SCHEME": "basic",
+                "JIRA_BASE_URL": "https://jira.example.test",
+                "JIRA_USERNAME": "",
+                "JIRA_EMAIL": "",
+            }
+            client._api_request = fake_api_request  # type: ignore[method-assign]
+            with patch.dict(os.environ, env), patch("bpmis_jira_tool.bpmis.requests.request", side_effect=fake_request):
+                tasks = client.list_jira_tasks_created_by_emails(["pm@npt.sg"], enrich_missing_parent=False)
+
+            self.assertEqual(len(tasks), 220)
+            self.assertEqual(len(bulk_jqls), 3)
+            self.assertEqual(client.request_stats["jira_live_bulk_lookup_count"], 3)
+            self.assertEqual(client.request_stats["jira_live_bulk_issue_count"], 220)
+            self.assertEqual(client.request_stats["jira_live_detail_lookup_count"], 0)
+            self.assertEqual(tasks[0]["jira_status"], "Closed")
+            self.assertEqual(tasks[0]["jira_title"], "Live AF-0")
+
+    def test_list_jira_tasks_created_by_emails_falls_back_when_bulk_live_jira_fails(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            client = BPMISDirectApiClient(self._settings(temp_dir))
+            client._resolve_bpmis_user_ids_by_emails = lambda emails: {"pm@npt.sg": [101]}  # type: ignore[method-assign]
+
+            def fake_api_request(path, method="GET", params=None, body=None):
+                self.assertEqual(path, "/api/v1/issues/list")
+                return {
+                    "data": {
+                        "rows": [
+                            {
+                                "id": 991,
+                                "jiraKey": "AF-991",
+                                "summary": "Stale task",
+                                "reporter": {"id": 101},
+                                "status": {"label": "Waiting"},
+                            }
+                        ]
+                    }
+                }
+
+            def fake_request(**kwargs):
+                if kwargs["url"].endswith("/rest/api/2/search"):
+                    return self._FakeResponse(400, {"errorMessages": ["bad jql"]})
+                self.assertTrue(kwargs["url"].endswith("/rest/api/2/issue/AF-991"))
+                return self._FakeResponse(
+                    200,
+                    {
+                        "id": "10001",
+                        "key": "AF-991",
+                        "fields": {
+                            "summary": "Live fallback task",
+                            "status": {"name": "Closed"},
+                            "fixVersions": [],
+                            "components": [],
+                        },
+                    },
+                )
+
+            env = {
+                "JIRA_API_TOKEN": "dXNlcjp0b2tlbg==",
+                "JIRA_AUTH_SCHEME": "basic",
+                "JIRA_BASE_URL": "https://jira.example.test",
+                "JIRA_USERNAME": "",
+                "JIRA_EMAIL": "",
+            }
+            client._api_request = fake_api_request  # type: ignore[method-assign]
+            with patch.dict(os.environ, env), patch("bpmis_jira_tool.bpmis.requests.request", side_effect=fake_request):
+                tasks = client.list_jira_tasks_created_by_emails(["pm@npt.sg"], enrich_missing_parent=False)
+
+            self.assertEqual(tasks[0]["jira_status"], "Closed")
+            self.assertEqual(tasks[0]["jira_title"], "Live fallback task")
+            self.assertEqual(client.request_stats["jira_live_bulk_lookup_count"], 1)
+            self.assertEqual(client.request_stats["jira_live_bulk_issue_count"], 0)
+            self.assertEqual(client.request_stats["jira_live_detail_lookup_count"], 1)
 
     def test_team_dashboard_jira_lookup_can_cap_pages_and_skip_missing_parent_detail(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1901,9 +2036,12 @@ class BPMISClientTests(unittest.TestCase):
 
             client = BPMISDirectApiClient(settings)
             client._resolve_bpmis_user_ids_by_emails = lambda emails: {email: [101] for email in emails}  # type: ignore[method-assign]
+            searches = []
 
             def fake_api_request(path, method="GET", params=None, body=None):
                 self.assertEqual(path, "/api/v1/issues/list")
+                search = json.loads((params or {}).get("search") or "{}")
+                searches.append(search)
                 return {
                     "data": {
                         "rows": [
@@ -1944,10 +2082,95 @@ class BPMISClientTests(unittest.TestCase):
             )
 
             self.assertEqual([task["jira_id"] for task in tasks], ["AF-991", "AF-992"])
+            self.assertEqual(len(searches[0]["subQueries"]), 2)
             self.assertEqual(tasks[0]["release_date"], "2026-03-01")
             self.assertEqual(tasks[1]["release_date"], "")
             self.assertEqual(client.request_stats["issue_release_before_cutoff_count"], 1)
             self.assertEqual(client.request_stats["issue_release_missing_included_count"], 1)
+
+    def test_team_dashboard_jira_lookup_can_probe_and_apply_bpmis_release_filter(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            client = BPMISDirectApiClient(self._settings(temp_dir))
+            client._resolve_bpmis_user_ids_by_emails = lambda emails: {"pm@npt.sg": [101]}  # type: ignore[method-assign]
+            searches = []
+
+            def fake_api_request(path, method="GET", params=None, body=None):
+                self.assertEqual(path, "/api/v1/issues/list")
+                search = json.loads((params or {}).get("search") or "{}")
+                searches.append(search)
+                release_query = search.get("subQueries", [])[-1]
+                release_text = json.dumps(release_query)
+                if "2999-12-31" in release_text:
+                    return {"data": {"rows": []}}
+                return {
+                    "data": {
+                        "rows": [
+                            {
+                                "id": 991,
+                                "jiraKey": "AF-991",
+                                "summary": "Future task",
+                                "reporter": {"id": 101},
+                                "fixVersionId": [{"timeline": {"release": "2026-05-01"}}],
+                                "status": {"label": "Testing"},
+                            }
+                        ]
+                    }
+                }
+
+            client._api_request = fake_api_request  # type: ignore[method-assign]
+            with patch.dict(os.environ, {"TEAM_DASHBOARD_BPMIS_RELEASE_QUERY_FILTER": "probe"}):
+                tasks = client.list_jira_tasks_created_by_emails(
+                    ["pm@npt.sg"],
+                    release_after="2026-04-29",
+                    enrich_missing_parent=False,
+                )
+
+            self.assertEqual([task["jira_id"] for task in tasks], ["AF-991"])
+            self.assertEqual(len(searches), 3)
+            self.assertIn("2026-04-29", json.dumps(searches[-1]["subQueries"][-1]))
+            self.assertEqual(client.request_stats["bpmis_release_query_filter_probe_count"], 1)
+            self.assertEqual(client.request_stats["bpmis_release_query_filter_enabled_count"], 1)
+
+    def test_team_dashboard_jira_lookup_skips_bpmis_release_filter_when_probe_fails(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            client = BPMISDirectApiClient(self._settings(temp_dir))
+            client._resolve_bpmis_user_ids_by_emails = lambda emails: {"pm@npt.sg": [101]}  # type: ignore[method-assign]
+            searches = []
+
+            def fake_api_request(path, method="GET", params=None, body=None):
+                self.assertEqual(path, "/api/v1/issues/list")
+                search = json.loads((params or {}).get("search") or "{}")
+                searches.append(search)
+                if "2999-12-31" in json.dumps(search):
+                    return {"data": {"rows": [{"id": 1}]}}
+                return {
+                    "data": {
+                        "rows": [
+                            {
+                                "id": 991,
+                                "jiraKey": "AF-991",
+                                "summary": "Future task",
+                                "reporter": {"id": 101},
+                                "fixVersionId": [{"timeline": {"release": "2026-05-01"}}],
+                                "status": {"label": "Testing"},
+                            }
+                        ]
+                    }
+                }
+
+            client._api_request = fake_api_request  # type: ignore[method-assign]
+            with patch.dict(os.environ, {"TEAM_DASHBOARD_BPMIS_RELEASE_QUERY_FILTER": "probe"}):
+                tasks = client.list_jira_tasks_created_by_emails(
+                    ["pm@npt.sg"],
+                    release_after="2026-04-29",
+                    enrich_missing_parent=False,
+                )
+
+            self.assertEqual([task["jira_id"] for task in tasks], ["AF-991"])
+            self.assertEqual(len(searches), 2)
+            self.assertEqual(len(searches[-1]["subQueries"]), 2)
+            self.assertEqual(client.request_stats["bpmis_release_query_filter_probe_count"], 1)
+            self.assertEqual(client.request_stats["bpmis_release_query_filter_enabled_count"], 0)
 
     def test_team_dashboard_parent_project_uses_inline_parent_when_detail_missing(self):
         with tempfile.TemporaryDirectory() as temp_dir:

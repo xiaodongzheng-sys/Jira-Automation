@@ -21,6 +21,7 @@ from bpmis_jira_tool.models import CreatedTicket, ProjectMatch
 ISSUE_KEY_PATTERN = re.compile(r"\b([A-Z][A-Z0-9]+-\d+)\b")
 BPMIS_LOGGER = logging.getLogger(__name__)
 BPMIS_SLOW_REQUEST_SECONDS = 5.0
+JIRA_LIVE_BULK_DETAIL_CHUNK_SIZE = 100
 
 
 class BPMISClient(ABC):
@@ -163,8 +164,12 @@ class BPMISDirectApiClient(BPMISClient):
         self.request_stats: dict[str, int] = {
             "api_call_count": 0,
             "issue_detail_lookup_count": 0,
+            "jira_live_bulk_lookup_count": 0,
+            "jira_live_bulk_issue_count": 0,
             "jira_live_detail_lookup_count": 0,
             "jira_live_status_override_count": 0,
+            "bpmis_release_query_filter_probe_count": 0,
+            "bpmis_release_query_filter_enabled_count": 0,
             "issue_detail_enrichment_skipped_count": 0,
             "issue_created_before_cutoff_count": 0,
             "issue_release_before_cutoff_count": 0,
@@ -469,6 +474,7 @@ class BPMISDirectApiClient(BPMISClient):
         page_size = 200
         created_cutoff = self._parse_issue_datetime(created_after) if created_after else None
         release_cutoff = self._parse_issue_datetime(release_after) if release_after else None
+        use_release_query_filter = self._bpmis_release_query_filter_enabled(user_ids, release_cutoff)
         while True:
             if max_pages is not None and page > max(0, int(max_pages)):
                 self.request_stats["issue_list_page_cap_hit"] += 1
@@ -477,22 +483,12 @@ class BPMISDirectApiClient(BPMISClient):
                 "/api/v1/issues/list",
                 params={
                     "search": json.dumps(
-                        {
-                            "joinType": "and",
-                            "subQueries": [
-                                {"typeId": [self.TASK_TYPE_ID]},
-                                {
-                                    "joinType": "or",
-                                    "subQueries": [
-                                        {"reporter": user_ids},
-                                        {"jiraRegionalPmPicId": user_ids},
-                                    ],
-                                },
-                            ],
-                            "page": page,
-                            "pageSize": page_size,
-                            "mapping": True,
-                        }
+                        self._team_dashboard_jira_issue_list_search_payload(
+                            user_ids,
+                            page=page,
+                            page_size=page_size,
+                            release_cutoff=release_cutoff if use_release_query_filter else None,
+                        )
                     )
                 },
             )
@@ -507,7 +503,7 @@ class BPMISDirectApiClient(BPMISClient):
                 break
             page += 1
 
-        tasks: list[dict[str, Any]] = []
+        task_rows: list[tuple[dict[str, Any], str, str, dict[str, Any]]] = []
         seen_issue_ids: set[str] = set()
         parent_project_cache: dict[str, dict[str, Any]] = {}
         user_id_texts_by_email = {email: {str(user_id) for user_id in ids} for email, ids in user_ids_by_email.items()}
@@ -546,9 +542,106 @@ class BPMISDirectApiClient(BPMISClient):
             elif issue_id and not self._extract_parent_issue_ids(row):
                 self.request_stats["issue_detail_enrichment_skipped_count"] += 1
             parent_project = self._parent_project_for_task(row, parent_project_cache)
-            row = self._with_live_jira_fields(row, issue_key)
+            task_rows.append((row, issue_key, matched_email, parent_project))
+
+        live_details = self._get_jira_ticket_details_via_jira_bulk([issue_key for _row, issue_key, _email, _parent in task_rows])
+        tasks: list[dict[str, Any]] = []
+        for row, issue_key, matched_email, parent_project in task_rows:
+            if live_details is None:
+                row = self._with_live_jira_fields(row, issue_key)
+            else:
+                detail = live_details.get(self._normalize_jira_issue_key(issue_key))
+                if detail:
+                    row = self._merge_live_jira_fields(row, detail)
             tasks.append(self._normalize_team_dashboard_jira_task(row, pm_email=matched_email, parent_project=parent_project))
         return tasks
+
+    def _team_dashboard_jira_issue_list_search_payload(
+        self,
+        user_ids: list[int],
+        *,
+        page: int,
+        page_size: int,
+        release_cutoff: datetime | None = None,
+    ) -> dict[str, Any]:
+        sub_queries: list[dict[str, Any]] = [
+            {"typeId": [self.TASK_TYPE_ID]},
+            {
+                "joinType": "or",
+                "subQueries": [
+                    {"reporter": user_ids},
+                    {"jiraRegionalPmPicId": user_ids},
+                ],
+            },
+        ]
+        if release_cutoff:
+            sub_queries.append(self._bpmis_release_cutoff_subquery(release_cutoff))
+        return {
+            "joinType": "and",
+            "subQueries": sub_queries,
+            "page": page,
+            "pageSize": page_size,
+            "mapping": True,
+        }
+
+    def _bpmis_release_cutoff_subquery(self, release_cutoff: datetime) -> dict[str, Any]:
+        cutoff_text = release_cutoff.date().isoformat()
+        return {
+            "joinType": "or",
+            "subQueries": [
+                {"releaseDate": {"gte": cutoff_text}},
+                {"fixVersionId.timeline.release": {"gte": cutoff_text}},
+                {"fixVersions.timeline.release": {"gte": cutoff_text}},
+            ],
+        }
+
+    def _bpmis_release_query_filter_enabled(self, user_ids: list[int], release_cutoff: datetime | None) -> bool:
+        if not release_cutoff:
+            return False
+        mode = str(os.getenv("TEAM_DASHBOARD_BPMIS_RELEASE_QUERY_FILTER") or "").strip().casefold()
+        if mode not in {"1", "true", "yes", "probe"}:
+            return False
+
+        self.request_stats["bpmis_release_query_filter_probe_count"] += 1
+        try:
+            future_payload = self._team_dashboard_jira_issue_list_search_payload(
+                user_ids,
+                page=1,
+                page_size=5,
+                release_cutoff=datetime(2999, 12, 31),
+            )
+            future_response = self._api_request(
+                "/api/v1/issues/list",
+                params={"search": json.dumps(future_payload)},
+            )
+            future_rows = ((future_response.get("data") or {}).get("rows") or []) if isinstance(future_response, dict) else []
+            if future_rows:
+                return False
+
+            cutoff_payload = self._team_dashboard_jira_issue_list_search_payload(
+                user_ids,
+                page=1,
+                page_size=5,
+                release_cutoff=release_cutoff,
+            )
+            cutoff_response = self._api_request(
+                "/api/v1/issues/list",
+                params={"search": json.dumps(cutoff_payload)},
+            )
+            cutoff_rows = ((cutoff_response.get("data") or {}).get("rows") or []) if isinstance(cutoff_response, dict) else []
+        except (BPMISError, ValueError, TypeError) as error:
+            self.event_logger.warning("Could not probe BPMIS release query filter: %s", error)
+            return False
+
+        if not cutoff_rows:
+            return False
+        for row in cutoff_rows:
+            release_text = self._extract_issue_release_date_text(row)
+            release_at = self._parse_issue_datetime(release_text)
+            if not release_text or not release_at or release_at < release_cutoff:
+                return False
+        self.request_stats["bpmis_release_query_filter_enabled_count"] += 1
+        return True
 
     def search_versions(self, query: str) -> list[dict[str, Any]]:
         normalized_query = query.strip()
@@ -1326,14 +1419,59 @@ class BPMISDirectApiClient(BPMISClient):
         if payload is None:
             return None
 
+        return self._normalize_live_jira_issue_payload(payload, fallback_ticket_key=ticket_key)
+
+    def _get_jira_ticket_details_via_jira_bulk(self, ticket_keys: list[str]) -> dict[str, dict[str, Any]] | None:
+        normalized_keys: list[str] = []
+        for ticket_key in ticket_keys:
+            normalized_key = self._normalize_jira_issue_key(ticket_key)
+            if normalized_key and normalized_key not in normalized_keys:
+                normalized_keys.append(normalized_key)
+        if not normalized_keys or not self._jira_token():
+            return {}
+
+        details: dict[str, dict[str, Any]] = {}
+        for index in range(0, len(normalized_keys), JIRA_LIVE_BULK_DETAIL_CHUNK_SIZE):
+            chunk = normalized_keys[index : index + JIRA_LIVE_BULK_DETAIL_CHUNK_SIZE]
+            self.request_stats["jira_live_bulk_lookup_count"] += 1
+            try:
+                payload = self._jira_api_request(
+                    "POST",
+                    "/rest/api/2/search",
+                    body={
+                        "jql": f"key in ({', '.join(self._jira_jql_literal(key) for key in chunk)})",
+                        "fields": ["summary", "status", "fixVersions", "components"],
+                        "maxResults": len(chunk),
+                    },
+                )
+            except BPMISError as error:
+                if self._jira_bulk_error_is_fallbackable(error):
+                    self.event_logger.warning("Could not bulk refresh live Jira fields: %s", error)
+                    return None
+                raise
+            if payload is None:
+                return None
+            issues = payload.get("issues") if isinstance(payload.get("issues"), list) else []
+            self.request_stats["jira_live_bulk_issue_count"] += len(issues)
+            for issue in issues:
+                if not isinstance(issue, dict):
+                    continue
+                detail = self._normalize_live_jira_issue_payload(issue)
+                detail_key = self._normalize_jira_issue_key(str(detail.get("jiraKey") or detail.get("key") or ""))
+                if detail_key:
+                    details[detail_key] = detail
+        return details
+
+    def _normalize_live_jira_issue_payload(self, payload: dict[str, Any], *, fallback_ticket_key: str = "") -> dict[str, Any]:
         fields = payload.get("fields") if isinstance(payload.get("fields"), dict) else {}
         status = fields.get("status") if isinstance(fields.get("status"), dict) else {}
         fix_versions = fields.get("fixVersions") if isinstance(fields.get("fixVersions"), list) else []
         components = fields.get("components") if isinstance(fields.get("components"), list) else []
+        ticket_key = str(payload.get("key") or fallback_ticket_key).strip()
         return {
             "id": str(payload.get("id") or "").strip(),
-            "jiraKey": str(payload.get("key") or ticket_key).strip(),
-            "key": str(payload.get("key") or ticket_key).strip(),
+            "jiraKey": ticket_key,
+            "key": ticket_key,
             "summary": str(fields.get("summary") or "").strip(),
             "status": {"label": str(status.get("name") or "").strip()},
             "fixVersions": [
@@ -1348,6 +1486,19 @@ class BPMISDirectApiClient(BPMISClient):
             ],
             "raw_jira": payload,
         }
+
+    def _normalize_jira_issue_key(self, ticket_key: str) -> str:
+        return (self._extract_issue_key(str(ticket_key or "")) or str(ticket_key or "").strip()).upper()
+
+    @staticmethod
+    def _jira_jql_literal(value: str) -> str:
+        escaped = str(value or "").replace("\\", "\\\\").replace('"', '\\"')
+        return f'"{escaped}"'
+
+    @staticmethod
+    def _jira_bulk_error_is_fallbackable(error: BPMISError) -> bool:
+        message = str(error)
+        return any(f"status {status}" in message for status in (400, 401, 403, 404))
 
     def _update_jira_ticket_status_via_jira(self, ticket_key: str, status: str) -> dict[str, Any] | None:
         try:
@@ -1536,6 +1687,9 @@ class BPMISDirectApiClient(BPMISClient):
         if not detail:
             return row
 
+        return self._merge_live_jira_fields(row, detail)
+
+    def _merge_live_jira_fields(self, row: dict[str, Any], detail: dict[str, Any]) -> dict[str, Any]:
         merged = dict(row)
         live_status = self._extract_jira_status_label(detail)
         current_status = self._extract_jira_status_label(row)
