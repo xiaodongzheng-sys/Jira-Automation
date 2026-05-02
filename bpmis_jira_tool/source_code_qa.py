@@ -15781,10 +15781,20 @@ class SourceCodeQAService:
             *STOPWORDS,
             *LOW_VALUE_FOCUS_TERMS,
             *SourceCodeQAService._fast_followup_low_value_terms(),
+            "can",
             "could",
+            "help",
+            "how",
+            "i",
             "please",
-            "show",
             "tell",
+            "what",
+            "when",
+            "where",
+            "which",
+            "you",
+            "your",
+            "show",
             "me",
             "used",
             "use",
@@ -15978,6 +15988,38 @@ class SourceCodeQAService:
         text = str((claim or {}).get("text") or "").lower()
         return any(term.lower() in text for term in focus_terms)
 
+    @staticmethod
+    def _fast_direct_claim_summary(claims: list[dict[str, Any]], *, limit: int = 4) -> str:
+        fragments: list[str] = []
+        seen: set[str] = set()
+        for claim in claims or []:
+            text = re.sub(r"\s+", " ", str((claim or {}).get("text") or "")).strip()
+            if not text:
+                continue
+            text = re.sub(r"\s*\[[Ss]\d+\]\s*", " ", text).strip()
+            if " shows `" in text and " near: " in text:
+                path_part, evidence_line = text.split(" near: ", 1)
+                path_part = path_part.split(" shows `", 1)[0].strip()
+                filename = Path(path_part).name or path_part
+                compact = f"{filename} ({evidence_line.strip()})"
+            else:
+                compact = text
+            compact = re.sub(r"\s+", " ", compact).strip(" ;,.")
+            if not compact:
+                continue
+            key = compact.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            fragments.append(compact[:180])
+            if len(fragments) >= max(1, int(limit or 4)):
+                break
+        if not fragments:
+            return ""
+        if len(fragments) == 1:
+            return fragments[0]
+        return "; ".join(fragments[:-1]) + f"; and {fragments[-1]}"
+
     @classmethod
     def _fast_claim_from_match(cls, citation: dict[str, Any], match: dict[str, Any], focus_terms: list[str]) -> str:
         path = str(match.get("path") or "").strip()
@@ -16023,10 +16065,15 @@ class SourceCodeQAService:
         if not claims:
             return "Fast mode did not find reliable enough code evidence for a meaningful answer; use Deep verification for the complete chain."
         term_text = "、".join(focus_terms[:4])
+        claim_summary = SourceCodeQAService._fast_direct_claim_summary(claims)
         if term_text and re.search(r"\b(explain|difference|diff|区别|是什么意思|什么是|解释)\b", question, flags=re.IGNORECASE):
+            if claim_summary:
+                return f"Fast mode reached the 1-minute limit before Codex completed full reasoning. Based on retrieved code, `{term_text}` is mainly connected to: {claim_summary}. Cross-file chain verification is not complete, so unresolved parts are listed in Missing Evidence."
             return f"Based on the retrieved code evidence, this is the first-pass explanation for `{term_text}`. Cross-file chain verification is not complete, so unresolved parts are listed in Missing Evidence."
         if confidence == "medium":
-            return "Fast mode found focused code evidence for the core term and can return a cited answer; unresolved cross-file links remain in Missing Evidence."
+            if claim_summary:
+                return f"Fast mode reached the 1-minute limit before Codex completed full reasoning. Based on retrieved code, `{term_text or 'the core term'}` is used around: {claim_summary}. Treat this as a first-pass map; unresolved cross-file links remain in Missing Evidence."
+            return "Fast mode reached the 1-minute limit before Codex completed full reasoning. Retrieved code evidence is focused, but unresolved cross-file links remain in Missing Evidence."
         if missing:
             return "Fast mode can only provide a low-confidence first-pass answer; key gaps are listed in Missing Evidence."
         return "Fast mode can only provide a first-pass answer based on retrieved evidence."

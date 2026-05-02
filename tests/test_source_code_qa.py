@@ -23,7 +23,13 @@ from bpmis_jira_tool.source_code_qa import (
     VertexAISourceCodeQALLMProvider,
 )
 from bpmis_jira_tool.user_config import TEAM_PROFILE_DEFAULTS
-from bpmis_jira_tool.web import JobStore, SourceCodeQAQueryScheduler, SourceCodeQASessionStore, create_app
+from bpmis_jira_tool.web import (
+    JobStore,
+    SourceCodeQAQueryScheduler,
+    SourceCodeQASessionStore,
+    _build_source_code_qa_session_context,
+    create_app,
+)
 from scripts.promote_source_code_qa_eval_candidates import promote_candidates
 from scripts.run_source_code_qa_evals import _build_fixture_repositories, _evaluate_case, _guard_fixture_data_root
 from scripts.source_code_qa_feedback_to_eval import build_eval_candidates
@@ -417,6 +423,41 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertEqual(payload["session"]["last_context"]["question"], "follow up")
         self.assertEqual(payload["session"]["last_context"]["recent_turns"][0]["question"], "first question")
         self.assertEqual(payload["session"]["last_context"]["recent_turns"][0]["trace_id"], "trace-1")
+
+    def test_session_context_preserves_fast_deadline_fallback_flags(self):
+        context = _build_source_code_qa_session_context(
+            {
+                "status": "ok",
+                "trace_id": "trace-fast",
+                "summary": "Found evidence",
+                "llm_answer": "Fast fallback answer",
+                "llm_provider": "codex_cli_bridge",
+                "llm_model": "gpt-5.5",
+                "query_mode": "fast",
+                "deadline_seconds": 60,
+                "deadline_hit": True,
+                "fallback_used": True,
+                "fallback_answer_quality": "medium",
+                "fallback_evidence_count": 3,
+                "fallback_claim_count": 2,
+                "deadline_fallback_reason": "Codex CLI timed out after 55s.",
+                "structured_answer": {
+                    "direct_answer": "Fast fallback answer",
+                    "claims": [],
+                    "missing_evidence": [],
+                    "confidence": "medium",
+                },
+                "matches": [],
+            },
+            {"pm_team": "AF", "country": "All", "question": "Can you tell me how blacklist is used?"},
+        )
+
+        self.assertEqual(context["query_mode"], "fast")
+        self.assertEqual(context["deadline_seconds"], 60)
+        self.assertTrue(context["deadline_hit"])
+        self.assertTrue(context["fallback_used"])
+        self.assertEqual(context["fallback_evidence_count"], 3)
+        self.assertEqual(context["deadline_fallback_reason"], "Codex CLI timed out after 55s.")
 
     def test_source_code_qa_attachment_upload_is_session_scoped(self):
         with self.app.test_client() as client:
@@ -8337,6 +8378,77 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertIn("BioDevBlackWhiteListTypeEnum", claim_text)
         self.assertNotIn("iml-es.sh", claim_text)
         self.assertIn("Definition found, but usage flow is not yet confirmed", json.dumps(payload["structured_answer"], ensure_ascii=False))
+
+    def test_codex_fast_timeout_summarizes_evidence_in_direct_answer(self):
+        service = SourceCodeQAService(
+            data_root=Path(self.temp_dir.name),
+            team_profiles=TEAM_PROFILE_DEFAULTS,
+            llm_provider="codex_cli_bridge",
+            gitlab_token="secret-token",
+            git_timeout_seconds=5,
+            max_file_bytes=200_000,
+        )
+        entry = RepositoryEntry("AF Admin", "https://git.example.com/team/anti-fraud-admin.git")
+        matches = [
+            {
+                "repo": "AF Admin",
+                "path": "anti-fraud-admin-infra/src/main/java/com/shopee/banking/af/admin/infra/constant/TreatmentTypeEnum.java",
+                "line_start": 8,
+                "line_end": 15,
+                "retrieval": "persistent_index",
+                "trace_stage": "direct",
+                "reason": "symbol matched: blacklist",
+                "score": 30,
+                "snippet": 'ADD_BLACKLIST("addBlacklist", "Add Blacklist"),',
+            },
+            {
+                "repo": "AF Admin",
+                "path": "anti-fraud-admin-infra/src/main/resources/mapper/main/SceneDOMapper.xml",
+                "line_start": 101,
+                "line_end": 125,
+                "retrieval": "persistent_index",
+                "trace_stage": "direct",
+                "reason": "content matched: blacklist",
+                "score": 29,
+                "snippet": '<if test="enableBlacklist != null"> and enable_blacklist = #{enableBlacklist}</if>',
+            },
+            {
+                "repo": "AF Admin",
+                "path": "anti-fraud-admin-app/src/main/java/com/shopee/banking/af/admin/app/util/TwoWayUtil.java",
+                "line_start": 66,
+                "line_end": 85,
+                "retrieval": "persistent_index",
+                "trace_stage": "direct",
+                "reason": "content matched: blacklist",
+                "score": 28,
+                "snippet": "case ADD_BLACKLIST: twoWayTemplateRelationConfigDO.setListIdType(approveTreatmentVO.getListIdType());",
+            },
+        ]
+        with patch.object(service.llm_provider, "ready", return_value=True), patch.object(
+            service.llm_provider,
+            "generate",
+            side_effect=ToolError("Codex CLI timed out after 55s."),
+        ):
+            payload = service._build_llm_answer(
+                entries=[entry],
+                key="AF:All",
+                pm_team="AF",
+                country="All",
+                question="Can you tell me how blacklist is used?",
+                matches=matches,
+                llm_budget_mode="auto",
+                query_mode="fast",
+                requested_answer_mode="auto",
+            )
+
+        self.assertTrue(payload["deadline_hit"])
+        self.assertTrue(payload["fallback_used"])
+        direct_answer = payload["structured_answer"]["direct_answer"]
+        self.assertIn("Fast mode reached the 1-minute limit", direct_answer)
+        self.assertIn("TreatmentTypeEnum.java", direct_answer)
+        self.assertIn("SceneDOMapper.xml", direct_answer)
+        self.assertNotIn("can return a cited answer", direct_answer)
+        self.assertNotIn("`you`", json.dumps(payload["structured_answer"], ensure_ascii=False))
 
     def test_codex_fast_timeout_with_weak_evidence_returns_draft_without_auto_deep(self):
         service = SourceCodeQAService(
