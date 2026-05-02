@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 from email.message import EmailMessage
+import mimetypes
 from pathlib import Path
 from typing import Any
 
@@ -87,6 +88,7 @@ def build_gmail_raw_message(
     subject: str,
     text_body: str,
     html_body: str | None = None,
+    attachments: list[dict[str, Any]] | None = None,
 ) -> str:
     message = EmailMessage()
     message["To"] = recipient
@@ -95,6 +97,25 @@ def build_gmail_raw_message(
     message.set_content(text_body)
     if html_body:
         message.add_alternative(html_body, subtype="html")
+    for attachment in attachments or []:
+        if not isinstance(attachment, dict):
+            continue
+        filename = Path(str(attachment.get("filename") or "attachment")).name or "attachment"
+        content = attachment.get("content")
+        if content is None:
+            continue
+        if isinstance(content, str):
+            content_bytes = content.encode("utf-8")
+        else:
+            content_bytes = bytes(content)
+        mime_type = str(attachment.get("mime_type") or mimetypes.guess_type(filename)[0] or "application/octet-stream")
+        maintype, _, subtype = mime_type.partition("/")
+        message.add_attachment(
+            content_bytes,
+            maintype=maintype or "application",
+            subtype=subtype or "octet-stream",
+            filename=filename,
+        )
     return base64.urlsafe_b64encode(message.as_bytes()).decode("utf-8")
 
 
@@ -107,6 +128,7 @@ def send_gmail_message(
     text_body: str,
     html_body: str | None = None,
     gmail_service: Any | None = None,
+    attachments: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     service = gmail_service or build_gmail_api_service(credentials)
     raw = build_gmail_raw_message(
@@ -115,5 +137,6 @@ def send_gmail_message(
         subject=subject,
         text_body=text_body,
         html_body=html_body,
+        attachments=attachments,
     )
     return service.users().messages().send(userId="me", body={"raw": raw}).execute()

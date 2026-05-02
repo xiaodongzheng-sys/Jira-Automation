@@ -1057,6 +1057,26 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         self.assertIn("To-do", decoded)
         self.assertIn("<p>Review</p>", decoded)
 
+    def test_gmail_raw_message_can_include_text_attachment(self):
+        raw = build_gmail_raw_message(
+            sender="xiaodong.zheng@npt.sg",
+            recipient="xiaodong.zheng@npt.sg",
+            subject="Meeting Minutes",
+            text_body="Minutes body",
+            attachments=[
+                {
+                    "filename": "meeting-transcript.txt",
+                    "mime_type": "text/plain",
+                    "content": b"Alice approved the launch.",
+                }
+            ],
+        )
+        decoded = base64.urlsafe_b64decode(raw.encode("utf-8")).decode("utf-8")
+
+        self.assertIn("filename=\"meeting-transcript.txt\"", decoded)
+        self.assertIn("Content-Type: text/plain", decoded)
+        self.assertIn("QWxpY2UgYXBwcm92ZWQgdGhlIGxhdW5jaC4=", decoded)
+
     def test_missing_gmail_send_scope_reports_reconnect(self):
         with self.assertRaisesRegex(ConfigError, "Reconnect Google"):
             ensure_gmail_send_scope({"scopes": ["https://www.googleapis.com/auth/gmail.readonly"]})

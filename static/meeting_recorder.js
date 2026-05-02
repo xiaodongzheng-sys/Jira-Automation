@@ -390,6 +390,8 @@
     const videoUrl = media.playback_video_url || media.video_url || '';
     const recordingUrl = isAudioOnly ? (media.audio_url || '') : videoUrl;
     const recordingDownloadUrl = downloadUrl(recordingUrl);
+    const transcriptUrl = transcript.asset_url || '';
+    const transcriptDownloadUrl = downloadUrl(transcriptUrl);
     const usingPlaybackCopy = Boolean(media.playback_video_url);
     const visualEvidence = Array.isArray(record.visual_evidence) ? record.visual_evidence : [];
     const audioLabel = state.diagnostics?.audio_capture_label || '';
@@ -433,7 +435,7 @@
         </div>
         ${recordingUrl ? `
           <div class="button-row meeting-video-actions">
-            <button class="button" type="button" data-record-download-media="${escapeHtml(recordingDownloadUrl)}" data-download-filename="${escapeHtml(filenameFromUrl(recordingUrl, isAudioOnly ? 'meeting.wav' : 'meeting-recording.mp4'))}">${isAudioOnly ? 'Download audio file' : 'Download video file'}</button>
+            <button class="button" type="button" data-record-download-asset="${escapeHtml(recordingDownloadUrl)}" data-download-filename="${escapeHtml(filenameFromUrl(recordingUrl, isAudioOnly ? 'meeting.wav' : 'meeting-recording.mp4'))}" data-download-status-selector="[data-media-download-status]">${isAudioOnly ? 'Download audio file' : 'Download video file'}</button>
             <span class="inline-status" data-media-download-status>${isAudioOnly ? 'Downloads the face-to-face meeting audio.' : (usingPlaybackCopy ? 'Downloads the browser-compatible playback copy.' : 'Downloads the original recording for local playback.')}</span>
           </div>
         ` : `<p class="empty-state">${isAudioOnly ? 'Audio is not available yet.' : 'Video is not available yet.'}</p>`}
@@ -456,7 +458,11 @@
         ` : ''}
       </section>
       <section class="meeting-output">
-        <h3>Transcript</h3>
+        <div class="meeting-output-head">
+          <h3>Transcript</h3>
+          ${transcriptUrl ? `<button class="button button-secondary" type="button" data-record-download-asset="${escapeHtml(transcriptDownloadUrl)}" data-download-filename="${escapeHtml(filenameFromUrl(transcriptUrl, 'meeting-transcript.txt'))}" data-download-status-selector="[data-transcript-download-status]">Download transcript</button>` : ''}
+        </div>
+        ${transcriptUrl ? '<div class="inline-status" data-transcript-download-status hidden></div>' : ''}
         ${renderTranscript(transcript)}
       </section>
     `;
@@ -520,28 +526,29 @@
         await loadRecords();
       });
     });
-    nodes.detail.querySelectorAll('[data-record-download-media]').forEach((button) => {
+    nodes.detail.querySelectorAll('[data-record-download-asset]').forEach((button) => {
       button.addEventListener('click', async () => {
-        const status = nodes.detail.querySelector('[data-media-download-status]');
+        const status = nodes.detail.querySelector(button.dataset.downloadStatusSelector || '[data-media-download-status]');
         const originalText = button.textContent;
         button.disabled = true;
         button.textContent = 'Preparing download...';
         if (status) {
-          status.textContent = 'Checking recording file...';
+          status.hidden = false;
+          status.textContent = 'Checking file...';
           status.classList.remove('inline-status-error');
         }
         try {
-          const response = await fetch(button.dataset.recordDownloadMedia || '', { credentials: 'same-origin' });
+          const response = await fetch(button.dataset.recordDownloadAsset || '', { credentials: 'same-origin' });
           const contentType = response.headers.get('Content-Type') || '';
           if (!response.ok) throw new Error(`Download failed with HTTP ${response.status}.`);
           if (contentType.includes('text/html')) {
-            throw new Error('Download returned an HTML page instead of a recording file. Refresh the page and sign in again, then retry.');
+            throw new Error('Download returned an HTML page instead of the requested file. Refresh the page and sign in again, then retry.');
           }
           const blob = await response.blob();
-          if (!blob.size) throw new Error('Downloaded recording file is empty.');
+          if (!blob.size) throw new Error('Downloaded file is empty.');
           const filename = filenameFromDisposition(response.headers.get('Content-Disposition'))
             || button.dataset.downloadFilename
-            || 'meeting-recording.mp4';
+            || 'meeting-download';
           const objectUrl = URL.createObjectURL(blob);
           const link = document.createElement('a');
           link.href = objectUrl;

@@ -377,6 +377,45 @@ class MeetingProcessingServiceTests(unittest.TestCase):
         self.assertEqual(processed["visual_evidence"], [])
         self.assertEqual(processed["transcript"]["text"], "Alice approved.")
 
+    def test_send_minutes_email_attaches_transcript_text_file(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = MeetingRecordStore(root)
+            record = store.create_record(
+                owner_email="owner@npt.sg",
+                title="Review",
+                platform="zoom",
+                meeting_link="https://zoom.us/j/123",
+            )
+            record["status"] = "completed"
+            record["minutes"] = {"status": "completed", "markdown": "## Summary\nApproved."}
+            record["transcript"] = {"status": "completed", "text": "Alice approved the launch."}
+            transcript_path = store.record_dir(record["record_id"]) / "transcript.txt"
+            transcript_path.write_text("Alice approved the launch.", encoding="utf-8")
+            store.save_record(record)
+            credential_store = Mock()
+            credential_store.load.return_value = {"token": "x"}
+            service = MeetingProcessingService(
+                store=store,
+                config=MeetingRecorderConfig(),
+                text_client=FakeTextClient(),
+                credential_store=credential_store,
+                portal_base_url="https://portal.example.test",
+            )
+
+            with patch("bpmis_jira_tool.meeting_recorder.credentials_from_payload", return_value=object()), patch(
+                "bpmis_jira_tool.meeting_recorder.send_gmail_message",
+                return_value={"id": "msg-1"},
+            ) as send_message:
+                email = service.send_minutes_email(record_id=record["record_id"], owner_email="owner@npt.sg")
+
+        self.assertEqual(email["status"], "sent")
+        self.assertTrue(email["transcript_attached"])
+        attachment = send_message.call_args.kwargs["attachments"][0]
+        self.assertEqual(attachment["filename"], "meeting-transcript.txt")
+        self.assertEqual(attachment["mime_type"], "text/plain")
+        self.assertEqual(attachment["content"], b"Alice approved the launch.")
+
     def test_parse_srt_transcript_chunks(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             srt_path = Path(temp_dir) / "whisper-transcript.srt"
@@ -801,8 +840,9 @@ class MeetingRecorderRouteTests(unittest.TestCase):
 
         self.assertIn("Download video file", source)
         self.assertIn("Download audio file", source)
+        self.assertIn("Download transcript", source)
         self.assertIn("download=1", source)
-        self.assertIn("data-record-download-media", source)
+        self.assertIn("data-record-download-asset", source)
         self.assertIn("Download returned an HTML page", source)
         self.assertIn("Checking microphone/audio input", source)
         self.assertIn("Starting...", source)

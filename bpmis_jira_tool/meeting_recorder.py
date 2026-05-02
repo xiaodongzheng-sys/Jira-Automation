@@ -709,18 +709,21 @@ class MeetingProcessingService:
         portal_url = self._record_url(record_id)
         subject = f"Meeting Minutes - {record.get('title') or 'Untitled meeting'}"
         body = f"{minutes}\n\nFull transcript and recording archive: {portal_url}\n"
+        attachments = self._transcript_email_attachments(record_id=record_id, record=record)
         result = send_gmail_message(
             credentials=credentials,
             sender=owner_email,
             recipient=target,
             subject=subject,
             text_body=body,
+            attachments=attachments,
         )
         record["email"] = {
             "status": "sent",
             "sent_at": _utc_now(),
             "message_id": str(result.get("id") or result.get("message_id") or ""),
             "recipient": target,
+            "transcript_attached": bool(attachments),
         }
         self.store.save_record(record)
         return record["email"]
@@ -728,6 +731,25 @@ class MeetingProcessingService:
     def _record_url(self, record_id: str) -> str:
         path = f"/meeting-recorder?record={record_id}"
         return f"{self.portal_base_url}{path}" if self.portal_base_url else path
+
+    def _transcript_email_attachments(self, *, record_id: str, record: dict[str, Any]) -> list[dict[str, Any]]:
+        transcript_path = self.store.record_dir(record_id) / "transcript.txt"
+        content = b""
+        if transcript_path.exists() and transcript_path.is_file():
+            content = transcript_path.read_bytes()
+        if not content:
+            transcript_text = str((record.get("transcript") or {}).get("text") or "").strip()
+            if transcript_text:
+                content = transcript_text.encode("utf-8")
+        if not content:
+            return []
+        return [
+            {
+                "filename": "meeting-transcript.txt",
+                "mime_type": "text/plain",
+                "content": content,
+            }
+        ]
 
     def _video_path(self, record: dict[str, Any]) -> Path:
         relative = str((record.get("media") or {}).get("video_path") or "").strip()
