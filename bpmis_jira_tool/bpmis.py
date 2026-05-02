@@ -176,6 +176,9 @@ class BPMISDirectApiClient(BPMISClient):
         self.request_stats: dict[str, int] = {
             "api_call_count": 0,
             "issue_detail_lookup_count": 0,
+            "issue_detail_bulk_lookup_count": 0,
+            "issue_detail_bulk_issue_count": 0,
+            "issue_detail_single_fallback_count": 0,
             "jira_live_bulk_lookup_count": 0,
             "jira_live_bulk_issue_count": 0,
             "jira_live_detail_lookup_count": 0,
@@ -573,6 +576,14 @@ class BPMISDirectApiClient(BPMISClient):
 
         ticket_rows: list[tuple[dict[str, Any], str, str, list[str]]] = []
         seen_by_parent: set[tuple[str, str]] = set()
+        self._prime_issue_detail_cache(
+            [
+                self._extract_issue_identifier(row)
+                for row in rows
+                if isinstance(row, dict)
+                and any(self._issue_requires_user_enrichment(row, email) for email in normalized_emails)
+            ]
+        )
         for row in rows:
             if not isinstance(row, dict):
                 continue
@@ -673,7 +684,7 @@ class BPMISDirectApiClient(BPMISClient):
                 break
             page += 1
 
-        task_rows: list[tuple[dict[str, Any], str, str, dict[str, Any]]] = []
+        candidate_task_rows: list[tuple[dict[str, Any], str, str]] = []
         seen_issue_ids: set[str] = set()
         parent_project_cache: dict[str, dict[str, Any]] = {}
         user_id_texts_by_email = {email: {str(user_id) for user_id in ids} for email, ids in user_ids_by_email.items()}
@@ -711,9 +722,13 @@ class BPMISDirectApiClient(BPMISClient):
                     row = self._merge_issue_payloads(row, detail)
             elif issue_id and not self._extract_parent_issue_ids(row):
                 self.request_stats["issue_detail_enrichment_skipped_count"] += 1
+            candidate_task_rows.append((row, issue_key, matched_email))
+
+        self._prime_biz_project_parent_details([row for row, _issue_key, _email in candidate_task_rows])
+        task_rows: list[tuple[dict[str, Any], str, str, dict[str, Any]]] = []
+        for row, issue_key, matched_email in candidate_task_rows:
             parent_project = self._parent_project_for_task(row, parent_project_cache)
             task_rows.append((row, issue_key, matched_email, parent_project))
-
         live_details = self._get_jira_ticket_details_via_jira_bulk([issue_key for _row, issue_key, _email, _parent in task_rows])
         tasks: list[dict[str, Any]] = []
         for row, issue_key, matched_email, parent_project in task_rows:
@@ -974,11 +989,94 @@ class BPMISDirectApiClient(BPMISClient):
             return {}
         if normalized_issue_id in self._issue_detail_cache:
             return dict(self._issue_detail_cache[normalized_issue_id])
+        self.request_stats["issue_detail_single_fallback_count"] += 1
         detail = self._get_issue_detail_via_list(normalized_issue_id)
         if detail:
             self._issue_detail_cache[normalized_issue_id] = dict(detail)
             return detail
         return self.get_issue_detail(normalized_issue_id)
+
+    def _get_issue_details_via_list_bulk(self, issue_ids: list[str], *, chunk_size: int = 50) -> dict[str, dict[str, Any]] | None:
+        normalized_issue_ids: list[int] = []
+        seen_ids: set[str] = set()
+        for issue_id in issue_ids:
+            text = str(issue_id or "").strip()
+            if not text or text in seen_ids:
+                continue
+            try:
+                normalized_issue_ids.append(int(text))
+            except ValueError:
+                continue
+            seen_ids.add(text)
+        if not normalized_issue_ids:
+            return {}
+
+        details: dict[str, dict[str, Any]] = {}
+        for issue_id_chunk in self._chunks(normalized_issue_ids, chunk_size):
+            self.request_stats["issue_detail_bulk_lookup_count"] += 1
+            try:
+                response = self._api_request(
+                    "/api/v1/issues/list",
+                    params={
+                        "search": json.dumps(
+                            {
+                                "joinType": "and",
+                                "subQueries": [{"id": issue_id_chunk}],
+                                "page": 1,
+                                "pageSize": max(1, len(issue_id_chunk)),
+                                "mapping": True,
+                            }
+                        )
+                    },
+                )
+            except (BPMISError, ValueError, TypeError) as error:
+                self.event_logger.warning("Could not bulk load BPMIS issue details: %s", error)
+                return None
+            rows = ((response.get("data") or {}).get("rows") or []) if isinstance(response, dict) else []
+            chunk_ids = {str(issue_id) for issue_id in issue_id_chunk}
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                detail_id = self._extract_issue_identifier(row)
+                if not detail_id or detail_id not in chunk_ids:
+                    continue
+                details[detail_id] = row
+                self._issue_detail_cache[detail_id] = dict(row)
+            self.request_stats["issue_detail_bulk_issue_count"] += len(
+                [issue_id for issue_id in chunk_ids if issue_id in details]
+            )
+        return details
+
+    def _prime_issue_detail_cache(self, issue_ids: list[str]) -> None:
+        missing_issue_ids = [
+            str(issue_id or "").strip()
+            for issue_id in issue_ids
+            if str(issue_id or "").strip() and str(issue_id or "").strip() not in self._issue_detail_cache
+        ]
+        if missing_issue_ids:
+            self._get_issue_details_via_list_bulk(missing_issue_ids)
+
+    def _prime_biz_project_parent_details(self, rows: list[dict[str, Any]], *, max_depth: int = 5) -> None:
+        pending = {
+            parent_id
+            for row in rows
+            if isinstance(row, dict)
+            for parent_id in self._extract_parent_issue_ids(row)
+        }
+        visited: set[str] = set()
+        for _depth in range(max_depth):
+            current_ids = sorted(issue_id for issue_id in pending if issue_id and issue_id not in visited)
+            if not current_ids:
+                break
+            visited.update(current_ids)
+            self._prime_issue_detail_cache(current_ids)
+            next_pending: set[str] = set()
+            for issue_id in current_ids:
+                detail = self._issue_detail_cache.get(issue_id) or {}
+                if not detail or self._is_biz_project_issue(detail):
+                    continue
+                next_pending.update(self._extract_parent_issue_ids(detail))
+            pending = next_pending
 
     def get_jira_ticket_detail(self, ticket_key: str) -> dict[str, Any]:
         normalized_ticket_key = self._extract_issue_key(str(ticket_key or "")) or str(ticket_key or "").strip()
@@ -2316,6 +2414,19 @@ class BPMISDirectApiClient(BPMISClient):
 
     def _normalize_team_dashboard_biz_project_rows(self, rows: list[dict[str, Any]]) -> list[dict[str, str]]:
         deduped: dict[str, dict[str, str]] = {}
+        self._prime_issue_detail_cache(
+            [
+                str(row.get("id") or row.get("issue_id") or row.get("bpmis_id") or "").strip()
+                for row in rows
+                if isinstance(row, dict)
+                and self._team_dashboard_project_requires_enrichment(
+                    self._normalize_team_dashboard_parent_project(
+                        row,
+                        fallback_id=str(row.get("id") or row.get("issue_id") or row.get("bpmis_id") or "").strip(),
+                    )
+                )
+            ]
+        )
         for row in rows:
             issue_id = str(row.get("id") or row.get("issue_id") or row.get("bpmis_id") or "").strip()
             if not issue_id or issue_id in deduped:

@@ -283,6 +283,9 @@ class WebPortalFeatureTests(unittest.TestCase):
                 "jira_live_bulk_lookup_count": 3,
                 "jira_live_bulk_issue_count": 220,
                 "jira_live_detail_lookup_count": 0,
+                "issue_detail_bulk_lookup_count": 2,
+                "issue_detail_bulk_issue_count": 72,
+                "issue_detail_single_fallback_count": 0,
                 "bpmis_release_query_filter_probe_count": 1,
                 "bpmis_release_query_filter_enabled_count": 1,
                 "bpmis_release_query_filter_used_count": 1,
@@ -294,6 +297,9 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertEqual(stats["jira_live_bulk_lookup_count"], 3)
         self.assertEqual(stats["jira_live_bulk_issue_count"], 220)
         self.assertEqual(stats["jira_live_detail_lookup_count"], 0)
+        self.assertEqual(stats["issue_detail_bulk_lookup_count"], 2)
+        self.assertEqual(stats["issue_detail_bulk_issue_count"], 72)
+        self.assertEqual(stats["issue_detail_single_fallback_count"], 0)
         self.assertEqual(stats["bpmis_release_query_filter_probe_count"], 1)
         self.assertEqual(stats["bpmis_release_query_filter_enabled_count"], 1)
         self.assertEqual(stats["bpmis_release_query_filter_used_count"], 1)

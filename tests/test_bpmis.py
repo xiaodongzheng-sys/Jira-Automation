@@ -57,6 +57,22 @@ class BPMISClientTests(unittest.TestCase):
                         ]
                     }
                 if path == "/api/v1/issues/list":
+                    search = json.loads(params["search"])
+                    sub_queries = search.get("subQueries") or []
+                    if sub_queries and "id" in sub_queries[0]:
+                        self.assertEqual(sub_queries[0]["id"], [900])
+                        return {
+                            "data": {
+                                "rows": [
+                                    {
+                                        "id": 900,
+                                        "typeId": "Biz Project",
+                                        "summary": "Parent Project",
+                                        "market": "SG",
+                                    }
+                                ]
+                            }
+                        }
                     return {
                         "data": {
                             "rows": [
@@ -77,9 +93,6 @@ class BPMISClientTests(unittest.TestCase):
                             ]
                         }
                     }
-                if path == "/api/v1/issues/detail":
-                    self.assertEqual(params["id"], "900")
-                    return {"data": {"id": 900, "typeId": "Biz Project", "summary": "Parent Project", "market": "SG"}}
                 self.fail(f"unexpected API call: {path}")
 
             client._api_request = fake_api_request  # type: ignore[method-assign]
@@ -90,7 +103,121 @@ class BPMISClientTests(unittest.TestCase):
         self.assertEqual([task["pm_email"] for task in tasks], ["af@npt.sg", "pm@npt.sg"])
         self.assertEqual(tasks[0]["parent_project"]["project_name"], "Parent Project")
         self.assertEqual([path for path, _params in calls].count("/api/v1/users/listByEmail"), 1)
-        self.assertEqual([path for path, _params in calls].count("/api/v1/issues/detail"), 1)
+        self.assertEqual([path for path, _params in calls].count("/api/v1/issues/list"), 2)
+        self.assertEqual(client.request_stats["issue_detail_bulk_lookup_count"], 1)
+        self.assertEqual(client.request_stats["issue_detail_bulk_issue_count"], 1)
+        self.assertEqual(client.request_stats["issue_detail_single_fallback_count"], 0)
+
+    def test_team_dashboard_parent_details_are_loaded_in_bulk_chunks(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            client = BPMISDirectApiClient(self._settings(temp_dir))
+            searches = []
+
+            def fake_api_request(path, method="GET", params=None, body=None):
+                if path == "/api/v1/users/listByEmail":
+                    return {"data": [{"id": 101, "email": "pm@npt.sg"}]}
+                self.assertEqual(path, "/api/v1/issues/list")
+                search = json.loads((params or {}).get("search") or "{}")
+                searches.append(search)
+                sub_queries = search.get("subQueries") or []
+                if sub_queries and "id" in sub_queries[0]:
+                    issue_ids = sub_queries[0]["id"]
+                    return {
+                        "data": {
+                            "rows": [
+                                {
+                                    "id": issue_id,
+                                    "typeId": "Biz Project",
+                                    "summary": f"Parent Project {issue_id}",
+                                    "market": "SG",
+                                }
+                                for issue_id in issue_ids
+                            ]
+                        }
+                    }
+                return {
+                    "data": {
+                        "rows": [
+                            {
+                                "id": index,
+                                "jiraKey": f"AF-{index}",
+                                "summary": f"Task {index}",
+                                "reporter": {"id": 101},
+                                "parentIds": [{"id": 1000 + index}],
+                            }
+                            for index in range(72)
+                        ]
+                    }
+                }
+
+            client._api_request = fake_api_request  # type: ignore[method-assign]
+
+            tasks = client.list_jira_tasks_created_by_emails(["pm@npt.sg"], enrich_missing_parent=False)
+
+        self.assertEqual(len(tasks), 72)
+        self.assertEqual(tasks[0]["parent_project"]["project_name"], "Parent Project 1000")
+        self.assertEqual(tasks[-1]["parent_project"]["project_name"], "Parent Project 1071")
+        bulk_searches = [search for search in searches if (search.get("subQueries") or [{}])[0].get("id")]
+        self.assertEqual([len(search["subQueries"][0]["id"]) for search in bulk_searches], [50, 22])
+        self.assertEqual(client.request_stats["issue_detail_bulk_lookup_count"], 2)
+        self.assertEqual(client.request_stats["issue_detail_bulk_issue_count"], 72)
+        self.assertEqual(client.request_stats["issue_detail_single_fallback_count"], 0)
+
+    def test_team_dashboard_parent_bulk_failure_falls_back_to_single_lookup(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            client = BPMISDirectApiClient(self._settings(temp_dir))
+
+            def fake_api_request(path, method="GET", params=None, body=None):
+                if path == "/api/v1/users/listByEmail":
+                    return {"data": [{"id": 101, "email": "pm@npt.sg"}]}
+                if path == "/api/v1/issues/list":
+                    search = json.loads((params or {}).get("search") or "{}")
+                    sub_queries = search.get("subQueries") or []
+                    if sub_queries and "id" in sub_queries[0]:
+                        issue_ids = sub_queries[0]["id"]
+                        if len(issue_ids) > 1:
+                            raise BPMISError("bulk id list unsupported")
+                        return {
+                            "data": {
+                                "rows": [
+                                    {
+                                        "id": issue_ids[0],
+                                        "typeId": "Biz Project",
+                                        "summary": "Fallback Parent",
+                                        "market": "SG",
+                                    }
+                                ]
+                            }
+                        }
+                    return {
+                        "data": {
+                            "rows": [
+                                {
+                                    "id": 1,
+                                    "jiraKey": "AF-1",
+                                    "summary": "Task 1",
+                                    "reporter": {"id": 101},
+                                    "parentIds": [{"id": 900}],
+                                },
+                                {
+                                    "id": 2,
+                                    "jiraKey": "AF-2",
+                                    "summary": "Task 2",
+                                    "reporter": {"id": 101},
+                                    "parentIds": [{"id": 901}],
+                                },
+                            ]
+                        }
+                    }
+                self.fail(f"unexpected API call: {path}")
+
+            client._api_request = fake_api_request  # type: ignore[method-assign]
+
+            tasks = client.list_jira_tasks_created_by_emails(["pm@npt.sg"], enrich_missing_parent=False)
+
+        self.assertEqual([task["parent_project"]["project_name"] for task in tasks], ["Fallback Parent", "Fallback Parent"])
+        self.assertEqual(client.request_stats["issue_detail_bulk_lookup_count"], 1)
+        self.assertEqual(client.request_stats["issue_detail_single_fallback_count"], 2)
 
     def test_api_request_logs_timing_and_payload_summary(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1758,6 +1885,26 @@ class BPMISClientTests(unittest.TestCase):
                     }
                 self.assertEqual(path, "/api/v1/issues/list")
                 search = json.loads((params or {}).get("search") or "{}")
+                if search.get("subQueries") == [{"id": [225159, 225160]}]:
+                    return {
+                        "data": {
+                            "rows": [
+                                {
+                                    "id": 225159,
+                                    "summary": "Parent Project 225159",
+                                    "typeId": "Biz Project",
+                                    "marketId": {"label": "SG"},
+                                    "bizPriorityId": {"label": "P1"},
+                                    "regionalPmPicId": [{"emailAddress": "rpm@npt.sg"}],
+                                },
+                                {
+                                    "id": 225160,
+                                    "summary": "Parent Project 225160",
+                                    "typeId": "Biz Project",
+                                },
+                            ]
+                        }
+                    }
                 if search.get("subQueries") == [{"id": [225159]}]:
                     return {
                         "data": {
