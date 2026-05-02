@@ -201,7 +201,7 @@
 
   const renderNameMappings = (root, payload) => {
     const body = root.querySelector('[data-seatalk-name-mapping-body]');
-    const actions = root.querySelector('[data-seatalk-name-mapping-actions]');
+    const actionContainers = [...root.querySelectorAll('[data-seatalk-name-mapping-actions]')];
     if (!body) return;
     const mappings = payload?.mappings && typeof payload.mappings === 'object' ? payload.mappings : {};
     const unknownRows = Array.isArray(payload?.unknown_ids) ? payload.unknown_ids : [];
@@ -264,7 +264,7 @@
         </article>
       `;
       body.hidden = false;
-      if (actions) actions.hidden = true;
+      actionContainers.forEach((actions) => { actions.hidden = true; });
       return;
     }
     body.innerHTML = rows.map((row) => `
@@ -290,7 +290,7 @@
       </div>
     `).join('');
     body.hidden = false;
-    if (actions) actions.hidden = false;
+    actionContainers.forEach((actions) => { actions.hidden = false; });
   };
 
   const collectNameMappings = (root) => {
@@ -341,13 +341,13 @@
 
   const saveSeaTalkNameMappings = async (root, mappingsUrl) => {
     if (!mappingsUrl) return;
-    const saveButton = root.querySelector('[data-seatalk-name-mapping-save]');
+    const saveButtons = [...root.querySelectorAll('[data-seatalk-name-mapping-save]')];
     const feedbackNode = root.querySelector('[data-seatalk-name-mapping-save-feedback]');
-    const originalButtonText = saveButton?.textContent || 'Save Mappings';
-    if (saveButton) {
+    const originalButtonText = saveButtons[0]?.textContent || 'Save Mappings';
+    saveButtons.forEach((saveButton) => {
       saveButton.disabled = true;
       saveButton.textContent = 'Saving...';
-    }
+    });
     if (feedbackNode) {
       feedbackNode.textContent = 'Saving mappings...';
       feedbackNode.dataset.tone = 'neutral';
@@ -362,24 +362,24 @@
       const payload = await parseDashboardResponse(response);
       if (!response.ok) throw new Error(payload.message || 'Could not save SeaTalk name mappings.');
       setScopedStatus(root, '[data-seatalk-mapping-status]', 'Saved. Exports and Codex evidence will use these names on the next load.', 'success');
-      if (saveButton) saveButton.textContent = 'Saved';
+      saveButtons.forEach((saveButton) => { saveButton.textContent = 'Saved'; });
       if (feedbackNode) {
         feedbackNode.textContent = 'Saved. Exports and Codex evidence will use these names on the next load.';
         feedbackNode.dataset.tone = 'success';
       }
       root.dataset.seatalkMappingsLoaded = '';
       window.setTimeout(() => {
-        if (saveButton) {
+        saveButtons.forEach((saveButton) => {
           saveButton.disabled = false;
           saveButton.textContent = originalButtonText;
-        }
+        });
         loadSeaTalkNameMappings(root, mappingsUrl);
       }, 700);
     } catch (error) {
-      if (saveButton) {
+      saveButtons.forEach((saveButton) => {
         saveButton.disabled = false;
         saveButton.textContent = originalButtonText;
-      }
+      });
       if (feedbackNode) {
         feedbackNode.textContent = error.message || 'Could not save SeaTalk name mappings.';
         feedbackNode.dataset.tone = 'error';
@@ -575,10 +575,10 @@
         }
       });
     });
-    const saveMappingsButton = seatalkRoot.querySelector('[data-seatalk-name-mapping-save]');
-    if (saveMappingsButton) {
+    const saveMappingButtons = seatalkRoot.querySelectorAll('[data-seatalk-name-mapping-save]');
+    saveMappingButtons.forEach((saveMappingsButton) => {
       saveMappingsButton.addEventListener('click', () => saveSeaTalkNameMappings(seatalkRoot, nameMappingsUrl));
-    }
+    });
     const refreshMappingsButton = seatalkRoot.querySelector('[data-seatalk-name-mapping-refresh]');
     if (refreshMappingsButton) {
       refreshMappingsButton.addEventListener('click', () => loadSeaTalkNameMappings(seatalkRoot, nameMappingsUrl, { forceRefresh: true }));

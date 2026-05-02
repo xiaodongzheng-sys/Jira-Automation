@@ -124,6 +124,7 @@ class GmailSeaTalkDemoRouteTests(unittest.TestCase):
         self.assertIn(b"Refresh Candidates", response.data)
         self.assertIn(b"data-seatalk-name-mapping-refresh", response.data)
         self.assertIn(b"data-seatalk-name-mappings-url", response.data)
+        self.assertGreaterEqual(response.data.count(b"data-seatalk-name-mapping-save"), 2)
         self.assertIn(b"data-seatalk-name-mapping-save-feedback", response.data)
         self.assertIn(b"/api/gmail-sea-talk-demo/seatalk/name-mappings", response.data)
         self.assertNotIn(b"data-seatalk-insights-url", response.data)
