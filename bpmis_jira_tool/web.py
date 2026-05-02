@@ -4031,6 +4031,7 @@ def create_app() -> Flask:
         access_gate = _require_meeting_recorder_access(settings)
         if access_gate is not None:
             return access_gate
+        as_download = str(request.args.get("download") or "").strip().lower() in {"1", "true", "yes"}
         try:
             if _local_agent_meeting_recorder_enabled(settings):
                 upstream = _build_local_agent_client(settings).meeting_recorder_asset_response(
@@ -4044,8 +4045,11 @@ def create_app() -> Flask:
                 headers = [
                     (key, value)
                     for key, value in upstream.headers.items()
-                    if key.lower() not in excluded_headers
+                    if key.lower() not in excluded_headers and (not as_download or key.lower() != "content-disposition")
                 ]
+                if as_download:
+                    filename = Path(upstream.headers.get("X-Meeting-Recorder-Filename") or relative_path).name or "meeting-recording.mp4"
+                    headers.append(("Content-Disposition", f'attachment; filename="{filename}"'))
                 if request.method == "HEAD":
                     upstream.close()
                     return Response(status=upstream.status_code, headers=headers)
@@ -4068,7 +4072,7 @@ def create_app() -> Flask:
                 return jsonify({"status": "error", "message": "Invalid meeting asset path."}), HTTPStatus.BAD_REQUEST
             if not asset_path.exists():
                 return jsonify({"status": "error", "message": "Meeting asset not found."}), HTTPStatus.NOT_FOUND
-            return send_file(asset_path, conditional=True)
+            return send_file(asset_path, conditional=True, as_attachment=as_download, download_name=asset_path.name)
         except ToolError as error:
             return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
 

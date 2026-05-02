@@ -324,6 +324,27 @@ class LocalAgentServerTests(unittest.TestCase):
         get_response.close()
         head_response.close()
 
+    def test_signed_meeting_recorder_asset_download_sets_attachment_header(self):
+        store = self.app.config["MEETING_RECORD_STORE"]
+        record = store.create_record(
+            owner_email="owner@npt.sg",
+            title="Playback",
+            platform="google_meet",
+            meeting_link="https://meet.google.com/abc-defg-hij",
+        )
+        asset_path = store.record_dir(record["record_id"]) / "meeting.mp4"
+        asset_path.write_bytes(b"video-bytes")
+        route_path = f"/api/local-agent/meeting-recorder/assets/{record['record_id']}/meeting.mp4"
+        headers = sign_headers(secret="shared-secret", method="GET", path=route_path, body=b"")
+
+        response = self.app.test_client().get(f"{route_path}?owner_email=owner@npt.sg&download=1", headers=headers)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data, b"video-bytes")
+        self.assertIn("attachment", response.headers.get("Content-Disposition", ""))
+        self.assertIn("meeting.mp4", response.headers.get("Content-Disposition", ""))
+        response.close()
+
     def test_signed_meeting_recorder_repair_video_delegates_to_runtime(self):
         fake_runtime = Mock()
         fake_runtime.repair_video_playback.return_value = {

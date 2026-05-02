@@ -29,6 +29,12 @@
     .replaceAll('"', '&quot;')
     .replaceAll("'", '&#39;');
 
+  const downloadUrl = (url) => {
+    if (!url) return '';
+    const separator = String(url).includes('?') ? '&' : '?';
+    return `${url}${separator}download=1`;
+  };
+
   const api = async (url, options = {}) => {
     const response = await fetch(url, {
       headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
@@ -361,6 +367,7 @@
     const minutes = record.minutes || {};
     const media = record.media || {};
     const videoUrl = media.playback_video_url || media.video_url || '';
+    const videoDownloadUrl = downloadUrl(videoUrl);
     const usingPlaybackCopy = Boolean(media.playback_video_url);
     const visualEvidence = Array.isArray(record.visual_evidence) ? record.visual_evidence : [];
     const audioLabel = state.diagnostics?.audio_capture_label || '';
@@ -402,14 +409,17 @@
           <h3>Screen Recording</h3>
           ${audioLabel ? `<span>${escapeHtml(audioLabel)}</span>` : ''}
         </div>
-        ${videoUrl ? `<video controls preload="metadata" class="meeting-video" src="${escapeHtml(videoUrl)}"></video>` : '<p class="empty-state">Video is not available yet.</p>'}
-        <div class="inline-status" data-video-status>${usingPlaybackCopy ? 'Loading browser-compatible playback copy…' : 'Loading video metadata…'}</div>
+        ${videoUrl ? `
+          <div class="button-row meeting-video-actions">
+            <a class="button" href="${escapeHtml(videoDownloadUrl)}" download>Download video file</a>
+            ${usingPlaybackCopy ? '<span class="inline-status">Downloading browser-compatible playback copy.</span>' : '<span class="inline-status">Download the original recording and play it locally.</span>'}
+          </div>
+        ` : '<p class="empty-state">Video is not available yet.</p>'}
         ${videoUrl ? `
           <div class="button-row meeting-video-actions">
             <button class="button button-secondary" type="button" data-record-repair-video="${escapeHtml(record.record_id)}">
-              ${usingPlaybackCopy ? 'Rebuild playback copy' : 'Repair playback'}
+              ${usingPlaybackCopy ? 'Rebuild downloadable copy' : 'Build downloadable playback copy'}
             </button>
-            ${usingPlaybackCopy ? '<span class="inline-status">Using browser-compatible playback copy.</span>' : ''}
           </div>
         ` : ''}
         ${visualEvidence.length ? `
@@ -429,62 +439,6 @@
       </section>
     `;
     bindDetailActions(record.record_id);
-    bindVideoStatus(record.record_id);
-  };
-
-  const bindVideoStatus = (recordId) => {
-    const video = nodes.detail.querySelector('video.meeting-video');
-    const status = nodes.detail.querySelector('[data-video-status]');
-    if (!video || !status) return;
-    const repairButton = nodes.detail.querySelector('[data-record-repair-video]');
-    const showRepairHint = (message) => {
-      status.textContent = `${message} Repairing creates a browser-compatible playback copy and keeps the original recording.`;
-      status.classList.add('inline-status-error');
-      if (repairButton) repairButton.classList.add('is-attention');
-    };
-    const metadataTimeout = window.setTimeout(() => {
-      if (Number.isNaN(video.duration) || !Number.isFinite(video.duration) || video.readyState < 1) {
-        showRepairHint('Video metadata is still loading after 10 seconds.');
-        telemetry('video_metadata_timeout', { outcome: 'timeout', reason: recordId || '' });
-      }
-    }, 10000);
-    video.addEventListener('loadedmetadata', () => {
-      window.clearTimeout(metadataTimeout);
-      status.textContent = `Duration: ${formatTimestamp(video.duration || 0)}. Seeking is available when the browser receives byte-range video responses.`;
-      status.classList.remove('inline-status-error');
-      telemetry('video_loadedmetadata', { outcome: 'ok', reason: recordId || '' });
-    });
-    video.addEventListener('loadeddata', () => {
-      window.clearTimeout(metadataTimeout);
-      status.textContent = `Video data loaded. Duration: ${formatTimestamp(video.duration || 0)}.`;
-      status.classList.remove('inline-status-error');
-      telemetry('video_loadeddata', { outcome: 'ok', reason: recordId || '' });
-    });
-    video.addEventListener('canplay', () => {
-      window.clearTimeout(metadataTimeout);
-      status.textContent = `Video can play. Duration: ${formatTimestamp(video.duration || 0)}.`;
-      status.classList.remove('inline-status-error');
-      telemetry('video_canplay', { outcome: 'ok', reason: recordId || '' });
-    });
-    video.addEventListener('waiting', () => {
-      status.textContent = 'Video is waiting for data from the recorder asset proxy.';
-      telemetry('video_waiting', { outcome: 'waiting', reason: recordId || '' });
-    });
-    video.addEventListener('stalled', () => {
-      showRepairHint('Video loading stalled while reading from the recorder asset proxy.');
-      telemetry('video_stalled', { outcome: 'stalled', reason: recordId || '' });
-    });
-    video.addEventListener('error', () => {
-      const code = video.error?.code ? ` Error code: ${video.error.code}.` : '';
-      showRepairHint(`Video could not be loaded.${code}`);
-      telemetry('video_error', { outcome: 'error', reason: recordId || '', error_message: code });
-    });
-    video.addEventListener('seeking', () => {
-      status.textContent = `Seeking to ${formatTimestamp(video.currentTime || 0)}…`;
-    });
-    video.addEventListener('seeked', () => {
-      status.textContent = `Playing from ${formatTimestamp(video.currentTime || 0)}.`;
-    });
   };
 
   const bindDetailActions = (recordId) => {

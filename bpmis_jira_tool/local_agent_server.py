@@ -505,7 +505,14 @@ def create_local_agent_app() -> Flask:
             raise ToolError("Invalid meeting asset path.")
         if not asset_path.exists() or not asset_path.is_file():
             raise ToolError("Meeting asset not found.")
-        response = send_file(asset_path, mimetype=mimetypes.guess_type(asset_path.name)[0], conditional=True)
+        as_download = str(request.args.get("download") or "").strip().lower() in {"1", "true", "yes"}
+        response = send_file(
+            asset_path,
+            mimetype=mimetypes.guess_type(asset_path.name)[0],
+            conditional=True,
+            as_attachment=as_download,
+            download_name=asset_path.name,
+        )
         response.headers["X-Meeting-Recorder-Filename"] = asset_path.name
         response.headers["Accept-Ranges"] = "bytes"
         return response

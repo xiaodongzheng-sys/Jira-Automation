@@ -670,6 +670,31 @@ class MeetingRecorderRouteTests(unittest.TestCase):
             method="GET",
         )
 
+    def test_meeting_asset_download_sets_attachment_header_for_local_agent(self):
+        fake_response = FakeStreamingResponse(
+            status_code=200,
+            headers={
+                "Content-Type": "video/mp4",
+                "Content-Length": "11",
+                "X-Meeting-Recorder-Filename": "meeting.mp4",
+            },
+            chunks=[b"video-bytes"],
+        )
+        fake_client = Mock()
+        fake_client.meeting_recorder_asset_response.return_value = fake_response
+
+        with patch("bpmis_jira_tool.web._local_agent_meeting_recorder_enabled", return_value=True):
+            with patch("bpmis_jira_tool.web._build_local_agent_client", return_value=fake_client):
+                with self.app.test_client() as client:
+                    self._login(client, email="xiaodong.zheng@npt.sg")
+                    response = client.get("/meeting-recorder/assets/meeting-1/meeting.mp4?download=1")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("attachment", response.headers.get("Content-Disposition", ""))
+        self.assertIn("meeting.mp4", response.headers.get("Content-Disposition", ""))
+        self.assertEqual(response.data, b"video-bytes")
+        self.assertTrue(fake_response.closed)
+
     def test_base_template_renders_meeting_indicator_and_reminder_script(self):
         with self.app.test_client() as client:
             self._login(client, email="xiaodong.zheng@npt.sg", scopes=[CALENDAR_READONLY_SCOPE])
@@ -691,10 +716,9 @@ class MeetingRecorderRouteTests(unittest.TestCase):
     def test_meeting_recorder_script_reports_video_status_and_transcript_quality(self):
         source = Path("static/meeting_recorder.js").read_text(encoding="utf-8")
 
-        self.assertIn("loadedmetadata", source)
-        self.assertIn("stalled", source)
-        self.assertIn("video_error", source)
-        self.assertIn("Repair playback", source)
+        self.assertIn("Download video file", source)
+        self.assertIn("download=1", source)
+        self.assertIn("Build downloadable playback copy", source)
         self.assertIn("/repair-video", source)
         self.assertIn("Transcript may be incomplete", source)
         self.assertIn("low_audio", source)
