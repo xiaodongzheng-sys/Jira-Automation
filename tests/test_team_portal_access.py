@@ -163,7 +163,7 @@ class TeamPortalAccessTests(unittest.TestCase):
                     session["google_profile"] = {"email": "allowed@npt.sg", "name": "Allowed User"}
                     session["google_credentials"] = {"token": "x"}
 
-                response = client.get("/")
+                response = client.get("/?workspace=run")
                 self.assertEqual(response.status_code, 200)
                 self.assertIn(b"Allowed User", response.data)
                 self.assertIn(b"Logout", response.data)
@@ -191,7 +191,7 @@ class TeamPortalAccessTests(unittest.TestCase):
                     session["google_profile"] = {"email": "allowed@npt.sg", "name": "Allowed User"}
                     session["google_credentials"] = {"token": "x"}
 
-                response = client.get("/")
+                response = client.get("/?workspace=run")
 
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"environment-banner-uat", response.data)
@@ -214,7 +214,7 @@ class TeamPortalAccessTests(unittest.TestCase):
             app.testing = True
 
             with app.test_client() as client:
-                response = client.get("/")
+                response = client.get("/?workspace=run")
 
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"environment-banner-uat", response.data)
@@ -242,7 +242,7 @@ class TeamPortalAccessTests(unittest.TestCase):
                     session["google_profile"] = {"email": "allowed@npt.sg", "name": "Allowed User"}
                     session["google_credentials"] = {"token": "x"}
 
-                response = client.get("/")
+                response = client.get("/?workspace=run")
 
         self.assertEqual(response.status_code, 200)
         self.assertNotIn(b"environment-banner-uat", response.data)
@@ -294,7 +294,7 @@ class TeamPortalAccessTests(unittest.TestCase):
                     session["google_profile"] = {"email": "allowed@npt.sg", "name": "Allowed User"}
                     session["google_credentials"] = {"token": "x"}
 
-                response = client.get("/")
+                response = client.get("/?workspace=run")
 
             self.assertEqual(response.status_code, 200)
             self.assertIn(b"Allowed User", response.data)
@@ -373,7 +373,7 @@ class TeamPortalAccessTests(unittest.TestCase):
                     session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
                     session["google_credentials"] = {"token": "x"}
 
-                response = client.get("/")
+                response = client.get("/?workspace=run")
                 self.assertEqual(response.status_code, 200)
                 self.assertIn(b"Teammate", response.data)
 
@@ -604,7 +604,7 @@ class TeamPortalAccessTests(unittest.TestCase):
                     session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
                     session["google_credentials"] = {"token": "x"}
 
-                response = client.get("/")
+                response = client.get("/?workspace=run")
 
         self.assertEqual(response.status_code, 200)
 

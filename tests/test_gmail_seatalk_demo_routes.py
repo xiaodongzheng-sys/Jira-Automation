@@ -41,10 +41,10 @@ class GmailSeaTalkDemoRouteTests(unittest.TestCase):
             session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
             session["google_credentials"] = {"token": "x", "scopes": [GMAIL_READONLY_SCOPE]}
 
-    def test_owner_sees_seatalk_management_tab_last_on_index(self):
+    def test_owner_sees_seatalk_management_tab_before_bpmis_on_index(self):
         with self.app.test_client() as client:
             self._login_owner(client, scopes=[GMAIL_READONLY_SCOPE])
-            response = client.get("/")
+            response = client.get("/?workspace=run")
 
         self.assertEqual(response.status_code, 200)
         html = response.get_data(as_text=True)
@@ -53,6 +53,7 @@ class GmailSeaTalkDemoRouteTests(unittest.TestCase):
         self.assertLess(html.index("Source Code Q&amp;A"), html.index("PRD Briefing Tool"))
         self.assertLess(html.index("PRD Briefing Tool"), html.index("Team Dashboard"))
         self.assertLess(html.index("Team Dashboard"), html.index("SeaTalk Management"))
+        self.assertLess(html.index("SeaTalk Management"), html.index("BPMIS Automation Tool"))
         self.assertNotIn("SeaTalk Summary", html)
         self.assertNotIn("Gmail &amp; SeaTalk Demo", html)
 
@@ -71,7 +72,7 @@ class GmailSeaTalkDemoRouteTests(unittest.TestCase):
 
             with app.test_client() as client:
                 self._login_owner(client, scopes=[GMAIL_READONLY_SCOPE])
-                response = client.get("/")
+                response = client.get("/?workspace=run")
 
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"SeaTalk Management", response.data)
@@ -80,7 +81,7 @@ class GmailSeaTalkDemoRouteTests(unittest.TestCase):
     def test_non_owner_does_not_see_seatalk_summary_tab(self):
         with self.app.test_client() as client:
             self._login_teammate(client)
-            response = client.get("/")
+            response = client.get("/?workspace=run")
 
         self.assertEqual(response.status_code, 200)
         self.assertNotIn(b"SeaTalk Summary", response.data)

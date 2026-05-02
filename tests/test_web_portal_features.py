@@ -451,7 +451,7 @@ class WebPortalFeatureTests(unittest.TestCase):
                 with client.session_transaction() as session:
                     session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
                     session["google_credentials"] = {"token": "x"}
-                response = client.get("/")
+                response = client.get("/?workspace=run")
 
         self.assertEqual(response.status_code, 200)
         self.assertNotIn(b"Step 2 \xc2\xb7 Sheet Template", response.data)
@@ -602,7 +602,7 @@ class WebPortalFeatureTests(unittest.TestCase):
                     session["google_profile"] = {"email": "new-user@npt.sg", "name": "New User"}
                     session["google_credentials"] = {"token": "x"}
 
-                response = client.get("/")
+                response = client.get("/?workspace=run")
 
         self.assertEqual(response.status_code, 200)
         self.assertNotIn(b"Google Sheets request failed", response.data)
@@ -638,7 +638,7 @@ class WebPortalFeatureTests(unittest.TestCase):
                     },
                     "google:new-user@npt.sg",
                 )
-                response = client.get("/")
+                response = client.get("/?workspace=run")
 
         self.assertEqual(response.status_code, 200)
         read_snapshot.assert_not_called()
@@ -809,7 +809,7 @@ class WebPortalFeatureTests(unittest.TestCase):
                 with app_after_redeploy.test_client() as client:
                     with client.session_transaction() as session:
                         session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
-                    index_response = client.get("/")
+                    index_response = client.get("/?workspace=run")
 
                 self.assertEqual(index_response.status_code, 200)
                 self.assertIn(b'value="AF" selected', index_response.data)
@@ -920,19 +920,19 @@ class WebPortalFeatureTests(unittest.TestCase):
                 with client.session_transaction() as session:
                     session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong"}
                     session["google_credentials"] = {"token": "x"}
-                admin_response = client.get("/")
+                admin_response = client.get("/?workspace=setup")
 
             with app.test_client() as client:
                 with client.session_transaction() as session:
                     session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
                     session["google_credentials"] = {"token": "x"}
-                user_response = client.get("/")
+                user_response = client.get("/?workspace=run")
 
             with app.test_client() as client:
                 with client.session_transaction() as session:
                     session["google_profile"] = {"email": "sophia.wangzj@npt.sg", "name": "Sophia"}
                     session["google_credentials"] = {"token": "x"}
-                sophia_response = client.get("/")
+                sophia_response = client.get("/?workspace=run")
 
         self.assertEqual(admin_response.status_code, 200)
         self.assertIn(b">Team Default Admin<", admin_response.data)
@@ -3282,7 +3282,7 @@ class WebPortalFeatureTests(unittest.TestCase):
                 with client.session_transaction() as session:
                     session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
                     session["google_credentials"] = {"token": "x"}
-                page_response = client.get("/")
+                page_response = client.get("/?workspace=run")
 
         self.assertEqual(save_response.status_code, 302)
         self.assertIn("google:teammate@npt.sg", remote_client.configs)
@@ -3309,7 +3309,7 @@ class WebPortalFeatureTests(unittest.TestCase):
                     session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
                     session["google_credentials"] = {"token": "x"}
 
-                response = client.get("/")
+                response = client.get("/?workspace=run")
 
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"teammate@npt.sg", response.data)
@@ -3503,7 +3503,7 @@ class WebPortalFeatureTests(unittest.TestCase):
                     session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong Zheng"}
                     session["google_credentials"] = {"token": "x"}
 
-                response = client.get("/")
+                response = client.get("/?workspace=run")
 
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"Planning_26Q2", response.data)

@@ -2307,13 +2307,7 @@ def create_app() -> Flask:
             }
         user_identity = _get_user_identity(settings)
         can_access_team_dashboard = _can_access_team_dashboard(user_identity)
-        site_tabs = [
-            {
-                "label": "BPMIS Automation Tool",
-                "href": url_for("index"),
-                "active": current_endpoint == "index",
-            }
-        ]
+        site_tabs = []
         if _can_access_source_code_qa(settings):
             site_tabs.append(
                 {
@@ -2357,6 +2351,13 @@ def create_app() -> Flask:
             )
         if seatalk_tab:
             site_tabs.append(seatalk_tab)
+        site_tabs.append(
+            {
+                "label": "BPMIS Automation Tool",
+                "href": url_for("index", workspace="run"),
+                "active": current_endpoint == "index",
+            }
+        )
         return {
             "site_tabs": site_tabs,
             "site_requires_google_login": _site_requires_google_login(settings),
@@ -2450,6 +2451,14 @@ def create_app() -> Flask:
 
         if str(request.args.get("workspace") or "").strip() == "team-dashboard":
             return redirect(url_for("team_dashboard_page"))
+        requested_workspace_tab = str(request.args.get("workspace") or "").strip()
+        has_bpmis_return_state = any(key in session for key in ("default_workspace_tab", "last_results", "run_notice"))
+        if (
+            not requested_workspace_tab
+            and not has_bpmis_return_state
+            and _can_access_source_code_qa(settings)
+        ):
+            return redirect(url_for("source_code_qa"))
 
         results = _results_for_display(session.pop("last_results", []))
         run_notice = session.pop("run_notice", None)
@@ -2474,7 +2483,6 @@ def create_app() -> Flask:
         input_headers: list[str] = []
         has_saved_config = bool(config_key and raw_config_data)
         default_workspace_tab = session.pop("default_workspace_tab", "run" if has_saved_config else "setup")
-        requested_workspace_tab = str(request.args.get("workspace") or "").strip()
         allowed_workspace_tabs = {"setup", "run", "productization-upgrade-summary"}
         if _is_team_profile_admin(user_identity):
             allowed_workspace_tabs.add("team-default-admin")

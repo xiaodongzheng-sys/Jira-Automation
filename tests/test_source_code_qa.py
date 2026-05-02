@@ -56,20 +56,23 @@ class SourceCodeQARouteTests(unittest.TestCase):
             session["google_profile"] = {"email": email, "name": "Portal User"}
             session["google_credentials"] = {"token": "x", "scopes": []}
 
-    def test_npt_user_sees_source_code_tab_after_bpmis(self):
+    def test_npt_user_defaults_to_source_code_qa_and_sees_bpmis_last(self):
         with self.app.test_client() as client:
             self._login(client)
-            response = client.get("/")
+            default_response = client.get("/", follow_redirects=False)
+            response = client.get("/source-code-qa")
 
+        self.assertEqual(default_response.status_code, 302)
+        self.assertEqual(default_response.headers["Location"], "/source-code-qa")
         self.assertEqual(response.status_code, 200)
         html = response.get_data(as_text=True)
         self.assertIn("Source Code Q&amp;A", html)
-        self.assertLess(html.index("BPMIS Automation Tool"), html.index("Source Code Q&amp;A"))
+        self.assertLess(html.index("Source Code Q&amp;A"), html.index("BPMIS Automation Tool"))
 
     def test_whitelisted_gmail_user_also_sees_source_code_tab(self):
         with self.app.test_client() as client:
             self._login(client, "xiaodong.zheng1991@gmail.com")
-            response = client.get("/")
+            response = client.get("/", follow_redirects=True)
 
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"Source Code Q&amp;A", response.data)
