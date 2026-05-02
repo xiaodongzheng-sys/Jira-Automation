@@ -9,6 +9,7 @@ from bpmis_jira_tool.meeting_recorder import (
     MeetingRecorderConfig,
     MeetingRecordStore,
     _audio_capture_status,
+    _build_ffmpeg_recording_command,
     _effective_audio_input,
     _parse_avfoundation_devices,
     _parse_srt_transcript,
@@ -75,6 +76,29 @@ class MeetingRecorderParsingTests(unittest.TestCase):
         self.assertEqual(_audio_capture_status("MacBook Air Microphone", devices["audio_devices"])["audio_capture_label"], "Microphone only")
         self.assertEqual(_audio_capture_status("BlackHole 2ch", devices["audio_devices"])["audio_capture_label"], "System audio configured")
         self.assertTrue(_audio_capture_status("Meeting Recorder Aggregate", devices["audio_devices"])["system_audio_configured"])
+
+    def test_ffmpeg_recording_command_uses_browser_safe_video_encoding(self):
+        command = _build_ffmpeg_recording_command(
+            ffmpeg_path="/opt/homebrew/bin/ffmpeg",
+            video_input="Capture screen 0",
+            audio_input="default",
+            video_path=Path("/tmp/meeting.mp4"),
+            video_fps=15,
+            video_max_width=1920,
+            video_max_height=1080,
+            avfoundation_pixel_format="bgr0",
+        )
+
+        self.assertIn("-pixel_format", command)
+        self.assertEqual(command[command.index("-pixel_format") + 1], "bgr0")
+        self.assertIn("-vf", command)
+        self.assertEqual(
+            command[command.index("-vf") + 1],
+            "scale='if(gt(iw/ih,1920/1080),min(1920,iw),-2)':'if(gt(iw/ih,1920/1080),-2,min(1080,ih))':flags=bicubic,fps=15,format=yuv420p",
+        )
+        self.assertEqual(command[command.index("-profile:v") + 1], "high")
+        self.assertEqual(command[command.index("-level") + 1], "4.2")
+        self.assertEqual(command[command.index("-pix_fmt") + 1], "yuv420p")
 
 
 class MeetingRecordStoreTests(unittest.TestCase):

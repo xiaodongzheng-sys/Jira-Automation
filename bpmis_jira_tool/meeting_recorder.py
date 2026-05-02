@@ -43,6 +43,10 @@ class MeetingRecorderConfig:
     ffmpeg_bin: str = "ffmpeg"
     video_input: str = "Capture screen 0"
     audio_input: str = "default"
+    video_fps: int = 15
+    video_max_width: int = 1920
+    video_max_height: int = 1080
+    avfoundation_pixel_format: str = "bgr0"
     frame_interval_seconds: int = 60
     vision_model: str = "gpt-4.1-mini"
     transcribe_provider: str = "whisper_cpp"
@@ -278,6 +282,10 @@ class MeetingRecorderRuntime:
             "video_input": self.config.video_input,
             "audio_input": effective_audio_input,
             "configured_audio_input": self.config.audio_input,
+            "video_fps": _bounded_int(self.config.video_fps, default=15, minimum=5, maximum=30),
+            "video_max_width": _bounded_int(self.config.video_max_width, default=1920, minimum=640, maximum=2560),
+            "video_max_height": _bounded_int(self.config.video_max_height, default=1080, minimum=360, maximum=1600),
+            "avfoundation_pixel_format": _safe_avfoundation_pixel_format(self.config.avfoundation_pixel_format),
             "audio_devices": devices.get("audio_devices") or [],
             "video_devices": devices.get("video_devices") or [],
             **audio_status,
@@ -323,30 +331,16 @@ class MeetingRecorderRuntime:
         record_dir = self.store.record_dir(record["record_id"])
         video_path = record_dir / "meeting.mp4"
         log_path = record_dir / "ffmpeg.log"
-        command = [
-            ffmpeg_path,
-            "-hide_banner",
-            "-loglevel",
-            "warning",
-            "-y",
-            "-f",
-            "avfoundation",
-            "-framerate",
-            "15",
-            "-i",
-            f"{self.config.video_input}:{audio_input}",
-            "-c:v",
-            "libx264",
-            "-preset",
-            "veryfast",
-            "-pix_fmt",
-            "yuv420p",
-            "-c:a",
-            "aac",
-            "-movflags",
-            "+faststart",
-            str(video_path),
-        ]
+        command = _build_ffmpeg_recording_command(
+            ffmpeg_path=ffmpeg_path,
+            video_input=self.config.video_input,
+            audio_input=audio_input,
+            video_path=video_path,
+            video_fps=self.config.video_fps,
+            video_max_width=self.config.video_max_width,
+            video_max_height=self.config.video_max_height,
+            avfoundation_pixel_format=self.config.avfoundation_pixel_format,
+        )
         try:
             log_handle = log_path.open("w", encoding="utf-8")
             process = subprocess.Popen(  # noqa: S603
@@ -696,6 +690,66 @@ def _avfoundation_devices(ffmpeg_path: str | None) -> dict[str, list[str]]:
     return _parse_avfoundation_devices(f"{completed.stderr}\n{completed.stdout}")
 
 
+def _build_ffmpeg_recording_command(
+    *,
+    ffmpeg_path: str,
+    video_input: str,
+    audio_input: str,
+    video_path: Path,
+    video_fps: int,
+    video_max_width: int,
+    video_max_height: int,
+    avfoundation_pixel_format: str,
+) -> list[str]:
+    fps = _bounded_int(video_fps, default=15, minimum=5, maximum=30)
+    max_width = _bounded_int(video_max_width, default=1920, minimum=640, maximum=2560)
+    max_height = _bounded_int(video_max_height, default=1080, minimum=360, maximum=1600)
+    pixel_format = _safe_avfoundation_pixel_format(avfoundation_pixel_format)
+    scale_filter = (
+        f"scale='if(gt(iw/ih,{max_width}/{max_height}),min({max_width},iw),-2)'"
+        f":'if(gt(iw/ih,{max_width}/{max_height}),-2,min({max_height},ih))'"
+        f":flags=bicubic,fps={fps},format=yuv420p"
+    )
+    return [
+        ffmpeg_path,
+        "-hide_banner",
+        "-loglevel",
+        "warning",
+        "-y",
+        "-thread_queue_size",
+        "512",
+        "-f",
+        "avfoundation",
+        "-framerate",
+        str(fps),
+        "-pixel_format",
+        pixel_format,
+        "-i",
+        f"{video_input}:{audio_input}",
+        "-vf",
+        scale_filter,
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-profile:v",
+        "high",
+        "-level",
+        "4.2",
+        "-g",
+        str(fps * 2),
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "128k",
+        "-movflags",
+        "+faststart",
+        str(video_path),
+    ]
+
+
 def _parse_avfoundation_devices(output: str) -> dict[str, list[str]]:
     video_devices: list[str] = []
     audio_devices: list[str] = []
@@ -717,6 +771,20 @@ def _parse_avfoundation_devices(output: str) -> dict[str, list[str]]:
         elif section == "audio":
             audio_devices.append(name)
     return {"video_devices": video_devices, "audio_devices": audio_devices}
+
+
+def _bounded_int(value: int | str | None, *, default: int, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(value if value is not None else default)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, min(parsed, maximum))
+
+
+def _safe_avfoundation_pixel_format(value: str | None) -> str:
+    normalized = str(value or "").strip().lower()
+    supported = {"bgr0", "0rgb", "nv12", "uyvy422", "yuyv422"}
+    return normalized if normalized in supported else "bgr0"
 
 
 def _effective_audio_input(configured_audio_input: str, audio_devices: list[str]) -> str:

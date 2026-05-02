@@ -58,6 +58,10 @@ class Settings:
     meeting_recorder_ffmpeg_bin: str = "ffmpeg"
     meeting_recorder_video_input: str = "Capture screen 0"
     meeting_recorder_audio_input: str = "default"
+    meeting_recorder_video_fps: int = 15
+    meeting_recorder_video_max_width: int = 1920
+    meeting_recorder_video_max_height: int = 1080
+    meeting_recorder_avfoundation_pixel_format: str = "bgr0"
     meeting_recorder_frame_interval_seconds: int = 60
     meeting_recorder_vision_model: str = "gpt-4.1-mini"
     meeting_recorder_transcribe_provider: str = "whisper_cpp"
@@ -189,6 +193,10 @@ class Settings:
             meeting_recorder_ffmpeg_bin=_env_str("MEETING_RECORDER_FFMPEG_BIN", "ffmpeg"),
             meeting_recorder_video_input=_env_str("MEETING_RECORDER_VIDEO_INPUT", "Capture screen 0"),
             meeting_recorder_audio_input=_env_str("MEETING_RECORDER_AUDIO_INPUT", "default"),
+            meeting_recorder_video_fps=int(_env_str("MEETING_RECORDER_VIDEO_FPS", "15")),
+            meeting_recorder_video_max_width=int(_env_str("MEETING_RECORDER_VIDEO_MAX_WIDTH", "1920")),
+            meeting_recorder_video_max_height=int(_env_str("MEETING_RECORDER_VIDEO_MAX_HEIGHT", "1080")),
+            meeting_recorder_avfoundation_pixel_format=_env_str("MEETING_RECORDER_AVFOUNDATION_PIXEL_FORMAT", "bgr0"),
             meeting_recorder_frame_interval_seconds=int(_env_str("MEETING_RECORDER_FRAME_INTERVAL_SECONDS", "60")),
             meeting_recorder_vision_model=_env_str("MEETING_RECORDER_VISION_MODEL", "gpt-4.1-mini"),
             meeting_recorder_transcribe_provider=_env_str("MEETING_RECORDER_TRANSCRIBE_PROVIDER", "whisper_cpp"),
