@@ -3677,6 +3677,11 @@ def create_app() -> Flask:
         access_gate = _require_meeting_recorder_access(settings, api=True)
         if access_gate is not None:
             return access_gate
+        if _local_agent_meeting_recorder_enabled(settings):
+            try:
+                return jsonify({"status": "ok", **_build_local_agent_client(settings).meeting_recorder_diagnostics()})
+            except ToolError as error:
+                return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_GATEWAY
         return jsonify({"status": "ok", **_get_meeting_recorder_runtime().diagnostics()})
 
     @app.get("/api/meeting-recorder/calendar/upcoming")
@@ -3711,6 +3716,12 @@ def create_app() -> Flask:
         access_gate = _require_meeting_recorder_access(settings, api=True)
         if access_gate is not None:
             return access_gate
+        if _local_agent_meeting_recorder_enabled(settings):
+            try:
+                records = _build_local_agent_client(settings).meeting_recorder_records(owner_email=_current_google_email())
+                return jsonify({"status": "ok", "records": records})
+            except ToolError as error:
+                return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_GATEWAY
         records = _get_meeting_record_store().list_records(owner_email=_current_google_email())
         return jsonify({"status": "ok", "records": [_meeting_record_summary(record) for record in records]})
 
@@ -3720,6 +3731,12 @@ def create_app() -> Flask:
         if access_gate is not None:
             return access_gate
         try:
+            if _local_agent_meeting_recorder_enabled(settings):
+                record_payload = _build_local_agent_client(settings).meeting_recorder_record(
+                    record_id=record_id,
+                    owner_email=_current_google_email(),
+                )
+                return jsonify({"status": "ok", "record": record_payload.get("record") or {}})
             record = _get_meeting_record_store().get_record(record_id)
             if str(record.get("owner_email") or "").strip().lower() != _current_google_email():
                 return jsonify({"status": "error", "message": "Meeting record is not available for this Google account."}), HTTPStatus.FORBIDDEN
@@ -3735,6 +3752,17 @@ def create_app() -> Flask:
         payload = request.get_json(silent=True) or {}
         try:
             meeting_link = str(payload.get("meeting_link") or payload.get("meetingLink") or "").strip()
+            if _local_agent_meeting_recorder_enabled(settings):
+                remote_payload = dict(payload)
+                remote_payload.update(
+                    {
+                        "owner_email": _current_google_email(),
+                        "meeting_link": meeting_link,
+                        "platform": str(payload.get("platform") or meeting_platform_from_link(meeting_link)).strip(),
+                    }
+                )
+                result = _build_local_agent_client(settings).meeting_recorder_start(remote_payload)
+                return jsonify({"status": "ok", "record": result.get("record") or {}})
             record = _get_meeting_recorder_runtime().start_recording(
                 owner_email=_current_google_email(),
                 title=str(payload.get("title") or "Untitled meeting").strip(),
@@ -3755,6 +3783,12 @@ def create_app() -> Flask:
         if access_gate is not None:
             return access_gate
         try:
+            if _local_agent_meeting_recorder_enabled(settings):
+                result = _build_local_agent_client(settings).meeting_recorder_stop(
+                    record_id=record_id,
+                    owner_email=_current_google_email(),
+                )
+                return jsonify({"status": "ok", "record": result.get("record") or {}})
             record = _get_meeting_recorder_runtime().stop_recording(record_id=record_id, owner_email=_current_google_email())
             return jsonify({"status": "ok", "record": _meeting_record_summary(record)})
         except ToolError as error:
@@ -3766,6 +3800,12 @@ def create_app() -> Flask:
         if access_gate is not None:
             return access_gate
         try:
+            if _local_agent_meeting_recorder_enabled(settings):
+                result = _build_local_agent_client(settings).meeting_recorder_process(
+                    record_id=record_id,
+                    owner_email=_current_google_email(),
+                )
+                return jsonify({"status": "ok", "record": result.get("record") or {}})
             record = _build_meeting_processing_service(settings).process_recording(
                 record_id=record_id,
                 owner_email=_current_google_email(),
@@ -3781,6 +3821,13 @@ def create_app() -> Flask:
             return access_gate
         payload = request.get_json(silent=True) or {}
         try:
+            if _local_agent_meeting_recorder_enabled(settings):
+                result = _build_local_agent_client(settings).meeting_recorder_send_email(
+                    record_id=record_id,
+                    owner_email=_current_google_email(),
+                    recipient=str(payload.get("recipient") or "").strip() or _current_google_email(),
+                )
+                return jsonify({"status": "ok", "email": result.get("email") or {}})
             email_payload = _build_meeting_processing_service(settings).send_minutes_email(
                 record_id=record_id,
                 owner_email=_current_google_email(),
@@ -3796,6 +3843,12 @@ def create_app() -> Flask:
         if access_gate is not None:
             return access_gate
         try:
+            if _local_agent_meeting_recorder_enabled(settings):
+                _build_local_agent_client(settings).meeting_recorder_delete(
+                    record_id=record_id,
+                    owner_email=_current_google_email(),
+                )
+                return jsonify({"status": "ok"})
             _get_meeting_record_store().delete_record(record_id=record_id, owner_email=_current_google_email())
             return jsonify({"status": "ok"})
         except ToolError as error:
@@ -3807,6 +3860,15 @@ def create_app() -> Flask:
         if access_gate is not None:
             return access_gate
         try:
+            if _local_agent_meeting_recorder_enabled(settings):
+                content, content_type, filename = _build_local_agent_client(settings).meeting_recorder_asset(
+                    record_id=record_id,
+                    owner_email=_current_google_email(),
+                    relative_path=relative_path,
+                )
+                response = Response(content, mimetype=content_type)
+                response.headers["Content-Disposition"] = f'inline; filename="{filename}"'
+                return response
             record = _get_meeting_record_store().get_record(record_id)
             if str(record.get("owner_email") or "").strip().lower() != _current_google_email():
                 return jsonify({"status": "error", "message": "Meeting record is not available for this Google account."}), HTTPStatus.FORBIDDEN
@@ -6051,6 +6113,14 @@ def _local_agent_seatalk_enabled(settings: Settings) -> bool:
         and settings.local_agent_base_url
         and settings.local_agent_hmac_secret
         and settings.local_agent_seatalk_enabled
+    )
+
+
+def _local_agent_meeting_recorder_enabled(settings: Settings) -> bool:
+    return bool(
+        _local_agent_mode_enabled(settings)
+        and settings.local_agent_base_url
+        and settings.local_agent_hmac_secret
     )
 
 

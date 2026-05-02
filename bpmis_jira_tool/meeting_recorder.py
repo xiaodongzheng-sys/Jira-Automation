@@ -267,7 +267,8 @@ class MeetingRecorderRuntime:
         self._lock = threading.Lock()
 
     def diagnostics(self) -> dict[str, Any]:
-        ffmpeg_path = shutil.which(self.config.ffmpeg_bin) if self.config.ffmpeg_bin else None
+        ffmpeg_path = _resolve_ffmpeg_bin(self.config.ffmpeg_bin)
+        whisper_path = _resolve_whisper_cpp_bin(self.config.whisper_cpp_bin)
         return {
             "ffmpeg_configured": bool(ffmpeg_path),
             "ffmpeg_path": ffmpeg_path or "",
@@ -275,8 +276,8 @@ class MeetingRecorderRuntime:
             "audio_input": self.config.audio_input,
             "frame_interval_seconds": self.config.frame_interval_seconds,
             "transcribe_provider": self.config.transcribe_provider,
-            "whisper_cpp_configured": bool(shutil.which(self.config.whisper_cpp_bin)),
-            "whisper_cpp_bin": shutil.which(self.config.whisper_cpp_bin) or "",
+            "whisper_cpp_configured": bool(whisper_path),
+            "whisper_cpp_bin": whisper_path or "",
             "whisper_model": str(Path(self.config.whisper_model).expanduser()),
             "whisper_model_exists": Path(self.config.whisper_model).expanduser().exists(),
             "whisper_language": self.config.whisper_language,
@@ -297,7 +298,7 @@ class MeetingRecorderRuntime:
         scheduled_end: str = "",
         attendees: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        ffmpeg_path = shutil.which(self.config.ffmpeg_bin)
+        ffmpeg_path = _resolve_ffmpeg_bin(self.config.ffmpeg_bin)
         if not ffmpeg_path:
             raise ConfigError("ffmpeg is required for local meeting recording. Install ffmpeg or set MEETING_RECORDER_FFMPEG_BIN.")
         record = self.store.create_record(
@@ -496,7 +497,7 @@ class MeetingProcessingService:
         return video_path
 
     def _extract_audio(self, record: dict[str, Any], video_path: Path) -> Path:
-        ffmpeg_path = shutil.which(self.config.ffmpeg_bin)
+        ffmpeg_path = _resolve_ffmpeg_bin(self.config.ffmpeg_bin)
         if not ffmpeg_path:
             raise ConfigError("ffmpeg is required to extract meeting audio.")
         audio_path = self.store.record_dir(record["record_id"]) / "audio.wav"
@@ -524,7 +525,7 @@ class MeetingProcessingService:
         provider = str(self.config.transcribe_provider or "whisper_cpp").strip().lower()
         if provider != "whisper_cpp":
             raise ConfigError("Meeting Recorder transcription is restricted to whisper.cpp.")
-        whisper_bin = shutil.which(self.config.whisper_cpp_bin)
+        whisper_bin = _resolve_whisper_cpp_bin(self.config.whisper_cpp_bin)
         if not whisper_bin:
             raise ConfigError("whisper.cpp is required for transcription. Set MEETING_RECORDER_WHISPER_CPP_BIN to whisper-cli.")
         model_path = Path(self.config.whisper_model).expanduser()
@@ -557,7 +558,7 @@ class MeetingProcessingService:
         return transcript
 
     def _extract_visual_evidence(self, record: dict[str, Any], video_path: Path) -> list[dict[str, Any]]:
-        ffmpeg_path = shutil.which(self.config.ffmpeg_bin)
+        ffmpeg_path = _resolve_ffmpeg_bin(self.config.ffmpeg_bin)
         if not ffmpeg_path:
             return []
         keyframe_dir = self.store.record_dir(record["record_id"]) / "keyframes"
@@ -640,6 +641,44 @@ def _safe_record_id(record_id: str) -> str:
 
 def _redact_command(command: list[str]) -> list[str]:
     return [str(part) for part in command]
+
+
+def _resolve_executable(value: str, candidates: tuple[str, ...]) -> str | None:
+    configured = str(value or "").strip()
+    if configured:
+        configured_path = Path(configured).expanduser()
+        if configured_path.is_absolute() and configured_path.exists():
+            return str(configured_path)
+        resolved = shutil.which(configured)
+        if resolved:
+            return resolved
+    for candidate in candidates:
+        path = Path(candidate).expanduser()
+        if path.exists():
+            return str(path)
+    return None
+
+
+def _resolve_ffmpeg_bin(value: str) -> str | None:
+    return _resolve_executable(
+        value,
+        (
+            "/opt/homebrew/bin/ffmpeg",
+            "/opt/homebrew/opt/ffmpeg/bin/ffmpeg",
+            "/usr/local/bin/ffmpeg",
+        ),
+    )
+
+
+def _resolve_whisper_cpp_bin(value: str) -> str | None:
+    return _resolve_executable(
+        value,
+        (
+            "/opt/homebrew/bin/whisper-cli",
+            "/opt/homebrew/opt/whisper-cpp/bin/whisper-cli",
+            "/usr/local/bin/whisper-cli",
+        ),
+    )
 
 
 def _utc_now() -> str:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import mimetypes
 import os
 import tempfile
 import threading
@@ -13,13 +14,20 @@ from pathlib import Path
 from typing import Any
 import uuid
 
-from flask import Flask, current_app, jsonify, request
+from flask import Flask, current_app, jsonify, request, send_file
 
 from bpmis_jira_tool.bpmis import BPMISDirectApiClient
 from bpmis_jira_tool.bpmis_projects import BPMISProjectStore
 from bpmis_jira_tool.config import Settings
 from bpmis_jira_tool.errors import ToolError
 from bpmis_jira_tool.local_agent_protocol import NONCE_HEADER, SIGNATURE_HEADER, TIMESTAMP_HEADER, verify_signature
+from bpmis_jira_tool.meeting_recorder import (
+    MeetingProcessingService,
+    MeetingRecorderConfig,
+    MeetingRecorderRuntime,
+    MeetingRecordStore,
+    meeting_platform_from_link,
+)
 from bpmis_jira_tool.models import ProjectMatch
 from bpmis_jira_tool.monthly_report import (
     DEFAULT_MONTHLY_REPORT_RECIPIENT,
@@ -85,6 +93,12 @@ def create_local_agent_app() -> Flask:
     app.config["SOURCE_CODE_QA_SERVICE"] = _build_source_code_qa_service(settings)
     app.config["SOURCE_CODE_QA_QUERY_JOBS"] = {}
     app.config["SOURCE_CODE_QA_QUERY_JOBS_LOCK"] = threading.Lock()
+    meeting_store = MeetingRecordStore(_data_root(settings) / "meeting_records")
+    app.config["MEETING_RECORD_STORE"] = meeting_store
+    app.config["MEETING_RECORDER_RUNTIME"] = MeetingRecorderRuntime(
+        store=meeting_store,
+        config=_meeting_recorder_config(settings),
+    )
 
     @app.before_request
     def verify_local_agent_signature():
@@ -117,6 +131,8 @@ def create_local_agent_app() -> Flask:
                     "seatalk_configured": _seatalk_configured(settings),
                     "bpmis_mode": settings.bpmis_call_mode,
                     "bpmis_proxy": settings.local_agent_bpmis_enabled,
+                    "meeting_recorder": True,
+                    "meeting_recorder_diagnostics": _get_meeting_recorder_runtime().diagnostics(),
                 },
             }
         )
@@ -372,6 +388,95 @@ def create_local_agent_app() -> Flask:
             draft_markdown=str(payload.get("draft_markdown") or "").strip(),
         )
         return jsonify({"status": "ok", **asdict(result)})
+
+    @app.post("/api/local-agent/meeting-recorder/diagnostics")
+    def meeting_recorder_diagnostics():
+        return jsonify({"status": "ok", **_get_meeting_recorder_runtime().diagnostics()})
+
+    @app.post("/api/local-agent/meeting-recorder/records")
+    def meeting_recorder_records():
+        payload = request.get_json(silent=True) or {}
+        records = _get_meeting_record_store().list_records(owner_email=str(payload.get("owner_email") or ""))
+        return jsonify({"status": "ok", "records": [_meeting_record_summary(record) for record in records]})
+
+    @app.post("/api/local-agent/meeting-recorder/record")
+    def meeting_recorder_record():
+        payload = request.get_json(silent=True) or {}
+        record = _meeting_record_for_owner(
+            record_id=str(payload.get("record_id") or ""),
+            owner_email=str(payload.get("owner_email") or ""),
+        )
+        return jsonify({"status": "ok", "record": record})
+
+    @app.post("/api/local-agent/meeting-recorder/start")
+    def meeting_recorder_start():
+        payload = request.get_json(silent=True) or {}
+        meeting_link = str(payload.get("meeting_link") or payload.get("meetingLink") or "").strip()
+        record = _get_meeting_recorder_runtime().start_recording(
+            owner_email=str(payload.get("owner_email") or "").strip().lower(),
+            title=str(payload.get("title") or "Untitled meeting").strip(),
+            platform=str(payload.get("platform") or meeting_platform_from_link(meeting_link)).strip(),
+            meeting_link=meeting_link,
+            calendar_event_id=str(payload.get("calendar_event_id") or payload.get("calendarEventId") or "").strip(),
+            scheduled_start=str(payload.get("scheduled_start") or payload.get("scheduledStart") or "").strip(),
+            scheduled_end=str(payload.get("scheduled_end") or payload.get("scheduledEnd") or "").strip(),
+            attendees=payload.get("attendees") if isinstance(payload.get("attendees"), list) else [],
+        )
+        return jsonify({"status": "ok", "record": _meeting_record_summary(record)})
+
+    @app.post("/api/local-agent/meeting-recorder/stop")
+    def meeting_recorder_stop():
+        payload = request.get_json(silent=True) or {}
+        record = _get_meeting_recorder_runtime().stop_recording(
+            record_id=str(payload.get("record_id") or ""),
+            owner_email=str(payload.get("owner_email") or ""),
+        )
+        return jsonify({"status": "ok", "record": _meeting_record_summary(record)})
+
+    @app.post("/api/local-agent/meeting-recorder/process")
+    def meeting_recorder_process():
+        payload = request.get_json(silent=True) or {}
+        record = _build_meeting_processing_service(settings).process_recording(
+            record_id=str(payload.get("record_id") or ""),
+            owner_email=str(payload.get("owner_email") or ""),
+        )
+        return jsonify({"status": "ok", "record": _meeting_record_summary(record)})
+
+    @app.post("/api/local-agent/meeting-recorder/send-email")
+    def meeting_recorder_send_email():
+        payload = request.get_json(silent=True) or {}
+        email_payload = _build_meeting_processing_service(settings).send_minutes_email(
+            record_id=str(payload.get("record_id") or ""),
+            owner_email=str(payload.get("owner_email") or ""),
+            recipient=str(payload.get("recipient") or "").strip(),
+        )
+        return jsonify({"status": "ok", "email": email_payload})
+
+    @app.post("/api/local-agent/meeting-recorder/delete")
+    def meeting_recorder_delete():
+        payload = request.get_json(silent=True) or {}
+        _get_meeting_record_store().delete_record(
+            record_id=str(payload.get("record_id") or ""),
+            owner_email=str(payload.get("owner_email") or ""),
+        )
+        return jsonify({"status": "ok"})
+
+    @app.post("/api/local-agent/meeting-recorder/asset")
+    def meeting_recorder_asset():
+        payload = request.get_json(silent=True) or {}
+        record_id = str(payload.get("record_id") or "")
+        owner_email = str(payload.get("owner_email") or "")
+        relative_path = str(payload.get("relative_path") or "").strip()
+        _meeting_record_for_owner(record_id=record_id, owner_email=owner_email)
+        root_dir = _get_meeting_record_store().record_dir(record_id).resolve()
+        asset_path = (root_dir / relative_path).resolve()
+        if root_dir not in asset_path.parents and asset_path != root_dir:
+            raise ToolError("Invalid meeting asset path.")
+        if not asset_path.exists() or not asset_path.is_file():
+            raise ToolError("Meeting asset not found.")
+        response = send_file(asset_path, mimetype=mimetypes.guess_type(asset_path.name)[0])
+        response.headers["X-Meeting-Recorder-Filename"] = asset_path.name
+        return response
 
     @app.post("/api/local-agent/source-code-qa/sessions/list")
     def source_code_qa_sessions_list():
@@ -1270,6 +1375,73 @@ def _build_team_dashboard_config_store(settings: Settings):
 
 def _build_bpmis_project_store(settings: Settings) -> BPMISProjectStore:
     return BPMISProjectStore(_build_config_store(settings).db_path)
+
+
+def _meeting_recorder_config(settings: Settings) -> MeetingRecorderConfig:
+    return MeetingRecorderConfig(
+        ffmpeg_bin=settings.meeting_recorder_ffmpeg_bin,
+        video_input=settings.meeting_recorder_video_input,
+        audio_input=settings.meeting_recorder_audio_input,
+        frame_interval_seconds=settings.meeting_recorder_frame_interval_seconds,
+        vision_model=settings.meeting_recorder_vision_model,
+        transcribe_provider=settings.meeting_recorder_transcribe_provider,
+        whisper_cpp_bin=settings.meeting_recorder_whisper_cpp_bin,
+        whisper_model=settings.meeting_recorder_whisper_model,
+        whisper_language=settings.meeting_recorder_whisper_language,
+    )
+
+
+def _get_meeting_record_store() -> MeetingRecordStore:
+    return current_app.config["MEETING_RECORD_STORE"]
+
+
+def _get_meeting_recorder_runtime() -> MeetingRecorderRuntime:
+    return current_app.config["MEETING_RECORDER_RUNTIME"]
+
+
+def _build_meeting_processing_service(settings: Settings) -> MeetingProcessingService:
+    text_client = CodexTextGenerationClient(
+        settings=settings,
+        workspace_root=Path(__file__).resolve().parent.parent,
+        prompt_mode="meeting_recorder_minutes_codex",
+        codex_model=settings.prd_briefing_codex_model,
+    )
+    return MeetingProcessingService(
+        store=_get_meeting_record_store(),
+        config=_meeting_recorder_config(settings),
+        text_client=text_client,
+        credential_store=_build_google_credential_store(settings),
+        portal_base_url=settings.team_portal_base_url,
+    )
+
+
+def _meeting_record_for_owner(*, record_id: str, owner_email: str) -> dict[str, Any]:
+    record = _get_meeting_record_store().get_record(record_id)
+    if str(record.get("owner_email") or "").strip().lower() != str(owner_email or "").strip().lower():
+        raise ToolError("Meeting record is not available for this Google account.")
+    return record
+
+
+def _meeting_record_summary(record: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "record_id": record.get("record_id"),
+        "title": record.get("title"),
+        "platform": record.get("platform"),
+        "meeting_link": record.get("meeting_link"),
+        "calendar_event_id": record.get("calendar_event_id"),
+        "scheduled_start": record.get("scheduled_start"),
+        "scheduled_end": record.get("scheduled_end"),
+        "status": record.get("status"),
+        "recording_started_at": record.get("recording_started_at"),
+        "recording_stopped_at": record.get("recording_stopped_at"),
+        "created_at": record.get("created_at"),
+        "updated_at": record.get("updated_at"),
+        "media": record.get("media") or {},
+        "transcript_status": (record.get("transcript") or {}).get("status"),
+        "minutes_status": (record.get("minutes") or {}).get("status"),
+        "email_status": (record.get("email") or {}).get("status"),
+        "error": record.get("error") or "",
+    }
 
 
 def _data_root(settings: Settings) -> Path:

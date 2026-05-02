@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+from pathlib import Path
 import time
 from typing import Any, Callable
 from urllib.parse import urljoin, urlsplit
@@ -206,6 +207,47 @@ class LocalAgentClient:
     def team_dashboard_monthly_report_send(self, payload: dict[str, Any]) -> dict[str, Any]:
         result = self._request("POST", "/api/local-agent/team-dashboard/monthly-report/send", payload)
         return result if isinstance(result, dict) else {}
+
+    def meeting_recorder_diagnostics(self) -> dict[str, Any]:
+        return self._request("POST", "/api/local-agent/meeting-recorder/diagnostics", {})
+
+    def meeting_recorder_records(self, *, owner_email: str) -> list[dict[str, Any]]:
+        payload = self._request("POST", "/api/local-agent/meeting-recorder/records", {"owner_email": owner_email})
+        records = payload.get("records")
+        return records if isinstance(records, list) else []
+
+    def meeting_recorder_record(self, *, record_id: str, owner_email: str) -> dict[str, Any]:
+        return self._request("POST", "/api/local-agent/meeting-recorder/record", {"record_id": record_id, "owner_email": owner_email})
+
+    def meeting_recorder_start(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self._request("POST", "/api/local-agent/meeting-recorder/start", payload)
+
+    def meeting_recorder_stop(self, *, record_id: str, owner_email: str) -> dict[str, Any]:
+        return self._request("POST", "/api/local-agent/meeting-recorder/stop", {"record_id": record_id, "owner_email": owner_email})
+
+    def meeting_recorder_process(self, *, record_id: str, owner_email: str) -> dict[str, Any]:
+        return self._request("POST", "/api/local-agent/meeting-recorder/process", {"record_id": record_id, "owner_email": owner_email})
+
+    def meeting_recorder_send_email(self, *, record_id: str, owner_email: str, recipient: str) -> dict[str, Any]:
+        return self._request(
+            "POST",
+            "/api/local-agent/meeting-recorder/send-email",
+            {"record_id": record_id, "owner_email": owner_email, "recipient": recipient},
+        )
+
+    def meeting_recorder_delete(self, *, record_id: str, owner_email: str) -> dict[str, Any]:
+        return self._request("POST", "/api/local-agent/meeting-recorder/delete", {"record_id": record_id, "owner_email": owner_email})
+
+    def meeting_recorder_asset(self, *, record_id: str, owner_email: str, relative_path: str) -> tuple[bytes, str, str]:
+        response = self._request_raw(
+            "POST",
+            "/api/local-agent/meeting-recorder/asset",
+            {"record_id": record_id, "owner_email": owner_email, "relative_path": relative_path},
+            expect_json=False,
+        )
+        content_type = response.headers.get("Content-Type") or "application/octet-stream"
+        filename = response.headers.get("X-Meeting-Recorder-Filename") or Path(relative_path).name or "meeting-asset"
+        return response.content, content_type, filename
 
     def seatalk_overview(self) -> dict[str, Any]:
         return self._request("POST", "/api/local-agent/seatalk/overview", {})
@@ -548,10 +590,34 @@ class LocalAgentClient:
         return saved if isinstance(saved, dict) else {}
 
     def _request(self, method: str, path: str, payload: dict[str, Any] | None = None, *, signed: bool = True) -> dict[str, Any]:
+        response = self._request_raw(method, path, payload, signed=signed)
+        try:
+            response_payload = response.json()
+        except ValueError as error:
+            body_preview = response.text.strip().replace("\n", " ")[:160]
+            host = urlsplit(response.url).netloc or self.base_url
+            detail = f" HTTP {response.status_code} from {host}."
+            if body_preview:
+                detail += f" Response starts with: {body_preview}"
+            raise ToolError(f"Mac local-agent returned an unreadable response.{detail}") from error
+        if response.status_code >= 400 or response_payload.get("status") == "error":
+            message = str(response_payload.get("message") or f"Mac local-agent request failed with HTTP {response.status_code}.")
+            raise ToolError(message)
+        return response_payload
+
+    def _request_raw(
+        self,
+        method: str,
+        path: str,
+        payload: dict[str, Any] | None = None,
+        *,
+        signed: bool = True,
+        expect_json: bool = True,
+    ) -> requests.Response:
         url = urljoin(self.base_url, path.lstrip("/"))
         body = b""
         headers = {
-            "Accept": "application/json",
+            "Accept": "application/json" if expect_json else "*/*",
             "ngrok-skip-browser-warning": "true",
         }
         if method.upper() != "GET":
@@ -572,10 +638,12 @@ class LocalAgentClient:
                 )
             except requests.RequestException as error:
                 raise ToolError(f"Mac local-agent is unavailable: {error}") from error
-            try:
-                response_payload = response.json()
+            if not expect_json:
                 break
-            except ValueError as error:
+            try:
+                response.json()
+                break
+            except ValueError:
                 body_preview = response.text.strip().replace("\n", " ")[:160]
                 if (
                     attempt < max_attempts - 1
@@ -583,15 +651,19 @@ class LocalAgentClient:
                 ):
                     time.sleep(LOCAL_AGENT_TRANSIENT_UNREADABLE_RETRY_DELAYS_SECONDS[attempt])
                     continue
+                break
+        if response.status_code >= 400:
+            try:
+                response_payload = response.json()
+                message = str(response_payload.get("message") or f"Mac local-agent request failed with HTTP {response.status_code}.")
+            except ValueError:
+                body_preview = response.text.strip().replace("\n", " ")[:160]
                 host = urlsplit(url).netloc or self.base_url
-                detail = f" HTTP {response.status_code} from {host}."
+                message = f"Mac local-agent request failed with HTTP {response.status_code} from {host}."
                 if body_preview:
-                    detail += f" Response starts with: {body_preview}"
-                raise ToolError(f"Mac local-agent returned an unreadable response.{detail}") from error
-        if response.status_code >= 400 or response_payload.get("status") == "error":
-            message = str(response_payload.get("message") or f"Mac local-agent request failed with HTTP {response.status_code}.")
+                    message += f" Response starts with: {body_preview}"
             raise ToolError(message)
-        return response_payload
+        return response
 
 
 class RemoteSeaTalkDashboardService:

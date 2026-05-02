@@ -203,6 +203,26 @@ class MeetingRecorderRouteTests(unittest.TestCase):
         payload = response.get_json()
         self.assertEqual(payload["records"][0]["title"], "Review")
 
+    def test_diagnostics_and_records_use_local_agent_when_configured(self):
+        fake_client = Mock()
+        fake_client.meeting_recorder_diagnostics.return_value = {"ffmpeg_configured": True, "ffmpeg_path": "/opt/homebrew/bin/ffmpeg"}
+        fake_client.meeting_recorder_records.return_value = [{"record_id": "meeting-1", "title": "Review"}]
+
+        with patch("bpmis_jira_tool.web._local_agent_meeting_recorder_enabled", return_value=True):
+            client_patch = patch("bpmis_jira_tool.web._build_local_agent_client", return_value=fake_client)
+            with client_patch:
+                with self.app.test_client() as client:
+                    self._login(client, email="xiaodong.zheng@npt.sg")
+                    diagnostics = client.get("/api/meeting-recorder/diagnostics")
+                    records = client.get("/api/meeting-recorder/records")
+
+        self.assertEqual(diagnostics.status_code, 200)
+        self.assertEqual(records.status_code, 200)
+        self.assertEqual(diagnostics.get_json()["ffmpeg_path"], "/opt/homebrew/bin/ffmpeg")
+        self.assertEqual(records.get_json()["records"][0]["record_id"], "meeting-1")
+        fake_client.meeting_recorder_diagnostics.assert_called_once_with()
+        fake_client.meeting_recorder_records.assert_called_once_with(owner_email="xiaodong.zheng@npt.sg")
+
     def test_start_stop_process_and_email_routes_delegate_to_services(self):
         fake_runtime = Mock()
         fake_runtime.start_recording.return_value = {
