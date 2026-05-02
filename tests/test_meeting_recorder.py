@@ -549,6 +549,38 @@ class MeetingProcessingServiceTests(unittest.TestCase):
         self.assertEqual(processed["visual_evidence"], [])
         self.assertEqual(processed["transcript"]["text"], "Alice approved.")
 
+    def test_extract_audio_preserves_sparse_meeting_audio_timeline(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = MeetingRecordStore(root)
+            record = store.create_record(
+                owner_email="owner@npt.sg",
+                title="Zoom",
+                platform="zoom",
+                meeting_link="https://zoom.us/j/123",
+            )
+            video_path = store.record_dir(record["record_id"]) / "meeting.mp4"
+            video_path.write_bytes(b"video")
+            service = MeetingProcessingService(
+                store=store,
+                config=MeetingRecorderConfig(ffmpeg_bin="/opt/homebrew/bin/ffmpeg"),
+                text_client=FakeTextClient(),
+            )
+
+            with patch("bpmis_jira_tool.meeting_recorder._resolve_ffmpeg_bin", return_value="/opt/homebrew/bin/ffmpeg"), patch(
+                "bpmis_jira_tool.meeting_recorder._run_command"
+            ) as run_command:
+                audio_path = service._extract_audio(record, video_path)
+
+        command = run_command.call_args.args[0]
+        self.assertEqual(audio_path, store.record_dir(record["record_id"]) / "audio.wav")
+        self.assertIn("-fflags", command)
+        self.assertEqual(command[command.index("-fflags") + 1], "+genpts")
+        self.assertIn("-map", command)
+        self.assertEqual(command[command.index("-map") + 1], "0:a:0")
+        self.assertIn("-af", command)
+        self.assertEqual(command[command.index("-af") + 1], "aresample=async=1:first_pts=0")
+
     def test_send_minutes_email_attaches_transcript_text_file(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
