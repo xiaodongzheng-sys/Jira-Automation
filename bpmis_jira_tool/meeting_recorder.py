@@ -54,20 +54,6 @@ MEETING_TRANSCRIPT_EXPECTED_LANGUAGES = {
     "en",
     "zh",
     "cn",
-    "yue",
-    "ja",
-    "ko",
-    "ms",
-    "id",
-    "ta",
-    "hi",
-    "th",
-    "vi",
-    "fil",
-    "tl",
-    "es",
-    "fr",
-    "de",
 }
 
 
@@ -892,54 +878,93 @@ class MeetingProcessingService:
                 model_path=model_path,
             )
         output_base = self.store.record_dir(audio_path.parent.name) / "whisper-transcript"
+        configured_language = str(self.config.whisper_language or "auto").strip().lower()
+        return self._transcribe_audio_with_language_selection(
+            audio_path=audio_path,
+            output_base=output_base,
+            whisper_bin=whisper_bin,
+            model_path=model_path,
+            configured_language=configured_language,
+            offset_seconds=0,
+        )
+
+    def _transcribe_audio_with_language_selection(
+        self,
+        *,
+        audio_path: Path,
+        output_base: Path,
+        whisper_bin: str,
+        model_path: Path,
+        configured_language: str,
+        offset_seconds: float,
+    ) -> dict[str, Any]:
+        language = configured_language or "auto"
         transcript = self._transcribe_audio_once(
             audio_path=audio_path,
             output_base=output_base,
             whisper_bin=whisper_bin,
             model_path=model_path,
-            language=str(self.config.whisper_language or "auto").strip().lower(),
-            offset_seconds=0,
+            language=language,
+            offset_seconds=offset_seconds,
         )
         segments, quality = self._transcript_quality(
             audio_path=audio_path,
             chunks=transcript["chunks"],
             detected_language=transcript["language"],
         )
-        configured_language = str(self.config.whisper_language or "auto").strip().lower()
-        if configured_language in {"", "auto"} and _should_retry_transcript_in_english(quality):
-            english_base = self.store.record_dir(audio_path.parent.name) / "whisper-transcript-en"
-            english_transcript = self._transcribe_audio_once(
+        candidate = {
+            "text": transcript["text"],
+            "chunks": transcript["chunks"],
+            "segments": segments,
+            "quality": quality,
+            "language": quality.get("language") or transcript["language"],
+        }
+        if configured_language not in {"", "auto"} or not _should_retry_transcript_languages(quality):
+            return candidate
+
+        original_language = quality.get("language") or transcript["language"]
+        candidates = [candidate]
+        for retry_language in ("zh", "en"):
+            retry_base = output_base.with_name(f"{output_base.name}-{retry_language}")
+            retry_transcript = self._transcribe_audio_once(
                 audio_path=audio_path,
-                output_base=english_base,
+                output_base=retry_base,
                 whisper_bin=whisper_bin,
                 model_path=model_path,
-                language="en",
-                offset_seconds=0,
+                language=retry_language,
+                offset_seconds=offset_seconds,
             )
-            english_segments, english_quality = self._transcript_quality(
+            retry_segments, retry_quality = self._transcript_quality(
                 audio_path=audio_path,
-                chunks=english_transcript["chunks"],
-                detected_language=english_transcript["language"],
+                chunks=retry_transcript["chunks"],
+                detected_language=retry_transcript["language"],
             )
-            english_quality["retry_language"] = "en"
-            english_quality["original_language"] = quality.get("language") or transcript["language"]
-            if _transcript_quality_score(english_quality) > _transcript_quality_score(quality):
-                english_quality["warnings"] = [
-                    *english_quality.get("warnings", []),
-                    "Auto language transcription looked unreliable, so the accepted transcript was retried with English.",
-                ]
-                return {
-                    "text": english_transcript["text"],
-                    "chunks": english_transcript["chunks"],
-                    "segments": english_segments,
-                    "quality": english_quality,
+            retry_quality["retry_language"] = retry_language
+            retry_quality["original_language"] = original_language
+            candidates.append(
+                {
+                    "text": retry_transcript["text"],
+                    "chunks": retry_transcript["chunks"],
+                    "segments": retry_segments,
+                    "quality": retry_quality,
+                    "language": retry_quality.get("language") or retry_transcript["language"],
                 }
-            quality["retry_language"] = "en"
-            quality["warnings"] = [
-                *quality.get("warnings", []),
-                "Auto language transcription looked unreliable; English retry did not improve transcript quality.",
+            )
+        best = max(candidates, key=lambda item: _transcript_quality_score(item.get("quality") or {}))
+        best_quality = best.get("quality") or {}
+        if best is not candidate:
+            best_quality["warnings"] = [
+                *best_quality.get("warnings", []),
+                f"Auto language transcription looked unreliable, so the accepted transcript was retried with {best_quality.get('retry_language')}.",
             ]
-        return {"text": transcript["text"], "chunks": transcript["chunks"], "segments": segments, "quality": quality}
+        else:
+            best_quality["retry_language"] = "zh,en"
+            best_quality["original_language"] = original_language
+            best_quality["warnings"] = [
+                *best_quality.get("warnings", []),
+                "Auto language transcription looked unreliable; Chinese and English retries did not improve transcript quality.",
+            ]
+        return best
 
     def _transcribe_audio_once(
         self,
@@ -1027,12 +1052,12 @@ class MeetingProcessingService:
                 str(segment_audio),
             ]
             _run_command(extract_command, "Could not split meeting audio for transcription.")
-            transcript = self._transcribe_audio_once(
+            transcript = self._transcribe_audio_with_language_selection(
                 audio_path=segment_audio,
                 output_base=output_base,
                 whisper_bin=whisper_bin,
                 model_path=model_path,
-                language=configured_language or "auto",
+                configured_language=configured_language,
                 offset_seconds=float(start),
             )
             text_parts.append(str(transcript.get("text") or "").strip())
@@ -1309,7 +1334,7 @@ def _transcript_repetition_metrics(chunks: list[dict[str, Any]]) -> dict[str, An
     }
 
 
-def _should_retry_transcript_in_english(quality: dict[str, Any]) -> bool:
+def _should_retry_transcript_languages(quality: dict[str, Any]) -> bool:
     language = str(quality.get("language") or "auto").strip().lower()
     language_codes = {code.strip() for code in language.split(",") if code.strip()}
     unusual_language = bool(language_codes) and not language_codes.issubset(MEETING_TRANSCRIPT_EXPECTED_LANGUAGES)

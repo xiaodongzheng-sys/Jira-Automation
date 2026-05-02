@@ -676,7 +676,7 @@ class MeetingProcessingServiceTests(unittest.TestCase):
         self.assertIn("-l", command)
         self.assertIn("auto", command)
 
-    def test_transcribe_audio_retries_english_when_auto_language_is_repetitive(self):
+    def test_transcribe_audio_selects_english_when_auto_language_is_repetitive(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             model_path = root / "ggml-medium.bin"
@@ -720,10 +720,66 @@ class MeetingProcessingServiceTests(unittest.TestCase):
                 transcript = service._transcribe_audio(audio_path)
 
         whisper_calls = [call.args[0] for call in run_command.call_args_list if "-of" in call.args[0]]
-        self.assertEqual(len(whisper_calls), 2)
+        self.assertEqual(len(whisper_calls), 3)
         self.assertEqual(transcript["text"], "Project launch was approved.")
         self.assertEqual(transcript["quality"]["retry_language"], "en")
         self.assertEqual(transcript["quality"]["original_language"], "nn")
+
+    def test_transcribe_audio_selects_chinese_when_auto_language_is_unexpected(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            model_path = root / "ggml-medium.bin"
+            model_path.write_text("model", encoding="utf-8")
+            record_dir = root / "records" / "meeting-1"
+            record_dir.mkdir(parents=True)
+            audio_path = record_dir / "audio.wav"
+            audio_path.write_bytes(b"audio")
+            service = MeetingProcessingService(
+                store=MeetingRecordStore(root),
+                config=MeetingRecorderConfig(whisper_cpp_bin="whisper-cli", whisper_model=str(model_path)),
+                text_client=FakeTextClient(),
+            )
+
+            def fake_run(command, *_args, **_kwargs):
+                output_base = Path(command[command.index("-of") + 1])
+                if output_base.name.endswith("-zh"):
+                    output_base.with_suffix(".txt").write_text("我们确认今天上线。", encoding="utf-8")
+                    output_base.with_suffix(".srt").write_text(
+                        "1\n00:00:00,000 --> 00:00:04,000\n我们确认今天上线。\n",
+                        encoding="utf-8",
+                    )
+                    return Mock(stdout="", stderr="")
+                if output_base.name.endswith("-en"):
+                    output_base.with_suffix(".txt").write_text("There are a lot of them.\n" * 8, encoding="utf-8")
+                    output_base.with_suffix(".srt").write_text(
+                        "".join(
+                            f"{index}\n00:00:{index:02d},000 --> 00:00:{index + 1:02d},000\nThere are a lot of them.\n\n"
+                            for index in range(1, 9)
+                        ),
+                        encoding="utf-8",
+                    )
+                    return Mock(stdout="whisper_full_with_state: auto-detected language: en (p = 0.40)", stderr="")
+                output_base.with_suffix(".txt").write_text("잘 자요 잘 자요 잘 자요", encoding="utf-8")
+                output_base.with_suffix(".srt").write_text(
+                    "1\n00:00:00,000 --> 00:00:03,000\n잘 자요 잘 자요 잘 자요\n",
+                    encoding="utf-8",
+                )
+                return Mock(stdout="whisper_full_with_state: auto-detected language: ko (p = 0.70)", stderr="")
+
+            with patch("bpmis_jira_tool.meeting_recorder.shutil.which", return_value="/usr/local/bin/whisper-cli"), patch(
+                "bpmis_jira_tool.meeting_recorder._audio_duration_seconds",
+                return_value=42,
+            ), patch("bpmis_jira_tool.meeting_recorder._audio_volume_metrics", return_value={"low_audio": False}), patch(
+                "bpmis_jira_tool.meeting_recorder._run_command",
+                side_effect=fake_run,
+            ) as run_command:
+                transcript = service._transcribe_audio(audio_path)
+
+        whisper_calls = [call.args[0] for call in run_command.call_args_list if "-of" in call.args[0]]
+        self.assertEqual(len(whisper_calls), 3)
+        self.assertEqual(transcript["text"], "我们确认今天上线。")
+        self.assertEqual(transcript["quality"]["retry_language"], "zh")
+        self.assertEqual(transcript["quality"]["original_language"], "ko")
 
     def test_transcript_quality_flags_repetitive_unexpected_language(self):
         with tempfile.TemporaryDirectory() as temp_dir:
