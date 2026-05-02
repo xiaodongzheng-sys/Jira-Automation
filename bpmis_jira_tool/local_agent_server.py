@@ -1444,6 +1444,7 @@ def _meeting_recorder_config(settings: Settings) -> MeetingRecorderConfig:
         video_max_height=settings.meeting_recorder_video_max_height,
         avfoundation_pixel_format=settings.meeting_recorder_avfoundation_pixel_format,
         screen_preflight_timeout_seconds=settings.meeting_recorder_screen_preflight_timeout_seconds,
+        audio_only_fallback_on_screen_failure=settings.meeting_recorder_audio_only_fallback_on_screen_failure,
         frame_interval_seconds=settings.meeting_recorder_frame_interval_seconds,
         vision_model=settings.meeting_recorder_vision_model,
         transcribe_provider=settings.meeting_recorder_transcribe_provider,

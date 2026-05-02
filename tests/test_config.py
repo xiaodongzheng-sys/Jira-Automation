@@ -81,6 +81,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(settings.source_code_qa_llm_max_backoff_seconds, 8.0)
         self.assertEqual(settings.local_agent_connect_timeout_seconds, 10)
         self.assertEqual(settings.meeting_recorder_screen_preflight_timeout_seconds, 20)
+        self.assertTrue(settings.meeting_recorder_audio_only_fallback_on_screen_failure)
 
     def test_local_agent_connect_timeout_from_env(self):
         with patch.dict(os.environ, {"LOCAL_AGENT_CONNECT_TIMEOUT_SECONDS": "4"}, clear=True), patch(
@@ -92,13 +93,18 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(settings.local_agent_connect_timeout_seconds, 4)
 
     def test_meeting_recorder_screen_preflight_timeout_from_env(self):
-        with patch.dict(os.environ, {"MEETING_RECORDER_SCREEN_PREFLIGHT_TIMEOUT_SECONDS": "30"}, clear=True), patch(
+        env = {
+            "MEETING_RECORDER_SCREEN_PREFLIGHT_TIMEOUT_SECONDS": "30",
+            "MEETING_RECORDER_AUDIO_ONLY_FALLBACK_ON_SCREEN_FAILURE": "false",
+        }
+        with patch.dict(os.environ, env, clear=True), patch(
             "bpmis_jira_tool.config.find_dotenv",
             return_value="",
         ):
             settings = Settings.from_env()
 
         self.assertEqual(settings.meeting_recorder_screen_preflight_timeout_seconds, 30)
+        self.assertFalse(settings.meeting_recorder_audio_only_fallback_on_screen_failure)
 
     def test_source_code_qa_codex_concurrency_from_env(self):
         with patch.dict(os.environ, {"SOURCE_CODE_QA_CODEX_CONCURRENCY": "2"}, clear=True), patch(

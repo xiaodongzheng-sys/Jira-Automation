@@ -81,6 +81,7 @@ class MeetingRecorderConfig:
     video_max_height: int = 1080
     avfoundation_pixel_format: str = "bgr0"
     screen_preflight_timeout_seconds: int = 20
+    audio_only_fallback_on_screen_failure: bool = True
     frame_interval_seconds: int = 60
     vision_model: str = "gpt-4.1-mini"
     transcribe_provider: str = "whisper_cpp"
@@ -415,11 +416,17 @@ class MeetingRecorderRuntime:
             screen_preflight = self._screen_capture_preflight(ffmpeg_path=ffmpeg_path)
             if screen_preflight.get("status") != "ok":
                 warning = screen_preflight.get("warning") or "Screen capture is unavailable."
-                raise ToolError(
-                    "Screen recording is required for Zoom/Google Meet links but is not available. "
-                    f"{warning} Grant macOS Screen Recording permission to the process running the local agent, "
-                    "verify MEETING_RECORDER_VIDEO_INPUT, then restart the local agent."
-                )
+                if self.config.audio_only_fallback_on_screen_failure:
+                    effective_mode = MEETING_RECORDING_MODE_AUDIO_ONLY
+                    screen_preflight["warning"] = (
+                        f"{warning} Continuing with audio-only recording because screen capture is unavailable."
+                    )
+                else:
+                    raise ToolError(
+                        "Screen recording is required for Zoom/Google Meet links but is not available. "
+                        f"{warning} Grant macOS Screen Recording permission to the process running the local agent, "
+                        "verify MEETING_RECORDER_VIDEO_INPUT, then restart the local agent."
+                    )
         record = self.store.create_record(
             owner_email=owner_email,
             title=title,

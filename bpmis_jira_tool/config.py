@@ -63,6 +63,7 @@ class Settings:
     meeting_recorder_video_max_height: int = 1080
     meeting_recorder_avfoundation_pixel_format: str = "bgr0"
     meeting_recorder_screen_preflight_timeout_seconds: int = 20
+    meeting_recorder_audio_only_fallback_on_screen_failure: bool = True
     meeting_recorder_frame_interval_seconds: int = 60
     meeting_recorder_vision_model: str = "gpt-4.1-mini"
     meeting_recorder_transcribe_provider: str = "whisper_cpp"
@@ -198,6 +199,7 @@ class Settings:
             meeting_recorder_video_max_height=int(_env_str("MEETING_RECORDER_VIDEO_MAX_HEIGHT", "1080")),
             meeting_recorder_avfoundation_pixel_format=_env_str("MEETING_RECORDER_AVFOUNDATION_PIXEL_FORMAT", "bgr0"),
             meeting_recorder_screen_preflight_timeout_seconds=int(_env_str("MEETING_RECORDER_SCREEN_PREFLIGHT_TIMEOUT_SECONDS", "20")),
+            meeting_recorder_audio_only_fallback_on_screen_failure=_env_bool("MEETING_RECORDER_AUDIO_ONLY_FALLBACK_ON_SCREEN_FAILURE", True),
             meeting_recorder_frame_interval_seconds=int(_env_str("MEETING_RECORDER_FRAME_INTERVAL_SECONDS", "60")),
             meeting_recorder_vision_model=_env_str("MEETING_RECORDER_VISION_MODEL", "gpt-4.1-mini"),
             meeting_recorder_transcribe_provider=_env_str("MEETING_RECORDER_TRANSCRIBE_PROVIDER", "whisper_cpp"),
