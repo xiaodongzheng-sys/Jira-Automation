@@ -88,11 +88,13 @@ from prd_briefing.storage import BriefingStore
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(PROJECT_ROOT / ".env")
 MARKET_KEYS = ["ID", "SG", "PH", "Regional"]
-TEAM_PROFILE_ADMIN_EMAIL = "xiaodong.zheng@npt.sg"
-SYNC_EMAIL_EDIT_ALLOWLIST = {"xiaodong.zheng@npt.sg", "xiaodong.zheng1991@gmail.com"}
-SOURCE_CODE_QA_BUILTIN_ADMIN_EMAILS = {"xiaodong.zheng@npt.sg"}
-GMAIL_SEATALK_BUILTIN_OWNER_EMAILS = {"xiaodong.zheng@npt.sg"}
-TEAM_DASHBOARD_ACCESS_EMAILS = {"xiaodong.zheng@npt.sg", "sophia.wangzj@npt.sg"}
+PORTAL_ADMIN_EMAIL = "xiaodong.zheng@npt.sg"
+PORTAL_TEST_USER_EMAIL = "xiaodong.zheng1991@gmail.com"
+TEAM_PROFILE_ADMIN_EMAIL = PORTAL_ADMIN_EMAIL
+SYNC_EMAIL_EDIT_ALLOWLIST = {PORTAL_ADMIN_EMAIL}
+SOURCE_CODE_QA_BUILTIN_ADMIN_EMAILS = {PORTAL_ADMIN_EMAIL}
+GMAIL_SEATALK_BUILTIN_OWNER_EMAILS = {PORTAL_ADMIN_EMAIL}
+TEAM_DASHBOARD_ACCESS_EMAILS = {PORTAL_ADMIN_EMAIL}
 TEAM_DASHBOARD_LEGACY_DEFAULT_MEMBER_EMAILS = (
     "huixian.nah@npt.sg",
     "jireh.tanyx@npt.sg",
@@ -5550,21 +5552,29 @@ def _current_google_email() -> str:
     return str(_current_google_profile().get("email") or "").strip().lower()
 
 
+def _is_portal_admin(email: str | None = None) -> bool:
+    current_email = str(email or _current_google_email() or "").strip().lower()
+    return current_email == PORTAL_ADMIN_EMAIL
+
+
+def _is_portal_user(email: str | None = None) -> bool:
+    current_email = str(email or _current_google_email() or "").strip().lower()
+    return bool(
+        current_email
+        and (
+            current_email.endswith("@npt.sg")
+            or current_email == PORTAL_TEST_USER_EMAIL
+        )
+    )
+
+
 def _current_google_user_is_blocked(settings: Settings) -> bool:
     if not _shared_portal_enabled(settings):
-        return False
-    if not settings.team_allowed_emails and not settings.team_allowed_email_domains:
         return False
     email = _current_google_email()
     if not email:
         return False
-    if email in settings.team_allowed_emails:
-        return False
-    if "@" in email:
-        domain = email.rsplit("@", 1)[1]
-        if domain in settings.team_allowed_email_domains:
-            return False
-    return True
+    return not _is_portal_user(email)
 
 
 def _shared_portal_enabled(settings: Settings) -> bool:
@@ -5583,72 +5593,36 @@ def _google_session_is_connected() -> bool:
 
 
 def _can_access_prd_briefing(settings: Settings) -> bool:
-    email = _current_google_email()
-    allowed_emails = {
-        str(settings.prd_briefing_owner_email or "").strip().lower(),
-        "xiaodong.zheng@npt.sg",
-        "xiaodong.zheng1991@gmail.com",
-    }
-    return bool(email and email in {item for item in allowed_emails if item})
+    return _is_portal_user()
 
 
 def _can_access_prd_self_assessment(settings: Settings) -> bool:
-    email = _current_google_email()
-    return bool(
-        email
-        and (
-            email.endswith("@npt.sg")
-            or email == "xiaodong.zheng1991@gmail.com"
-        )
-    )
+    return _is_portal_user()
 
 
 def _can_access_gmail_seatalk_demo(settings: Settings) -> bool:
-    email = _current_google_email()
-    allowed_emails = {
-        settings.gmail_seatalk_demo_owner_email.strip().lower(),
-        *GMAIL_SEATALK_BUILTIN_OWNER_EMAILS,
-    }
-    return bool(email and email in {item for item in allowed_emails if item})
+    return _is_portal_admin()
 
 
 def _can_access_source_code_qa(settings: Settings) -> bool:
-    email = _current_google_email()
-    return bool(
-        email
-        and (
-            email.endswith("@npt.sg")
-            or email == "xiaodong.zheng1991@gmail.com"
-        )
-    )
+    return _is_portal_user()
 
 
 def _can_manage_source_code_qa(settings: Settings) -> bool:
-    email = _current_google_email()
-    admin_emails = {
-        settings.source_code_qa_owner_email.strip().lower(),
-        *settings.source_code_qa_admin_emails,
-        *SOURCE_CODE_QA_BUILTIN_ADMIN_EMAILS,
-    }
-    return bool(email and email in {item for item in admin_emails if item})
+    return _is_portal_admin()
 
 
 def _source_code_qa_auth_payload(settings: Settings) -> dict[str, Any]:
     email = _current_google_email()
     owner_email = settings.source_code_qa_owner_email.strip().lower()
-    admin_emails = {owner_email, *settings.source_code_qa_admin_emails, *SOURCE_CODE_QA_BUILTIN_ADMIN_EMAILS}
-    normalized_admins = {item for item in admin_emails if item}
-    if email == owner_email:
-        match_source = "owner"
-    elif email and email in SOURCE_CODE_QA_BUILTIN_ADMIN_EMAILS:
-        match_source = "builtin_admin"
-    elif email and email in normalized_admins:
-        match_source = "admin_allowlist"
+    normalized_admins = {PORTAL_ADMIN_EMAIL}
+    if _is_portal_admin(email):
+        match_source = "portal_admin"
     else:
         match_source = ""
     return {
         "signed_in_email": email,
-        "can_manage": bool(email and email in normalized_admins),
+        "can_manage": _is_portal_admin(email),
         "owner_email": owner_email,
         "admin_email_count": len(normalized_admins),
         "admin_match_source": match_source,
@@ -6147,7 +6121,7 @@ def _require_gmail_seatalk_demo_access(settings: Settings, *, api: bool = False)
     login_gate = _require_google_login(settings, api=api)
     if login_gate is not None:
         return login_gate
-    message = f"SeaTalk Management is restricted to {settings.gmail_seatalk_demo_owner_email.strip().lower()}."
+    message = f"SeaTalk Management is restricted to {PORTAL_ADMIN_EMAIL}."
     if not _can_access_gmail_seatalk_demo(settings):
         if api:
             return jsonify({"status": "error", "message": message}), HTTPStatus.FORBIDDEN
@@ -6160,7 +6134,7 @@ def _require_source_code_qa_access(settings: Settings, *, api: bool = False):
     login_gate = _require_google_login(settings, api=api)
     if login_gate is not None:
         return login_gate
-    message = "Source Code Q&A is available to signed-in @npt.sg users only."
+    message = "Source Code Q&A is available to signed-in @npt.sg users and the configured test account."
     if not _can_access_source_code_qa(settings):
         if api:
             return jsonify({"status": "error", "message": message}), HTTPStatus.FORBIDDEN
@@ -6175,8 +6149,8 @@ def _require_source_code_qa_manage_access(settings: Settings, *, api: bool = Fal
         return access_gate
     auth_payload = _source_code_qa_auth_payload(settings)
     message = (
-        f"Source Code Q&A repository admin is restricted to {auth_payload['owner_email']} "
-        f"and configured admin allowlist. Signed in as {auth_payload['signed_in_email'] or 'unknown'}."
+        f"Source Code Q&A repository admin is restricted to {PORTAL_ADMIN_EMAIL}. "
+        f"Signed in as {auth_payload['signed_in_email'] or 'unknown'}."
     )
     if not _can_manage_source_code_qa(settings):
         if api:
@@ -6191,8 +6165,7 @@ def _require_team_dashboard_access(settings: Settings, *, api: bool = False):
     if login_gate is not None:
         return login_gate
     user_identity = _get_user_identity(settings)
-    allowed = ", ".join(sorted(TEAM_DASHBOARD_ACCESS_EMAILS))
-    message = f"Team Dashboard is restricted to {allowed}."
+    message = f"Team Dashboard is restricted to {PORTAL_ADMIN_EMAIL}."
     if not _can_access_team_dashboard(user_identity):
         if api:
             return jsonify({"status": "error", "message": message}), HTTPStatus.FORBIDDEN
@@ -6320,23 +6293,23 @@ def _load_effective_team_profiles(config_store: WebConfigStore) -> dict[str, dic
 
 
 def _is_team_profile_admin(user_identity: dict[str, str | None]) -> bool:
-    return str(user_identity.get("email") or "").strip().lower() == TEAM_PROFILE_ADMIN_EMAIL
+    return _is_portal_admin(str(user_identity.get("email") or ""))
 
 
 def _can_access_team_dashboard(user_identity: dict[str, str | None]) -> bool:
-    return str(user_identity.get("email") or "").strip().lower() in TEAM_DASHBOARD_ACCESS_EMAILS
+    return _is_portal_admin(str(user_identity.get("email") or ""))
 
 
 def _can_manage_team_dashboard(user_identity: dict[str, str | None]) -> bool:
-    return str(user_identity.get("email") or "").strip().lower() == TEAM_PROFILE_ADMIN_EMAIL
+    return _is_portal_admin(str(user_identity.get("email") or ""))
 
 
 def _can_access_team_dashboard_monthly_report(user_identity: dict[str, str | None]) -> bool:
-    return str(user_identity.get("email") or "").strip().lower() == "xiaodong.zheng@npt.sg"
+    return _is_portal_admin(str(user_identity.get("email") or ""))
 
 
 def _can_edit_sync_email(user_identity: dict[str, str | None]) -> bool:
-    return str(user_identity.get("email") or "").strip().lower() in SYNC_EMAIL_EDIT_ALLOWLIST
+    return _is_portal_admin(str(user_identity.get("email") or ""))
 
 
 def _apply_sync_email_policy(config_data: dict[str, Any], user_identity: dict[str, str | None]) -> None:

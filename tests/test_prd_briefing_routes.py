@@ -508,15 +508,15 @@ class PRDBriefingRouteTests(unittest.TestCase):
         self.assertEqual(payload["review"]["result_markdown"], "### Cached Review")
         self.assertEqual(fake_client.payload["language"], "en")
 
-    def test_portal_route_blocks_non_owner_npt_google_user(self):
+    def test_portal_route_allows_non_admin_npt_google_user(self):
         with self.app.test_client() as client:
             with client.session_transaction() as session:
                 session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
                 session["google_credentials"] = {"token": "x"}
 
             response = client.get("/prd-briefing/", follow_redirects=False)
-            self.assertEqual(response.status_code, 302)
-            self.assertEqual(response.headers["Location"], "/access-denied")
+            self.assertEqual(response.status_code, 200)
+            self.assertIn(b"PRD Briefing Tool", response.data)
 
     def test_portal_route_allows_test_gmail_user(self):
         with self.app.test_client() as client:

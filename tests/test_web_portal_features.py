@@ -944,8 +944,11 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertNotIn(b"data-team-dashboard", admin_response.data)
         self.assertNotIn(b">Team Default Admin<", user_response.data)
         self.assertNotIn(b">Team Dashboard<", user_response.data)
-        self.assertIn(b">Team Dashboard<", sophia_response.data)
-        self.assertIn(b'href="/team-dashboard"', sophia_response.data)
+        self.assertNotIn(b">Team Default Admin<", sophia_response.data)
+        self.assertNotIn(b">Team Dashboard<", sophia_response.data)
+        self.assertIn(b">PRD Briefing Tool<", user_response.data)
+        self.assertIn(b">PRD Self-Assessment<", user_response.data)
+        self.assertIn(b">Source Code Q&amp;A<", user_response.data)
 
     def test_team_dashboard_is_standalone_page_for_admin_user(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
@@ -992,13 +995,8 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertNotIn(b"Manage My Projects", dashboard_response.data)
         self.assertNotIn(b'data-default-tab="team-dashboard"', dashboard_response.data)
         self.assertNotIn(b'data-tab-trigger="team-dashboard"', dashboard_response.data)
-        self.assertEqual(sophia_dashboard_response.status_code, 200)
-        self.assertIn(b"Task List", sophia_dashboard_response.data)
-        self.assertNotIn(b"Monthly Report", sophia_dashboard_response.data)
-        self.assertNotIn(b'data-team-dashboard-tab="monthly-report"', sophia_dashboard_response.data)
-        self.assertNotIn(b"data-monthly-report-draft-url", sophia_dashboard_response.data)
-        self.assertNotIn(b"Team Admin", sophia_dashboard_response.data)
-        self.assertNotIn(b"data-team-dashboard-admin-form", sophia_dashboard_response.data)
+        self.assertEqual(sophia_dashboard_response.status_code, 302)
+        self.assertEqual(sophia_dashboard_response.headers["Location"], "/access-denied")
 
     def test_team_dashboard_config_defaults_and_save_are_admin_only(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
@@ -1070,7 +1068,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertEqual(config_payload["config"]["teams"]["GRC"]["member_emails"], ["sabrina.chan@npt.sg"])
         self.assertIn("Monthly Report", config_payload["config"]["monthly_report_template"])
         self.assertEqual(save_response.status_code, 200)
-        self.assertEqual(sophia_config_response.status_code, 200)
+        self.assertEqual(sophia_config_response.status_code, 403)
         self.assertEqual(sophia_save_response.status_code, 403)
         saved_payload = save_response.get_json()
         self.assertEqual(saved_payload["config"]["teams"]["AF"]["member_emails"], ["pm1@npt.sg", "pm2@npt.sg"])
@@ -1359,7 +1357,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertEqual(cached.get_json()["team"]["cache_source"], "server")
         self.assertEqual(reloaded.get_json()["team"]["under_prd"][0]["jira_tickets"][0]["jira_id"], "AF-2")
 
-    def test_team_dashboard_key_project_write_is_admin_only_but_visible_to_readonly_users(self):
+    def test_team_dashboard_key_project_read_and_write_are_admin_only(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
@@ -1420,11 +1418,7 @@ class WebPortalFeatureTests(unittest.TestCase):
                     tasks_response = client.get("/api/team-dashboard/tasks?team=AF")
 
         self.assertEqual(write_response.status_code, 403)
-        self.assertEqual(tasks_response.status_code, 200)
-        project = tasks_response.get_json()["team"]["under_prd"][0]
-        self.assertEqual(project["bpmis_id"], "P1-100")
-        self.assertTrue(project["is_key_project"])
-        self.assertEqual(project["key_project_source"], "manual_on")
+        self.assertEqual(tasks_response.status_code, 403)
 
     def test_team_dashboard_config_uses_remote_local_agent_store_when_enabled(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(

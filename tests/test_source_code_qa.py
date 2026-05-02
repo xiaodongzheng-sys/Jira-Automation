@@ -131,7 +131,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertIn("data-source-preview-attachment", script)
         self.assertIn("Please wait for image upload to finish.", script)
 
-    def test_source_code_qa_admin_allowlist_can_manage_repositories(self):
+    def test_source_code_qa_admin_allowlist_does_not_grant_portal_admin(self):
         with patch.dict(
             os.environ,
             {
@@ -150,8 +150,11 @@ class SourceCodeQARouteTests(unittest.TestCase):
             page_response = client.get("/source-code-qa")
             config_response = client.get("/api/source-code-qa/config")
 
-        self.assertIn(b"Repository Mapping", page_response.data)
-        self.assertTrue(config_response.get_json()["can_manage"])
+        self.assertEqual(page_response.status_code, 200)
+        self.assertNotIn(b"Repository Mapping", page_response.data)
+        self.assertNotIn(b"Repo Admin", page_response.data)
+        self.assertFalse(config_response.get_json()["can_manage"])
+        self.assertEqual(config_response.get_json()["auth"]["admin_match_source"], "")
 
     def test_source_code_qa_builtin_owner_can_manage_when_env_owner_changes(self):
         with patch.dict(
@@ -176,9 +179,9 @@ class SourceCodeQARouteTests(unittest.TestCase):
         config_payload = config_response.get_json()
         self.assertIn(b"Repository Mapping", page_response.data)
         self.assertTrue(config_payload["can_manage"])
-        self.assertEqual(config_payload["auth"]["admin_match_source"], "builtin_admin")
+        self.assertEqual(config_payload["auth"]["admin_match_source"], "portal_admin")
 
-    def test_source_code_qa_default_owner_alias_can_manage_repositories(self):
+    def test_source_code_qa_test_user_is_not_admin_even_with_default_allowlist(self):
         with patch.dict(
             os.environ,
             {
@@ -208,24 +211,14 @@ class SourceCodeQARouteTests(unittest.TestCase):
                     json={"pm_team": "AF", "country": "All", "repositories": [{"url": "https://git.example.com/team/repo.git"}]},
                 )
                 sync_response = client.post("/api/source-code-qa/sync", json={"pm_team": "AF", "country": "All"})
-                sync_payload = sync_response.get_json()
-                sync_snapshot = {}
-                for _ in range(20):
-                    job_response = client.get(f"/api/jobs/{sync_payload['job_id']}")
-                    sync_snapshot = job_response.get_json()
-                    if sync_snapshot.get("state") == "completed":
-                        break
-                    time.sleep(0.05)
 
         config_payload = config_response.get_json()
-        self.assertIn(b"Repository Mapping", page_response.data)
-        self.assertTrue(config_payload["can_manage"])
+        self.assertNotIn(b"Repository Mapping", page_response.data)
+        self.assertFalse(config_payload["can_manage"])
         self.assertEqual(config_payload["auth"]["signed_in_email"], "xiaodong.zheng1991@gmail.com")
-        self.assertEqual(config_payload["auth"]["admin_match_source"], "admin_allowlist")
-        self.assertEqual(save_response.status_code, 200)
-        self.assertEqual(sync_response.status_code, 200)
-        self.assertEqual(sync_payload["status"], "queued")
-        self.assertEqual(sync_snapshot.get("state"), "completed")
+        self.assertEqual(config_payload["auth"]["admin_match_source"], "")
+        self.assertEqual(save_response.status_code, 403)
+        self.assertEqual(sync_response.status_code, 403)
 
     def test_source_code_qa_manage_forbidden_reports_signed_in_email(self):
         with self.app.test_client() as client:

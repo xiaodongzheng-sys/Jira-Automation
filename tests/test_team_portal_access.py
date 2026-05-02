@@ -104,12 +104,12 @@ class TeamPortalAccessTests(unittest.TestCase):
         self.assertEqual(response.status_code, 308)
         self.assertEqual(response.headers["Location"], "https://breeze-lung-clunky.ngrok-free.dev/prd-briefing/")
 
-    def test_blocked_google_user_is_logged_out_and_shown_index(self):
+    def test_non_portal_google_user_is_logged_out_and_shown_access_denied(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
                 "FLASK_SECRET_KEY": "test-secret",
-                "TEAM_ALLOWED_EMAILS": "allowed@npt.sg",
+                "TEAM_ALLOWED_EMAILS": "xiaodong.zheng1991@gmail.com",
                 "TEAM_ALLOWED_EMAIL_DOMAINS": "",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
             },
@@ -120,7 +120,7 @@ class TeamPortalAccessTests(unittest.TestCase):
 
             with app.test_client() as client:
                 with client.session_transaction() as session:
-                    session["google_profile"] = {"email": "blocked@npt.sg", "name": "Blocked User"}
+                    session["google_profile"] = {"email": "blocked@example.com", "name": "Blocked User"}
                     session["google_credentials"] = {"token": "x"}
 
                 response = client.get("/", follow_redirects=False)
