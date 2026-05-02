@@ -2,6 +2,8 @@
   const gmailRoot = document.querySelector('[data-gmail-demo-root]');
   const seatalkRoot = document.querySelector('[data-seatalk-demo-root]');
   if (!gmailRoot && !seatalkRoot) return;
+  const SEATALK_NAME_MAPPING_PAGE_SIZE = 50;
+  const seatalkNameMappingState = new WeakMap();
 
   const escapeHtml = (value) => String(value ?? '')
     .replaceAll('&', '&amp;')
@@ -199,10 +201,92 @@
     });
   };
 
-  const renderNameMappings = (root, payload) => {
+  const seatalkMappingStateFor = (root) => {
+    if (!seatalkNameMappingState.has(root)) {
+      seatalkNameMappingState.set(root, { rows: [], mappings: {}, page: 1 });
+    }
+    return seatalkNameMappingState.get(root);
+  };
+
+  const syncVisibleNameMappingInputs = (root) => {
+    const state = seatalkMappingStateFor(root);
+    root.querySelectorAll('[data-seatalk-mapping-row]').forEach((row) => {
+      const id = row.dataset.seatalkMappingId || '';
+      const input = row.querySelector('[data-seatalk-mapping-input]');
+      if (id && input) state.mappings[id] = String(input.value || '');
+    });
+  };
+
+  const renderNameMappingPage = (root) => {
     const body = root.querySelector('[data-seatalk-name-mapping-body]');
     const actionContainers = [...root.querySelectorAll('[data-seatalk-name-mapping-actions]')];
     if (!body) return;
+    const state = seatalkMappingStateFor(root);
+    const rows = Array.isArray(state.rows) ? state.rows : [];
+    const totalPages = Math.max(1, Math.ceil(rows.length / SEATALK_NAME_MAPPING_PAGE_SIZE));
+    state.page = Math.min(Math.max(Number(state.page || 1), 1), totalPages);
+    const start = (state.page - 1) * SEATALK_NAME_MAPPING_PAGE_SIZE;
+    const pageRows = rows.slice(start, start + SEATALK_NAME_MAPPING_PAGE_SIZE);
+    if (!rows.length) {
+      body.innerHTML = `
+        <article class="seatalk-insight-item">
+          <p>No frequent or recently surfaced SeaTalk source IDs were found.</p>
+        </article>
+      `;
+      body.hidden = false;
+      actionContainers.forEach((actions) => { actions.hidden = true; });
+      return;
+    }
+    body.innerHTML = `
+      <div class="seatalk-mapping-pagination" data-seatalk-name-mapping-pagination>
+        <span>Showing ${formatNumber(start + 1)}-${formatNumber(start + pageRows.length)} of ${formatNumber(rows.length)}</span>
+        <div class="button-row">
+          <button class="button button-secondary" type="button" data-seatalk-name-mapping-prev ${state.page <= 1 ? 'disabled' : ''}>Previous</button>
+          <span>Page ${formatNumber(state.page)} / ${formatNumber(totalPages)}</span>
+          <button class="button button-secondary" type="button" data-seatalk-name-mapping-next ${state.page >= totalPages ? 'disabled' : ''}>Next</button>
+        </div>
+      </div>
+      ${pageRows.map((row) => `
+        <div class="seatalk-mapping-row" data-seatalk-mapping-row data-seatalk-mapping-id="${escapeHtml(row.id)}">
+          <div class="seatalk-mapping-id">
+            <strong>${escapeHtml(row.id)}</strong>
+            <span>${escapeHtml(row.priorityReason || row.type || 'Frequent unknown ID')}</span>
+          </div>
+          <div class="seatalk-mapping-count">
+            <strong>${formatNumber(row.count || 0)}</strong>
+            <span>mentions</span>
+          </div>
+          <div>
+            <input
+              type="text"
+              value="${escapeHtml(state.mappings[row.id] || '')}"
+              placeholder="Display name"
+              data-seatalk-mapping-input
+              aria-label="Display name for ${escapeHtml(row.id)}"
+            >
+            ${row.example ? `<div class="seatalk-mapping-example">${escapeHtml(row.example)}</div>` : ''}
+          </div>
+        </div>
+      `).join('')}
+    `;
+    body.hidden = false;
+    actionContainers.forEach((actions) => { actions.hidden = false; });
+    body.querySelectorAll('[data-seatalk-mapping-input]').forEach((input) => {
+      input.addEventListener('input', () => syncVisibleNameMappingInputs(root));
+    });
+    body.querySelector('[data-seatalk-name-mapping-prev]')?.addEventListener('click', () => {
+      syncVisibleNameMappingInputs(root);
+      state.page -= 1;
+      renderNameMappingPage(root);
+    });
+    body.querySelector('[data-seatalk-name-mapping-next]')?.addEventListener('click', () => {
+      syncVisibleNameMappingInputs(root);
+      state.page += 1;
+      renderNameMappingPage(root);
+    });
+  };
+
+  const renderNameMappings = (root, payload) => {
     const mappings = payload?.mappings && typeof payload.mappings === 'object' ? payload.mappings : {};
     const unknownRows = Array.isArray(payload?.unknown_ids) ? payload.unknown_ids : [];
     const rowsById = new Map();
@@ -257,49 +341,23 @@
       }
     });
     const rows = Array.from(rowsById.values());
-    if (!rows.length) {
-      body.innerHTML = `
-        <article class="seatalk-insight-item">
-          <p>No frequent or recently surfaced SeaTalk source IDs were found.</p>
-        </article>
-      `;
-      body.hidden = false;
-      actionContainers.forEach((actions) => { actions.hidden = true; });
-      return;
-    }
-    body.innerHTML = rows.map((row) => `
-      <div class="seatalk-mapping-row" data-seatalk-mapping-row data-seatalk-mapping-id="${escapeHtml(row.id)}">
-        <div class="seatalk-mapping-id">
-          <strong>${escapeHtml(row.id)}</strong>
-          <span>${escapeHtml(row.priorityReason || row.type || 'Frequent unknown ID')}</span>
-        </div>
-        <div class="seatalk-mapping-count">
-          <strong>${formatNumber(row.count || 0)}</strong>
-          <span>mentions</span>
-        </div>
-        <div>
-          <input
-            type="text"
-            value="${escapeHtml(mappingValueFor(row.id))}"
-            placeholder="Display name"
-            data-seatalk-mapping-input
-            aria-label="Display name for ${escapeHtml(row.id)}"
-          >
-          ${row.example ? `<div class="seatalk-mapping-example">${escapeHtml(row.example)}</div>` : ''}
-        </div>
-      </div>
-    `).join('');
-    body.hidden = false;
-    actionContainers.forEach((actions) => { actions.hidden = false; });
+    const state = seatalkMappingStateFor(root);
+    state.rows = rows;
+    state.mappings = {};
+    rows.forEach((row) => {
+      state.mappings[row.id] = mappingValueFor(row.id);
+    });
+    state.page = 1;
+    renderNameMappingPage(root);
   };
 
   const collectNameMappings = (root) => {
+    syncVisibleNameMappingInputs(root);
+    const state = seatalkMappingStateFor(root);
     const mappings = {};
-    root.querySelectorAll('[data-seatalk-mapping-row]').forEach((row) => {
-      const id = row.dataset.seatalkMappingId || '';
-      const input = row.querySelector('[data-seatalk-mapping-input]');
-      const value = String(input?.value || '').trim();
-      if (id && value) mappings[id] = value;
+    Object.entries(state.mappings || {}).forEach(([id, value]) => {
+      const trimmed = String(value || '').trim();
+      if (id && trimmed) mappings[id] = trimmed;
     });
     return mappings;
   };

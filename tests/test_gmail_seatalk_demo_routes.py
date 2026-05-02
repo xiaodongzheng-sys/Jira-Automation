@@ -1,6 +1,7 @@
 import os
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from bpmis_jira_tool.gmail_dashboard import GMAIL_READONLY_SCOPE
@@ -774,6 +775,14 @@ class GmailSeaTalkDemoRouteTests(unittest.TestCase):
         self.assertEqual(payload["mappings"]["buddy-456"], "Important DM")
         self.assertEqual(payload["mappings"]["UID 456"], "Important DM")
         self.assertEqual(payload["unknown_ids"], [])
+
+    def test_seatalk_name_mapping_script_paginates_candidates(self):
+        source = Path("static/gmail_seatalk_demo.js").read_text(encoding="utf-8")
+
+        self.assertIn("SEATALK_NAME_MAPPING_PAGE_SIZE = 50", source)
+        self.assertIn("data-seatalk-name-mapping-prev", source)
+        self.assertIn("data-seatalk-name-mapping-next", source)
+        self.assertIn("syncVisibleNameMappingInputs(root)", source)
 
     def test_owner_seatalk_name_mappings_dedupes_buddy_and_uid_candidates(self):
         class FakeSeaTalkService:
