@@ -3854,21 +3854,39 @@ def create_app() -> Flask:
         except ToolError as error:
             return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
 
-    @app.get("/meeting-recorder/assets/<record_id>/<path:relative_path>")
+    @app.route("/meeting-recorder/assets/<record_id>/<path:relative_path>", methods=["GET", "HEAD"])
     def meeting_recorder_asset(record_id: str, relative_path: str):
         access_gate = _require_meeting_recorder_access(settings)
         if access_gate is not None:
             return access_gate
         try:
             if _local_agent_meeting_recorder_enabled(settings):
-                content, content_type, filename = _build_local_agent_client(settings).meeting_recorder_asset(
+                upstream = _build_local_agent_client(settings).meeting_recorder_asset_response(
                     record_id=record_id,
                     owner_email=_current_google_email(),
                     relative_path=relative_path,
+                    range_header=str(request.headers.get("Range") or ""),
+                    method=request.method,
                 )
-                response = Response(content, mimetype=content_type)
-                response.headers["Content-Disposition"] = f'inline; filename="{filename}"'
-                return response
+                excluded_headers = {"content-encoding", "connection", "transfer-encoding"}
+                headers = [
+                    (key, value)
+                    for key, value in upstream.headers.items()
+                    if key.lower() not in excluded_headers
+                ]
+                if request.method == "HEAD":
+                    upstream.close()
+                    return Response(status=upstream.status_code, headers=headers)
+
+                def stream_upstream():
+                    try:
+                        for chunk in upstream.iter_content(chunk_size=1024 * 256):
+                            if chunk:
+                                yield chunk
+                    finally:
+                        upstream.close()
+
+                return Response(stream_upstream(), status=upstream.status_code, headers=headers, direct_passthrough=True)
             record = _get_meeting_record_store().get_record(record_id)
             if str(record.get("owner_email") or "").strip().lower() != _current_google_email():
                 return jsonify({"status": "error", "message": "Meeting record is not available for this Google account."}), HTTPStatus.FORBIDDEN
@@ -3878,7 +3896,7 @@ def create_app() -> Flask:
                 return jsonify({"status": "error", "message": "Invalid meeting asset path."}), HTTPStatus.BAD_REQUEST
             if not asset_path.exists():
                 return jsonify({"status": "error", "message": "Meeting asset not found."}), HTTPStatus.NOT_FOUND
-            return send_file(asset_path)
+            return send_file(asset_path, conditional=True)
         except ToolError as error:
             return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
 

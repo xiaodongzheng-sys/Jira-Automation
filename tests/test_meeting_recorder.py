@@ -8,6 +8,9 @@ from bpmis_jira_tool.meeting_recorder import (
     MeetingProcessingService,
     MeetingRecorderConfig,
     MeetingRecordStore,
+    _audio_capture_status,
+    _effective_audio_input,
+    _parse_avfoundation_devices,
     _parse_srt_transcript,
     extract_meeting_links,
     meeting_platform_from_link,
@@ -53,6 +56,26 @@ class MeetingRecorderParsingTests(unittest.TestCase):
         self.assertEqual(payload["meeting_link"], "https://meet.google.com/abc-defg-hij")
         self.assertEqual(payload["attendees"], [{"email": "alice@npt.sg", "name": "Alice"}])
 
+    def test_parse_avfoundation_devices_and_audio_capture_modes(self):
+        output = """
+        [AVFoundation indev @ 0x123] AVFoundation video devices:
+        [AVFoundation indev @ 0x123] [0] MacBook Air Camera
+        [AVFoundation indev @ 0x123] [1] Capture screen 0
+        [AVFoundation indev @ 0x123] AVFoundation audio devices:
+        [AVFoundation indev @ 0x123] [0] MacBook Air Microphone
+        [AVFoundation indev @ 0x123] [1] BlackHole 2ch
+        [AVFoundation indev @ 0x123] [2] Meeting Recorder Aggregate
+        """
+
+        devices = _parse_avfoundation_devices(output)
+
+        self.assertEqual(devices["video_devices"], ["MacBook Air Camera", "Capture screen 0"])
+        self.assertEqual(devices["audio_devices"], ["MacBook Air Microphone", "BlackHole 2ch", "Meeting Recorder Aggregate"])
+        self.assertEqual(_effective_audio_input("default", devices["audio_devices"]), "Meeting Recorder Aggregate")
+        self.assertEqual(_audio_capture_status("MacBook Air Microphone", devices["audio_devices"])["audio_capture_label"], "Microphone only")
+        self.assertEqual(_audio_capture_status("BlackHole 2ch", devices["audio_devices"])["audio_capture_label"], "System audio configured")
+        self.assertTrue(_audio_capture_status("Meeting Recorder Aggregate", devices["audio_devices"])["system_audio_configured"])
+
 
 class MeetingRecordStoreTests(unittest.TestCase):
     def test_create_list_get_and_delete_record(self):
@@ -87,6 +110,21 @@ class FakeTextClient:
     def create_answer(self, *, system_prompt, user_prompt):
         self.calls.append({"system_prompt": system_prompt, "user_prompt": user_prompt})
         return "## Summary\nCodex minutes"
+
+
+class FakeStreamingResponse:
+    def __init__(self, *, status_code=206, headers=None, chunks=None):
+        self.status_code = status_code
+        self.headers = headers or {}
+        self._chunks = chunks or []
+        self.closed = False
+
+    def iter_content(self, chunk_size=1):
+        del chunk_size
+        yield from self._chunks
+
+    def close(self):
+        self.closed = True
 
 
 class MeetingProcessingServiceTests(unittest.TestCase):
@@ -250,6 +288,42 @@ class MeetingRecorderRouteTests(unittest.TestCase):
         self.assertEqual(records.get_json()["records"][0]["record_id"], "meeting-1")
         fake_client.meeting_recorder_diagnostics.assert_called_once_with()
         fake_client.meeting_recorder_records.assert_called_once_with(owner_email="xiaodong.zheng@npt.sg")
+
+    def test_meeting_asset_proxy_forwards_range_to_local_agent(self):
+        fake_response = FakeStreamingResponse(
+            status_code=206,
+            headers={
+                "Content-Type": "video/mp4",
+                "Content-Range": "bytes 0-99/1000",
+                "Accept-Ranges": "bytes",
+                "Content-Length": "100",
+            },
+            chunks=[b"a" * 40, b"b" * 60],
+        )
+        fake_client = Mock()
+        fake_client.meeting_recorder_asset_response.return_value = fake_response
+
+        with patch("bpmis_jira_tool.web._local_agent_meeting_recorder_enabled", return_value=True):
+            with patch("bpmis_jira_tool.web._build_local_agent_client", return_value=fake_client):
+                with self.app.test_client() as client:
+                    self._login(client, email="xiaodong.zheng@npt.sg")
+                    response = client.get(
+                        "/meeting-recorder/assets/meeting-1/meeting.mp4",
+                        headers={"Range": "bytes=0-99"},
+                    )
+
+        self.assertEqual(response.status_code, 206)
+        self.assertEqual(response.headers.get("Content-Range"), "bytes 0-99/1000")
+        self.assertEqual(response.headers.get("Accept-Ranges"), "bytes")
+        self.assertEqual(response.data, b"a" * 40 + b"b" * 60)
+        self.assertTrue(fake_response.closed)
+        fake_client.meeting_recorder_asset_response.assert_called_once_with(
+            record_id="meeting-1",
+            owner_email="xiaodong.zheng@npt.sg",
+            relative_path="meeting.mp4",
+            range_header="bytes=0-99",
+            method="GET",
+        )
 
     def test_start_stop_process_and_email_routes_delegate_to_services(self):
         fake_runtime = Mock()

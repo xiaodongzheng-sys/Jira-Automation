@@ -274,6 +274,55 @@ class LocalAgentServerTests(unittest.TestCase):
         self.assertEqual(response.status_code, 401)
         self.assertEqual(response.get_json()["status"], "error")
 
+    def test_signed_meeting_recorder_asset_supports_range_streaming(self):
+        store = self.app.config["MEETING_RECORD_STORE"]
+        record = store.create_record(
+            owner_email="owner@npt.sg",
+            title="Playback",
+            platform="google_meet",
+            meeting_link="https://meet.google.com/abc-defg-hij",
+        )
+        asset_path = store.record_dir(record["record_id"]) / "meeting.mp4"
+        asset_path.write_bytes(bytes(range(256)) * 4)
+        route_path = f"/api/local-agent/meeting-recorder/assets/{record['record_id']}/meeting.mp4"
+        headers = sign_headers(secret="shared-secret", method="GET", path=route_path, body=b"")
+        headers["Range"] = "bytes=0-99"
+
+        response = self.app.test_client().get(f"{route_path}?owner_email=owner@npt.sg", headers=headers)
+
+        self.assertEqual(response.status_code, 206)
+        self.assertEqual(response.headers.get("Accept-Ranges"), "bytes")
+        self.assertEqual(response.headers.get("Content-Range"), f"bytes 0-99/{asset_path.stat().st_size}")
+        self.assertEqual(len(response.data), 100)
+        self.assertEqual(response.data, asset_path.read_bytes()[:100])
+        response.close()
+
+    def test_signed_meeting_recorder_asset_supports_head_and_full_get(self):
+        store = self.app.config["MEETING_RECORD_STORE"]
+        record = store.create_record(
+            owner_email="owner@npt.sg",
+            title="Playback",
+            platform="google_meet",
+            meeting_link="https://meet.google.com/abc-defg-hij",
+        )
+        asset_path = store.record_dir(record["record_id"]) / "meeting.mp4"
+        asset_path.write_bytes(b"video-bytes")
+        route_path = f"/api/local-agent/meeting-recorder/assets/{record['record_id']}/meeting.mp4"
+        query_path = f"{route_path}?owner_email=owner@npt.sg"
+        get_headers = sign_headers(secret="shared-secret", method="GET", path=route_path, body=b"")
+        head_headers = sign_headers(secret="shared-secret", method="HEAD", path=route_path, body=b"")
+
+        get_response = self.app.test_client().get(query_path, headers=get_headers)
+        head_response = self.app.test_client().head(query_path, headers=head_headers)
+
+        self.assertEqual(get_response.status_code, 200)
+        self.assertEqual(get_response.data, b"video-bytes")
+        self.assertEqual(head_response.status_code, 200)
+        self.assertEqual(head_response.data, b"")
+        self.assertEqual(head_response.headers.get("Content-Length"), str(asset_path.stat().st_size))
+        get_response.close()
+        head_response.close()
+
     def test_signed_bpmis_config_save_and_load_use_agent_data_dir(self):
         save_response = self._post_signed(
             "/api/local-agent/bpmis/config/save",

@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 import time
 from typing import Any, Callable
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import quote, urlencode, urljoin, urlsplit
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -238,13 +238,29 @@ class LocalAgentClient:
     def meeting_recorder_delete(self, *, record_id: str, owner_email: str) -> dict[str, Any]:
         return self._request("POST", "/api/local-agent/meeting-recorder/delete", {"record_id": record_id, "owner_email": owner_email})
 
-    def meeting_recorder_asset(self, *, record_id: str, owner_email: str, relative_path: str) -> tuple[bytes, str, str]:
-        response = self._request_raw(
-            "POST",
-            "/api/local-agent/meeting-recorder/asset",
-            {"record_id": record_id, "owner_email": owner_email, "relative_path": relative_path},
+    def meeting_recorder_asset_response(
+        self,
+        *,
+        record_id: str,
+        owner_email: str,
+        relative_path: str,
+        range_header: str = "",
+        method: str = "GET",
+    ) -> requests.Response:
+        safe_record_id = quote(str(record_id or ""), safe="")
+        safe_relative_path = quote(str(relative_path or "").strip().lstrip("/"), safe="/")
+        query = urlencode({"owner_email": str(owner_email or "")})
+        headers = {"Range": range_header} if str(range_header or "").strip() else None
+        return self._request_raw(
+            method,
+            f"/api/local-agent/meeting-recorder/assets/{safe_record_id}/{safe_relative_path}?{query}",
             expect_json=False,
+            extra_headers=headers,
+            stream=True,
         )
+
+    def meeting_recorder_asset(self, *, record_id: str, owner_email: str, relative_path: str) -> tuple[bytes, str, str]:
+        response = self.meeting_recorder_asset_response(record_id=record_id, owner_email=owner_email, relative_path=relative_path)
         content_type = response.headers.get("Content-Type") or "application/octet-stream"
         filename = response.headers.get("X-Meeting-Recorder-Filename") or Path(relative_path).name or "meeting-asset"
         return response.content, content_type, filename
@@ -613,6 +629,8 @@ class LocalAgentClient:
         *,
         signed: bool = True,
         expect_json: bool = True,
+        extra_headers: dict[str, str] | None = None,
+        stream: bool = False,
     ) -> requests.Response:
         url = urljoin(self.base_url, path.lstrip("/"))
         body = b""
@@ -620,9 +638,12 @@ class LocalAgentClient:
             "Accept": "application/json" if expect_json else "*/*",
             "ngrok-skip-browser-warning": "true",
         }
-        if method.upper() != "GET":
+        if method.upper() not in {"GET", "HEAD"}:
             body = json.dumps(payload or {}, ensure_ascii=False, sort_keys=True).encode("utf-8")
             headers["Content-Type"] = "application/json"
+        for key, value in (extra_headers or {}).items():
+            if str(value or "").strip():
+                headers[str(key)] = str(value)
         if signed:
             request_path = urlsplit(url).path or "/"
             headers.update(sign_headers(secret=self.hmac_secret, method=method, path=request_path, body=body))
@@ -634,6 +655,7 @@ class LocalAgentClient:
                     url,
                     data=body if body else None,
                     headers=headers,
+                    stream=stream,
                     timeout=(self.connect_timeout_seconds, self.timeout_seconds),
                 )
             except requests.RequestException as error:

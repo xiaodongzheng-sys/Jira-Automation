@@ -6,6 +6,7 @@
     activeRecordId: '',
     selectedRecordId: root.dataset.selectedRecordId || '',
     initialSelectionPending: Boolean(root.dataset.selectedRecordId),
+    diagnostics: null,
   };
 
   const nodes = {
@@ -156,6 +157,31 @@
     });
   };
 
+  const renderDiagnostics = (payload) => {
+    const ffmpeg = payload.ffmpeg_configured ? 'ffmpeg ready' : 'ffmpeg missing';
+    const whisper = payload.whisper_cpp_configured && payload.whisper_model_exists ? 'whisper.cpp ready' : 'whisper.cpp not ready';
+    const audioLabel = payload.audio_capture_label || 'Audio input unknown';
+    const audioClass = payload.system_audio_configured ? 'is-ready' : 'is-warning';
+    const devices = Array.isArray(payload.audio_devices) ? payload.audio_devices : [];
+    const deviceText = devices.length ? devices.join(', ') : 'No audio devices detected';
+    return `
+      <div class="meeting-diagnostic-grid">
+        <span class="${payload.ffmpeg_configured ? 'is-ready' : 'is-warning'}">${escapeHtml(ffmpeg)}</span>
+        <span class="${payload.whisper_cpp_configured && payload.whisper_model_exists ? 'is-ready' : 'is-warning'}">${escapeHtml(whisper)}</span>
+        <span class="${audioClass}">${escapeHtml(audioLabel)}</span>
+      </div>
+      <div class="meeting-diagnostic-detail">
+        <span>Screen: ${escapeHtml(payload.video_input || 'not configured')}</span>
+        <span>Audio: ${escapeHtml(payload.audio_input || 'not configured')}</span>
+      </div>
+      ${payload.audio_capture_warning ? `<p class="meeting-audio-warning">${escapeHtml(payload.audio_capture_warning)}</p>` : ''}
+      <details class="meeting-device-list">
+        <summary>Audio devices</summary>
+        <p>${escapeHtml(deviceText)}</p>
+      </details>
+    `;
+  };
+
   const setRecordingState = (record) => {
     state.activeRecordId = record?.record_id || '';
     if (nodes.stopCurrent) nodes.stopCurrent.disabled = !state.activeRecordId;
@@ -169,9 +195,11 @@
   const loadDiagnostics = async () => {
     try {
       const payload = await api('/api/meeting-recorder/diagnostics');
-      nodes.diagnostic.textContent = payload.ffmpeg_configured
-        ? `Local recorder ready: ${payload.ffmpeg_path}`
-        : 'ffmpeg is not configured. Install ffmpeg before recording.';
+      state.diagnostics = payload;
+      nodes.diagnostic.innerHTML = renderDiagnostics(payload);
+      if (nodes.recordingStatus && payload.audio_capture_warning && !state.activeRecordId) {
+        nodes.recordingStatus.textContent = payload.audio_capture_warning;
+      }
     } catch (error) {
       nodes.diagnostic.textContent = error.message;
     }
@@ -274,6 +302,7 @@
     const minutes = record.minutes || {};
     const videoUrl = record.media?.video_url || '';
     const visualEvidence = Array.isArray(record.visual_evidence) ? record.visual_evidence : [];
+    const audioLabel = state.diagnostics?.audio_capture_label || '';
     state.selectedRecordId = recordId;
     updateRecordSelection();
     nodes.detail.innerHTML = `
@@ -301,8 +330,12 @@
         <div class="meeting-markdown">${renderMarkdown(minutes.markdown || '')}</div>
       </section>
       <section class="meeting-output">
-        <h3>Screen Recording</h3>
-        ${videoUrl ? `<video controls class="meeting-video" src="${escapeHtml(videoUrl)}"></video>` : '<p class="empty-state">Video is not available yet.</p>'}
+        <div class="meeting-output-head">
+          <h3>Screen Recording</h3>
+          ${audioLabel ? `<span>${escapeHtml(audioLabel)}</span>` : ''}
+        </div>
+        ${videoUrl ? `<video controls preload="metadata" class="meeting-video" src="${escapeHtml(videoUrl)}"></video>` : '<p class="empty-state">Video is not available yet.</p>'}
+        <div class="inline-status" data-video-status>Loading video metadata…</div>
         ${visualEvidence.length ? `
           <div class="meeting-snapshots">
             ${visualEvidence.map((item) => `
@@ -320,6 +353,26 @@
       </section>
     `;
     bindDetailActions(record.record_id);
+    bindVideoStatus();
+  };
+
+  const bindVideoStatus = () => {
+    const video = nodes.detail.querySelector('video.meeting-video');
+    const status = nodes.detail.querySelector('[data-video-status]');
+    if (!video || !status) return;
+    video.addEventListener('loadedmetadata', () => {
+      status.textContent = `Duration: ${formatTimestamp(video.duration || 0)}. Seeking is available when the browser receives byte-range video responses.`;
+    });
+    video.addEventListener('error', () => {
+      status.textContent = 'Video could not be loaded. Refresh the page or try again after the local recorder service is reachable.';
+      status.classList.add('inline-status-error');
+    });
+    video.addEventListener('seeking', () => {
+      status.textContent = `Seeking to ${formatTimestamp(video.currentTime || 0)}…`;
+    });
+    video.addEventListener('seeked', () => {
+      status.textContent = `Playing from ${formatTimestamp(video.currentTime || 0)}.`;
+    });
   };
 
   const bindDetailActions = (recordId) => {

@@ -7865,6 +7865,74 @@ select:focus {
   font-size: 0.92rem;
 }
 
+.meeting-diagnostic-card {
+  display: grid;
+  gap: 8px;
+  width: 100%;
+}
+
+.meeting-diagnostic-grid {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.meeting-diagnostic-grid span {
+  padding: 4px 8px;
+  border: 1px solid #d0d5dd;
+  border-radius: 999px;
+  background: #fff;
+  color: #344054;
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.meeting-diagnostic-grid .is-ready {
+  border-color: #bbf7d0;
+  background: #f0fdf4;
+  color: #166534;
+}
+
+.meeting-diagnostic-grid .is-warning {
+  border-color: #fed7aa;
+  background: #fff7ed;
+  color: #9a3412;
+}
+
+.meeting-diagnostic-detail {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+  color: #667085;
+  font-size: 0.82rem;
+}
+
+.meeting-audio-warning {
+  max-width: 520px;
+  margin: 0 0 0 auto;
+  color: #9a3412;
+  line-height: 1.45;
+  text-align: right;
+}
+
+.meeting-device-list {
+  color: #667085;
+  font-size: 0.82rem;
+  text-align: right;
+}
+
+.meeting-device-list summary {
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.meeting-device-list p {
+  margin: 6px 0 0;
+  word-break: break-word;
+}
+
 .meeting-recorder-grid {
   display: grid;
   grid-template-columns: minmax(0, 1.2fr) minmax(320px, 0.8fr);
@@ -7945,6 +8013,19 @@ select:focus {
 .meeting-output h3 {
   margin: 0;
   font-size: 1rem;
+}
+
+.meeting-output-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.meeting-output-head span {
+  color: #667085;
+  font-size: 0.85rem;
+  font-weight: 700;
 }
 
 .meeting-output pre {
@@ -8131,6 +8212,17 @@ select:focus {
 
   .meeting-recorder-status {
     justify-content: flex-start;
+  }
+
+  .meeting-diagnostic-grid,
+  .meeting-diagnostic-detail {
+    justify-content: flex-start;
+  }
+
+  .meeting-audio-warning,
+  .meeting-device-list {
+    margin-left: 0;
+    text-align: left;
   }
 
   .meeting-detail-header {

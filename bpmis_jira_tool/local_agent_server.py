@@ -467,6 +467,17 @@ def create_local_agent_app() -> Flask:
         record_id = str(payload.get("record_id") or "")
         owner_email = str(payload.get("owner_email") or "")
         relative_path = str(payload.get("relative_path") or "").strip()
+        return _send_meeting_recorder_asset(record_id=record_id, owner_email=owner_email, relative_path=relative_path)
+
+    @app.route("/api/local-agent/meeting-recorder/assets/<record_id>/<path:relative_path>", methods=["GET", "HEAD"])
+    def meeting_recorder_asset_stream(record_id: str, relative_path: str):
+        return _send_meeting_recorder_asset(
+            record_id=record_id,
+            owner_email=str(request.args.get("owner_email") or ""),
+            relative_path=relative_path,
+        )
+
+    def _send_meeting_recorder_asset(*, record_id: str, owner_email: str, relative_path: str):
         _meeting_record_for_owner(record_id=record_id, owner_email=owner_email)
         root_dir = _get_meeting_record_store().record_dir(record_id).resolve()
         asset_path = (root_dir / relative_path).resolve()
@@ -474,8 +485,9 @@ def create_local_agent_app() -> Flask:
             raise ToolError("Invalid meeting asset path.")
         if not asset_path.exists() or not asset_path.is_file():
             raise ToolError("Meeting asset not found.")
-        response = send_file(asset_path, mimetype=mimetypes.guess_type(asset_path.name)[0])
+        response = send_file(asset_path, mimetype=mimetypes.guess_type(asset_path.name)[0], conditional=True)
         response.headers["X-Meeting-Recorder-Filename"] = asset_path.name
+        response.headers["Accept-Ranges"] = "bytes"
         return response
 
     @app.post("/api/local-agent/source-code-qa/sessions/list")

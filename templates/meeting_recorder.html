@@ -9,7 +9,7 @@
       <p class="help-text">Use calendar-assisted start for Google Meet or Zoom, then keep audio transcript, English minutes, and full screen recording for replay.</p>
     </div>
     <div class="meeting-recorder-status">
-      <span data-meeting-recorder-diagnostic>Checking local recorder…</span>
+      <div class="meeting-diagnostic-card" data-meeting-recorder-diagnostic>Checking local recorder…</div>
       {% if not calendar_connected %}
         <a class="button button-secondary" href="{{ url_for('google_login') }}">Reconnect Calendar</a>
       {% endif %}

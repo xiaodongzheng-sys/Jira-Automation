@@ -269,11 +269,18 @@ class MeetingRecorderRuntime:
     def diagnostics(self) -> dict[str, Any]:
         ffmpeg_path = _resolve_ffmpeg_bin(self.config.ffmpeg_bin)
         whisper_path = _resolve_whisper_cpp_bin(self.config.whisper_cpp_bin)
+        devices = _avfoundation_devices(ffmpeg_path)
+        effective_audio_input = _effective_audio_input(self.config.audio_input, devices.get("audio_devices") or [])
+        audio_status = _audio_capture_status(effective_audio_input, devices.get("audio_devices") or [])
         return {
             "ffmpeg_configured": bool(ffmpeg_path),
             "ffmpeg_path": ffmpeg_path or "",
             "video_input": self.config.video_input,
-            "audio_input": self.config.audio_input,
+            "audio_input": effective_audio_input,
+            "configured_audio_input": self.config.audio_input,
+            "audio_devices": devices.get("audio_devices") or [],
+            "video_devices": devices.get("video_devices") or [],
+            **audio_status,
             "frame_interval_seconds": self.config.frame_interval_seconds,
             "transcribe_provider": self.config.transcribe_provider,
             "whisper_cpp_configured": bool(whisper_path),
@@ -301,6 +308,8 @@ class MeetingRecorderRuntime:
         ffmpeg_path = _resolve_ffmpeg_bin(self.config.ffmpeg_bin)
         if not ffmpeg_path:
             raise ConfigError("ffmpeg is required for local meeting recording. Install ffmpeg or set MEETING_RECORDER_FFMPEG_BIN.")
+        devices = _avfoundation_devices(ffmpeg_path)
+        audio_input = _effective_audio_input(self.config.audio_input, devices.get("audio_devices") or [])
         record = self.store.create_record(
             owner_email=owner_email,
             title=title,
@@ -325,7 +334,7 @@ class MeetingRecorderRuntime:
             "-framerate",
             "15",
             "-i",
-            f"{self.config.video_input}:{self.config.audio_input}",
+            f"{self.config.video_input}:{audio_input}",
             "-c:v",
             "libx264",
             "-preset",
@@ -674,6 +683,93 @@ def _srt_timestamp_seconds(value: str) -> float:
         return 0
     hours, minutes, seconds, millis = (int(part) for part in match.groups())
     return hours * 3600 + minutes * 60 + seconds + millis / 1000
+
+
+def _avfoundation_devices(ffmpeg_path: str | None) -> dict[str, list[str]]:
+    if not ffmpeg_path:
+        return {"video_devices": [], "audio_devices": []}
+    command = [ffmpeg_path, "-hide_banner", "-f", "avfoundation", "-list_devices", "true", "-i", ""]
+    try:
+        completed = subprocess.run(command, check=False, capture_output=True, text=True, timeout=10)  # noqa: S603
+    except (OSError, subprocess.TimeoutExpired):
+        return {"video_devices": [], "audio_devices": []}
+    return _parse_avfoundation_devices(f"{completed.stderr}\n{completed.stdout}")
+
+
+def _parse_avfoundation_devices(output: str) -> dict[str, list[str]]:
+    video_devices: list[str] = []
+    audio_devices: list[str] = []
+    section = ""
+    for line in str(output or "").splitlines():
+        lowered = line.lower()
+        if "avfoundation video devices" in lowered:
+            section = "video"
+            continue
+        if "avfoundation audio devices" in lowered:
+            section = "audio"
+            continue
+        match = re.search(r"\[\d+\]\s+(.+)$", line.strip())
+        if not match:
+            continue
+        name = match.group(1).strip()
+        if section == "video":
+            video_devices.append(name)
+        elif section == "audio":
+            audio_devices.append(name)
+    return {"video_devices": video_devices, "audio_devices": audio_devices}
+
+
+def _effective_audio_input(configured_audio_input: str, audio_devices: list[str]) -> str:
+    configured = str(configured_audio_input or "").strip() or "default"
+    if configured.lower() != "default":
+        return configured
+    for name in audio_devices:
+        if str(name or "").strip().lower() == "meeting recorder aggregate":
+            return str(name).strip()
+    return configured
+
+
+def _audio_capture_status(audio_input: str, audio_devices: list[str]) -> dict[str, Any]:
+    normalized_input = str(audio_input or "").strip().lower()
+    normalized_devices = [str(item or "").strip().lower() for item in audio_devices]
+    system_audio_available = any(_looks_like_system_audio_device(name) for name in normalized_devices)
+    aggregate_available = any("aggregate" in name for name in normalized_devices)
+    if "aggregate" in normalized_input:
+        mode = "aggregate_device"
+        label = "Aggregate device configured"
+        configured = True
+    elif _looks_like_system_audio_device(normalized_input):
+        mode = "system_audio"
+        label = "System audio configured"
+        configured = True
+    elif normalized_input not in {"", "default", "0"} and "microphone" not in normalized_input:
+        mode = "custom_audio"
+        label = "Custom audio input configured"
+        configured = True
+    else:
+        mode = "microphone_only"
+        label = "Microphone only"
+        configured = False
+    warning = ""
+    if not configured:
+        warning = (
+            "Current audio input is microphone-only. Meet/Zoom participants are captured reliably only after configuring "
+            "a system-audio or aggregate input such as BlackHole plus MacBook microphone."
+        )
+    return {
+        "audio_capture_mode": mode,
+        "audio_capture_label": label,
+        "system_audio_configured": configured,
+        "system_audio_available": system_audio_available,
+        "aggregate_audio_available": aggregate_available,
+        "recommended_audio_input": "Meeting Recorder Aggregate",
+        "audio_capture_warning": warning,
+    }
+
+
+def _looks_like_system_audio_device(name: str) -> bool:
+    lowered = str(name or "").strip().lower()
+    return any(token in lowered for token in ("blackhole", "soundflower", "loopback", "aggregate", "multi-output"))
 
 
 def _safe_record_id(record_id: str) -> str:
