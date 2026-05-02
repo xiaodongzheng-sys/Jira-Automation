@@ -548,6 +548,7 @@ class PortalProjectSyncService:
         projects = self.bpmis_client.list_biz_projects_for_pm_email(str(pm_email or "").strip())
         issue_ids = [str(project.get("issue_id") or "").strip() for project in projects if str(project.get("issue_id") or "").strip()]
         brd_links_by_issue_id = self.bpmis_client.get_brd_doc_links_for_projects(issue_ids) if issue_ids else {}
+        jira_tasks_by_issue_id = self._bulk_jira_tasks_by_project(issue_ids, pm_email)
 
         total = len(projects)
         results: list[RunResult] = []
@@ -568,7 +569,12 @@ class PortalProjectSyncService:
                 market=market,
             )
             if status == "restored":
-                imported_count = self._sync_project_jira_tasks(user_key=user_key, bpmis_id=issue_id, pm_email=pm_email)
+                imported_count = self._sync_project_jira_tasks(
+                    user_key=user_key,
+                    bpmis_id=issue_id,
+                    pm_email=pm_email,
+                    preloaded_tasks=jira_tasks_by_issue_id.get(issue_id) if jira_tasks_by_issue_id is not None else None,
+                )
                 results.append(
                     RunResult(
                         row_number=0,
@@ -584,7 +590,12 @@ class PortalProjectSyncService:
                 )
                 continue
             if status == "skipped":
-                imported_count = self._sync_project_jira_tasks(user_key=user_key, bpmis_id=issue_id, pm_email=pm_email)
+                imported_count = self._sync_project_jira_tasks(
+                    user_key=user_key,
+                    bpmis_id=issue_id,
+                    pm_email=pm_email,
+                    preloaded_tasks=jira_tasks_by_issue_id.get(issue_id) if jira_tasks_by_issue_id is not None else None,
+                )
                 results.append(
                     RunResult(
                         row_number=0,
@@ -596,7 +607,12 @@ class PortalProjectSyncService:
                     )
                 )
                 continue
-            imported_count = self._sync_project_jira_tasks(user_key=user_key, bpmis_id=issue_id, pm_email=pm_email)
+            imported_count = self._sync_project_jira_tasks(
+                user_key=user_key,
+                bpmis_id=issue_id,
+                pm_email=pm_email,
+                preloaded_tasks=jira_tasks_by_issue_id.get(issue_id) if jira_tasks_by_issue_id is not None else None,
+            )
             results.append(
                 RunResult(
                     row_number=0,
@@ -613,17 +629,48 @@ class PortalProjectSyncService:
         self._emit_progress(progress_callback, "completed", "BPMIS sync finished.", total, total)
         return results
 
-    def _sync_project_jira_tasks(self, *, user_key: str, bpmis_id: str, pm_email: str) -> int:
-        if not hasattr(self.bpmis_client, "list_jira_tasks_for_project_created_by_email"):
-            return 0
+    def _bulk_jira_tasks_by_project(self, issue_ids: list[str], pm_email: str) -> dict[str, list[dict[str, Any]]] | None:
+        if not issue_ids or not hasattr(self.bpmis_client, "list_jira_tasks_for_projects_created_by_emails"):
+            return None
         try:
-            tasks = self.bpmis_client.list_jira_tasks_for_project_created_by_email(bpmis_id, pm_email) or []
+            grouped = self.bpmis_client.list_jira_tasks_for_projects_created_by_emails(issue_ids, [pm_email]) or {}
         except BPMISError:
+            return None
+        if not isinstance(grouped, dict):
+            return None
+        normalized: dict[str, list[dict[str, Any]]] = {}
+        for issue_id, tasks in grouped.items():
+            issue_id_text = str(issue_id or "").strip()
+            if not issue_id_text:
+                continue
+            normalized[issue_id_text] = [task for task in tasks if isinstance(task, dict)] if isinstance(tasks, list) else []
+        return normalized
+
+    def _sync_project_jira_tasks(
+        self,
+        *,
+        user_key: str,
+        bpmis_id: str,
+        pm_email: str,
+        preloaded_tasks: list[dict[str, Any]] | None = None,
+    ) -> int:
+        if preloaded_tasks is None and not hasattr(self.bpmis_client, "list_jira_tasks_for_project_created_by_email"):
             return 0
+        if preloaded_tasks is None:
+            try:
+                tasks = self.bpmis_client.list_jira_tasks_for_project_created_by_email(bpmis_id, pm_email) or []
+            except BPMISError:
+                return 0
+        else:
+            tasks = preloaded_tasks
         imported = 0
         for task in tasks:
             if not isinstance(task, dict):
                 continue
+            prd_links = task.get("prd_links")
+            prd_link = str(task.get("prd_link") or "")
+            if not prd_link and isinstance(prd_links, list):
+                prd_link = "\n".join(str(link or "").strip() for link in prd_links if str(link or "").strip())
             stored = self.store.upsert_synced_jira_ticket(
                 user_key=user_key,
                 bpmis_id=bpmis_id,
@@ -631,13 +678,13 @@ class PortalProjectSyncService:
                 market=str(task.get("market") or ""),
                 system=str(task.get("system") or ""),
                 jira_title=str(task.get("jira_title") or task.get("summary") or ""),
-                prd_link=str(task.get("prd_link") or ""),
+                prd_link=prd_link,
                 description=str(task.get("description") or ""),
-                fix_version_name=str(task.get("fix_version_name") or task.get("fix_version") or ""),
+                fix_version_name=str(task.get("fix_version_name") or task.get("fix_version") or task.get("version") or ""),
                 fix_version_id=str(task.get("fix_version_id") or ""),
-                ticket_key=str(task.get("ticket_key") or ""),
-                ticket_link=str(task.get("ticket_link") or ""),
-                status=str(task.get("status") or "synced"),
+                ticket_key=str(task.get("ticket_key") or task.get("jira_id") or ""),
+                ticket_link=str(task.get("ticket_link") or task.get("jira_link") or ""),
+                status=str(task.get("status") or task.get("jira_status") or "synced"),
                 message=str(task.get("message") or "Imported from BPMIS project sync."),
                 raw_response=task.get("raw_response") if isinstance(task.get("raw_response"), dict) else task,
             )
@@ -804,7 +851,7 @@ class PortalJiraCreationService:
             return []
         if not include_live:
             return [dict(ticket) for ticket in tickets]
-        return [self._ticket_with_live_jira_fields(ticket) for ticket in tickets]
+        return self._tickets_with_live_jira_fields(tickets)
 
     def delete_ticket(self, *, user_key: str, bpmis_id: str, ticket_id: str | int) -> bool:
         project = self.store.get_project(user_key=user_key, bpmis_id=bpmis_id)
@@ -922,6 +969,48 @@ class PortalJiraCreationService:
             live_detail, "fixVersionId", "fixVersion", "fixVersions", "version", "versions"
         ) or str(item.get("fix_version_name") or "").strip()
         return item
+
+    def _tickets_with_live_jira_fields(self, tickets: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        ticket_items = [dict(ticket) for ticket in tickets if isinstance(ticket, dict)]
+        if not ticket_items:
+            return []
+        ticket_keys = [str(item.get("ticket_key") or item.get("ticket_link") or "").strip() for item in ticket_items]
+        live_details: dict[str, dict[str, Any]] = {}
+        if hasattr(self.bpmis_client, "get_jira_ticket_details"):
+            try:
+                live_details = self.bpmis_client.get_jira_ticket_details(ticket_keys) or {}
+            except BPMISError:
+                live_details = {}
+        if not live_details:
+            return [self._ticket_with_live_jira_fields(item) for item in ticket_items]
+
+        enriched: list[dict[str, Any]] = []
+        for item in ticket_items:
+            ticket_key = str(item.get("ticket_key") or item.get("ticket_link") or "").strip()
+            normalized_key = self._normalize_ticket_key(ticket_key)
+            live_detail = live_details.get(normalized_key) or {}
+            enriched.append(self._ticket_with_live_jira_fields_from_detail(item, live_detail))
+        return enriched
+
+    def _ticket_with_live_jira_fields_from_detail(self, ticket: dict[str, Any], live_detail: dict[str, Any]) -> dict[str, Any]:
+        item = dict(ticket)
+        item["live_jira_title"] = self._extract_first_text(live_detail, "summary", "title", "jiraSummary") or str(
+            item.get("jira_title") or ""
+        ).strip()
+        item["live_jira_status"] = self._extract_first_text(
+            live_detail, "status", "statusId", "jiraStatus", "jiraStatusId"
+        ) or str(item.get("status") or "").strip()
+        item["live_fix_version"] = self._extract_first_text(
+            live_detail, "fixVersionId", "fixVersion", "fixVersions", "version", "versions"
+        ) or str(item.get("fix_version_name") or "").strip()
+        return item
+
+    @staticmethod
+    def _normalize_ticket_key(value: str) -> str:
+        text = str(value or "").strip()
+        if "/" in text:
+            text = text.rstrip("/").rsplit("/", 1)[-1]
+        return text.upper()
 
     @classmethod
     def _extract_first_text(cls, row: dict[str, Any], *keys: str) -> str:

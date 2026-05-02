@@ -108,6 +108,10 @@ class BPMISClient(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def get_jira_ticket_details(self, ticket_keys: list[str]) -> dict[str, dict[str, Any]]:
+        raise NotImplementedError
+
+    @abstractmethod
     def update_jira_ticket_status(self, ticket_key: str, status: str) -> dict[str, Any]:
         raise NotImplementedError
 
@@ -1333,6 +1337,27 @@ class BPMISDirectApiClient(BPMISClient):
                         return self._merge_issue_payloads(match, detail)
                 return match
         return {}
+
+    def get_jira_ticket_details(self, ticket_keys: list[str]) -> dict[str, dict[str, Any]]:
+        normalized_keys: list[str] = []
+        for ticket_key in ticket_keys:
+            normalized_key = self._normalize_jira_issue_key(ticket_key)
+            if normalized_key and normalized_key not in normalized_keys:
+                normalized_keys.append(normalized_key)
+        if not normalized_keys:
+            return {}
+
+        bulk_details = self._get_jira_ticket_details_via_jira_bulk(normalized_keys)
+        if bulk_details is not None and (bulk_details or self._jira_token()):
+            return bulk_details
+
+        details: dict[str, dict[str, Any]] = {}
+        for ticket_key in normalized_keys:
+            detail = self.get_jira_ticket_detail(ticket_key)
+            detail_key = self._normalize_jira_issue_key(str(detail.get("jiraKey") or detail.get("key") or ticket_key))
+            if detail_key and detail:
+                details[detail_key] = detail
+        return details
 
     def update_jira_ticket_status(self, ticket_key: str, status: str) -> dict[str, Any]:
         normalized_ticket_key = self._extract_issue_key(str(ticket_key or "")) or str(ticket_key or "").strip()
