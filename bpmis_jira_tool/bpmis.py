@@ -48,11 +48,23 @@ class BPMISClient(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def list_biz_projects_for_pm_emails(self, emails: list[str]) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
+    @abstractmethod
     def search_biz_projects_by_title_keywords(self, keywords: str, *, max_pages: int | None = None) -> list[dict[str, str]]:
         raise NotImplementedError
 
     @abstractmethod
     def list_jira_tasks_for_project_created_by_email(self, project_issue_id: str, email: str) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def list_jira_tasks_for_projects_created_by_emails(
+        self,
+        project_issue_ids: list[str],
+        emails: list[str],
+    ) -> dict[str, list[dict[str, Any]]]:
         raise NotImplementedError
 
     @abstractmethod
@@ -281,6 +293,63 @@ class BPMISDirectApiClient(BPMISClient):
 
         return self._normalize_team_dashboard_biz_project_rows(rows)
 
+    def list_biz_projects_for_pm_emails(self, emails: list[str]) -> list[dict[str, Any]]:
+        normalized_emails = self._normalize_email_list(emails)
+        if not normalized_emails:
+            return []
+
+        user_ids_by_email = self._resolve_bpmis_user_ids_by_emails(normalized_emails)
+        user_ids = sorted({user_id for ids in user_ids_by_email.values() for user_id in ids})
+        if not user_ids:
+            return []
+
+        rows: list[dict[str, Any]] = []
+        page = 1
+        page_size = 200
+        while True:
+            response = self._api_request(
+                "/api/v1/issues/list",
+                params={
+                    "search": json.dumps(
+                        {
+                            "joinType": "and",
+                            "subQueries": [
+                                {"typeId": [self.BIZ_PROJECT_TYPE_ID]},
+                                {"statusId": self.SYNC_BIZ_PROJECT_STATUS_IDS},
+                                {
+                                    "joinType": "or",
+                                    "subQueries": [
+                                        {"regionalPmPicId": user_ids},
+                                        {"involvedPM": user_ids},
+                                    ],
+                                },
+                            ],
+                            "page": page,
+                            "pageSize": page_size,
+                            "mapping": True,
+                        }
+                    )
+                },
+            )
+            page_rows = (response.get("data") or {}).get("rows") or []
+            rows.extend(page_rows)
+            if len(page_rows) < page_size:
+                break
+            page += 1
+
+        normalized = self._normalize_team_dashboard_biz_project_rows(rows)
+        rows_by_id = {
+            str(row.get("id") or row.get("issue_id") or row.get("bpmis_id") or "").strip(): row
+            for row in rows
+            if isinstance(row, dict)
+        }
+        user_id_texts_by_email = {email: {str(user_id) for user_id in ids} for email, ids in user_ids_by_email.items()}
+        for project in normalized:
+            raw_row = rows_by_id.get(str(project.get("issue_id") or project.get("bpmis_id") or "").strip()) or {}
+            matched = self._biz_project_matched_pm_emails(raw_row, normalized_emails, user_id_texts_by_email)
+            project["matched_pm_emails"] = matched
+        return normalized
+
     def search_biz_projects_by_title_keywords(self, keywords: str, *, max_pages: int | None = None) -> list[dict[str, str]]:
         normalized_keywords = re.sub(r"\s+", " ", str(keywords or "").strip())
         if not normalized_keywords:
@@ -450,6 +519,102 @@ class BPMISDirectApiClient(BPMISClient):
             row = self._with_live_jira_fields(row, issue_key)
             tasks.append(self._normalize_project_jira_task(row))
         return tasks
+
+    def list_jira_tasks_for_projects_created_by_emails(
+        self,
+        project_issue_ids: list[str],
+        emails: list[str],
+    ) -> dict[str, list[dict[str, Any]]]:
+        normalized_emails = self._normalize_email_list(emails)
+        parent_issue_ids: list[int] = []
+        parent_id_texts: set[str] = set()
+        for project_issue_id in project_issue_ids:
+            text = str(project_issue_id or "").strip()
+            if not text or text in parent_id_texts:
+                continue
+            try:
+                parent_issue_ids.append(int(text))
+            except ValueError:
+                continue
+            parent_id_texts.add(text)
+        if not parent_issue_ids or not normalized_emails:
+            return {}
+
+        rows: list[dict[str, Any]] = []
+        page_size = 200
+        for parent_chunk in self._chunks(parent_issue_ids, 50):
+            page = 1
+            while True:
+                response = self._api_request(
+                    "/api/v1/issues/list",
+                    params={
+                        "search": json.dumps(
+                            {
+                                "joinType": "and",
+                                "subQueries": [
+                                    {"typeId": [self.TASK_TYPE_ID]},
+                                    {"parentIds": parent_chunk},
+                                ],
+                                "page": page,
+                                "pageSize": page_size,
+                                "mapping": True,
+                            }
+                        )
+                    },
+                )
+                page_rows = (response.get("data") or {}).get("rows") or []
+                rows.extend(page_rows)
+                if len(page_rows) < page_size:
+                    break
+                page += 1
+
+        ticket_rows: list[tuple[dict[str, Any], str, str, list[str]]] = []
+        seen_by_parent: set[tuple[str, str]] = set()
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            issue_id = self._extract_issue_identifier(row)
+            issue_key = self._extract_issue_key_from_row(row)
+            matched_email = ""
+            for email in normalized_emails:
+                if self._issue_requires_user_enrichment(row, email) and issue_id:
+                    detail = self.get_issue_detail(issue_id)
+                    if detail:
+                        row = self._merge_issue_payloads(row, detail)
+                if self._issue_reported_by(row, email):
+                    matched_email = email
+                    break
+            if not matched_email:
+                continue
+            parent_ids = [parent_id for parent_id in self._extract_parent_issue_ids(row) if parent_id in parent_id_texts]
+            if not parent_ids:
+                continue
+            dedupe_key = issue_key or issue_id
+            if not dedupe_key:
+                continue
+            for parent_id in parent_ids:
+                key = (parent_id, dedupe_key)
+                if key in seen_by_parent:
+                    continue
+                seen_by_parent.add(key)
+                ticket_rows.append((row, issue_key, matched_email, [parent_id]))
+
+        live_details = self._get_jira_ticket_details_via_jira_bulk([issue_key for _row, issue_key, _email, _parents in ticket_rows])
+        grouped: dict[str, list[dict[str, Any]]] = {str(parent_id): [] for parent_id in parent_issue_ids}
+        for row, issue_key, matched_email, parent_ids in ticket_rows:
+            if live_details is None:
+                row = self._with_live_jira_fields(row, issue_key)
+            else:
+                detail = live_details.get(self._normalize_jira_issue_key(issue_key))
+                if detail:
+                    row = self._merge_live_jira_fields(row, detail)
+            for parent_id in parent_ids:
+                grouped.setdefault(parent_id, []).append(
+                    self._normalize_team_dashboard_jira_task(row, pm_email=matched_email, parent_project={})
+                )
+        for tasks in grouped.values():
+            tasks.sort(key=lambda task: (str(task.get("release_date") or ""), str(task.get("jira_id") or "")))
+        return grouped
 
     def list_jira_tasks_created_by_emails(
         self,
@@ -1848,6 +2013,31 @@ class BPMISDirectApiClient(BPMISClient):
                     return email
         return ""
 
+    def _biz_project_matched_pm_emails(
+        self,
+        row: dict[str, Any],
+        emails: list[str],
+        user_ids_by_email: dict[str, set[str]],
+    ) -> list[str]:
+        matched: list[str] = []
+        for email in emails:
+            user_ids = user_ids_by_email.get(email) or set()
+            for key in (
+                "regionalPmPicId",
+                "regional_pm_pic",
+                "regionalPmPic",
+                "regionalPm",
+                "involvedPM",
+                "involvedPm",
+                "pm",
+                "pmEmail",
+            ):
+                value = self._find_first_value(row, key)
+                if self._value_matches_user(value, email, user_ids):
+                    matched.append(email)
+                    break
+        return list(dict.fromkeys(matched))
+
     def _issue_has_creator_value(self, row: dict[str, Any]) -> bool:
         return any(self._find_first_value(row, key) is not None for key in self._issue_creator_field_names())
 
@@ -2650,6 +2840,11 @@ class BPMISDirectApiClient(BPMISClient):
         for email in normalized_emails:
             resolved[email] = list(self._bpmis_user_ids_by_email_cache.get(email) or [])
         return resolved
+
+    @staticmethod
+    def _chunks(items: list[Any], size: int) -> list[list[Any]]:
+        chunk_size = max(1, int(size or 1))
+        return [items[index : index + chunk_size] for index in range(0, len(items), chunk_size)]
 
     def _emails_for_bpmis_user(self, user: dict[str, Any], candidate_emails: list[str]) -> list[str]:
         matched: list[str] = []

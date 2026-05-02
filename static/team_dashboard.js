@@ -662,6 +662,17 @@
     `;
   };
 
+  const renderTeamLoadMeta = (team) => {
+    if (!team.loaded || team.loading || team.error) return '';
+    const parts = [];
+    const elapsed = Number(team.elapsed_seconds || team.timing_stats?.total || 0);
+    if (elapsed > 0) parts.push(`Loaded in ${formatDuration(elapsed)}`);
+    const apiCalls = Number(team.fetch_stats?.api_call_count || 0);
+    if (apiCalls > 0) parts.push(`${apiCalls} upstream calls`);
+    if (!parts.length && team.cached_at) parts.push(`Restored ${team.cached_at}`);
+    return parts.length ? `<p class="productization-inline-status" data-tone="neutral">${escapeHtml(parts.join(' · '))}</p>` : '';
+  };
+
   const renderTeam = (team) => {
     const underPrd = Array.isArray(team.under_prd) ? team.under_prd : [];
     const pendingLive = Array.isArray(team.pending_live) ? team.pending_live : [];
@@ -696,6 +707,7 @@
         </div>
         ${error}
         ${loading}
+        ${renderTeamLoadMeta(team)}
         ${notLoaded ? '<p class="productization-inline-status" data-tone="neutral">Not loaded. Click Load Jira to fetch only this team.</p>' : ''}
         ${team.loading || notLoaded ? '' : renderSection('Under PRD', filteredUnderPrd, `${teamKey}-under-prd-${selectedPm || 'all'}`)}
         ${team.loading || notLoaded ? '' : renderSection('Pending Live', filteredPendingLive, `${teamKey}-pending-live-${selectedPm || 'all'}`)}
@@ -933,6 +945,9 @@
         pending_live: Array.isArray(cached.pending_live) ? cached.pending_live : [],
         loaded: true,
         cached_at: cached.cached_at || '',
+        elapsed_seconds: cached.elapsed_seconds || 0,
+        fetch_stats: cached.fetch_stats || {},
+        timing_stats: cached.timing_stats || {},
       };
     });
   };

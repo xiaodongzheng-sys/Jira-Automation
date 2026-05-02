@@ -66,8 +66,10 @@ BPMIS_PROXY_OPERATIONS = {
     "find_project",
     "create_jira_ticket",
     "list_biz_projects_for_pm_email",
+    "list_biz_projects_for_pm_emails",
     "search_biz_projects_by_title_keywords",
     "list_jira_tasks_for_project_created_by_email",
+    "list_jira_tasks_for_projects_created_by_emails",
     "list_jira_tasks_created_by_emails",
     "get_single_brd_doc_link_for_project",
     "get_single_brd_doc_links_for_projects",
@@ -895,7 +897,13 @@ def create_local_agent_app() -> Flask:
                 sort_keys=True,
             ),
         )
-        return jsonify({"status": "ok", "result": _serialize_bpmis_result(result)})
+        return jsonify(
+            {
+                "status": "ok",
+                "result": _serialize_bpmis_result(result),
+                "request_stats": getattr(client, "request_stats", {}),
+            }
+        )
 
     @app.post("/api/local-agent/bpmis/config/load")
     def bpmis_config_load():
@@ -1188,11 +1196,18 @@ def _summarize_bpmis_proxy_args(operation: str, args: list[Any]) -> dict[str, An
     summary: dict[str, Any] = {"arg_count": len(args)}
     if operation == "list_jira_tasks_created_by_emails" and args and isinstance(args[0], list):
         summary["email_count"] = len(args[0])
+    elif operation == "list_jira_tasks_for_projects_created_by_emails":
+        if args and isinstance(args[0], list):
+            summary["project_count"] = len(args[0])
+        if len(args) > 1 and isinstance(args[1], list):
+            summary["email_count"] = len(args[1])
     elif operation == "list_jira_tasks_for_project_created_by_email":
         if args:
             summary["project_issue_id_present"] = bool(str(args[0] or "").strip())
         if len(args) > 1:
             summary["email_present"] = bool(str(args[1] or "").strip())
+    elif operation == "list_biz_projects_for_pm_emails" and args and isinstance(args[0], list):
+        summary["email_count"] = len(args[0])
     elif operation == "list_biz_projects_for_pm_email" and args:
         summary["email_present"] = bool(str(args[0] or "").strip())
     elif operation == "search_biz_projects_by_title_keywords" and args:

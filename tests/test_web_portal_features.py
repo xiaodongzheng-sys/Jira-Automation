@@ -1403,6 +1403,9 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertEqual(first.get_json()["team"]["under_prd"][0]["jira_tickets"][0]["jira_id"], "AF-1")
         self.assertEqual(cached.get_json()["team"]["under_prd"][0]["jira_tickets"][0]["jira_id"], "AF-1")
         self.assertEqual(cached.get_json()["team"]["cache_source"], "server")
+        self.assertIn("timing_stats", first.get_json()["team"])
+        self.assertIn("timing_stats", cached.get_json()["team"])
+        self.assertIn("fetch_stats", first.get_json()["team"])
         self.assertEqual(reloaded.get_json()["team"]["under_prd"][0]["jira_tickets"][0]["jira_id"], "AF-2")
 
     def test_team_dashboard_key_project_read_and_write_are_admin_only(self):
@@ -2256,6 +2259,90 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertEqual([ticket["jira_id"] for ticket in project["jira_tickets"]], ["SPDBP-92169"])
         self.assertEqual(project["jira_tickets"][0]["jira_status"], "Waiting")
         self.assertEqual(fake_client.project_task_calls, [("214164", "zoey.luxy@npt.sg")])
+
+    def test_team_dashboard_backfills_empty_project_jira_tasks_with_bulk_parent_lookup(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_ALLOWED_EMAILS": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_DASHBOARD_JIRA_RELEASE_AFTER": "2026-04-29",
+            },
+            clear=True,
+        ):
+            app = create_app()
+            app.testing = True
+            app.config["TEAM_DASHBOARD_CONFIG_STORE"].save(
+                {
+                    "teams": {
+                        "AF": {"member_emails": ["zoey.luxy@npt.sg"]},
+                        "CRMS": {"member_emails": []},
+                        "GRC": {"member_emails": []},
+                    }
+                }
+            )
+
+            class FakeTeamDashboardClient:
+                def __init__(self):
+                    self.bulk_project_task_calls = []
+                    self.single_project_task_calls = []
+                    self.request_stats = {"api_call_count": 3}
+
+                def list_biz_projects_for_pm_emails(self, emails):
+                    return [
+                        {
+                            "issue_id": "214164",
+                            "project_name": "AF System - Project CENTUM",
+                            "market": "SG",
+                            "priority": "P0",
+                            "regional_pm_pic": "zoey.luxy@npt.sg",
+                            "matched_pm_emails": emails,
+                            "status": "Confirmed",
+                        }
+                    ]
+
+                def list_biz_projects_for_pm_email(self, email):
+                    raise AssertionError("single Biz Project lookup should not be used")
+
+                def list_jira_tasks_created_by_emails(self, emails, **kwargs):
+                    return []
+
+                def list_jira_tasks_for_projects_created_by_emails(self, project_issue_ids, emails):
+                    self.bulk_project_task_calls.append((project_issue_ids, emails))
+                    return {
+                        "214164": [
+                            {
+                                "jira_id": "SPDBP-92169",
+                                "jira_title": "[Feature] AF Function Enhancement",
+                                "pm_email": "zoey.luxy@npt.sg",
+                                "jira_status": "Waiting",
+                                "version": "AF_v1.0.77_20260410",
+                            }
+                        ]
+                    }
+
+                def list_jira_tasks_for_project_created_by_email(self, project_issue_id, email):
+                    self.single_project_task_calls.append((project_issue_id, email))
+                    return []
+
+            fake_client = FakeTeamDashboardClient()
+            with patch("bpmis_jira_tool.web._build_bpmis_client_for_current_user", return_value=fake_client):
+                with app.test_client() as client:
+                    with client.session_transaction() as session:
+                        session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong"}
+                        session["google_credentials"] = {"token": "x"}
+                    response = client.get("/api/team-dashboard/tasks?team_key=AF")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        project = payload["team"]["under_prd"][0]
+        self.assertEqual([ticket["jira_id"] for ticket in project["jira_tickets"]], ["SPDBP-92169"])
+        self.assertEqual(fake_client.bulk_project_task_calls, [(["214164"], ["zoey.luxy@npt.sg"])])
+        self.assertEqual(fake_client.single_project_task_calls, [])
+        self.assertEqual(payload["team"]["fetch_stats"]["api_call_count"], 3)
+        self.assertIn("backfill_zero_jira_projects", payload["team"]["timing_stats"])
 
     def test_team_dashboard_pending_live_fallback_excludes_done_jira_tasks(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(

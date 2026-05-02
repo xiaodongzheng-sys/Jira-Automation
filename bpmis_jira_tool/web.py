@@ -4438,8 +4438,11 @@ def create_app() -> Flask:
         access_gate = _require_team_dashboard_access(settings, api=True)
         if access_gate is not None:
             return access_gate
+        route_started_at = time.monotonic()
+        config_started_at = time.monotonic()
         store = _get_team_dashboard_config_store()
         config = store.load()
+        config_elapsed = round(time.monotonic() - config_started_at, 3)
         key_project_overrides = config.get("key_project_overrides") if isinstance(config.get("key_project_overrides"), dict) else {}
         bpmis_client = _build_bpmis_client_for_current_user(settings)
         requested_team_key = str(request.args.get("team") or request.args.get("team_key") or "").strip().upper()
@@ -4457,21 +4460,33 @@ def create_app() -> Flask:
         team_payloads: list[dict[str, Any]] = []
         has_error = False
         for team_key, label in team_items:
+            timing_stats = _team_dashboard_new_timing()
+            timing_stats["config_load"] = config_elapsed
             team_config = (config.get("teams") or {}).get(team_key) or {}
             emails = _normalize_team_dashboard_emails(team_config.get("member_emails") or [])
+            cache_started_at = time.monotonic()
             cached_team = None if force_reload else _cached_team_dashboard_task_payload(config, team_key, emails)
+            _team_dashboard_add_timing(timing_stats, "cache_check", cache_started_at)
             if cached_team is not None:
+                timing_stats["total"] = round(time.monotonic() - route_started_at, 3)
+                cached_team["timing_stats"] = timing_stats
+                cached_team["elapsed_seconds"] = timing_stats["total"]
                 team_payloads.append(cached_team)
                 continue
             started_at = time.monotonic()
             try:
+                step_started_at = time.monotonic()
                 tasks = bpmis_client.list_jira_tasks_created_by_emails(
                     emails,
                     max_pages=_team_dashboard_jira_max_pages(),
                     enrich_missing_parent=False,
                     release_after=_team_dashboard_jira_release_after(),
                 )
+                _team_dashboard_add_timing(timing_stats, "list_jira_tasks", step_started_at)
+                step_started_at = time.monotonic()
                 biz_projects = _team_dashboard_biz_projects_for_emails(bpmis_client, emails)
+                _team_dashboard_add_timing(timing_stats, "list_biz_projects", step_started_at)
+                step_started_at = time.monotonic()
                 team_payload = _build_team_dashboard_task_group(
                     team_key,
                     label,
@@ -4480,10 +4495,22 @@ def create_app() -> Flask:
                     biz_projects,
                     key_project_overrides=key_project_overrides,
                 )
+                _team_dashboard_add_timing(timing_stats, "group_projects", step_started_at)
+                step_started_at = time.monotonic()
                 _backfill_team_dashboard_empty_project_jira_tasks(bpmis_client, team_payload)
                 _remove_team_dashboard_zero_jira_pending_live_projects(team_payload)
+                _team_dashboard_add_timing(timing_stats, "backfill_zero_jira_projects", step_started_at)
                 team_payload["elapsed_seconds"] = round(time.monotonic() - started_at, 2)
                 team_payload["fetch_stats"] = _team_dashboard_fetch_stats(bpmis_client)
+                timing_stats["total"] = team_payload["elapsed_seconds"]
+                team_payload["timing_stats"] = timing_stats
+                team_payloads.append(team_payload)
+                step_started_at = time.monotonic()
+                _store_team_dashboard_task_payload(store, team_key, emails, team_payload)
+                _team_dashboard_add_timing(timing_stats, "cache_store", step_started_at)
+                timing_stats["total"] = round(time.monotonic() - started_at, 2)
+                team_payload["elapsed_seconds"] = timing_stats["total"]
+                team_payload["timing_stats"] = timing_stats
                 _log_portal_event(
                     "team_dashboard_tasks_team_loaded",
                     **_build_request_log_context(
@@ -4496,13 +4523,13 @@ def create_app() -> Flask:
                             "raw_biz_project_count": len(biz_projects or []),
                             "elapsed_seconds": team_payload["elapsed_seconds"],
                             "fetch_stats": team_payload["fetch_stats"],
+                            "timing_stats": team_payload["timing_stats"],
                         },
                     ),
                 )
-                team_payloads.append(team_payload)
-                _store_team_dashboard_task_payload(store, team_key, emails, team_payload)
             except Exception as error:  # noqa: BLE001 - keep other team groups renderable.
                 has_error = True
+                timing_stats["total"] = round(time.monotonic() - started_at, 2)
                 error_details = _classify_portal_error(error)
                 _log_portal_event(
                     "team_dashboard_tasks_team_error",
@@ -4521,8 +4548,9 @@ def create_app() -> Flask:
                         "under_prd": [],
                         "pending_live": [],
                         "error": str(error),
-                        "elapsed_seconds": round(time.monotonic() - started_at, 2),
+                        "elapsed_seconds": timing_stats["total"],
                         "fetch_stats": _team_dashboard_fetch_stats(bpmis_client),
+                        "timing_stats": timing_stats,
                     }
                 )
         response = jsonify(
@@ -7530,7 +7558,23 @@ def _build_team_dashboard_task_group(
 
 def _team_dashboard_biz_projects_for_emails(bpmis_client: Any, emails: list[str]) -> list[dict[str, Any]]:
     projects: dict[str, dict[str, Any]] = {}
-    for email in emails:
+    normalized_emails = _normalize_team_dashboard_emails(emails)
+    if hasattr(bpmis_client, "list_biz_projects_for_pm_emails"):
+        try:
+            rows = bpmis_client.list_biz_projects_for_pm_emails(normalized_emails)
+        except Exception as error:  # noqa: BLE001 - fall back to the stable single-email path.
+            current_app.logger.warning("Team Dashboard bulk Biz Project lookup failed: %s", error)
+        else:
+            for row in rows or []:
+                project = _normalize_team_dashboard_project(row if isinstance(row, dict) else {})
+                matched_emails = _normalize_team_dashboard_emails(
+                    row.get("matched_pm_emails") if isinstance(row, dict) else []
+                )
+                if not matched_emails:
+                    matched_emails = _normalize_team_dashboard_emails(project.get("matched_pm_emails") or [])
+                _merge_team_dashboard_biz_project_lookup(projects, project, matched_emails)
+            return list(projects.values())
+    for email in normalized_emails:
         normalized_email = str(email or "").strip().lower()
         if not normalized_email:
             continue
@@ -7541,23 +7585,32 @@ def _team_dashboard_biz_projects_for_emails(bpmis_client: Any, emails: list[str]
             continue
         for row in rows or []:
             project = _normalize_team_dashboard_project(row if isinstance(row, dict) else {})
-            bpmis_id = project.get("bpmis_id")
-            if not bpmis_id:
-                continue
-            existing = projects.setdefault(
-                bpmis_id,
-                {
-                    **project,
-                    "matched_pm_emails": [],
-                },
-            )
-            for key, value in project.items():
-                if value and not existing.get(key):
-                    existing[key] = value
-            matched = existing.setdefault("matched_pm_emails", [])
-            if normalized_email not in matched:
-                matched.append(normalized_email)
+            _merge_team_dashboard_biz_project_lookup(projects, project, [normalized_email])
     return list(projects.values())
+
+
+def _merge_team_dashboard_biz_project_lookup(
+    projects: dict[str, dict[str, Any]],
+    project: dict[str, Any],
+    matched_emails: list[str],
+) -> None:
+    bpmis_id = str(project.get("bpmis_id") or "").strip()
+    if not bpmis_id:
+        return
+    existing = projects.setdefault(
+        bpmis_id,
+        {
+            **project,
+            "matched_pm_emails": [],
+        },
+    )
+    for key, value in project.items():
+        if value and not existing.get(key):
+            existing[key] = value
+    matched = existing.setdefault("matched_pm_emails", [])
+    for normalized_email in _normalize_team_dashboard_emails(matched_emails):
+        if normalized_email not in matched:
+            matched.append(normalized_email)
 
 
 def _team_dashboard_fetch_stats(bpmis_client: Any) -> dict[str, int]:
@@ -7586,6 +7639,23 @@ def _team_dashboard_fetch_stats(bpmis_client: Any) -> dict[str, int]:
             "user_lookup_count",
         )
     }
+
+
+def _team_dashboard_new_timing() -> dict[str, float]:
+    return {
+        "config_load": 0.0,
+        "cache_check": 0.0,
+        "list_jira_tasks": 0.0,
+        "list_biz_projects": 0.0,
+        "group_projects": 0.0,
+        "backfill_zero_jira_projects": 0.0,
+        "cache_store": 0.0,
+        "total": 0.0,
+    }
+
+
+def _team_dashboard_add_timing(timing_stats: dict[str, float], key: str, started_at: float) -> None:
+    timing_stats[key] = round(float(timing_stats.get(key) or 0.0) + (time.monotonic() - started_at), 3)
 
 
 def _load_all_team_dashboard_task_payloads(settings: Settings, config: dict[str, Any]) -> list[dict[str, Any]]:
@@ -7963,6 +8033,46 @@ def _extract_parent_issue_ids_from_any(value: Any) -> set[str]:
 
 
 def _backfill_team_dashboard_empty_project_jira_tasks(bpmis_client: Any, team_payload: dict[str, Any]) -> None:
+    candidates: list[dict[str, Any]] = []
+    for section_key in ("under_prd", "pending_live"):
+        projects = team_payload.get(section_key)
+        if not isinstance(projects, list):
+            continue
+        for project in projects:
+            if not isinstance(project, dict) or project.get("jira_tickets"):
+                continue
+            bpmis_id = str(project.get("bpmis_id") or "").strip()
+            if not bpmis_id:
+                continue
+            emails = _team_dashboard_project_fallback_emails(project)
+            if not emails:
+                continue
+            candidates.append({"project": project, "bpmis_id": bpmis_id, "emails": emails})
+    if candidates and hasattr(bpmis_client, "list_jira_tasks_for_projects_created_by_emails"):
+        project_ids = [candidate["bpmis_id"] for candidate in candidates]
+        all_emails: list[str] = []
+        for candidate in candidates:
+            all_emails.extend(candidate["emails"])
+        try:
+            grouped_rows = bpmis_client.list_jira_tasks_for_projects_created_by_emails(
+                project_ids,
+                _normalize_team_dashboard_emails(all_emails),
+            )
+        except Exception as error:  # noqa: BLE001 - keep the older per-project fallback available.
+            current_app.logger.warning("Team Dashboard bulk Jira fallback lookup failed: %s", error)
+            grouped_rows = {}
+        if isinstance(grouped_rows, dict):
+            for candidate in candidates:
+                rows = grouped_rows.get(candidate["bpmis_id"]) or []
+                tickets = _normalize_team_dashboard_project_fallback_rows(
+                    rows,
+                    candidate["project"],
+                    candidate["emails"],
+                )
+                if tickets:
+                    candidate["project"]["jira_tickets"] = tickets
+                    candidate["project"]["task_count"] = len(tickets)
+                    _apply_team_dashboard_project_release_date(candidate["project"])
     for section_key in ("under_prd", "pending_live"):
         projects = team_payload.get(section_key)
         if not isinstance(projects, list):
@@ -7994,27 +8104,71 @@ def _remove_team_dashboard_zero_jira_pending_live_projects(team_payload: dict[st
     ]
 
 
-def _team_dashboard_project_fallback_jira_tasks(bpmis_client: Any, project: dict[str, Any]) -> list[dict[str, Any]]:
-    bpmis_id = str(project.get("bpmis_id") or "").strip()
-    if not bpmis_id or not hasattr(bpmis_client, "list_jira_tasks_for_project_created_by_email"):
-        return []
+def _team_dashboard_project_fallback_emails(project: dict[str, Any]) -> list[str]:
     emails = _normalize_team_dashboard_emails(project.get("matched_pm_emails") or [])
     if not emails:
         regional_pm = str(project.get("regional_pm_pic") or "").strip()
         if "@" in regional_pm:
             emails = _normalize_team_dashboard_emails([regional_pm])
-    if not emails:
-        return []
-    tickets: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    parent_project = {
-        "bpmis_id": bpmis_id,
+    return emails
+
+
+def _team_dashboard_project_parent_payload(project: dict[str, Any]) -> dict[str, str]:
+    return {
+        "bpmis_id": str(project.get("bpmis_id") or "").strip(),
         "project_name": str(project.get("project_name") or "").strip(),
         "market": str(project.get("market") or "").strip(),
         "priority": str(project.get("priority") or "").strip(),
         "regional_pm_pic": str(project.get("regional_pm_pic") or "").strip(),
         "status": str(project.get("status") or "").strip(),
     }
+
+
+def _normalize_team_dashboard_project_fallback_rows(
+    rows: list[dict[str, Any]],
+    project: dict[str, Any],
+    emails: list[str],
+) -> list[dict[str, Any]]:
+    parent_project = _team_dashboard_project_parent_payload(project)
+    allowed_emails = set(_normalize_team_dashboard_emails(emails))
+    tickets: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        row_email = str(row.get("pm_email") or "").strip().lower()
+        if allowed_emails and row_email and row_email not in allowed_emails:
+            continue
+        normalized = _normalize_team_dashboard_task(
+            {
+                **row,
+                "pm_email": row.get("pm_email") or (next(iter(allowed_emails)) if allowed_emails else ""),
+                "parent_project": row.get("parent_project") if isinstance(row.get("parent_project"), dict) else parent_project,
+            }
+        )
+        status_key = str(normalized.get("jira_status") or "").strip().casefold()
+        if status_key in TEAM_DASHBOARD_EXCLUDED_PENDING_STATUSES:
+            continue
+        dedupe_key = normalized.get("jira_id") or normalized.get("issue_id")
+        if dedupe_key and dedupe_key in seen:
+            continue
+        if dedupe_key:
+            seen.add(dedupe_key)
+        tickets.append(normalized)
+    tickets.sort(key=_team_dashboard_sort_key)
+    return tickets
+
+
+def _team_dashboard_project_fallback_jira_tasks(bpmis_client: Any, project: dict[str, Any]) -> list[dict[str, Any]]:
+    bpmis_id = str(project.get("bpmis_id") or "").strip()
+    if not bpmis_id or not hasattr(bpmis_client, "list_jira_tasks_for_project_created_by_email"):
+        return []
+    emails = _team_dashboard_project_fallback_emails(project)
+    if not emails:
+        return []
+    tickets: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    parent_project = _team_dashboard_project_parent_payload(project)
     for email in emails:
         try:
             rows = bpmis_client.list_jira_tasks_for_project_created_by_email(bpmis_id, email)

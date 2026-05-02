@@ -1586,6 +1586,134 @@ class BPMISClientTests(unittest.TestCase):
             self.assertEqual(tasks[0]["component"], "")
             self.assertEqual(tasks[0]["market"], "")
 
+    def test_list_biz_projects_for_pm_emails_batches_pm_lookup_and_tags_matches(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings = Settings(
+                flask_secret_key="secret",
+                google_oauth_client_secret_file=Path(temp_dir) / "client.json",
+                google_oauth_redirect_uri=None,
+                team_portal_host="127.0.0.1",
+                team_portal_port=5000,
+                team_portal_base_url=None,
+                team_allowed_emails=(),
+                team_allowed_email_domains=(),
+                team_portal_data_dir=Path(temp_dir),
+                spreadsheet_id="sheet",
+                common_tab_name="Common",
+                input_tab_name="Input",
+                bpmis_base_url="https://example.com",
+                bpmis_api_access_token="token",
+            )
+            client = BPMISDirectApiClient(settings)
+            client._resolve_bpmis_user_ids_by_emails = lambda emails: {  # type: ignore[method-assign]
+                "pm1@npt.sg": [101],
+                "pm2@npt.sg": [202],
+            }
+            calls = []
+
+            def fake_api_request(path, method="GET", params=None, body=None):
+                calls.append((path, params))
+                search = json.loads((params or {}).get("search") or "{}")
+                self.assertEqual(search["subQueries"][2]["subQueries"][0], {"regionalPmPicId": [101, 202]})
+                return {
+                    "data": {
+                        "rows": [
+                            {
+                                "id": 100,
+                                "summary": "PM1 Project",
+                                "marketId": "SG",
+                                "bizPriorityId": "P1",
+                                "regionalPmPicId": [{"id": 101, "email": "pm1@npt.sg"}],
+                                "statusId": "Confirmed",
+                            },
+                            {
+                                "id": 200,
+                                "summary": "PM2 Project",
+                                "marketId": "ID",
+                                "bizPriorityId": "P0",
+                                "involvedPM": [{"id": 202, "email": "pm2@npt.sg"}],
+                                "statusId": "Developing",
+                            },
+                        ]
+                    }
+                }
+
+            client._api_request = fake_api_request  # type: ignore[method-assign]
+
+            projects = client.list_biz_projects_for_pm_emails(["PM1@npt.sg", "pm2@npt.sg"])
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual([project["bpmis_id"] for project in projects], ["100", "200"])
+        self.assertEqual(projects[0]["matched_pm_emails"], ["pm1@npt.sg"])
+        self.assertEqual(projects[1]["matched_pm_emails"], ["pm2@npt.sg"])
+
+    def test_list_jira_tasks_for_projects_created_by_emails_batches_parent_lookup(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings = Settings(
+                flask_secret_key="secret",
+                google_oauth_client_secret_file=Path(temp_dir) / "client.json",
+                google_oauth_redirect_uri=None,
+                team_portal_host="127.0.0.1",
+                team_portal_port=5000,
+                team_portal_base_url=None,
+                team_allowed_emails=(),
+                team_allowed_email_domains=(),
+                team_portal_data_dir=Path(temp_dir),
+                spreadsheet_id="sheet",
+                common_tab_name="Common",
+                input_tab_name="Input",
+                bpmis_base_url="https://example.com",
+                bpmis_api_access_token="token",
+            )
+            client = BPMISDirectApiClient(settings)
+            calls = []
+
+            def fake_api_request(path, method="GET", params=None, body=None):
+                calls.append((path, params))
+                search = json.loads((params or {}).get("search") or "{}")
+                self.assertEqual(search["subQueries"][1], {"parentIds": [225159, 225160]})
+                return {
+                    "data": {
+                        "rows": [
+                            {
+                                "id": 991,
+                                "jiraKey": "AF-991",
+                                "summary": "Project one task",
+                                "reporter": {"emailAddress": "pm@npt.sg"},
+                                "parentIds": [225159],
+                                "status": {"label": "Waiting"},
+                            },
+                            {
+                                "id": 992,
+                                "jiraKey": "AF-992",
+                                "summary": "Project two task",
+                                "reporter": {"emailAddress": "pm@npt.sg"},
+                                "parentIds": [225160],
+                                "status": {"label": "Developing"},
+                            },
+                            {
+                                "id": 993,
+                                "jiraKey": "AF-993",
+                                "summary": "Other PM task",
+                                "reporter": {"emailAddress": "other@npt.sg"},
+                                "parentIds": [225160],
+                            },
+                        ]
+                    }
+                }
+
+            client._api_request = fake_api_request  # type: ignore[method-assign]
+            client.get_issue_detail = lambda issue_id: (_ for _ in ()).throw(AssertionError("detail lookup not expected"))  # type: ignore[method-assign]
+
+            tasks_by_project = client.list_jira_tasks_for_projects_created_by_emails(
+                ["225159", "225160"],
+                ["pm@npt.sg"],
+            )
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual([task["jira_id"] for task in tasks_by_project["225159"]], ["AF-991"])
+        self.assertEqual([task["jira_id"] for task in tasks_by_project["225160"]], ["AF-992"])
+
     def test_list_jira_tasks_created_by_emails_filters_and_normalizes_rows(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             settings = Settings(

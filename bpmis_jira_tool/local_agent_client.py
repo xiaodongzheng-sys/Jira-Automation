@@ -68,6 +68,7 @@ class LocalAgentClient:
         self.timeout_seconds = max(5, int(timeout_seconds or 300))
         self.connect_timeout_seconds = max(1, min(int(connect_timeout_seconds or 10), self.timeout_seconds))
         self.session = session or _LOCAL_AGENT_SESSION
+        self.last_bpmis_request_stats: dict[str, int] = {}
         if not self.base_url.strip("/"):
             raise ToolError("LOCAL_AGENT_BASE_URL is required before using Mac local-agent capabilities.")
         if not self.hmac_secret:
@@ -320,6 +321,8 @@ class LocalAgentClient:
                 "kwargs": kwargs or {},
             },
         )
+        request_stats = payload.get("request_stats")
+        self.last_bpmis_request_stats = request_stats if isinstance(request_stats, dict) else {}
         return payload.get("result")
 
     def bpmis_config_load(self, *, user_key: str) -> dict[str, Any] | None:
@@ -810,6 +813,7 @@ class RemoteBPMISClient:
     def __init__(self, client: LocalAgentClient, *, access_token: str | None = None) -> None:
         self.client = client
         self.access_token = access_token
+        self.request_stats: dict[str, int] = {}
 
     def ping(self) -> None:
         self._call("ping")
@@ -840,6 +844,9 @@ class RemoteBPMISClient:
     def list_biz_projects_for_pm_email(self, email: str) -> list[dict[str, str]]:
         return self._call("list_biz_projects_for_pm_email", email) or []
 
+    def list_biz_projects_for_pm_emails(self, emails: list[str]) -> list[dict[str, Any]]:
+        return self._call("list_biz_projects_for_pm_emails", emails) or []
+
     def search_biz_projects_by_title_keywords(self, keywords: str, *, max_pages: int | None = None) -> list[dict[str, str]]:
         kwargs: dict[str, Any] = {}
         if max_pages is not None:
@@ -848,6 +855,13 @@ class RemoteBPMISClient:
 
     def list_jira_tasks_for_project_created_by_email(self, project_issue_id: str, email: str) -> list[dict[str, Any]]:
         return self._call("list_jira_tasks_for_project_created_by_email", project_issue_id, email) or []
+
+    def list_jira_tasks_for_projects_created_by_emails(
+        self,
+        project_issue_ids: list[str],
+        emails: list[str],
+    ) -> dict[str, list[dict[str, Any]]]:
+        return self._call("list_jira_tasks_for_projects_created_by_emails", project_issue_ids, emails) or {}
 
     def list_jira_tasks_created_by_emails(
         self,
@@ -901,12 +915,27 @@ class RemoteBPMISClient:
         return self._call("delink_jira_ticket_from_project", ticket_key, project_issue_id) or {}
 
     def _call(self, operation: str, *args: Any, **kwargs: Any) -> Any:
-        return self.client.bpmis_call(
+        result = self.client.bpmis_call(
             operation=operation,
             access_token=self.access_token,
             args=list(args),
             kwargs=kwargs,
         )
+        self._merge_request_stats(getattr(self.client, "last_bpmis_request_stats", {}))
+        return result
+
+    def _merge_request_stats(self, stats: dict[str, Any]) -> None:
+        if not isinstance(stats, dict):
+            return
+        for key, value in stats.items():
+            try:
+                numeric_value = int(value or 0)
+            except (TypeError, ValueError):
+                continue
+            if key.endswith("_count") or key in {"api_call_count"}:
+                self.request_stats[key] = int(self.request_stats.get(key) or 0) + numeric_value
+            else:
+                self.request_stats[key] = max(int(self.request_stats.get(key) or 0), numeric_value)
 
 
 class RemoteBPMISProjectStore:

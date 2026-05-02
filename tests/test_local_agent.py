@@ -425,6 +425,7 @@ class LocalAgentServerTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()["result"][0]["issue_id"], "123")
+        self.assertEqual(response.get_json()["request_stats"], {"api_call_count": 1})
         log_text = "\n".join(captured.output)
         self.assertIn('"event": "local_agent_bpmis_call_start"', log_text)
         self.assertIn('"event": "local_agent_bpmis_call_done"', log_text)
