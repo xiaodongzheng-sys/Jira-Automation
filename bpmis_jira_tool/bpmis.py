@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import base64
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 import json
 import logging
 import os
@@ -196,6 +196,12 @@ class BPMISDirectApiClient(BPMISClient):
             "issue_list_page_cap_hit": 0,
             "issue_list_page_count": 0,
             "issue_rows_scanned": 0,
+            "issue_tree_page_count": 0,
+            "issue_tree_rows_scanned": 0,
+            "issue_tree_fallback_count": 0,
+            "release_version_lookup_count": 0,
+            "release_version_count": 0,
+            "release_version_lookup_failed_count": 0,
             "user_lookup_count": 0,
         }
 
@@ -649,40 +655,29 @@ class BPMISDirectApiClient(BPMISClient):
             return []
 
         rows: list[dict[str, Any]] = []
-        page = 1
-        page_size = 200
         created_cutoff = self._parse_issue_datetime(created_after) if created_after else None
         release_cutoff = self._parse_issue_datetime(release_after) if release_after else None
-        use_release_query_filter = self._bpmis_release_query_filter_enabled(user_ids, release_cutoff)
-        if use_release_query_filter:
-            self.request_stats["bpmis_release_query_filter_used_count"] += 1
-        while True:
-            if max_pages is not None and page > max(0, int(max_pages)):
-                self.request_stats["issue_list_page_cap_hit"] += 1
-                break
-            response = self._api_request(
-                "/api/v1/issues/list",
-                params={
-                    "search": json.dumps(
-                        self._team_dashboard_jira_issue_list_search_payload(
-                            user_ids,
-                            page=page,
-                            page_size=page_size,
-                            release_cutoff=release_cutoff if use_release_query_filter else None,
-                        )
-                    )
-                },
+        release_version_ids = self._team_dashboard_release_version_ids(release_cutoff)
+        if release_cutoff and not release_version_ids:
+            rows = self._list_team_dashboard_jira_task_rows_via_list(
+                user_ids,
+                max_pages=max_pages,
+                created_cutoff=created_cutoff,
             )
-            self.request_stats["issue_list_page_count"] += 1
-            page_rows = (response.get("data") or {}).get("rows") or []
-            self.request_stats["issue_rows_scanned"] += len(page_rows)
-            rows.extend(page_rows)
-            if len(page_rows) < page_size:
-                break
-            if created_cutoff and page_rows and self._all_rows_before_created_cutoff(page_rows, created_cutoff):
-                self.request_stats["issue_list_created_cutoff_hit"] += 1
-                break
-            page += 1
+        else:
+            rows = self._list_team_dashboard_jira_task_rows_via_tree(
+                user_ids,
+                fix_version_ids=release_version_ids,
+                max_pages=max_pages,
+                created_cutoff=created_cutoff,
+            )
+            if rows is None:
+                self.request_stats["issue_tree_fallback_count"] += 1
+                rows = self._list_team_dashboard_jira_task_rows_via_list(
+                    user_ids,
+                    max_pages=max_pages,
+                    created_cutoff=created_cutoff,
+                )
 
         candidate_task_rows: list[tuple[dict[str, Any], str, str]] = []
         seen_issue_ids: set[str] = set()
@@ -741,26 +736,173 @@ class BPMISDirectApiClient(BPMISClient):
             tasks.append(self._normalize_team_dashboard_jira_task(row, pm_email=matched_email, parent_project=parent_project))
         return tasks
 
+    def _list_team_dashboard_jira_task_rows_via_list(
+        self,
+        user_ids: list[int],
+        *,
+        max_pages: int | None,
+        created_cutoff: datetime | None,
+        field_name: str | None = None,
+        fix_version_ids: list[int] | None = None,
+    ) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        page = 1
+        page_size = 200
+        while True:
+            if max_pages is not None and page > max(0, int(max_pages)):
+                self.request_stats["issue_list_page_cap_hit"] += 1
+                break
+            response = self._api_request(
+                "/api/v1/issues/list",
+                params={
+                    "search": json.dumps(
+                        self._team_dashboard_jira_issue_list_search_payload(
+                            user_ids,
+                            page=page,
+                            page_size=page_size,
+                            field_name=field_name,
+                            fix_version_ids=fix_version_ids,
+                        )
+                    )
+                },
+            )
+            self.request_stats["issue_list_page_count"] += 1
+            page_rows = self._extract_issue_rows_from_response(response)
+            self.request_stats["issue_rows_scanned"] += len(page_rows)
+            rows.extend(page_rows)
+            if len(page_rows) < page_size:
+                break
+            if created_cutoff and page_rows and self._all_rows_before_created_cutoff(page_rows, created_cutoff):
+                self.request_stats["issue_list_created_cutoff_hit"] += 1
+                break
+            page += 1
+        return rows
+
+    def _list_team_dashboard_jira_task_rows_via_tree(
+        self,
+        user_ids: list[int],
+        *,
+        fix_version_ids: list[int],
+        max_pages: int | None,
+        created_cutoff: datetime | None,
+    ) -> list[dict[str, Any]] | None:
+        rows_by_key: dict[str, dict[str, Any]] = {}
+        for field_name in ("reporter", "jiraRegionalPmPicId"):
+            try:
+                field_rows = self._list_team_dashboard_jira_task_rows_via_tree_field(
+                    user_ids,
+                    field_name=field_name,
+                    fix_version_ids=fix_version_ids,
+                    max_pages=max_pages,
+                    created_cutoff=created_cutoff,
+                )
+            except (BPMISError, ValueError, TypeError) as error:
+                self.event_logger.warning("Could not load Team Dashboard tasks via BPMIS issues/tree %s: %s", field_name, error)
+                self.request_stats["issue_tree_fallback_count"] += 1
+                try:
+                    field_rows = self._list_team_dashboard_jira_task_rows_via_list(
+                        user_ids,
+                        max_pages=max_pages,
+                        created_cutoff=created_cutoff,
+                        field_name=field_name,
+                        fix_version_ids=fix_version_ids or None,
+                    )
+                except (BPMISError, ValueError, TypeError):
+                    return None
+            for row in field_rows:
+                dedupe_key = self._extract_issue_key_from_row(row) or self._extract_issue_identifier(row)
+                if not dedupe_key:
+                    dedupe_key = f"row:{len(rows_by_key)}"
+                rows_by_key.setdefault(dedupe_key, row)
+        return list(rows_by_key.values())
+
+    def _list_team_dashboard_jira_task_rows_via_tree_field(
+        self,
+        user_ids: list[int],
+        *,
+        field_name: str,
+        fix_version_ids: list[int],
+        max_pages: int | None,
+        created_cutoff: datetime | None,
+    ) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        page = 1
+        page_size = 200
+        while True:
+            if max_pages is not None and page > max(0, int(max_pages)):
+                self.request_stats["issue_list_page_cap_hit"] += 1
+                break
+            response = self._api_request(
+                "/api/v1/issues/tree",
+                params={
+                    "search": json.dumps(
+                        self._team_dashboard_jira_issue_tree_search_payload(
+                            user_ids,
+                            field_name=field_name,
+                            page=page,
+                            page_size=page_size,
+                            fix_version_ids=fix_version_ids,
+                        )
+                    )
+                },
+            )
+            self.request_stats["issue_tree_page_count"] += 1
+            page_rows = self._extract_issue_rows_from_response(response)
+            self.request_stats["issue_tree_rows_scanned"] += len(page_rows)
+            rows.extend(page_rows)
+            if len(page_rows) < page_size:
+                break
+            if created_cutoff and page_rows and self._all_rows_before_created_cutoff(page_rows, created_cutoff):
+                self.request_stats["issue_list_created_cutoff_hit"] += 1
+                break
+            page += 1
+        return rows
+
+    def _team_dashboard_jira_issue_tree_search_payload(
+        self,
+        user_ids: list[int],
+        *,
+        field_name: str,
+        page: int,
+        page_size: int,
+        fix_version_ids: list[int],
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            field_name: user_ids,
+            "typeId": self.TASK_TYPE_ID,
+            "taskType": 1,
+            "page": page,
+            "pageSize": page_size,
+        }
+        if fix_version_ids:
+            payload["fixVersionId"] = fix_version_ids
+        return payload
+
     def _team_dashboard_jira_issue_list_search_payload(
         self,
         user_ids: list[int],
         *,
         page: int,
         page_size: int,
-        release_cutoff: datetime | None = None,
+        field_name: str | None = None,
+        fix_version_ids: list[int] | None = None,
     ) -> dict[str, Any]:
-        sub_queries: list[dict[str, Any]] = [
-            {"typeId": [self.TASK_TYPE_ID]},
-            {
+        if field_name:
+            creator_query: dict[str, Any] = {field_name: user_ids}
+        else:
+            creator_query = {
                 "joinType": "or",
                 "subQueries": [
                     {"reporter": user_ids},
                     {"jiraRegionalPmPicId": user_ids},
                 ],
-            },
+            }
+        sub_queries: list[dict[str, Any]] = [
+            {"typeId": [self.TASK_TYPE_ID]},
+            creator_query,
         ]
-        if release_cutoff:
-            sub_queries.append(self._bpmis_release_cutoff_subquery(release_cutoff))
+        if fix_version_ids:
+            sub_queries.append({"fixVersionId": fix_version_ids})
         return {
             "joinType": "and",
             "subQueries": sub_queries,
@@ -768,6 +910,78 @@ class BPMISDirectApiClient(BPMISClient):
             "pageSize": page_size,
             "mapping": True,
         }
+
+    def _team_dashboard_release_version_ids(self, release_cutoff: datetime | None) -> list[int]:
+        if not release_cutoff:
+            return []
+        rows: list[dict[str, Any]] = []
+        page = 1
+        page_size = 1000
+        end_date = (release_cutoff + timedelta(days=730)).date().isoformat()
+        start_date = release_cutoff.date().isoformat()
+        try:
+            while True:
+                self.request_stats["release_version_lookup_count"] += 1
+                response = self._api_request(
+                    "/api/v1/versions/list",
+                    params={
+                        "search": json.dumps(
+                            {
+                                "timelineEndBefore": end_date,
+                                "timelineEndAfter": start_date,
+                                "page": page,
+                                "pageSize": page_size,
+                            }
+                        )
+                    },
+                )
+                page_rows = self._extract_issue_rows_from_response(response)
+                rows.extend(page_rows)
+                if len(page_rows) < page_size:
+                    break
+                page += 1
+        except (BPMISError, ValueError, TypeError) as error:
+            self.request_stats["release_version_lookup_failed_count"] += 1
+            self.event_logger.warning("Could not load BPMIS release versions: %s", error)
+            return []
+
+        version_ids: list[int] = []
+        seen_ids: set[int] = set()
+        for row in rows:
+            try:
+                version_id = int(str(row.get("id") or "").strip())
+            except (TypeError, ValueError):
+                continue
+            if version_id in seen_ids:
+                continue
+            seen_ids.add(version_id)
+            version_ids.append(version_id)
+        self.request_stats["release_version_count"] += len(version_ids)
+        return version_ids
+
+    def _extract_issue_rows_from_response(self, response: dict[str, Any]) -> list[dict[str, Any]]:
+        if not isinstance(response, dict):
+            return []
+        data = response.get("data")
+        if isinstance(data, dict) and isinstance(data.get("rows"), list):
+            return [row for row in data.get("rows") or [] if isinstance(row, dict)]
+        return self._flatten_issue_tree_rows(data)
+
+    def _flatten_issue_tree_rows(self, value: Any) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        if isinstance(value, list):
+            for item in value:
+                rows.extend(self._flatten_issue_tree_rows(item))
+            return rows
+        if not isinstance(value, dict):
+            return rows
+        if any(key in value for key in ("id", "jiraKey", "issueKey", "key", "parentIds", "summary", "fixVersionId")):
+            rows.append(value)
+        for child_key in ("children", "childIssues", "issues", "tasks", "list"):
+            child_value = value.get(child_key)
+            if isinstance(child_value, (dict, list)):
+                rows.extend(self._flatten_issue_tree_rows(child_value))
+        return rows
 
     def _bpmis_release_cutoff_subquery(self, release_cutoff: datetime) -> dict[str, Any]:
         cutoff_text = release_cutoff.date().isoformat()
@@ -781,58 +995,13 @@ class BPMISDirectApiClient(BPMISClient):
         }
 
     def _bpmis_release_query_filter_enabled(self, user_ids: list[int], release_cutoff: datetime | None) -> bool:
+        del user_ids
         if not release_cutoff:
             return False
-        mode = str(os.getenv("TEAM_DASHBOARD_BPMIS_RELEASE_QUERY_FILTER") or "probe").strip().casefold()
-        if mode not in {"1", "true", "yes", "probe"}:
-            self.request_stats["bpmis_release_query_filter_disabled_count"] += 1
-            return False
-
-        self.request_stats["bpmis_release_query_filter_probe_count"] += 1
-        try:
-            future_payload = self._team_dashboard_jira_issue_list_search_payload(
-                user_ids,
-                page=1,
-                page_size=5,
-                release_cutoff=datetime(2999, 12, 31),
-            )
-            future_response = self._api_request(
-                "/api/v1/issues/list",
-                params={"search": json.dumps(future_payload)},
-            )
-            future_rows = ((future_response.get("data") or {}).get("rows") or []) if isinstance(future_response, dict) else []
-            if future_rows:
-                self.request_stats["bpmis_release_query_filter_disabled_count"] += 1
-                return False
-
-            cutoff_payload = self._team_dashboard_jira_issue_list_search_payload(
-                user_ids,
-                page=1,
-                page_size=5,
-                release_cutoff=release_cutoff,
-            )
-            cutoff_response = self._api_request(
-                "/api/v1/issues/list",
-                params={"search": json.dumps(cutoff_payload)},
-            )
-            cutoff_rows = ((cutoff_response.get("data") or {}).get("rows") or []) if isinstance(cutoff_response, dict) else []
-        except (BPMISError, ValueError, TypeError) as error:
-            self.request_stats["bpmis_release_query_filter_probe_failed_count"] += 1
-            self.request_stats["bpmis_release_query_filter_disabled_count"] += 1
-            self.event_logger.warning("Could not probe BPMIS release query filter: %s", error)
-            return False
-
-        if not cutoff_rows:
-            self.request_stats["bpmis_release_query_filter_disabled_count"] += 1
-            return False
-        for row in cutoff_rows:
-            release_text = self._extract_issue_release_date_text(row)
-            release_at = self._parse_issue_datetime(release_text)
-            if not release_text or not release_at or release_at < release_cutoff:
-                self.request_stats["bpmis_release_query_filter_disabled_count"] += 1
-                return False
-        self.request_stats["bpmis_release_query_filter_enabled_count"] += 1
-        return True
+        # Deprecated: Team Dashboard now mirrors BPMIS Feature Pool by resolving
+        # release windows through /versions/list and filtering issues by fixVersionId.
+        self.request_stats["bpmis_release_query_filter_disabled_count"] += 1
+        return False
 
     def search_versions(self, query: str) -> list[dict[str, Any]]:
         normalized_query = query.strip()

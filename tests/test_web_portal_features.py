@@ -289,6 +289,12 @@ class WebPortalFeatureTests(unittest.TestCase):
                 "bpmis_release_query_filter_probe_count": 1,
                 "bpmis_release_query_filter_enabled_count": 1,
                 "bpmis_release_query_filter_used_count": 1,
+                "issue_tree_page_count": 2,
+                "issue_tree_rows_scanned": 80,
+                "issue_tree_fallback_count": 0,
+                "release_version_lookup_count": 1,
+                "release_version_count": 12,
+                "release_version_lookup_failed_count": 0,
                 "team_dashboard_zero_jira_fallback_candidate_count": 12,
             }
 
@@ -303,6 +309,10 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertEqual(stats["bpmis_release_query_filter_probe_count"], 1)
         self.assertEqual(stats["bpmis_release_query_filter_enabled_count"], 1)
         self.assertEqual(stats["bpmis_release_query_filter_used_count"], 1)
+        self.assertEqual(stats["issue_tree_page_count"], 2)
+        self.assertEqual(stats["issue_tree_rows_scanned"], 80)
+        self.assertEqual(stats["release_version_lookup_count"], 1)
+        self.assertEqual(stats["release_version_count"], 12)
         self.assertEqual(stats["team_dashboard_zero_jira_fallback_candidate_count"], 12)
 
     def test_classify_portal_error_categorizes_duplicate_route_rule(self):

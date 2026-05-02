@@ -56,6 +56,35 @@ class BPMISClientTests(unittest.TestCase):
                             {"id": 202, "email": "pm@npt.sg"},
                         ]
                     }
+                if path == "/api/v1/issues/tree":
+                    search = json.loads(params["search"])
+                    if "reporter" in search:
+                        return {
+                            "data": {
+                                "rows": [
+                                    {
+                                        "id": 1,
+                                        "jiraKey": "AF-1",
+                                        "summary": "First task",
+                                        "reporter": {"id": 101},
+                                        "parentIds": [{"id": 900}],
+                                    }
+                                ]
+                            }
+                        }
+                    return {
+                        "data": {
+                            "rows": [
+                                {
+                                    "id": 2,
+                                    "jiraKey": "AF-2",
+                                    "summary": "Second task",
+                                    "jiraRegionalPmPicId": [{"id": 202}],
+                                    "parentIds": [{"id": 900}],
+                                }
+                            ]
+                        }
+                    }
                 if path == "/api/v1/issues/list":
                     search = json.loads(params["search"])
                     sub_queries = search.get("subQueries") or []
@@ -73,26 +102,6 @@ class BPMISClientTests(unittest.TestCase):
                                 ]
                             }
                         }
-                    return {
-                        "data": {
-                            "rows": [
-                                {
-                                    "id": 1,
-                                    "jiraKey": "AF-1",
-                                    "summary": "First task",
-                                    "reporter": {"id": 101},
-                                    "parentIds": [{"id": 900}],
-                                },
-                                {
-                                    "id": 2,
-                                    "jiraKey": "AF-2",
-                                    "summary": "Second task",
-                                    "jiraRegionalPmPicId": [{"id": 202}],
-                                    "parentIds": [{"id": 900}],
-                                },
-                            ]
-                        }
-                    }
                 self.fail(f"unexpected API call: {path}")
 
             client._api_request = fake_api_request  # type: ignore[method-assign]
@@ -103,7 +112,8 @@ class BPMISClientTests(unittest.TestCase):
         self.assertEqual([task["pm_email"] for task in tasks], ["af@npt.sg", "pm@npt.sg"])
         self.assertEqual(tasks[0]["parent_project"]["project_name"], "Parent Project")
         self.assertEqual([path for path, _params in calls].count("/api/v1/users/listByEmail"), 1)
-        self.assertEqual([path for path, _params in calls].count("/api/v1/issues/list"), 2)
+        self.assertEqual([path for path, _params in calls].count("/api/v1/issues/tree"), 2)
+        self.assertEqual([path for path, _params in calls].count("/api/v1/issues/list"), 1)
         self.assertEqual(client.request_stats["issue_detail_bulk_lookup_count"], 1)
         self.assertEqual(client.request_stats["issue_detail_bulk_issue_count"], 1)
         self.assertEqual(client.request_stats["issue_detail_single_fallback_count"], 0)
@@ -116,6 +126,25 @@ class BPMISClientTests(unittest.TestCase):
             def fake_api_request(path, method="GET", params=None, body=None):
                 if path == "/api/v1/users/listByEmail":
                     return {"data": [{"id": 101, "email": "pm@npt.sg"}]}
+                if path == "/api/v1/issues/tree":
+                    search = json.loads((params or {}).get("search") or "{}")
+                    searches.append(search)
+                    if "jiraRegionalPmPicId" in search:
+                        return {"data": {"rows": []}}
+                    return {
+                        "data": {
+                            "rows": [
+                                {
+                                    "id": index,
+                                    "jiraKey": f"AF-{index}",
+                                    "summary": f"Task {index}",
+                                    "reporter": {"id": 101},
+                                    "parentIds": [{"id": 1000 + index}],
+                                }
+                                for index in range(72)
+                            ]
+                        }
+                    }
                 self.assertEqual(path, "/api/v1/issues/list")
                 search = json.loads((params or {}).get("search") or "{}")
                 searches.append(search)
@@ -135,20 +164,7 @@ class BPMISClientTests(unittest.TestCase):
                             ]
                         }
                     }
-                return {
-                    "data": {
-                        "rows": [
-                            {
-                                "id": index,
-                                "jiraKey": f"AF-{index}",
-                                "summary": f"Task {index}",
-                                "reporter": {"id": 101},
-                                "parentIds": [{"id": 1000 + index}],
-                            }
-                            for index in range(72)
-                        ]
-                    }
-                }
+                self.fail(f"unexpected issue list search: {search}")
 
             client._api_request = fake_api_request  # type: ignore[method-assign]
 
@@ -170,25 +186,10 @@ class BPMISClientTests(unittest.TestCase):
             def fake_api_request(path, method="GET", params=None, body=None):
                 if path == "/api/v1/users/listByEmail":
                     return {"data": [{"id": 101, "email": "pm@npt.sg"}]}
-                if path == "/api/v1/issues/list":
+                if path == "/api/v1/issues/tree":
                     search = json.loads((params or {}).get("search") or "{}")
-                    sub_queries = search.get("subQueries") or []
-                    if sub_queries and "id" in sub_queries[0]:
-                        issue_ids = sub_queries[0]["id"]
-                        if len(issue_ids) > 1:
-                            raise BPMISError("bulk id list unsupported")
-                        return {
-                            "data": {
-                                "rows": [
-                                    {
-                                        "id": issue_ids[0],
-                                        "typeId": "Biz Project",
-                                        "summary": "Fallback Parent",
-                                        "market": "SG",
-                                    }
-                                ]
-                            }
-                        }
+                    if "jiraRegionalPmPicId" in search:
+                        return {"data": {"rows": []}}
                     return {
                         "data": {
                             "rows": [
@@ -209,6 +210,26 @@ class BPMISClientTests(unittest.TestCase):
                             ]
                         }
                     }
+                if path == "/api/v1/issues/list":
+                    search = json.loads((params or {}).get("search") or "{}")
+                    sub_queries = search.get("subQueries") or []
+                    if sub_queries and "id" in sub_queries[0]:
+                        issue_ids = sub_queries[0]["id"]
+                        if len(issue_ids) > 1:
+                            raise BPMISError("bulk id list unsupported")
+                        return {
+                            "data": {
+                                "rows": [
+                                    {
+                                        "id": issue_ids[0],
+                                        "typeId": "Biz Project",
+                                        "summary": "Fallback Parent",
+                                        "market": "SG",
+                                    }
+                                ]
+                            }
+                        }
+                    self.fail(f"unexpected issue list search: {search}")
                 self.fail(f"unexpected API call: {path}")
 
             client._api_request = fake_api_request  # type: ignore[method-assign]
@@ -1883,6 +1904,51 @@ class BPMISClientTests(unittest.TestCase):
                             "regionalPmPicId": [{"emailAddress": "rpm@npt.sg"}],
                         }
                     }
+                if path == "/api/v1/issues/tree":
+                    search = json.loads((params or {}).get("search") or "{}")
+                    calls.append(search)
+                    self.assertEqual(search["typeId"], BPMISDirectApiClient.TASK_TYPE_ID)
+                    self.assertEqual(search["taskType"], 1)
+                    if "reporter" in search:
+                        return {
+                            "data": {
+                                "rows": [
+                                    {
+                                        "id": 991,
+                                        "jiraKey": "AF-991",
+                                        "summary": "PRD task",
+                                        "reporter": {"emailAddress": "pm1@npt.sg"},
+                                        "status": {"label": "PRD Reviewed"},
+                                        "fixVersions": [{"name": "Planning_26Q2"}],
+                                        "jiraPrdLink": "https://docs/prd-1",
+                                        "parentIds": [225159],
+                                    },
+                                    {
+                                        "id": 992,
+                                        "jiraKey": "AF-992",
+                                        "summary": "Wrong creator",
+                                        "creator": {"emailAddress": "other@npt.sg"},
+                                    },
+                                ]
+                            }
+                        }
+                    return {
+                        "data": {
+                            "rows": [
+                                {
+                                    "id": 993,
+                                    "jiraKey": "AF-993",
+                                    "summary": "Pending task",
+                                    "reporter": {"id": 999},
+                                    "jiraRegionalPmPicId": [{"id": 202}],
+                                    "status": {"label": "Testing"},
+                                    "fixVersionId": [{"fullName": "Planning_26Q3"}],
+                                    "jiraPrdLink": [{"url": "https://docs/prd-2"}],
+                                    "parentIds": [{"id": 225160}],
+                                }
+                            ]
+                        }
+                    }
                 self.assertEqual(path, "/api/v1/issues/list")
                 search = json.loads((params or {}).get("search") or "{}")
                 if search.get("subQueries") == [{"id": [225159, 225160]}]:
@@ -1932,68 +1998,7 @@ class BPMISClientTests(unittest.TestCase):
                             ]
                         }
                     }
-                calls.append(search)
-                self.assertEqual(search["subQueries"][0], {"typeId": [BPMISDirectApiClient.TASK_TYPE_ID]})
-                self.assertEqual(
-                    search["subQueries"][1],
-                    {
-                        "joinType": "or",
-                        "subQueries": [
-                            {"reporter": [101, 202]},
-                            {"jiraRegionalPmPicId": [101, 202]},
-                        ],
-                    },
-                )
-                if search["page"] == 1:
-                    filler_rows = [
-                        {
-                            "id": 2000 + index,
-                            "jiraKey": f"AF-X{index}",
-                            "summary": "Filler wrong creator",
-                            "creator": {"emailAddress": "other@npt.sg"},
-                        }
-                        for index in range(198)
-                    ]
-                    return {
-                        "data": {
-                            "rows": [
-                                {
-                                    "id": 991,
-                                    "jiraKey": "AF-991",
-                                    "summary": "PRD task",
-                                    "reporter": {"emailAddress": "pm1@npt.sg"},
-                                    "status": {"label": "PRD Reviewed"},
-                                    "fixVersions": [{"name": "Planning_26Q2"}],
-                                    "jiraPrdLink": "https://docs/prd-1",
-                                    "parentIds": [225159],
-                                },
-                                {
-                                    "id": 992,
-                                    "jiraKey": "AF-992",
-                                    "summary": "Wrong creator",
-                                    "creator": {"emailAddress": "other@npt.sg"},
-                                },
-                                *filler_rows,
-                            ]
-                        }
-                    }
-                return {
-                    "data": {
-                        "rows": [
-                                {
-                                    "id": 993,
-                                    "jiraKey": "AF-993",
-                                    "summary": "Pending task",
-                                    "reporter": {"id": 999},
-                                    "jiraRegionalPmPicId": [{"id": 202}],
-                                    "status": {"label": "Testing"},
-                                    "fixVersionId": [{"fullName": "Planning_26Q3"}],
-                                    "jiraPrdLink": [{"url": "https://docs/prd-2"}],
-                                "parentIds": [{"id": 225160}],
-                            }
-                        ]
-                    }
-                }
+                self.fail(f"unexpected issue list search: {search}")
 
             client._api_request = fake_api_request  # type: ignore[method-assign]
 
@@ -2046,21 +2051,40 @@ class BPMISClientTests(unittest.TestCase):
                             "marketId": {"label": "SG"},
                         }
                     }
-                self.assertEqual(path, "/api/v1/issues/list")
-                return {
-                    "data": {
-                        "rows": [
-                            {
-                                "id": 991,
-                                "jiraKey": "SGDB-68363",
-                                "summary": "BPMIS stale task title",
-                                "reporter": {"id": 101},
-                                "status": {"label": "Waiting"},
-                                "parentIds": [225159],
-                            }
-                        ]
+                if path == "/api/v1/issues/tree":
+                    search = json.loads((params or {}).get("search") or "{}")
+                    if "jiraRegionalPmPicId" in search:
+                        return {"data": {"rows": []}}
+                    return {
+                        "data": {
+                            "rows": [
+                                {
+                                    "id": 991,
+                                    "jiraKey": "SGDB-68363",
+                                    "summary": "BPMIS stale task title",
+                                    "reporter": {"id": 101},
+                                    "status": {"label": "Waiting"},
+                                    "parentIds": [225159],
+                                }
+                            ]
+                        }
                     }
-                }
+                self.assertEqual(path, "/api/v1/issues/list")
+                search = json.loads((params or {}).get("search") or "{}")
+                if search.get("subQueries") == [{"id": [225159]}]:
+                    return {
+                        "data": {
+                            "rows": [
+                                {
+                                    "id": 225159,
+                                    "summary": "Parent Project 225159",
+                                    "typeId": "Biz Project",
+                                    "marketId": {"label": "SG"},
+                                }
+                            ]
+                        }
+                    }
+                self.fail(f"unexpected issue list search: {search}")
 
             def fake_request(**kwargs):
                 self.assertTrue(kwargs["url"].endswith("/rest/api/2/search"))
@@ -2110,8 +2134,10 @@ class BPMISClientTests(unittest.TestCase):
             client._resolve_bpmis_user_ids_by_emails = lambda emails: {"pm@npt.sg": [101]}  # type: ignore[method-assign]
 
             def fake_api_request(path, method="GET", params=None, body=None):
-                self.assertEqual(path, "/api/v1/issues/list")
+                self.assertEqual(path, "/api/v1/issues/tree")
                 search = json.loads((params or {}).get("search") or "{}")
+                if "jiraRegionalPmPicId" in search:
+                    return {"data": {"rows": []}}
                 page = int(search.get("page") or 1)
                 start = 0 if page == 1 else 200
                 count = 200 if page == 1 else 20
@@ -2181,7 +2207,10 @@ class BPMISClientTests(unittest.TestCase):
             client._resolve_bpmis_user_ids_by_emails = lambda emails: {"pm@npt.sg": [101]}  # type: ignore[method-assign]
 
             def fake_api_request(path, method="GET", params=None, body=None):
-                self.assertEqual(path, "/api/v1/issues/list")
+                self.assertEqual(path, "/api/v1/issues/tree")
+                search = json.loads((params or {}).get("search") or "{}")
+                if "jiraRegionalPmPicId" in search:
+                    return {"data": {"rows": []}}
                 return {
                     "data": {
                         "rows": [
@@ -2256,9 +2285,11 @@ class BPMISClientTests(unittest.TestCase):
 
             def fake_api_request(path, method="GET", params=None, body=None):
                 calls.append((path, params))
-                self.assertEqual(path, "/api/v1/issues/list")
+                self.assertEqual(path, "/api/v1/issues/tree")
                 search = json.loads((params or {}).get("search") or "{}")
                 self.assertEqual(search["page"], 1)
+                if "reporter" in search:
+                    return {"data": {"rows": []}}
                 return {
                     "data": {
                         "rows": [
@@ -2282,11 +2313,11 @@ class BPMISClientTests(unittest.TestCase):
                 enrich_missing_parent=False,
             )
 
-            self.assertEqual(len(calls), 1)
+            self.assertEqual(len(calls), 2)
             self.assertEqual(len(tasks), 200)
-            self.assertEqual(client.request_stats["issue_list_page_count"], 1)
+            self.assertEqual(client.request_stats["issue_tree_page_count"], 2)
             self.assertEqual(client.request_stats["issue_list_page_cap_hit"], 1)
-            self.assertEqual(client.request_stats["issue_rows_scanned"], 200)
+            self.assertEqual(client.request_stats["issue_tree_rows_scanned"], 200)
             self.assertEqual(client.request_stats["issue_detail_lookup_count"], 0)
             self.assertEqual(client.request_stats["issue_detail_enrichment_skipped_count"], 200)
 
@@ -2314,9 +2345,17 @@ class BPMISClientTests(unittest.TestCase):
             searches = []
 
             def fake_api_request(path, method="GET", params=None, body=None):
-                self.assertEqual(path, "/api/v1/issues/list")
                 search = json.loads((params or {}).get("search") or "{}")
                 searches.append(search)
+                if path == "/api/v1/versions/list":
+                    self.assertEqual(search["timelineEndAfter"], "2026-03-01")
+                    self.assertEqual(search["timelineEndBefore"], "2028-02-29")
+                    self.assertEqual(search["pageSize"], 1000)
+                    return {"data": {"rows": [{"id": 321}, {"id": 322}, {"id": 321}]}}
+                self.assertEqual(path, "/api/v1/issues/tree")
+                self.assertEqual(search.get("fixVersionId"), [321, 322])
+                if "jiraRegionalPmPicId" in search:
+                    return {"data": {"rows": []}}
                 return {
                     "data": {
                         "rows": [
@@ -2357,69 +2396,27 @@ class BPMISClientTests(unittest.TestCase):
             )
 
             self.assertEqual([task["jira_id"] for task in tasks], ["AF-991", "AF-992"])
-            self.assertEqual(len(searches[-1]["subQueries"]), 2)
+            self.assertEqual(searches[0]["timelineEndAfter"], "2026-03-01")
+            self.assertEqual(searches[-1]["fixVersionId"], [321, 322])
             self.assertEqual(tasks[0]["release_date"], "2026-03-01")
             self.assertEqual(tasks[1]["release_date"], "")
-            self.assertEqual(client.request_stats["bpmis_release_query_filter_probe_count"], 1)
-            self.assertEqual(client.request_stats["bpmis_release_query_filter_disabled_count"], 1)
+            self.assertEqual(client.request_stats["release_version_lookup_count"], 1)
+            self.assertEqual(client.request_stats["release_version_count"], 2)
             self.assertEqual(client.request_stats["issue_release_before_cutoff_count"], 1)
             self.assertEqual(client.request_stats["issue_release_missing_included_count"], 1)
 
-    def test_team_dashboard_jira_lookup_can_probe_and_apply_bpmis_release_filter(self):
+    def test_team_dashboard_jira_lookup_falls_back_when_release_version_lookup_fails(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             client = BPMISDirectApiClient(self._settings(temp_dir))
             client._resolve_bpmis_user_ids_by_emails = lambda emails: {"pm@npt.sg": [101]}  # type: ignore[method-assign]
             searches = []
 
             def fake_api_request(path, method="GET", params=None, body=None):
-                self.assertEqual(path, "/api/v1/issues/list")
                 search = json.loads((params or {}).get("search") or "{}")
                 searches.append(search)
-                release_query = search.get("subQueries", [])[-1]
-                release_text = json.dumps(release_query)
-                if "2999-12-31" in release_text:
-                    return {"data": {"rows": []}}
-                return {
-                    "data": {
-                        "rows": [
-                            {
-                                "id": 991,
-                                "jiraKey": "AF-991",
-                                "summary": "Future task",
-                                "reporter": {"id": 101},
-                                "fixVersionId": [{"timeline": {"release": "2026-05-01"}}],
-                                "status": {"label": "Testing"},
-                            }
-                        ]
-                    }
-                }
-
-            client._api_request = fake_api_request  # type: ignore[method-assign]
-            tasks = client.list_jira_tasks_created_by_emails(
-                ["pm@npt.sg"],
-                release_after="2026-04-29",
-                enrich_missing_parent=False,
-            )
-
-            self.assertEqual([task["jira_id"] for task in tasks], ["AF-991"])
-            self.assertEqual(len(searches), 3)
-            self.assertIn("2026-04-29", json.dumps(searches[-1]["subQueries"][-1]))
-            self.assertEqual(client.request_stats["bpmis_release_query_filter_probe_count"], 1)
-            self.assertEqual(client.request_stats["bpmis_release_query_filter_enabled_count"], 1)
-            self.assertEqual(client.request_stats["bpmis_release_query_filter_used_count"], 1)
-
-    def test_team_dashboard_jira_lookup_skips_bpmis_release_filter_when_probe_fails(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            client = BPMISDirectApiClient(self._settings(temp_dir))
-            client._resolve_bpmis_user_ids_by_emails = lambda emails: {"pm@npt.sg": [101]}  # type: ignore[method-assign]
-            searches = []
-
-            def fake_api_request(path, method="GET", params=None, body=None):
+                if path == "/api/v1/versions/list":
+                    raise BPMISError("version lookup failed")
                 self.assertEqual(path, "/api/v1/issues/list")
-                search = json.loads((params or {}).get("search") or "{}")
-                searches.append(search)
-                if "2999-12-31" in json.dumps(search):
-                    return {"data": {"rows": [{"id": 1}]}}
                 return {
                     "data": {
                         "rows": [
@@ -2444,10 +2441,88 @@ class BPMISClientTests(unittest.TestCase):
 
             self.assertEqual([task["jira_id"] for task in tasks], ["AF-991"])
             self.assertEqual(len(searches), 2)
-            self.assertEqual(len(searches[-1]["subQueries"]), 2)
-            self.assertEqual(client.request_stats["bpmis_release_query_filter_probe_count"], 1)
-            self.assertEqual(client.request_stats["bpmis_release_query_filter_enabled_count"], 0)
-            self.assertEqual(client.request_stats["bpmis_release_query_filter_disabled_count"], 1)
+            self.assertEqual(searches[0]["timelineEndAfter"], "2026-04-29")
+            self.assertEqual(client.request_stats["release_version_lookup_failed_count"], 1)
+            self.assertEqual(client.request_stats["issue_list_page_count"], 1)
+
+    def test_team_dashboard_jira_lookup_falls_back_when_release_version_lookup_is_empty(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            client = BPMISDirectApiClient(self._settings(temp_dir))
+            client._resolve_bpmis_user_ids_by_emails = lambda emails: {"pm@npt.sg": [101]}  # type: ignore[method-assign]
+            paths = []
+
+            def fake_api_request(path, method="GET", params=None, body=None):
+                paths.append(path)
+                if path == "/api/v1/versions/list":
+                    return {"data": {"rows": []}}
+                self.assertEqual(path, "/api/v1/issues/list")
+                return {
+                    "data": {
+                        "rows": [
+                            {
+                                "id": 991,
+                                "jiraKey": "AF-991",
+                                "summary": "Future task",
+                                "reporter": {"id": 101},
+                                "fixVersionId": [{"timeline": {"release": "2026-05-01"}}],
+                                "status": {"label": "Testing"},
+                            }
+                        ]
+                    }
+                }
+
+            client._api_request = fake_api_request  # type: ignore[method-assign]
+            tasks = client.list_jira_tasks_created_by_emails(
+                ["pm@npt.sg"],
+                release_after="2026-04-29",
+                enrich_missing_parent=False,
+            )
+
+            self.assertEqual([task["jira_id"] for task in tasks], ["AF-991"])
+            self.assertEqual(paths, ["/api/v1/versions/list", "/api/v1/issues/list"])
+            self.assertEqual(client.request_stats["release_version_count"], 0)
+            self.assertEqual(client.request_stats["issue_list_page_count"], 1)
+
+    def test_team_dashboard_jira_lookup_falls_back_when_issues_tree_fails(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            client = BPMISDirectApiClient(self._settings(temp_dir))
+            client._resolve_bpmis_user_ids_by_emails = lambda emails: {"pm@npt.sg": [101]}  # type: ignore[method-assign]
+            searches = []
+
+            def fake_api_request(path, method="GET", params=None, body=None):
+                search = json.loads((params or {}).get("search") or "{}")
+                searches.append(search)
+                if path == "/api/v1/versions/list":
+                    return {"data": {"rows": [{"id": 321}]}}
+                if path == "/api/v1/issues/tree":
+                    raise BPMISError("tree failed")
+                self.assertEqual(path, "/api/v1/issues/list")
+                return {
+                    "data": {
+                        "rows": [
+                            {
+                                "id": 991,
+                                "jiraKey": "AF-991",
+                                "summary": "Future task",
+                                "reporter": {"id": 101},
+                                "fixVersionId": [{"timeline": {"release": "2026-05-01"}}],
+                                "status": {"label": "Testing"},
+                            }
+                        ]
+                    }
+                }
+
+            client._api_request = fake_api_request  # type: ignore[method-assign]
+            tasks = client.list_jira_tasks_created_by_emails(
+                ["pm@npt.sg"],
+                release_after="2026-04-29",
+                enrich_missing_parent=False,
+            )
+
+            self.assertEqual([task["jira_id"] for task in tasks], ["AF-991"])
+            self.assertEqual(client.request_stats["release_version_count"], 1)
+            self.assertEqual(client.request_stats["issue_tree_fallback_count"], 2)
+            self.assertEqual(client.request_stats["issue_list_page_count"], 2)
 
     def test_team_dashboard_parent_project_uses_inline_parent_when_detail_missing(self):
         with tempfile.TemporaryDirectory() as temp_dir:
