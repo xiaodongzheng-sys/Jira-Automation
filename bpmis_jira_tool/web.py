@@ -3904,12 +3904,16 @@ def create_app() -> Flask:
         payload = request.get_json(silent=True) or {}
         try:
             meeting_link = str(payload.get("meeting_link") or payload.get("meetingLink") or "").strip()
+            recording_mode = str(payload.get("recording_mode") or payload.get("recordingMode") or "").strip()
+            if not recording_mode:
+                recording_mode = "screen_audio" if meeting_link else "audio_only"
             if _local_agent_meeting_recorder_enabled(settings):
                 remote_payload = dict(payload)
                 remote_payload.update(
                     {
                         "owner_email": _current_google_email(),
                         "meeting_link": meeting_link,
+                        "recording_mode": recording_mode,
                         "platform": str(payload.get("platform") or meeting_platform_from_link(meeting_link)).strip(),
                     }
                 )
@@ -3920,6 +3924,7 @@ def create_app() -> Flask:
                 title=str(payload.get("title") or "Untitled meeting").strip(),
                 platform=str(payload.get("platform") or meeting_platform_from_link(meeting_link)).strip(),
                 meeting_link=meeting_link,
+                recording_mode=recording_mode,
                 calendar_event_id=str(payload.get("calendar_event_id") or payload.get("calendarEventId") or "").strip(),
                 scheduled_start=str(payload.get("scheduled_start") or payload.get("scheduledStart") or "").strip(),
                 scheduled_end=str(payload.get("scheduled_end") or payload.get("scheduledEnd") or "").strip(),
@@ -6506,6 +6511,9 @@ def _compact_source_code_qa_session_payload(result: dict[str, Any]) -> dict[str,
         "structured_answer": {
             "direct_answer": structured.get("direct_answer") or "",
             "claims": (structured.get("claims") or [])[:8],
+            "confirmed_points": (structured.get("confirmed_points") or [])[:8],
+            "missing_points": (structured.get("missing_points") or [])[:8],
+            "evidence_cards": (structured.get("evidence_cards") or [])[:8],
             "citations": (structured.get("citations") or [])[:12],
             "missing_evidence": (structured.get("missing_evidence") or [])[:8],
             "confidence": structured.get("confidence") or "",

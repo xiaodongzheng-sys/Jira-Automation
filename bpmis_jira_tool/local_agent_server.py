@@ -423,11 +423,15 @@ def create_local_agent_app() -> Flask:
     def meeting_recorder_start():
         payload = request.get_json(silent=True) or {}
         meeting_link = str(payload.get("meeting_link") or payload.get("meetingLink") or "").strip()
+        recording_mode = str(payload.get("recording_mode") or payload.get("recordingMode") or "").strip()
+        if not recording_mode:
+            recording_mode = "screen_audio" if meeting_link else "audio_only"
         record = _get_meeting_recorder_runtime().start_recording(
             owner_email=str(payload.get("owner_email") or "").strip().lower(),
             title=str(payload.get("title") or "Untitled meeting").strip(),
             platform=str(payload.get("platform") or meeting_platform_from_link(meeting_link)).strip(),
             meeting_link=meeting_link,
+            recording_mode=recording_mode,
             calendar_event_id=str(payload.get("calendar_event_id") or payload.get("calendarEventId") or "").strip(),
             scheduled_start=str(payload.get("scheduled_start") or payload.get("scheduledStart") or "").strip(),
             scheduled_end=str(payload.get("scheduled_end") or payload.get("scheduledEnd") or "").strip(),

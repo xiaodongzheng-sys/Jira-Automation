@@ -330,6 +330,7 @@
               title: meeting.title,
               platform: meeting.platform,
               meeting_link: meeting.meeting_link,
+              recording_mode: 'screen_audio',
               calendar_event_id: meeting.calendar_event_id,
               scheduled_start: meeting.start,
               scheduled_end: meeting.end,
@@ -385,8 +386,10 @@
     const transcript = record.transcript || {};
     const minutes = record.minutes || {};
     const media = record.media || {};
+    const isAudioOnly = media.recording_mode === 'audio_only';
     const videoUrl = media.playback_video_url || media.video_url || '';
-    const videoDownloadUrl = downloadUrl(videoUrl);
+    const recordingUrl = isAudioOnly ? (media.audio_url || '') : videoUrl;
+    const recordingDownloadUrl = downloadUrl(recordingUrl);
     const usingPlaybackCopy = Boolean(media.playback_video_url);
     const visualEvidence = Array.isArray(record.visual_evidence) ? record.visual_evidence : [];
     const audioLabel = state.diagnostics?.audio_capture_label || '';
@@ -425,16 +428,16 @@
       </section>
       <section class="meeting-output">
         <div class="meeting-output-head">
-          <h3>Screen Recording</h3>
+          <h3>${isAudioOnly ? 'Audio Recording' : 'Screen Recording'}</h3>
           ${audioLabel ? `<span>${escapeHtml(audioLabel)}</span>` : ''}
         </div>
-        ${videoUrl ? `
+        ${recordingUrl ? `
           <div class="button-row meeting-video-actions">
-            <button class="button" type="button" data-record-download-video="${escapeHtml(videoDownloadUrl)}" data-download-filename="${escapeHtml(filenameFromUrl(videoUrl))}">Download video file</button>
-            <span class="inline-status" data-video-download-status>${usingPlaybackCopy ? 'Downloads the browser-compatible playback copy.' : 'Downloads the original recording for local playback.'}</span>
+            <button class="button" type="button" data-record-download-media="${escapeHtml(recordingDownloadUrl)}" data-download-filename="${escapeHtml(filenameFromUrl(recordingUrl, isAudioOnly ? 'meeting.wav' : 'meeting-recording.mp4'))}">${isAudioOnly ? 'Download audio file' : 'Download video file'}</button>
+            <span class="inline-status" data-media-download-status>${isAudioOnly ? 'Downloads the face-to-face meeting audio.' : (usingPlaybackCopy ? 'Downloads the browser-compatible playback copy.' : 'Downloads the original recording for local playback.')}</span>
           </div>
-        ` : '<p class="empty-state">Video is not available yet.</p>'}
-        ${videoUrl ? `
+        ` : `<p class="empty-state">${isAudioOnly ? 'Audio is not available yet.' : 'Video is not available yet.'}</p>`}
+        ${videoUrl && !isAudioOnly ? `
           <div class="button-row meeting-video-actions">
             <button class="button button-secondary" type="button" data-record-repair-video="${escapeHtml(record.record_id)}">
               ${usingPlaybackCopy ? 'Rebuild downloadable copy' : 'Build downloadable playback copy'}
@@ -517,25 +520,25 @@
         await loadRecords();
       });
     });
-    nodes.detail.querySelectorAll('[data-record-download-video]').forEach((button) => {
+    nodes.detail.querySelectorAll('[data-record-download-media]').forEach((button) => {
       button.addEventListener('click', async () => {
-        const status = nodes.detail.querySelector('[data-video-download-status]');
+        const status = nodes.detail.querySelector('[data-media-download-status]');
         const originalText = button.textContent;
         button.disabled = true;
         button.textContent = 'Preparing download...';
         if (status) {
-          status.textContent = 'Checking video file...';
+          status.textContent = 'Checking recording file...';
           status.classList.remove('inline-status-error');
         }
         try {
-          const response = await fetch(button.dataset.recordDownloadVideo || '', { credentials: 'same-origin' });
+          const response = await fetch(button.dataset.recordDownloadMedia || '', { credentials: 'same-origin' });
           const contentType = response.headers.get('Content-Type') || '';
           if (!response.ok) throw new Error(`Download failed with HTTP ${response.status}.`);
           if (contentType.includes('text/html')) {
-            throw new Error('Download returned an HTML page instead of a video file. Refresh the page and sign in again, then retry.');
+            throw new Error('Download returned an HTML page instead of a recording file. Refresh the page and sign in again, then retry.');
           }
           const blob = await response.blob();
-          if (!blob.size) throw new Error('Downloaded video file is empty.');
+          if (!blob.size) throw new Error('Downloaded recording file is empty.');
           const filename = filenameFromDisposition(response.headers.get('Content-Disposition'))
             || button.dataset.downloadFilename
             || 'meeting-recording.mp4';
@@ -548,13 +551,13 @@
           link.remove();
           window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
           if (status) status.textContent = `Download started: ${filename}`;
-          telemetry('video_download_started', { outcome: 'ok', reason: recordId || '' });
+          telemetry('recording_download_started', { outcome: 'ok', reason: recordId || '' });
         } catch (error) {
           if (status) {
             status.textContent = error.message || 'Could not download video.';
             status.classList.add('inline-status-error');
           }
-          telemetry('video_download_failed', { outcome: 'error', reason: recordId || '', error_message: error.message || '' });
+          telemetry('recording_download_failed', { outcome: 'error', reason: recordId || '', error_message: error.message || '' });
         } finally {
           button.disabled = false;
           button.textContent = originalText;
@@ -577,14 +580,31 @@
   });
   nodes.startForm?.addEventListener('submit', async (event) => {
     event.preventDefault();
+    const submitButton = nodes.startForm.querySelector('button[type="submit"]');
+    const originalText = submitButton?.textContent || 'Start Recording';
+    if (submitButton?.disabled) return;
     const data = new FormData(nodes.startForm);
+    const meetingLink = String(data.get('meeting_link') || '').trim();
+    if (submitButton) {
+      submitButton.disabled = true;
+      submitButton.textContent = 'Starting...';
+    }
+    if (nodes.recordingStatus) {
+      nodes.recordingStatus.textContent = 'Checking microphone/audio input...';
+    }
     try {
       await startRecording({
         title: data.get('title') || 'Untitled meeting',
-        meeting_link: data.get('meeting_link') || '',
+        meeting_link: meetingLink,
+        recording_mode: meetingLink ? 'screen_audio' : 'audio_only',
       });
     } catch (error) {
       nodes.recordingStatus.textContent = error.message;
+    } finally {
+      if (submitButton) {
+        submitButton.disabled = false;
+        submitButton.textContent = originalText;
+      }
     }
   });
 

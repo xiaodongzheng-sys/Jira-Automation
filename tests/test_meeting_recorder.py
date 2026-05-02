@@ -13,6 +13,7 @@ from bpmis_jira_tool.meeting_recorder import (
     MeetingRecorderRuntime,
     MeetingRecordStore,
     _audio_capture_status,
+    _build_ffmpeg_audio_recording_command,
     _build_ffmpeg_playback_repair_command,
     _build_ffmpeg_recording_command,
     _effective_audio_input,
@@ -114,6 +115,22 @@ class MeetingRecorderParsingTests(unittest.TestCase):
         self.assertEqual(command[command.index("-ac") + 1], "2")
         self.assertIn("-ar", command)
         self.assertEqual(command[command.index("-ar") + 1], "48000")
+
+    def test_ffmpeg_audio_recording_command_uses_audio_input_only(self):
+        command = _build_ffmpeg_audio_recording_command(
+            ffmpeg_path="/opt/homebrew/bin/ffmpeg",
+            audio_input="Meeting Recorder Aggregate",
+            audio_path=Path("/tmp/meeting.wav"),
+        )
+
+        self.assertIn("-i", command)
+        self.assertEqual(command[command.index("-i") + 1], ":Meeting Recorder Aggregate")
+        self.assertNotIn("Capture screen 0", command)
+        self.assertNotIn("-framerate", command)
+        self.assertNotIn("-c:v", command)
+        self.assertIn("-acodec", command)
+        self.assertEqual(command[command.index("-acodec") + 1], "pcm_s16le")
+        self.assertEqual(command[-1], "/tmp/meeting.wav")
 
     def test_ffmpeg_playback_repair_command_copies_video_and_rebuilds_stereo_audio(self):
         command = _build_ffmpeg_playback_repair_command(
@@ -322,6 +339,43 @@ class MeetingProcessingServiceTests(unittest.TestCase):
         self.assertNotIn("Screen Evidence", text_client.calls[0]["user_prompt"])
         self.assertNotIn("keyframe", text_client.calls[0]["user_prompt"])
         self.assertNotIn("screen evidence", text_client.calls[0]["system_prompt"].lower())
+
+    def test_process_audio_only_recording_transcribes_recorded_audio_directly(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = MeetingRecordStore(root)
+            record = store.create_record(
+                owner_email="owner@npt.sg",
+                title="Face to face",
+                platform="unknown",
+                meeting_link="",
+            )
+            audio_path = store.record_dir(record["record_id"]) / "meeting.wav"
+            audio_path.write_bytes(b"audio")
+            record["status"] = "recorded"
+            record["media"] = {
+                "recording_mode": "audio_only",
+                "audio_path": str(audio_path.relative_to(root)),
+                "audio_url": f"/meeting-recorder/assets/{record['record_id']}/meeting.wav",
+            }
+            store.save_record(record)
+            service = MeetingProcessingService(
+                store=store,
+                config=MeetingRecorderConfig(),
+                text_client=FakeTextClient(),
+            )
+
+            with patch.object(service, "_transcribe_audio", return_value={"text": "Alice approved.", "chunks": [], "segments": [], "quality": {}}) as transcribe:
+                with patch.object(service, "_extract_audio") as extract_audio:
+                    with patch.object(service, "_extract_visual_evidence") as visual:
+                        processed = service.process_recording(record_id=record["record_id"], owner_email="owner@npt.sg")
+
+        self.assertEqual(processed["status"], "completed")
+        self.assertEqual(transcribe.call_args.args[0], audio_path.resolve())
+        extract_audio.assert_not_called()
+        visual.assert_not_called()
+        self.assertEqual(processed["visual_evidence"], [])
+        self.assertEqual(processed["transcript"]["text"], "Alice approved.")
 
     def test_parse_srt_transcript_chunks(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -746,9 +800,14 @@ class MeetingRecorderRouteTests(unittest.TestCase):
         source = Path("static/meeting_recorder.js").read_text(encoding="utf-8")
 
         self.assertIn("Download video file", source)
+        self.assertIn("Download audio file", source)
         self.assertIn("download=1", source)
-        self.assertIn("data-record-download-video", source)
+        self.assertIn("data-record-download-media", source)
         self.assertIn("Download returned an HTML page", source)
+        self.assertIn("Checking microphone/audio input", source)
+        self.assertIn("Starting...", source)
+        self.assertIn("audio_only", source)
+        self.assertIn("screen_audio", source)
         self.assertIn("Build downloadable playback copy", source)
         self.assertIn("/repair-video", source)
         self.assertIn("Transcript may be incomplete", source)
@@ -810,6 +869,7 @@ class MeetingRecorderRouteTests(unittest.TestCase):
             title="Review",
             platform="zoom",
             meeting_link="https://zoom.us/j/123",
+            recording_mode="screen_audio",
             calendar_event_id="event-1",
             scheduled_start="2026-05-04T10:00:00+08:00",
             scheduled_end="2026-05-04T10:30:00+08:00",
@@ -818,6 +878,38 @@ class MeetingRecorderRouteTests(unittest.TestCase):
         fake_runtime.stop_recording.assert_called_once_with(record_id="meeting-1", owner_email="xiaodong.zheng@npt.sg")
         fake_processing.process_recording.assert_called_once_with(record_id="meeting-1", owner_email="xiaodong.zheng@npt.sg")
         fake_processing.send_minutes_email.assert_called_once()
+
+    def test_manual_empty_link_start_route_defaults_to_audio_only(self):
+        fake_runtime = Mock()
+        fake_runtime.start_recording.return_value = {
+            "record_id": "meeting-2",
+            "title": "Face to face",
+            "platform": "unknown",
+            "meeting_link": "",
+            "status": "recording",
+            "media": {"recording_mode": "audio_only"},
+        }
+        self.app.config["MEETING_RECORDER_RUNTIME"] = fake_runtime
+
+        with self.app.test_client() as client:
+            self._login(client, email="xiaodong.zheng@npt.sg")
+            response = client.post(
+                "/api/meeting-recorder/start",
+                json={"title": "Face to face", "meeting_link": "", "recording_mode": "audio_only"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        fake_runtime.start_recording.assert_called_once_with(
+            owner_email="xiaodong.zheng@npt.sg",
+            title="Face to face",
+            platform="unknown",
+            meeting_link="",
+            recording_mode="audio_only",
+            calendar_event_id="",
+            scheduled_start="",
+            scheduled_end="",
+            attendees=[],
+        )
 
 
 if __name__ == "__main__":

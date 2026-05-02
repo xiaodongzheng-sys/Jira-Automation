@@ -45,6 +45,8 @@ MEETING_TRANSCRIPT_SEGMENT_SECONDS = 60
 MEETING_PLAYBACK_PROFILE = "browser_compatible_v1"
 MEETING_PLAYBACK_AUDIO_CHANNELS = 2
 MEETING_PLAYBACK_AUDIO_SAMPLE_RATE = 48000
+MEETING_RECORDING_MODE_AUDIO_ONLY = "audio_only"
+MEETING_RECORDING_MODE_SCREEN_AUDIO = "screen_audio"
 
 
 @dataclass(frozen=True)
@@ -370,6 +372,7 @@ class MeetingRecorderRuntime:
         title: str,
         platform: str,
         meeting_link: str,
+        recording_mode: str = "",
         calendar_event_id: str = "",
         scheduled_start: str = "",
         scheduled_end: str = "",
@@ -382,6 +385,7 @@ class MeetingRecorderRuntime:
         audio_input = _effective_audio_input(self.config.audio_input, devices.get("audio_devices") or [])
         audio_status = _audio_capture_status(audio_input, devices.get("audio_devices") or [])
         preflight = self._audio_preflight(ffmpeg_path=ffmpeg_path, audio_input=audio_input)
+        effective_mode = _normalize_recording_mode(recording_mode=recording_mode, meeting_link=meeting_link)
         record = self.store.create_record(
             owner_email=owner_email,
             title=title,
@@ -394,12 +398,14 @@ class MeetingRecorderRuntime:
         )
         record_dir = self.store.record_dir(record["record_id"])
         video_path = record_dir / "meeting.mp4"
+        audio_path = record_dir / "meeting.wav"
         log_path = record_dir / "ffmpeg.log"
         record["audio_preflight"] = preflight
         record["diagnostics_snapshot"] = {
             "ffmpeg_path": ffmpeg_path,
             "video_input": self.config.video_input,
             "audio_input": audio_input,
+            "recording_mode": effective_mode,
             "audio_capture_mode": audio_status.get("audio_capture_mode"),
             "audio_capture_label": audio_status.get("audio_capture_label"),
             "system_audio_configured": audio_status.get("system_audio_configured"),
@@ -412,16 +418,23 @@ class MeetingRecorderRuntime:
             "checked_at": preflight.get("checked_at", ""),
         }
         self.store.save_record(record)
-        command = _build_ffmpeg_recording_command(
-            ffmpeg_path=ffmpeg_path,
-            video_input=self.config.video_input,
-            audio_input=audio_input,
-            video_path=video_path,
-            video_fps=self.config.video_fps,
-            video_max_width=self.config.video_max_width,
-            video_max_height=self.config.video_max_height,
-            avfoundation_pixel_format=self.config.avfoundation_pixel_format,
-        )
+        if effective_mode == MEETING_RECORDING_MODE_AUDIO_ONLY:
+            command = _build_ffmpeg_audio_recording_command(
+                ffmpeg_path=ffmpeg_path,
+                audio_input=audio_input,
+                audio_path=audio_path,
+            )
+        else:
+            command = _build_ffmpeg_recording_command(
+                ffmpeg_path=ffmpeg_path,
+                video_input=self.config.video_input,
+                audio_input=audio_input,
+                video_path=video_path,
+                video_fps=self.config.video_fps,
+                video_max_width=self.config.video_max_width,
+                video_max_height=self.config.video_max_height,
+                avfoundation_pixel_format=self.config.avfoundation_pixel_format,
+            )
         try:
             log_handle = log_path.open("w", encoding="utf-8")
             process = subprocess.Popen(  # noqa: S603
@@ -452,14 +465,31 @@ class MeetingRecorderRuntime:
             self._processes[record["record_id"]] = process
         record["status"] = "recording"
         record["recording_started_at"] = _utc_now()
-        record["media"] = {
-            "video_path": str(video_path.relative_to(self.store.root_dir)),
-            "video_url": f"/meeting-recorder/assets/{record['record_id']}/meeting.mp4",
+        media = {
+            "recording_mode": effective_mode,
             "recorder_command": _redact_command(command),
-            "playback_profile": MEETING_PLAYBACK_PROFILE,
-            "playback_audio_channels": MEETING_PLAYBACK_AUDIO_CHANNELS,
-            "playback_audio_sample_rate": MEETING_PLAYBACK_AUDIO_SAMPLE_RATE,
         }
+        if effective_mode == MEETING_RECORDING_MODE_AUDIO_ONLY:
+            media.update(
+                {
+                    "audio_path": str(audio_path.relative_to(self.store.root_dir)),
+                    "audio_url": f"/meeting-recorder/assets/{record['record_id']}/meeting.wav",
+                    "audio_format": "wav",
+                    "audio_sample_rate": 16000,
+                    "audio_channels": 1,
+                }
+            )
+        else:
+            media.update(
+                {
+                    "video_path": str(video_path.relative_to(self.store.root_dir)),
+                    "video_url": f"/meeting-recorder/assets/{record['record_id']}/meeting.mp4",
+                    "playback_profile": MEETING_PLAYBACK_PROFILE,
+                    "playback_audio_channels": MEETING_PLAYBACK_AUDIO_CHANNELS,
+                    "playback_audio_sample_rate": MEETING_PLAYBACK_AUDIO_SAMPLE_RATE,
+                }
+            )
+        record["media"] = media
         self.store.save_record(record)
         return record
 
@@ -491,6 +521,8 @@ class MeetingRecorderRuntime:
         record = self.store.get_record(record_id)
         _assert_record_owner(record, owner_email)
         media = record.get("media") if isinstance(record.get("media"), dict) else {}
+        if str(media.get("recording_mode") or "") == MEETING_RECORDING_MODE_AUDIO_ONLY:
+            raise ToolError("Audio-only recordings do not have a video playback copy.")
         relative = str(media.get("video_path") or "").strip()
         if not relative:
             raise ToolError("Recorded meeting video is missing.")
@@ -580,17 +612,21 @@ class MeetingRecorderRuntime:
         }
 
     def _recording_health(self, record: dict[str, Any]) -> dict[str, Any]:
-        relative = str((record.get("media") or {}).get("video_path") or "").strip()
+        media = record.get("media") if isinstance(record.get("media"), dict) else {}
+        is_audio_only = str(media.get("recording_mode") or "") == MEETING_RECORDING_MODE_AUDIO_ONLY
+        relative = str(media.get("audio_path" if is_audio_only else "video_path") or "").strip()
+        noun = "audio" if is_audio_only else "video"
         if not relative:
-            return {"status": "unknown", "checked_at": _utc_now(), "warning": "Recorded video path is missing."}
-        video_path = (self.store.root_dir / relative).resolve()
-        if not video_path.exists():
-            return {"status": "missing", "checked_at": _utc_now(), "warning": "Recorded video file is missing."}
+            return {"status": "unknown", "checked_at": _utc_now(), "warning": f"Recorded {noun} path is missing."}
+        media_path = (self.store.root_dir / relative).resolve()
+        if not media_path.exists():
+            return {"status": "missing", "checked_at": _utc_now(), "warning": f"Recorded {noun} file is missing."}
+        byte_key = "audio_bytes" if is_audio_only else "video_bytes"
         return {
-            "status": "ok" if video_path.stat().st_size > 0 else "warning",
+            "status": "ok" if media_path.stat().st_size > 0 else "warning",
             "checked_at": _utc_now(),
-            "video_bytes": video_path.stat().st_size,
-            "warning": "" if video_path.stat().st_size > 0 else "Recorded video file is empty.",
+            byte_key: media_path.stat().st_size,
+            "warning": "" if media_path.stat().st_size > 0 else f"Recorded {noun} file is empty.",
         }
 
 
@@ -619,11 +655,13 @@ class MeetingProcessingService:
         record["error"] = ""
         self.store.save_record(record)
         try:
-            video_path = self._video_path(record)
-            audio_path = self._extract_audio(record, video_path)
+            media = record.get("media") if isinstance(record.get("media"), dict) else {}
+            is_audio_only = str(media.get("recording_mode") or "") == MEETING_RECORDING_MODE_AUDIO_ONLY
+            video_path = None if is_audio_only else self._video_path(record)
+            audio_path = self._recorded_audio_path(record) if is_audio_only else self._extract_audio(record, video_path)
             transcript = self._transcribe_audio(audio_path)
             transcript_text = str(transcript.get("text") or "").strip()
-            snapshots = self._extract_visual_evidence(record, video_path)
+            snapshots = [] if video_path is None else self._extract_visual_evidence(record, video_path)
             minutes = self._generate_minutes(
                 record=record,
                 transcript_text=transcript_text,
@@ -670,7 +708,7 @@ class MeetingProcessingService:
             raise ToolError("Email recipient is missing.")
         portal_url = self._record_url(record_id)
         subject = f"Meeting Minutes - {record.get('title') or 'Untitled meeting'}"
-        body = f"{minutes}\n\nFull transcript and video archive: {portal_url}\n"
+        body = f"{minutes}\n\nFull transcript and recording archive: {portal_url}\n"
         result = send_gmail_message(
             credentials=credentials,
             sender=owner_email,
@@ -699,6 +737,15 @@ class MeetingProcessingService:
         if not video_path.exists():
             raise ToolError("Recorded meeting video file was not found.")
         return video_path
+
+    def _recorded_audio_path(self, record: dict[str, Any]) -> Path:
+        relative = str((record.get("media") or {}).get("audio_path") or "").strip()
+        if not relative:
+            raise ToolError("Recorded meeting audio is missing.")
+        audio_path = (self.store.root_dir / relative).resolve()
+        if not audio_path.exists():
+            raise ToolError("Recorded meeting audio file was not found.")
+        return audio_path
 
     def _extract_audio(self, record: dict[str, Any], video_path: Path) -> Path:
         ffmpeg_path = _resolve_ffmpeg_bin(self.config.ffmpeg_bin)
@@ -1205,6 +1252,27 @@ def _build_ffmpeg_recording_command(
     ]
 
 
+def _build_ffmpeg_audio_recording_command(*, ffmpeg_path: str, audio_input: str, audio_path: Path) -> list[str]:
+    return [
+        ffmpeg_path,
+        "-hide_banner",
+        "-loglevel",
+        "warning",
+        "-y",
+        "-f",
+        "avfoundation",
+        "-i",
+        f":{audio_input}",
+        "-acodec",
+        "pcm_s16le",
+        "-ar",
+        "16000",
+        "-ac",
+        "1",
+        str(audio_path),
+    ]
+
+
 def _build_ffmpeg_playback_repair_command(*, ffmpeg_path: str, source_path: Path, output_path: Path) -> list[str]:
     return [
         ffmpeg_path,
@@ -1320,6 +1388,15 @@ def _audio_capture_status(audio_input: str, audio_devices: list[str]) -> dict[st
 def _looks_like_system_audio_device(name: str) -> bool:
     lowered = str(name or "").strip().lower()
     return any(token in lowered for token in ("blackhole", "soundflower", "loopback", "aggregate", "multi-output"))
+
+
+def _normalize_recording_mode(*, recording_mode: str, meeting_link: str) -> str:
+    normalized = str(recording_mode or "").strip().lower().replace("-", "_")
+    if normalized in {"audio", "audio_only", "onsite"}:
+        return MEETING_RECORDING_MODE_AUDIO_ONLY
+    if normalized in {"screen", "screen_audio", "video", "video_audio"}:
+        return MEETING_RECORDING_MODE_SCREEN_AUDIO
+    return MEETING_RECORDING_MODE_SCREEN_AUDIO if str(meeting_link or "").strip() else MEETING_RECORDING_MODE_AUDIO_ONLY
 
 
 def _safe_record_id(record_id: str) -> str:
