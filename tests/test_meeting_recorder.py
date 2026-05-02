@@ -16,6 +16,7 @@ from bpmis_jira_tool.meeting_recorder import (
     _build_ffmpeg_audio_recording_command,
     _build_ffmpeg_playback_repair_command,
     _build_ffmpeg_recording_command,
+    _build_ffmpeg_screen_preflight_command,
     _effective_audio_input,
     _parse_avfoundation_devices,
     _parse_srt_transcript,
@@ -101,6 +102,10 @@ class MeetingRecorderParsingTests(unittest.TestCase):
 
         self.assertIn("-pixel_format", command)
         self.assertEqual(command[command.index("-pixel_format") + 1], "bgr0")
+        self.assertIn("Capture screen 0:", command)
+        self.assertIn(":default", command)
+        self.assertNotIn("Capture screen 0:default", command)
+        self.assertIn("-map", command)
         self.assertIn("-vf", command)
         self.assertEqual(
             command[command.index("-vf") + 1],
@@ -115,6 +120,19 @@ class MeetingRecorderParsingTests(unittest.TestCase):
         self.assertEqual(command[command.index("-ac") + 1], "2")
         self.assertIn("-ar", command)
         self.assertEqual(command[command.index("-ar") + 1], "48000")
+
+    def test_ffmpeg_screen_preflight_command_writes_video_file(self):
+        command = _build_ffmpeg_screen_preflight_command(
+            ffmpeg_path="/opt/homebrew/bin/ffmpeg",
+            video_input="Capture screen 0",
+            video_path=Path("/tmp/preflight.mp4"),
+            avfoundation_pixel_format="bgr0",
+        )
+
+        self.assertIn("Capture screen 0:", command)
+        self.assertIn("-frames:v", command)
+        self.assertIn("-an", command)
+        self.assertEqual(command[-1], "/tmp/preflight.mp4")
 
     def test_ffmpeg_audio_recording_command_uses_audio_input_only(self):
         command = _build_ffmpeg_audio_recording_command(
@@ -253,7 +271,7 @@ class MeetingRecordStoreTests(unittest.TestCase):
 
 
 class MeetingRecorderRuntimeTests(unittest.TestCase):
-    def test_screen_recording_falls_back_to_audio_only_when_screen_capture_fails(self):
+    def test_screen_recording_fails_start_when_screen_capture_fails(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             store = MeetingRecordStore(root)
@@ -282,6 +300,47 @@ class MeetingRecorderRuntimeTests(unittest.TestCase):
                 "bpmis_jira_tool.meeting_recorder.subprocess.Popen",
                 return_value=fake_process,
             ) as popen:
+                with self.assertRaisesRegex(Exception, "Screen recording is required"):
+                    runtime.start_recording(
+                        owner_email="owner@npt.sg",
+                        title="Zoom review",
+                        platform="zoom",
+                        meeting_link="https://zoom.us/j/123",
+                        recording_mode="screen_audio",
+                    )
+
+        popen.assert_not_called()
+        self.assertEqual(store.list_records(owner_email="owner@npt.sg"), [])
+
+    def test_screen_recording_start_keeps_video_mode_when_screen_capture_passes(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = MeetingRecordStore(root)
+            runtime = MeetingRecorderRuntime(
+                store=store,
+                config=MeetingRecorderConfig(ffmpeg_bin="/opt/homebrew/bin/ffmpeg"),
+            )
+            fake_process = Mock()
+            fake_process.poll.return_value = None
+
+            with patch("bpmis_jira_tool.meeting_recorder._resolve_ffmpeg_bin", return_value="/opt/homebrew/bin/ffmpeg"), patch(
+                "bpmis_jira_tool.meeting_recorder._avfoundation_devices",
+                return_value={
+                    "video_devices": ["Capture screen 0"],
+                    "audio_devices": ["Meeting Recorder Aggregate"],
+                },
+            ), patch.object(
+                runtime,
+                "_audio_preflight",
+                return_value={"status": "ok", "checked_at": "2026-05-02T10:00:00+00:00", "warning": ""},
+            ), patch.object(
+                runtime,
+                "_screen_capture_preflight",
+                return_value={"status": "ok", "checked_at": "2026-05-02T10:00:00+00:00", "warning": ""},
+            ), patch(
+                "bpmis_jira_tool.meeting_recorder.subprocess.Popen",
+                return_value=fake_process,
+            ) as popen:
                 record = runtime.start_recording(
                     owner_email="owner@npt.sg",
                     title="Zoom review",
@@ -290,12 +349,12 @@ class MeetingRecorderRuntimeTests(unittest.TestCase):
                     recording_mode="screen_audio",
                 )
 
-        self.assertEqual(record["media"]["recording_mode"], "audio_only")
-        self.assertIn("audio_path", record["media"])
-        self.assertNotIn("video_path", record["media"])
-        self.assertTrue(record["diagnostics_snapshot"]["screen_capture_fallback"])
-        self.assertEqual(record["recording_health"]["warning"], "screen failed")
+        self.assertEqual(record["media"]["recording_mode"], "screen_audio")
+        self.assertIn("video_path", record["media"])
+        self.assertNotIn("audio_path", record["media"])
+        self.assertEqual(record["diagnostics_snapshot"]["screen_capture_status"], "ok")
         command = popen.call_args.args[0]
+        self.assertIn("Capture screen 0:", command)
         self.assertIn(":Meeting Recorder Aggregate", command)
         self.assertNotIn("Capture screen 0:Meeting Recorder Aggregate", command)
 
@@ -517,6 +576,83 @@ class MeetingProcessingServiceTests(unittest.TestCase):
         self.assertIn("-osrt", command)
         self.assertIn("-l", command)
         self.assertIn("auto", command)
+
+    def test_transcribe_audio_retries_english_when_auto_language_is_repetitive(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            model_path = root / "ggml-medium.bin"
+            model_path.write_text("model", encoding="utf-8")
+            record_dir = root / "records" / "meeting-1"
+            record_dir.mkdir(parents=True)
+            audio_path = record_dir / "audio.wav"
+            audio_path.write_bytes(b"audio")
+            service = MeetingProcessingService(
+                store=MeetingRecordStore(root),
+                config=MeetingRecorderConfig(whisper_cpp_bin="whisper-cli", whisper_model=str(model_path)),
+                text_client=FakeTextClient(),
+            )
+
+            def fake_run(command, *_args, **_kwargs):
+                output_base = Path(command[command.index("-of") + 1])
+                if output_base.name.endswith("-en"):
+                    output_base.with_suffix(".txt").write_text("Project launch was approved.", encoding="utf-8")
+                    output_base.with_suffix(".srt").write_text(
+                        "1\n00:00:00,000 --> 00:00:04,000\nProject launch was approved.\n",
+                        encoding="utf-8",
+                    )
+                    return Mock(stdout="whisper_full_with_state: auto-detected language: en (p = 0.90)", stderr="")
+                output_base.with_suffix(".txt").write_text("There are a lot of them.\n" * 8, encoding="utf-8")
+                output_base.with_suffix(".srt").write_text(
+                    "".join(
+                        f"{index}\n00:00:{index:02d},000 --> 00:00:{index + 1:02d},000\nThere are a lot of them.\n\n"
+                        for index in range(1, 9)
+                    ),
+                    encoding="utf-8",
+                )
+                return Mock(stdout="whisper_full_with_state: auto-detected language: nn (p = 0.50)", stderr="")
+
+            with patch("bpmis_jira_tool.meeting_recorder.shutil.which", return_value="/usr/local/bin/whisper-cli"), patch(
+                "bpmis_jira_tool.meeting_recorder._audio_duration_seconds",
+                return_value=42,
+            ), patch("bpmis_jira_tool.meeting_recorder._audio_volume_metrics", return_value={"low_audio": False}), patch(
+                "bpmis_jira_tool.meeting_recorder._run_command",
+                side_effect=fake_run,
+            ) as run_command:
+                transcript = service._transcribe_audio(audio_path)
+
+        whisper_calls = [call.args[0] for call in run_command.call_args_list if "-of" in call.args[0]]
+        self.assertEqual(len(whisper_calls), 2)
+        self.assertEqual(transcript["text"], "Project launch was approved.")
+        self.assertEqual(transcript["quality"]["retry_language"], "en")
+        self.assertEqual(transcript["quality"]["original_language"], "nn")
+
+    def test_transcript_quality_flags_repetitive_unexpected_language(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            record_dir = root / "records" / "meeting-1"
+            record_dir.mkdir(parents=True)
+            audio_path = record_dir / "audio.wav"
+            audio_path.write_bytes(b"audio")
+            service = MeetingProcessingService(
+                store=MeetingRecordStore(root),
+                config=MeetingRecorderConfig(),
+                text_client=FakeTextClient(),
+            )
+            chunks = [
+                {"start_seconds": float(index), "end_seconds": float(index + 1), "text": "There are a lot of them."}
+                for index in range(8)
+            ]
+
+            with patch("bpmis_jira_tool.meeting_recorder._audio_duration_seconds", return_value=42), patch(
+                "bpmis_jira_tool.meeting_recorder._audio_volume_metrics",
+                return_value={"low_audio": False},
+            ):
+                _segments, quality = service._transcript_quality(audio_path=audio_path, chunks=chunks, detected_language="nn")
+
+        self.assertTrue(quality["possible_incomplete"])
+        self.assertEqual(quality["repetitive_chunk_count"], 8)
+        self.assertIn("unexpected language", " ".join(quality["warnings"]))
+        self.assertIn("repeated chunks", " ".join(quality["warnings"]))
 
     def test_transcribe_audio_splits_long_mixed_language_recordings(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -894,10 +1030,12 @@ class MeetingRecorderRouteTests(unittest.TestCase):
         self.assertIn("Starting...", source)
         self.assertIn("audio_only", source)
         self.assertIn("screen_audio", source)
+        self.assertIn("recording_mode: meetingLink ? 'screen_audio' : 'audio_only'", source)
         self.assertIn("Build downloadable playback copy", source)
         self.assertIn("/repair-video", source)
         self.assertIn("Transcript may be incomplete", source)
         self.assertIn("low_audio", source)
+        self.assertIn("repeated chunk", source)
 
     def test_start_stop_process_and_email_routes_delegate_to_services(self):
         fake_runtime = Mock()

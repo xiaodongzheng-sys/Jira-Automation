@@ -47,6 +47,28 @@ MEETING_PLAYBACK_AUDIO_CHANNELS = 2
 MEETING_PLAYBACK_AUDIO_SAMPLE_RATE = 48000
 MEETING_RECORDING_MODE_AUDIO_ONLY = "audio_only"
 MEETING_RECORDING_MODE_SCREEN_AUDIO = "screen_audio"
+MEETING_TRANSCRIPT_REPETITIVE_DOMINANT_RATIO = 0.6
+MEETING_TRANSCRIPT_REPETITIVE_UNIQUE_RATIO = 0.35
+MEETING_TRANSCRIPT_EXPECTED_LANGUAGES = {
+    "auto",
+    "en",
+    "zh",
+    "cn",
+    "yue",
+    "ja",
+    "ko",
+    "ms",
+    "id",
+    "ta",
+    "hi",
+    "th",
+    "vi",
+    "fil",
+    "tl",
+    "es",
+    "fr",
+    "de",
+}
 
 
 @dataclass(frozen=True)
@@ -385,7 +407,18 @@ class MeetingRecorderRuntime:
         audio_input = _effective_audio_input(self.config.audio_input, devices.get("audio_devices") or [])
         audio_status = _audio_capture_status(audio_input, devices.get("audio_devices") or [])
         preflight = self._audio_preflight(ffmpeg_path=ffmpeg_path, audio_input=audio_input)
+        requested_mode = str(recording_mode or "").strip().lower().replace("-", "_")
         effective_mode = _normalize_recording_mode(recording_mode=recording_mode, meeting_link=meeting_link)
+        screen_preflight: dict[str, Any] | None = None
+        if effective_mode == MEETING_RECORDING_MODE_SCREEN_AUDIO:
+            screen_preflight = self._screen_capture_preflight(ffmpeg_path=ffmpeg_path)
+            if screen_preflight.get("status") != "ok":
+                warning = screen_preflight.get("warning") or "Screen capture is unavailable."
+                raise ToolError(
+                    "Screen recording is required for Zoom/Google Meet links but is not available. "
+                    f"{warning} Grant macOS Screen Recording permission to the process running the local agent, "
+                    "verify MEETING_RECORDER_VIDEO_INPUT, then restart the local agent."
+                )
         record = self.store.create_record(
             owner_email=owner_email,
             title=title,
@@ -405,30 +438,23 @@ class MeetingRecorderRuntime:
             "ffmpeg_path": ffmpeg_path,
             "video_input": self.config.video_input,
             "audio_input": audio_input,
+            "requested_recording_mode": requested_mode or ("screen_audio" if meeting_link else "audio_only"),
             "recording_mode": effective_mode,
+            "effective_recording_mode": effective_mode,
             "audio_capture_mode": audio_status.get("audio_capture_mode"),
             "audio_capture_label": audio_status.get("audio_capture_label"),
             "system_audio_configured": audio_status.get("system_audio_configured"),
             "audio_signal_verified": preflight.get("status") == "ok",
             "audio_devices": devices.get("audio_devices") or [],
         }
+        if screen_preflight is not None:
+            record["diagnostics_snapshot"]["screen_capture_status"] = screen_preflight.get("status") or "unknown"
+            record["diagnostics_snapshot"]["screen_capture_warning"] = screen_preflight.get("warning", "")
         record["recording_health"] = {
             "status": "warning" if preflight.get("status") == "too_quiet" else preflight.get("status", "unknown"),
             "warning": preflight.get("warning", ""),
             "checked_at": preflight.get("checked_at", ""),
         }
-        if effective_mode == MEETING_RECORDING_MODE_SCREEN_AUDIO:
-            screen_preflight = self._screen_capture_preflight(ffmpeg_path=ffmpeg_path)
-            if screen_preflight.get("status") != "ok":
-                effective_mode = MEETING_RECORDING_MODE_AUDIO_ONLY
-                record["recording_health"] = {
-                    **record["recording_health"],
-                    "status": "warning",
-                    "warning": screen_preflight.get("warning") or "Screen capture is unavailable; recording audio only.",
-                    "screen_capture_status": screen_preflight.get("status") or "unknown",
-                }
-                record["diagnostics_snapshot"]["screen_capture_fallback"] = True
-                record["diagnostics_snapshot"]["screen_capture_warning"] = record["recording_health"]["warning"]
         self.store.save_record(record)
         if effective_mode == MEETING_RECORDING_MODE_AUDIO_ONLY:
             command = _build_ffmpeg_audio_recording_command(
@@ -626,35 +652,21 @@ class MeetingRecorderRuntime:
     def _screen_capture_preflight(self, *, ffmpeg_path: str) -> dict[str, Any]:
         checked_at = _utc_now()
         with _temporary_path("meeting-screen-preflight", ".mp4") as video_path:
-            command = [
-                ffmpeg_path,
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-y",
-                "-f",
-                "avfoundation",
-                "-framerate",
-                "5",
-                "-pixel_format",
-                _safe_avfoundation_pixel_format(self.config.avfoundation_pixel_format),
-                "-i",
-                self.config.video_input,
-                "-t",
-                "2",
-                "-frames:v",
-                "1",
-                "-f",
-                "null",
-                "-",
-            ]
+            command = _build_ffmpeg_screen_preflight_command(
+                ffmpeg_path=ffmpeg_path,
+                video_input=self.config.video_input,
+                video_path=video_path,
+                avfoundation_pixel_format=self.config.avfoundation_pixel_format,
+            )
             try:
                 _run_command(command, "Could not verify meeting screen capture.", timeout_seconds=8)
+                if not video_path.exists() or video_path.stat().st_size <= 0:
+                    raise ToolError("Screen preflight produced no video bytes.")
             except Exception as error:  # noqa: BLE001
                 return {
                     "status": "unavailable",
                     "checked_at": checked_at,
-                    "warning": f"Screen capture is unavailable; recording audio only. {error}",
+                    "warning": f"Screen capture is unavailable. {error}",
                 }
         return {"status": "ok", "checked_at": checked_at, "warning": ""}
 
@@ -875,6 +887,40 @@ class MeetingProcessingService:
             chunks=transcript["chunks"],
             detected_language=transcript["language"],
         )
+        configured_language = str(self.config.whisper_language or "auto").strip().lower()
+        if configured_language in {"", "auto"} and _should_retry_transcript_in_english(quality):
+            english_base = self.store.record_dir(audio_path.parent.name) / "whisper-transcript-en"
+            english_transcript = self._transcribe_audio_once(
+                audio_path=audio_path,
+                output_base=english_base,
+                whisper_bin=whisper_bin,
+                model_path=model_path,
+                language="en",
+                offset_seconds=0,
+            )
+            english_segments, english_quality = self._transcript_quality(
+                audio_path=audio_path,
+                chunks=english_transcript["chunks"],
+                detected_language=english_transcript["language"],
+            )
+            english_quality["retry_language"] = "en"
+            english_quality["original_language"] = quality.get("language") or transcript["language"]
+            if _transcript_quality_score(english_quality) > _transcript_quality_score(quality):
+                english_quality["warnings"] = [
+                    *english_quality.get("warnings", []),
+                    "Auto language transcription looked unreliable, so the accepted transcript was retried with English.",
+                ]
+                return {
+                    "text": english_transcript["text"],
+                    "chunks": english_transcript["chunks"],
+                    "segments": english_segments,
+                    "quality": english_quality,
+                }
+            quality["retry_language"] = "en"
+            quality["warnings"] = [
+                *quality.get("warnings", []),
+                "Auto language transcription looked unreliable; English retry did not improve transcript quality.",
+            ]
         return {"text": transcript["text"], "chunks": transcript["chunks"], "segments": segments, "quality": quality}
 
     def _transcribe_audio_once(
@@ -994,7 +1040,7 @@ class MeetingProcessingService:
         text = "\n".join(part for part in text_parts if part).strip()
         if not text:
             raise ToolError("whisper.cpp transcription produced no text.")
-        quality = self._quality_from_segments(segment_metadata)
+        quality = self._quality_from_segments(segment_metadata, chunks=all_chunks)
         return {"text": text, "chunks": all_chunks, "segments": segment_metadata, "quality": quality}
 
     def _extract_visual_evidence(self, record: dict[str, Any], video_path: Path) -> list[dict[str, Any]]:
@@ -1068,25 +1114,42 @@ class MeetingProcessingService:
                     "chunk_count": len(segment_chunks),
                 }
             )
-        quality = self._quality_from_segments(segments, default_language=detected_language or "auto")
+        quality = self._quality_from_segments(segments, default_language=detected_language or "auto", chunks=chunks)
         return segments, quality
 
-    def _quality_from_segments(self, segments: list[dict[str, Any]], *, default_language: str = "auto") -> dict[str, Any]:
+    def _quality_from_segments(
+        self,
+        segments: list[dict[str, Any]],
+        *,
+        default_language: str = "auto",
+        chunks: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         low_audio_count = sum(1 for segment in segments if segment.get("quality") == "low_audio")
         no_audio_count = sum(1 for segment in segments if segment.get("possible_missed_speech") and segment.get("chunk_count"))
         languages = sorted({str(segment.get("language") or "").strip() for segment in segments if segment.get("language")})
+        language = ",".join(languages) or default_language
+        language_codes = {code.strip().lower() for code in language.split(",") if code.strip()}
+        unusual_language = bool(language_codes) and not language_codes.issubset(MEETING_TRANSCRIPT_EXPECTED_LANGUAGES)
+        repetition = _transcript_repetition_metrics(chunks or [])
         warnings = []
         if low_audio_count:
             warnings.append("Some transcript segments have low audio and may miss Zoom/system audio or microphone speech.")
         if no_audio_count:
             warnings.append("One or more transcript segments may contain [no audio] or missed speech.")
+        if unusual_language:
+            warnings.append(f"Whisper detected unexpected language '{language}', so transcript may be unreliable.")
+        if repetition.get("is_repetitive"):
+            warnings.append("Transcript contains repeated chunks and may be a Whisper hallucination or captured looped/unclear audio.")
         return {
-            "language": ",".join(languages) or default_language,
+            "language": language,
             "segment_seconds": MEETING_TRANSCRIPT_SEGMENT_SECONDS,
             "segment_count": len(segments),
             "low_audio_segment_count": low_audio_count,
             "no_audio_segment_count": no_audio_count,
-            "possible_incomplete": bool(low_audio_count or no_audio_count),
+            "repetitive_chunk_count": repetition.get("repetitive_chunk_count", 0),
+            "unique_text_ratio": repetition.get("unique_text_ratio"),
+            "dominant_chunk_ratio": repetition.get("dominant_chunk_ratio"),
+            "possible_incomplete": bool(low_audio_count or no_audio_count or unusual_language or repetition.get("is_repetitive")),
             "warnings": warnings,
         }
 
@@ -1187,6 +1250,64 @@ def _audio_duration_seconds(audio_path: Path) -> float:
 def _parse_whisper_language(output: str, fallback: str = "auto") -> str:
     match = re.search(r"auto-detected language:\s*([a-zA-Z_-]+)", str(output or ""))
     return (match.group(1).lower() if match else fallback) or "auto"
+
+
+def _normalize_transcript_text(value: str) -> str:
+    lowered = str(value or "").strip().lower()
+    return re.sub(r"\s+", " ", re.sub(r"[^\w\s\u4e00-\u9fff]", " ", lowered)).strip()
+
+
+def _transcript_repetition_metrics(chunks: list[dict[str, Any]]) -> dict[str, Any]:
+    texts = [_normalize_transcript_text(str(chunk.get("text") or "")) for chunk in chunks]
+    texts = [text for text in texts if text]
+    total = len(texts)
+    if total < 5:
+        return {
+            "is_repetitive": False,
+            "repetitive_chunk_count": 0,
+            "unique_text_ratio": None,
+            "dominant_chunk_ratio": None,
+        }
+    counts: dict[str, int] = {}
+    adjacent_repeats = 0
+    previous = ""
+    for text in texts:
+        counts[text] = counts.get(text, 0) + 1
+        if previous and previous == text:
+            adjacent_repeats += 1
+        previous = text
+    dominant_count = max(counts.values(), default=0)
+    unique_ratio = len(counts) / total
+    dominant_ratio = dominant_count / total
+    is_repetitive = (
+        dominant_ratio >= MEETING_TRANSCRIPT_REPETITIVE_DOMINANT_RATIO
+        or (unique_ratio <= MEETING_TRANSCRIPT_REPETITIVE_UNIQUE_RATIO and adjacent_repeats >= 3)
+    )
+    return {
+        "is_repetitive": is_repetitive,
+        "repetitive_chunk_count": dominant_count if is_repetitive else 0,
+        "unique_text_ratio": round(unique_ratio, 3),
+        "dominant_chunk_ratio": round(dominant_ratio, 3),
+    }
+
+
+def _should_retry_transcript_in_english(quality: dict[str, Any]) -> bool:
+    language = str(quality.get("language") or "auto").strip().lower()
+    language_codes = {code.strip() for code in language.split(",") if code.strip()}
+    unusual_language = bool(language_codes) and not language_codes.issubset(MEETING_TRANSCRIPT_EXPECTED_LANGUAGES)
+    return bool(unusual_language or quality.get("repetitive_chunk_count"))
+
+
+def _transcript_quality_score(quality: dict[str, Any]) -> int:
+    score = 100
+    score -= 40 if quality.get("repetitive_chunk_count") else 0
+    language = str(quality.get("language") or "auto").strip().lower()
+    language_codes = {code.strip() for code in language.split(",") if code.strip()}
+    if language_codes and not language_codes.issubset(MEETING_TRANSCRIPT_EXPECTED_LANGUAGES):
+        score -= 30
+    score -= 10 * int(quality.get("low_audio_segment_count") or 0)
+    score -= 10 * int(quality.get("no_audio_segment_count") or 0)
+    return score
 
 
 def _parse_srt_transcript(path: Path) -> list[dict[str, Any]]:
@@ -1292,7 +1413,17 @@ def _build_ffmpeg_recording_command(
         "-pixel_format",
         pixel_format,
         "-i",
-        f"{video_input}:{audio_input}",
+        f"{video_input}:",
+        "-thread_queue_size",
+        "512",
+        "-f",
+        "avfoundation",
+        "-i",
+        f":{audio_input}",
+        "-map",
+        "0:v:0",
+        "-map",
+        "1:a:0",
         "-vf",
         scale_filter,
         "-c:v",
@@ -1317,6 +1448,40 @@ def _build_ffmpeg_recording_command(
         "128k",
         "-movflags",
         "+faststart",
+        str(video_path),
+    ]
+
+
+def _build_ffmpeg_screen_preflight_command(
+    *,
+    ffmpeg_path: str,
+    video_input: str,
+    video_path: Path,
+    avfoundation_pixel_format: str,
+) -> list[str]:
+    return [
+        ffmpeg_path,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-f",
+        "avfoundation",
+        "-framerate",
+        "5",
+        "-pixel_format",
+        _safe_avfoundation_pixel_format(avfoundation_pixel_format),
+        "-i",
+        f"{video_input}:",
+        "-t",
+        "1",
+        "-frames:v",
+        "1",
+        "-an",
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
         str(video_path),
     ]
 

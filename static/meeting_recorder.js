@@ -176,6 +176,7 @@
           quality.language ? `language=${quality.language}` : '',
           quality.low_audio_segment_count ? `${quality.low_audio_segment_count} low-audio segment(s)` : '',
           quality.no_audio_segment_count ? `${quality.no_audio_segment_count} no-audio segment(s)` : '',
+          quality.repetitive_chunk_count ? `${quality.repetitive_chunk_count} repeated chunk(s)` : '',
         ].filter(Boolean).join(' · ') || 'No quality warnings')}</span>
         ${warnings.length || segmentTags.length ? `<ul>${[...warnings, ...segmentTags].map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</ul>` : ''}
       </div>
@@ -603,7 +604,7 @@
       await startRecording({
         title: data.get('title') || 'Untitled meeting',
         meeting_link: meetingLink,
-        recording_mode: 'audio_only',
+        recording_mode: meetingLink ? 'screen_audio' : 'audio_only',
       });
     } catch (error) {
       nodes.recordingStatus.textContent = error.message;
