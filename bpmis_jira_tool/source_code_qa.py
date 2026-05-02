@@ -7,6 +7,7 @@ from datetime import date, datetime, timedelta, timezone
 import functools
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 import queue
@@ -28,6 +29,8 @@ from google.oauth2 import service_account
 from bpmis_jira_tool.errors import ToolError
 
 
+LOGGER = logging.getLogger(__name__)
+
 ALL_COUNTRY = "All"
 CRMS_COUNTRIES = ("SG", "ID", "PH")
 ANSWER_MODE_AUTO = "auto"
@@ -42,6 +45,32 @@ LLM_PROVIDER_OPENAI_COMPATIBLE = "openai_compatible"
 LLM_PROVIDER_CODEX_CLI_BRIDGE = "codex_cli_bridge"
 LLM_PROVIDER_VERTEX_AI = "vertex_ai"
 LLM_PROVIDER_ALLOWED_QUERY_CHOICES = {LLM_PROVIDER_GEMINI, LLM_PROVIDER_CODEX_CLI_BRIDGE, LLM_PROVIDER_VERTEX_AI}
+
+
+def _log_source_code_qa_timing(component: str, *, elapsed_ms: int, **fields: Any) -> None:
+    payload = {
+        "event": "source_code_qa_timing",
+        "component": component,
+        "elapsed_ms": max(0, int(elapsed_ms)),
+    }
+    for key, value in fields.items():
+        if value is None:
+            continue
+        if isinstance(value, (str, int, float, bool)):
+            payload[key] = value
+        elif isinstance(value, (list, tuple, set)):
+            payload[key] = list(value)[:20]
+        elif isinstance(value, dict):
+            payload[key] = {
+                str(item_key): item_value
+                for item_key, item_value in value.items()
+                if isinstance(item_value, (str, int, float, bool))
+            }
+        else:
+            payload[key] = str(value)
+    LOGGER.warning("source_code_qa_timing %s", json.dumps(payload, ensure_ascii=False, sort_keys=True))
+
+
 LLM_PROMPT_VERSION = 11
 LLM_RESPONSE_SCHEMA_VERSION = 5
 LLM_ROUTER_VERSION = 7
@@ -4211,6 +4240,7 @@ class SourceCodeQAService:
                 matches=top_matches,
                 llm_budget_mode=llm_budget_mode,
                 query_mode=query_mode,
+                trace_id=trace_id,
                 followup_context=followup_context,
                 requested_answer_mode=normalized_answer_mode,
                 request_cache=request_cache,
@@ -14323,6 +14353,7 @@ class SourceCodeQAService:
         matches: list[dict[str, Any]],
         llm_budget_mode: str,
         query_mode: str = QUERY_MODE_DEEP,
+        trace_id: str = "",
         followup_context: dict[str, Any] | None = None,
         requested_answer_mode: str = ANSWER_MODE_GEMINI,
         request_cache: dict[str, Any] | None = None,
@@ -14367,6 +14398,7 @@ class SourceCodeQAService:
                 evidence_pack=evidence_pack,
                 llm_budget_mode=llm_budget_mode,
                 query_mode=query_mode,
+                trace_id=trace_id,
                 routed_budget_mode=routed_budget_mode,
                 budget=budget,
                 llm_route=llm_route,
@@ -15005,12 +15037,32 @@ class SourceCodeQAService:
         followup_context: dict[str, Any] | None,
         requested_answer_mode: str,
         query_mode: str = QUERY_MODE_DEEP,
+        trace_id: str = "",
         request_cache: dict[str, Any] | None = None,
         progress_callback: Any | None = None,
         attachments: list[dict[str, Any]] | None = None,
         runtime_evidence: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         query_mode = self.normalize_query_mode(query_mode)
+        timing: dict[str, int] = {}
+
+        def timed_call(component: str, callback: Any, **fields: Any) -> Any:
+            started = time.perf_counter()
+            try:
+                return callback()
+            finally:
+                elapsed_ms = int((time.perf_counter() - started) * 1000)
+                timing[component] = timing.get(component, 0) + elapsed_ms
+                _log_source_code_qa_timing(
+                    component,
+                    elapsed_ms=elapsed_ms,
+                    trace_id=trace_id,
+                    provider=self.llm_provider.name,
+                    model=selected_model,
+                    query_mode=query_mode,
+                    **fields,
+                )
+
         candidate_limit = self.codex_top_path_limit
         candidate_matches = self._select_llm_matches(
             matches,
@@ -15062,9 +15114,17 @@ class SourceCodeQAService:
         if cached is not None:
             cached_answer = str(cached["answer"])
             cached_structured = self._parse_structured_answer(cached_answer)
-            cached_validation = self._validate_codex_citations(cached_answer, candidate_paths, candidate_paths)
+            cached_validation = timed_call(
+                "citation_validation",
+                lambda: self._validate_codex_citations(cached_answer, candidate_paths, candidate_paths),
+                phase="cache_refresh_check",
+            )
             cached_claim_check = self._merge_codex_validation(self._trusted_provider_check(), cached_validation)
-            cached_judge = self._run_answer_judge(question, cached_answer, evidence_pack, cached_claim_check)
+            cached_judge = timed_call(
+                "answer_judge",
+                lambda: self._run_answer_judge(question, cached_answer, evidence_pack, cached_claim_check),
+                phase="cache_refresh_check",
+            )
             cached_needs_refresh = self.codex_repair_enabled and self._codex_deep_investigation_needed(
                 question=question,
                 answer=cached_answer,
@@ -15085,9 +15145,17 @@ class SourceCodeQAService:
         if cached is not None:
             cached_answer = str(cached["answer"])
             cached_structured = self._parse_structured_answer(cached_answer)
-            cached_validation = self._validate_codex_citations(cached_answer, candidate_paths, candidate_paths)
+            cached_validation = timed_call(
+                "citation_validation",
+                lambda: self._validate_codex_citations(cached_answer, candidate_paths, candidate_paths),
+                phase="cache_hit",
+            )
             cached_claim_check = self._merge_codex_validation(self._trusted_provider_check(), cached_validation)
-            cached_judge = self._run_answer_judge(question, cached_answer, evidence_pack, cached_claim_check)
+            cached_judge = timed_call(
+                "answer_judge",
+                lambda: self._run_answer_judge(question, cached_answer, evidence_pack, cached_claim_check),
+                phase="cache_hit",
+            )
             cached_final = self._finalize_trusted_model_answer(
                 question=question,
                 answer=cached_answer,
@@ -15161,9 +15229,17 @@ class SourceCodeQAService:
         llm_attempt_log = [dict(item) for item in result.attempt_log]
         finish_reason = self._llm_finish_reason(result.payload)
         codex_cli_trace = result.payload.get("codex_cli_trace") if isinstance(result.payload.get("codex_cli_trace"), dict) else {}
-        codex_validation = self._validate_codex_citations(answer, candidate_paths, candidate_paths)
+        codex_validation = timed_call(
+            "citation_validation",
+            lambda: self._validate_codex_citations(answer, candidate_paths, candidate_paths),
+            phase="initial",
+        )
         claim_check = self._merge_codex_validation(self._trusted_provider_check(), codex_validation)
-        answer_judge = self._run_answer_judge(question, answer, evidence_pack, claim_check)
+        answer_judge = timed_call(
+            "answer_judge",
+            lambda: self._run_answer_judge(question, answer, evidence_pack, claim_check),
+            phase="initial",
+        )
         repair_attempted = False
         deep_investigation_rounds = 0
         deep_investigation_terms: list[str] = []
@@ -15263,9 +15339,17 @@ class SourceCodeQAService:
             )
             repair_answer = self.llm_provider.extract_text(repair_result.payload)
             repair_structured = self._parse_structured_answer(repair_answer)
-            repair_validation = self._validate_codex_citations(repair_answer, candidate_paths, candidate_paths)
+            repair_validation = timed_call(
+                "citation_validation",
+                lambda: self._validate_codex_citations(repair_answer, candidate_paths, candidate_paths),
+                phase="repair",
+            )
             repair_claim_check = self._merge_codex_validation(self._trusted_provider_check(), repair_validation)
-            repair_judge = self._run_answer_judge(question, repair_answer, evidence_pack, repair_claim_check)
+            repair_judge = timed_call(
+                "answer_judge",
+                lambda: self._run_answer_judge(question, repair_answer, evidence_pack, repair_claim_check),
+                phase="repair",
+            )
             answer = repair_answer
             structured_answer = repair_structured
             codex_validation = repair_validation
@@ -15314,6 +15398,7 @@ class SourceCodeQAService:
                 finish_reason=finish_reason,
                 query_mode=query_mode,
                 llm_budget_mode=routed_budget_mode,
+                trace_id=trace_id,
             )
         codex_cli_summary = {
             "prompt_mode": llm_route.get("prompt_mode"),
@@ -15357,6 +15442,7 @@ class SourceCodeQAService:
             "codex_cli_summary": codex_cli_summary,
             "codex_cli_trace": codex_cli_trace,
             "cache_metadata": self._answer_cache_metadata(cache_key),
+            "llm_timing": timing,
         }
 
     @staticmethod
@@ -17904,7 +17990,9 @@ class SourceCodeQAService:
         finish_reason: str | None = None,
         query_mode: str = "",
         llm_budget_mode: str = "",
+        trace_id: str = "",
     ) -> None:
+        started = time.perf_counter()
         self.answer_cache_root.mkdir(parents=True, exist_ok=True)
         payload = {
             "versions": self._llm_versions(),
@@ -17921,6 +18009,16 @@ class SourceCodeQAService:
             "expire_at": datetime.now(timezone.utc).timestamp() + self.llm_cache_ttl_seconds,
         }
         self._atomic_write_json(self.answer_cache_root / f"{key}.json", payload)
+        _log_source_code_qa_timing(
+            "cache_write",
+            elapsed_ms=int((time.perf_counter() - started) * 1000),
+            trace_id=trace_id,
+            cache_key=key,
+            provider=provider,
+            model=model,
+            query_mode=query_mode,
+            llm_budget_mode=llm_budget_mode,
+        )
 
     @staticmethod
     def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:

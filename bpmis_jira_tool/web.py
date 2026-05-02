@@ -7255,6 +7255,7 @@ def _run_source_code_qa_query_job(app: Flask, job_id: str, payload: dict[str, An
             result["attachments"] = _source_code_qa_public_attachments(attachments)
             result["runtime_evidence"] = _source_code_qa_public_runtime_evidence(runtime_evidence)
             if session_id:
+                session_write_started = time.perf_counter()
                 session_payload = session_store.append_exchange(
                     session_id,
                     owner_email=owner_email,
@@ -7265,6 +7266,24 @@ def _run_source_code_qa_query_job(app: Flask, job_id: str, payload: dict[str, An
                     result=result,
                     context=_build_source_code_qa_session_context(result, payload),
                     attachments=attachments,
+                )
+                current_app.logger.warning(
+                    "source_code_qa_timing %s",
+                    json.dumps(
+                        {
+                            "event": "source_code_qa_timing",
+                            "component": "session_write",
+                            "elapsed_ms": int((time.perf_counter() - session_write_started) * 1000),
+                            "job_id": job_id,
+                            "trace_id": str(result.get("trace_id") or ""),
+                            "session_id": session_id,
+                            "owner_email": owner_email,
+                            "message_count": len(session_payload.get("messages") or []) if isinstance(session_payload, dict) else 0,
+                            "status": "ok" if session_payload is not None else "missing_session",
+                        },
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ),
                 )
                 if session_payload is not None:
                     result["session"] = session_payload
