@@ -54,6 +54,16 @@ class Settings:
     bpmis_api_access_token: str | None
     prd_briefing_owner_email: str = "xiaodong.zheng@npt.sg"
     gmail_seatalk_demo_owner_email: str = "xiaodong.zheng@npt.sg"
+    meeting_recorder_owner_email: str = "xiaodong.zheng@npt.sg"
+    meeting_recorder_ffmpeg_bin: str = "ffmpeg"
+    meeting_recorder_video_input: str = "Capture screen 0"
+    meeting_recorder_audio_input: str = "default"
+    meeting_recorder_frame_interval_seconds: int = 60
+    meeting_recorder_vision_model: str = "gpt-4.1-mini"
+    meeting_recorder_transcribe_provider: str = "whisper_cpp"
+    meeting_recorder_whisper_cpp_bin: str = "whisper-cli"
+    meeting_recorder_whisper_model: str = "~/.cache/whisper.cpp/ggml-medium.bin"
+    meeting_recorder_whisper_language: str = "auto"
     source_code_qa_owner_email: str = "xiaodong.zheng@npt.sg"
     source_code_qa_admin_emails: tuple[str, ...] = ()
     source_code_qa_git_timeout_seconds: int = 90
@@ -175,6 +185,16 @@ class Settings:
             team_portal_data_dir=Path(_env_str("TEAM_PORTAL_DATA_DIR", ".")),
             prd_briefing_owner_email=_env_str("PRD_BRIEFING_OWNER_EMAIL", "xiaodong.zheng@npt.sg"),
             gmail_seatalk_demo_owner_email=_env_str("GMAIL_SEATALK_DEMO_OWNER_EMAIL", "xiaodong.zheng@npt.sg"),
+            meeting_recorder_owner_email=_env_str("MEETING_RECORDER_OWNER_EMAIL", "xiaodong.zheng@npt.sg"),
+            meeting_recorder_ffmpeg_bin=_env_str("MEETING_RECORDER_FFMPEG_BIN", "ffmpeg"),
+            meeting_recorder_video_input=_env_str("MEETING_RECORDER_VIDEO_INPUT", "Capture screen 0"),
+            meeting_recorder_audio_input=_env_str("MEETING_RECORDER_AUDIO_INPUT", "default"),
+            meeting_recorder_frame_interval_seconds=int(_env_str("MEETING_RECORDER_FRAME_INTERVAL_SECONDS", "60")),
+            meeting_recorder_vision_model=_env_str("MEETING_RECORDER_VISION_MODEL", "gpt-4.1-mini"),
+            meeting_recorder_transcribe_provider=_env_str("MEETING_RECORDER_TRANSCRIBE_PROVIDER", "whisper_cpp"),
+            meeting_recorder_whisper_cpp_bin=_env_str("MEETING_RECORDER_WHISPER_CPP_BIN", "whisper-cli"),
+            meeting_recorder_whisper_model=_env_str("MEETING_RECORDER_WHISPER_MODEL", "~/.cache/whisper.cpp/ggml-medium.bin"),
+            meeting_recorder_whisper_language=_env_str("MEETING_RECORDER_WHISPER_LANGUAGE", "auto"),
             source_code_qa_owner_email=source_code_qa_owner_email,
             source_code_qa_admin_emails=source_code_qa_admin_emails,
             source_code_qa_git_timeout_seconds=int(_env_str("SOURCE_CODE_QA_GIT_TIMEOUT_SECONDS", "90")),

@@ -56,6 +56,15 @@ from bpmis_jira_tool.local_agent_client import (
 )
 from bpmis_jira_tool.gmail_dashboard import GMAIL_READONLY_SCOPE, GmailDashboardService
 from bpmis_jira_tool.gmail_sender import StoredGoogleCredentials
+from bpmis_jira_tool.meeting_recorder import (
+    CALENDAR_READONLY_SCOPE,
+    GoogleCalendarMeetingService,
+    MeetingProcessingService,
+    MeetingRecorderConfig,
+    MeetingRecorderRuntime,
+    MeetingRecordStore,
+    meeting_platform_from_link,
+)
 from bpmis_jira_tool.monthly_report import (
     DEFAULT_MONTHLY_REPORT_RECIPIENT,
     DEFAULT_MONTHLY_REPORT_TEMPLATE,
@@ -83,6 +92,7 @@ from prd_briefing import create_prd_briefing_blueprint
 from prd_briefing.confluence import ConfluenceConnector
 from prd_briefing.reviewer import PRDBriefingReviewRequest, PRDReviewRequest, PRDReviewService
 from prd_briefing.storage import BriefingStore
+from prd_briefing.text_generation import CodexTextGenerationClient
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -2018,6 +2028,28 @@ def _safe_email_identity(user_identity: dict[str, str | None] | None = None) -> 
     return str(user_identity.get("email") or user_identity.get("config_key") or "").strip().lower()
 
 
+def _meeting_record_summary(record: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "record_id": record.get("record_id"),
+        "title": record.get("title"),
+        "platform": record.get("platform"),
+        "meeting_link": record.get("meeting_link"),
+        "calendar_event_id": record.get("calendar_event_id"),
+        "scheduled_start": record.get("scheduled_start"),
+        "scheduled_end": record.get("scheduled_end"),
+        "status": record.get("status"),
+        "recording_started_at": record.get("recording_started_at"),
+        "recording_stopped_at": record.get("recording_stopped_at"),
+        "created_at": record.get("created_at"),
+        "updated_at": record.get("updated_at"),
+        "media": record.get("media") or {},
+        "transcript_status": (record.get("transcript") or {}).get("status"),
+        "minutes_status": (record.get("minutes") or {}).get("status"),
+        "email_status": (record.get("email") or {}).get("status"),
+        "error": record.get("error") or "",
+    }
+
+
 def _try_acquire_gmail_export_lock(email: str) -> bool:
     normalized = str(email or "").strip().lower()
     if not normalized:
@@ -2219,6 +2251,12 @@ def create_app() -> Flask:
     app.config["SEATALK_TODO_STORE"] = SeaTalkTodoStore(data_root / "seatalk" / "completed_todos.json")
     app.config["SEATALK_NAME_MAPPING_STORE"] = SeaTalkNameMappingStore(data_root / "seatalk" / "name_overrides.json")
     app.config["SEATALK_DAILY_CACHE_DIR"] = data_root / "seatalk" / "cache"
+    meeting_store = MeetingRecordStore(data_root / "meeting_records")
+    app.config["MEETING_RECORD_STORE"] = meeting_store
+    app.config["MEETING_RECORDER_RUNTIME"] = MeetingRecorderRuntime(
+        store=meeting_store,
+        config=_meeting_recorder_config(settings),
+    )
     app.config["GOOGLE_CREDENTIAL_STORE"] = StoredGoogleCredentials(
         data_root / "google" / "credentials.json",
         encryption_key=settings.team_portal_config_encryption_key,
@@ -2300,6 +2338,7 @@ def create_app() -> Flask:
                 "can_access_prd_briefing": False,
                 "can_access_prd_self_assessment": False,
                 "can_access_gmail_seatalk_demo": False,
+                "can_access_meeting_recorder": False,
                 "can_access_source_code_qa": False,
                 "can_manage_source_code_qa": False,
                 "asset_revision": _current_release_revision(),
@@ -2337,6 +2376,14 @@ def create_app() -> Flask:
                 "href": url_for("gmail_seatalk_demo"),
                 "active": request.path.startswith("/gmail-sea-talk-demo"),
             }
+        if _can_access_meeting_recorder(settings):
+            site_tabs.append(
+                {
+                    "label": "Meeting Recorder",
+                    "href": url_for("meeting_recorder_page"),
+                    "active": request.path.startswith("/meeting-recorder"),
+                }
+            )
         if prd_self_assessment_tab:
             site_tabs.append(prd_self_assessment_tab)
         if prd_tab:
@@ -2364,6 +2411,7 @@ def create_app() -> Flask:
             "can_access_prd_briefing": _can_access_prd_briefing(settings),
             "can_access_prd_self_assessment": _can_access_prd_self_assessment(settings),
             "can_access_gmail_seatalk_demo": _can_access_gmail_seatalk_demo(settings),
+            "can_access_meeting_recorder": _can_access_meeting_recorder(settings),
             "can_access_source_code_qa": _can_access_source_code_qa(settings),
             "can_manage_source_code_qa": _can_manage_source_code_qa(settings),
             "asset_revision": _current_release_revision(),
@@ -3607,6 +3655,170 @@ def create_app() -> Flask:
                 jsonify({"status": "error", "message": "SeaTalk chat history could not be exported right now. Please try again shortly."}),
                 HTTPStatus.INTERNAL_SERVER_ERROR,
             )
+
+    @app.get("/meeting-recorder")
+    def meeting_recorder_page():
+        access_gate = _require_meeting_recorder_access(settings)
+        if access_gate is not None:
+            return access_gate
+        user_identity = _get_user_identity(settings)
+        return render_template(
+            "meeting_recorder.html",
+            page_title="Meeting Recorder",
+            user_identity=user_identity,
+            calendar_connected=_google_credentials_have_scopes(CALENDAR_READONLY_SCOPE),
+            gmail_send_connected=_google_credentials_have_scopes("https://www.googleapis.com/auth/gmail.send"),
+            selected_record_id=str(request.args.get("record") or "").strip(),
+            asset_revision=_current_release_revision(),
+        )
+
+    @app.get("/api/meeting-recorder/diagnostics")
+    def meeting_recorder_diagnostics_api():
+        access_gate = _require_meeting_recorder_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        return jsonify({"status": "ok", **_get_meeting_recorder_runtime().diagnostics()})
+
+    @app.get("/api/meeting-recorder/calendar/upcoming")
+    def meeting_recorder_upcoming_api():
+        access_gate = _require_meeting_recorder_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        if not _google_credentials_have_scopes(CALENDAR_READONLY_SCOPE):
+            return (
+                jsonify(
+                    {
+                        "status": "error",
+                        "message": "Google Calendar access is not available yet. Sign in with Google again to grant calendar read access.",
+                    }
+                ),
+                HTTPStatus.BAD_REQUEST,
+            )
+        try:
+            meetings = _build_calendar_meeting_service().upcoming_meetings()
+            return jsonify({"status": "ok", "meetings": meetings})
+        except Exception as error:  # noqa: BLE001
+            _log_portal_event(
+                "meeting_recorder_calendar_unexpected_error",
+                level=logging.ERROR,
+                **_build_request_log_context(settings, user_identity=_get_user_identity(settings), extra=_classify_portal_error(error)),
+            )
+            current_app.logger.exception("Meeting Recorder calendar load failed.")
+            return jsonify({"status": "error", "message": "Upcoming meetings could not be loaded right now."}), HTTPStatus.INTERNAL_SERVER_ERROR
+
+    @app.get("/api/meeting-recorder/records")
+    def meeting_recorder_records_api():
+        access_gate = _require_meeting_recorder_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        records = _get_meeting_record_store().list_records(owner_email=_current_google_email())
+        return jsonify({"status": "ok", "records": [_meeting_record_summary(record) for record in records]})
+
+    @app.get("/api/meeting-recorder/records/<record_id>")
+    def meeting_recorder_record_api(record_id: str):
+        access_gate = _require_meeting_recorder_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        try:
+            record = _get_meeting_record_store().get_record(record_id)
+            if str(record.get("owner_email") or "").strip().lower() != _current_google_email():
+                return jsonify({"status": "error", "message": "Meeting record is not available for this Google account."}), HTTPStatus.FORBIDDEN
+            return jsonify({"status": "ok", "record": record})
+        except ToolError as error:
+            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
+
+    @app.post("/api/meeting-recorder/start")
+    def meeting_recorder_start_api():
+        access_gate = _require_meeting_recorder_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        payload = request.get_json(silent=True) or {}
+        try:
+            meeting_link = str(payload.get("meeting_link") or payload.get("meetingLink") or "").strip()
+            record = _get_meeting_recorder_runtime().start_recording(
+                owner_email=_current_google_email(),
+                title=str(payload.get("title") or "Untitled meeting").strip(),
+                platform=str(payload.get("platform") or meeting_platform_from_link(meeting_link)).strip(),
+                meeting_link=meeting_link,
+                calendar_event_id=str(payload.get("calendar_event_id") or payload.get("calendarEventId") or "").strip(),
+                scheduled_start=str(payload.get("scheduled_start") or payload.get("scheduledStart") or "").strip(),
+                scheduled_end=str(payload.get("scheduled_end") or payload.get("scheduledEnd") or "").strip(),
+                attendees=payload.get("attendees") if isinstance(payload.get("attendees"), list) else [],
+            )
+            return jsonify({"status": "ok", "record": _meeting_record_summary(record)})
+        except (ConfigError, ToolError) as error:
+            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
+
+    @app.post("/api/meeting-recorder/records/<record_id>/stop")
+    def meeting_recorder_stop_api(record_id: str):
+        access_gate = _require_meeting_recorder_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        try:
+            record = _get_meeting_recorder_runtime().stop_recording(record_id=record_id, owner_email=_current_google_email())
+            return jsonify({"status": "ok", "record": _meeting_record_summary(record)})
+        except ToolError as error:
+            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
+
+    @app.post("/api/meeting-recorder/records/<record_id>/process")
+    def meeting_recorder_process_api(record_id: str):
+        access_gate = _require_meeting_recorder_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        try:
+            record = _build_meeting_processing_service(settings).process_recording(
+                record_id=record_id,
+                owner_email=_current_google_email(),
+            )
+            return jsonify({"status": "ok", "record": _meeting_record_summary(record)})
+        except (ConfigError, ToolError, requests.RequestException) as error:
+            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
+
+    @app.post("/api/meeting-recorder/records/<record_id>/send-email")
+    def meeting_recorder_send_email_api(record_id: str):
+        access_gate = _require_meeting_recorder_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        payload = request.get_json(silent=True) or {}
+        try:
+            email_payload = _build_meeting_processing_service(settings).send_minutes_email(
+                record_id=record_id,
+                owner_email=_current_google_email(),
+                recipient=str(payload.get("recipient") or "").strip() or _current_google_email(),
+            )
+            return jsonify({"status": "ok", "email": email_payload})
+        except (ConfigError, ToolError) as error:
+            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
+
+    @app.delete("/api/meeting-recorder/records/<record_id>")
+    def meeting_recorder_delete_api(record_id: str):
+        access_gate = _require_meeting_recorder_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        try:
+            _get_meeting_record_store().delete_record(record_id=record_id, owner_email=_current_google_email())
+            return jsonify({"status": "ok"})
+        except ToolError as error:
+            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
+
+    @app.get("/meeting-recorder/assets/<record_id>/<path:relative_path>")
+    def meeting_recorder_asset(record_id: str, relative_path: str):
+        access_gate = _require_meeting_recorder_access(settings)
+        if access_gate is not None:
+            return access_gate
+        try:
+            record = _get_meeting_record_store().get_record(record_id)
+            if str(record.get("owner_email") or "").strip().lower() != _current_google_email():
+                return jsonify({"status": "error", "message": "Meeting record is not available for this Google account."}), HTTPStatus.FORBIDDEN
+            root_dir = _get_meeting_record_store().record_dir(record_id).resolve()
+            asset_path = (root_dir / relative_path).resolve()
+            if root_dir not in asset_path.parents and asset_path != root_dir:
+                return jsonify({"status": "error", "message": "Invalid meeting asset path."}), HTTPStatus.BAD_REQUEST
+            if not asset_path.exists():
+                return jsonify({"status": "error", "message": "Meeting asset not found."}), HTTPStatus.NOT_FOUND
+            return send_file(asset_path)
+        except ToolError as error:
+            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
 
     @app.post("/auth/google/logout")
     def google_logout():
@@ -5325,16 +5537,62 @@ def _build_gmail_dashboard_service() -> GmailDashboardService:
     return GmailDashboardService(credentials=credentials, cache_key=_current_google_email())
 
 
+def _meeting_recorder_config(settings: Settings) -> MeetingRecorderConfig:
+    return MeetingRecorderConfig(
+        ffmpeg_bin=settings.meeting_recorder_ffmpeg_bin,
+        video_input=settings.meeting_recorder_video_input,
+        audio_input=settings.meeting_recorder_audio_input,
+        frame_interval_seconds=settings.meeting_recorder_frame_interval_seconds,
+        vision_model=settings.meeting_recorder_vision_model,
+        transcribe_provider=settings.meeting_recorder_transcribe_provider,
+        whisper_cpp_bin=settings.meeting_recorder_whisper_cpp_bin,
+        whisper_model=settings.meeting_recorder_whisper_model,
+        whisper_language=settings.meeting_recorder_whisper_language,
+    )
+
+
+def _get_meeting_record_store() -> MeetingRecordStore:
+    return current_app.config["MEETING_RECORD_STORE"]
+
+
+def _get_meeting_recorder_runtime() -> MeetingRecorderRuntime:
+    return current_app.config["MEETING_RECORDER_RUNTIME"]
+
+
+def _build_calendar_meeting_service() -> GoogleCalendarMeetingService:
+    return GoogleCalendarMeetingService(get_google_credentials())
+
+
+def _build_meeting_processing_service(settings: Settings) -> MeetingProcessingService:
+    text_client = CodexTextGenerationClient(
+        settings=settings,
+        workspace_root=PROJECT_ROOT,
+        prompt_mode="meeting_recorder_minutes_codex",
+        codex_model=settings.prd_briefing_codex_model,
+    )
+    return MeetingProcessingService(
+        store=_get_meeting_record_store(),
+        config=_meeting_recorder_config(settings),
+        text_client=text_client,
+        credential_store=current_app.config.get("GOOGLE_CREDENTIAL_STORE"),
+        portal_base_url=settings.team_portal_base_url,
+    )
+
+
 def _persist_owner_google_credentials(settings: Settings) -> None:
-    owner_email = str(settings.gmail_seatalk_demo_owner_email or settings.seatalk_owner_email or "").strip().lower()
     current_email = _current_google_email()
-    if not owner_email or current_email != owner_email:
+    owner_emails = {
+        str(settings.gmail_seatalk_demo_owner_email or settings.seatalk_owner_email or "").strip().lower(),
+        str(settings.meeting_recorder_owner_email or "").strip().lower(),
+    }
+    owner_emails.discard("")
+    if not current_email or current_email not in owner_emails:
         return
     store = current_app.config.get("GOOGLE_CREDENTIAL_STORE") if current_app else None
     credentials_payload = dict(session.get("google_credentials") or {})
     if store is None or not credentials_payload:
         return
-    store.save(owner_email=owner_email, credentials_payload=credentials_payload)
+    store.save(owner_email=current_email, credentials_payload=credentials_payload)
 
 
 def _build_seatalk_dashboard_service(settings: Settings) -> SeaTalkDashboardService:
@@ -5609,6 +5867,10 @@ def _can_access_prd_self_assessment(settings: Settings) -> bool:
 
 
 def _can_access_gmail_seatalk_demo(settings: Settings) -> bool:
+    return _is_portal_admin()
+
+
+def _can_access_meeting_recorder(settings: Settings) -> bool:
     return _is_portal_admin()
 
 
@@ -6131,6 +6393,19 @@ def _require_gmail_seatalk_demo_access(settings: Settings, *, api: bool = False)
         return login_gate
     message = f"SeaTalk Management is restricted to {PORTAL_ADMIN_EMAIL}."
     if not _can_access_gmail_seatalk_demo(settings):
+        if api:
+            return jsonify({"status": "error", "message": message}), HTTPStatus.FORBIDDEN
+        flash(message, "error")
+        return redirect(url_for("index"))
+    return None
+
+
+def _require_meeting_recorder_access(settings: Settings, *, api: bool = False):
+    login_gate = _require_google_login(settings, api=api)
+    if login_gate is not None:
+        return login_gate
+    message = f"Meeting Recorder is restricted to {PORTAL_ADMIN_EMAIL}."
+    if not _can_access_meeting_recorder(settings):
         if api:
             return jsonify({"status": "error", "message": message}), HTTPStatus.FORBIDDEN
         flash(message, "error")

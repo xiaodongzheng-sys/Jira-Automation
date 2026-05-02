@@ -18,6 +18,7 @@ from bpmis_jira_tool.google_auth import (
 class GoogleAuthTests(unittest.TestCase):
     def test_google_scopes_include_gmail_readonly(self):
         self.assertIn("https://www.googleapis.com/auth/gmail.readonly", GOOGLE_SCOPES)
+        self.assertIn("https://www.googleapis.com/auth/calendar.readonly", GOOGLE_SCOPES)
 
     def test_allow_localhost_oauth_http_sets_insecure_transport(self):
         with patch.dict(os.environ, {}, clear=False):

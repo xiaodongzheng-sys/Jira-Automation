@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+
+{% block body %}
+<section class="meeting-recorder-shell" data-meeting-recorder-root data-selected-record-id="{{ selected_record_id }}">
+  <header class="tool-hero meeting-recorder-hero">
+    <div>
+      <p class="eyebrow">Meeting Recorder</p>
+      <h1>Transcript and screen-aware minutes</h1>
+      <p class="help-text">Use calendar-assisted start for Google Meet or Zoom, then keep audio transcript, English minutes, and full screen video in the portal archive.</p>
+    </div>
+    <div class="meeting-recorder-status">
+      <span data-meeting-recorder-diagnostic>Checking local recorder…</span>
+      {% if not calendar_connected %}
+        <a class="button button-secondary" href="{{ url_for('google_login') }}">Reconnect Calendar</a>
+      {% endif %}
+    </div>
+  </header>
+
+  <section class="meeting-recorder-grid">
+    <section class="tool-card meeting-recorder-card">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">Upcoming</p>
+          <h2>Calendar Meetings</h2>
+        </div>
+        <button class="button button-secondary" type="button" data-meeting-refresh>Refresh</button>
+      </div>
+      <div class="inline-status" data-meeting-calendar-status>Loading upcoming Meet and Zoom meetings…</div>
+      <div class="meeting-list" data-meeting-upcoming></div>
+    </section>
+
+    <section class="tool-card meeting-recorder-card">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">Manual</p>
+          <h2>Start Recording</h2>
+        </div>
+      </div>
+      <form class="meeting-start-form" data-meeting-start-form>
+        <label>
+          <span>Title</span>
+          <input name="title" type="text" placeholder="Meeting title">
+        </label>
+        <label>
+          <span>Meet or Zoom link</span>
+          <input name="meeting_link" type="url" placeholder="https://meet.google.com/... or https://...zoom.us/...">
+        </label>
+        <div class="button-row">
+          <button class="button" type="submit">Start Recording</button>
+          <button class="button button-secondary" type="button" data-meeting-stop-current disabled>Stop</button>
+        </div>
+      </form>
+      <div class="inline-status" data-meeting-recording-status>No active recording.</div>
+    </section>
+  </section>
+
+  <section class="tool-card meeting-recorder-card">
+    <div class="section-heading">
+      <div>
+        <p class="eyebrow">Archive</p>
+        <h2>Recorded Meetings</h2>
+      </div>
+      <button class="button button-secondary" type="button" data-meeting-records-refresh>Refresh</button>
+    </div>
+    <div class="meeting-record-layout">
+      <div class="meeting-record-list" data-meeting-records></div>
+      <article class="meeting-record-detail" data-meeting-record-detail>
+        <p class="empty-state">Select a recorded meeting to view transcript, minutes, and video.</p>
+      </article>
+    </div>
+  </section>
+</section>
+<script src="{{ url_for('static', filename='meeting_recorder.js', v=asset_revision|default('static')) }}" defer></script>
+{% endblock %}

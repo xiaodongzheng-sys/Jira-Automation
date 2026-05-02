@@ -7845,3 +7845,143 @@ select:focus {
     font-size: 44px;
   }
 }
+
+.meeting-recorder-shell {
+  display: grid;
+  gap: 20px;
+}
+
+.meeting-recorder-hero {
+  align-items: flex-start;
+}
+
+.meeting-recorder-status {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  max-width: 420px;
+  color: #667085;
+  font-size: 0.92rem;
+}
+
+.meeting-recorder-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(320px, 0.8fr);
+  gap: 18px;
+}
+
+.meeting-recorder-card,
+.meeting-list,
+.meeting-record-list,
+.meeting-start-form,
+.meeting-record-detail,
+.meeting-output {
+  display: grid;
+  gap: 12px;
+}
+
+.meeting-list-item,
+.meeting-record-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 12px;
+  border: 1px solid #d0d5dd;
+  border-radius: 8px;
+  background: #fff;
+  color: inherit;
+  text-align: left;
+}
+
+.meeting-record-row {
+  cursor: pointer;
+}
+
+.meeting-record-row.is-active,
+.meeting-record-row:hover {
+  border-color: #2563eb;
+}
+
+.meeting-list-item strong,
+.meeting-record-row strong {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.meeting-list-item span,
+.meeting-record-row span {
+  display: block;
+  color: #667085;
+  font-size: 0.85rem;
+}
+
+.meeting-start-form label {
+  display: grid;
+  gap: 6px;
+  font-size: 0.88rem;
+  font-weight: 700;
+}
+
+.meeting-record-layout {
+  display: grid;
+  grid-template-columns: minmax(260px, 0.34fr) minmax(0, 0.66fr);
+  gap: 16px;
+}
+
+.meeting-video {
+  width: 100%;
+  max-height: 420px;
+  border-radius: 8px;
+  background: #111827;
+}
+
+.meeting-output h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.meeting-output pre {
+  overflow: auto;
+  max-height: 360px;
+  margin: 0;
+  padding: 12px;
+  border: 1px solid #d0d5dd;
+  border-radius: 8px;
+  background: #f8fafc;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.meeting-evidence {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr);
+  gap: 10px;
+  padding: 10px 0;
+  border-bottom: 1px solid #d0d5dd;
+}
+
+.button-danger {
+  border-color: #fecaca;
+  background: #fff1f2;
+  color: #b42318;
+}
+
+.inline-status-error {
+  color: #b42318;
+}
+
+@media (max-width: 900px) {
+  .meeting-recorder-grid,
+  .meeting-record-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .meeting-recorder-status {
+    justify-content: flex-start;
+  }
+}
