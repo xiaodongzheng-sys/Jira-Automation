@@ -178,7 +178,11 @@ class MeetingRecorderParsingTests(unittest.TestCase):
         )
 
         self.assertIn("-i", command)
+        self.assertIn("-use_wallclock_as_timestamps", command)
+        self.assertEqual(command[command.index("-use_wallclock_as_timestamps") + 1], "1")
         self.assertEqual(command[command.index("-i") + 1], ":Meeting Recorder Aggregate")
+        self.assertIn("-af", command)
+        self.assertEqual(command[command.index("-af") + 1], "aresample=async=1:first_pts=0")
         self.assertNotIn("Capture screen 0", command)
         self.assertNotIn("-framerate", command)
         self.assertNotIn("-c:v", command)
