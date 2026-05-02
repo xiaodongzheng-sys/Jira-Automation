@@ -7852,85 +7852,163 @@ select:focus {
 }
 
 .meeting-recorder-hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(340px, 430px);
+  gap: 28px;
   align-items: flex-start;
 }
 
 .meeting-recorder-status {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
+  display: grid;
   gap: 12px;
-  max-width: 420px;
+  width: 100%;
   color: #667085;
   font-size: 0.92rem;
 }
 
 .meeting-diagnostic-card {
   display: grid;
-  gap: 8px;
+  gap: 12px;
   width: 100%;
+  padding: 14px;
+  border: 1px solid #dbe5f1;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.74);
+  box-shadow: 0 10px 28px rgba(15, 23, 42, 0.06);
+  backdrop-filter: blur(8px);
 }
 
-.meeting-diagnostic-grid {
+.meeting-diagnostic-head {
   display: flex;
-  justify-content: flex-end;
-  flex-wrap: wrap;
-  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
 }
 
-.meeting-diagnostic-grid span {
-  padding: 4px 8px;
+.meeting-diagnostic-kicker {
+  color: #475467;
+  font-size: 0.76rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.meeting-diagnostic-pill {
+  padding: 4px 9px;
   border: 1px solid #d0d5dd;
   border-radius: 999px;
   background: #fff;
   color: #344054;
   font-size: 0.78rem;
-  font-weight: 700;
+  font-weight: 800;
 }
 
-.meeting-diagnostic-grid .is-ready {
+.meeting-diagnostic-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.meeting-diagnostic-item {
+  display: grid;
+  grid-template-columns: 9px minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid #d0d5dd;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #344054;
+}
+
+.meeting-diagnostic-item.is-wide {
+  grid-column: 1 / -1;
+}
+
+.meeting-diagnostic-dot {
+  width: 9px;
+  height: 9px;
+  margin-top: 5px;
+  border-radius: 50%;
+  background: #98a2b3;
+}
+
+.meeting-diagnostic-item strong {
+  display: block;
+  color: #101828;
+  font-size: 0.82rem;
+  font-weight: 800;
+}
+
+.meeting-diagnostic-item span:not(.meeting-diagnostic-dot) {
+  display: block;
+  overflow: hidden;
+  color: #667085;
+  font-size: 0.8rem;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.meeting-diagnostic-pill.is-ready,
+.meeting-diagnostic-dot.is-ready {
   border-color: #bbf7d0;
-  background: #f0fdf4;
+  background: #16a34a;
   color: #166534;
 }
 
-.meeting-diagnostic-grid .is-warning {
+.meeting-diagnostic-pill.is-ready {
+  background: #f0fdf4;
+}
+
+.meeting-diagnostic-pill.is-warning,
+.meeting-diagnostic-dot.is-warning {
   border-color: #fed7aa;
-  background: #fff7ed;
+  background: #f97316;
   color: #9a3412;
 }
 
-.meeting-diagnostic-detail {
-  display: flex;
-  justify-content: flex-end;
-  flex-wrap: wrap;
-  gap: 8px;
-  color: #667085;
-  font-size: 0.82rem;
+.meeting-diagnostic-pill.is-warning {
+  background: #fff7ed;
 }
 
 .meeting-audio-warning {
-  max-width: 520px;
-  margin: 0 0 0 auto;
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid #fed7aa;
+  border-radius: 8px;
+  background: #fff7ed;
   color: #9a3412;
   line-height: 1.45;
-  text-align: right;
 }
 
 .meeting-device-list {
   color: #667085;
   font-size: 0.82rem;
-  text-align: right;
 }
 
 .meeting-device-list summary {
+  width: fit-content;
   cursor: pointer;
   font-weight: 700;
 }
 
-.meeting-device-list p {
-  margin: 6px 0 0;
-  word-break: break-word;
+.meeting-device-list div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.meeting-device-list div span {
+  padding: 4px 8px;
+  border: 1px solid #d0d5dd;
+  border-radius: 999px;
+  background: #fff;
+  color: #475467;
+  font-size: 0.76rem;
+  font-weight: 700;
 }
 
 .meeting-recorder-grid {
@@ -8205,24 +8283,23 @@ select:focus {
 }
 
 @media (max-width: 900px) {
+  .meeting-recorder-hero,
   .meeting-recorder-grid,
   .meeting-record-layout {
     grid-template-columns: 1fr;
   }
 
-  .meeting-recorder-status {
-    justify-content: flex-start;
+  .meeting-recorder-status,
+  .meeting-diagnostic-card {
+    max-width: none;
   }
 
-  .meeting-diagnostic-grid,
-  .meeting-diagnostic-detail {
-    justify-content: flex-start;
+  .meeting-diagnostic-grid {
+    grid-template-columns: 1fr;
   }
 
-  .meeting-audio-warning,
-  .meeting-device-list {
-    margin-left: 0;
-    text-align: left;
+  .meeting-diagnostic-item.is-wide {
+    grid-column: auto;
   }
 
   .meeting-detail-header {

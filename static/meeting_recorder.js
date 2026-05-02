@@ -158,26 +158,48 @@
   };
 
   const renderDiagnostics = (payload) => {
-    const ffmpeg = payload.ffmpeg_configured ? 'ffmpeg ready' : 'ffmpeg missing';
-    const whisper = payload.whisper_cpp_configured && payload.whisper_model_exists ? 'whisper.cpp ready' : 'whisper.cpp not ready';
+    const recorderReady = Boolean(payload.ffmpeg_configured && payload.whisper_cpp_configured && payload.whisper_model_exists);
+    const audioReady = Boolean(payload.system_audio_configured);
     const audioLabel = payload.audio_capture_label || 'Audio input unknown';
-    const audioClass = payload.system_audio_configured ? 'is-ready' : 'is-warning';
+    const audioClass = audioReady ? 'is-ready' : 'is-warning';
     const devices = Array.isArray(payload.audio_devices) ? payload.audio_devices : [];
-    const deviceText = devices.length ? devices.join(', ') : 'No audio devices detected';
+    const videoConfig = [
+      payload.video_input || 'not configured',
+      payload.video_max_width && payload.video_max_height ? `${payload.video_max_width}x${payload.video_max_height}` : '',
+      payload.video_fps ? `${payload.video_fps}fps` : '',
+    ].filter(Boolean).join(' · ');
     return `
-      <div class="meeting-diagnostic-grid">
-        <span class="${payload.ffmpeg_configured ? 'is-ready' : 'is-warning'}">${escapeHtml(ffmpeg)}</span>
-        <span class="${payload.whisper_cpp_configured && payload.whisper_model_exists ? 'is-ready' : 'is-warning'}">${escapeHtml(whisper)}</span>
-        <span class="${audioClass}">${escapeHtml(audioLabel)}</span>
+      <div class="meeting-diagnostic-head">
+        <span class="meeting-diagnostic-kicker">Recorder status</span>
+        <span class="meeting-diagnostic-pill ${recorderReady ? 'is-ready' : 'is-warning'}">${escapeHtml(recorderReady ? 'Ready' : 'Needs setup')}</span>
       </div>
-      <div class="meeting-diagnostic-detail">
-        <span>Screen: ${escapeHtml(payload.video_input || 'not configured')}</span>
-        <span>Audio: ${escapeHtml(payload.audio_input || 'not configured')}</span>
+      <div class="meeting-diagnostic-grid">
+        <div class="meeting-diagnostic-item">
+          <span class="meeting-diagnostic-dot ${payload.ffmpeg_configured ? 'is-ready' : 'is-warning'}"></span>
+          <div>
+            <strong>Screen capture</strong>
+            <span>${escapeHtml(videoConfig)}</span>
+          </div>
+        </div>
+        <div class="meeting-diagnostic-item">
+          <span class="meeting-diagnostic-dot ${payload.whisper_cpp_configured && payload.whisper_model_exists ? 'is-ready' : 'is-warning'}"></span>
+          <div>
+            <strong>Transcription</strong>
+            <span>${escapeHtml(payload.whisper_cpp_configured && payload.whisper_model_exists ? 'whisper.cpp ready' : 'whisper.cpp not ready')}</span>
+          </div>
+        </div>
+        <div class="meeting-diagnostic-item is-wide">
+          <span class="meeting-diagnostic-dot ${audioClass}"></span>
+          <div>
+            <strong>Meeting audio</strong>
+            <span>${escapeHtml(audioLabel)} · ${escapeHtml(payload.audio_input || 'not configured')}</span>
+          </div>
+        </div>
       </div>
       ${payload.audio_capture_warning ? `<p class="meeting-audio-warning">${escapeHtml(payload.audio_capture_warning)}</p>` : ''}
       <details class="meeting-device-list">
-        <summary>Audio devices</summary>
-        <p>${escapeHtml(deviceText)}</p>
+        <summary>${escapeHtml(devices.length ? `${devices.length} audio devices` : 'No audio devices detected')}</summary>
+        <div>${devices.map((device) => `<span>${escapeHtml(device)}</span>`).join('')}</div>
       </details>
     `;
   };
