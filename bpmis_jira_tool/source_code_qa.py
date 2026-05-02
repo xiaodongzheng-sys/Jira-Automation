@@ -15074,6 +15074,7 @@ class SourceCodeQAService:
         candidate_paths = self._codex_candidate_paths(entries=entries, key=key, matches=candidate_matches)
         candidate_paths = self._merge_codex_followup_candidate_paths(candidate_paths, followup_context)
         candidate_path_layers = self._codex_candidate_path_layers(candidate_paths, followup_context)
+        codex_raw_passthrough = self.llm_provider.name == LLM_PROVIDER_CODEX_CLI_BRIDGE
         llm_route = {
             **llm_route,
             "answer_model": selected_model,
@@ -15083,7 +15084,8 @@ class SourceCodeQAService:
             "candidate_repo_count": len({item.get("repo") for item in candidate_paths}),
             "candidate_path_count": len(candidate_paths),
             "codex_repair_enabled": self.codex_repair_enabled,
-            "codex_repair_allowed": bool(self.codex_repair_enabled),
+            "codex_repair_allowed": bool(self.codex_repair_enabled and not codex_raw_passthrough),
+            "codex_repair_skipped_reason": "codex_raw_answer_passthrough" if codex_raw_passthrough else "",
             "query_mode": query_mode,
             "deadline_seconds": 0,
             "codex_session_mode": self.codex_session_mode,
@@ -15231,16 +15233,19 @@ class SourceCodeQAService:
         codex_cli_trace = result.payload.get("codex_cli_trace") if isinstance(result.payload.get("codex_cli_trace"), dict) else {}
         codex_validation = timed_call(
             "citation_validation",
-            lambda: self._validate_codex_citations(answer, candidate_paths, candidate_paths),
+            lambda: self._skipped_codex_validation() if codex_raw_passthrough else self._validate_codex_citations(answer, candidate_paths, candidate_paths),
             phase="initial",
+            skipped_reason="codex_raw_answer_passthrough" if codex_raw_passthrough else "",
         )
-        claim_check = self._merge_codex_validation(self._trusted_provider_check(), codex_validation)
+        claim_check = self._trusted_provider_check() if codex_raw_passthrough else self._merge_codex_validation(self._trusted_provider_check(), codex_validation)
         answer_judge = timed_call(
             "answer_judge",
-            lambda: self._run_answer_judge(question, answer, evidence_pack, claim_check),
+            lambda: self._trusted_provider_judge() if codex_raw_passthrough else self._run_answer_judge(question, answer, evidence_pack, claim_check),
             phase="initial",
+            skipped_reason="codex_raw_answer_passthrough" if codex_raw_passthrough else "",
         )
         repair_attempted = False
+        repair_skipped_reason = "codex_raw_answer_passthrough" if codex_raw_passthrough else ""
         deep_investigation_rounds = 0
         deep_investigation_terms: list[str] = []
         deep_investigation_added = 0
@@ -15254,8 +15259,9 @@ class SourceCodeQAService:
             answer_judge=answer_judge,
             codex_validation=codex_validation,
         )
-        if self.codex_repair_enabled and (repair_issues or deep_needed):
+        if self.codex_repair_enabled and not codex_raw_passthrough and (repair_issues or deep_needed):
             repair_attempted = True
+            repair_skipped_reason = ""
             if deep_needed:
                 if progress_callback:
                     try:
@@ -15381,6 +15387,7 @@ class SourceCodeQAService:
             **llm_route,
             "codex_citation_validation_status": codex_validation.get("status"),
             "codex_repair_attempted": repair_attempted,
+            "codex_repair_skipped_reason": repair_skipped_reason,
             "codex_cited_path_count": codex_validation.get("cited_path_count", 0),
             "codex_deep_investigation_rounds": deep_investigation_rounds,
             "codex_deep_investigation_terms": deep_investigation_terms[:12],
@@ -15407,6 +15414,7 @@ class SourceCodeQAService:
             "cited_path_count": codex_validation.get("cited_path_count", 0),
             "citation_validation_status": codex_validation.get("status"),
             "repair_attempted": repair_attempted,
+            "repair_skipped_reason": repair_skipped_reason,
             "cli_latency_ms": llm_latency_ms,
             "exit_codes": [item.get("exit_code") for item in llm_attempt_log if item.get("exit_code") is not None],
             "timeout": any(bool(item.get("timeout")) for item in llm_attempt_log),
