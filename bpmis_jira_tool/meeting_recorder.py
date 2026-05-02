@@ -12,6 +12,7 @@ import subprocess
 import threading
 import time
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import google_auth_httplib2
 import httplib2
@@ -146,6 +147,54 @@ class GoogleCalendarMeetingService:
                 if normalized:
                     meetings.append(normalized)
         return meetings
+
+
+def meeting_reminder_suppression_key(meeting: dict[str, Any], *, timezone_name: str = "Asia/Singapore") -> str:
+    event_id = str(meeting.get("calendar_event_id") or meeting.get("id") or meeting.get("meeting_link") or meeting.get("title") or "").strip()
+    start_at = _parse_meeting_datetime(str(meeting.get("start") or meeting.get("scheduled_start") or ""), timezone_name=timezone_name)
+    if start_at is None:
+        date_key = datetime.now(ZoneInfo(timezone_name)).strftime("%Y%m%d")
+    else:
+        date_key = start_at.astimezone(ZoneInfo(timezone_name)).strftime("%Y%m%d")
+    safe_event = re.sub(r"[^a-zA-Z0-9_.:-]", "-", event_id)[:160] or "meeting"
+    return f"{date_key}:{safe_event}"
+
+
+def reminder_eligible_meetings(
+    meetings: list[dict[str, Any]],
+    *,
+    now: datetime | None = None,
+    timezone_name: str = "Asia/Singapore",
+    workday_start_hour: int = 9,
+    workday_end_hour: int = 20,
+    lead_seconds: int = 120,
+    grace_seconds: int = 600,
+) -> list[dict[str, Any]]:
+    local_tz = ZoneInfo(timezone_name)
+    current = now or datetime.now(local_tz)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=local_tz)
+    current = current.astimezone(local_tz)
+    eligible: list[dict[str, Any]] = []
+    for meeting in meetings:
+        if str(meeting.get("platform") or "").strip() not in {"google_meet", "zoom"}:
+            continue
+        start_at = _parse_meeting_datetime(str(meeting.get("start") or meeting.get("scheduled_start") or ""), timezone_name=timezone_name)
+        if start_at is None:
+            continue
+        local_start = start_at.astimezone(local_tz)
+        if not (workday_start_hour <= local_start.hour < workday_end_hour):
+            continue
+        seconds_until_start = int((local_start - current).total_seconds())
+        if seconds_until_start > lead_seconds or seconds_until_start < -grace_seconds:
+            continue
+        item = dict(meeting)
+        item["start"] = str(meeting.get("start") or meeting.get("scheduled_start") or "")
+        item["suppression_key"] = meeting_reminder_suppression_key(item, timezone_name=timezone_name)
+        item["seconds_until_start"] = seconds_until_start
+        eligible.append(item)
+    eligible.sort(key=lambda item: int(item.get("seconds_until_start") or 0))
+    return eligible
 
 
 class MeetingRecordStore:
@@ -677,6 +726,20 @@ def _srt_timestamp_seconds(value: str) -> float:
         return 0
     hours, minutes, seconds, millis = (int(part) for part in match.groups())
     return hours * 3600 + minutes * 60 + seconds + millis / 1000
+
+
+def _parse_meeting_datetime(value: str, *, timezone_name: str) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        normalized = raw.replace("Z", "+00:00")
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=ZoneInfo(timezone_name))
+    return parsed
 
 
 def _avfoundation_devices(ffmpeg_path: str | None) -> dict[str, list[str]]:

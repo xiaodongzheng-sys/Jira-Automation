@@ -64,6 +64,7 @@ from bpmis_jira_tool.meeting_recorder import (
     MeetingRecorderRuntime,
     MeetingRecordStore,
     meeting_platform_from_link,
+    reminder_eligible_meetings,
 )
 from bpmis_jira_tool.monthly_report import (
     DEFAULT_MONTHLY_REPORT_RECIPIENT,
@@ -2050,6 +2051,18 @@ def _meeting_record_summary(record: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _meeting_recorder_diagnostics_payload(settings: Settings) -> dict[str, Any]:
+    if _local_agent_meeting_recorder_enabled(settings):
+        return _build_local_agent_client(settings).meeting_recorder_diagnostics()
+    return _get_meeting_recorder_runtime().diagnostics()
+
+
+def _meeting_recorder_record_summaries_for_current_user(settings: Settings) -> list[dict[str, Any]]:
+    if _local_agent_meeting_recorder_enabled(settings):
+        return _build_local_agent_client(settings).meeting_recorder_records(owner_email=_current_google_email())
+    return [_meeting_record_summary(record) for record in _get_meeting_record_store().list_records(owner_email=_current_google_email())]
+
+
 def _try_acquire_gmail_export_lock(email: str) -> bool:
     normalized = str(email or "").strip().lower()
     if not normalized:
@@ -2339,6 +2352,7 @@ def create_app() -> Flask:
                 "can_access_prd_self_assessment": False,
                 "can_access_gmail_seatalk_demo": False,
                 "can_access_meeting_recorder": False,
+                "meeting_recorder_reminder_enabled": False,
                 "can_access_source_code_qa": False,
                 "can_manage_source_code_qa": False,
                 "asset_revision": _current_release_revision(),
@@ -2412,6 +2426,7 @@ def create_app() -> Flask:
             "can_access_prd_self_assessment": _can_access_prd_self_assessment(settings),
             "can_access_gmail_seatalk_demo": _can_access_gmail_seatalk_demo(settings),
             "can_access_meeting_recorder": _can_access_meeting_recorder(settings),
+            "meeting_recorder_reminder_enabled": _can_access_meeting_recorder(settings) and _google_credentials_have_scopes(CALENDAR_READONLY_SCOPE),
             "can_access_source_code_qa": _can_access_source_code_qa(settings),
             "can_manage_source_code_qa": _can_manage_source_code_qa(settings),
             "asset_revision": _current_release_revision(),
@@ -3710,6 +3725,48 @@ def create_app() -> Flask:
             )
             current_app.logger.exception("Meeting Recorder calendar load failed.")
             return jsonify({"status": "error", "message": "Upcoming meetings could not be loaded right now."}), HTTPStatus.INTERNAL_SERVER_ERROR
+
+    @app.get("/api/meeting-recorder/reminders")
+    def meeting_recorder_reminders_api():
+        access_gate = _require_meeting_recorder_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        if not _google_credentials_have_scopes(CALENDAR_READONLY_SCOPE):
+            return jsonify(
+                {
+                    "status": "ok",
+                    "calendar_connected": False,
+                    "meetings": [],
+                    "active_recording": None,
+                    "poll_seconds": 60,
+                    "timezone": "Asia/Singapore",
+                }
+            )
+        try:
+            meetings = _build_calendar_meeting_service().upcoming_meetings(days=1, max_results=20)
+            eligible = reminder_eligible_meetings(meetings, timezone_name="Asia/Singapore")
+            records = _meeting_recorder_record_summaries_for_current_user(settings)
+            active_recording = next((record for record in records if str(record.get("status") or "") == "recording"), None)
+            diagnostics = _meeting_recorder_diagnostics_payload(settings)
+            return jsonify(
+                {
+                    "status": "ok",
+                    "calendar_connected": True,
+                    "meetings": eligible,
+                    "active_recording": active_recording,
+                    "diagnostics": diagnostics,
+                    "poll_seconds": 60,
+                    "timezone": "Asia/Singapore",
+                }
+            )
+        except Exception as error:  # noqa: BLE001
+            _log_portal_event(
+                "meeting_recorder_reminders_unexpected_error",
+                level=logging.ERROR,
+                **_build_request_log_context(settings, user_identity=_get_user_identity(settings), extra=_classify_portal_error(error)),
+            )
+            current_app.logger.exception("Meeting Recorder reminders failed.")
+            return jsonify({"status": "error", "message": "Meeting reminders could not be loaded right now."}), HTTPStatus.INTERNAL_SERVER_ERROR
 
     @app.get("/api/meeting-recorder/records")
     def meeting_recorder_records_api():

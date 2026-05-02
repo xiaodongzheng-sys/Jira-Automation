@@ -1,10 +1,13 @@
 import os
 import tempfile
 import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import Mock, patch
+from zoneinfo import ZoneInfo
 
 from bpmis_jira_tool.meeting_recorder import (
+    CALENDAR_READONLY_SCOPE,
     MeetingProcessingService,
     MeetingRecorderConfig,
     MeetingRecordStore,
@@ -15,7 +18,9 @@ from bpmis_jira_tool.meeting_recorder import (
     _parse_srt_transcript,
     extract_meeting_links,
     meeting_platform_from_link,
+    meeting_reminder_suppression_key,
     normalize_calendar_event,
+    reminder_eligible_meetings,
 )
 
 
@@ -99,6 +104,86 @@ class MeetingRecorderParsingTests(unittest.TestCase):
         self.assertEqual(command[command.index("-profile:v") + 1], "high")
         self.assertEqual(command[command.index("-level") + 1], "4.2")
         self.assertEqual(command[command.index("-pix_fmt") + 1], "yuv420p")
+
+    def test_reminder_eligible_meetings_filters_by_window_hours_and_platform(self):
+        now = datetime(2026, 5, 4, 9, 58, tzinfo=ZoneInfo("Asia/Singapore"))
+        meetings = [
+            {
+                "calendar_event_id": "meet-soon",
+                "title": "Record me",
+                "platform": "google_meet",
+                "start": "2026-05-04T10:00:00+08:00",
+                "meeting_link": "https://meet.google.com/abc-defg-hij",
+            },
+            {
+                "calendar_event_id": "too-early",
+                "title": "Too early",
+                "platform": "zoom",
+                "start": "2026-05-04T08:59:00+08:00",
+                "meeting_link": "https://zoom.us/j/123",
+            },
+            {
+                "calendar_event_id": "too-late",
+                "title": "Too late",
+                "platform": "google_meet",
+                "start": "2026-05-04T20:00:00+08:00",
+                "meeting_link": "https://meet.google.com/late-one",
+            },
+            {
+                "calendar_event_id": "not-meeting",
+                "title": "Office",
+                "platform": "unknown",
+                "start": "2026-05-04T10:00:00+08:00",
+                "meeting_link": "https://example.com",
+            },
+            {
+                "calendar_event_id": "future",
+                "title": "Future",
+                "platform": "zoom",
+                "start": "2026-05-04T10:04:00+08:00",
+                "meeting_link": "https://zoom.us/j/456",
+            },
+        ]
+
+        eligible = reminder_eligible_meetings(meetings, now=now)
+
+        self.assertEqual([item["calendar_event_id"] for item in eligible], ["meet-soon"])
+        self.assertEqual(eligible[0]["seconds_until_start"], 120)
+        self.assertEqual(eligible[0]["suppression_key"], "20260504:meet-soon")
+
+    def test_reminder_eligible_meetings_keeps_grace_window_after_start(self):
+        now = datetime(2026, 5, 4, 10, 9, tzinfo=ZoneInfo("Asia/Singapore"))
+        meetings = [
+            {
+                "calendar_event_id": "within-grace",
+                "title": "Within grace",
+                "platform": "zoom",
+                "start": "2026-05-04T10:00:00+08:00",
+                "meeting_link": "https://zoom.us/j/123",
+            },
+            {
+                "calendar_event_id": "outside-grace",
+                "title": "Outside grace",
+                "platform": "zoom",
+                "start": "2026-05-04T09:58:00+08:00",
+                "meeting_link": "https://zoom.us/j/456",
+            },
+        ]
+
+        eligible = reminder_eligible_meetings(meetings, now=now)
+
+        self.assertEqual([item["calendar_event_id"] for item in eligible], ["within-grace"])
+        self.assertEqual(eligible[0]["seconds_until_start"], -540)
+
+    def test_meeting_reminder_suppression_key_is_stable_by_event_and_date(self):
+        meeting = {
+            "calendar_event_id": "event/with spaces",
+            "title": "Review",
+            "platform": "google_meet",
+            "start": "2026-05-04T10:00:00+08:00",
+        }
+
+        self.assertEqual(meeting_reminder_suppression_key(meeting), "20260504:event-with-spaces")
 
 
 class MeetingRecordStoreTests(unittest.TestCase):
@@ -293,6 +378,53 @@ class MeetingRecorderRouteTests(unittest.TestCase):
         payload = response.get_json()
         self.assertEqual(payload["records"][0]["title"], "Review")
 
+    def test_non_admin_cannot_access_reminders_api(self):
+        with self.app.test_client() as client:
+            self._login(client, email="owner@npt.sg", scopes=[CALENDAR_READONLY_SCOPE])
+            response = client.get("/api/meeting-recorder/reminders")
+
+        self.assertEqual(response.status_code, 403)
+
+    def test_reminders_api_returns_eligible_meetings_and_active_recording(self):
+        store = self.app.config["MEETING_RECORD_STORE"]
+        active = store.create_record(
+            owner_email="xiaodong.zheng@npt.sg",
+            title="Current",
+            platform="google_meet",
+            meeting_link="https://meet.google.com/current",
+        )
+        active["status"] = "recording"
+        store.save_record(active)
+        start = datetime.now(ZoneInfo("Asia/Singapore")) + timedelta(seconds=90)
+
+        fake_calendar = Mock()
+        fake_calendar.upcoming_meetings.return_value = [
+            {
+                "calendar_event_id": "event-1",
+                "title": "Upcoming",
+                "platform": "google_meet",
+                "start": start.isoformat(),
+                "end": (start + timedelta(minutes=30)).isoformat(),
+                "meeting_link": "https://meet.google.com/abc-defg-hij",
+            }
+        ]
+
+        with patch("bpmis_jira_tool.web._build_calendar_meeting_service", return_value=fake_calendar), patch(
+            "bpmis_jira_tool.web._meeting_recorder_diagnostics_payload",
+            return_value={"audio_capture_label": "Aggregate device configured", "system_audio_configured": True},
+        ):
+            with self.app.test_client() as client:
+                self._login(client, email="xiaodong.zheng@npt.sg", scopes=[CALENDAR_READONLY_SCOPE])
+                response = client.get("/api/meeting-recorder/reminders")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertTrue(payload["calendar_connected"])
+        self.assertEqual(payload["meetings"][0]["calendar_event_id"], "event-1")
+        self.assertEqual(payload["meetings"][0]["suppression_key"].split(":", 1)[1], "event-1")
+        self.assertEqual(payload["active_recording"]["record_id"], active["record_id"])
+        self.assertEqual(payload["diagnostics"]["audio_capture_label"], "Aggregate device configured")
+
     def test_diagnostics_and_records_use_local_agent_when_configured(self):
         fake_client = Mock()
         fake_client.meeting_recorder_diagnostics.return_value = {"ffmpeg_configured": True, "ffmpeg_path": "/opt/homebrew/bin/ffmpeg"}
@@ -382,7 +514,15 @@ class MeetingRecorderRouteTests(unittest.TestCase):
                 self._login(client, email="xiaodong.zheng@npt.sg")
                 start = client.post(
                     "/api/meeting-recorder/start",
-                    json={"title": "Review", "meeting_link": "https://zoom.us/j/123"},
+                    json={
+                        "title": "Review",
+                        "platform": "zoom",
+                        "meeting_link": "https://zoom.us/j/123",
+                        "calendar_event_id": "event-1",
+                        "scheduled_start": "2026-05-04T10:00:00+08:00",
+                        "scheduled_end": "2026-05-04T10:30:00+08:00",
+                        "attendees": [{"email": "alice@npt.sg"}],
+                    },
                 )
                 stop = client.post("/api/meeting-recorder/records/meeting-1/stop")
                 process = client.post("/api/meeting-recorder/records/meeting-1/process")
@@ -392,7 +532,16 @@ class MeetingRecorderRouteTests(unittest.TestCase):
         self.assertEqual(stop.status_code, 200)
         self.assertEqual(process.status_code, 200)
         self.assertEqual(email.status_code, 200)
-        fake_runtime.start_recording.assert_called_once()
+        fake_runtime.start_recording.assert_called_once_with(
+            owner_email="xiaodong.zheng@npt.sg",
+            title="Review",
+            platform="zoom",
+            meeting_link="https://zoom.us/j/123",
+            calendar_event_id="event-1",
+            scheduled_start="2026-05-04T10:00:00+08:00",
+            scheduled_end="2026-05-04T10:30:00+08:00",
+            attendees=[{"email": "alice@npt.sg"}],
+        )
         fake_runtime.stop_recording.assert_called_once_with(record_id="meeting-1", owner_email="xiaodong.zheng@npt.sg")
         fake_processing.process_recording.assert_called_once_with(record_id="meeting-1", owner_email="xiaodong.zheng@npt.sg")
         fake_processing.send_minutes_email.assert_called_once()

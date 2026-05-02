@@ -318,6 +318,9 @@
         }
       })();
     </script>
+    {% if meeting_recorder_reminder_enabled %}
+      <script src="{{ url_for('static', filename='meeting_recorder_reminder.js', v=asset_revision|default('static')) }}" defer></script>
+    {% endif %}
     {% block extra_scripts %}{% endblock %}
   </body>
 </html>
