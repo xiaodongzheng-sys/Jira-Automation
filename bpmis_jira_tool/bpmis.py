@@ -182,6 +182,9 @@ class BPMISDirectApiClient(BPMISClient):
             "jira_live_status_override_count": 0,
             "bpmis_release_query_filter_probe_count": 0,
             "bpmis_release_query_filter_enabled_count": 0,
+            "bpmis_release_query_filter_disabled_count": 0,
+            "bpmis_release_query_filter_probe_failed_count": 0,
+            "bpmis_release_query_filter_used_count": 0,
             "issue_detail_enrichment_skipped_count": 0,
             "issue_created_before_cutoff_count": 0,
             "issue_release_before_cutoff_count": 0,
@@ -640,6 +643,8 @@ class BPMISDirectApiClient(BPMISClient):
         created_cutoff = self._parse_issue_datetime(created_after) if created_after else None
         release_cutoff = self._parse_issue_datetime(release_after) if release_after else None
         use_release_query_filter = self._bpmis_release_query_filter_enabled(user_ids, release_cutoff)
+        if use_release_query_filter:
+            self.request_stats["bpmis_release_query_filter_used_count"] += 1
         while True:
             if max_pages is not None and page > max(0, int(max_pages)):
                 self.request_stats["issue_list_page_cap_hit"] += 1
@@ -763,8 +768,9 @@ class BPMISDirectApiClient(BPMISClient):
     def _bpmis_release_query_filter_enabled(self, user_ids: list[int], release_cutoff: datetime | None) -> bool:
         if not release_cutoff:
             return False
-        mode = str(os.getenv("TEAM_DASHBOARD_BPMIS_RELEASE_QUERY_FILTER") or "").strip().casefold()
+        mode = str(os.getenv("TEAM_DASHBOARD_BPMIS_RELEASE_QUERY_FILTER") or "probe").strip().casefold()
         if mode not in {"1", "true", "yes", "probe"}:
+            self.request_stats["bpmis_release_query_filter_disabled_count"] += 1
             return False
 
         self.request_stats["bpmis_release_query_filter_probe_count"] += 1
@@ -781,6 +787,7 @@ class BPMISDirectApiClient(BPMISClient):
             )
             future_rows = ((future_response.get("data") or {}).get("rows") or []) if isinstance(future_response, dict) else []
             if future_rows:
+                self.request_stats["bpmis_release_query_filter_disabled_count"] += 1
                 return False
 
             cutoff_payload = self._team_dashboard_jira_issue_list_search_payload(
@@ -795,15 +802,19 @@ class BPMISDirectApiClient(BPMISClient):
             )
             cutoff_rows = ((cutoff_response.get("data") or {}).get("rows") or []) if isinstance(cutoff_response, dict) else []
         except (BPMISError, ValueError, TypeError) as error:
+            self.request_stats["bpmis_release_query_filter_probe_failed_count"] += 1
+            self.request_stats["bpmis_release_query_filter_disabled_count"] += 1
             self.event_logger.warning("Could not probe BPMIS release query filter: %s", error)
             return False
 
         if not cutoff_rows:
+            self.request_stats["bpmis_release_query_filter_disabled_count"] += 1
             return False
         for row in cutoff_rows:
             release_text = self._extract_issue_release_date_text(row)
             release_at = self._parse_issue_datetime(release_text)
             if not release_text or not release_at or release_at < release_cutoff:
+                self.request_stats["bpmis_release_query_filter_disabled_count"] += 1
                 return False
         self.request_stats["bpmis_release_query_filter_enabled_count"] += 1
         return True

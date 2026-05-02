@@ -285,6 +285,8 @@ class WebPortalFeatureTests(unittest.TestCase):
                 "jira_live_detail_lookup_count": 0,
                 "bpmis_release_query_filter_probe_count": 1,
                 "bpmis_release_query_filter_enabled_count": 1,
+                "bpmis_release_query_filter_used_count": 1,
+                "team_dashboard_zero_jira_fallback_candidate_count": 12,
             }
 
         stats = web_module._team_dashboard_fetch_stats(FakeBPMISClient())
@@ -294,6 +296,8 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertEqual(stats["jira_live_detail_lookup_count"], 0)
         self.assertEqual(stats["bpmis_release_query_filter_probe_count"], 1)
         self.assertEqual(stats["bpmis_release_query_filter_enabled_count"], 1)
+        self.assertEqual(stats["bpmis_release_query_filter_used_count"], 1)
+        self.assertEqual(stats["team_dashboard_zero_jira_fallback_candidate_count"], 12)
 
     def test_classify_portal_error_categorizes_duplicate_route_rule(self):
         details = _classify_portal_error(
@@ -2343,6 +2347,41 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertEqual(fake_client.single_project_task_calls, [])
         self.assertEqual(payload["team"]["fetch_stats"]["api_call_count"], 3)
         self.assertIn("backfill_zero_jira_projects", payload["team"]["timing_stats"])
+
+    def test_team_dashboard_backfill_skips_single_project_retry_after_bulk_empty_result(self):
+        class FakeTeamDashboardClient:
+            def __init__(self):
+                self.request_stats = {}
+                self.bulk_project_task_calls = []
+                self.single_project_task_calls = []
+
+            def list_jira_tasks_for_projects_created_by_emails(self, project_issue_ids, emails):
+                self.bulk_project_task_calls.append((project_issue_ids, emails))
+                return {"214164": []}
+
+            def list_jira_tasks_for_project_created_by_email(self, project_issue_id, email):
+                self.single_project_task_calls.append((project_issue_id, email))
+                return []
+
+        fake_client = FakeTeamDashboardClient()
+        team_payload = {
+            "under_prd": [
+                {
+                    "bpmis_id": "214164",
+                    "jira_tickets": [],
+                    "matched_pm_emails": ["zoey.luxy@npt.sg"],
+                }
+            ],
+            "pending_live": [],
+        }
+
+        web_module._backfill_team_dashboard_empty_project_jira_tasks(fake_client, team_payload)
+
+        self.assertEqual(fake_client.bulk_project_task_calls, [(["214164"], ["zoey.luxy@npt.sg"])])
+        self.assertEqual(fake_client.single_project_task_calls, [])
+        self.assertEqual(fake_client.request_stats["team_dashboard_zero_jira_fallback_candidate_count"], 1)
+        self.assertEqual(fake_client.request_stats["team_dashboard_zero_jira_bulk_project_count"], 1)
+        self.assertEqual(fake_client.request_stats["team_dashboard_zero_jira_per_project_fallback_skipped_count"], 1)
 
     def test_team_dashboard_pending_live_fallback_excludes_done_jira_tasks(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(

@@ -669,6 +669,16 @@
     if (elapsed > 0) parts.push(`Loaded in ${formatDuration(elapsed)}`);
     const apiCalls = Number(team.fetch_stats?.api_call_count || 0);
     if (apiCalls > 0) parts.push(`${apiCalls} upstream calls`);
+    const rowsScanned = Number(team.fetch_stats?.issue_rows_scanned || 0);
+    const jiraBulk = Number(team.fetch_stats?.jira_live_bulk_lookup_count || 0);
+    const fallbackCandidates = Number(team.fetch_stats?.team_dashboard_zero_jira_fallback_candidate_count || 0);
+    const releaseFilterUsed = Number(team.fetch_stats?.bpmis_release_query_filter_used_count || 0);
+    const bottlenecks = [];
+    if (rowsScanned > 0) bottlenecks.push(`BPMIS rows ${rowsScanned}`);
+    if (jiraBulk > 0) bottlenecks.push(`Jira bulk ${jiraBulk}`);
+    if (fallbackCandidates > 0) bottlenecks.push(`fallback ${fallbackCandidates}`);
+    if (releaseFilterUsed > 0) bottlenecks.push('release filter on');
+    if (bottlenecks.length) parts.push(bottlenecks.slice(0, 4).join(' / '));
     if (!parts.length && team.cached_at) parts.push(`Restored ${team.cached_at}`);
     return parts.length ? `<p class="productization-inline-status" data-tone="neutral">${escapeHtml(parts.join(' · '))}</p>` : '';
   };

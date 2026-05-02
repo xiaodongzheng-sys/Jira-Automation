@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 import difflib
@@ -4444,7 +4445,6 @@ def create_app() -> Flask:
         config = store.load()
         config_elapsed = round(time.monotonic() - config_started_at, 3)
         key_project_overrides = config.get("key_project_overrides") if isinstance(config.get("key_project_overrides"), dict) else {}
-        bpmis_client = _build_bpmis_client_for_current_user(settings)
         requested_team_key = str(request.args.get("team") or request.args.get("team_key") or "").strip().upper()
         force_reload = str(request.args.get("reload") or "").strip().lower() in {"1", "true", "yes"}
         if requested_team_key and requested_team_key not in TEAM_DASHBOARD_TEAMS:
@@ -4475,17 +4475,14 @@ def create_app() -> Flask:
                 continue
             started_at = time.monotonic()
             try:
-                step_started_at = time.monotonic()
-                tasks = bpmis_client.list_jira_tasks_created_by_emails(
+                bpmis_client = _build_bpmis_client_for_current_user(settings)
+                biz_bpmis_client = _build_bpmis_client_for_current_user(settings)
+                tasks, biz_projects = _team_dashboard_load_jira_and_biz_projects(
+                    bpmis_client,
+                    biz_bpmis_client,
                     emails,
-                    max_pages=_team_dashboard_jira_max_pages(),
-                    enrich_missing_parent=False,
-                    release_after=_team_dashboard_jira_release_after(),
+                    timing_stats,
                 )
-                _team_dashboard_add_timing(timing_stats, "list_jira_tasks", step_started_at)
-                step_started_at = time.monotonic()
-                biz_projects = _team_dashboard_biz_projects_for_emails(bpmis_client, emails)
-                _team_dashboard_add_timing(timing_stats, "list_biz_projects", step_started_at)
                 step_started_at = time.monotonic()
                 team_payload = _build_team_dashboard_task_group(
                     team_key,
@@ -4501,7 +4498,7 @@ def create_app() -> Flask:
                 _remove_team_dashboard_zero_jira_pending_live_projects(team_payload)
                 _team_dashboard_add_timing(timing_stats, "backfill_zero_jira_projects", step_started_at)
                 team_payload["elapsed_seconds"] = round(time.monotonic() - started_at, 2)
-                team_payload["fetch_stats"] = _team_dashboard_fetch_stats(bpmis_client)
+                team_payload["fetch_stats"] = _team_dashboard_combined_fetch_stats(bpmis_client, biz_bpmis_client)
                 timing_stats["total"] = team_payload["elapsed_seconds"]
                 team_payload["timing_stats"] = timing_stats
                 team_payloads.append(team_payload)
@@ -4549,7 +4546,7 @@ def create_app() -> Flask:
                         "pending_live": [],
                         "error": str(error),
                         "elapsed_seconds": timing_stats["total"],
-                        "fetch_stats": _team_dashboard_fetch_stats(bpmis_client),
+                        "fetch_stats": {},
                         "timing_stats": timing_stats,
                     }
                 )
@@ -7589,6 +7586,42 @@ def _team_dashboard_biz_projects_for_emails(bpmis_client: Any, emails: list[str]
     return list(projects.values())
 
 
+def _team_dashboard_load_jira_and_biz_projects(
+    jira_bpmis_client: Any,
+    biz_bpmis_client: Any,
+    emails: list[str],
+    timing_stats: dict[str, float],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    app_obj = current_app._get_current_object()
+
+    def load_jira_tasks() -> tuple[list[dict[str, Any]], float]:
+        started_at = time.monotonic()
+        rows = jira_bpmis_client.list_jira_tasks_created_by_emails(
+            emails,
+            max_pages=_team_dashboard_jira_max_pages(),
+            enrich_missing_parent=False,
+            release_after=_team_dashboard_jira_release_after(),
+        )
+        return rows, round(time.monotonic() - started_at, 3)
+
+    def load_biz_projects() -> tuple[list[dict[str, Any]], float]:
+        started_at = time.monotonic()
+        with app_obj.app_context():
+            rows = _team_dashboard_biz_projects_for_emails(biz_bpmis_client, emails)
+        return rows, round(time.monotonic() - started_at, 3)
+
+    started_at = time.monotonic()
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        jira_future = executor.submit(load_jira_tasks)
+        biz_future = executor.submit(load_biz_projects)
+        tasks, jira_elapsed = jira_future.result()
+        biz_projects, biz_elapsed = biz_future.result()
+    timing_stats["list_jira_tasks"] = jira_elapsed
+    timing_stats["list_biz_projects"] = biz_elapsed
+    timing_stats["list_jira_and_biz_projects"] = round(time.monotonic() - started_at, 3)
+    return tasks, biz_projects
+
+
 def _merge_team_dashboard_biz_project_lookup(
     projects: dict[str, dict[str, Any]],
     project: dict[str, Any],
@@ -7631,14 +7664,38 @@ def _team_dashboard_fetch_stats(bpmis_client: Any) -> dict[str, int]:
             "jira_live_status_override_count",
             "bpmis_release_query_filter_probe_count",
             "bpmis_release_query_filter_enabled_count",
+            "bpmis_release_query_filter_disabled_count",
+            "bpmis_release_query_filter_probe_failed_count",
+            "bpmis_release_query_filter_used_count",
             "issue_detail_enrichment_skipped_count",
             "issue_list_created_cutoff_hit",
             "issue_list_page_cap_hit",
             "issue_list_page_count",
             "issue_rows_scanned",
+            "team_dashboard_zero_jira_fallback_candidate_count",
+            "team_dashboard_zero_jira_bulk_project_count",
+            "team_dashboard_zero_jira_bulk_hit_count",
+            "team_dashboard_zero_jira_bulk_failed_count",
+            "team_dashboard_zero_jira_per_project_fallback_count",
+            "team_dashboard_zero_jira_per_project_fallback_skipped_count",
             "user_lookup_count",
         )
     }
+
+
+def _team_dashboard_combined_fetch_stats(*bpmis_clients: Any) -> dict[str, int]:
+    combined: dict[str, int] = {}
+    seen: set[int] = set()
+    for bpmis_client in bpmis_clients:
+        if bpmis_client is None:
+            continue
+        identity = id(bpmis_client)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        for key, value in _team_dashboard_fetch_stats(bpmis_client).items():
+            combined[key] = int(combined.get(key) or 0) + int(value or 0)
+    return combined
 
 
 def _team_dashboard_new_timing() -> dict[str, float]:
@@ -7647,6 +7704,7 @@ def _team_dashboard_new_timing() -> dict[str, float]:
         "cache_check": 0.0,
         "list_jira_tasks": 0.0,
         "list_biz_projects": 0.0,
+        "list_jira_and_biz_projects": 0.0,
         "group_projects": 0.0,
         "backfill_zero_jira_projects": 0.0,
         "cache_store": 0.0,
@@ -7656,6 +7714,12 @@ def _team_dashboard_new_timing() -> dict[str, float]:
 
 def _team_dashboard_add_timing(timing_stats: dict[str, float], key: str, started_at: float) -> None:
     timing_stats[key] = round(float(timing_stats.get(key) or 0.0) + (time.monotonic() - started_at), 3)
+
+
+def _team_dashboard_increment_request_stat(bpmis_client: Any, key: str, amount: int = 1) -> None:
+    stats = getattr(bpmis_client, "request_stats", None)
+    if isinstance(stats, dict):
+        stats[key] = int(stats.get(key) or 0) + amount
 
 
 def _load_all_team_dashboard_task_payloads(settings: Settings, config: dict[str, Any]) -> list[dict[str, Any]]:
@@ -8048,20 +8112,33 @@ def _backfill_team_dashboard_empty_project_jira_tasks(bpmis_client: Any, team_pa
             if not emails:
                 continue
             candidates.append({"project": project, "bpmis_id": bpmis_id, "emails": emails})
+    _team_dashboard_increment_request_stat(
+        bpmis_client,
+        "team_dashboard_zero_jira_fallback_candidate_count",
+        len(candidates),
+    )
+    bulk_lookup_handled = False
     if candidates and hasattr(bpmis_client, "list_jira_tasks_for_projects_created_by_emails"):
         project_ids = [candidate["bpmis_id"] for candidate in candidates]
         all_emails: list[str] = []
         for candidate in candidates:
             all_emails.extend(candidate["emails"])
+        _team_dashboard_increment_request_stat(
+            bpmis_client,
+            "team_dashboard_zero_jira_bulk_project_count",
+            len(project_ids),
+        )
         try:
             grouped_rows = bpmis_client.list_jira_tasks_for_projects_created_by_emails(
                 project_ids,
                 _normalize_team_dashboard_emails(all_emails),
             )
         except Exception as error:  # noqa: BLE001 - keep the older per-project fallback available.
+            _team_dashboard_increment_request_stat(bpmis_client, "team_dashboard_zero_jira_bulk_failed_count")
             current_app.logger.warning("Team Dashboard bulk Jira fallback lookup failed: %s", error)
-            grouped_rows = {}
+            grouped_rows = None
         if isinstance(grouped_rows, dict):
+            bulk_lookup_handled = True
             for candidate in candidates:
                 rows = grouped_rows.get(candidate["bpmis_id"]) or []
                 tickets = _normalize_team_dashboard_project_fallback_rows(
@@ -8070,9 +8147,27 @@ def _backfill_team_dashboard_empty_project_jira_tasks(bpmis_client: Any, team_pa
                     candidate["emails"],
                 )
                 if tickets:
+                    _team_dashboard_increment_request_stat(bpmis_client, "team_dashboard_zero_jira_bulk_hit_count")
                     candidate["project"]["jira_tickets"] = tickets
                     candidate["project"]["task_count"] = len(tickets)
                     _apply_team_dashboard_project_release_date(candidate["project"])
+    if bulk_lookup_handled:
+        skipped_count = sum(
+            1
+            for candidate in candidates
+            if isinstance(candidate.get("project"), dict) and not candidate["project"].get("jira_tickets")
+        )
+        _team_dashboard_increment_request_stat(
+            bpmis_client,
+            "team_dashboard_zero_jira_per_project_fallback_skipped_count",
+            skipped_count,
+        )
+    if bulk_lookup_handled:
+        for section_key in ("under_prd", "pending_live"):
+            projects = team_payload.get(section_key)
+            if section_key == "under_prd" and isinstance(projects, list):
+                _sort_team_dashboard_under_prd_projects(projects)
+        return
     for section_key in ("under_prd", "pending_live"):
         projects = team_payload.get(section_key)
         if not isinstance(projects, list):
@@ -8083,6 +8178,7 @@ def _backfill_team_dashboard_empty_project_jira_tasks(bpmis_client: Any, team_pa
             bpmis_id = str(project.get("bpmis_id") or "").strip()
             if not bpmis_id:
                 continue
+            _team_dashboard_increment_request_stat(bpmis_client, "team_dashboard_zero_jira_per_project_fallback_count")
             tickets = _team_dashboard_project_fallback_jira_tasks(bpmis_client, project)
             if not tickets:
                 continue

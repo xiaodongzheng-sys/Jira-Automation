@@ -2210,9 +2210,11 @@ class BPMISClientTests(unittest.TestCase):
             )
 
             self.assertEqual([task["jira_id"] for task in tasks], ["AF-991", "AF-992"])
-            self.assertEqual(len(searches[0]["subQueries"]), 2)
+            self.assertEqual(len(searches[-1]["subQueries"]), 2)
             self.assertEqual(tasks[0]["release_date"], "2026-03-01")
             self.assertEqual(tasks[1]["release_date"], "")
+            self.assertEqual(client.request_stats["bpmis_release_query_filter_probe_count"], 1)
+            self.assertEqual(client.request_stats["bpmis_release_query_filter_disabled_count"], 1)
             self.assertEqual(client.request_stats["issue_release_before_cutoff_count"], 1)
             self.assertEqual(client.request_stats["issue_release_missing_included_count"], 1)
 
@@ -2246,18 +2248,18 @@ class BPMISClientTests(unittest.TestCase):
                 }
 
             client._api_request = fake_api_request  # type: ignore[method-assign]
-            with patch.dict(os.environ, {"TEAM_DASHBOARD_BPMIS_RELEASE_QUERY_FILTER": "probe"}):
-                tasks = client.list_jira_tasks_created_by_emails(
-                    ["pm@npt.sg"],
-                    release_after="2026-04-29",
-                    enrich_missing_parent=False,
-                )
+            tasks = client.list_jira_tasks_created_by_emails(
+                ["pm@npt.sg"],
+                release_after="2026-04-29",
+                enrich_missing_parent=False,
+            )
 
             self.assertEqual([task["jira_id"] for task in tasks], ["AF-991"])
             self.assertEqual(len(searches), 3)
             self.assertIn("2026-04-29", json.dumps(searches[-1]["subQueries"][-1]))
             self.assertEqual(client.request_stats["bpmis_release_query_filter_probe_count"], 1)
             self.assertEqual(client.request_stats["bpmis_release_query_filter_enabled_count"], 1)
+            self.assertEqual(client.request_stats["bpmis_release_query_filter_used_count"], 1)
 
     def test_team_dashboard_jira_lookup_skips_bpmis_release_filter_when_probe_fails(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2287,18 +2289,18 @@ class BPMISClientTests(unittest.TestCase):
                 }
 
             client._api_request = fake_api_request  # type: ignore[method-assign]
-            with patch.dict(os.environ, {"TEAM_DASHBOARD_BPMIS_RELEASE_QUERY_FILTER": "probe"}):
-                tasks = client.list_jira_tasks_created_by_emails(
-                    ["pm@npt.sg"],
-                    release_after="2026-04-29",
-                    enrich_missing_parent=False,
-                )
+            tasks = client.list_jira_tasks_created_by_emails(
+                ["pm@npt.sg"],
+                release_after="2026-04-29",
+                enrich_missing_parent=False,
+            )
 
             self.assertEqual([task["jira_id"] for task in tasks], ["AF-991"])
             self.assertEqual(len(searches), 2)
             self.assertEqual(len(searches[-1]["subQueries"]), 2)
             self.assertEqual(client.request_stats["bpmis_release_query_filter_probe_count"], 1)
             self.assertEqual(client.request_stats["bpmis_release_query_filter_enabled_count"], 0)
+            self.assertEqual(client.request_stats["bpmis_release_query_filter_disabled_count"], 1)
 
     def test_team_dashboard_parent_project_uses_inline_parent_when_detail_missing(self):
         with tempfile.TemporaryDirectory() as temp_dir:
