@@ -994,6 +994,18 @@ class PortalJiraCreationService:
 
     def _ticket_with_live_jira_fields_from_detail(self, ticket: dict[str, Any], live_detail: dict[str, Any]) -> dict[str, Any]:
         item = dict(ticket)
+        raw_response = item.get("raw_response") if isinstance(item.get("raw_response"), dict) else {}
+        if not str(item.get("market") or "").strip():
+            item["market"] = self._extract_first_text(raw_response, "marketId", "market", "country")
+        if not str(item.get("component") or "").strip():
+            item["component"] = self._extract_first_text(live_detail, "components", "componentId", "component") or self._extract_first_text(
+                raw_response,
+                "componentId",
+                "component",
+                "components",
+            )
+        if not str(item.get("system") or "").strip():
+            item["system"] = self._extract_first_text(raw_response, "system", "systemId", "track", "scope")
         item["live_jira_title"] = self._extract_first_text(live_detail, "summary", "title", "jiraSummary") or str(
             item.get("jira_title") or ""
         ).strip()

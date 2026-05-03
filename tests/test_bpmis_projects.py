@@ -57,7 +57,14 @@ class FakeBPMISClient:
         self.jira_task_bulk_calls.append((normalized_ids, normalized_emails))
         return {
             issue_id: [
-                task
+                {
+                    **task,
+                    "raw_response": {
+                        "componentId": {"label": task.get("component")},
+                        "marketId": {"label": task.get("market")},
+                        "system": task.get("system"),
+                    },
+                }
                 for email in normalized_emails
                 for task in self._jira_tasks_for_project_created_by_email(issue_id, email)
             ]
@@ -229,6 +236,8 @@ class BPMISProjectStoreTests(unittest.TestCase):
             self.assertEqual(projects_by_id["225160"]["brd_link"], "https://docs/brd-2")
             self.assertEqual(projects_by_id["225159"]["jira_tickets"][0]["ticket_key"], "AF-EXIST-1")
             self.assertEqual(projects_by_id["225159"]["jira_tickets"][0]["jira_title"], "[Feature][AF]Existing synced task")
+            self.assertEqual(projects_by_id["225159"]["jira_tickets"][0]["component"], "DBP-Anti-fraud")
+            self.assertEqual(projects_by_id["225159"]["jira_tickets"][0]["market"], "SG")
             self.assertEqual(service.bpmis_client.jira_task_bulk_calls, [(["225159", "225160"], ["pm@npt.sg"])])
             self.assertEqual(service.bpmis_client.jira_task_single_calls, [])
 
@@ -362,6 +371,8 @@ class BPMISProjectStoreTests(unittest.TestCase):
             self.assertEqual(tickets[0]["live_jira_title"], "Live Jira title")
             self.assertEqual(tickets[0]["live_jira_status"], "In Progress")
             self.assertEqual(tickets[0]["live_fix_version"], "Live_26Q2")
+            self.assertEqual(tickets[0]["component"], "DBP-Anti-fraud")
+            self.assertEqual(tickets[0]["market"], "SG")
             self.assertEqual(bpmis_client.detail_bulk_calls, [["AF-1"]])
             self.assertEqual(bpmis_client.detail_calls, [])
             updated = service.update_ticket_status(
