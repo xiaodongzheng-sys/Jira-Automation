@@ -1866,6 +1866,283 @@ class WebPortalFeatureTests(unittest.TestCase):
             ],
         )
 
+    def test_team_dashboard_all_team_reload_merged_query_matches_serial_output(self):
+        team_config = {
+            "teams": {
+                "AF": {"member_emails": ["af@npt.sg", "shared@npt.sg"]},
+                "CRMS": {"member_emails": ["cr@npt.sg"]},
+                "GRC": {"member_emails": ["ops@npt.sg", "shared@npt.sg"]},
+            }
+        }
+
+        class FakeMergedTeamDashboardClient:
+            def __init__(self):
+                self.task_calls = []
+                self.biz_bulk_calls = []
+                self.fallback_bulk_calls = []
+                self.request_stats = {"api_call_count": 0}
+                self.tasks = [
+                    {
+                        "jira_id": "AF-1",
+                        "jira_title": "AF PRD",
+                        "pm_email": "af@npt.sg",
+                        "jira_status": "Waiting",
+                        "version": "AF_v1",
+                        "release_date": "2026-06-01",
+                        "prd_links": ["https://docs/af"],
+                        "parent_project": {
+                            "bpmis_id": "P-AF",
+                            "project_name": "Fraud Project",
+                            "market": "SG",
+                            "priority": "P1",
+                            "regional_pm_pic": "af@npt.sg",
+                        },
+                    },
+                    {
+                        "jira_id": "AF-2",
+                        "jira_title": "AF Live",
+                        "pm_email": "af@npt.sg",
+                        "jira_status": "Testing",
+                        "version": "AF_v2",
+                        "release_date": "2026-06-10",
+                        "parent_project": {
+                            "bpmis_id": "P-AF",
+                            "project_name": "Fraud Project",
+                            "market": "SG",
+                            "priority": "P1",
+                            "regional_pm_pic": "af@npt.sg",
+                        },
+                    },
+                    {
+                        "jira_id": "CR-1",
+                        "jira_title": "Credit PRD",
+                        "pm_email": "cr@npt.sg",
+                        "jira_status": "PRD in Progress",
+                        "version": "CR_v1",
+                        "parent_project": {
+                            "bpmis_id": "P-CR",
+                            "project_name": "Credit Project",
+                            "market": "ID",
+                            "priority": "P0",
+                            "regional_pm_pic": "cr@npt.sg",
+                        },
+                    },
+                    {
+                        "jira_id": "OPS-1",
+                        "jira_title": "Ops Live",
+                        "pm_email": "ops@npt.sg",
+                        "jira_status": "UAT",
+                        "release_date": "2026-07-01",
+                        "version": "OPS_v1",
+                        "parent_project": {
+                            "bpmis_id": "P-OPS",
+                            "project_name": "Ops Project",
+                            "market": "PH",
+                            "priority": "P2",
+                            "regional_pm_pic": "ops@npt.sg",
+                        },
+                    },
+                    {
+                        "jira_id": "SHARED-1",
+                        "jira_title": "Shared PRD",
+                        "pm_email": "shared@npt.sg",
+                        "jira_status": "Waiting",
+                        "version": "SHARED_v1",
+                        "parent_project": {
+                            "bpmis_id": "P-SHARED",
+                            "project_name": "Shared Project",
+                            "market": "SG",
+                            "priority": "P1",
+                            "regional_pm_pic": "shared@npt.sg",
+                        },
+                    },
+                ]
+                self.projects = [
+                    {
+                        "issue_id": "P-AF",
+                        "project_name": "Fraud Project",
+                        "market": "SG",
+                        "priority": "P1",
+                        "regional_pm_pic": "af@npt.sg",
+                        "status": "Confirmed",
+                        "matched_pm_emails": ["af@npt.sg"],
+                    },
+                    {
+                        "issue_id": "P-AF-ZERO",
+                        "project_name": "AF Zero Project",
+                        "market": "SG",
+                        "priority": "P0",
+                        "regional_pm_pic": "af@npt.sg",
+                        "status": "Confirmed",
+                        "matched_pm_emails": ["af@npt.sg"],
+                    },
+                    {
+                        "issue_id": "P-CR",
+                        "project_name": "Credit Project",
+                        "market": "ID",
+                        "priority": "P0",
+                        "regional_pm_pic": "cr@npt.sg",
+                        "status": "Confirmed",
+                        "matched_pm_emails": ["cr@npt.sg"],
+                    },
+                    {
+                        "issue_id": "P-CR-ZERO",
+                        "project_name": "Credit Zero Live",
+                        "market": "ID",
+                        "priority": "P1",
+                        "regional_pm_pic": "cr@npt.sg",
+                        "status": "Developing",
+                        "matched_pm_emails": ["cr@npt.sg"],
+                    },
+                    {
+                        "issue_id": "P-OPS",
+                        "project_name": "Ops Project",
+                        "market": "PH",
+                        "priority": "P2",
+                        "regional_pm_pic": "ops@npt.sg",
+                        "status": "UAT",
+                        "matched_pm_emails": ["ops@npt.sg"],
+                    },
+                    {
+                        "issue_id": "P-SHARED",
+                        "project_name": "Shared Project",
+                        "market": "SG",
+                        "priority": "P1",
+                        "regional_pm_pic": "shared@npt.sg",
+                        "status": "Confirmed",
+                        "matched_pm_emails": ["shared@npt.sg"],
+                    },
+                ]
+                self.fallback_rows = {
+                    "P-AF-ZERO": [
+                        {
+                            "jira_id": "AF-Z1",
+                            "jira_title": "AF zero fallback",
+                            "pm_email": "af@npt.sg",
+                            "jira_status": "Waiting",
+                            "version": "AF_zero",
+                            "release_date": "2026-06-20",
+                        }
+                    ],
+                    "P-CR-ZERO": [
+                        {
+                            "jira_id": "CR-Z1",
+                            "jira_title": "CR zero fallback",
+                            "pm_email": "cr@npt.sg",
+                            "jira_status": "Testing",
+                            "version": "CR_zero",
+                            "release_date": "2026-07-20",
+                        }
+                    ],
+                }
+
+            def list_jira_tasks_created_by_emails(self, emails, **kwargs):
+                normalized = web_module._normalize_team_dashboard_emails(emails)
+                self.task_calls.append({"emails": normalized, "kwargs": kwargs})
+                allowed = set(normalized)
+                return [task for task in self.tasks if task["pm_email"] in allowed]
+
+            def list_biz_projects_for_pm_emails(self, emails):
+                normalized = web_module._normalize_team_dashboard_emails(emails)
+                self.biz_bulk_calls.append(normalized)
+                allowed = set(normalized)
+                rows = []
+                for project in self.projects:
+                    matches = [email for email in project["matched_pm_emails"] if email in allowed]
+                    if not matches:
+                        continue
+                    rows.append({**project, "matched_pm_emails": matches})
+                return rows
+
+            def list_biz_projects_for_pm_email(self, email):
+                return self.list_biz_projects_for_pm_emails([email])
+
+            def list_jira_tasks_for_projects_created_by_emails(self, project_issue_ids, emails):
+                normalized_ids = [str(project_id) for project_id in project_issue_ids]
+                normalized_emails = web_module._normalize_team_dashboard_emails(emails)
+                self.fallback_bulk_calls.append((normalized_ids, normalized_emails))
+                allowed = set(normalized_emails)
+                return {
+                    project_id: [
+                        row
+                        for row in self.fallback_rows.get(project_id, [])
+                        if str(row.get("pm_email") or "").lower() in allowed
+                    ]
+                    for project_id in normalized_ids
+                }
+
+        def make_client(fake_client):
+            temp_dir = tempfile.TemporaryDirectory()
+            patcher = patch.dict(
+                os.environ,
+                {
+                    "FLASK_SECRET_KEY": "test-secret",
+                    "TEAM_PORTAL_DATA_DIR": temp_dir.name,
+                    "TEAM_PORTAL_BASE_URL": "",
+                    "TEAM_ALLOWED_EMAILS": "",
+                    "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                    "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
+                    "TEAM_DASHBOARD_JIRA_RELEASE_AFTER": "2026-04-29",
+                },
+                clear=True,
+            )
+            patcher.start()
+            app = create_app()
+            app.testing = True
+            app.config["TEAM_DASHBOARD_CONFIG_STORE"].save(team_config)
+            client = app.test_client()
+            with client.session_transaction() as session:
+                session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong"}
+                session["google_credentials"] = {"token": "x"}
+            return temp_dir, patcher, client
+
+        def business_payload(team):
+            return {
+                "team_key": team["team_key"],
+                "label": team["label"],
+                "member_emails": team["member_emails"],
+                "under_prd": team["under_prd"],
+                "pending_live": team["pending_live"],
+            }
+
+        serial_fake = FakeMergedTeamDashboardClient()
+        serial_temp_dir, serial_env_patch, serial_client = make_client(serial_fake)
+        try:
+            with patch("bpmis_jira_tool.web._build_bpmis_client_for_current_user", return_value=serial_fake):
+                serial_teams = {}
+                for team_key in ("AF", "CRMS", "GRC"):
+                    response = serial_client.get(f"/api/team-dashboard/tasks?team_key={team_key}&reload=1")
+                    self.assertEqual(response.status_code, 200)
+                    serial_teams[team_key] = business_payload(response.get_json()["team"])
+        finally:
+            serial_env_patch.stop()
+            serial_temp_dir.cleanup()
+
+        merged_fake = FakeMergedTeamDashboardClient()
+        merged_temp_dir, merged_env_patch, merged_client = make_client(merged_fake)
+        try:
+            with patch("bpmis_jira_tool.web._build_bpmis_client_for_current_user", return_value=merged_fake):
+                merged_response = merged_client.get("/api/team-dashboard/tasks?reload=1")
+                self.assertEqual(merged_response.status_code, 200)
+                merged_payload = merged_response.get_json()
+                merged_teams = {team["team_key"]: business_payload(team) for team in merged_payload["teams"]}
+        finally:
+            merged_env_patch.stop()
+            merged_temp_dir.cleanup()
+
+        self.assertEqual(merged_teams, serial_teams)
+        self.assertEqual(len(serial_fake.task_calls), 3)
+        self.assertEqual(len(serial_fake.biz_bulk_calls), 3)
+        self.assertEqual(len(serial_fake.fallback_bulk_calls), 2)
+        self.assertEqual(len(merged_fake.task_calls), 1)
+        self.assertEqual(
+            merged_fake.task_calls[0]["emails"],
+            ["af@npt.sg", "shared@npt.sg", "cr@npt.sg", "ops@npt.sg"],
+        )
+        self.assertEqual(len(merged_fake.biz_bulk_calls), 1)
+        self.assertEqual(len(merged_fake.fallback_bulk_calls), 1)
+        self.assertEqual(merged_fake.fallback_bulk_calls[0][0], ["P-AF-ZERO", "P-CR-ZERO"])
+
     def test_team_dashboard_link_biz_project_jira_step_does_not_load_bpmis_projects(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
