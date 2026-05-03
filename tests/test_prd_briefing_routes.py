@@ -80,7 +80,7 @@ class FakeBriefingService:
                 "session_id": "session-1",
                 "title": "PRD",
                 "model_id": "codex:gpt-5.5",
-                "prompt_version": "v3_codex_gpt55_prd_presentation_chunks_media",
+                "prompt_version": "v4_codex_gpt55_prd_presentation_chunks_media",
                 "page_id": "123",
                 "version_number": "5",
             },

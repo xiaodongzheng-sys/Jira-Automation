@@ -152,6 +152,34 @@ class ConfluenceConnectorTests(unittest.TestCase):
         self.assertNotIn("style=", table_html)
         self.assertNotIn("onclick", table_html)
 
+    def test_table_media_preserves_cell_images_through_proxy(self):
+        media = {}
+        sections = self.connector._parse_sections(
+            html="""
+            <h1>Status Machine</h1>
+            <table>
+              <tr><th>Status Machine</th><th>Remarks</th></tr>
+              <tr>
+                <td><img src="/download/attachments/1/status-machine.png" width="720" height="420" /></td>
+                <td>Show state transitions.</td>
+              </tr>
+            </table>
+            """,
+            base_url="https://confluence.shopee.io",
+            source_url="https://confluence.shopee.io/pages/viewpage.action?pageId=1",
+            session_id="session-1",
+            media_dict=media,
+        )
+
+        self.assertIn("[MEDIA_ID_1]", sections[0].content)
+        self.assertEqual(media["MEDIA_ID_1"]["type"], "table")
+        table_html = media["MEDIA_ID_1"]["content"]
+        self.assertIn("<img", table_html)
+        self.assertIn("/prd-briefing/image-proxy?src=", table_html)
+        self.assertIn("https%3A%2F%2Fconfluence.shopee.io%2Fdownload%2Fattachments%2F1%2Fstatus-machine.png", table_html)
+        self.assertIn('loading="lazy"', table_html)
+        self.assertNotIn("/download/attachments/1/status-machine.png", table_html)
+
     @patch("prd_briefing.confluence.requests.get")
     def test_ingest_display_url_follows_confluence_renamed_page_suggestion(self, mock_get):
         empty_search = Mock()

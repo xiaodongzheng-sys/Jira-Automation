@@ -4294,6 +4294,14 @@ body.briefing-no-image-mode .briefing-presentation-card {
   color: var(--ink);
 }
 
+.briefing-presenter-media-table img {
+  display: block;
+  max-width: min(100%, 980px);
+  height: auto;
+  margin: 8px auto;
+  object-fit: contain;
+}
+
 .briefing-share-sound-toast {
   position: fixed;
   right: 24px;
@@ -4471,6 +4479,11 @@ body.briefing-no-image-mode .briefing-presentation-card {
 
 .briefing-presenter-layout.is-theater .briefing-presenter-media-table a {
   color: #1d4ed8 !important;
+}
+
+.briefing-presenter-layout.is-theater .briefing-presenter-media-table img {
+  max-width: 100%;
+  max-height: calc(100vh - 300px);
 }
 
 .briefing-presenter-layout.is-theater .briefing-presenter-script {

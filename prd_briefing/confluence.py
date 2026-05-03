@@ -19,7 +19,10 @@ except ImportError:  # pragma: no cover - requirements should install bleach in 
     bleach = None
 
 
-TABLE_ALLOWED_TAGS = ["table", "thead", "tbody", "tr", "th", "td", "p", "br", "b", "i", "strong", "em"]
+TABLE_ALLOWED_TAGS = ["table", "thead", "tbody", "tr", "th", "td", "p", "br", "b", "i", "strong", "em", "img"]
+TABLE_ALLOWED_ATTRIBUTES = {
+    "img": ["src", "alt", "width", "height", "loading", "decoding"],
+}
 NOISE_IMAGE_URL_RE = re.compile(
     r"(/images/icons/|/profilepics/|emoticons|avatar|tracking|pixel|spacer|blank\.gif|transparent)",
     re.IGNORECASE,
@@ -401,12 +404,13 @@ class ConfluenceConnector:
         self,
         table: Tag,
         *,
+        base_url: str,
         media_dict: dict[str, dict[str, str]] | None,
         section_path: str,
     ) -> str | None:
         if media_dict is None or not self._is_presentation_table(table):
             return None
-        sanitized = self._sanitize_table_html(table)
+        sanitized = self._sanitize_table_html(table, base_url=base_url)
         if not sanitized:
             return None
         media_id = f"MEDIA_ID_{len(media_dict) + 1}"
@@ -445,19 +449,30 @@ class ConfluenceConnector:
                 return False
         return True
 
-    def _sanitize_table_html(self, table: Tag) -> str:
+    def _sanitize_table_html(self, table: Tag, *, base_url: str) -> str:
         fragment = BeautifulSoup(str(table), "html.parser")
         for unwanted in fragment.find_all(["script", "style"]):
             unwanted.decompose()
+        for image in list(fragment.find_all("img")):
+            if self._is_noise_image(image):
+                image.decompose()
+                continue
+            src = (image.get("src") or "").strip()
+            if src:
+                resolved_src = self._resolve_image_ref(src, base_url=base_url)
+                image["src"] = f"/prd-briefing/image-proxy?src={quote(resolved_src, safe='')}"
+            image["loading"] = "lazy"
+            image["decoding"] = "async"
         raw = str(fragment.find("table") or fragment)
         if bleach is not None:
-            return bleach.clean(raw, tags=TABLE_ALLOWED_TAGS, attributes={}, strip=True).strip()
+            return bleach.clean(raw, tags=TABLE_ALLOWED_TAGS, attributes=TABLE_ALLOWED_ATTRIBUTES, strip=True).strip()
         fallback = BeautifulSoup(raw, "html.parser")
         for tag in list(fallback.find_all(True)):
             if tag.name not in TABLE_ALLOWED_TAGS:
                 tag.unwrap()
                 continue
-            tag.attrs = {}
+            allowed_attrs = set(TABLE_ALLOWED_ATTRIBUTES.get(str(tag.name), []))
+            tag.attrs = {key: value for key, value in tag.attrs.items() if key in allowed_attrs}
         return str(fallback.find("table") or fallback).strip()
 
     @staticmethod
@@ -531,6 +546,7 @@ class ConfluenceConnector:
             block = self._render_html_fragment(node, base_url=base_url)
             media_ref = self._register_table_media(
                 table,
+                base_url=base_url,
                 media_dict=media_dict,
                 section_path=section_path,
             ) if table else None
