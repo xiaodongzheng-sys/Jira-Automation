@@ -8232,6 +8232,76 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertEqual(payload["answer_contract"]["status"], "model_answer")
         self.assertIn("IssueRepository reads issue_table", payload["llm_answer"])
 
+    def test_codex_repair_bad_request_keeps_initial_answer(self):
+        service = SourceCodeQAService(
+            data_root=Path(self.temp_dir.name),
+            team_profiles=TEAM_PROFILE_DEFAULTS,
+            llm_provider="codex_cli_bridge",
+            gitlab_token="secret-token",
+            git_timeout_seconds=5,
+            max_file_bytes=200_000,
+        )
+        entry = RepositoryEntry("Portal Repo", "https://git.example.com/team/portal.git")
+        key = "AF:All"
+        repo_path = service._repo_path(key, entry)
+        source_file = repo_path / "repository" / "IssueRepository.java"
+        source_file.parent.mkdir(parents=True)
+        source_file.write_text("class IssueRepository {\n  void find(){ jdbc.query(\"select * from issue_table\"); }\n}\n", encoding="utf-8")
+        matches = [
+            {
+                "repo": "Portal Repo",
+                "path": "repository/IssueRepository.java",
+                "line_start": 1,
+                "line_end": 3,
+                "retrieval": "persistent_index",
+                "trace_stage": "direct",
+                "reason": "repository and table matched",
+                "score": 10,
+                "snippet": "class IssueRepository { void find(){ jdbc.query(\"select * from issue_table\"); } }",
+            }
+        ]
+        calls = []
+
+        def fake_run(command, **kwargs):
+            calls.append((command, kwargs))
+            if "login" in command and "status" in command:
+                return SimpleNamespace(returncode=0, stdout="Logged in using ChatGPT\n", stderr="")
+            output_path = command[command.index("--output-last-message") + 1]
+            exec_count = len([item for item in calls if "exec" in item[0]])
+            if exec_count == 1:
+                Path(output_path).write_text(
+                    '{"direct_answer":"Initial answer survived repair failure.",'
+                    '"claims":[{"text":"IssueRepository reads issue_table","citations":[]}],'
+                    '"missing_evidence":[],"confidence":"medium"}',
+                    encoding="utf-8",
+                )
+            else:
+                Path(output_path).write_text('{"detail":"Bad Request"}', encoding="utf-8")
+            return SimpleNamespace(returncode=0, stdout='{"type":"done"}\n', stderr="")
+
+        with patch("bpmis_jira_tool.source_code_qa.shutil.which", return_value="/usr/local/bin/codex"), patch(
+            "bpmis_jira_tool.source_code_qa.subprocess.run",
+            side_effect=fake_run,
+        ):
+            payload = service._build_llm_answer(
+                entries=[entry],
+                key=key,
+                pm_team="AF",
+                country="All",
+                question="what table does IssueRepository read",
+                matches=matches,
+                llm_budget_mode="auto",
+                followup_context={"question": "previous", "answer": "previous answer"},
+                requested_answer_mode="auto",
+            )
+
+        exec_calls = [item for item in calls if "exec" in item[0]]
+        self.assertEqual(len(exec_calls), 2)
+        self.assertEqual(payload["llm_route"]["codex_repair_skipped_reason"], "repair_failed_kept_initial_answer")
+        self.assertEqual(payload["codex_cli_summary"]["repair_skipped_reason"], "repair_failed_kept_initial_answer")
+        self.assertIn("Initial answer survived repair failure", payload["llm_answer"])
+        self.assertNotIn('{"detail":"Bad Request"}', payload["llm_answer"])
+
     def test_codex_cli_bridge_requires_chatgpt_login(self):
         provider = CodexCliBridgeSourceCodeQALLMProvider(
             workspace_root=Path(self.temp_dir.name),

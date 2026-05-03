@@ -101,6 +101,8 @@ DEFAULT_LLM_MAX_BACKOFF_SECONDS = 8.0
 DEFAULT_CODEX_CLI_MODEL = "codex-cli"
 DEFAULT_CODEX_TIMEOUT_SECONDS = 240
 DEFAULT_CODEX_TOP_PATH_LIMIT = 30
+DEFAULT_CODEX_REPAIR_TOP_PATH_LIMIT = 16
+DEFAULT_CODEX_REPAIR_PROMPT_TOKEN_LIMIT = 11_000
 CODEX_INVESTIGATION_PROMPT_MODE = "codex_investigation_brief_v5"
 CODEX_SESSION_MODE_EPHEMERAL = "ephemeral"
 CODEX_SESSION_MODE_RESUME = "resume"
@@ -2361,6 +2363,17 @@ class SourceCodeQAService:
         )
         self.codex_concurrency = max(1, min(int(codex_concurrency or 1), 4))
         self.codex_top_path_limit = max(5, min(int(codex_top_path_limit or DEFAULT_CODEX_TOP_PATH_LIMIT), 80))
+        self.codex_repair_top_path_limit = max(
+            5,
+            min(
+                int(os.getenv("SOURCE_CODE_QA_CODEX_REPAIR_TOP_PATH_LIMIT", DEFAULT_CODEX_REPAIR_TOP_PATH_LIMIT) or DEFAULT_CODEX_REPAIR_TOP_PATH_LIMIT),
+                self.codex_top_path_limit,
+            ),
+        )
+        self.codex_repair_prompt_token_limit = max(
+            4_000,
+            int(os.getenv("SOURCE_CODE_QA_CODEX_REPAIR_PROMPT_TOKEN_LIMIT", DEFAULT_CODEX_REPAIR_PROMPT_TOKEN_LIMIT) or DEFAULT_CODEX_REPAIR_PROMPT_TOKEN_LIMIT),
+        )
         self.codex_repair_enabled = bool(codex_repair_enabled)
         normalized_codex_session_mode = str(codex_session_mode or CODEX_SESSION_MODE_EPHEMERAL).strip().lower()
         self.codex_session_mode = normalized_codex_session_mode if normalized_codex_session_mode in {CODEX_SESSION_MODE_EPHEMERAL, CODEX_SESSION_MODE_RESUME} else CODEX_SESSION_MODE_EPHEMERAL
@@ -15471,9 +15484,10 @@ class SourceCodeQAService:
                     request_cache=request_cache,
                 )
                 if expanded_matches:
-                    candidate_matches = self._select_llm_matches(expanded_matches, self.codex_top_path_limit, question=question)
+                    candidate_matches = self._select_llm_matches(expanded_matches, self.codex_repair_top_path_limit, question=question)
                     candidate_paths = self._codex_candidate_paths(entries=entries, key=key, matches=candidate_matches)
                     candidate_paths = self._merge_codex_followup_candidate_paths(candidate_paths, followup_context)
+                    candidate_paths = candidate_paths[: self.codex_repair_top_path_limit]
                     candidate_path_layers = self._codex_candidate_path_layers(candidate_paths, followup_context)
                     llm_route = {
                         **llm_route,
@@ -15536,51 +15550,84 @@ class SourceCodeQAService:
                 repair_issue_count=repair_issue_count,
                 deep_investigation_added=deep_investigation_added,
             )
-            repair_payload = self._codex_payload(
-                repair_context,
-                progress_callback=progress_callback,
-                codex_cli_session_id=codex_cli_session_id,
-                image_paths=self._attachment_image_paths(attachments or []),
-                trace_id=trace_id,
-                phase="repair",
-                prompt_stats=repair_prompt_stats,
-                candidate_path_count=len(candidate_paths),
-                candidate_repo_count=repair_candidate_repo_count,
-                repair_issue_count=repair_issue_count,
-            )
-            repair_result = self.llm_provider.generate(
-                payload=repair_payload,
-                primary_model=selected_model,
-                fallback_model=self._llm_fallback_model(),
-            )
-            repair_answer = self.llm_provider.extract_text(repair_result.payload)
-            repair_structured = self._parse_structured_answer(repair_answer)
-            repair_validation = timed_call(
-                "citation_validation",
-                lambda: self._validate_codex_citations(repair_answer, candidate_paths, candidate_paths),
-                phase="repair",
-            )
-            repair_claim_check = self._merge_codex_validation(self._trusted_provider_check(), repair_validation)
-            repair_judge = timed_call(
-                "answer_judge",
-                lambda: self._run_answer_judge(question, repair_answer, evidence_pack, repair_claim_check),
-                phase="repair",
-            )
-            answer = repair_answer
-            structured_answer = repair_structured
-            codex_validation = repair_validation
-            claim_check = repair_claim_check
-            answer_judge = repair_judge
-            repair_usage = self._normalize_llm_usage(repair_result.usage or repair_result.payload.get("usageMetadata") or {})
-            usage = self._merge_llm_usage(usage, repair_usage)
-            effective_model = repair_result.model
-            attempts += repair_result.attempts
-            llm_latency_ms += int(repair_result.latency_ms or 0)
-            llm_attempt_log.extend(dict(item) for item in repair_result.attempt_log)
-            finish_reason = self._llm_finish_reason(repair_result.payload)
-            repair_trace = repair_result.payload.get("codex_cli_trace") if isinstance(repair_result.payload.get("codex_cli_trace"), dict) else {}
-            if repair_trace:
-                codex_cli_trace = repair_trace
+            if int(repair_prompt_stats["estimated_prompt_tokens"]) > self.codex_repair_prompt_token_limit:
+                repair_attempted = False
+                repair_skipped_reason = (
+                    f"repair_prompt_too_large:{repair_prompt_stats['estimated_prompt_tokens']}>{self.codex_repair_prompt_token_limit}"
+                )
+                _log_source_code_qa_timing(
+                    "codex_repair_skip",
+                    elapsed_ms=0,
+                    trace_id=trace_id,
+                    provider=self.llm_provider.name,
+                    model=selected_model,
+                    query_mode=query_mode,
+                    reason="repair_prompt_too_large",
+                    phase="repair",
+                    estimated_prompt_tokens=repair_prompt_stats["estimated_prompt_tokens"],
+                    prompt_token_limit=self.codex_repair_prompt_token_limit,
+                    candidate_path_count=len(candidate_paths),
+                )
+            else:
+                repair_payload = self._codex_payload(
+                    repair_context,
+                    progress_callback=progress_callback,
+                    codex_cli_session_id=codex_cli_session_id,
+                    image_paths=self._attachment_image_paths(attachments or []),
+                    trace_id=trace_id,
+                    phase="repair",
+                    prompt_stats=repair_prompt_stats,
+                    candidate_path_count=len(candidate_paths),
+                    candidate_repo_count=repair_candidate_repo_count,
+                    repair_issue_count=repair_issue_count,
+                )
+                try:
+                    repair_result = self.llm_provider.generate(
+                        payload=repair_payload,
+                        primary_model=selected_model,
+                        fallback_model=self._llm_fallback_model(),
+                    )
+                except ToolError as error:
+                    repair_skipped_reason = "repair_failed_kept_initial_answer"
+                    _log_source_code_qa_timing(
+                        "codex_repair_failed",
+                        elapsed_ms=0,
+                        trace_id=trace_id,
+                        provider=self.llm_provider.name,
+                        model=selected_model,
+                        query_mode=query_mode,
+                        phase="repair",
+                        error=str(error)[:500],
+                    )
+                else:
+                    repair_answer = self.llm_provider.extract_text(repair_result.payload)
+                    repair_structured = self._parse_structured_answer(repair_answer)
+                    repair_validation = timed_call(
+                        "citation_validation",
+                        lambda: self._validate_codex_citations(repair_answer, candidate_paths, candidate_paths),
+                        phase="repair",
+                    )
+                    repair_claim_check = self._merge_codex_validation(self._trusted_provider_check(), repair_validation)
+                    repair_judge = timed_call(
+                        "answer_judge",
+                        lambda: self._run_answer_judge(question, repair_answer, evidence_pack, repair_claim_check),
+                        phase="repair",
+                    )
+                    answer = repair_answer
+                    structured_answer = repair_structured
+                    codex_validation = repair_validation
+                    claim_check = repair_claim_check
+                    answer_judge = repair_judge
+                    repair_usage = self._normalize_llm_usage(repair_result.usage or repair_result.payload.get("usageMetadata") or {})
+                    usage = self._merge_llm_usage(usage, repair_usage)
+                    effective_model = repair_result.model
+                    attempts += repair_result.attempts
+                    llm_latency_ms += int(repair_result.latency_ms or 0)
+                    llm_attempt_log.extend(dict(item) for item in repair_result.attempt_log)
+                    finish_reason = self._llm_finish_reason(repair_result.payload)
+                    repair_trace = repair_result.payload.get("codex_cli_trace") if isinstance(repair_result.payload.get("codex_cli_trace"), dict) else {}
+                    if repair_trace:
+                        codex_cli_trace = repair_trace
         final = self._finalize_trusted_model_answer(
             question=question,
             answer=answer,

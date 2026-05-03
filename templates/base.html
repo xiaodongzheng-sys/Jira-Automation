@@ -250,8 +250,19 @@
         forms.forEach((form) => {
           form.addEventListener('submit', async (event) => {
             event.preventDefault();
+            if (form.dataset.jobRunning === 'true') {
+              return;
+            }
             const jobUrl = form.dataset.jobUrl;
             const title = form.dataset.jobLabel || 'Working…';
+            const submitButton = form.querySelector('button[type="submit"]');
+            const originalButtonText = submitButton?.textContent || '';
+            form.dataset.jobRunning = 'true';
+            if (submitButton) {
+              submitButton.disabled = true;
+              submitButton.setAttribute('aria-busy', 'true');
+              submitButton.textContent = title === 'Sync BPMIS Projects' ? 'Syncing BPMIS Projects…' : 'Working…';
+            }
             setProgress({
               title,
               message: 'Starting…',
@@ -281,6 +292,13 @@
                 summary: error.message || 'Could not start the job.',
                 details: [],
               });
+            } finally {
+              delete form.dataset.jobRunning;
+              if (submitButton) {
+                submitButton.disabled = false;
+                submitButton.removeAttribute('aria-busy');
+                submitButton.textContent = originalButtonText;
+              }
             }
           });
         });

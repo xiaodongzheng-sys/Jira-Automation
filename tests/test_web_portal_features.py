@@ -277,6 +277,17 @@ class _FakeMonthlyReportLocalAgentClient(_FakePRDReviewLocalAgentClient):
 
 
 class WebPortalFeatureTests(unittest.TestCase):
+    def test_background_job_forms_disable_submit_button_while_running(self):
+        template = Path("templates/base.html").read_text(encoding="utf-8")
+
+        self.assertIn("form.dataset.jobRunning === 'true'", template)
+        self.assertIn("form.dataset.jobRunning = 'true'", template)
+        self.assertIn("submitButton.disabled = true", template)
+        self.assertIn("submitButton.setAttribute('aria-busy', 'true')", template)
+        self.assertIn("Syncing BPMIS Projects", template)
+        self.assertIn("delete form.dataset.jobRunning", template)
+        self.assertIn("submitButton.disabled = false", template)
+
     def test_team_dashboard_fetch_stats_exposes_bulk_and_probe_counters(self):
         class FakeBPMISClient:
             request_stats = {
