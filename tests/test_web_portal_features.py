@@ -2250,7 +2250,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertEqual(payload["rows"][0]["suggested_bpmis_id"], "")
         self.assertEqual(fake_client.project_calls, [])
 
-    def test_team_dashboard_link_biz_project_suggestions_use_team_and_keyword_fallback(self):
+    def test_team_dashboard_link_biz_project_suggestions_are_scoped_to_jira_pm(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
@@ -2277,8 +2277,10 @@ class WebPortalFeatureTests(unittest.TestCase):
             class FakeLinkBizClient:
                 def __init__(self):
                     self.keyword_calls = []
+                    self.project_calls = []
 
                 def list_biz_projects_for_pm_email(self, email):
+                    self.project_calls.append(email)
                     if email == "af@npt.sg":
                         return [
                             {
@@ -2286,15 +2288,24 @@ class WebPortalFeatureTests(unittest.TestCase):
                                 "project_name": "Fraud Alert Revamp",
                                 "market": "SG",
                                 "status": "Confirmed",
-                            }
+                                "matched_pm_emails": ["af@npt.sg"],
+                            },
+                            {
+                                "issue_id": "225300",
+                                "project_name": "AF Draft Project",
+                                "market": "SG",
+                                "status": "Draft",
+                                "matched_pm_emails": ["af@npt.sg"],
+                            },
                         ]
                     if email == "cr@npt.sg":
                         return [
                             {
                                 "issue_id": "225200",
-                                "project_name": "Credit Scoring Improvements",
+                                "project_name": "Fraud Alert Revamp Exact Better Text",
                                 "market": "ID",
                                 "status": "Confirmed",
+                                "matched_pm_emails": ["cr@npt.sg"],
                             }
                         ]
                     return []
@@ -2307,16 +2318,6 @@ class WebPortalFeatureTests(unittest.TestCase):
 
                 def search_biz_projects_by_title_keywords(self, keywords, *, max_pages=None):
                     self.keyword_calls.append((keywords, max_pages))
-                    if "regional onboarding" in keywords:
-                        return [
-                            {
-                                "issue_id": "225999",
-                                "bpmis_id": "225999",
-                                "project_name": "Regional Onboarding Risk Project",
-                                "market": "Regional",
-                                "status": "Confirmed",
-                            },
-                        ]
                     return []
 
             fake_client = FakeLinkBizClient()
@@ -2337,9 +2338,9 @@ class WebPortalFeatureTests(unittest.TestCase):
                                 },
                                 {
                                     "team_key": "AF",
-                                    "jira_id": "AF-9",
-                                    "jira_title": "[Feature][Regional] Regional Onboarding Risk",
-                                    "reporter_email": "af@npt.sg",
+                                    "jira_id": "AF-2",
+                                    "jira_title": "[Feature] Fraud Alert Revamp Exact Better Text",
+                                    "reporter_email": "cr@npt.sg",
                                 },
                             ]
                         },
@@ -2351,15 +2352,18 @@ class WebPortalFeatureTests(unittest.TestCase):
         suggestions = {row["jira_id"]: row for row in payload["rows"]}
         self.assertEqual(suggestions["AF-1"]["suggested_bpmis_id"], "225159")
         self.assertEqual(suggestions["AF-1"]["suggested_project_title"], "Fraud Alert Revamp")
-        self.assertEqual(suggestions["AF-1"]["match_source"], "team")
-        self.assertEqual(suggestions["AF-9"]["suggested_bpmis_id"], "225999")
-        self.assertEqual(suggestions["AF-9"]["match_source"], "keyword")
-        self.assertEqual(payload["keyword_search_count"], 1)
-        self.assertEqual(fake_client.keyword_calls[0][1], 2)
+        self.assertEqual(suggestions["AF-1"]["match_source"], "pm")
+        self.assertEqual(suggestions["AF-2"]["suggested_bpmis_id"], "225200")
+        self.assertEqual(suggestions["AF-2"]["match_source"], "pm")
+        self.assertEqual(payload["keyword_search_count"], 0)
+        self.assertEqual(fake_client.keyword_calls, [])
         self.assertGreater(suggestions["AF-1"]["match_score"], 0.8)
-        option_titles = [item["project_name"] for item in payload["select_biz_project_options"]]
-        self.assertIn("Fraud Alert Revamp", option_titles)
-        self.assertIn("Credit Scoring Improvements", option_titles)
+        af_option_titles = [item["project_name"] for item in suggestions["AF-1"]["select_biz_project_options"]]
+        cr_option_titles = [item["project_name"] for item in suggestions["AF-2"]["select_biz_project_options"]]
+        self.assertEqual(af_option_titles, ["Fraud Alert Revamp"])
+        self.assertEqual(cr_option_titles, ["Fraud Alert Revamp Exact Better Text"])
+        self.assertNotIn("AF Draft Project", af_option_titles)
+        self.assertEqual(fake_client.project_calls, ["af@npt.sg", "cr@npt.sg"])
 
     def test_team_dashboard_link_biz_project_suggestions_can_use_loaded_task_payload_candidates(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
@@ -2409,11 +2413,15 @@ class WebPortalFeatureTests(unittest.TestCase):
                                         {
                                             "bpmis_id": "225159",
                                             "project_name": "Fraud Alert Revamp",
+                                            "status": "Confirmed",
+                                            "matched_pm_emails": ["af@npt.sg"],
                                             "jira_tickets": [],
                                         },
                                         {
                                             "bpmis_id": "225160",
                                             "project_name": "Busy Fraud Project",
+                                            "status": "Confirmed",
+                                            "matched_pm_emails": ["af@npt.sg"],
                                             "jira_tickets": [{"jira_id": "AF-9"}],
                                         },
                                     ],
@@ -2426,7 +2434,14 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         payload = response.get_json()
         self.assertEqual(payload["rows"][0]["suggested_bpmis_id"], "225159")
-        self.assertEqual(payload["select_biz_project_options"], [{"bpmis_id": "225159", "project_name": "Fraud Alert Revamp", "team_key": "AF", "market": ""}])
+        self.assertEqual(
+            [item["project_name"] for item in payload["rows"][0]["select_biz_project_options"]],
+            ["Busy Fraud Project", "Fraud Alert Revamp"],
+        )
+        self.assertEqual(
+            {item["project_name"]: item["team_key"] for item in payload["select_biz_project_options"]},
+            {"Busy Fraud Project": "AF", "Fraud Alert Revamp": "AF"},
+        )
 
     def test_team_dashboard_link_biz_project_links_real_bpmis_and_updates_portal_cache(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
@@ -2445,6 +2460,19 @@ class WebPortalFeatureTests(unittest.TestCase):
             class FakeLinkClient:
                 def __init__(self):
                     self.link_calls = []
+
+                def list_biz_projects_for_pm_email(self, email):
+                    if email == "af@npt.sg":
+                        return [
+                            {
+                                "issue_id": "225200",
+                                "project_name": "Selected Credit Project",
+                                "market": "SG",
+                                "status": "Confirmed",
+                                "matched_pm_emails": ["af@npt.sg"],
+                            }
+                        ]
+                    return []
 
                 def link_jira_ticket_to_project(self, ticket_key, project_issue_id):
                     self.link_calls.append((ticket_key, project_issue_id))
@@ -2470,6 +2498,7 @@ class WebPortalFeatureTests(unittest.TestCase):
                             "jira_id": "AF-1",
                             "jira_link": "https://jira.shopee.io/browse/AF-1",
                             "jira_title": "Fraud Alert Revamp",
+                            "reporter_email": "af@npt.sg",
                             "suggested_bpmis_id": "225159",
                             "suggested_project_title": "Fraud Alert Revamp",
                             "selected_bpmis_id": "225200",
@@ -2500,6 +2529,19 @@ class WebPortalFeatureTests(unittest.TestCase):
             app.testing = True
 
             class BrokenLinkClient:
+                def list_biz_projects_for_pm_email(self, email):
+                    if email == "af@npt.sg":
+                        return [
+                            {
+                                "issue_id": "225159",
+                                "project_name": "Fraud Alert Revamp",
+                                "market": "SG",
+                                "status": "Confirmed",
+                                "matched_pm_emails": ["af@npt.sg"],
+                            }
+                        ]
+                    return []
+
                 def link_jira_ticket_to_project(self, _ticket_key, _project_issue_id):
                     raise BPMISError("BPMIS link endpoint rejected the ticket.")
 
@@ -2510,13 +2552,77 @@ class WebPortalFeatureTests(unittest.TestCase):
                         session["google_credentials"] = {"token": "x"}
                     response = client.post(
                         "/api/team-dashboard/link-biz-projects",
-                        json={"jira_id": "AF-1", "suggested_bpmis_id": "225159"},
+                        json={"jira_id": "AF-1", "reporter_email": "af@npt.sg", "suggested_bpmis_id": "225159"},
                     )
 
             projects = app.config["BPMIS_PROJECT_STORE"].list_projects(user_key="google:xiaodong.zheng@npt.sg")
 
         self.assertEqual(response.status_code, 400)
         self.assertEqual(projects, [])
+
+    def test_team_dashboard_link_biz_project_rejects_cross_pm_project(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_ALLOWED_EMAILS": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+            },
+            clear=True,
+        ):
+            app = create_app()
+            app.testing = True
+
+            class FakeLinkClient:
+                def __init__(self):
+                    self.link_calls = []
+
+                def list_biz_projects_for_pm_email(self, email):
+                    if email == "af@npt.sg":
+                        return [
+                            {
+                                "issue_id": "225159",
+                                "project_name": "AF Owned Project",
+                                "market": "SG",
+                                "status": "Confirmed",
+                                "matched_pm_emails": ["af@npt.sg"],
+                            }
+                        ]
+                    return []
+
+                def link_jira_ticket_to_project(self, ticket_key, project_issue_id):
+                    self.link_calls.append((ticket_key, project_issue_id))
+                    return {}
+
+            fake_client = FakeLinkClient()
+            with patch("bpmis_jira_tool.web._build_bpmis_client_for_current_user", return_value=fake_client):
+                with app.test_client() as client:
+                    with client.session_transaction() as session:
+                        session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong"}
+                        session["google_credentials"] = {"token": "x"}
+                    response = client.post(
+                        "/api/team-dashboard/link-biz-projects",
+                        json={
+                            "jira_id": "AF-1",
+                            "reporter_email": "af@npt.sg",
+                            "selected_bpmis_id": "225200",
+                            "selected_project_title": "CR Owned Project",
+                        },
+                    )
+
+            projects = app.config["BPMIS_PROJECT_STORE"].list_projects(user_key="google:xiaodong.zheng@npt.sg")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("must belong to the Jira PM", response.get_json()["message"])
+        self.assertEqual(fake_client.link_calls, [])
+        self.assertEqual(projects, [])
+
+    def test_team_dashboard_link_biz_project_frontend_uses_row_scoped_options(self):
+        script = Path("static/team_dashboard.js").read_text(encoding="utf-8")
+        self.assertIn("row.select_biz_project_options", script)
+        self.assertIn("data-reporter-email", script)
+        self.assertIn("reporter_email: button.dataset.reporterEmail", script)
 
     def test_team_dashboard_backfills_empty_project_jira_tasks_by_parent_id(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(

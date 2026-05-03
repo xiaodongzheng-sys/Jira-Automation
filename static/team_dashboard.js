@@ -771,6 +771,7 @@
     }
     const selectOptions = Array.isArray(linkBizProjectSelectOptions) ? linkBizProjectSelectOptions : [];
     linkBizProjectRows.innerHTML = items.map((row) => {
+      const rowSelectOptions = Array.isArray(row.select_biz_project_options) ? row.select_biz_project_options : selectOptions;
       const bpmisId = String(row.suggested_bpmis_id || '').trim();
       const selectedBpmisId = String(row.selected_bpmis_id || '').trim();
       const effectiveBpmisId = selectedBpmisId || bpmisId;
@@ -786,7 +787,7 @@
       const selectHtml = `
         <select class="team-dashboard-link-biz-select" data-link-biz-project-select>
           <option value="">Use suggested match</option>
-          ${selectOptions.map((option) => {
+          ${rowSelectOptions.map((option) => {
             const optionId = String(option.bpmis_id || '').trim();
             const optionTitle = String(option.project_name || '').trim();
             if (!optionId || !optionTitle) return '';
@@ -809,6 +810,7 @@
               data-jira-id="${escapeHtml(row.jira_id || '')}"
               data-jira-link="${escapeHtml(row.jira_link || '')}"
               data-jira-title="${escapeHtml(row.jira_title || '')}"
+              data-reporter-email="${escapeHtml(row.reporter_email || '')}"
               data-suggested-bpmis-id="${escapeHtml(effectiveBpmisId)}"
               data-suggested-project-title="${escapeHtml(selectedProjectTitle || row.suggested_project_title || '')}"
               ${disabled}
@@ -1428,7 +1430,11 @@
     const row = select.closest('[data-link-biz-project-row]');
     const jiraId = row?.dataset.linkBizProjectRow || '';
     const selectedBpmisId = String(select.value || '').trim();
-    const selectedOption = linkBizProjectSelectOptions.find(
+    const rowState = linkBizProjectRowsState.find((item) => String(item.jira_id || '') === jiraId) || {};
+    const rowOptions = Array.isArray(rowState.select_biz_project_options)
+      ? rowState.select_biz_project_options
+      : linkBizProjectSelectOptions;
+    const selectedOption = rowOptions.find(
       (option) => String(option.bpmis_id || '').trim() === selectedBpmisId,
     ) || {};
     linkBizProjectRowsState = linkBizProjectRowsState.map((item) => {
@@ -1461,6 +1467,7 @@
           jira_id: jiraId,
           jira_link: button.dataset.jiraLink || '',
           jira_title: button.dataset.jiraTitle || '',
+          reporter_email: button.dataset.reporterEmail || '',
           suggested_bpmis_id: suggestedBpmisId,
           suggested_project_title: button.dataset.suggestedProjectTitle || '',
           selected_bpmis_id: suggestedBpmisId,
