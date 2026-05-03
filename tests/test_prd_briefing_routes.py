@@ -279,7 +279,7 @@ class PRDBriefingRouteTests(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             self.assertIn("PRD Briefing Tool".encode("utf-8"), response.data)
             self.assertIn("AI PRD Briefing Tool".encode("utf-8"), response.data)
-            self.assertIn("生成宣讲".encode("utf-8"), response.data)
+            self.assertIn(b"Generate Briefing", response.data)
             self.assertIn(b"page-shell-briefing", response.data)
             self.assertIn(b"data-image-lightbox", response.data)
             self.assertNotIn(b"data-prd-review-generate", response.data)
@@ -287,7 +287,8 @@ class PRDBriefingRouteTests(unittest.TestCase):
             self.assertIn(b"data-briefing-page-ref", response.data)
             self.assertIn(b"data-presenter-view", response.data)
             self.assertIn(b"data-theater-toggle", response.data)
-            self.assertIn("开启宣讲模式".encode("utf-8"), response.data)
+            self.assertIn(b"Start Presentation Mode", response.data)
+            self.assertIn(b"AI Briefing Player", response.data)
             self.assertIn(b"PRD Details", response.data)
             self.assertIn(b"No PRD output yet", response.data)
             self.assertNotIn(b"Developer Walkthrough", response.data)
@@ -295,6 +296,8 @@ class PRDBriefingRouteTests(unittest.TestCase):
             self.assertNotIn(b"data-prd-review-language", response.data)
             self.assertNotIn(b"No walkthrough yet", response.data)
             self.assertNotIn("3 分钟".encode("utf-8"), response.data)
+            self.assertNotIn("生成宣讲".encode("utf-8"), response.data)
+            self.assertNotIn("开启宣讲模式".encode("utf-8"), response.data)
             self.assertNotIn(b"Team Knowledge Base", response.data)
 
     def test_build_service_uses_codex_for_presentation_generation(self):

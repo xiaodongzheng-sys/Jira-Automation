@@ -100,7 +100,7 @@
   const setSessionSubmitLoading = (isLoading) => {
     if (!sessionSubmitButton) return;
     sessionSubmitButton.disabled = isLoading;
-    sessionSubmitButton.textContent = isLoading ? '生成中...' : '生成宣讲';
+    sessionSubmitButton.textContent = isLoading ? 'Generating...' : 'Generate Briefing';
   };
 
   const parseJsonResponse = async (response) => {
@@ -148,7 +148,7 @@
 
   const sanitizeChunk = (chunk, index) => ({
     id: String(chunk.id || `chunk-${index + 1}`),
-    title: String(chunk.title || `宣讲段落 ${index + 1}`),
+    title: String(chunk.title || `Briefing chunk ${index + 1}`),
     content: String(chunk.content || '').trim(),
     audioUrl: chunk.audioUrl || '',
     duration: Number(chunk.duration || 0),
@@ -200,7 +200,7 @@
     state.shareSoundReminderShown = true;
     const toast = document.createElement('div');
     toast.className = 'briefing-share-sound-toast';
-    toast.textContent = '请确保 Zoom 屏幕共享已勾选「共享声音 / Share Sound」';
+    toast.textContent = 'Make sure Zoom screen sharing has Share Sound enabled.';
     document.body.appendChild(toast);
     window.clearTimeout(shareSoundToastTimer);
     shareSoundToastTimer = window.setTimeout(() => {
@@ -250,7 +250,7 @@
     state.theaterMode = Boolean(enabled);
     document.body.classList.toggle('briefing-theater-mode', state.theaterMode);
     if (theaterToggle) {
-      theaterToggle.textContent = state.theaterMode ? '退出宣讲模式' : '开启宣讲模式';
+      theaterToggle.textContent = state.theaterMode ? 'Exit Presentation Mode' : 'Start Presentation Mode';
     }
     if (state.theaterMode) {
       showShareSoundReminder();
@@ -296,7 +296,7 @@
     chunk.audioStatus = chunk.audioUrl ? 'ready' : 'audio-failed';
     chunk.errorMessage = chunk.audioUrl ? '' : 'No audio URL returned.';
     if (index === state.currentIndex) {
-      setStatus(chunk.audioUrl ? `第 ${index + 1} 段音频已就绪，可以播放。` : `第 ${index + 1} 段音频不可用，可手动朗读。`, chunk.audioUrl ? 'success' : 'error');
+      setStatus(chunk.audioUrl ? `Chunk ${index + 1} audio is ready to play.` : `Chunk ${index + 1} audio is unavailable. You can read it manually.`, chunk.audioUrl ? 'success' : 'error');
     }
     renderPresenterView();
   };
@@ -399,11 +399,11 @@
     showShareSoundReminder();
     await unlockQuestionCueAudio();
     if (chunk.audioStatus === 'audio-failed') {
-      setStatus('这段音频生成失败，可以手动朗读后继续下一段。', 'error');
+      setStatus('Audio generation failed for this chunk. Read it manually, then continue to the next chunk.', 'error');
       return;
     }
     if (chunk.audioStatus !== 'ready') {
-      setStatus(`正在生成第 ${state.currentIndex + 1} 段音频，请稍等。`, 'neutral');
+      setStatus(`Generating audio for chunk ${state.currentIndex + 1}. Please wait.`, 'neutral');
       await enqueueAudio(state.currentIndex);
       if (activeChunk()?.audioStatus !== 'ready') return;
     }
@@ -573,7 +573,7 @@
   const renderPresenterView = () => {
     if (!presenterView) return;
     if (!state.chunks.length) {
-      presenterView.innerHTML = '<div class="empty-state"><p>生成宣讲后，研发视角大纲和播放器会显示在这里。</p></div>';
+      presenterView.innerHTML = '<div class="empty-state"><p>The engineering-focused outline and player will appear here after the briefing is generated.</p></div>';
       return;
     }
 
@@ -609,7 +609,7 @@
         ${state.theaterMode ? `
           <div class="briefing-theater-chrome">
             <span>Chapter ${state.currentIndex + 1} / ${state.chunks.length}</span>
-            <button class="button button-secondary" type="button" data-theater-exit>退出宣讲模式</button>
+            <button class="button button-secondary" type="button" data-theater-exit>Exit Presentation Mode</button>
           </div>
         ` : ''}
         ${state.theaterMode ? '' : `<aside class="briefing-presenter-outline" aria-label="Briefing outline">
@@ -635,7 +635,7 @@
             <div class="briefing-presenter-editor">
               <textarea data-edit-content="${state.currentIndex}" rows="8">${escapeHtml(chunk.content)}</textarea>
               <div class="button-row">
-                <button class="button" type="button" data-save-edit="${state.currentIndex}">保存并重新生成音频</button>
+                <button class="button" type="button" data-save-edit="${state.currentIndex}">Save and Regenerate Audio</button>
                 <button class="button button-secondary" type="button" data-cancel-edit="${state.currentIndex}">Cancel</button>
               </div>
             </div>
@@ -650,21 +650,21 @@
           `}
           ${chunk.errorMessage ? `<p class="briefing-presenter-error">${escapeHtml(chunk.errorMessage)}</p>` : ''}
           <div class="briefing-presenter-controls">
-            <button class="button" type="button" data-play-current ${canPlay ? '' : 'disabled'}>${isPlaying ? '播放中' : '播放/继续'}</button>
-            <button class="button button-secondary" type="button" data-pause-current ${isPlaying ? '' : 'disabled'}>暂停</button>
-            <button class="button button-secondary" type="button" data-next-current ${state.currentIndex >= state.chunks.length - 1 ? 'disabled' : ''}>下一段</button>
-            ${isLoading ? '<span class="briefing-presenter-loading">正在生成本段音频...</span>' : ''}
-            ${hasFailed ? '<button class="button button-secondary" type="button" data-manual-advance>手动朗读并继续</button>' : ''}
+            <button class="button" type="button" data-play-current ${canPlay ? '' : 'disabled'}>${isPlaying ? 'Playing' : 'Play / Continue'}</button>
+            <button class="button button-secondary" type="button" data-pause-current ${isPlaying ? '' : 'disabled'}>Pause</button>
+            <button class="button button-secondary" type="button" data-next-current ${state.currentIndex >= state.chunks.length - 1 ? 'disabled' : ''}>Next Chunk</button>
+            ${isLoading ? '<span class="briefing-presenter-loading">Generating audio for this chunk...</span>' : ''}
+            ${hasFailed ? '<button class="button button-secondary" type="button" data-manual-advance>Read Manually and Continue</button>' : ''}
           </div>
           ${state.continueRequired ? `
             <div class="briefing-presenter-continue">
               <button class="button" type="button" data-continue-next>
-                ${state.currentIndex >= state.chunks.length - 1 ? '宣讲已结束' : '开发/测试提问结束，继续下一段'}
+                ${state.currentIndex >= state.chunks.length - 1 ? 'Briefing Complete' : 'Q&A Finished, Continue to Next Chunk'}
               </button>
             </div>
           ` : ''}
         </article>
-        ${state.panicPaused ? '<div class="briefing-panic-watermark">答疑中</div>' : ''}
+        ${state.panicPaused ? '<div class="briefing-panic-watermark">Q&A in Progress</div>' : ''}
         ${state.theaterMode ? `
           <div class="briefing-theater-progress" aria-hidden="true">
             <span style="width: ${progressPercent.toFixed(1)}%"></span>
@@ -723,7 +723,7 @@
     clearPanicFeedback();
     renderPresenterView();
     setSessionSubmitLoading(true);
-    setStatus('正在读取 PRD 并生成宣讲大纲，预计需要 30-40 秒。');
+    setStatus('Reading the PRD and generating the briefing outline. This usually takes 30-40 seconds.');
 
     try {
       const response = await fetch('/prd-briefing/api/process-prd', {
@@ -738,7 +738,7 @@
       state.chunks = (payload.chunks || []).map(sanitizeChunk).filter((chunk) => chunk.content);
       state.isGenerating = false;
       state.currentIndex = 0;
-      setStatus(`已生成 "${state.sessionTitle}" 的宣讲大纲。正在优先生成开场音频。`, 'success');
+      setStatus(`Generated the briefing outline for "${state.sessionTitle}". Generating the opening audio first.`, 'success');
       renderPresenterView();
       enqueueAudio(0).then(() => ensurePrefetchWindow(1));
     } catch (error) {
