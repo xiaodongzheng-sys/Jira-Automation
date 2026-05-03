@@ -871,25 +871,30 @@
   const loadLinkBizJira = async () => {
     if (!linkBizProjectRows || linkBizProjectLoading) return;
     linkBizProjectLoading = true;
+    const originalFindLabel = linkBizProjectFindJira?.textContent || 'Find Unlinked Jira';
     if (linkBizProjectFindJira) linkBizProjectFindJira.disabled = true;
+    if (linkBizProjectFindJira) linkBizProjectFindJira.textContent = 'Finding...';
     if (linkBizProjectSuggest) linkBizProjectSuggest.disabled = true;
     linkBizProjectRows.innerHTML = '<tr><td colspan="6" class="team-dashboard-empty-cell">Finding unlinked Jira tickets...</td></tr>';
+    setStatus(linkBizProjectStatus, 'Finding unlinked Jira tickets...', 'neutral');
+    await new Promise((resolve) => window.setTimeout(resolve, 0));
     const cachedTeams = linkBizProjectLoadedTeams();
     if (cachedTeams.length) {
       linkBizProjectRowsState = linkBizRowsFromLoadedTeams(cachedTeams);
       linkBizProjectSelectOptions = [];
       renderLinkBizRows(linkBizProjectRowsState);
       if (linkBizProjectSuggest) linkBizProjectSuggest.disabled = !linkBizProjectRowsState.length;
+      const refreshedAt = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
       setStatus(
         linkBizProjectStatus,
-        `${linkBizProjectRowsState.length} unlinked Jira tickets found from ${cachedTeams.length} loaded Task List team${cachedTeams.length === 1 ? '' : 's'}.`,
+        `Refreshed at ${refreshedAt}. ${linkBizProjectRowsState.length} unlinked Jira tickets found from ${cachedTeams.length} loaded Task List team${cachedTeams.length === 1 ? '' : 's'}.`,
         'success',
       );
       linkBizProjectLoading = false;
       if (linkBizProjectFindJira) linkBizProjectFindJira.disabled = false;
+      if (linkBizProjectFindJira) linkBizProjectFindJira.textContent = originalFindLabel;
       return;
     }
-    setStatus(linkBizProjectStatus, 'Loading unlinked Jira tickets...', 'neutral');
     try {
       const response = await fetch(root.dataset.linkBizProjectJiraUrl || '/api/team-dashboard/link-biz-projects/jira', {
         headers: { Accept: 'application/json' },
@@ -908,6 +913,7 @@
     } finally {
       linkBizProjectLoading = false;
       if (linkBizProjectFindJira) linkBizProjectFindJira.disabled = false;
+      if (linkBizProjectFindJira) linkBizProjectFindJira.textContent = originalFindLabel;
     }
   };
 

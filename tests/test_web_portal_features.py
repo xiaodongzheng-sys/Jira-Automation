@@ -2623,6 +2623,8 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertIn("row.select_biz_project_options", script)
         self.assertIn("data-reporter-email", script)
         self.assertIn("reporter_email: button.dataset.reporterEmail", script)
+        self.assertIn("Finding...", script)
+        self.assertIn("Refreshed at", script)
 
     def test_team_dashboard_backfills_empty_project_jira_tasks_by_parent_id(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
