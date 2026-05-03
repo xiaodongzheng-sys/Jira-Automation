@@ -8013,6 +8013,14 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertGreater(prompt_logs[0]["prompt_chars"], 0)
         self.assertGreater(prompt_logs[0]["prompt_bytes"], 0)
         self.assertGreater(prompt_logs[0]["estimated_prompt_tokens"], 0)
+        components = [component for component, _fields in timing_logs]
+        self.assertIn("codex_repair_prepare", components)
+        repair_prepare_logs = [fields for component, fields in timing_logs if component == "codex_repair_prepare"]
+        self.assertTrue(repair_prepare_logs)
+        self.assertIn("repair_will_run", repair_prepare_logs[0])
+        self.assertIn("deep_investigation_needed", repair_prepare_logs[0])
+        self.assertIn("repair_issue_count", repair_prepare_logs[0])
+        self.assertIn("elapsed_ms", repair_prepare_logs[0])
 
     def test_codex_candidate_paths_resolve_stale_path_by_filename(self):
         entry = RepositoryEntry("Portal Repo", "https://git.example.com/team/portal.git")

@@ -15443,6 +15443,7 @@ class SourceCodeQAService:
         deep_investigation_rounds = 0
         deep_investigation_terms: list[str] = []
         deep_investigation_added = 0
+        repair_prepare_started = time.perf_counter()
         repair_issues = list(codex_validation.get("issues") or [])
         repair_issues.extend(answer_judge.get("issues") or [])
         deep_needed = self._codex_deep_investigation_needed(
@@ -15453,15 +15454,33 @@ class SourceCodeQAService:
             answer_judge=answer_judge,
             codex_validation=codex_validation,
         )
+        repair_issue_count = len([issue for issue in repair_issues if issue]) + (1 if deep_needed else 0)
+        _log_source_code_qa_timing(
+            "codex_repair_prepare",
+            elapsed_ms=int((time.perf_counter() - repair_prepare_started) * 1000),
+            trace_id=trace_id,
+            provider=self.llm_provider.name,
+            model=selected_model,
+            query_mode=query_mode,
+            phase="repair_prepare",
+            repair_enabled=self.codex_repair_enabled,
+            repair_will_run=bool(self.codex_repair_enabled and (repair_issues or deep_needed)),
+            repair_issue_count=repair_issue_count,
+            validation_issue_count=len([issue for issue in codex_validation.get("issues") or [] if issue]),
+            judge_issue_count=len([issue for issue in answer_judge.get("issues") or [] if issue]),
+            deep_investigation_needed=bool(deep_needed),
+        )
         if self.codex_repair_enabled and (repair_issues or deep_needed):
             repair_attempted = True
             if deep_needed:
+                deep_started = time.perf_counter()
                 if progress_callback:
                     try:
                         progress_callback("codex_deep_investigation", "Expanding investigation from Codex gaps.", 0, 0)
                     except Exception:
                         pass
                 before_keys = {(item.get("repo"), item.get("path"), item.get("line_start"), item.get("line_end")) for item in candidate_matches}
+                terms_started = time.perf_counter()
                 deep_investigation_terms = self._codex_deep_investigation_terms(
                     question=question,
                     answer=answer,
@@ -15469,6 +15488,17 @@ class SourceCodeQAService:
                     answer_judge=answer_judge,
                     codex_validation=codex_validation,
                 )
+                _log_source_code_qa_timing(
+                    "codex_deep_investigation_terms",
+                    elapsed_ms=int((time.perf_counter() - terms_started) * 1000),
+                    trace_id=trace_id,
+                    provider=self.llm_provider.name,
+                    model=selected_model,
+                    query_mode=query_mode,
+                    phase="repair",
+                    term_count=len(deep_investigation_terms),
+                )
+                matches_started = time.perf_counter()
                 expanded_matches = self._codex_deep_investigation_matches(
                     entries=entries,
                     key=key,
@@ -15483,7 +15513,20 @@ class SourceCodeQAService:
                     limit=max(int(budget["match_limit"]), self.codex_top_path_limit),
                     request_cache=request_cache,
                 )
+                _log_source_code_qa_timing(
+                    "codex_deep_investigation_matches",
+                    elapsed_ms=int((time.perf_counter() - matches_started) * 1000),
+                    trace_id=trace_id,
+                    provider=self.llm_provider.name,
+                    model=selected_model,
+                    query_mode=query_mode,
+                    phase="repair",
+                    expanded_match_count=len(expanded_matches or []),
+                    original_match_count=len(matches),
+                    candidate_path_count_before=len(candidate_paths),
+                )
                 if expanded_matches:
+                    rebuild_started = time.perf_counter()
                     candidate_matches = self._select_llm_matches(expanded_matches, self.codex_repair_top_path_limit, question=question)
                     candidate_paths = self._codex_candidate_paths(entries=entries, key=key, matches=candidate_matches)
                     candidate_paths = self._merge_codex_followup_candidate_paths(candidate_paths, followup_context)
@@ -15510,7 +15553,33 @@ class SourceCodeQAService:
                     )
                     after_keys = {(item.get("repo"), item.get("path"), item.get("line_start"), item.get("line_end")) for item in candidate_matches}
                     deep_investigation_added = len(after_keys - before_keys)
+                    _log_source_code_qa_timing(
+                        "codex_deep_investigation_rebuild",
+                        elapsed_ms=int((time.perf_counter() - rebuild_started) * 1000),
+                        trace_id=trace_id,
+                        provider=self.llm_provider.name,
+                        model=selected_model,
+                        query_mode=query_mode,
+                        phase="repair",
+                        candidate_path_count=len(candidate_paths),
+                        candidate_repo_count=len({item.get("repo") for item in candidate_paths}),
+                        deep_investigation_added=deep_investigation_added,
+                    )
                 deep_investigation_rounds = 1
+                _log_source_code_qa_timing(
+                    "codex_deep_investigation",
+                    elapsed_ms=int((time.perf_counter() - deep_started) * 1000),
+                    trace_id=trace_id,
+                    provider=self.llm_provider.name,
+                    model=selected_model,
+                    query_mode=query_mode,
+                    phase="repair",
+                    candidate_path_count=len(candidate_paths),
+                    candidate_repo_count=len({item.get("repo") for item in candidate_paths}),
+                    deep_investigation_added=deep_investigation_added,
+                    deep_investigation_rounds=deep_investigation_rounds,
+                    term_count=len(deep_investigation_terms),
+                )
             repair_context = self._codex_investigation_brief(
                 pm_team=pm_team,
                 country=country,
@@ -15528,7 +15597,6 @@ class SourceCodeQAService:
             )
             repair_prompt_stats = self._codex_prompt_stats(repair_context)
             repair_candidate_repo_count = len({item.get("repo") for item in candidate_paths})
-            repair_issue_count = len([issue for issue in repair_issues if issue]) + (1 if deep_needed else 0)
             _log_source_code_qa_timing(
                 "codex_prompt",
                 elapsed_ms=0,
