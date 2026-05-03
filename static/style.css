@@ -7952,6 +7952,13 @@ select:focus {
   margin: 0;
 }
 
+.seatalk-mapping-page-summary {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+}
+
 .seatalk-mapping-page-size {
   display: inline-flex;
   align-items: center;

@@ -2712,6 +2712,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertIn(".seatalk-mapping-row", stylesheet)
         self.assertIn("grid-template-columns: minmax(0, 1fr) minmax(80px, 0.45fr) minmax(0, 1.2fr)", stylesheet)
         self.assertIn(".seatalk-mapping-example", stylesheet)
+        self.assertIn(".seatalk-mapping-page-summary", stylesheet)
         self.assertIn(".seatalk-mapping-page-size", stylesheet)
 
     def test_team_dashboard_backfills_empty_project_jira_tasks_by_parent_id(self):

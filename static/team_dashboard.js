@@ -1567,8 +1567,8 @@
     }
     body.innerHTML = `
       <div class="seatalk-mapping-pagination" data-seatalk-name-mapping-pagination>
-        <span>Showing ${start + 1}-${start + pageRows.length} of ${rows.length}</span>
-        <div class="button-row">
+        <div class="seatalk-mapping-page-summary">
+          <span>Showing ${start + 1}-${start + pageRows.length} of ${rows.length}</span>
           <label class="seatalk-mapping-page-size">
             <span>Rows per page</span>
             <select data-seatalk-name-mapping-page-size aria-label="Rows per page">
@@ -1577,6 +1577,8 @@
               `).join('')}
             </select>
           </label>
+        </div>
+        <div class="button-row">
           <button class="button button-secondary" type="button" data-seatalk-name-mapping-prev ${state.page <= 1 ? 'disabled' : ''}>Previous</button>
           <span>Page ${state.page} / ${totalPages}</span>
           <button class="button button-secondary" type="button" data-seatalk-name-mapping-next ${state.page >= totalPages ? 'disabled' : ''}>Next</button>
