@@ -323,6 +323,7 @@ class MeetingRecorderRuntimeTests(unittest.TestCase):
                 ),
             )
             fake_process = Mock()
+            fake_process.pid = 12345
             fake_process.poll.return_value = None
 
             with patch("bpmis_jira_tool.meeting_recorder._resolve_ffmpeg_bin", return_value="/opt/homebrew/bin/ffmpeg"), patch(
@@ -348,6 +349,7 @@ class MeetingRecorderRuntimeTests(unittest.TestCase):
                 )
 
         self.assertEqual(record["media"]["recording_mode"], "audio_only")
+        self.assertEqual(record["media"]["recorder_pid"], 12345)
         self.assertEqual(record["diagnostics_snapshot"]["audio_input"], "MacBook Air Microphone")
         self.assertEqual(record["diagnostics_snapshot"]["configured_audio_input"], "Meeting Recorder Aggregate")
         command = popen.call_args.args[0]
@@ -396,6 +398,72 @@ class MeetingRecorderRuntimeTests(unittest.TestCase):
         self.assertEqual(health["duration_seconds"], 16.0)
         self.assertEqual(health["elapsed_seconds"], 61.0)
         self.assertIn("only 16s for a 61s recording", health["warning"])
+
+    def test_audio_only_recording_health_warns_when_media_duration_is_too_long(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = MeetingRecordStore(root)
+            runtime = MeetingRecorderRuntime(store=store, config=MeetingRecorderConfig())
+            record = store.create_record(
+                owner_email="owner@npt.sg",
+                title="Restarted recorder",
+                platform="unknown",
+                meeting_link="",
+            )
+            audio_path = store.record_dir(record["record_id"]) / "meeting.wav"
+            audio_path.write_bytes(b"audio")
+            record.update(
+                {
+                    "recording_started_at": "2026-05-03T00:43:20+00:00",
+                    "recording_stopped_at": "2026-05-03T00:43:52+00:00",
+                    "media": {
+                        "recording_mode": "audio_only",
+                        "audio_path": str(audio_path.relative_to(store.root_dir)),
+                    },
+                }
+            )
+
+            with patch("bpmis_jira_tool.meeting_recorder._audio_duration_seconds", return_value=277.0):
+                health = runtime._recording_health(record)
+
+        self.assertEqual(health["status"], "warning")
+        self.assertIn("277s for a 32s recording", health["warning"])
+
+    def test_stop_recording_terminates_persisted_recorder_process_after_restart(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = MeetingRecordStore(root)
+            runtime = MeetingRecorderRuntime(store=store, config=MeetingRecorderConfig())
+            record = store.create_record(
+                owner_email="owner@npt.sg",
+                title="Restarted recorder",
+                platform="unknown",
+                meeting_link="",
+            )
+            audio_path = store.record_dir(record["record_id"]) / "meeting.wav"
+            audio_path.write_bytes(b"audio")
+            record.update(
+                {
+                    "status": "recording",
+                    "recording_started_at": "2026-05-03T00:43:20+00:00",
+                    "media": {
+                        "recording_mode": "audio_only",
+                        "audio_path": str(audio_path.relative_to(store.root_dir)),
+                        "recorder_pid": 12345,
+                    },
+                }
+            )
+            store.save_record(record)
+
+            with patch.object(runtime, "_terminate_persisted_recorder_process") as terminate, patch.object(
+                runtime,
+                "_recording_health",
+                return_value={"status": "ok", "checked_at": "2026-05-03T00:43:52+00:00", "warning": ""},
+            ):
+                stopped = runtime.stop_recording(record_id=record["record_id"], owner_email="owner@npt.sg")
+
+        self.assertEqual(stopped["status"], "recorded")
+        terminate.assert_called_once()
 
     def test_screen_recording_falls_back_to_audio_only_when_screen_capture_fails(self):
         with tempfile.TemporaryDirectory() as temp_dir:

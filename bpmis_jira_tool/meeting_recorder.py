@@ -506,6 +506,7 @@ class MeetingRecorderRuntime:
         media = {
             "recording_mode": effective_mode,
             "recorder_command": _redact_command(command),
+            "recorder_pid": _safe_int(process.pid),
         }
         if effective_mode == MEETING_RECORDING_MODE_AUDIO_ONLY:
             media.update(
@@ -537,20 +538,24 @@ class MeetingRecorderRuntime:
         with self._lock:
             process = self._processes.pop(record_id, None)
         if process is not None and process.poll() is None:
-            try:
-                os.killpg(process.pid, signal.SIGTERM)
-            except OSError:
-                process.terminate()
-            try:
-                process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=5)
+            _terminate_recorder_process(process)
+        else:
+            self._terminate_persisted_recorder_process(record)
         record["status"] = "recorded"
         record["recording_stopped_at"] = _utc_now()
         record["recording_health"] = self._recording_health(record)
         self.store.save_record(record)
         return record
+
+    def _terminate_persisted_recorder_process(self, record: dict[str, Any]) -> None:
+        media = record.get("media") if isinstance(record.get("media"), dict) else {}
+        candidates = _recorder_process_candidates(record=record, store_root=self.store.root_dir)
+        pid = _safe_int(media.get("recorder_pid"))
+        if pid and _pid_command_contains(pid, candidates):
+            _terminate_process_id(pid)
+            return
+        for candidate_pid in _find_recorder_processes_for_paths(candidates):
+            _terminate_process_id(candidate_pid)
 
     def repair_video_playback(self, *, record_id: str, owner_email: str) -> dict[str, Any]:
         ffmpeg_path = _resolve_ffmpeg_bin(self.config.ffmpeg_bin)
@@ -697,6 +702,12 @@ class MeetingRecorderRuntime:
                 warning = (
                     f"Recorded audio is only {media_duration_seconds:.0f}s for a {elapsed_seconds:.0f}s recording. "
                     "Check the microphone input and start a new recording."
+                )
+            elif media_duration_seconds > elapsed_seconds * 1.3 + 10:
+                status = "warning"
+                warning = (
+                    f"Recorded audio is {media_duration_seconds:.0f}s for a {elapsed_seconds:.0f}s recording. "
+                    "The recorder process may have continued after Stop."
                 )
         return {
             "status": status,
@@ -1309,6 +1320,108 @@ def _audio_duration_seconds(audio_path: Path) -> float:
         return max(0.0, float((completed.stdout or "").strip() or 0))
     except (ToolError, ValueError):
         return 0.0
+
+
+def _terminate_recorder_process(process: subprocess.Popen[str]) -> None:
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except OSError:
+        process.terminate()
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=5)
+
+
+def _terminate_process_id(pid: int) -> None:
+    try:
+        os.killpg(pid, signal.SIGTERM)
+    except OSError:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            return
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        if not _process_exists(pid):
+            return
+        time.sleep(0.2)
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except OSError:
+        return
+
+
+def _process_exists(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def _recorder_process_candidates(*, record: dict[str, Any], store_root: Path) -> list[str]:
+    media = record.get("media") if isinstance(record.get("media"), dict) else {}
+    candidates: list[str] = []
+    for key in ("audio_path", "video_path"):
+        relative = str(media.get(key) or "").strip()
+        if relative:
+            candidates.append(str((store_root / relative).resolve()))
+            candidates.append(str((store_root / "records" / str(record.get("record_id") or "") / Path(relative).name).resolve()))
+    return [candidate for candidate in dict.fromkeys(candidates) if candidate]
+
+
+def _pid_command_contains(pid: int, candidates: list[str]) -> bool:
+    if not candidates:
+        return False
+    try:
+        completed = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    command = completed.stdout or ""
+    return any(candidate in command for candidate in candidates)
+
+
+def _find_recorder_processes_for_paths(candidates: list[str]) -> list[int]:
+    if not candidates:
+        return []
+    try:
+        completed = subprocess.run(
+            ["ps", "-axo", "pid=,command="],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    pids: list[int] = []
+    for line in (completed.stdout or "").splitlines():
+        if "ffmpeg" not in line:
+            continue
+        if not any(candidate in line for candidate in candidates):
+            continue
+        parts = line.strip().split(None, 1)
+        if not parts:
+            continue
+        pid = _safe_int(parts[0])
+        if pid:
+            pids.append(pid)
+    return pids
+
+
+def _safe_int(value: Any) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _recording_elapsed_seconds(record: dict[str, Any]) -> float | None:
