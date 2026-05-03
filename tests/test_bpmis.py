@@ -174,10 +174,125 @@ class BPMISClientTests(unittest.TestCase):
         self.assertEqual(tasks[0]["parent_project"]["project_name"], "Parent Project 1000")
         self.assertEqual(tasks[-1]["parent_project"]["project_name"], "Parent Project 1071")
         bulk_searches = [search for search in searches if (search.get("subQueries") or [{}])[0].get("id")]
-        self.assertEqual([len(search["subQueries"][0]["id"]) for search in bulk_searches], [50, 22])
+        self.assertEqual(sorted(len(search["subQueries"][0]["id"]) for search in bulk_searches), [22, 50])
         self.assertEqual(client.request_stats["issue_detail_bulk_lookup_count"], 2)
         self.assertEqual(client.request_stats["issue_detail_bulk_issue_count"], 72)
         self.assertEqual(client.request_stats["issue_detail_single_fallback_count"], 0)
+
+    def test_team_dashboard_parallel_tree_queries_preserve_serial_dedupe_order(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {"TEAM_DASHBOARD_TREE_WORKERS": "2"},
+            clear=False,
+        ):
+            client = BPMISDirectApiClient(self._settings(temp_dir))
+            client._resolve_bpmis_user_ids_by_emails = lambda emails: {"pm@npt.sg": [101]}  # type: ignore[method-assign]
+
+            def fake_api_request(path, method="GET", params=None, body=None):
+                self.assertEqual(path, "/api/v1/issues/tree")
+                search = json.loads((params or {}).get("search") or "{}")
+                if "reporter" in search:
+                    return {
+                        "data": {
+                            "rows": [
+                                {
+                                    "id": 1,
+                                    "jiraKey": "DUP-1",
+                                    "summary": "Reporter wins",
+                                    "reporter": {"id": 101},
+                                    "status": {"label": "Waiting"},
+                                },
+                                {
+                                    "id": 2,
+                                    "jiraKey": "REP-2",
+                                    "summary": "Reporter only",
+                                    "reporter": {"id": 101},
+                                    "status": {"label": "Waiting"},
+                                },
+                            ]
+                        }
+                    }
+                return {
+                    "data": {
+                        "rows": [
+                            {
+                                "id": 3,
+                                "jiraKey": "DUP-1",
+                                "summary": "PM duplicate",
+                                "jiraRegionalPmPicId": [{"id": 101}],
+                                "status": {"label": "Testing"},
+                            },
+                            {
+                                "id": 4,
+                                "jiraKey": "PM-4",
+                                "summary": "PM only",
+                                "jiraRegionalPmPicId": [{"id": 101}],
+                                "status": {"label": "Testing"},
+                            },
+                        ]
+                    }
+                }
+
+            client._api_request = fake_api_request  # type: ignore[method-assign]
+
+            tasks = client.list_jira_tasks_created_by_emails(["pm@npt.sg"], enrich_missing_parent=False)
+
+        self.assertEqual([task["jira_id"] for task in tasks], ["DUP-1", "REP-2", "PM-4"])
+        self.assertEqual(tasks[0]["jira_title"], "Reporter wins")
+        self.assertEqual(client.request_stats["issue_tree_page_count"], 2)
+        self.assertIn("issue_tree_reporter", client.request_timings)
+        self.assertIn("issue_tree_jiraRegionalPmPicId", client.request_timings)
+
+    def test_team_dashboard_parallel_tree_single_field_failure_uses_list_fallback(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {"TEAM_DASHBOARD_TREE_WORKERS": "2"},
+            clear=False,
+        ):
+            client = BPMISDirectApiClient(self._settings(temp_dir))
+            client._resolve_bpmis_user_ids_by_emails = lambda emails: {"pm@npt.sg": [101]}  # type: ignore[method-assign]
+
+            def fake_api_request(path, method="GET", params=None, body=None):
+                search = json.loads((params or {}).get("search") or "{}")
+                if path == "/api/v1/issues/tree":
+                    if "reporter" in search:
+                        raise BPMISError("reporter tree unavailable")
+                    return {
+                        "data": {
+                            "rows": [
+                                {
+                                    "id": 2,
+                                    "jiraKey": "PM-2",
+                                    "summary": "PM tree",
+                                    "jiraRegionalPmPicId": [{"id": 101}],
+                                    "status": {"label": "Testing"},
+                                }
+                            ]
+                        }
+                    }
+                self.assertEqual(path, "/api/v1/issues/list")
+                return {
+                    "data": {
+                        "rows": [
+                            {
+                                "id": 1,
+                                "jiraKey": "REP-1",
+                                "summary": "Reporter fallback",
+                                "reporter": {"id": 101},
+                                "status": {"label": "Waiting"},
+                            }
+                        ]
+                    }
+                }
+
+            client._api_request = fake_api_request  # type: ignore[method-assign]
+
+            tasks = client.list_jira_tasks_created_by_emails(["pm@npt.sg"], enrich_missing_parent=False)
+
+        self.assertEqual([task["jira_id"] for task in tasks], ["REP-1", "PM-2"])
+        self.assertEqual(client.request_stats["issue_tree_fallback_count"], 1)
+        self.assertEqual(client.request_stats["issue_list_page_count"], 1)
+        self.assertEqual(client.request_stats["issue_tree_page_count"], 1)
 
     def test_team_dashboard_parent_bulk_failure_falls_back_to_single_lookup(self):
         with tempfile.TemporaryDirectory() as temp_dir:

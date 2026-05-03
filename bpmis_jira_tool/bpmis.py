@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import base64
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
 import json
 import logging
 import os
 import re
+import threading
 import time
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -172,12 +174,17 @@ class BPMISDirectApiClient(BPMISClient):
                 "Content-Type": "application/json",
             }
         )
+        self._main_thread_id = threading.get_ident()
+        self._thread_local = threading.local()
+        self._stats_lock = threading.Lock()
+        self._cache_lock = threading.RLock()
         self._field_defs_cache: dict[str, Any] | None = None
         self._group_options_cache: dict[str, list[dict[str, Any]]] = {}
         self._bpmis_user_ids_by_email_cache: dict[str, list[int]] = {}
         self._issue_detail_cache: dict[str, dict[str, Any]] = {}
         self._team_dashboard_release_versions_by_id: dict[int, dict[str, Any]] = {}
         self.event_logger = BPMIS_LOGGER
+        self.request_timings: dict[str, float] = {}
         self.request_stats: dict[str, int] = {
             "api_call_count": 0,
             "issue_detail_lookup_count": 0,
@@ -212,6 +219,45 @@ class BPMISDirectApiClient(BPMISClient):
 
     def ping(self) -> None:
         self._get_issue_fields()
+
+    def _worker_count(self, env_name: str, default: int, hard_cap: int) -> int:
+        raw_value = str(os.getenv(env_name) or "").strip()
+        try:
+            configured = int(raw_value) if raw_value else default
+        except ValueError:
+            configured = default
+        return max(1, min(max(1, hard_cap), configured))
+
+    def _bpmis_session_for_current_thread(self) -> requests.Session:
+        if threading.get_ident() == self._main_thread_id:
+            return self.session
+        session = getattr(self._thread_local, "session", None)
+        if session is None:
+            session = requests.Session()
+            session.headers.update(self.session.headers)
+            self._thread_local.session = session
+        return session
+
+    def _increment_stat(self, key: str, amount: int = 1) -> int:
+        with self._stats_lock:
+            self.request_stats[key] = int(self.request_stats.get(key) or 0) + int(amount or 0)
+            return self.request_stats[key]
+
+    def _add_request_timing(self, key: str, started_at: float) -> None:
+        elapsed = time.monotonic() - started_at
+        with self._stats_lock:
+            self.request_timings[key] = round(float(self.request_timings.get(key) or 0.0) + elapsed, 3)
+
+    def _snapshot_issue_detail(self, issue_id: str) -> dict[str, Any] | None:
+        with self._cache_lock:
+            cached = self._issue_detail_cache.get(issue_id)
+            return dict(cached) if isinstance(cached, dict) else None
+
+    def _store_issue_detail(self, issue_id: str, detail: dict[str, Any]) -> None:
+        if not issue_id:
+            return
+        with self._cache_lock:
+            self._issue_detail_cache[issue_id] = dict(detail)
 
     def find_project(self, issue_id: str) -> ProjectMatch:
         return ProjectMatch(
@@ -557,33 +603,28 @@ class BPMISDirectApiClient(BPMISClient):
         if not parent_issue_ids or not normalized_emails:
             return {}
 
+        started_at = time.monotonic()
         rows: list[dict[str, Any]] = []
         page_size = 200
-        for parent_chunk in self._chunks(parent_issue_ids, 50):
-            page = 1
-            while True:
-                response = self._api_request(
-                    "/api/v1/issues/list",
-                    params={
-                        "search": json.dumps(
-                            {
-                                "joinType": "and",
-                                "subQueries": [
-                                    {"typeId": [self.TASK_TYPE_ID]},
-                                    {"parentIds": parent_chunk},
-                                ],
-                                "page": page,
-                                "pageSize": page_size,
-                                "mapping": True,
-                            }
-                        )
-                    },
-                )
-                page_rows = (response.get("data") or {}).get("rows") or []
-                rows.extend(page_rows)
-                if len(page_rows) < page_size:
-                    break
-                page += 1
+        parent_chunks = self._chunks(parent_issue_ids, 50)
+        worker_count = min(len(parent_chunks), self._worker_count("TEAM_DASHBOARD_BPMIS_BULK_WORKERS", 4, 4))
+        try:
+            if worker_count > 1:
+                with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                    future_by_index = {
+                        executor.submit(self._list_jira_task_rows_for_parent_chunk, parent_chunk, page_size): index
+                        for index, parent_chunk in enumerate(parent_chunks)
+                    }
+                    rows_by_index: dict[int, list[dict[str, Any]]] = {}
+                    for future in as_completed(future_by_index):
+                        rows_by_index[future_by_index[future]] = future.result()
+                    for index in range(len(parent_chunks)):
+                        rows.extend(rows_by_index.get(index) or [])
+            else:
+                for parent_chunk in parent_chunks:
+                    rows.extend(self._list_jira_task_rows_for_parent_chunk(parent_chunk, page_size))
+        finally:
+            self._add_request_timing("zero_jira_bulk", started_at)
 
         ticket_rows: list[tuple[dict[str, Any], str, str, list[str]]] = []
         seen_by_parent: set[tuple[str, str]] = set()
@@ -641,6 +682,34 @@ class BPMISDirectApiClient(BPMISClient):
             tasks.sort(key=lambda task: (str(task.get("release_date") or ""), str(task.get("jira_id") or "")))
         return grouped
 
+    def _list_jira_task_rows_for_parent_chunk(self, parent_chunk: list[int], page_size: int) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        page = 1
+        while True:
+            response = self._api_request(
+                "/api/v1/issues/list",
+                params={
+                    "search": json.dumps(
+                        {
+                            "joinType": "and",
+                            "subQueries": [
+                                {"typeId": [self.TASK_TYPE_ID]},
+                                {"parentIds": parent_chunk},
+                            ],
+                            "page": page,
+                            "pageSize": page_size,
+                            "mapping": True,
+                        }
+                    )
+                },
+            )
+            page_rows = (response.get("data") or {}).get("rows") or []
+            rows.extend(page_rows)
+            if len(page_rows) < page_size:
+                break
+            page += 1
+        return rows
+
     def list_jira_tasks_created_by_emails(
         self,
         emails: list[str],
@@ -654,15 +723,18 @@ class BPMISDirectApiClient(BPMISClient):
         if not normalized_emails:
             return []
 
-        user_ids_by_email = self._resolve_bpmis_user_ids_by_emails(normalized_emails)
+        created_cutoff = self._parse_issue_datetime(created_after) if created_after else None
+        release_cutoff = self._parse_issue_datetime(release_after) if release_after else None
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            user_future = executor.submit(self._resolve_team_dashboard_user_ids_timed, normalized_emails)
+            release_future = executor.submit(self._team_dashboard_release_version_ids, release_cutoff)
+            user_ids_by_email = user_future.result()
+            release_version_ids = release_future.result()
         user_ids = sorted({user_id for ids in user_ids_by_email.values() for user_id in ids})
         if not user_ids:
             return []
 
         rows: list[dict[str, Any]] = []
-        created_cutoff = self._parse_issue_datetime(created_after) if created_after else None
-        release_cutoff = self._parse_issue_datetime(release_after) if release_after else None
-        release_version_ids = self._team_dashboard_release_version_ids(release_cutoff)
         if release_cutoff and not release_version_ids:
             rows = self._list_team_dashboard_jira_task_rows_via_list(
                 user_ids,
@@ -677,7 +749,7 @@ class BPMISDirectApiClient(BPMISClient):
                 created_cutoff=created_cutoff,
             )
             if rows is None:
-                self.request_stats["issue_tree_fallback_count"] += 1
+                self._increment_stat("issue_tree_fallback_count")
                 rows = self._list_team_dashboard_jira_task_rows_via_list(
                     user_ids,
                     max_pages=max_pages,
@@ -708,22 +780,22 @@ class BPMISDirectApiClient(BPMISClient):
             if not matched_email:
                 continue
             if created_cutoff and not self._issue_created_on_or_after(row, created_cutoff):
-                self.request_stats["issue_created_before_cutoff_count"] += 1
+                self._increment_stat("issue_created_before_cutoff_count")
                 continue
             if release_cutoff:
                 release_text = self._extract_issue_release_date_text(row)
                 release_at = self._parse_issue_datetime(release_text)
                 if not release_text or not release_at:
-                    self.request_stats["issue_release_missing_included_count"] += 1
+                    self._increment_stat("issue_release_missing_included_count")
                 elif release_at < release_cutoff:
-                    self.request_stats["issue_release_before_cutoff_count"] += 1
+                    self._increment_stat("issue_release_before_cutoff_count")
                     continue
             if enrich_missing_parent and issue_id and not self._extract_parent_issue_ids(row):
                 detail = self.get_issue_detail(issue_id)
                 if detail:
                     row = self._merge_issue_payloads(row, detail)
             elif issue_id and not self._extract_parent_issue_ids(row):
-                self.request_stats["issue_detail_enrichment_skipped_count"] += 1
+                self._increment_stat("issue_detail_enrichment_skipped_count")
             candidate_task_rows.append((row, issue_key, matched_email))
 
         self._prime_biz_project_parent_details([row for row, _issue_key, _email in candidate_task_rows])
@@ -743,6 +815,13 @@ class BPMISDirectApiClient(BPMISClient):
             tasks.append(self._normalize_team_dashboard_jira_task(row, pm_email=matched_email, parent_project=parent_project))
         return tasks
 
+    def _resolve_team_dashboard_user_ids_timed(self, emails: list[str]) -> dict[str, list[int]]:
+        started_at = time.monotonic()
+        try:
+            return self._resolve_bpmis_user_ids_by_emails(emails)
+        finally:
+            self._add_request_timing("bpmis_user_lookup", started_at)
+
     def _list_team_dashboard_jira_task_rows_via_list(
         self,
         user_ids: list[int],
@@ -757,7 +836,7 @@ class BPMISDirectApiClient(BPMISClient):
         page_size = 200
         while True:
             if max_pages is not None and page > max(0, int(max_pages)):
-                self.request_stats["issue_list_page_cap_hit"] += 1
+                self._increment_stat("issue_list_page_cap_hit")
                 break
             response = self._api_request(
                 "/api/v1/issues/list",
@@ -773,14 +852,14 @@ class BPMISDirectApiClient(BPMISClient):
                     )
                 },
             )
-            self.request_stats["issue_list_page_count"] += 1
+            self._increment_stat("issue_list_page_count")
             page_rows = self._extract_issue_rows_from_response(response)
-            self.request_stats["issue_rows_scanned"] += len(page_rows)
+            self._increment_stat("issue_rows_scanned", len(page_rows))
             rows.extend(page_rows)
             if len(page_rows) < page_size:
                 break
             if created_cutoff and page_rows and self._all_rows_before_created_cutoff(page_rows, created_cutoff):
-                self.request_stats["issue_list_created_cutoff_hit"] += 1
+                self._increment_stat("issue_list_created_cutoff_hit")
                 break
             page += 1
         return rows
@@ -794,34 +873,85 @@ class BPMISDirectApiClient(BPMISClient):
         created_cutoff: datetime | None,
     ) -> list[dict[str, Any]] | None:
         rows_by_key: dict[str, dict[str, Any]] = {}
-        for field_name in ("reporter", "jiraRegionalPmPicId"):
-            try:
-                field_rows = self._list_team_dashboard_jira_task_rows_via_tree_field(
-                    user_ids,
-                    field_name=field_name,
-                    fix_version_ids=fix_version_ids,
-                    max_pages=max_pages,
-                    created_cutoff=created_cutoff,
-                )
-            except (BPMISError, ValueError, TypeError) as error:
-                self.event_logger.warning("Could not load Team Dashboard tasks via BPMIS issues/tree %s: %s", field_name, error)
-                self.request_stats["issue_tree_fallback_count"] += 1
-                try:
-                    field_rows = self._list_team_dashboard_jira_task_rows_via_list(
+        field_names = ("reporter", "jiraRegionalPmPicId")
+        worker_count = self._worker_count("TEAM_DASHBOARD_TREE_WORKERS", 2, 2)
+        if worker_count > 1:
+            field_results: dict[str, list[dict[str, Any]] | None] = {}
+            with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                futures = {
+                    executor.submit(
+                        self._list_team_dashboard_jira_task_rows_via_tree_or_fallback_field,
                         user_ids,
+                        field_name=field_name,
+                        fix_version_ids=fix_version_ids,
                         max_pages=max_pages,
                         created_cutoff=created_cutoff,
-                        field_name=field_name,
-                        fix_version_ids=fix_version_ids or None,
-                    )
-                except (BPMISError, ValueError, TypeError):
+                    ): field_name
+                    for field_name in field_names
+                }
+                for future in as_completed(futures):
+                    field_results[futures[future]] = future.result()
+            for field_name in field_names:
+                field_rows = field_results.get(field_name)
+                if field_rows is None:
                     return None
+                for row in field_rows:
+                    dedupe_key = self._extract_issue_key_from_row(row) or self._extract_issue_identifier(row)
+                    if not dedupe_key:
+                        dedupe_key = f"row:{len(rows_by_key)}"
+                    rows_by_key.setdefault(dedupe_key, row)
+            return list(rows_by_key.values())
+
+        for field_name in field_names:
+            field_rows = self._list_team_dashboard_jira_task_rows_via_tree_or_fallback_field(
+                user_ids,
+                field_name=field_name,
+                fix_version_ids=fix_version_ids,
+                max_pages=max_pages,
+                created_cutoff=created_cutoff,
+            )
+            if field_rows is None:
+                return None
             for row in field_rows:
                 dedupe_key = self._extract_issue_key_from_row(row) or self._extract_issue_identifier(row)
                 if not dedupe_key:
                     dedupe_key = f"row:{len(rows_by_key)}"
                 rows_by_key.setdefault(dedupe_key, row)
         return list(rows_by_key.values())
+
+    def _list_team_dashboard_jira_task_rows_via_tree_or_fallback_field(
+        self,
+        user_ids: list[int],
+        *,
+        field_name: str,
+        fix_version_ids: list[int],
+        max_pages: int | None,
+        created_cutoff: datetime | None,
+    ) -> list[dict[str, Any]] | None:
+        started_at = time.monotonic()
+        try:
+            return self._list_team_dashboard_jira_task_rows_via_tree_field(
+                user_ids,
+                field_name=field_name,
+                fix_version_ids=fix_version_ids,
+                max_pages=max_pages,
+                created_cutoff=created_cutoff,
+            )
+        except (BPMISError, ValueError, TypeError) as error:
+            self.event_logger.warning("Could not load Team Dashboard tasks via BPMIS issues/tree %s: %s", field_name, error)
+            self._increment_stat("issue_tree_fallback_count")
+            try:
+                return self._list_team_dashboard_jira_task_rows_via_list(
+                    user_ids,
+                    max_pages=max_pages,
+                    created_cutoff=created_cutoff,
+                    field_name=field_name,
+                    fix_version_ids=fix_version_ids or None,
+                )
+            except (BPMISError, ValueError, TypeError):
+                return None
+        finally:
+            self._add_request_timing(f"issue_tree_{field_name}", started_at)
 
     def _list_team_dashboard_jira_task_rows_via_tree_field(
         self,
@@ -837,7 +967,7 @@ class BPMISDirectApiClient(BPMISClient):
         page_size = 200
         while True:
             if max_pages is not None and page > max(0, int(max_pages)):
-                self.request_stats["issue_list_page_cap_hit"] += 1
+                self._increment_stat("issue_list_page_cap_hit")
                 break
             response = self._api_request(
                 "/api/v1/issues/tree",
@@ -853,14 +983,14 @@ class BPMISDirectApiClient(BPMISClient):
                     )
                 },
             )
-            self.request_stats["issue_tree_page_count"] += 1
+            self._increment_stat("issue_tree_page_count")
             page_rows = self._extract_issue_rows_from_response(response)
-            self.request_stats["issue_tree_rows_scanned"] += len(page_rows)
+            self._increment_stat("issue_tree_rows_scanned", len(page_rows))
             rows.extend(page_rows)
             if len(page_rows) < page_size:
                 break
             if created_cutoff and page_rows and self._all_rows_before_created_cutoff(page_rows, created_cutoff):
-                self.request_stats["issue_list_created_cutoff_hit"] += 1
+                self._increment_stat("issue_list_created_cutoff_hit")
                 break
             page += 1
         return rows
@@ -919,8 +1049,11 @@ class BPMISDirectApiClient(BPMISClient):
         }
 
     def _team_dashboard_release_version_ids(self, release_cutoff: datetime | None) -> list[int]:
-        self._team_dashboard_release_versions_by_id = {}
+        started_at = time.monotonic()
+        with self._cache_lock:
+            self._team_dashboard_release_versions_by_id = {}
         if not release_cutoff:
+            self._add_request_timing("release_versions", started_at)
             return []
         rows: list[dict[str, Any]] = []
         page = 1
@@ -929,7 +1062,7 @@ class BPMISDirectApiClient(BPMISClient):
         start_date = release_cutoff.date().isoformat()
         try:
             while True:
-                self.request_stats["release_version_lookup_count"] += 1
+                self._increment_stat("release_version_lookup_count")
                 response = self._api_request(
                     "/api/v1/versions/list",
                     params={
@@ -949,12 +1082,14 @@ class BPMISDirectApiClient(BPMISClient):
                     break
                 page += 1
         except (BPMISError, ValueError, TypeError) as error:
-            self.request_stats["release_version_lookup_failed_count"] += 1
+            self._increment_stat("release_version_lookup_failed_count")
             self.event_logger.warning("Could not load BPMIS release versions: %s", error)
+            self._add_request_timing("release_versions", started_at)
             return []
 
         version_ids: list[int] = []
         seen_ids: set[int] = set()
+        versions_by_id: dict[int, dict[str, Any]] = {}
         for row in rows:
             try:
                 version_id = int(str(row.get("id") or "").strip())
@@ -963,9 +1098,12 @@ class BPMISDirectApiClient(BPMISClient):
             if version_id in seen_ids:
                 continue
             seen_ids.add(version_id)
-            self._team_dashboard_release_versions_by_id[version_id] = row
+            versions_by_id[version_id] = row
             version_ids.append(version_id)
-        self.request_stats["release_version_count"] += len(version_ids)
+        with self._cache_lock:
+            self._team_dashboard_release_versions_by_id = versions_by_id
+        self._increment_stat("release_version_count", len(version_ids))
+        self._add_request_timing("release_versions", started_at)
         return version_ids
 
     def _with_team_dashboard_release_version_detail(self, row: dict[str, Any]) -> dict[str, Any]:
@@ -1052,7 +1190,7 @@ class BPMISDirectApiClient(BPMISClient):
             return False
         # Deprecated: Team Dashboard now mirrors BPMIS Feature Pool by resolving
         # release windows through /versions/list and filtering issues by fixVersionId.
-        self.request_stats["bpmis_release_query_filter_disabled_count"] += 1
+        self._increment_stat("bpmis_release_query_filter_disabled_count")
         return False
 
     def search_versions(self, query: str) -> list[dict[str, Any]]:
@@ -1171,10 +1309,11 @@ class BPMISDirectApiClient(BPMISClient):
         normalized_issue_id = str(issue_id).strip()
         if not normalized_issue_id:
             return {}
-        if normalized_issue_id in self._issue_detail_cache:
-            return dict(self._issue_detail_cache[normalized_issue_id])
+        cached = self._snapshot_issue_detail(normalized_issue_id)
+        if cached is not None:
+            return cached
 
-        self.request_stats["issue_detail_lookup_count"] += 1
+        self._increment_stat("issue_detail_lookup_count")
         attempts = [
             ("GET", "/api/v1/issues/detail", {"id": normalized_issue_id}, None),
             ("GET", "/api/v1/issues/detail", {"issueId": normalized_issue_id}, None),
@@ -1187,13 +1326,13 @@ class BPMISDirectApiClient(BPMISClient):
             payload = self._safe_api_request(path, method=method, params=params, body=body)
             detail = self._extract_issue_detail_payload(payload)
             if detail:
-                self._issue_detail_cache[normalized_issue_id] = dict(detail)
+                self._store_issue_detail(normalized_issue_id, detail)
                 return detail
         detail = self._get_issue_detail_via_list(normalized_issue_id)
         if detail:
-            self._issue_detail_cache[normalized_issue_id] = dict(detail)
+            self._store_issue_detail(normalized_issue_id, detail)
             return detail
-        self._issue_detail_cache[normalized_issue_id] = {}
+        self._store_issue_detail(normalized_issue_id, {})
         return {}
 
     def _get_issue_detail_via_list(self, issue_id: str) -> dict[str, Any]:
@@ -1224,12 +1363,13 @@ class BPMISDirectApiClient(BPMISClient):
         normalized_issue_id = str(issue_id or "").strip()
         if not normalized_issue_id:
             return {}
-        if normalized_issue_id in self._issue_detail_cache:
-            return dict(self._issue_detail_cache[normalized_issue_id])
-        self.request_stats["issue_detail_single_fallback_count"] += 1
+        cached = self._snapshot_issue_detail(normalized_issue_id)
+        if cached is not None:
+            return cached
+        self._increment_stat("issue_detail_single_fallback_count")
         detail = self._get_issue_detail_via_list(normalized_issue_id)
         if detail:
-            self._issue_detail_cache[normalized_issue_id] = dict(detail)
+            self._store_issue_detail(normalized_issue_id, detail)
             return detail
         return self.get_issue_detail(normalized_issue_id)
 
@@ -1248,48 +1388,67 @@ class BPMISDirectApiClient(BPMISClient):
         if not normalized_issue_ids:
             return {}
 
+        started_at = time.monotonic()
         details: dict[str, dict[str, Any]] = {}
-        for issue_id_chunk in self._chunks(normalized_issue_ids, chunk_size):
-            self.request_stats["issue_detail_bulk_lookup_count"] += 1
-            try:
-                response = self._api_request(
-                    "/api/v1/issues/list",
-                    params={
-                        "search": json.dumps(
-                            {
-                                "joinType": "and",
-                                "subQueries": [{"id": issue_id_chunk}],
-                                "page": 1,
-                                "pageSize": max(1, len(issue_id_chunk)),
-                                "mapping": True,
-                            }
-                        )
-                    },
+        chunks = self._chunks(normalized_issue_ids, chunk_size)
+        worker_count = min(len(chunks), self._worker_count("TEAM_DASHBOARD_BPMIS_BULK_WORKERS", 4, 4))
+        try:
+            if worker_count > 1:
+                with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                    future_by_chunk = {
+                        executor.submit(self._get_issue_details_via_list_bulk_chunk, issue_id_chunk): issue_id_chunk
+                        for issue_id_chunk in chunks
+                    }
+                    for future in as_completed(future_by_chunk):
+                        chunk_details = future.result()
+                        details.update(chunk_details)
+            else:
+                for issue_id_chunk in chunks:
+                    details.update(self._get_issue_details_via_list_bulk_chunk(issue_id_chunk))
+        except (BPMISError, ValueError, TypeError) as error:
+            self.event_logger.warning("Could not bulk load BPMIS issue details: %s", error)
+            return None
+        finally:
+            self._add_request_timing("parent_detail_bulk", started_at)
+        return details
+
+    def _get_issue_details_via_list_bulk_chunk(self, issue_id_chunk: list[int]) -> dict[str, dict[str, Any]]:
+        self._increment_stat("issue_detail_bulk_lookup_count")
+        response = self._api_request(
+            "/api/v1/issues/list",
+            params={
+                "search": json.dumps(
+                    {
+                        "joinType": "and",
+                        "subQueries": [{"id": issue_id_chunk}],
+                        "page": 1,
+                        "pageSize": max(1, len(issue_id_chunk)),
+                        "mapping": True,
+                    }
                 )
-            except (BPMISError, ValueError, TypeError) as error:
-                self.event_logger.warning("Could not bulk load BPMIS issue details: %s", error)
-                return None
-            rows = ((response.get("data") or {}).get("rows") or []) if isinstance(response, dict) else []
-            chunk_ids = {str(issue_id) for issue_id in issue_id_chunk}
-            for row in rows:
-                if not isinstance(row, dict):
-                    continue
-                detail_id = self._extract_issue_identifier(row)
-                if not detail_id or detail_id not in chunk_ids:
-                    continue
-                details[detail_id] = row
-                self._issue_detail_cache[detail_id] = dict(row)
-            self.request_stats["issue_detail_bulk_issue_count"] += len(
-                [issue_id for issue_id in chunk_ids if issue_id in details]
-            )
+            },
+        )
+        rows = ((response.get("data") or {}).get("rows") or []) if isinstance(response, dict) else []
+        chunk_ids = {str(issue_id) for issue_id in issue_id_chunk}
+        details: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            detail_id = self._extract_issue_identifier(row)
+            if not detail_id or detail_id not in chunk_ids:
+                continue
+            details[detail_id] = row
+            self._store_issue_detail(detail_id, row)
+        self._increment_stat("issue_detail_bulk_issue_count", len([issue_id for issue_id in chunk_ids if issue_id in details]))
         return details
 
     def _prime_issue_detail_cache(self, issue_ids: list[str]) -> None:
-        missing_issue_ids = [
-            str(issue_id or "").strip()
-            for issue_id in issue_ids
-            if str(issue_id or "").strip() and str(issue_id or "").strip() not in self._issue_detail_cache
-        ]
+        with self._cache_lock:
+            missing_issue_ids = [
+                str(issue_id or "").strip()
+                for issue_id in issue_ids
+                if str(issue_id or "").strip() and str(issue_id or "").strip() not in self._issue_detail_cache
+            ]
         if missing_issue_ids:
             self._get_issue_details_via_list_bulk(missing_issue_ids)
 
@@ -1309,7 +1468,7 @@ class BPMISDirectApiClient(BPMISClient):
             self._prime_issue_detail_cache(current_ids)
             next_pending: set[str] = set()
             for issue_id in current_ids:
-                detail = self._issue_detail_cache.get(issue_id) or {}
+                detail = self._snapshot_issue_detail(issue_id) or {}
                 if not detail or self._is_biz_project_issue(detail):
                     continue
                 next_pending.update(self._extract_parent_issue_ids(detail))
@@ -1962,36 +2121,64 @@ class BPMISDirectApiClient(BPMISClient):
         if not normalized_keys or not self._jira_token():
             return {}
 
+        started_at = time.monotonic()
         details: dict[str, dict[str, Any]] = {}
-        for index in range(0, len(normalized_keys), JIRA_LIVE_BULK_DETAIL_CHUNK_SIZE):
-            chunk = normalized_keys[index : index + JIRA_LIVE_BULK_DETAIL_CHUNK_SIZE]
-            self.request_stats["jira_live_bulk_lookup_count"] += 1
-            try:
-                payload = self._jira_api_request(
-                    "POST",
-                    "/rest/api/2/search",
-                    body={
-                        "jql": f"key in ({', '.join(self._jira_jql_literal(key) for key in chunk)})",
-                        "fields": ["summary", "status", "fixVersions", "components"],
-                        "maxResults": len(chunk),
-                    },
-                )
-            except BPMISError as error:
-                if self._jira_bulk_error_is_fallbackable(error):
-                    self.event_logger.warning("Could not bulk refresh live Jira fields: %s", error)
-                    return None
-                raise
-            if payload is None:
+        chunks = [
+            normalized_keys[index : index + JIRA_LIVE_BULK_DETAIL_CHUNK_SIZE]
+            for index in range(0, len(normalized_keys), JIRA_LIVE_BULK_DETAIL_CHUNK_SIZE)
+        ]
+        worker_count = min(len(chunks), self._worker_count("TEAM_DASHBOARD_JIRA_BULK_WORKERS", 4, 4))
+        try:
+            if worker_count > 1:
+                with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                    future_by_chunk = {
+                        executor.submit(self._get_jira_ticket_details_via_jira_bulk_chunk, chunk): chunk
+                        for chunk in chunks
+                    }
+                    for future in as_completed(future_by_chunk):
+                        chunk_details = future.result()
+                        if chunk_details is None:
+                            return None
+                        details.update(chunk_details)
+            else:
+                for chunk in chunks:
+                    chunk_details = self._get_jira_ticket_details_via_jira_bulk_chunk(chunk)
+                    if chunk_details is None:
+                        return None
+                    details.update(chunk_details)
+        finally:
+            self._add_request_timing("jira_live_bulk", started_at)
+        return details
+
+    def _get_jira_ticket_details_via_jira_bulk_chunk(self, chunk: list[str]) -> dict[str, dict[str, Any]] | None:
+        self._increment_stat("jira_live_bulk_lookup_count")
+        try:
+            payload = self._jira_api_request(
+                "POST",
+                "/rest/api/2/search",
+                body={
+                    "jql": f"key in ({', '.join(self._jira_jql_literal(key) for key in chunk)})",
+                    "fields": ["summary", "status", "fixVersions", "components"],
+                    "maxResults": len(chunk),
+                },
+            )
+        except BPMISError as error:
+            if self._jira_bulk_error_is_fallbackable(error):
+                self.event_logger.warning("Could not bulk refresh live Jira fields: %s", error)
                 return None
-            issues = payload.get("issues") if isinstance(payload.get("issues"), list) else []
-            self.request_stats["jira_live_bulk_issue_count"] += len(issues)
-            for issue in issues:
-                if not isinstance(issue, dict):
-                    continue
-                detail = self._normalize_live_jira_issue_payload(issue)
-                detail_key = self._normalize_jira_issue_key(str(detail.get("jiraKey") or detail.get("key") or ""))
-                if detail_key:
-                    details[detail_key] = detail
+            raise
+        if payload is None:
+            return None
+        issues = payload.get("issues") if isinstance(payload.get("issues"), list) else []
+        self._increment_stat("jira_live_bulk_issue_count", len(issues))
+        details: dict[str, dict[str, Any]] = {}
+        for issue in issues:
+            if not isinstance(issue, dict):
+                continue
+            detail = self._normalize_live_jira_issue_payload(issue)
+            detail_key = self._normalize_jira_issue_key(str(detail.get("jiraKey") or detail.get("key") or ""))
+            if detail_key:
+                details[detail_key] = detail
         return details
 
     def _normalize_live_jira_issue_payload(self, payload: dict[str, Any], *, fallback_ticket_key: str = "") -> dict[str, Any]:
@@ -2210,7 +2397,7 @@ class BPMISDirectApiClient(BPMISClient):
         normalized_ticket_key = self._extract_issue_key(str(ticket_key or "")) or str(ticket_key or "").strip()
         if not normalized_ticket_key or not self._jira_token():
             return row
-        self.request_stats["jira_live_detail_lookup_count"] += 1
+        self._increment_stat("jira_live_detail_lookup_count")
         try:
             detail = self._get_jira_ticket_detail_via_jira(normalized_ticket_key)
         except BPMISError as error:
@@ -2229,7 +2416,7 @@ class BPMISDirectApiClient(BPMISClient):
             merged["status"] = {"label": live_status}
             merged["jiraStatus"] = {"label": live_status}
             if current_status and not self._status_labels_match(current_status, live_status):
-                self.request_stats["jira_live_status_override_count"] += 1
+                self._increment_stat("jira_live_status_override_count")
 
         live_summary = str(detail.get("summary") or "").strip()
         if live_summary:
@@ -3014,13 +3201,13 @@ class BPMISDirectApiClient(BPMISClient):
         body: Any | None = None,
     ) -> dict[str, Any]:
         url = f"{self.settings.bpmis_base_url.rstrip('/')}/{path.lstrip('/')}"
-        self.request_stats["api_call_count"] += 1
+        request_index = self._increment_stat("api_call_count")
         started_at = time.monotonic()
         log_context = {
             "event": "bpmis_api_request",
             "path": path,
             "method": method,
-            "request_index": self.request_stats["api_call_count"],
+            "request_index": request_index,
             "params": self._summarize_api_params(params),
             "has_body": body is not None,
         }
@@ -3033,7 +3220,7 @@ class BPMISDirectApiClient(BPMISClient):
             ),
         )
         try:
-            response = self.session.request(
+            response = self._bpmis_session_for_current_thread().request(
                 method=method,
                 url=url,
                 params=params,
@@ -3226,9 +3413,10 @@ class BPMISDirectApiClient(BPMISClient):
     def _resolve_bpmis_user_ids_by_emails(self, emails: list[str]) -> dict[str, list[int]]:
         normalized_emails = self._normalize_email_list(emails)
         resolved: dict[str, list[int]] = {}
-        missing = [email for email in normalized_emails if email not in self._bpmis_user_ids_by_email_cache]
+        with self._cache_lock:
+            missing = [email for email in normalized_emails if email not in self._bpmis_user_ids_by_email_cache]
         if missing:
-            self.request_stats["user_lookup_count"] += 1
+            self._increment_stat("user_lookup_count")
             response = self._api_request(
                 "/api/v1/users/listByEmail",
                 params={"search": json.dumps(missing)},
@@ -3246,10 +3434,12 @@ class BPMISDirectApiClient(BPMISClient):
                     for matched_email in matched_emails:
                         if user_id not in grouped[matched_email]:
                             grouped[matched_email].append(user_id)
-            for email in missing:
-                self._bpmis_user_ids_by_email_cache[email] = grouped.get(email) or []
-        for email in normalized_emails:
-            resolved[email] = list(self._bpmis_user_ids_by_email_cache.get(email) or [])
+            with self._cache_lock:
+                for email in missing:
+                    self._bpmis_user_ids_by_email_cache[email] = grouped.get(email) or []
+        with self._cache_lock:
+            for email in normalized_emails:
+                resolved[email] = list(self._bpmis_user_ids_by_email_cache.get(email) or [])
         return resolved
 
     @staticmethod

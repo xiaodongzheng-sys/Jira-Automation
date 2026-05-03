@@ -4555,6 +4555,7 @@ def create_app() -> Flask:
                 _backfill_team_dashboard_empty_project_jira_tasks(bpmis_client, team_payload)
                 _remove_team_dashboard_zero_jira_pending_live_projects(team_payload)
                 _team_dashboard_add_timing(timing_stats, "backfill_zero_jira_projects", step_started_at)
+                timing_stats.update(_team_dashboard_combined_request_timings(bpmis_client, biz_bpmis_client))
                 team_payload["elapsed_seconds"] = round(time.monotonic() - started_at, 2)
                 team_payload["fetch_stats"] = _team_dashboard_combined_fetch_stats(bpmis_client, biz_bpmis_client)
                 timing_stats["total"] = team_payload["elapsed_seconds"]
@@ -7701,6 +7702,7 @@ def _team_dashboard_load_jira_and_biz_projects(
     timing_stats["list_jira_tasks"] = jira_elapsed
     timing_stats["list_biz_projects"] = biz_elapsed
     timing_stats["list_jira_and_biz_projects"] = round(time.monotonic() - started_at, 3)
+    timing_stats.update(_team_dashboard_combined_request_timings(jira_bpmis_client, biz_bpmis_client))
     return tasks, biz_projects
 
 
@@ -7755,6 +7757,7 @@ def _load_team_dashboard_tasks_for_all_teams_merged(
     for team_payload in team_payloads:
         _remove_team_dashboard_zero_jira_pending_live_projects(team_payload)
     _team_dashboard_add_timing(shared_timing, "backfill_zero_jira_projects", backfill_started_at)
+    shared_timing.update(_team_dashboard_combined_request_timings(bpmis_client, biz_bpmis_client))
 
     fetch_stats = _team_dashboard_combined_fetch_stats(bpmis_client, biz_bpmis_client)
     elapsed = round(time.monotonic() - started_at, 2)
@@ -7927,6 +7930,28 @@ def _team_dashboard_combined_fetch_stats(*bpmis_clients: Any) -> dict[str, int]:
     return combined
 
 
+def _team_dashboard_combined_request_timings(*bpmis_clients: Any) -> dict[str, float]:
+    combined: dict[str, float] = {}
+    seen: set[int] = set()
+    for bpmis_client in bpmis_clients:
+        if bpmis_client is None:
+            continue
+        identity = id(bpmis_client)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        timings = getattr(bpmis_client, "request_timings", None)
+        if not isinstance(timings, dict):
+            continue
+        for key, value in timings.items():
+            try:
+                numeric = float(value or 0.0)
+            except (TypeError, ValueError):
+                continue
+            combined[key] = round(float(combined.get(key) or 0.0) + numeric, 3)
+    return combined
+
+
 def _team_dashboard_new_timing() -> dict[str, float]:
     return {
         "config_load": 0.0,
@@ -7934,6 +7959,13 @@ def _team_dashboard_new_timing() -> dict[str, float]:
         "list_jira_tasks": 0.0,
         "list_biz_projects": 0.0,
         "list_jira_and_biz_projects": 0.0,
+        "bpmis_user_lookup": 0.0,
+        "release_versions": 0.0,
+        "issue_tree_reporter": 0.0,
+        "issue_tree_jiraRegionalPmPicId": 0.0,
+        "parent_detail_bulk": 0.0,
+        "jira_live_bulk": 0.0,
+        "zero_jira_bulk": 0.0,
         "group_projects": 0.0,
         "backfill_zero_jira_projects": 0.0,
         "cache_store": 0.0,

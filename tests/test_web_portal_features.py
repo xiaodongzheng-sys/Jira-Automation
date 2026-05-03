@@ -315,6 +315,28 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertEqual(stats["release_version_count"], 12)
         self.assertEqual(stats["team_dashboard_zero_jira_fallback_candidate_count"], 12)
 
+    def test_team_dashboard_combined_request_timings_dedupes_clients(self):
+        class FakeBPMISClient:
+            request_timings = {
+                "bpmis_user_lookup": 0.2,
+                "release_versions": 0.3,
+                "issue_tree_reporter": 1.1,
+            }
+
+        class OtherBPMISClient:
+            request_timings = {
+                "issue_tree_reporter": 0.4,
+                "jira_live_bulk": 0.5,
+            }
+
+        first = FakeBPMISClient()
+        timings = web_module._team_dashboard_combined_request_timings(first, first, OtherBPMISClient())
+
+        self.assertEqual(timings["bpmis_user_lookup"], 0.2)
+        self.assertEqual(timings["release_versions"], 0.3)
+        self.assertEqual(timings["issue_tree_reporter"], 1.5)
+        self.assertEqual(timings["jira_live_bulk"], 0.5)
+
     def test_classify_portal_error_categorizes_duplicate_route_rule(self):
         details = _classify_portal_error(
             ToolError(
