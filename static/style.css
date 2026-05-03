@@ -4276,8 +4276,14 @@ body.briefing-no-image-mode .briefing-presentation-card {
 .briefing-presenter-media-table td {
   padding: 10px 12px;
   border: 1px solid rgba(148, 163, 184, 0.44);
+  color: var(--ink);
   text-align: left;
   vertical-align: top;
+}
+
+.briefing-presenter-media-table td *,
+.briefing-presenter-media-table th * {
+  color: inherit;
 }
 
 .briefing-presenter-media-table th {
@@ -4450,6 +4456,21 @@ body.briefing-no-image-mode .briefing-presentation-card {
 .briefing-presenter-layout.is-theater .briefing-presenter-media-table {
   max-height: calc(100vh - 246px);
   background: #f8fafc;
+}
+
+.briefing-presenter-layout.is-theater .briefing-presenter-media-table table,
+.briefing-presenter-layout.is-theater .briefing-presenter-media-table th,
+.briefing-presenter-layout.is-theater .briefing-presenter-media-table td {
+  color: #0f172a;
+}
+
+.briefing-presenter-layout.is-theater .briefing-presenter-media-table th *,
+.briefing-presenter-layout.is-theater .briefing-presenter-media-table td * {
+  color: #0f172a !important;
+}
+
+.briefing-presenter-layout.is-theater .briefing-presenter-media-table a {
+  color: #1d4ed8 !important;
 }
 
 .briefing-presenter-layout.is-theater .briefing-presenter-script {

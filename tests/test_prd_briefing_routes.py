@@ -323,6 +323,18 @@ class PRDBriefingRouteTests(unittest.TestCase):
         self.assertNotIn("prd-self-assessment:last-form:v1", briefing_js)
         self.assertNotIn("prd-briefing:last-form:v1", self_assessment_js)
 
+    def test_theater_table_cells_keep_dark_text_on_light_background(self):
+        root = Path(__file__).resolve().parent.parent
+        stylesheet = (root / "static" / "style.css").read_text()
+
+        self.assertIn(".briefing-presenter-media-table th,", stylesheet)
+        self.assertIn(".briefing-presenter-media-table td", stylesheet)
+        self.assertIn("color: var(--ink);", stylesheet)
+        self.assertIn(".briefing-presenter-layout.is-theater .briefing-presenter-media-table td", stylesheet)
+        self.assertIn("color: #0f172a", stylesheet)
+        self.assertIn(".briefing-presenter-layout.is-theater .briefing-presenter-media-table td *", stylesheet)
+        self.assertIn("color: #0f172a !important;", stylesheet)
+
     @patch("prd_briefing.blueprint._build_service", return_value=FakeBriefingService())
     def test_process_prd_endpoint_returns_presentation_chunks(self, _mock_service):
         with self.app.test_client() as client:
