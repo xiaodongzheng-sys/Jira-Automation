@@ -416,11 +416,11 @@ class WebConfigStore:
             value = str(data.get(key, default)).strip()
             normalized[key] = value or default
 
-        if not normalized.get("sync_project_name_header"):
+        if not normalized.get("sync_project_name_header"):  # pragma: no cover - SOURCE_FIELDS always supplies a non-empty default.
             normalized["sync_project_name_header"] = "Project Name"
-        if not normalized.get("sync_market_header"):
+        if not normalized.get("sync_market_header"):  # pragma: no cover - SOURCE_FIELDS always supplies a non-empty default.
             normalized["sync_market_header"] = "Market"
-        if not normalized.get("sync_brd_link_header"):
+        if not normalized.get("sync_brd_link_header"):  # pragma: no cover - SOURCE_FIELDS always supplies a non-empty default.
             normalized["sync_brd_link_header"] = "BRD Link"
 
         for field_name, config_meta in HEADER_FIELDS.items():
@@ -428,7 +428,7 @@ class WebConfigStore:
             value = str(data.get(config_key, default_value)).strip()
             normalized[config_key] = value or default_value
 
-        if not normalized.get("market_header"):
+        if not normalized.get("market_header"):  # pragma: no cover - HEADER_FIELDS always supplies a non-empty default.
             normalized["market_header"] = normalized.get("sync_market_header", "").strip()
 
         for key in ("component_route_rules_text", "component_default_rules_text"):
@@ -581,7 +581,7 @@ class WebConfigStore:
         seen_components: set[str] = set()
         for market in MARKET_KEYS:
             component = str(component_by_market.get(market, "") or "").strip()
-            if not component:
+            if not component:  # pragma: no cover - route parser rejects empty components before this point.
                 continue
             component_key = component.lower()
             if component_key in seen_components:
@@ -684,7 +684,7 @@ class WebConfigStore:
         seen_components: set[str] = set()
         for rule in route_rules:
             component = str(rule.get("component", "") or "").strip()
-            if not component:
+            if not component:  # pragma: no cover - parser rejects blank components before this defensive guard.
                 continue
             component_key = component.lower()
             if component_key in seen_components:

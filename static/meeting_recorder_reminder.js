@@ -218,6 +218,7 @@
             title: meeting.title,
             platform: meeting.platform,
             meeting_link: meeting.meeting_link,
+            recording_mode: 'audio_only',
             calendar_event_id: meeting.calendar_event_id,
             scheduled_start: meeting.start,
             scheduled_end: meeting.end,

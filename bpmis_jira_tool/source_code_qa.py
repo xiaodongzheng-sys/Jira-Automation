@@ -9169,8 +9169,18 @@ class SourceCodeQAService:
         value = str(term or "").strip().lower()
         if not value:
             return False
-        if "/" in value or value.endswith((".java", ".kt", ".py", ".xml", ".sql", ".yaml", ".yml", ".properties", ".ts", ".tsx", ".js", ".jsx")):
+        path_extensions = (".java", ".kt", ".py", ".xml", ".sql", ".yaml", ".yml", ".properties", ".ts", ".tsx", ".js", ".jsx", ".md")
+        if value.endswith(path_extensions):
             return True
+        if "/" in value:
+            parts = [part for part in value.split("/") if part]
+            looks_like_repo_path = (
+                value.startswith(("./", "../", "src/", "spec/", "mapper/", "config/", "resources/"))
+                or any(part.endswith(path_extensions) for part in parts)
+            )
+            if looks_like_repo_path:
+                return True
+            return False
         if "_" not in value:
             return False
         table_markers = ("_tab", "_table", "dwd", "dim", "tmp", "ads", "ods", "snapshot", "process_info", "response_body")

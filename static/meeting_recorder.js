@@ -7,6 +7,11 @@
     selectedRecordId: root.dataset.selectedRecordId || '',
     initialSelectionPending: Boolean(root.dataset.selectedRecordId),
     diagnostics: null,
+    browserRecording: null,
+    f2fBrowserFallbackArmed: false,
+    f2fBrowserFallbackKey: '',
+    signalCheckToken: 0,
+    signalCheckTimer: null,
   };
 
   const nodes = {
@@ -15,10 +20,10 @@
     calendarStatus: root.querySelector('[data-meeting-calendar-status]'),
     refresh: root.querySelector('[data-meeting-refresh]'),
     startForm: root.querySelector('[data-meeting-start-form]'),
-    stopCurrent: root.querySelector('[data-meeting-stop-current]'),
     recordingStatus: root.querySelector('[data-meeting-recording-status]'),
     records: root.querySelector('[data-meeting-records]'),
     recordsRefresh: root.querySelector('[data-meeting-records-refresh]'),
+    recordDate: root.querySelector('[data-meeting-record-date]'),
     detail: root.querySelector('[data-meeting-record-detail]'),
   };
 
@@ -35,7 +40,7 @@
     return `${url}${separator}download=1`;
   };
 
-  const filenameFromUrl = (url, fallback = 'meeting-recording.mp4') => {
+  const filenameFromUrl = (url, fallback = 'meeting.wav') => {
     try {
       const pathname = new URL(url, window.location.origin).pathname;
       return decodeURIComponent(pathname.split('/').filter(Boolean).pop() || fallback);
@@ -60,7 +65,11 @@
       ...options,
     });
     const payload = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(payload.message || 'Request failed.');
+    if (!response.ok) {
+      const error = new Error(payload.message || 'Request failed.');
+      error.payload = payload;
+      throw error;
+    }
     return payload;
   };
 
@@ -76,10 +85,234 @@
     }).catch(() => {});
   };
 
+  const browserAudioMimeType = () => {
+    const candidates = [
+      'audio/webm;codecs=opus',
+      'audio/webm',
+      'audio/mp4',
+      'audio/ogg;codecs=opus',
+    ];
+    return candidates.find((candidate) => window.MediaRecorder?.isTypeSupported?.(candidate)) || '';
+  };
+
+  const browserAudioSupportSnapshot = () => ({
+    get_user_media_supported: Boolean(navigator.mediaDevices?.getUserMedia),
+    get_display_media_supported: Boolean(navigator.mediaDevices?.getDisplayMedia),
+    media_recorder_supported: Boolean(window.MediaRecorder),
+    selected_mime_type: browserAudioMimeType(),
+    protocol: window.location.protocol,
+    host: window.location.host,
+  });
+
+  const isVirtualAudioInputLabel = (label) => {
+    const normalized = String(label || '').toLowerCase();
+    return [
+      'blackhole',
+      'meeting recorder',
+      'aggregate',
+      'multi-output',
+      'soundflower',
+      'loopback',
+    ].some((needle) => normalized.includes(needle));
+  };
+
+  const audioInputDevices = async () => {
+    if (!navigator.mediaDevices?.enumerateDevices) return [];
+    try {
+      return (await navigator.mediaDevices.enumerateDevices())
+        .filter((device) => device.kind === 'audioinput');
+    } catch (_error) {
+      return [];
+    }
+  };
+
+  const choosePreferredAudioInput = (devices, currentLabel = '') => {
+    const inputs = Array.isArray(devices) ? devices.filter((device) => device.kind === 'audioinput') : [];
+    const realInputs = inputs.filter((device) => !isVirtualAudioInputLabel(device.label));
+    const currentLooksReal = currentLabel && !isVirtualAudioInputLabel(currentLabel);
+    if (currentLooksReal) return null;
+    const priority = [
+      /macbook.*microphone/i,
+      /built-?in.*microphone/i,
+      /airpods|headset|usb|external/i,
+      /microphone/i,
+    ];
+    for (const pattern of priority) {
+      const match = realInputs.find((device) => pattern.test(device.label || ''));
+      if (match) return match;
+    }
+    return realInputs[0] || null;
+  };
+
+  const browserAudioConstraints = (deviceId = '') => ({
+    audio: {
+      ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true,
+    },
+  });
+
+  const browserMeetingTabConstraints = () => ({
+    video: true,
+    audio: true,
+  });
+
+  const stopStreamTracks = (stream) => {
+    stream?.getTracks?.().forEach((track) => track.stop());
+  };
+
+  const watchCaptureTrackEnds = (stream, capturePath) => {
+    if (!stream?.getTracks) return () => {};
+    const disposers = [];
+    stream.getTracks().forEach((track) => {
+      const handler = () => {
+        const active = state.browserRecording;
+        if (!active || active.capturePath !== capturePath) return;
+        const reason = `${track.kind || 'media'} track ended`;
+        active.captureEndedAt = new Date().toISOString();
+        active.captureEndReason = reason;
+        if (nodes.recordingStatus) {
+          nodes.recordingStatus.textContent = 'Meeting tab audio sharing stopped. Stop this recording and start again.';
+        }
+        telemetry('browser_audio_capture_track_ended', {
+          capture_path: capturePath,
+          track_kind: track.kind || '',
+          track_label: track.label || '',
+          elapsed_ms: Math.max(0, Date.now() - new Date(active.startedAt).getTime()),
+        });
+      };
+      track.addEventListener('ended', handler);
+      disposers.push(() => track.removeEventListener('ended', handler));
+    });
+    return () => disposers.forEach((dispose) => dispose());
+  };
+
+  const closeAudioContext = (context) => {
+    const closePromise = context?.close?.();
+    if (closePromise?.catch) closePromise.catch(() => {});
+  };
+
+  const mixBrowserMeetingAudio = async (micStream, meetingStream) => {
+    const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextCtor) {
+      throw new Error('This browser cannot mix meeting tab audio and microphone audio.');
+    }
+    const meetingAudioTracks = meetingStream.getAudioTracks();
+    if (!meetingAudioTracks.length) {
+      throw new Error('Chrome did not provide meeting tab audio. Select the meeting Chrome tab and enable tab audio sharing.');
+    }
+    const context = new AudioContextCtor();
+    if (context.state === 'suspended') await context.resume();
+    const destination = context.createMediaStreamDestination();
+    const sources = [];
+    const connectStream = (stream) => {
+      const source = context.createMediaStreamSource(stream);
+      source.connect(destination);
+      sources.push(source);
+    };
+    connectStream(meetingStream);
+    if (micStream.getAudioTracks().length) connectStream(micStream);
+    return {
+      stream: destination.stream,
+      context,
+      sources,
+      meetingAudioTrackLabel: meetingAudioTracks.map((track) => track.label || '').filter(Boolean).join(' | '),
+      meetingVideoTrackLabel: meetingStream.getVideoTracks().map((track) => track.label || '').filter(Boolean).join(' | '),
+      meetingAudioTrackCount: meetingAudioTracks.length,
+    };
+  };
+
+  const amplitudeToDb = (value) => {
+    const amplitude = Math.max(0, Number(value) || 0);
+    if (!amplitude) return -120;
+    return Math.max(-120, 20 * Math.log10(amplitude));
+  };
+
+  const measureBrowserAudioSignal = async (stream, durationMs = 1200) => {
+    const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextCtor) return { status: 'unavailable', rms_db: null, peak_db: null };
+    const context = new AudioContextCtor();
+    try {
+      if (context.state === 'suspended') await context.resume();
+      const source = context.createMediaStreamSource(stream);
+      const analyser = context.createAnalyser();
+      analyser.fftSize = 2048;
+      source.connect(analyser);
+      const samples = new Float32Array(analyser.fftSize);
+      let sampleCount = 0;
+      let sumSquares = 0;
+      let peak = 0;
+      const started = performance.now();
+      await new Promise((resolve) => {
+        const collect = () => {
+          analyser.getFloatTimeDomainData(samples);
+          for (const sample of samples) {
+            const abs = Math.abs(sample);
+            peak = Math.max(peak, abs);
+            sumSquares += sample * sample;
+          }
+          sampleCount += samples.length;
+          if (performance.now() - started >= durationMs) {
+            resolve();
+            return;
+          }
+          window.requestAnimationFrame(collect);
+        };
+        collect();
+      });
+      source.disconnect();
+      const rms = Math.sqrt(sumSquares / Math.max(1, sampleCount));
+      return {
+        status: 'ok',
+        rms_db: amplitudeToDb(rms),
+        peak_db: amplitudeToDb(peak),
+      };
+    } catch (error) {
+      return {
+        status: 'unavailable',
+        rms_db: null,
+        peak_db: null,
+        warning: error.message || '',
+      };
+    } finally {
+      const closePromise = context.close?.();
+      if (closePromise?.catch) closePromise.catch(() => {});
+    }
+  };
+
+  const blobToBase64 = (blob) => new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = String(reader.result || '');
+      resolve(result.includes(',') ? result.split(',').pop() : result);
+    };
+    reader.onerror = () => reject(reader.error || new Error('Could not read browser audio.'));
+    reader.readAsDataURL(blob);
+  });
+
   const platformLabel = (platform) => {
     if (platform === 'google_meet') return 'Google Meet';
     if (platform === 'zoom') return 'Zoom';
     return 'Meeting';
+  };
+
+  const platformFromLink = (link) => {
+    const value = String(link || '').toLowerCase();
+    if (value.includes('meet.google.com')) return 'google_meet';
+    if (value.includes('zoom.us')) return 'zoom';
+    return '';
+  };
+
+  const fallbackKeyForMeeting = (meeting) => {
+    const title = String(meeting?.title || '').trim();
+    const link = String(meeting?.meeting_link || '').trim();
+    return `${title}\n${link}`;
+  };
+
+  const isScreenCaptureKitStartupFailure = (error) => {
+    const message = String(error?.message || error || '');
+    return /ScreenCaptureKit|Screen Recording|System Audio Recording|Microphone|TCC|helper|permission|declined TCCs|not authorized|unavailable/i.test(message);
   };
 
   const statusLabel = (status) => {
@@ -100,6 +333,17 @@
     }).format(date);
   };
 
+  const localDateValue = (value = new Date()) => {
+    const date = value instanceof Date ? value : new Date(value || '');
+    if (Number.isNaN(date.getTime())) return '';
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  };
+
+  const recordDateValue = (record) => localDateValue(record?.recording_started_at || record?.created_at || '');
+
   const durationLabel = (start, end) => {
     const startDate = new Date(start || '');
     const endDate = new Date(end || '');
@@ -111,17 +355,12 @@
     return remaining ? `${minutes}m ${remaining}s` : `${minutes}m`;
   };
 
-  const stripScreenEvidenceSection = (markdown) => String(markdown || '')
-    .replace(/(?:^|\n)(?:#{1,6}\s*)?Screen Evidence\s*\n[\s\S]*?(?=\n(?:#{1,6}\s*\S|\*\*[^*\n]+\*\*)|\s*$)/gi, '\n')
-    .replace(/(?:^|\n)\*\*Screen Evidence\*\*\s*\n[\s\S]*?(?=\n\*\*[^*\n]+\*\*|\s*$)/gi, '\n')
-    .trim();
-
   const renderInlineMarkdown = (value) => escapeHtml(value)
     .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
     .replace(/`([^`]+)`/g, '<code>$1</code>');
 
   const renderMarkdown = (markdown) => {
-    const cleaned = stripScreenEvidenceSection(markdown);
+    const cleaned = String(markdown || '').trim();
     if (!cleaned) return '<p class="empty-state">Minutes are not generated yet.</p>';
     const lines = cleaned.split(/\r?\n/);
     const html = [];
@@ -226,11 +465,6 @@
     const audioLabel = payload.audio_capture_label || 'Audio input unknown';
     const audioClass = audioReady ? 'is-ready' : 'is-warning';
     const devices = Array.isArray(payload.audio_devices) ? payload.audio_devices : [];
-    const videoConfig = [
-      payload.video_input || 'not configured',
-      payload.video_max_width && payload.video_max_height ? `${payload.video_max_width}x${payload.video_max_height}` : '',
-      payload.video_fps ? `${payload.video_fps}fps` : '',
-    ].filter(Boolean).join(' · ');
     return `
       <div class="meeting-diagnostic-head">
         <span class="meeting-diagnostic-kicker">Recorder status</span>
@@ -238,10 +472,10 @@
       </div>
       <div class="meeting-diagnostic-grid">
         <div class="meeting-diagnostic-item">
-          <span class="meeting-diagnostic-dot ${payload.ffmpeg_configured ? 'is-ready' : 'is-warning'}"></span>
+          <span class="meeting-diagnostic-dot ${audioClass}"></span>
           <div>
-            <strong>Screen capture</strong>
-            <span>${escapeHtml(videoConfig)}</span>
+            <strong>Recorder input</strong>
+            <span>${escapeHtml(audioLabel)} · ${escapeHtml(payload.audio_input || 'not configured')}</span>
           </div>
         </div>
         <div class="meeting-diagnostic-item">
@@ -254,8 +488,8 @@
         <div class="meeting-diagnostic-item is-wide">
           <span class="meeting-diagnostic-dot ${audioClass}"></span>
           <div>
-            <strong>Meeting audio</strong>
-            <span>${escapeHtml(audioLabel)} · ${escapeHtml(payload.audio_input || 'not configured')}</span>
+            <strong>Meet/Zoom setup</strong>
+            <span>${escapeHtml(payload.meeting_audio_setup_note || 'Meetings use ScreenCaptureKit system audio + microphone; keep speaker and microphone on normal devices.')}</span>
           </div>
         </div>
       </div>
@@ -269,12 +503,65 @@
 
   const setRecordingState = (record) => {
     state.activeRecordId = record?.record_id || '';
-    if (nodes.stopCurrent) nodes.stopCurrent.disabled = !state.activeRecordId;
     if (nodes.recordingStatus) {
       nodes.recordingStatus.textContent = state.activeRecordId
         ? `Recording: ${record.title || 'Untitled meeting'}`
         : 'No active recording.';
     }
+  };
+
+  const clearSignalChecks = () => {
+    state.signalCheckToken += 1;
+    if (state.signalCheckTimer) {
+      window.clearTimeout(state.signalCheckTimer);
+      state.signalCheckTimer = null;
+    }
+  };
+
+  const scheduleSignalCheck = (recordId, delayMs, remainingChecks, token) => {
+    if (!recordId || remainingChecks <= 0 || token !== state.signalCheckToken) return;
+    state.signalCheckTimer = window.setTimeout(async () => {
+      if (token !== state.signalCheckToken || state.activeRecordId !== recordId) return;
+      try {
+        const payload = await api(`/api/meeting-recorder/records/${encodeURIComponent(recordId)}/signal-check`, { method: 'POST' });
+        const record = payload.record || {};
+        const health = record.recording_health || {};
+        if (record.status === 'failed' || health.status === 'failed') {
+          clearSignalChecks();
+          setRecordingState(null);
+          if (nodes.recordingStatus) {
+            nodes.recordingStatus.textContent = health.warning || record.error || 'Recorder audio stopped. Start a new recording.';
+          }
+          await loadRecords();
+          await loadRecord(recordId);
+          telemetry('recording_signal_check_failed', {
+            outcome: 'error',
+            reason: recordId,
+            error_message: health.warning || record.error || '',
+          });
+          return;
+        }
+        if (nodes.recordingStatus && state.activeRecordId === recordId) {
+          nodes.recordingStatus.textContent = `Recording: ${record.title || 'Untitled meeting'}`;
+        }
+        scheduleSignalCheck(recordId, 3000, remainingChecks - 1, token);
+      } catch (error) {
+        telemetry('recording_signal_check_error', {
+          outcome: 'error',
+          reason: recordId,
+          error_message: error.message || '',
+        });
+        scheduleSignalCheck(recordId, 3000, remainingChecks - 1, token);
+      }
+    }, delayMs);
+  };
+
+  const startSignalChecks = (record) => {
+    clearSignalChecks();
+    const recordId = record?.record_id || '';
+    if (!recordId || record?.status !== 'recording') return;
+    const token = state.signalCheckToken;
+    scheduleSignalCheck(recordId, 4000, 4, token);
   };
 
   const loadDiagnostics = async () => {
@@ -291,16 +578,382 @@
   };
 
   const startRecording = async (meeting) => {
-    const payload = await api('/api/meeting-recorder/start', {
-      method: 'POST',
-      body: JSON.stringify(meeting),
+    clearSignalChecks();
+    const meetingLink = String(meeting?.meeting_link || '').trim();
+    const support = browserAudioSupportSnapshot();
+    const fallbackKey = fallbackKeyForMeeting(meeting);
+    const browserFallbackAvailable = !meetingLink && navigator.mediaDevices?.getUserMedia && window.MediaRecorder;
+    const useBrowserFallback = browserFallbackAvailable && state.f2fBrowserFallbackArmed && state.f2fBrowserFallbackKey === fallbackKey;
+    telemetry('recording_start_decision', {
+      capture_path: meetingLink ? 'screencapturekit_audio' : (useBrowserFallback ? 'browser_audio_f2f_fallback' : 'screencapturekit_f2f'),
+      meeting_link_present: Boolean(meetingLink),
+      title_present: Boolean(String(meeting?.title || '').trim()),
+      browser_fallback_armed: Boolean(useBrowserFallback),
+      ...support,
     });
+    if (useBrowserFallback) {
+      state.f2fBrowserFallbackArmed = false;
+      state.f2fBrowserFallbackKey = '';
+      if (nodes.recordingStatus) {
+        nodes.recordingStatus.textContent = 'ScreenCaptureKit unavailable, using browser microphone fallback.';
+      }
+      await startBrowserAudioRecording(meeting);
+      return;
+    }
+    let payload;
+    try {
+      payload = await api('/api/meeting-recorder/start', {
+        method: 'POST',
+        body: JSON.stringify({
+          title: meeting?.title || 'Meeting',
+          platform: platformFromLink(meetingLink) || meeting?.platform || 'unknown',
+          meeting_link: meetingLink,
+          recording_mode: meeting?.recording_mode || 'audio_only',
+          calendar_event_id: meeting?.calendar_event_id || '',
+          scheduled_start: meeting?.scheduled_start || '',
+          scheduled_end: meeting?.scheduled_end || '',
+          attendees: meeting?.attendees || [],
+        }),
+      });
+      state.f2fBrowserFallbackArmed = false;
+      state.f2fBrowserFallbackKey = '';
+    } catch (error) {
+      if (!meetingLink && browserFallbackAvailable && isScreenCaptureKitStartupFailure(error)) {
+        state.f2fBrowserFallbackArmed = true;
+        state.f2fBrowserFallbackKey = fallbackKey;
+        telemetry('browser_audio_fallback_available', {
+          capture_path: 'browser_audio_f2f_fallback',
+          sck_error_message: error.message || '',
+          ...support,
+        });
+        throw new Error(
+          `${error.message || 'ScreenCaptureKit helper could not start.'} ` +
+          'ScreenCaptureKit unavailable. Grant Screen & System Audio Recording and Microphone permissions, or click Start Recording again to use browser microphone fallback.'
+        );
+      }
+      if (!meetingLink && !browserFallbackAvailable && isScreenCaptureKitStartupFailure(error)) {
+        telemetry('browser_audio_unavailable', {
+          capture_path: 'browser_audio_f2f_fallback',
+          sck_error_message: error.message || '',
+          ...support,
+        });
+        throw new Error(
+          `${error.message || 'ScreenCaptureKit helper could not start.'} ` +
+          'Grant Screen & System Audio Recording and Microphone permissions. Browser microphone fallback is not available in this browser.'
+        );
+      }
+      throw error;
+    }
     setRecordingState(payload.record);
     await loadRecords();
+    await loadRecord(payload.record.record_id);
+    startSignalChecks(payload.record);
   };
 
   const stopRecording = async (recordId) => {
+    if (recordId === 'browser-audio' && state.browserRecording) {
+      await stopBrowserAudioRecording();
+      return;
+    }
+    clearSignalChecks();
     const payload = await api(`/api/meeting-recorder/records/${encodeURIComponent(recordId)}/stop`, { method: 'POST' });
+    setRecordingState(null);
+    await loadRecords();
+    await loadRecord(payload.record.record_id);
+  };
+
+  const startBrowserAudioRecording = async (meeting) => {
+    clearSignalChecks();
+    const meetingLink = String(meeting?.meeting_link || '').trim();
+    const isLinkedMeeting = Boolean(meetingLink);
+    const capturePath = isLinkedMeeting ? 'browser_tab_audio_linked' : 'browser_audio_f2f';
+    const captureLabel = isLinkedMeeting ? 'Browser meeting tab audio + microphone' : 'Browser microphone';
+    const mimeType = browserAudioMimeType();
+    telemetry('browser_audio_get_user_media_started', {
+      capture_path: capturePath,
+      selected_mime_type: mimeType,
+    });
+    let micStream;
+    let meetingStream;
+    let recordingStream;
+    let mix = null;
+    let devices = [];
+    let preferredDevice = null;
+    let activeTrackLabel = '';
+    let preflight = { status: 'not_checked', rms_db: null, peak_db: null };
+    let cleanupCaptureHandlers = () => {};
+    try {
+      micStream = await navigator.mediaDevices.getUserMedia(browserAudioConstraints());
+      activeTrackLabel = micStream.getAudioTracks()[0]?.label || '';
+      devices = await audioInputDevices();
+      preferredDevice = choosePreferredAudioInput(devices, activeTrackLabel);
+      if (preferredDevice?.deviceId) {
+        stopStreamTracks(micStream);
+        micStream = await navigator.mediaDevices.getUserMedia(browserAudioConstraints(preferredDevice.deviceId));
+        activeTrackLabel = micStream.getAudioTracks()[0]?.label || preferredDevice.label || '';
+      }
+      if (isLinkedMeeting) {
+        if (nodes.recordingStatus) nodes.recordingStatus.textContent = 'Select the meeting tab and share tab audio...';
+        meetingStream = await navigator.mediaDevices.getDisplayMedia(browserMeetingTabConstraints());
+        cleanupCaptureHandlers = watchCaptureTrackEnds(meetingStream, capturePath);
+        mix = await mixBrowserMeetingAudio(micStream, meetingStream);
+        recordingStream = mix.stream;
+      } else {
+        recordingStream = micStream;
+      }
+      preflight = await measureBrowserAudioSignal(recordingStream);
+      telemetry('browser_audio_preflight_checked', {
+        capture_path: capturePath,
+        selected_mime_type: mimeType,
+        active_track_label: activeTrackLabel,
+        preferred_device_label: preferredDevice?.label || '',
+        input_device_count: devices.length,
+        preflight_rms_db: preflight.rms_db,
+        preflight_peak_db: preflight.peak_db,
+        meeting_audio_track_label: mix?.meetingAudioTrackLabel || '',
+        meeting_video_track_label: mix?.meetingVideoTrackLabel || '',
+        meeting_audio_track_count: mix?.meetingAudioTrackCount || 0,
+        audio_input_labels: devices.map((device) => device.label || '').filter(Boolean).slice(0, 12).join(' | '),
+      });
+      if (!isLinkedMeeting && preflight.status === 'ok' && Number(preflight.peak_db) <= -80) {
+        stopStreamTracks(recordingStream);
+        telemetry('browser_audio_preflight_too_quiet', {
+          capture_path: capturePath,
+          selected_mime_type: mimeType,
+          active_track_label: activeTrackLabel,
+          preferred_device_label: preferredDevice?.label || '',
+          input_device_count: devices.length,
+          preflight_rms_db: preflight.rms_db,
+          preflight_peak_db: preflight.peak_db,
+        });
+        throw new Error('Chrome is receiving silence from the selected microphone. Check macOS/Chrome microphone input, then start again.');
+      }
+    } catch (error) {
+      cleanupCaptureHandlers();
+      stopStreamTracks(recordingStream);
+      stopStreamTracks(micStream);
+      stopStreamTracks(meetingStream);
+      closeAudioContext(mix?.context);
+      telemetry('browser_audio_get_user_media_failed', {
+        capture_path: capturePath,
+        selected_mime_type: mimeType,
+        active_track_label: activeTrackLabel,
+        preferred_device_label: preferredDevice?.label || '',
+        input_device_count: devices.length,
+        preflight_rms_db: preflight.rms_db,
+        preflight_peak_db: preflight.peak_db,
+        meeting_audio_track_label: mix?.meetingAudioTrackLabel || '',
+        meeting_video_track_label: mix?.meetingVideoTrackLabel || '',
+        meeting_audio_track_count: mix?.meetingAudioTrackCount || 0,
+        error_name: error.name || '',
+        error_message: error.message || '',
+      });
+      throw error;
+    }
+    const recorder = new MediaRecorder(recordingStream, mimeType ? { mimeType } : undefined);
+    const chunks = [];
+    const startedAt = new Date().toISOString();
+    recorder.addEventListener('dataavailable', (event) => {
+      if (event.data?.size) chunks.push(event.data);
+    });
+    recorder.start(1000);
+    telemetry('browser_audio_recording_started', {
+      capture_path: capturePath,
+      selected_mime_type: mimeType,
+      recorder_mime_type: recorder.mimeType || '',
+      active_track_label: activeTrackLabel,
+      preferred_device_label: preferredDevice?.label || '',
+      input_device_count: devices.length,
+      preflight_rms_db: preflight.rms_db,
+      preflight_peak_db: preflight.peak_db,
+      meeting_audio_track_label: mix?.meetingAudioTrackLabel || '',
+      meeting_video_track_label: mix?.meetingVideoTrackLabel || '',
+      meeting_audio_track_count: mix?.meetingAudioTrackCount || 0,
+    });
+    state.browserRecording = {
+      recorder,
+      stream: recordingStream,
+      sourceStreams: [micStream, meetingStream].filter(Boolean),
+      audioContext: mix?.context || null,
+      chunks,
+      startedAt,
+      title: meeting?.title || 'Untitled meeting',
+      meetingLink,
+      platform: meeting?.platform || '',
+      mimeType: recorder.mimeType || mimeType || 'audio/webm',
+      activeTrackLabel,
+      preferredDeviceLabel: preferredDevice?.label || '',
+      inputDeviceCount: devices.length,
+      capturePath,
+      captureLabel,
+      meetingAudioTrackLabel: mix?.meetingAudioTrackLabel || '',
+      meetingVideoTrackLabel: mix?.meetingVideoTrackLabel || '',
+      meetingAudioTrackCount: mix?.meetingAudioTrackCount || 0,
+      preflight,
+      cleanupCaptureHandlers,
+      captureEndedAt: '',
+      captureEndReason: '',
+    };
+    state.activeRecordId = 'browser-audio';
+    state.selectedRecordId = 'browser-audio';
+    if (nodes.recordingStatus) {
+      nodes.recordingStatus.textContent = `Recording: ${state.browserRecording.title}`;
+    }
+    nodes.detail.innerHTML = `<p class="empty-state">${escapeHtml(captureLabel)} recording is active. Audio will be saved after stopping.</p>`;
+    await loadRecords();
+  };
+
+  const stopBrowserAudioRecording = async () => {
+    const active = state.browserRecording;
+    if (!active) return;
+    if (nodes.recordingStatus) nodes.recordingStatus.textContent = `Finalizing ${active.captureLabel || 'browser audio'}...`;
+    const stoppedAt = new Date().toISOString();
+    telemetry('browser_audio_stop_started', {
+      capture_path: active.capturePath || 'browser_audio_f2f',
+      chunk_count: active.chunks.length,
+      recorder_mime_type: active.mimeType || '',
+      recorder_state: active.recorder.state || '',
+      active_track_label: active.activeTrackLabel || '',
+      preferred_device_label: active.preferredDeviceLabel || '',
+      input_device_count: active.inputDeviceCount || 0,
+      preflight_rms_db: active.preflight?.rms_db,
+      preflight_peak_db: active.preflight?.peak_db,
+      meeting_audio_track_label: active.meetingAudioTrackLabel || '',
+      meeting_video_track_label: active.meetingVideoTrackLabel || '',
+      meeting_audio_track_count: active.meetingAudioTrackCount || 0,
+      capture_ended_at: active.captureEndedAt || '',
+      capture_end_reason: active.captureEndReason || '',
+    });
+    const stopped = active.recorder.state === 'inactive'
+      ? Promise.resolve('already_inactive')
+      : new Promise((resolve) => {
+        let resolved = false;
+        let timeoutId = 0;
+        const done = (outcome) => {
+          if (resolved) return;
+          resolved = true;
+          window.clearTimeout(timeoutId);
+          resolve(outcome);
+        };
+        timeoutId = window.setTimeout(() => done('timeout'), 3000);
+        active.recorder.addEventListener('stop', () => done('stop_event'), { once: true });
+        try {
+          active.recorder.requestData?.();
+        } catch (_error) {
+          // Some browsers throw if requestData races with stop; stopping can still succeed.
+        }
+        try {
+          active.recorder.stop();
+        } catch (_error) {
+          done('stop_error');
+        }
+      });
+    const stopOutcome = await stopped;
+    active.cleanupCaptureHandlers?.();
+    stopStreamTracks(active.stream);
+    (active.sourceStreams || []).forEach((sourceStream) => stopStreamTracks(sourceStream));
+    closeAudioContext(active.audioContext);
+    const blob = new Blob(active.chunks, { type: active.mimeType || 'audio/webm' });
+    const elapsedMs = Math.max(0, new Date(stoppedAt).getTime() - new Date(active.startedAt).getTime());
+    telemetry('browser_audio_stop_finished', {
+      capture_path: active.capturePath || 'browser_audio_f2f',
+      blob_size: blob.size,
+      chunk_count: active.chunks.length,
+      elapsed_ms: elapsedMs,
+      recorder_mime_type: active.mimeType || '',
+      recorder_state: active.recorder.state || '',
+      stop_outcome: stopOutcome,
+      active_track_label: active.activeTrackLabel || '',
+      preferred_device_label: active.preferredDeviceLabel || '',
+      input_device_count: active.inputDeviceCount || 0,
+      preflight_rms_db: active.preflight?.rms_db,
+      preflight_peak_db: active.preflight?.peak_db,
+      meeting_audio_track_label: active.meetingAudioTrackLabel || '',
+      meeting_video_track_label: active.meetingVideoTrackLabel || '',
+      meeting_audio_track_count: active.meetingAudioTrackCount || 0,
+      capture_ended_at: active.captureEndedAt || '',
+      capture_end_reason: active.captureEndReason || '',
+    });
+    if (!blob.size) {
+      state.browserRecording = null;
+      setRecordingState(null);
+      await loadRecords();
+      throw new Error('Browser did not return any audio data. Refresh the page and start a new recording.');
+    }
+    if (nodes.recordingStatus) nodes.recordingStatus.textContent = 'Preparing browser audio...';
+    telemetry('browser_audio_upload_started', {
+      capture_path: active.capturePath || 'browser_audio_f2f',
+      blob_size: blob.size,
+      chunk_count: active.chunks.length,
+      elapsed_ms: elapsedMs,
+      recorder_mime_type: active.mimeType || '',
+      active_track_label: active.activeTrackLabel || '',
+      preferred_device_label: active.preferredDeviceLabel || '',
+      input_device_count: active.inputDeviceCount || 0,
+      preflight_rms_db: active.preflight?.rms_db,
+      preflight_peak_db: active.preflight?.peak_db,
+      meeting_audio_track_label: active.meetingAudioTrackLabel || '',
+      meeting_video_track_label: active.meetingVideoTrackLabel || '',
+      meeting_audio_track_count: active.meetingAudioTrackCount || 0,
+    });
+    const audioBase64 = await blobToBase64(blob);
+    if (nodes.recordingStatus) nodes.recordingStatus.textContent = 'Uploading browser audio...';
+    let payload;
+    try {
+      payload = await api('/api/meeting-recorder/browser-audio', {
+        method: 'POST',
+        body: JSON.stringify({
+          title: active.title,
+          meeting_link: active.meetingLink,
+          platform: active.platform,
+          recording_started_at: active.startedAt,
+          recording_stopped_at: stoppedAt,
+          mime_type: blob.type || active.mimeType || 'audio/webm',
+          audio_base64: audioBase64,
+          browser_audio_device_label: [
+            active.meetingAudioTrackLabel ? `tab: ${active.meetingAudioTrackLabel}` : '',
+            active.activeTrackLabel ? `mic: ${active.activeTrackLabel}` : '',
+          ].filter(Boolean).join(' | ') || active.activeTrackLabel || '',
+          browser_audio_capture_source: active.capturePath || 'browser_audio_f2f',
+          browser_audio_preflight: active.preflight || {},
+        }),
+      });
+    } catch (error) {
+      telemetry('browser_audio_upload_failed', {
+        capture_path: active.capturePath || 'browser_audio_f2f',
+        blob_size: blob.size,
+        chunk_count: active.chunks.length,
+        elapsed_ms: elapsedMs,
+        recorder_mime_type: active.mimeType || '',
+        active_track_label: active.activeTrackLabel || '',
+        preferred_device_label: active.preferredDeviceLabel || '',
+        input_device_count: active.inputDeviceCount || 0,
+        preflight_rms_db: active.preflight?.rms_db,
+        preflight_peak_db: active.preflight?.peak_db,
+        meeting_audio_track_label: active.meetingAudioTrackLabel || '',
+        meeting_video_track_label: active.meetingVideoTrackLabel || '',
+        meeting_audio_track_count: active.meetingAudioTrackCount || 0,
+        error_message: error.message || '',
+      });
+      throw error;
+    }
+    telemetry('browser_audio_upload_succeeded', {
+      capture_path: active.capturePath || 'browser_audio_f2f',
+      blob_size: blob.size,
+      chunk_count: active.chunks.length,
+      elapsed_ms: elapsedMs,
+      recorder_mime_type: active.mimeType || '',
+      active_track_label: active.activeTrackLabel || '',
+      preferred_device_label: active.preferredDeviceLabel || '',
+      input_device_count: active.inputDeviceCount || 0,
+      preflight_rms_db: active.preflight?.rms_db,
+      preflight_peak_db: active.preflight?.peak_db,
+      meeting_audio_track_label: active.meetingAudioTrackLabel || '',
+      meeting_video_track_label: active.meetingVideoTrackLabel || '',
+      meeting_audio_track_count: active.meetingAudioTrackCount || 0,
+      record_id: payload.record?.record_id || '',
+    });
+    state.browserRecording = null;
     setRecordingState(null);
     await loadRecords();
     await loadRecord(payload.record.record_id);
@@ -331,7 +984,7 @@
               title: meeting.title,
               platform: meeting.platform,
               meeting_link: meeting.meeting_link,
-              recording_mode: 'screen_audio',
+              recording_mode: 'audio_only',
               calendar_event_id: meeting.calendar_event_id,
               scheduled_start: meeting.start,
               scheduled_end: meeting.end,
@@ -353,9 +1006,29 @@
   const loadRecords = async () => {
     if (!nodes.records) return;
     const payload = await api('/api/meeting-recorder/records');
-    const records = Array.isArray(payload.records) ? payload.records : [];
+    const serverRecords = Array.isArray(payload.records) ? payload.records : [];
+    const selectedDate = nodes.recordDate?.value || localDateValue();
+    const activeBrowserRecord = state.browserRecording ? {
+      record_id: 'browser-audio',
+      title: state.browserRecording.title || 'Untitled meeting',
+      platform: 'f2f',
+      status: 'recording',
+      recording_started_at: state.browserRecording.startedAt,
+      recording_stopped_at: '',
+      created_at: state.browserRecording.startedAt,
+      minutes_status: 'pending',
+    } : null;
+    const allRecords = activeBrowserRecord ? [activeBrowserRecord, ...serverRecords] : serverRecords;
+    const records = allRecords.filter((record) => recordDateValue(record) === selectedDate);
     if (!records.length) {
-      nodes.records.innerHTML = '<p class="empty-state">No meeting recordings yet.</p>';
+      nodes.records.innerHTML = `<p class="empty-state">No meeting recordings on ${escapeHtml(selectedDate)}.</p>`;
+      if (state.selectedRecordId && !state.initialSelectionPending) {
+        state.selectedRecordId = '';
+        updateRecordSelection();
+      }
+      if (nodes.detail && !state.initialSelectionPending) {
+        nodes.detail.innerHTML = '<p class="empty-state">Select a recorded meeting to view audio, transcript, and minutes.</p>';
+      }
       return;
     }
     nodes.records.innerHTML = records.map((record) => `
@@ -372,9 +1045,24 @@
       </button>
     `).join('');
     nodes.records.querySelectorAll('[data-record-id]').forEach((button) => {
-      button.addEventListener('click', () => loadRecord(button.dataset.recordId || ''));
+      button.addEventListener('click', () => {
+        const recordId = button.dataset.recordId || '';
+        if (recordId === 'browser-audio' && state.browserRecording) {
+          state.selectedRecordId = 'browser-audio';
+          updateRecordSelection();
+          nodes.detail.innerHTML = '<p class="empty-state">Browser microphone recording is active. Audio will be saved after stopping.</p>';
+          return;
+        }
+        loadRecord(recordId);
+      });
     });
-    if (state.initialSelectionPending && state.selectedRecordId) {
+    if (state.selectedRecordId && !records.some((record) => record.record_id === state.selectedRecordId)) {
+      state.selectedRecordId = '';
+      if (nodes.detail && !state.initialSelectionPending) {
+        nodes.detail.innerHTML = '<p class="empty-state">Select a recorded meeting to view audio, transcript, and minutes.</p>';
+      }
+    }
+    if (state.initialSelectionPending && state.selectedRecordId && records.some((record) => record.record_id === state.selectedRecordId)) {
       state.initialSelectionPending = false;
       await loadRecord(state.selectedRecordId);
     }
@@ -387,21 +1075,24 @@
     const transcript = record.transcript || {};
     const minutes = record.minutes || {};
     const media = record.media || {};
-    const isAudioOnly = media.recording_mode === 'audio_only';
+    const transcriptChunks = Array.isArray(transcript.chunks) ? transcript.chunks.filter((chunk) => String(chunk?.text || '').trim()) : [];
+    const transcriptLineCount = transcriptChunks.length || String(transcript.text || '').split(/\n+/).filter((line) => line.trim()).length;
     const isRecording = record.status === 'recording';
-    const videoUrl = media.playback_video_url || media.video_url || '';
-    const recordingUrl = isRecording ? '' : (isAudioOnly ? (media.audio_url || '') : videoUrl);
+    const recordingUrl = isRecording ? '' : (media.audio_url || '');
     const recordingDownloadUrl = downloadUrl(recordingUrl);
     const transcriptUrl = transcript.asset_url || '';
     const transcriptDownloadUrl = downloadUrl(transcriptUrl);
-    const usingPlaybackCopy = Boolean(media.playback_video_url);
-    const visualEvidence = Array.isArray(record.visual_evidence) ? record.visual_evidence : [];
     const recordDiagnostics = record.diagnostics_snapshot || {};
     const audioLabel = recordDiagnostics.audio_capture_label || state.diagnostics?.audio_capture_label || '';
     const audioInputLabel = recordDiagnostics.audio_input || '';
     const audioSummary = [audioLabel, audioInputLabel ? `input: ${audioInputLabel}` : ''].filter(Boolean).join(' · ');
     const audioPreflight = record.audio_preflight || {};
     const recordingHealth = record.recording_health || {};
+    const isFailed = record.status === 'failed';
+    const canProcess = record.status === 'recorded';
+    const canDownloadAudio = Boolean(recordingUrl) && !isFailed;
+    const warningText = audioPreflight.warning || recordingHealth.warning || '';
+    const showWarningText = warningText && warningText !== record.error;
     state.selectedRecordId = recordId;
     updateRecordSelection();
     nodes.detail.innerHTML = `
@@ -418,59 +1109,55 @@
         <div class="meeting-detail-actions">
           <span class="badge badge-${escapeHtml(record.status || 'scheduled')}">${escapeHtml(statusLabel(record.status))}</span>
           ${record.status === 'recording' ? `<button class="button" type="button" data-record-stop="${escapeHtml(record.record_id)}">Stop</button>` : ''}
-          ${record.status === 'recorded' || record.status === 'failed' ? `<button class="button" type="button" data-record-process="${escapeHtml(record.record_id)}">Process</button>` : ''}
+          ${canProcess ? `<button class="button" type="button" data-record-process="${escapeHtml(record.record_id)}">Process</button>` : ''}
           ${minutes.markdown ? `<button class="button button-secondary" type="button" data-record-email="${escapeHtml(record.record_id)}">Send Email</button>` : ''}
           <button class="button button-danger" type="button" data-record-delete="${escapeHtml(record.record_id)}">Delete</button>
         </div>
       </div>
       ${record.error ? `<div class="inline-status inline-status-error">${escapeHtml(record.error)}</div>` : ''}
-      ${audioPreflight.warning || recordingHealth.warning ? `
+      ${showWarningText ? `
         <div class="inline-status inline-status-error">
-          ${escapeHtml(audioPreflight.warning || recordingHealth.warning)}
+          ${escapeHtml(warningText)}
         </div>
       ` : ''}
       <section class="meeting-output">
-        <h3>Minutes</h3>
+        <div class="meeting-output-head">
+          <h3>Minutes</h3>
+          ${minutes.markdown ? '<span>Ready</span>' : '<span>Pending</span>'}
+        </div>
         <div class="meeting-markdown">${renderMarkdown(minutes.markdown || '')}</div>
       </section>
       <section class="meeting-output">
         <div class="meeting-output-head">
-          <h3>${isAudioOnly ? 'Audio Recording' : 'Screen Recording'}</h3>
+          <h3>Audio Recording</h3>
           ${audioSummary ? `<span>${escapeHtml(audioSummary)}</span>` : ''}
         </div>
         ${isRecording ? `
-          <p class="empty-state">${isAudioOnly ? 'Audio download will be available after stopping the recording.' : 'Video download will be available after stopping the recording.'}</p>
-        ` : recordingUrl ? `
-          <div class="button-row meeting-video-actions">
-            <button class="button" type="button" data-record-download-asset="${escapeHtml(recordingDownloadUrl)}" data-download-filename="${escapeHtml(filenameFromUrl(recordingUrl, isAudioOnly ? 'meeting.wav' : 'meeting-recording.mp4'))}" data-download-status-selector="[data-media-download-status]">${isAudioOnly ? 'Download audio file' : 'Download video file'}</button>
-            <span class="inline-status" data-media-download-status>${isAudioOnly ? 'Downloads the face-to-face meeting audio.' : (usingPlaybackCopy ? 'Downloads the browser-compatible playback copy.' : 'Downloads the original recording for local playback.')}</span>
+          <p class="empty-state">Audio download will be available after stopping the recording.</p>
+        ` : canDownloadAudio ? `
+          <div class="button-row meeting-media-actions">
+            <button class="button" type="button" data-record-download-asset="${escapeHtml(recordingDownloadUrl)}" data-download-filename="${escapeHtml(filenameFromUrl(recordingUrl, 'meeting.wav'))}" data-download-status-selector="[data-media-download-status]">Download audio file</button>
+            <span class="inline-status" data-media-download-status>Downloads the meeting audio.</span>
           </div>
-        ` : `<p class="empty-state">${isAudioOnly ? 'Audio is not available yet.' : 'Video is not available yet.'}</p>`}
-        ${videoUrl && !isAudioOnly ? `
-          <div class="button-row meeting-video-actions">
-            <button class="button button-secondary" type="button" data-record-repair-video="${escapeHtml(record.record_id)}">
-              ${usingPlaybackCopy ? 'Rebuild downloadable copy' : 'Build downloadable playback copy'}
-            </button>
-          </div>
-        ` : ''}
-        ${visualEvidence.length ? `
-          <div class="meeting-snapshots">
-            ${visualEvidence.map((item) => `
-              <a href="${escapeHtml(item.image_url || '#')}" target="_blank" rel="noreferrer">
-                <span>${escapeHtml(formatTimestamp(item.timestamp_seconds || 0))}</span>
-                <small>${escapeHtml((item.summary || 'Video snapshot').replace(/^Screen keyframe/i, 'Video snapshot'))}</small>
-              </a>
-            `).join('')}
-          </div>
-        ` : ''}
+        ` : '<p class="empty-state">Audio is not available yet.</p>'}
       </section>
       <section class="meeting-output">
-        <div class="meeting-output-head">
-          <h3>Transcript</h3>
-          ${transcriptUrl ? `<button class="button button-secondary" type="button" data-record-download-asset="${escapeHtml(transcriptDownloadUrl)}" data-download-filename="${escapeHtml(filenameFromUrl(transcriptUrl, 'meeting-transcript.txt'))}" data-download-status-selector="[data-transcript-download-status]">Download transcript</button>` : ''}
-        </div>
+        <details class="meeting-transcript-panel">
+          <summary>
+            <span>
+              <strong>Transcript</strong>
+              <small>${escapeHtml(transcriptLineCount ? `${transcriptLineCount} segment(s)` : 'Not generated yet')}</small>
+            </span>
+            <span class="meeting-transcript-toggle">Open</span>
+          </summary>
+          <div class="meeting-transcript-tools">
+            ${transcriptUrl ? `<button class="button button-secondary" type="button" data-record-download-asset="${escapeHtml(transcriptDownloadUrl)}" data-download-filename="${escapeHtml(filenameFromUrl(transcriptUrl, 'meeting-transcript.txt'))}" data-download-status-selector="[data-transcript-download-status]">Download transcript</button>` : ''}
+          </div>
         ${transcriptUrl ? '<div class="inline-status" data-transcript-download-status hidden></div>' : ''}
-        ${renderTranscript(transcript)}
+          <div class="meeting-transcript-scroll">
+            ${renderTranscript(transcript)}
+          </div>
+        </details>
       </section>
     `;
     bindDetailActions(record.record_id);
@@ -496,21 +1183,6 @@
         }
       });
     });
-    nodes.detail.querySelectorAll('[data-record-repair-video]').forEach((button) => {
-      button.addEventListener('click', async () => {
-        button.disabled = true;
-        const originalText = button.textContent;
-        button.textContent = 'Repairing…';
-        try {
-          await api(`/api/meeting-recorder/records/${encodeURIComponent(recordId)}/repair-video`, { method: 'POST' });
-          await loadRecord(recordId);
-          await loadRecords();
-        } catch (error) {
-          button.disabled = false;
-          button.textContent = error.message || originalText;
-        }
-      });
-    });
     nodes.detail.querySelectorAll('[data-record-email]').forEach((button) => {
       button.addEventListener('click', async () => {
         button.disabled = true;
@@ -529,7 +1201,7 @@
       button.addEventListener('click', async () => {
         button.disabled = true;
         await api(`/api/meeting-recorder/records/${encodeURIComponent(recordId)}`, { method: 'DELETE' });
-        nodes.detail.innerHTML = '<p class="empty-state">Select a recorded meeting to view transcript, minutes, and video.</p>';
+        nodes.detail.innerHTML = '<p class="empty-state">Select a recorded meeting to view audio, transcript, and minutes.</p>';
         await loadRecords();
       });
     });
@@ -568,7 +1240,7 @@
           telemetry('recording_download_started', { outcome: 'ok', reason: recordId || '' });
         } catch (error) {
           if (status) {
-            status.textContent = error.message || 'Could not download video.';
+            status.textContent = error.message || 'Could not download audio.';
             status.classList.add('inline-status-error');
           }
           telemetry('recording_download_failed', { outcome: 'error', reason: recordId || '', error_message: error.message || '' });
@@ -589,9 +1261,17 @@
 
   nodes.refresh?.addEventListener('click', loadUpcoming);
   nodes.recordsRefresh?.addEventListener('click', loadRecords);
-  nodes.stopCurrent?.addEventListener('click', () => {
-    if (state.activeRecordId) stopRecording(state.activeRecordId);
-  });
+  if (nodes.recordDate) {
+    nodes.recordDate.value = localDateValue();
+    nodes.recordDate.addEventListener('change', () => {
+      state.initialSelectionPending = false;
+      state.selectedRecordId = '';
+      if (nodes.detail) {
+        nodes.detail.innerHTML = '<p class="empty-state">Select a recorded meeting to view audio, transcript, and minutes.</p>';
+      }
+      loadRecords();
+    });
+  }
   nodes.startForm?.addEventListener('submit', async (event) => {
     event.preventDefault();
     const submitButton = nodes.startForm.querySelector('button[type="submit"]');
@@ -610,7 +1290,7 @@
       await startRecording({
         title: data.get('title') || 'Untitled meeting',
         meeting_link: meetingLink,
-        recording_mode: meetingLink ? 'screen_audio' : 'audio_only',
+        recording_mode: 'audio_only',
       });
     } catch (error) {
       nodes.recordingStatus.textContent = error.message;

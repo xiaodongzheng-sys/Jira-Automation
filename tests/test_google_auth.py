@@ -12,6 +12,7 @@ from bpmis_jira_tool.google_auth import (
     GOOGLE_SCOPES,
     create_google_authorization_url,
     fetch_google_profile,
+    finish_google_oauth,
 )
 
 
@@ -119,6 +120,53 @@ class GoogleAuthTests(unittest.TestCase):
 
         self.assertEqual(payload["email"], "user@npt.sg")
         response.close.assert_called_once()
+
+    def test_finish_google_oauth_relaxes_partial_scope_warning_only_during_token_fetch(self):
+        settings = Settings(
+            flask_secret_key="secret",
+            google_oauth_client_secret_file=Path("client.json"),
+            google_oauth_redirect_uri="https://jira-tool.example.com/auth/google/callback",
+            team_portal_host="127.0.0.1",
+            team_portal_port=5000,
+            team_portal_base_url=None,
+            team_allowed_emails=(),
+            team_allowed_email_domains=("npt.sg",),
+            team_portal_data_dir=Path("."),
+            spreadsheet_id="sheet",
+            common_tab_name="Common",
+            input_tab_name="Projects",
+            bpmis_base_url="https://example.com",
+            bpmis_api_access_token=None,
+        )
+        flow = Mock()
+        flow.credentials = Mock(
+            token="token",
+            refresh_token="refresh",
+            token_uri="https://oauth2.googleapis.com/token",
+            client_id="client",
+            client_secret="secret",
+            scopes=["openid", "https://www.googleapis.com/auth/userinfo.email"],
+        )
+
+        def fetch_token(**_kwargs):
+            self.assertEqual(os.environ.get("OAUTHLIB_RELAX_TOKEN_SCOPE"), "1")
+
+        flow.fetch_token.side_effect = fetch_token
+
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("OAUTHLIB_RELAX_TOKEN_SCOPE", None)
+            with patch("bpmis_jira_tool.google_auth.session", {"google_oauth_state": "state"}) as fake_session:
+                with patch("bpmis_jira_tool.google_auth.build_google_flow", return_value=flow):
+                    with patch("bpmis_jira_tool.google_auth.fetch_google_profile", return_value={"email": "user@npt.sg"}):
+                        finish_google_oauth(
+                            settings,
+                            "https://jira-tool.example.com/auth/google/callback?state=state&code=code",
+                        )
+
+            self.assertIsNone(os.environ.get("OAUTHLIB_RELAX_TOKEN_SCOPE"))
+
+        self.assertEqual(fake_session["google_profile"]["email"], "user@npt.sg")
+        self.assertEqual(fake_session["google_credentials"]["scopes"], ["openid", "https://www.googleapis.com/auth/userinfo.email"])
 
 
 if __name__ == "__main__":

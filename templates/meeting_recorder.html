@@ -5,8 +5,8 @@
   <header class="tool-hero meeting-recorder-hero">
     <div>
       <p class="eyebrow">Meeting Recorder</p>
-      <h1>Meeting transcripts and recording archive</h1>
-      <p class="help-text">Use manual audio-only recording for face-to-face meetings, or calendar-assisted screen recording for Google Meet and Zoom.</p>
+      <h1>Meeting Recorder</h1>
+      <p class="help-text">Use audio-only recording for Google Meet, Zoom, and face-to-face meetings. Meet/Zoom can keep normal Speaker output and a real microphone; recordings are captured by the local ScreenCaptureKit helper.</p>
     </div>
     <div class="meeting-recorder-status">
       <div class="meeting-diagnostic-card" data-meeting-recorder-diagnostic>Checking local recorder…</div>
@@ -42,12 +42,11 @@
           <input name="title" type="text" placeholder="Meeting title">
         </label>
         <label>
-          <span>Meet or Zoom link</span>
-          <input name="meeting_link" type="url" placeholder="https://meet.google.com/... or https://...zoom.us/...">
+          <span>Meet or Zoom link (optional)</span>
+          <input name="meeting_link" type="url" placeholder="Leave blank for face-to-face meeting">
         </label>
         <div class="button-row">
           <button class="button" type="submit">Start Recording</button>
-          <button class="button button-secondary" type="button" data-meeting-stop-current disabled>Stop</button>
         </div>
       </form>
       <div class="inline-status" data-meeting-recording-status>No active recording.</div>
@@ -60,12 +59,18 @@
         <p class="eyebrow">Archive</p>
         <h2>Recorded Meetings</h2>
       </div>
-      <button class="button button-secondary" type="button" data-meeting-records-refresh>Refresh</button>
+      <div class="meeting-record-toolbar">
+        <label>
+          <span>Date</span>
+          <input name="record_date" type="date" data-meeting-record-date>
+        </label>
+        <button class="button button-secondary" type="button" data-meeting-records-refresh>Refresh</button>
+      </div>
     </div>
     <div class="meeting-record-layout">
       <div class="meeting-record-list" data-meeting-records></div>
       <article class="meeting-record-detail" data-meeting-record-detail>
-        <p class="empty-state">Select a recorded meeting to view transcript, minutes, and video.</p>
+        <p class="empty-state">Select a recorded meeting to view audio, transcript, and minutes.</p>
       </article>
     </div>
   </section>

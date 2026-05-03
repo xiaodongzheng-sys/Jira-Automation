@@ -1,0 +1,12 @@
+[run]
+include =
+    bpmis_jira_tool/config.py
+    bpmis_jira_tool/errors.py
+    bpmis_jira_tool/user_config.py
+    prd_briefing/models.py
+    prd_briefing/text_generation.py
+
+[report]
+fail_under = 100
+show_missing = True
+skip_covered = False

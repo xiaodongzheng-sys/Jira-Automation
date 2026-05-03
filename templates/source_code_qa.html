@@ -8,9 +8,12 @@
     data-save-url="{{ url_for('source_code_qa_save_config_api') }}"
     data-sync-url="{{ url_for('source_code_qa_sync_api') }}"
     data-query-url="{{ url_for('source_code_qa_query_api') }}"
+    data-effort-assessment-url="{{ url_for('source_code_qa_effort_assessment_api') }}"
+    data-effort-latest-url="{{ url_for('source_code_qa_effort_assessment_latest_api') }}"
     data-attachment-url="{{ url_for('source_code_qa_attachments_api') }}"
     data-runtime-evidence-url="{{ url_for('source_code_qa_runtime_evidence_api') }}"
     data-jobs-url="{{ url_for('source_code_qa_query_job_api', job_id='__JOB_ID__') }}"
+    data-effort-jobs-url="{{ url_for('source_code_qa_effort_assessment_job_api', job_id='__JOB_ID__') }}"
     data-feedback-url="{{ url_for('source_code_qa_feedback_api') }}"
     data-sessions-url="{{ url_for('source_code_qa_sessions_api') }}"
     data-model-availability-url="{{ url_for('source_code_qa_model_availability_api') }}"
@@ -64,6 +67,7 @@
   {% if can_manage_source_code_qa %}
     <nav class="source-qa-tabs" aria-label="Source Code Q&A views" data-default-tab="chat">
       <button class="source-qa-tab workspace-tab is-active" type="button" role="tab" data-tab-trigger="chat" data-source-view-tab="chat" aria-selected="true">Chat</button>
+      <button class="source-qa-tab workspace-tab" type="button" role="tab" data-tab-trigger="effort" data-source-view-tab="effort" aria-selected="false">Effort Assessment</button>
       <button class="source-qa-tab workspace-tab" type="button" role="tab" data-tab-trigger="admin" data-source-view-tab="admin" aria-selected="false">Repo Admin</button>
     </nav>
   {% endif %}
@@ -159,6 +163,62 @@
   </section>
 
   {% if can_manage_source_code_qa %}
+    <section class="workspace-panel source-qa-panel" data-tab-panel="effort" data-source-view-panel="effort" hidden>
+      <section class="grid source-qa-workspace">
+        <section class="panel panel-wide source-qa-effort">
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow">Admin Planning</p>
+              <h2>Effort Assessment</h2>
+              <p class="card-help">Uses the selected PM Team, Country, and Model above. The system optimizes the requirement into a code-grounded assessment prompt internally.</p>
+            </div>
+            <button class="button" type="button" data-source-effort-run>Assess Effort</button>
+          </div>
+          <div class="field-grid source-qa-effort-grid">
+            <label class="field-group">
+              <span>Language</span>
+              <select data-source-effort-language>
+                <option value="zh">Chinese</option>
+                <option value="en">English</option>
+              </select>
+            </label>
+          </div>
+          <label class="field-group source-qa-effort-requirement">
+            <span>业务需求</span>
+            <textarea data-source-effort-requirement rows="8" placeholder="Paste the new business requirement here."></textarea>
+          </label>
+          <div class="source-qa-status" data-source-effort-status>
+            Ready for an admin-only effort assessment.
+          </div>
+        </section>
+
+        <section class="panel panel-wide source-qa-effort-output" data-source-effort-output hidden>
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow">Assessment Output</p>
+              <h2>Code Impact &amp; Person-days</h2>
+              <p class="card-help" data-source-effort-summary>Run an assessment to estimate BE and FE work from code evidence.</p>
+            </div>
+            <div class="source-qa-metadata">
+              <span class="field-badge source-qa-meta-badge" data-source-effort-provider>Model</span>
+              <span class="field-badge source-qa-meta-badge" data-source-effort-scope>Scope</span>
+              <button class="button button-secondary" type="button" data-source-effort-copy>Copy PM/Dev Summary</button>
+            </div>
+          </div>
+          <div class="source-qa-llm-card">
+            <div class="source-qa-llm-head">
+              <div>
+                <strong>Effort Assessment</strong>
+              </div>
+              <span data-source-effort-meta>waiting</span>
+            </div>
+            <div class="source-qa-answer-body" data-source-effort-answer></div>
+          </div>
+          <div class="source-qa-evidence-summary" data-source-effort-evidence hidden></div>
+        </section>
+      </section>
+    </section>
+
     <section class="workspace-panel source-qa-panel" data-tab-panel="admin" data-source-view-panel="admin" hidden>
       <section class="grid source-qa-workspace">
         <section class="panel panel-wide source-qa-admin">

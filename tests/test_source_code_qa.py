@@ -27,7 +27,12 @@ from bpmis_jira_tool.web import (
     JobStore,
     SourceCodeQAQueryScheduler,
     SourceCodeQASessionStore,
+    _build_source_code_qa_effort_business_plan,
+    _build_source_code_qa_effort_estimation_rubric,
+    _build_source_code_qa_effort_structured_assessment,
+    _build_source_code_qa_effort_technical_candidates,
     _build_source_code_qa_session_context,
+    _load_source_code_qa_effort_dictionaries,
     create_app,
 )
 from scripts.promote_source_code_qa_eval_candidates import promote_candidates
@@ -103,16 +108,28 @@ class SourceCodeQARouteTests(unittest.TestCase):
 
         self.assertIn(b"Repository Mapping", owner_response.data)
         self.assertIn(b"Repo Admin", owner_response.data)
+        self.assertIn(b"Effort Assessment", owner_response.data)
+        self.assertLess(owner_response.data.index(b"Chat"), owner_response.data.index(b"Effort Assessment"))
+        self.assertLess(owner_response.data.index(b"Effort Assessment"), owner_response.data.index(b"Repo Admin"))
         self.assertIn(b'data-tab-trigger="admin"', owner_response.data)
+        self.assertIn(b'data-tab-trigger="effort"', owner_response.data)
         self.assertIn(b'data-source-view-tab="admin"', owner_response.data)
+        self.assertIn(b'data-source-view-tab="effort"', owner_response.data)
         self.assertIn(b'data-tab-panel="admin"', owner_response.data)
+        self.assertIn(b'data-tab-panel="effort"', owner_response.data)
         self.assertIn(b'data-source-view-panel="admin"', owner_response.data)
+        self.assertIn(b'data-source-view-panel="effort"', owner_response.data)
+        self.assertIn(b"data-source-effort-requirement", owner_response.data)
+        self.assertIn(b"data-source-effort-run", owner_response.data)
         self.assertIn(b"Save Config", owner_response.data)
         self.assertIn(b"Sync / Refresh", owner_response.data)
         self.assertNotIn(b"Repository Mapping", teammate_response.data)
         self.assertNotIn(b"Repo Admin", teammate_response.data)
+        self.assertNotIn(b"Effort Assessment", teammate_response.data)
         self.assertNotIn(b'data-tab-trigger="admin"', teammate_response.data)
+        self.assertNotIn(b'data-tab-trigger="effort"', teammate_response.data)
         self.assertNotIn(b'data-source-view-tab="admin"', teammate_response.data)
+        self.assertNotIn(b'data-source-view-tab="effort"', teammate_response.data)
         self.assertNotIn(b"Save Config", teammate_response.data)
         self.assertNotIn(b"Sync / Refresh", teammate_response.data)
         self.assertIn(b"data-source-question", teammate_response.data)
@@ -140,6 +157,23 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertIn("Uploading...", script)
         self.assertIn("data-source-preview-attachment", script)
         self.assertIn("Please wait for image upload to finish.", script)
+
+    def test_frontend_caches_effort_assessment_draft_and_result(self):
+        script = Path("static/source_code_qa.js").read_text(encoding="utf-8")
+
+        self.assertIn("source-code-qa:effort-assessment:last:v1", script)
+        self.assertIn("persistEffortAssessmentDraft", script)
+        self.assertIn("restoreEffortAssessmentCache", script)
+        self.assertIn("persistEffortAssessmentCache({ result: cachedEffortPayload(payload)", script)
+        self.assertIn("effortRequirement?.addEventListener('input', persistEffortAssessmentDraft)", script)
+        self.assertIn("renderEffortAssessment(cached.result, { persist: false })", script)
+        self.assertIn("renderEffortHybridSummary", script)
+        self.assertIn("assessment.business_plan", script)
+        self.assertIn("assessment.technical_candidates", script)
+        self.assertIn("data-source-effort-copy", Path("templates/source_code_qa.html").read_text(encoding="utf-8"))
+        self.assertIn("data-effort-latest-url", Path("templates/source_code_qa.html").read_text(encoding="utf-8"))
+        self.assertIn("loadLatestEffortAssessment", script)
+        self.assertIn("copyEffortPmDevSummary", script)
 
     def test_frontend_uses_deep_mode_and_raw_codex_answer(self):
         template = Path("templates/source_code_qa.html").read_text(encoding="utf-8")
@@ -341,6 +375,296 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.get_json()["message"], "Selected Source Code Q&A model is unavailable.")
 
+    def test_effort_assessment_is_admin_only_and_validates_input(self):
+        with self.app.test_client() as client:
+            self._login(client, "teammate@npt.sg")
+            forbidden = client.post(
+                "/api/source-code-qa/effort-assessment",
+                json={"pm_team": "AF", "country": "All", "requirement": "new flow", "llm_provider": "codex_cli_bridge"},
+            )
+            forbidden_status = client.get("/api/source-code-qa/effort-assessment-jobs/missing")
+            forbidden_events = client.get("/api/source-code-qa/effort-assessment-jobs/missing/events")
+            self._login(client, "xiaodong.zheng@npt.sg")
+            empty = client.post(
+                "/api/source-code-qa/effort-assessment",
+                json={"pm_team": "AF", "country": "All", "requirement": "   ", "llm_provider": "codex_cli_bridge"},
+            )
+
+        self.assertEqual(forbidden.status_code, 403)
+        self.assertEqual(forbidden_status.status_code, 403)
+        self.assertEqual(forbidden_events.status_code, 403)
+        self.assertEqual(empty.status_code, 400)
+        self.assertEqual(empty.get_json()["message"], "Business requirement is empty.")
+
+    def test_effort_assessment_builds_crms_business_plan_and_candidates(self):
+        requirement = (
+            "高收入人群(annual income >120K)的现金分期额度被信用卡现在给的额度低限制住。"
+            "方案1: 做信用卡现金分期专项额度 + 信用卡日常消费上限，报送还是报15w信用卡额度，通过103、104子产品额度控制。"
+            "方案2: 如果信用卡10w，现金贷能拿40w，按需申请一个独立cashline。"
+        )
+
+        dictionaries = _load_source_code_qa_effort_dictionaries()
+        crms_entries = dictionaries["domains"]["CRMS"]["entries"]
+        self.assertGreaterEqual(len(crms_entries), 10)
+        self.assertTrue(all(entry.get("business_aliases") for entry in crms_entries))
+        self.assertTrue(all(entry.get("technical_terms") for entry in crms_entries))
+        self.assertTrue(all(entry.get("surfaces") for entry in crms_entries))
+        self.assertTrue(all(entry.get("complexity_hint") for entry in crms_entries))
+        business_plan = _build_source_code_qa_effort_business_plan(
+            pm_team="CRMS",
+            country="SG",
+            language="zh",
+            requirement=requirement,
+        )
+        candidates = _build_source_code_qa_effort_technical_candidates(
+            pm_team="CRMS",
+            country="SG",
+            business_plan=business_plan,
+            requirement=requirement,
+        )
+        rubric = _build_source_code_qa_effort_estimation_rubric(
+            business_plan=business_plan,
+            technical_candidates=candidates,
+        )
+
+        self.assertIn("high income customers", business_plan["user_segments"])
+        self.assertIn("cash installment", business_plan["products"])
+        self.assertIn("cashline", business_plan["products"])
+        self.assertEqual(len(business_plan["options"]), 2)
+        self.assertIn("cash installment dedicated limit", business_plan["limit_types"])
+        self.assertIn("sub-product limit 103/104", business_plan["limit_types"])
+        search_terms = set(candidates["search_terms"])
+        self.assertIn("annualIncome", search_terms)
+        self.assertIn("cashline", search_terms)
+        self.assertIn("borrowerLimit", search_terms)
+        self.assertIn("productLimit", search_terms)
+        self.assertIn("subProductLimitInfos", search_terms)
+        self.assertIn("subProductCode=103", candidates["configs_or_tables"])
+        self.assertIn("subProductCode=104", candidates["configs_or_tables"])
+        self.assertIn("cash_installment_limit", candidates["matched_dictionary_entries"])
+        self.assertIn("backend_service", candidates["typed_candidates"])
+        self.assertIn("frontend_surface", candidates["typed_candidates"])
+        self.assertIn("downstream_reporting", candidates["typed_candidates"])
+        self.assertEqual(rubric["complexity_drivers"]["backend"], "high")
+        self.assertEqual(len(rubric["option_estimates"]), 2)
+        structured = _build_source_code_qa_effort_structured_assessment(
+            result={"matches": []},
+            language="zh",
+            business_plan=business_plan,
+            technical_candidates=candidates,
+            estimation_rubric=rubric,
+            missing_evidence=["missing code evidence"],
+            confidence="low",
+        )
+        self.assertIn("business_understanding", structured)
+        self.assertTrue(structured["be_estimate"])
+        self.assertTrue(structured["fe_estimate"])
+        self.assertTrue(structured["inferred_impact"])
+
+    def test_effort_assessment_builds_optimized_prompt_and_passes_runtime_evidence(self):
+        captured = {}
+
+        def fake_query(**kwargs):
+            captured.update(kwargs)
+            kwargs["progress_callback"]("direct_search", "Searching direct matches in Repo One.", 1, 1)
+            return {
+                "status": "ok",
+                "answer_mode": "auto",
+                "summary": "effort done",
+                "llm_answer": "代码改动点\n- Update API [S1]\n\nBE 人天\n- 1-2 PD\n\nFE 人天\n- 0 PD",
+                "llm_provider": "codex_cli_bridge",
+                "llm_model": "codex-cli",
+                "trace_id": "trace-effort",
+                "matches": [{"repo": "Repo One", "path": "src/api.py", "line_start": 10, "line_end": 12}],
+            }
+
+        with patch("bpmis_jira_tool.web._source_code_qa_provider_available", return_value=True), patch(
+            "bpmis_jira_tool.source_code_qa.SourceCodeQAService.ensure_synced_today",
+            return_value={"attempted": False, "status": "fresh"},
+        ) as ensure_synced, patch(
+            "bpmis_jira_tool.source_code_qa.SourceCodeQAService.query",
+            side_effect=fake_query,
+        ):
+            with self.app.test_client() as client:
+                self._login(client, "xiaodong.zheng@npt.sg")
+                upload = client.post(
+                    "/api/source-code-qa/runtime-evidence",
+                    data={
+                        "pm_team": "AF",
+                        "country": "SG",
+                        "source_type": "apollo",
+                        "file": (io.BytesIO(b"new.feature.enabled=true"), "apollo.properties"),
+                    },
+                    content_type="multipart/form-data",
+                )
+                response = client.post(
+                    "/api/source-code-qa/effort-assessment",
+                    json={
+                        "pm_team": "AF",
+                        "country": "SG",
+                        "language": "zh",
+                        "requirement": "Need to add a new approval flow for high-risk orders",
+                        "llm_provider": "codex_cli_bridge",
+                    },
+                )
+                self.assertEqual(response.status_code, 200)
+                payload = response.get_json()
+                snapshot = {}
+                for _ in range(20):
+                    status_response = client.get(f"/api/source-code-qa/effort-assessment-jobs/{payload['job_id']}")
+                    snapshot = status_response.get_json()
+                    if snapshot.get("state") == "completed":
+                        break
+                    time.sleep(0.05)
+                events_response = client.get(f"/api/source-code-qa/effort-assessment-jobs/{payload['job_id']}/events")
+
+        self.assertEqual(upload.status_code, 200)
+        self.assertEqual(snapshot.get("state"), "completed")
+        result = snapshot["results"][0]
+        self.assertEqual(result["assessment"]["type"], "effort_assessment")
+        self.assertEqual(result["assessment"]["language"], "zh")
+        self.assertEqual(result["assessment"]["confidence"], "medium")
+        self.assertIn("business_plan", result["assessment"])
+        self.assertIn("technical_candidates", result["assessment"])
+        self.assertIn("estimation_rubric", result["assessment"])
+        self.assertEqual(result["runtime_evidence"][0]["filename"], "apollo.properties")
+        self.assertIn("Original business requirement, verbatim:", captured["question"])
+        self.assertIn("Need to add a new approval flow for high-risk orders", captured["question"])
+        self.assertIn("Business plan extracted from the requirement:", captured["question"])
+        self.assertIn("Technical candidates for repository evidence search:", captured["question"])
+        self.assertIn("Estimation rubric:", captured["question"])
+        self.assertIn("Required output sections:", captured["question"])
+        self.assertIn("业务理解", captured["question"])
+        self.assertIn("方案 1/2 技术改造点", captured["question"])
+        self.assertIn("BE 人天", captured["question"])
+        self.assertIn("FE 人天", captured["question"])
+        self.assertIn("Confirmed / Inferred / Missing Evidence", captured["question"])
+        self.assertEqual(captured["pm_team"], "AF")
+        self.assertEqual(captured["country"], "SG")
+        self.assertEqual(captured["llm_budget_mode"], "auto")
+        self.assertEqual(captured["query_mode"], "deep")
+        self.assertIn("new.feature.enabled=true", captured["runtime_evidence"][0]["text"])
+        ensure_synced.assert_not_called()
+        self.assertIn(b"event: completed", events_response.data)
+
+    def test_effort_assessment_exact_miss_still_returns_low_confidence_assessment(self):
+        def fake_query(**kwargs):
+            kwargs["progress_callback"]("direct_search", "Searching focused candidates.", 1, 1)
+            return {
+                "status": "no_match",
+                "summary": "No exact table/path references were found in the indexed repositories.",
+                "trace_id": "trace-effort-no-match",
+                "matches": [],
+                "exact_lookup": {"terms": ["missing.limit.table"], "matched_terms": []},
+            }
+
+        requirement = (
+            "高收入人群 annual income >120K 的现金分期额度被信用卡额度限制。"
+            "方案1: 用现金分期专项额度和103/104子产品额度控制。"
+            "方案2: 引导申请独立cashline。"
+        )
+        with patch("bpmis_jira_tool.web._source_code_qa_provider_available", return_value=True), patch(
+            "bpmis_jira_tool.source_code_qa.SourceCodeQAService.query",
+            side_effect=fake_query,
+        ):
+            with self.app.test_client() as client:
+                self._login(client, "xiaodong.zheng@npt.sg")
+                response = client.post(
+                    "/api/source-code-qa/effort-assessment",
+                    json={
+                        "pm_team": "CRMS",
+                        "country": "SG",
+                        "language": "zh",
+                        "requirement": requirement,
+                        "llm_provider": "codex_cli_bridge",
+                    },
+                )
+                self.assertEqual(response.status_code, 200)
+                payload = response.get_json()
+                snapshot = {}
+                for _ in range(20):
+                    status_response = client.get(f"/api/source-code-qa/effort-assessment-jobs/{payload['job_id']}")
+                    snapshot = status_response.get_json()
+                    if snapshot.get("state") == "completed":
+                        break
+                    time.sleep(0.05)
+
+        result = snapshot["results"][0]
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["effort_evidence_status"], "warning")
+        self.assertEqual(result["assessment"]["confidence"], "low")
+        self.assertIn("business_plan", result["assessment"])
+        self.assertIn("technical_candidates", result["assessment"])
+        self.assertIn("estimation_rubric", result["assessment"])
+        self.assertIn("missing_evidence", result["assessment"])
+        self.assertIn("BE", result["llm_answer"])
+        self.assertIn("FE", result["llm_answer"])
+        self.assertIn("低置信度", result["llm_answer"])
+        self.assertIn("cashline", result["assessment"]["technical_candidates"]["search_terms"])
+        self.assertIn("subProductLimitInfos", result["assessment"]["technical_candidates"]["search_terms"])
+
+    def test_effort_assessment_latest_result_restores_from_job_store(self):
+        with patch("bpmis_jira_tool.web._source_code_qa_provider_available", return_value=True), patch(
+            "bpmis_jira_tool.source_code_qa.SourceCodeQAService.query",
+            return_value={
+                "status": "ok",
+                "summary": "effort done",
+                "llm_answer": "业务理解\n- ok\n\nBE 人天\n- 1-2 PD\n\nFE 人天\n- 0-1 PD",
+                "trace_id": "trace-latest-effort",
+                "matches": [{"repo": "CRMS", "path": "src/LimitService.java", "line_start": 3}],
+            },
+        ):
+            with self.app.test_client() as client:
+                self._login(client, "xiaodong.zheng@npt.sg")
+                initial_latest = client.get("/api/source-code-qa/effort-assessment/latest")
+                response = client.post(
+                    "/api/source-code-qa/effort-assessment",
+                    json={
+                        "pm_team": "CRMS",
+                        "country": "SG",
+                        "language": "zh",
+                        "requirement": "现金分期额度需要和信用卡额度区分展示。",
+                        "llm_provider": "codex_cli_bridge",
+                    },
+                )
+                self.assertEqual(response.status_code, 200)
+                payload = response.get_json()
+                snapshot = {}
+                for _ in range(20):
+                    status_response = client.get(f"/api/source-code-qa/effort-assessment-jobs/{payload['job_id']}")
+                    snapshot = status_response.get_json()
+                    if snapshot.get("state") == "completed":
+                        break
+                    time.sleep(0.05)
+                latest = client.get("/api/source-code-qa/effort-assessment/latest")
+
+        self.assertEqual(initial_latest.status_code, 200)
+        self.assertEqual(snapshot.get("state"), "completed")
+        self.assertEqual(latest.status_code, 200)
+        latest_payload = latest.get_json()
+        self.assertEqual(latest_payload["status"], "ok")
+        self.assertEqual(latest_payload["result"]["job_id"], payload["job_id"])
+        self.assertIn("structured_assessment", latest_payload["result"]["assessment"])
+        self.assertIn("business_plan", latest_payload["result"]["assessment"])
+
+    def test_effort_assessment_rejects_unavailable_model_provider(self):
+        with patch("bpmis_jira_tool.web._source_code_qa_provider_available", return_value=False):
+            with self.app.test_client() as client:
+                self._login(client, "xiaodong.zheng@npt.sg")
+                response = client.post(
+                    "/api/source-code-qa/effort-assessment",
+                    json={
+                        "pm_team": "AF",
+                        "country": "All",
+                        "language": "en",
+                        "requirement": "Add a new workflow",
+                        "llm_provider": "vertex_ai",
+                    },
+                )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()["message"], "Selected Source Code Q&A model is unavailable.")
+
     def test_source_code_qa_session_api_creates_lists_and_loads_session(self):
         with self.app.test_client() as client:
             self._login(client, "teammate@npt.sg")
@@ -357,6 +681,29 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertEqual(loaded.status_code, 200)
         self.assertEqual(listed.get_json()["sessions"][0]["id"], session_payload["id"])
         self.assertEqual(loaded.get_json()["session"]["llm_provider"], "vertex_ai")
+
+    def test_source_code_qa_session_list_and_load_are_owner_scoped(self):
+        with self.app.test_client() as client:
+            self._login(client, "owner@npt.sg")
+            created = client.post(
+                "/api/source-code-qa/sessions",
+                json={"pm_team": "AF", "country": "All", "llm_provider": "codex_cli_bridge", "title": "Owner session"},
+            )
+            session_id = created.get_json()["session"]["id"]
+
+            self._login(client, "other@npt.sg")
+            other_list = client.get("/api/source-code-qa/sessions")
+            other_loaded = client.get(f"/api/source-code-qa/sessions/{session_id}")
+
+            self._login(client, "owner@npt.sg")
+            owner_loaded = client.get(f"/api/source-code-qa/sessions/{session_id}")
+
+        self.assertEqual(other_list.status_code, 200)
+        self.assertEqual(other_list.get_json()["sessions"], [])
+        self.assertEqual(other_loaded.status_code, 404)
+        self.assertEqual(other_loaded.get_json()["status"], "error")
+        self.assertEqual(owner_loaded.status_code, 200)
+        self.assertEqual(owner_loaded.get_json()["session"]["id"], session_id)
 
     def test_source_code_qa_session_archive_hides_but_preserves_session(self):
         with self.app.test_client() as client:
@@ -496,6 +843,54 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertEqual(downloaded.status_code, 200)
         self.assertEqual(downloaded.data, b"ticket field notes")
         self.assertEqual(blocked.status_code, 404)
+
+    def test_attachment_upload_and_query_reference_reject_other_owner_session(self):
+        with self.app.test_client() as client:
+            self._login(client, "owner@npt.sg")
+            owner_session = client.post(
+                "/api/source-code-qa/sessions",
+                json={"pm_team": "AF", "country": "All", "llm_provider": "codex_cli_bridge"},
+            ).get_json()["session"]
+            owner_upload = client.post(
+                "/api/source-code-qa/attachments",
+                data={
+                    "session_id": owner_session["id"],
+                    "file": (io.BytesIO(b"owner private context"), "owner-notes.txt"),
+                },
+                content_type="multipart/form-data",
+            ).get_json()["attachment"]
+
+            self._login(client, "other@npt.sg")
+            other_upload_to_owner_session = client.post(
+                "/api/source-code-qa/attachments",
+                data={
+                    "session_id": owner_session["id"],
+                    "file": (io.BytesIO(b"other context"), "other-notes.txt"),
+                },
+                content_type="multipart/form-data",
+            )
+            other_session = client.post(
+                "/api/source-code-qa/sessions",
+                json={"pm_team": "AF", "country": "All", "llm_provider": "codex_cli_bridge"},
+            ).get_json()["session"]
+            with patch("bpmis_jira_tool.source_code_qa.SourceCodeQAService.query") as query:
+                query_with_owner_attachment = client.post(
+                    "/api/source-code-qa/query",
+                    json={
+                        "session_id": other_session["id"],
+                        "pm_team": "AF",
+                        "country": "All",
+                        "question": "use private attachment",
+                        "llm_provider": "codex_cli_bridge",
+                        "attachment_ids": [owner_upload["id"]],
+                    },
+                )
+
+        self.assertEqual(other_upload_to_owner_session.status_code, 404)
+        self.assertEqual(other_upload_to_owner_session.get_json()["status"], "error")
+        self.assertEqual(query_with_owner_attachment.status_code, 400)
+        self.assertIn("attachments", query_with_owner_attachment.get_json()["message"])
+        query.assert_not_called()
 
     def test_query_passes_attachment_metadata_and_text_to_service(self):
         captured = {}
@@ -1210,6 +1605,208 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertIn("progress_callback", captured)
         self.assertIn("codex_cli_bridge", selected)
         ensure_synced.assert_called_once_with(pm_team="AF", country="All")
+
+    def test_query_api_async_returns_before_slow_backend_step_and_exposes_timing(self):
+        backend_entered = threading.Event()
+        release_backend = threading.Event()
+
+        def slow_query(**kwargs):
+            kwargs["progress_callback"]("retrieval", "Slow fake retrieval started.", 1, 3)
+            backend_entered.set()
+            release_backend.wait(timeout=2)
+            return {
+                "status": "ok",
+                "answer_mode": "retrieval_only",
+                "summary": "slow retrieval finished",
+                "matches": [],
+                "trace_id": "trace-slow-step",
+                "retrieval_latency_ms": 1500,
+                "llm_latency_ms": 25,
+                "timing": {"slow_component": "retrieval", "retrieval_ms": 1500, "llm_ms": 25},
+            }
+
+        with patch(
+            "bpmis_jira_tool.source_code_qa.SourceCodeQAService.ensure_synced_today",
+            return_value={"attempted": False, "status": "fresh"},
+        ), patch(
+            "bpmis_jira_tool.source_code_qa.SourceCodeQAService.query",
+            side_effect=slow_query,
+        ):
+            with self.app.test_client() as client:
+                self._login(client, "teammate@npt.sg")
+                created = client.post(
+                    "/api/source-code-qa/sessions",
+                    json={"pm_team": "AF", "country": "All", "llm_provider": "codex_cli_bridge"},
+                )
+                session_id = created.get_json()["session"]["id"]
+                started = time.monotonic()
+                response = client.post(
+                    "/api/source-code-qa/query",
+                    json={
+                        "session_id": session_id,
+                        "pm_team": "AF",
+                        "country": "All",
+                        "question": "which step is slow",
+                        "answer_mode": "auto",
+                        "llm_provider": "codex_cli_bridge",
+                        "async": True,
+                    },
+                )
+                elapsed = time.monotonic() - started
+                payload = response.get_json()
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(payload["status"], "queued")
+                self.assertLess(elapsed, 0.25)
+                self.assertTrue(backend_entered.wait(timeout=1))
+                running_snapshot = client.get(f"/api/source-code-qa/query-jobs/{payload['job_id']}").get_json()
+                release_backend.set()
+                completed_snapshot = {}
+                for _ in range(40):
+                    completed_snapshot = client.get(f"/api/source-code-qa/query-jobs/{payload['job_id']}").get_json()
+                    if completed_snapshot.get("state") == "completed":
+                        break
+                    time.sleep(0.05)
+
+        self.assertEqual(running_snapshot["progress"]["stage"], "retrieval")
+        self.assertEqual(completed_snapshot["state"], "completed")
+        result = completed_snapshot["results"][0]
+        self.assertEqual(result["timing"]["slow_component"], "retrieval")
+        self.assertEqual(result["retrieval_latency_ms"], 1500)
+        self.assertEqual(result["llm_latency_ms"], 25)
+
+    def test_query_job_status_is_scoped_to_session_owner(self):
+        with patch(
+            "bpmis_jira_tool.source_code_qa.SourceCodeQAService.ensure_synced_today",
+            return_value={"attempted": False, "status": "fresh"},
+        ), patch(
+            "bpmis_jira_tool.source_code_qa.SourceCodeQAService.query",
+            return_value={"status": "ok", "answer_mode": "retrieval_only", "summary": "private answer", "matches": []},
+        ):
+            with self.app.test_client() as client:
+                self._login(client, "teammate@npt.sg")
+                response = client.post(
+                    "/api/source-code-qa/query",
+                    json={
+                        "pm_team": "AF",
+                        "country": "All",
+                        "question": "where is createIssue",
+                        "answer_mode": "auto",
+                        "llm_provider": "codex_cli_bridge",
+                        "async": True,
+                    },
+                )
+                self.assertEqual(response.status_code, 200)
+                job_id = response.get_json()["job_id"]
+                for _ in range(20):
+                    owner_status = client.get(f"/api/source-code-qa/query-jobs/{job_id}")
+                    owner_payload = owner_status.get_json()
+                    if owner_payload.get("state") == "completed":
+                        break
+                    time.sleep(0.05)
+
+                self._login(client, "other@npt.sg")
+                other_generic_status = client.get(f"/api/jobs/{job_id}")
+                other_status = client.get(f"/api/source-code-qa/query-jobs/{job_id}")
+                other_events = client.get(f"/api/source-code-qa/query-jobs/{job_id}/events")
+
+                self._login(client, "teammate@npt.sg")
+                owner_generic_status = client.get(f"/api/jobs/{job_id}")
+                owner_status = client.get(f"/api/source-code-qa/query-jobs/{job_id}")
+
+        self.assertEqual(owner_status.status_code, 200)
+        self.assertEqual(owner_status.get_json()["status"], "ok")
+        self.assertNotIn("owner_email", owner_status.get_json())
+        self.assertEqual(owner_generic_status.status_code, 200)
+        self.assertEqual(owner_generic_status.get_json()["status"], "ok")
+        self.assertNotIn("owner_email", owner_generic_status.get_json())
+        self.assertEqual(other_generic_status.status_code, 404)
+        self.assertEqual(other_status.status_code, 404)
+        self.assertEqual(other_status.get_json()["error_category"], "job_not_found")
+        self.assertEqual(other_events.status_code, 404)
+        self.assertEqual(other_events.get_json()["error_category"], "job_not_found")
+
+    def test_two_non_admin_users_cannot_cross_read_sessions_attachments_or_async_jobs(self):
+        with patch(
+            "bpmis_jira_tool.source_code_qa.SourceCodeQAService.ensure_synced_today",
+            return_value={"attempted": False, "status": "fresh"},
+        ), patch(
+            "bpmis_jira_tool.source_code_qa.SourceCodeQAService.query",
+            return_value={
+                "status": "ok",
+                "answer_mode": "retrieval_only",
+                "summary": "private answer",
+                "matches": [],
+                "trace_id": "trace-private",
+            },
+        ):
+            with self.app.test_client() as client:
+                self._login(client, "teammate@npt.sg")
+                owner_session = client.post(
+                    "/api/source-code-qa/sessions",
+                    json={"pm_team": "AF", "country": "All", "llm_provider": "codex_cli_bridge", "title": "Owner"},
+                ).get_json()["session"]
+                owner_attachment = client.post(
+                    "/api/source-code-qa/attachments",
+                    data={
+                        "session_id": owner_session["id"],
+                        "file": (io.BytesIO(b"owner-only"), "owner.txt"),
+                    },
+                    content_type="multipart/form-data",
+                ).get_json()["attachment"]
+                owner_job = client.post(
+                    "/api/source-code-qa/query",
+                    json={
+                        "session_id": owner_session["id"],
+                        "pm_team": "AF",
+                        "country": "All",
+                        "question": "private question",
+                        "llm_provider": "codex_cli_bridge",
+                        "async": True,
+                    },
+                ).get_json()["job_id"]
+                for _ in range(20):
+                    owner_status = client.get(f"/api/source-code-qa/query-jobs/{owner_job}").get_json()
+                    if owner_status.get("state") == "completed":
+                        break
+                    time.sleep(0.05)
+
+                self._login(client, "other@npt.sg")
+                other_session = client.post(
+                    "/api/source-code-qa/sessions",
+                    json={"pm_team": "AF", "country": "All", "llm_provider": "codex_cli_bridge", "title": "Other"},
+                ).get_json()["session"]
+                other_list = client.get("/api/source-code-qa/sessions").get_json()["sessions"]
+                blocked_owner_session = client.get(f"/api/source-code-qa/sessions/{owner_session['id']}")
+                blocked_owner_archive = client.post(f"/api/source-code-qa/sessions/{owner_session['id']}/archive")
+                blocked_owner_attachment = client.get(
+                    f"/api/source-code-qa/attachments/{owner_attachment['id']}?session_id={owner_session['id']}"
+                )
+                blocked_owner_generic_job = client.get(f"/api/jobs/{owner_job}")
+                blocked_owner_source_job = client.get(f"/api/source-code-qa/query-jobs/{owner_job}")
+                blocked_owner_events = client.get(f"/api/source-code-qa/query-jobs/{owner_job}/events")
+                other_session_visible = client.get(f"/api/source-code-qa/sessions/{other_session['id']}")
+
+                self._login(client, "teammate@npt.sg")
+                owner_session_still_visible = client.get(f"/api/source-code-qa/sessions/{owner_session['id']}")
+                owner_attachment_still_visible = client.get(
+                    f"/api/source-code-qa/attachments/{owner_attachment['id']}?session_id={owner_session['id']}"
+                )
+                owner_job_still_visible = client.get(f"/api/jobs/{owner_job}")
+
+        self.assertEqual(owner_status["state"], "completed")
+        self.assertEqual([item["id"] for item in other_list], [other_session["id"]])
+        self.assertNotIn(owner_session["id"], [item["id"] for item in other_list])
+        self.assertEqual(blocked_owner_session.status_code, 404)
+        self.assertEqual(blocked_owner_archive.status_code, 404)
+        self.assertEqual(blocked_owner_attachment.status_code, 404)
+        self.assertEqual(blocked_owner_generic_job.status_code, 404)
+        self.assertEqual(blocked_owner_source_job.status_code, 404)
+        self.assertEqual(blocked_owner_events.status_code, 404)
+        self.assertEqual(other_session_visible.status_code, 200)
+        self.assertEqual(owner_session_still_visible.status_code, 200)
+        self.assertEqual(owner_attachment_still_visible.status_code, 200)
+        self.assertEqual(owner_attachment_still_visible.data, b"owner-only")
+        self.assertEqual(owner_job_still_visible.status_code, 200)
 
     def test_job_store_persists_background_job_snapshots(self):
         path = Path(self.temp_dir.name) / "run" / "jobs.json"
@@ -2453,6 +3050,11 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertTrue(self.service._exact_lookup_miss_should_stop(["missing_schema.dwd_missing_table_di"]))
         self.assertTrue(self.service._exact_lookup_miss_should_stop(["mapper/MissingMapper.xml"]))
         self.assertFalse(self.service._exact_lookup_miss_should_stop(["risk.engine.timeout"]))
+        self.assertFalse(self.service._exact_lookup_miss_should_stop(["model/provider:", "screens/components", "db/apollo/log"]))
+        self.assertFalse(self.service._is_strict_exact_lookup_term("screens/components"))
+        self.assertFalse(self.service._is_strict_exact_lookup_term("db/apollo/log"))
+        self.assertTrue(self.service._is_strict_exact_lookup_term("spec/usecase/uc007_query_retail_underwriting_result.md"))
+        self.assertTrue(self.service._is_strict_exact_lookup_term("src/main/java/com/example/RiskEngine.java"))
 
     def test_query_does_not_build_missing_index_synchronously(self):
         self.service.save_mapping(

@@ -245,6 +245,12 @@ class LocalAgentClient:
     def meeting_recorder_stop(self, *, record_id: str, owner_email: str) -> dict[str, Any]:
         return self._request("POST", "/api/local-agent/meeting-recorder/stop", {"record_id": record_id, "owner_email": owner_email})
 
+    def meeting_recorder_signal_check(self, *, record_id: str, owner_email: str) -> dict[str, Any]:
+        return self._request("POST", "/api/local-agent/meeting-recorder/signal-check", {"record_id": record_id, "owner_email": owner_email})
+
+    def meeting_recorder_browser_audio(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self._request("POST", "/api/local-agent/meeting-recorder/browser-audio", payload)
+
     def meeting_recorder_process(self, *, record_id: str, owner_email: str) -> dict[str, Any]:
         return self._request("POST", "/api/local-agent/meeting-recorder/process", {"record_id": record_id, "owner_email": owner_email})
 

@@ -370,16 +370,8 @@ class LocalAgentServerTests(unittest.TestCase):
         self.assertIn("Stop the recording", response.get_json()["message"])
         response.close()
 
-    def test_signed_meeting_recorder_repair_video_delegates_to_runtime(self):
+    def test_signed_meeting_recorder_repair_video_is_unsupported(self):
         fake_runtime = Mock()
-        fake_runtime.repair_video_playback.return_value = {
-            "record_id": "meeting-1",
-            "title": "Playback",
-            "platform": "zoom",
-            "meeting_link": "https://zoom.us/j/123",
-            "status": "completed",
-            "media": {"playback_video_url": "/meeting-recorder/assets/meeting-1/meeting.playback.mp4"},
-        }
         self.app.config["MEETING_RECORDER_RUNTIME"] = fake_runtime
 
         response = self._post_signed(
@@ -387,9 +379,44 @@ class LocalAgentServerTests(unittest.TestCase):
             {"record_id": "meeting-1", "owner_email": "owner@npt.sg"},
         )
 
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("audio-only", response.get_json()["message"])
+        fake_runtime.repair_video_playback.assert_not_called()
+
+    def test_signed_meeting_recorder_start_allows_blank_link_for_sck_f2f(self):
+        fake_runtime = Mock()
+        fake_runtime.start_recording.return_value = {
+            "record_id": "meeting-f2f",
+            "title": "Face to face",
+            "platform": "unknown",
+            "meeting_link": "",
+            "status": "recording",
+            "media": {
+                "recording_mode": "audio_only",
+                "audio_capture_profile": "screencapturekit_audio_v1",
+                "screencapture_capture_source": "screencapturekit_f2f",
+            },
+        }
+        self.app.config["MEETING_RECORDER_RUNTIME"] = fake_runtime
+
+        response = self._post_signed(
+            "/api/local-agent/meeting-recorder/start",
+            {"owner_email": "owner@npt.sg", "title": "Face to face", "meeting_link": "", "recording_mode": "audio_only"},
+        )
+
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.get_json()["record"]["media"]["playback_video_url"], "/meeting-recorder/assets/meeting-1/meeting.playback.mp4")
-        fake_runtime.repair_video_playback.assert_called_once_with(record_id="meeting-1", owner_email="owner@npt.sg")
+        self.assertEqual(response.get_json()["record"]["media"]["screencapture_capture_source"], "screencapturekit_f2f")
+        fake_runtime.start_recording.assert_called_once_with(
+            owner_email="owner@npt.sg",
+            title="Face to face",
+            platform="unknown",
+            meeting_link="",
+            recording_mode="audio_only",
+            calendar_event_id="",
+            scheduled_start="",
+            scheduled_end="",
+            attendees=[],
+        )
 
     def test_signed_bpmis_config_save_and_load_use_agent_data_dir(self):
         save_response = self._post_signed(

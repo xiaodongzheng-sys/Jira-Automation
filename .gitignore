@@ -10,6 +10,7 @@ test-results/
 .chrome-cdp-profile/
 tmp/
 *.jsonl
+!evals/effort_assessment/crms_golden.jsonl
 jira_web_config.json
 team_portal.db
 .team-portal/

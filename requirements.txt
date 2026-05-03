@@ -18,3 +18,4 @@ openpyxl==3.1.5
 spacy==3.7.5
 pytextrank==3.3.0
 argostranslate==1.9.6
+coverage==7.10.7

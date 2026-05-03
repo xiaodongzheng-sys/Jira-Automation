@@ -97,7 +97,15 @@ def finish_google_oauth(settings: Settings, authorization_response: str) -> None
     if redirect_uri.startswith("https://"):
         os.environ.pop("OAUTHLIB_INSECURE_TRANSPORT", None)
     normalized_authorization_response = _normalize_authorization_response(authorization_response, redirect_uri)
-    flow.fetch_token(authorization_response=normalized_authorization_response)
+    previous_relax_scope = os.environ.get("OAUTHLIB_RELAX_TOKEN_SCOPE")
+    os.environ["OAUTHLIB_RELAX_TOKEN_SCOPE"] = "1"
+    try:
+        flow.fetch_token(authorization_response=normalized_authorization_response)
+    finally:
+        if previous_relax_scope is None:
+            os.environ.pop("OAUTHLIB_RELAX_TOKEN_SCOPE", None)
+        else:
+            os.environ["OAUTHLIB_RELAX_TOKEN_SCOPE"] = previous_relax_scope
     session["google_credentials"] = credentials_to_dict(flow.credentials)
     session["google_profile"] = fetch_google_profile(flow.credentials)
 

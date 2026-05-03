@@ -1,0 +1,123 @@
+{
+  "version": 1,
+  "updated_at": "2026-05-03",
+  "purpose": "Effort Assessment business-to-technical dictionaries. v1 focuses on CRMS planning-grade estimates.",
+  "domains": {
+    "CRMS": {
+      "label": "Credit Risk",
+      "description": "CRMS effort dictionary covering income, limits, products, underwriting/precheck, application flow, reporting, and FE guidance.",
+      "entries": [
+        {
+          "id": "income_annual_monthly",
+          "business_aliases": ["annual income", "monthly income", "年收入", "月收入", "收入", "income >120K", "高收入"],
+          "technical_terms": ["annualIncome", "monthlyIncome", "income", "CustomerInfo", "CreditRiskInfo", "FeatureData"],
+          "surfaces": ["backend_service", "workflow_rule", "table_or_config"],
+          "product_terms": [],
+          "limit_terms": [],
+          "country_terms": ["SG", "ID", "PH"],
+          "evidence_hints": ["income field population", "feature lookup", "customer/credit info mapper"],
+          "complexity_hint": "medium"
+        },
+        {
+          "id": "sg_myinfo_cpf_noa",
+          "business_aliases": ["MyInfo", "Singpass", "CPF", "NOA", "notice of assessment", "myinfo income", "cpf contribution"],
+          "technical_terms": ["get_monthly_income", "get_myinfo_monthly_income", "get_myinfo_features_online", "cpfContributions", "myInfoData", "myinfo_monthly_income"],
+          "surfaces": ["backend_service", "workflow_rule", "table_or_config"],
+          "product_terms": [],
+          "limit_terms": [],
+          "country_terms": ["SG"],
+          "evidence_hints": ["MyInfo payload parsing", "CPF/NOA income derivation"],
+          "complexity_hint": "medium"
+        },
+        {
+          "id": "ph_card_income_screening",
+          "business_aliases": ["payslip", "card income screening", "credit card income", "LLM payslip", "Ops extracted fields", "收入材料", "工资单"],
+          "technical_terms": ["ExtractRecordDO", "extract_record_tab", "response_body", "CardIncomeScreeningFlowStatusDO", "card_income_screening_flow_status_tab", "process_info", "PayslipProcessStrategy"],
+          "surfaces": ["backend_service", "workflow_rule", "table_or_config"],
+          "product_terms": ["credit card"],
+          "limit_terms": [],
+          "country_terms": ["PH"],
+          "evidence_hints": ["payslip extraction persistence", "Ops review process_info"],
+          "complexity_hint": "medium"
+        },
+        {
+          "id": "credit_card_limit",
+          "business_aliases": ["信用卡额度", "credit card limit", "card limit", "日常消费上限", "消费额度"],
+          "technical_terms": ["creditCardLimit", "credit limit", "limitAmount", "productLimit", "productLimitInfo", "productCode", "productType"],
+          "surfaces": ["backend_service", "frontend_surface", "workflow_rule", "table_or_config"],
+          "product_terms": ["credit card"],
+          "limit_terms": ["credit card limit", "daily consumption limit", "product limit"],
+          "country_terms": ["SG", "ID", "PH"],
+          "evidence_hints": ["limit strategy", "limit display", "product limit payload"],
+          "complexity_hint": "medium"
+        },
+        {
+          "id": "cash_installment_limit",
+          "business_aliases": ["现金分期", "cash installment", "cash instalment", "现金分期专项额度", "现金贷额度"],
+          "technical_terms": ["cashInstallment", "cash installment", "cashInstalment", "cashLoan", "installmentLimit", "productLimit", "subProductLimit"],
+          "surfaces": ["backend_service", "frontend_surface", "workflow_rule", "table_or_config"],
+          "product_terms": ["cash installment"],
+          "limit_terms": ["cash installment dedicated limit", "product limit", "sub-product limit"],
+          "country_terms": ["SG", "ID", "PH"],
+          "evidence_hints": ["cash installment strategy", "limit application/display"],
+          "complexity_hint": "high"
+        },
+        {
+          "id": "cashline_application",
+          "business_aliases": ["cashline", "cash line", "独立cashline", "cashline申请", "现金循环贷"],
+          "technical_terms": ["cashline", "cashLine", "cashline application", "application flow", "redirect flow", "productCode"],
+          "surfaces": ["backend_service", "frontend_surface", "workflow_rule"],
+          "product_terms": ["cashline"],
+          "limit_terms": ["cashline limit"],
+          "country_terms": ["SG", "ID", "PH"],
+          "evidence_hints": ["cashline eligibility", "application entry", "customer guidance"],
+          "complexity_hint": "high"
+        },
+        {
+          "id": "borrower_product_subproduct_limit",
+          "business_aliases": ["borrower limit", "product limit", "sub product limit", "sub-product limit", "子产品额度", "103", "104", "产品额度", "借款人额度"],
+          "technical_terms": ["borrowerLimit", "productLimit", "productLimitInfo", "subProductLimit", "subProductLimitInfos", "subProductCode", "subProductCode=103", "subProductCode=104"],
+          "surfaces": ["backend_service", "workflow_rule", "table_or_config"],
+          "product_terms": [],
+          "limit_terms": ["borrower limit", "product limit", "sub-product limit 103/104"],
+          "country_terms": ["SG", "ID", "PH"],
+          "evidence_hints": ["multi-level limit model", "product/sub-product payload"],
+          "complexity_hint": "high"
+        },
+        {
+          "id": "underwriting_precheck_initiation",
+          "business_aliases": ["授信", "进件", "underwriting", "precheck", "pre-check", "pre-check rule config", "rule config", "准入", "贷前检查", "initiation"],
+          "technical_terms": ["UnderwritingInitiationDTO", "UnderwritingContext", "UnderwritingBasicInfo", "TermLoanPreCheckEngine", "PreCheckStrategy", "UnderwritingInitiationProvider", "risk strategy config", "rule config"],
+          "surfaces": ["backend_service", "workflow_rule", "table_or_config"],
+          "product_terms": ["term loan"],
+          "limit_terms": [],
+          "country_terms": ["SG", "ID", "PH"],
+          "evidence_hints": ["entry strategy", "eligibility rule", "context assembly"],
+          "complexity_hint": "high"
+        },
+        {
+          "id": "reporting_submission",
+          "business_aliases": ["报送", "上报", "submission", "reporting", "下游", "downstream", "监管报送"],
+          "technical_terms": ["reporting", "submission", "report payload", "downstream", "DWH_CreditRisk", "DWH_ReportingPortal"],
+          "surfaces": ["downstream_reporting", "backend_service", "table_or_config"],
+          "product_terms": [],
+          "limit_terms": [],
+          "country_terms": ["SG", "ID", "PH"],
+          "evidence_hints": ["report payload", "DWH/reporting dependency"],
+          "complexity_hint": "high"
+        },
+        {
+          "id": "frontend_guidance",
+          "business_aliases": ["展示", "前端", "入口", "引导", "用户教育", "感知", "转化", "display", "entry", "guide", "customer education"],
+          "technical_terms": ["screen", "display", "entry point", "guide copy", "frontend", "FE"],
+          "surfaces": ["frontend_surface"],
+          "product_terms": [],
+          "limit_terms": [],
+          "country_terms": ["SG", "ID", "PH"],
+          "evidence_hints": ["limit display", "application entry", "education copy"],
+          "complexity_hint": "medium"
+        }
+      ]
+    }
+  }
+}

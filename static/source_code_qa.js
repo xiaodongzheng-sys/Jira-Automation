@@ -6,9 +6,12 @@
   const saveUrl = root.dataset.saveUrl;
   const syncUrl = root.dataset.syncUrl;
   const queryUrl = root.dataset.queryUrl;
+  const effortAssessmentUrl = root.dataset.effortAssessmentUrl;
+  const effortLatestUrl = root.dataset.effortLatestUrl;
   const attachmentUrl = root.dataset.attachmentUrl;
   const runtimeEvidenceUrl = root.dataset.runtimeEvidenceUrl;
   const jobsUrlTemplate = root.dataset.jobsUrl || '/api/jobs/__JOB_ID__';
+  const effortJobsUrlTemplate = root.dataset.effortJobsUrl || jobsUrlTemplate;
   const feedbackUrl = root.dataset.feedbackUrl;
   const sessionsUrl = root.dataset.sessionsUrl;
   const modelAvailabilityUrl = root.dataset.modelAvailabilityUrl;
@@ -60,6 +63,18 @@
   const runtimeEvidenceList = document.querySelector('[data-source-runtime-evidence-list]');
   const runtimeEvidenceStatus = document.querySelector('[data-source-runtime-evidence-status]');
   const newSessionButton = document.querySelector('[data-source-new-session]');
+  const effortLanguage = document.querySelector('[data-source-effort-language]');
+  const effortRequirement = document.querySelector('[data-source-effort-requirement]');
+  const effortRunButton = document.querySelector('[data-source-effort-run]');
+  const effortStatus = document.querySelector('[data-source-effort-status]');
+  const effortOutput = document.querySelector('[data-source-effort-output]');
+  const effortSummary = document.querySelector('[data-source-effort-summary]');
+  const effortProvider = document.querySelector('[data-source-effort-provider]');
+  const effortScope = document.querySelector('[data-source-effort-scope]');
+  const effortMeta = document.querySelector('[data-source-effort-meta]');
+  const effortAnswer = document.querySelector('[data-source-effort-answer]');
+  const effortEvidence = document.querySelector('[data-source-effort-evidence]');
+  const effortCopyButton = document.querySelector('[data-source-effort-copy]');
   const viewTabs = Array.from(document.querySelectorAll('[data-source-view-tab]'));
   const viewPanels = Array.from(document.querySelectorAll('[data-source-view-panel]'));
   const sessionList = document.querySelector('[data-source-session-list]');
@@ -90,6 +105,8 @@
   let nextAttachmentUploadToken = 0;
   let attachmentPreview = null;
   let activeQueryControl = null;
+  let activeEffortControl = null;
+  let lastEffortPayload = null;
   let pendingFeedbackRating = '';
   let notificationPermissionAsked = (() => {
     try {
@@ -99,10 +116,12 @@
     }
   })();
   const preferenceKey = 'source-code-qa:last-query-config:v1';
+  const effortAssessmentCacheKey = 'source-code-qa:effort-assessment:last:v1';
   const notificationPreferenceKey = 'source-code-qa:notification-permission-asked:v1';
 
   const setSourceView = (view) => {
-    const nextView = view === 'admin' && canManage ? 'admin' : 'chat';
+    const adminViews = new Set(['admin', 'effort']);
+    const nextView = adminViews.has(view) && canManage ? view : 'chat';
     viewTabs.forEach((tab) => {
       const active = tab.dataset.sourceViewTab === nextView;
       tab.classList.toggle('is-active', active);
@@ -146,8 +165,8 @@
     return payload;
   };
   const sleep = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms));
-  const jobStatusUrl = (jobId) => jobsUrlTemplate.replace('__JOB_ID__', encodeURIComponent(jobId));
-  const jobEventsUrl = (jobId) => `${jobStatusUrl(jobId)}/events`;
+  const jobStatusUrl = (jobId, template = jobsUrlTemplate) => template.replace('__JOB_ID__', encodeURIComponent(jobId));
+  const jobEventsUrl = (jobId, template = jobsUrlTemplate) => `${jobStatusUrl(jobId, template)}/events`;
   const sourceQaJobErrorMessage = (payloadOrError) => {
     const category = String(payloadOrError?.error_category || '').toLowerCase();
     const rawMessage = String(payloadOrError?.message || payloadOrError?.error || '').trim();
@@ -210,11 +229,11 @@
     }
     throw lastError || new Error('Request failed.');
   };
-  const readJobStatus = async (jobId) => {
+  const readJobStatus = async (jobId, template = jobsUrlTemplate) => {
     let lastError = null;
     for (let attempt = 0; attempt < 5; attempt += 1) {
       try {
-        return await apiFetchJson(jobStatusUrl(jobId), { method: 'GET' });
+        return await apiFetchJson(jobStatusUrl(jobId, template), { method: 'GET' });
       } catch (error) {
         lastError = error;
         if (!isTransientJobStatusError(error)) {
@@ -594,19 +613,19 @@
     }
   };
 
-  const startQueryProgress = (message = 'Submitting query to server...') => {
+  const startQueryProgress = (message = 'Submitting query to server...', statusElement = queryStatus) => {
     stopQueryProgress();
     const startedAt = performance.now();
     let currentMessage = message;
     const setMessage = (nextMessage) => {
       currentMessage = nextMessage || currentMessage;
-      if (queryStatus) {
-        queryStatus.textContent = `${currentMessage} elapsed ${formatElapsed(startedAt)}`;
+      if (statusElement) {
+        statusElement.textContent = `${currentMessage} elapsed ${formatElapsed(startedAt)}`;
       }
     };
     const update = () => {
-      if (queryStatus) {
-        queryStatus.textContent = `${currentMessage} elapsed ${formatElapsed(startedAt)}`;
+      if (statusElement) {
+        statusElement.textContent = `${currentMessage} elapsed ${formatElapsed(startedAt)}`;
       }
     };
     update();
@@ -701,6 +720,73 @@
     return date.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
   };
 
+  const effortAssessmentScope = () => ({
+    pm_team: pmTeam?.value || '',
+    country: currentCountry(),
+    llm_provider: selectedLlmProvider(),
+    language: effortLanguage?.value || 'zh',
+  });
+
+  const loadEffortAssessmentCache = () => {
+    try {
+      return JSON.parse(window.localStorage.getItem(effortAssessmentCacheKey) || '{}');
+    } catch (_error) {
+      return {};
+    }
+  };
+
+  const persistEffortAssessmentCache = (patch = {}) => {
+    try {
+      const existing = loadEffortAssessmentCache();
+      window.localStorage.setItem(effortAssessmentCacheKey, JSON.stringify({
+        ...existing,
+        ...patch,
+        requirement: patch.requirement ?? String(effortRequirement?.value || existing.requirement || ''),
+        language: patch.language ?? effortLanguage?.value ?? existing.language ?? 'zh',
+        scope: patch.scope || effortAssessmentScope(),
+        updated_at: new Date().toISOString(),
+      }));
+    } catch (_error) {
+      // Local storage can be blocked in private/browser-managed contexts.
+    }
+  };
+
+  const persistEffortAssessmentDraft = () => {
+    persistEffortAssessmentCache({
+      requirement: String(effortRequirement?.value || ''),
+      language: effortLanguage?.value || 'zh',
+    });
+  };
+
+  const cachedEffortPayload = (payload) => ({
+    ...payload,
+    cache_scope: effortAssessmentScope(),
+    cached_requirement: String(effortRequirement?.value || ''),
+  });
+
+  const restoreEffortAssessmentCache = () => {
+    if (!canManage || !effortRequirement) return;
+    const cached = loadEffortAssessmentCache();
+    if (!cached || typeof cached !== 'object') return;
+    if (typeof cached.requirement === 'string') {
+      effortRequirement.value = cached.requirement;
+    }
+    if (selectHasValue(effortLanguage, cached.language)) {
+      effortLanguage.value = cached.language;
+    }
+    if (cached.result) {
+      renderEffortAssessment(cached.result, { persist: false });
+      if (effortStatus) {
+        const restoredAt = formatSessionTime(cached.updated_at);
+        effortStatus.textContent = restoredAt
+          ? `Restored cached effort assessment from ${restoredAt}.`
+          : 'Restored cached effort assessment.';
+      }
+    } else if (cached.requirement && effortStatus) {
+      effortStatus.textContent = 'Restored cached effort assessment draft.';
+    }
+  };
+
   const renderSessionList = () => {
     if (!sessionList) return;
     if (!sourceSessions.length) {
@@ -775,6 +861,37 @@
     return `<${tagName}>${escapeHtml(cleanText)}${citationHtml}</${tagName}>`;
   };
 
+  const answerEvidenceHeadingPattern = /^(?:\*\*)?\s*(?:source[-\s]?code evidence|source evidence|evidence|references|citations|confirmed from code|not found|missing evidence|代码证据|证据|引用|来源)(?:\s*[:：])?\s*(?:\*\*)?$/i;
+  const splitAnswerEvidence = (text) => {
+    const raw = String(text || '');
+    const lines = raw.split('\n');
+    const evidenceIndex = lines.findIndex((line) => answerEvidenceHeadingPattern.test(line.trim()));
+    if (evidenceIndex <= 0) {
+      return { primary: raw, evidence: '' };
+    }
+    return {
+      primary: lines.slice(0, evidenceIndex).join('\n').trimEnd(),
+      evidence: lines.slice(evidenceIndex).join('\n').trim(),
+    };
+  };
+
+  const renderCodexAnswerHtml = (text, options = {}) => {
+    const raw = String(text || '');
+    if (options.live) {
+      return `<pre class="source-qa-raw-codex-answer">${escapeHtml(raw)}</pre>`;
+    }
+    const { primary, evidence } = splitAnswerEvidence(raw);
+    if (!evidence) {
+      return `<pre class="source-qa-raw-codex-answer">${escapeHtml(raw)}</pre>`;
+    }
+    return `
+      <div class="source-qa-answer-rendered">
+        ${primary ? `<pre class="source-qa-raw-codex-answer source-qa-answer-primary">${escapeHtml(primary)}</pre>` : ''}
+        <pre class="source-qa-raw-codex-answer source-qa-answer-evidence">${escapeHtml(evidence)}</pre>
+      </div>
+    `;
+  };
+
   const renderSessionMessages = (session) => {
     if (!sessionMessages) return;
     const messages = [...(session?.messages || [])];
@@ -837,7 +954,7 @@
             <span>${escapeHtml(meta)}</span>
           </div>
           <div class="source-qa-message-body">
-            ${message.live || message.role === 'assistant' ? `<pre class="source-qa-raw-codex-answer">${escapeHtml(text)}</pre>` : `<p>${escapeHtml(text)}</p>`}
+            ${message.role === 'assistant' ? renderCodexAnswerHtml(text, { live: Boolean(message.live) }) : `<p>${escapeHtml(text)}</p>`}
             ${renderAttachmentChips(attachmentItems)}
             ${liveActions}
           </div>
@@ -1671,7 +1788,7 @@
           <span>${escapeHtml(meta)}</span>
         </div>
         <div class="source-qa-answer-body">
-          <pre class="source-qa-raw-codex-answer">${escapeHtml(answer)}</pre>
+          ${renderCodexAnswerHtml(answer)}
         </div>
       </div>
     `;
@@ -1814,12 +1931,13 @@
     }
   };
 
-  const applyQueryJobStatus = (payload, progress) => {
+  const applyQueryJobStatus = (payload, progress, options = {}) => {
     const etaText = payload.queued_position
       ? `queue position ${payload.queued_position}${payload.eta_seconds_range?.length ? `, ${formatEtaRange(payload.eta_seconds_range)}` : ''}`
       : '';
     const stageLabels = {
       queued: 'Queued',
+      assessment_prompt: 'Prompt Optimization',
       auto_sync: 'Sync Check',
       evidence_pack: 'Building Evidence',
       auto_deep: 'Deep Verification',
@@ -1835,17 +1953,17 @@
       : `${stageLabel ? `${stageLabel}: ` : ''}${payload.message || 'Processing source-code question.'}`;
     const stalledText = payload.stalled_retryable ? ' No background progress for more than 3 minutes; reconnect or retry.' : '';
     progress?.setMessage([modeText, progressText, etaText, stalledText].filter(Boolean).join(' '));
-    if (payload.stage === 'codex_stream' && payload.message) {
+    if (options.live !== false && payload.stage === 'codex_stream' && payload.message) {
       renderLiveAnswer(payload.message, { title: 'Codex Live', meta: 'streaming CLI output', jobId: payload.job_id });
     }
   };
 
-  const watchQueryJobEvents = (jobId, progress, control) => new Promise((resolve, reject) => {
+  const watchQueryJobEvents = (jobId, progress, control, template = jobsUrlTemplate, options = {}) => new Promise((resolve, reject) => {
     if (!window.EventSource) {
       reject(new Error('EventSource is not supported by this browser.'));
       return;
     }
-    const source = new EventSource(jobEventsUrl(jobId));
+    const source = new EventSource(jobEventsUrl(jobId, template));
     let settled = false;
     const close = () => {
       source.close();
@@ -1865,7 +1983,7 @@
       }
       try {
         const payload = JSON.parse(event.data || '{}');
-        applyQueryJobStatus(payload, progress);
+        applyQueryJobStatus(payload, progress, options);
         if (payload.state === 'completed') {
           finish(resolve, (payload.results || [])[0] || {});
         } else if (payload.state === 'failed') {
@@ -1889,20 +2007,20 @@
     };
   });
 
-  const pollQueryJob = async (jobId, progress, control) => {
+  const pollQueryJob = async (jobId, progress, control, template = jobsUrlTemplate, options = {}) => {
     while (jobId) {
       if (control?.stopped) {
         const error = new Error('Stopped by user.');
         error.stoppedByUser = true;
         throw error;
       }
-      const payload = await readJobStatus(jobId);
+      const payload = await readJobStatus(jobId, template);
       if (control?.stopped) {
         const error = new Error('Stopped by user.');
         error.stoppedByUser = true;
         throw error;
       }
-      applyQueryJobStatus(payload, progress);
+      applyQueryJobStatus(payload, progress, options);
       if (payload.state === 'completed') {
         return (payload.results || [])[0] || {};
       }
@@ -1916,13 +2034,13 @@
     return {};
   };
 
-  const runQueryJob = async (jobId, progress, control) => {
+  const runQueryJob = async (jobId, progress, control, template = jobsUrlTemplate, options = {}) => {
     try {
-      return await watchQueryJobEvents(jobId, progress, control);
+      return await watchQueryJobEvents(jobId, progress, control, template, options);
     } catch (error) {
       if (error?.stoppedByUser) throw error;
       progress?.setMessage('Live status stream disconnected; falling back to status polling...');
-      return pollQueryJob(jobId, progress, control);
+      return pollQueryJob(jobId, progress, control, template, options);
     }
   };
 
@@ -1997,6 +2115,293 @@
       retryQuestion: pending.question,
     });
     resumeQueryJob(pending.jobId, pending.question);
+  };
+
+  const updateEffortButtonState = (running = Boolean(activeEffortControl && !activeEffortControl.stopped)) => {
+    if (!effortRunButton) return;
+    effortRunButton.textContent = running ? 'Stop' : 'Assess Effort';
+    effortRunButton.classList.toggle('is-stopping', running);
+  };
+
+  const stopActiveEffortAssessment = () => {
+    if (!activeEffortControl || activeEffortControl.stopped) return;
+    activeEffortControl.stopped = true;
+    stopQueryProgress();
+    updateEffortButtonState(false);
+    if (effortStatus) effortStatus.textContent = 'Stopped.';
+  };
+
+  const renderEffortEvidence = (payload) => {
+    if (!effortEvidence) return;
+    const matches = (payload?.matches || []).slice(0, 8);
+    const runtimeEvidence = (payload?.runtime_evidence || []).slice(0, 6);
+    if (!matches.length && !runtimeEvidence.length) {
+      effortEvidence.hidden = true;
+      effortEvidence.innerHTML = '';
+      return;
+    }
+    const codeItems = matches.map((match, index) => `
+      <li>[S${index + 1}] ${escapeHtml(match.repo || '')} · ${escapeHtml(match.path || '')}${match.line_start ? `:${escapeHtml(match.line_start)}` : ''}</li>
+    `).join('');
+    const runtimeItems = runtimeEvidence.map((item) => `
+      <li>${escapeHtml(item.pm_team || '')}:${escapeHtml(item.country || '')} · ${escapeHtml(item.source_type || 'runtime')} · ${escapeHtml(item.filename || item.id || '')}</li>
+    `).join('');
+    effortEvidence.hidden = false;
+    effortEvidence.innerHTML = `
+      <div class="source-qa-evidence-card">
+        <div class="source-qa-evidence-head">
+          <strong>Evidence Used</strong>
+          <span>${matches.length} code reference(s) · ${runtimeEvidence.length} runtime evidence file(s)</span>
+        </div>
+        <div class="source-qa-evidence-grid">
+          <section>
+            <strong>Source Code</strong>
+            <ul>${codeItems || '<li>No source-code citation returned.</li>'}</ul>
+          </section>
+          <section>
+            <strong>Runtime Evidence</strong>
+            <ul>${runtimeItems || '<li>No runtime evidence was available for this scope.</li>'}</ul>
+          </section>
+        </div>
+      </div>
+    `;
+  };
+
+  const effortListPreview = (items, limit = 6) => {
+    const values = Array.isArray(items) ? items.filter(Boolean).slice(0, limit) : [];
+    if (!values.length) return '<span class="muted">None captured.</span>';
+    return `<ul>${values.map((item) => `<li>${escapeHtml(String(item))}</li>`).join('')}</ul>`;
+  };
+
+  const renderEffortHybridSummary = (payload) => {
+    const assessment = payload?.assessment || {};
+    const businessPlan = assessment.business_plan || payload?.business_plan || {};
+    const candidates = assessment.technical_candidates || payload?.technical_candidates || {};
+    const rubric = assessment.estimation_rubric || payload?.estimation_rubric || {};
+    if (!businessPlan.raw_requirement && !candidates.search_terms && !rubric.option_estimates) return '';
+    const confidence = assessment.confidence || payload?.assessment_confidence || 'unknown';
+    const evidenceStatus = assessment.evidence_status || payload?.effort_evidence_status || 'unknown';
+    const missingEvidence = assessment.missing_evidence || payload?.missing_evidence || [];
+    const options = Array.isArray(businessPlan.options) ? businessPlan.options.slice(0, 3) : [];
+    const optionHtml = options.length
+      ? `<ul>${options.map((item) => `<li><strong>${escapeHtml(item.label || item.id || 'Option')}</strong>: ${escapeHtml(item.summary || '')}</li>`).join('')}</ul>`
+      : '<span class="muted">No option split detected.</span>';
+    const estimates = Array.isArray(rubric.option_estimates) ? rubric.option_estimates : [];
+    const estimateHtml = estimates.length
+      ? `<ul>${estimates.map((item) => `<li><strong>${escapeHtml(item.label || item.id || 'Option')}</strong>: BE ${escapeHtml(item.be_person_days || 'n/a')}, FE ${escapeHtml(item.fe_person_days || 'n/a')}</li>`).join('')}</ul>`
+      : '<span class="muted">No rubric estimate available.</span>';
+    return `
+      <div class="source-qa-evidence-card source-qa-effort-hybrid-card">
+        <div class="source-qa-evidence-head">
+          <strong>Hybrid Assessment Context</strong>
+          <span>confidence: ${escapeHtml(confidence)} · evidence: ${escapeHtml(evidenceStatus)}</span>
+        </div>
+        <div class="source-qa-evidence-grid">
+          <section>
+            <strong>Business Plan</strong>
+            ${effortListPreview(businessPlan.business_goals, 4)}
+            ${optionHtml}
+          </section>
+          <section>
+            <strong>Technical Candidates</strong>
+            ${effortListPreview(candidates.search_terms, 12)}
+          </section>
+          <section>
+            <strong>Rubric Estimate</strong>
+            ${estimateHtml}
+          </section>
+          <section>
+            <strong>Missing Evidence</strong>
+            ${effortListPreview(missingEvidence, 6)}
+          </section>
+        </div>
+      </div>
+    `;
+  };
+
+  const effortPmDevSummaryText = (payload) => {
+    const assessment = payload?.assessment || {};
+    const structured = assessment.structured_assessment || payload?.structured_assessment || {};
+    const business = structured.business_understanding || {};
+    const options = structured.option_impacts || [];
+    const beEstimates = structured.be_estimate || [];
+    const feEstimates = structured.fe_estimate || [];
+    const missing = structured.missing_evidence || assessment.missing_evidence || payload?.missing_evidence || [];
+    const inferred = structured.inferred_impact || [];
+    const evidence = structured.confirmed_evidence || [];
+    const questions = structured.questions || [];
+    const lines = [
+      'Effort Assessment PM/Dev Summary',
+      `Scope: ${[assessment.pm_team || payload?.pm_team || '', assessment.country || payload?.country || ''].filter(Boolean).join(' / ')}`,
+      `Confidence: ${assessment.confidence || payload?.assessment_confidence || 'unknown'}`,
+      '',
+      'Business understanding:',
+      `- Goals: ${(business.goals || []).join(', ') || 'n/a'}`,
+      `- Products: ${(business.products || []).join(', ') || 'n/a'}`,
+      `- Limits: ${(business.limit_types || []).join(', ') || 'n/a'}`,
+      `- Flow changes: ${(business.flow_changes || []).join(', ') || 'n/a'}`,
+      '',
+      'Options:',
+      ...(options.length ? options.map((item) => `- ${item.label || item.id || 'Option'}: ${item.summary || ''}`) : ['- n/a']),
+      '',
+      'BE estimate:',
+      ...(beEstimates.length ? beEstimates.map((item) => `- ${item.option_id || 'option'}: ${item.person_days || 'n/a'} (${item.basis || 'planning-grade'})`) : ['- n/a']),
+      '',
+      'FE estimate:',
+      ...(feEstimates.length ? feEstimates.map((item) => `- ${item.option_id || 'option'}: ${item.person_days || 'n/a'} (${item.basis || 'planning-grade'})`) : ['- n/a']),
+      '',
+      'Inferred impact:',
+      ...(inferred.length ? inferred.map((item) => `- ${item.surface}: ${(item.terms || []).slice(0, 8).join(', ')}`) : ['- n/a']),
+      '',
+      'Confirmed evidence:',
+      ...(evidence.length ? evidence.map((item) => `- ${[item.repo, item.path, item.line_start ? `L${item.line_start}` : ''].filter(Boolean).join(':')}`) : ['- No confirmed code evidence returned.']),
+      '',
+      'Missing evidence:',
+      ...(missing.length ? missing.map((item) => `- ${item}`) : ['- none']),
+      '',
+      'Confirmation questions:',
+      ...(questions.length ? questions.map((item) => `- ${item}`) : ['- none']),
+    ];
+    return lines.join('\n');
+  };
+
+  const renderEffortAssessment = (payload, options = {}) => {
+    if (!effortOutput || !effortAnswer) return;
+    lastEffortPayload = payload || null;
+    const answer = String(payload?.llm_answer || payload?.summary || '').trim();
+    const payloadScope = payload?.cache_scope || payload?.scope || {};
+    effortOutput.hidden = false;
+    if (effortSummary) effortSummary.textContent = payload?.summary || 'Effort assessment completed.';
+    if (effortProvider) effortProvider.textContent = providerLabel(payload?.llm_provider || payloadScope.llm_provider || selectedLlmProvider());
+    if (effortScope) {
+      effortScope.textContent = [
+        payload?.pm_team || payloadScope.pm_team || pmTeam?.value,
+        payload?.country || payloadScope.country || currentCountry(),
+      ].filter(Boolean).join(' · ');
+    }
+    const meta = [
+      payload?.llm_model ? `model: ${payload.llm_model}` : '',
+      payload?.trace_id ? `trace: ${payload.trace_id}` : '',
+      payload?.status ? `status: ${payload.status}` : '',
+    ].filter(Boolean).join(' · ');
+    if (effortMeta) effortMeta.textContent = meta || 'completed';
+    const hybridSummary = renderEffortHybridSummary(payload);
+    const answerHtml = answer
+      ? renderCodexAnswerHtml(answer)
+      : '<div class="source-qa-empty">Assessment completed without a generated answer.</div>';
+    effortAnswer.innerHTML = `${hybridSummary}${answerHtml}`;
+    renderEffortEvidence(payload);
+    if (options.persist !== false) {
+      persistEffortAssessmentCache({ result: cachedEffortPayload(payload), status: 'completed' });
+    }
+  };
+
+  const loadLatestEffortAssessment = async () => {
+    if (!canManage || !effortLatestUrl) return;
+    try {
+      const payload = await apiFetchJson(effortLatestUrl, {}, { attempts: 1 });
+      if (payload.status !== 'ok' || !payload.result) return;
+      renderEffortAssessment(payload.result, { persist: false });
+      if (effortStatus) {
+        const generatedAt = payload.result.generated_at ? formatSessionTime(payload.result.generated_at * 1000) : '';
+        effortStatus.textContent = generatedAt
+          ? `Restored latest server effort assessment from ${generatedAt}.`
+          : 'Restored latest server effort assessment.';
+      }
+    } catch (_error) {
+      // Server-side restore is best effort; local draft restore already ran.
+    }
+  };
+
+  const copyEffortPmDevSummary = async () => {
+    const cached = loadEffortAssessmentCache();
+    const payload = lastEffortPayload || cached?.result || null;
+    if (!payload) {
+      if (effortStatus) effortStatus.textContent = 'No effort assessment result to copy.';
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(effortPmDevSummaryText(payload));
+      if (effortStatus) effortStatus.textContent = 'PM/Dev summary copied.';
+    } catch (_error) {
+      if (effortStatus) effortStatus.textContent = 'Copy failed. Please copy from the assessment manually.';
+    }
+  };
+
+  const runEffortAssessment = async () => {
+    if (!canManage || !effortAssessmentUrl) return;
+    if (activeEffortControl && !activeEffortControl.stopped) {
+      stopActiveEffortAssessment();
+      return;
+    }
+    if (activeQueryControl && !activeQueryControl.stopped) {
+      if (effortStatus) effortStatus.textContent = 'Stop the current chat query before running an effort assessment.';
+      return;
+    }
+    const requirement = String(effortRequirement?.value || '').trim();
+    if (!requirement) {
+      if (effortStatus) effortStatus.textContent = 'Business requirement is empty.';
+      return;
+    }
+    persistEffortAssessmentDraft();
+    const selectedProvider = selectedLlmProvider();
+    const control = { stopped: false, jobId: '', requirement };
+    activeEffortControl = control;
+    updateEffortButtonState(true);
+    if (effortOutput) effortOutput.hidden = false;
+    if (effortAnswer) effortAnswer.innerHTML = '<div class="source-qa-empty">Building optimized prompt and searching code evidence...</div>';
+    if (effortSummary) effortSummary.textContent = `Running assessment for ${pmTeam?.value || ''}:${currentCountry()}.`;
+    if (effortProvider) effortProvider.textContent = providerLabel(selectedProvider);
+    if (effortScope) effortScope.textContent = [pmTeam?.value, currentCountry()].filter(Boolean).join(' · ');
+    if (effortEvidence) {
+      effortEvidence.hidden = true;
+      effortEvidence.innerHTML = '';
+    }
+    const progress = startQueryProgress('Submitting effort assessment to server...', effortStatus);
+    try {
+      const initialPayload = await apiFetchJson(effortAssessmentUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          pm_team: pmTeam?.value || '',
+          country: currentCountry(),
+          language: effortLanguage?.value || 'zh',
+          requirement,
+          llm_provider: selectedProvider,
+        }),
+      }, { attempts: 3 });
+      if (control.stopped) return;
+      if (initialPayload.job_id) {
+        control.jobId = initialPayload.job_id;
+        applyQueryJobStatus(initialPayload, progress, { live: false });
+      }
+      const payload = initialPayload.status === 'queued' && initialPayload.job_id
+        ? await runQueryJob(initialPayload.job_id, progress, control, effortJobsUrlTemplate, { live: false })
+        : initialPayload;
+      if (control.stopped) return;
+      renderEffortAssessment(payload);
+      if (effortStatus) {
+        effortStatus.textContent = payload.status === 'ok'
+          ? `Assessment completed in ${formatElapsed(progress.startedAt)}.`
+          : `${payload.status || 'completed'} after ${formatElapsed(progress.startedAt)}.`;
+      }
+    } catch (error) {
+      if (error?.stoppedByUser) {
+        if (effortStatus) effortStatus.textContent = `Stopped after ${formatElapsed(progress.startedAt)}.`;
+        persistEffortAssessmentCache({ status: 'stopped' });
+        return;
+      }
+      const message = sourceQaJobErrorMessage(error.jobPayload || error);
+      if (effortStatus) effortStatus.textContent = `${message} elapsed ${formatElapsed(progress.startedAt)}`;
+      if (effortAnswer) effortAnswer.innerHTML = `<div class="source-qa-empty">${escapeHtml(message)}</div>`;
+      persistEffortAssessmentCache({ status: message });
+    } finally {
+      stopQueryProgress();
+      if (activeEffortControl === control) {
+        activeEffortControl = null;
+        updateEffortButtonState(false);
+      }
+    }
   };
 
   const queryCode = async () => {
@@ -2198,18 +2603,21 @@
     updateCountryVisibility();
     conversationContext = null;
     if (sessionScope) sessionScope.textContent = [pmTeam.value, currentCountry()].filter(Boolean).join(' · ');
+    persistEffortAssessmentDraft();
     renderSelectedConfig();
   });
   country.addEventListener('change', () => {
     conversationContext = null;
     if (countryHelp) countryHelp.textContent = runtimeContextHelp();
     if (sessionScope) sessionScope.textContent = [pmTeam.value, currentCountry()].filter(Boolean).join(' · ');
+    persistEffortAssessmentDraft();
     renderSelectedConfig();
   });
   answerMode?.addEventListener('change', updateAnswerModeState);
   llmProvider?.addEventListener('change', () => {
     updateAnswerModeState();
     if (sessionProvider) sessionProvider.textContent = providerLabel(selectedLlmProvider());
+    persistEffortAssessmentDraft();
   });
   newSessionButton?.addEventListener('click', async () => {
     if (queryStatus) queryStatus.textContent = 'Starting a new chat...';
@@ -2244,6 +2652,10 @@
   });
   syncButton?.addEventListener('click', syncRepos);
   queryButton?.addEventListener('click', queryCode);
+  effortRunButton?.addEventListener('click', runEffortAssessment);
+  effortCopyButton?.addEventListener('click', copyEffortPmDevSummary);
+  effortRequirement?.addEventListener('input', persistEffortAssessmentDraft);
+  effortLanguage?.addEventListener('change', persistEffortAssessmentDraft);
   (chatComposer || questionInput)?.addEventListener('paste', handleAttachmentPaste);
   attachmentUploadButton?.addEventListener('click', () => attachmentInput?.click());
   attachmentInput?.addEventListener('change', async () => {
@@ -2313,6 +2725,8 @@
 
   setSourceView('chat');
   restoreLastQueryConfig();
+  restoreEffortAssessmentCache();
+  loadLatestEffortAssessment();
   applyActiveSession(null);
   updateAnswerModeState();
   loadConfig();

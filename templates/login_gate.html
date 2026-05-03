@@ -1,49 +1,36 @@
 {% extends "base.html" %}
 
+{% block page_shell_class %} page-shell-login page-shell-login-image{% endblock %}
+
 {% block body %}
-  <section class="workspace-shell">
-    <section class="panel panel-wide glass-panel login-gate-panel">
-      <div class="panel-head">
-        <div>
-          <p class="eyebrow">Welcome</p>
-          <h1>Sign in to Risk PM Tool</h1>
-          <p class="step-copy">
-            This shared portal is available only to approved NPT Google accounts.
-            Sign in to access risk PM workflows, source-code grounded answers, and owner-scoped SeaTalk insights.
-          </p>
-        </div>
-      </div>
+  <section class="login-image-hero" aria-label="Risk PM Tool sign in">
+    <div class="login-image-stage">
+      <img
+        class="login-image-hero-bg"
+        src="{{ url_for('static', filename='risk_pm_login_background.png', v=asset_revision|default('static')) }}"
+        alt=""
+        aria-hidden="true"
+      >
 
-      <div class="premium-list">
-        <div class="premium-list-item">
-          <strong>Manage My Projects</strong>
-          <span>Sync BPMIS projects, manage project rows, and create or delink Jira tasks from each BPMIS item.</span>
-        </div>
-        <div class="premium-list-item">
-          <strong>Source Code Q&amp;A</strong>
-          <span>Ask code-grounded questions across configured risk repositories with local retrieval and Codex answers.</span>
-        </div>
-        <div class="premium-list-item">
-          <strong>Report Intelligence</strong>
-          <span>Owner-only VIP, keyword, noise, and SeaTalk name mapping controls for Daily Brief and Monthly Report.</span>
-        </div>
-        <div class="premium-list-item">
-          <strong>PRD Self-Assessment</strong>
-          <span>Generate PRD summaries and delivery-logic reviews from Confluence links.</span>
-        </div>
-        <div class="premium-list-item">
-          <strong>PRD Briefing Tool</strong>
-          <span>Owner-only PRD walkthrough and narration support.</span>
-        </div>
-        <div class="premium-list-item">
-          <strong>Account requirement</strong>
-          <span>Use an approved <code>@npt.sg</code> Google account. Private owner modules appear only after sign-in.</span>
-        </div>
-      </div>
+      <a class="login-image-google-button" href="{{ url_for('google_login') }}" aria-label="Continue with Google">
+        <span class="login-image-button-text">Continue with Google</span>
+      </a>
+    </div>
 
-      <div class="button-row">
-        <a class="button" href="{{ url_for('google_login') }}">Continue with Google</a>
-      </div>
-    </section>
+    <div class="login-image-accessibility-copy">
+      <p>NPT Risk PM Workspace</p>
+      <h1>Risk PM Tool</h1>
+      <p>
+        One secure workspace for BPMIS project tracking, code-grounded investigation,
+        PRD review, and team delivery intelligence.
+      </p>
+      <p>Approved @npt.sg accounts only</p>
+      <ul>
+        <li>BPMIS Projects</li>
+        <li>Source Code Q&amp;A</li>
+        <li>Effort Assessment</li>
+        <li>Team Dashboard</li>
+      </ul>
+    </div>
   </section>
 {% endblock %}

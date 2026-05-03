@@ -80,6 +80,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(settings.source_code_qa_llm_backoff_seconds, 1.0)
         self.assertEqual(settings.source_code_qa_llm_max_backoff_seconds, 8.0)
         self.assertEqual(settings.local_agent_connect_timeout_seconds, 10)
+        self.assertEqual(settings.meeting_recorder_audio_input, "Meeting Recorder Aggregate")
         self.assertEqual(settings.meeting_recorder_screen_preflight_timeout_seconds, 20)
         self.assertTrue(settings.meeting_recorder_audio_only_fallback_on_screen_failure)
 

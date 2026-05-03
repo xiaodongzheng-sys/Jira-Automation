@@ -3,6 +3,7 @@ import os
 import tempfile
 import time
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -13,7 +14,8 @@ import bpmis_jira_tool.web as web_module
 from bpmis_jira_tool.config import Settings
 from bpmis_jira_tool.errors import BPMISError, ToolError
 from bpmis_jira_tool.models import CreatedTicket
-from bpmis_jira_tool.monthly_report import DEFAULT_MONTHLY_REPORT_TEMPLATE, MonthlyReportSendResult
+from bpmis_jira_tool.monthly_report import DEFAULT_MONTHLY_REPORT_TEMPLATE, MonthlyReportSendResult, resolve_monthly_report_period
+from bpmis_jira_tool.seatalk_dashboard import SEATALK_INSIGHTS_TIMEZONE
 from bpmis_jira_tool.user_config import WebConfigStore
 from bpmis_jira_tool.web import (
     _build_team_profiles_for_display,
@@ -194,14 +196,25 @@ class _FakePRDReviewLocalAgentClient:
 
 
 class _FakeMonthlyReportService:
-    def generate_draft(self, *, template, team_payloads, report_intelligence_config=None, progress_callback=None):
+    def __init__(self):
+        self.request = None
+
+    def generate_draft(self, **kwargs):
+        self.request = kwargs
+        progress_callback = kwargs.get("progress_callback")
         if progress_callback:
             progress_callback("summarizing_seatalk", "Summarizing SeaTalk batch 1/1.", 1, 1, estimated_prompt_tokens=1200, token_risk="normal")
         return {
             "status": "ok",
             "draft_markdown": "## Monthly Report\n- Draft",
+            "subject": "Monthly Report - 2026-04-13 to 2026-05-03",
+            "generation_version": "v2_project_evidence_index",
             "generated_at": "2026-04-29T10:00:00+08:00",
             "generation_summary": {
+                "generation_version": "v2_project_evidence_index",
+                "period_start": "2026-04-13",
+                "period_end": "2026-05-03",
+                "period_end_exclusive": "2026-05-04T00:00:00+08:00",
                 "total_batches": 1,
                 "max_batch_estimated_tokens": 1200,
                 "final_estimated_tokens": 800,
@@ -233,8 +246,14 @@ class _FakeMonthlyReportLocalAgentClient(_FakePRDReviewLocalAgentClient):
         return {
             "status": "ok",
             "draft_markdown": "## Remote Monthly Report",
+            "subject": "Monthly Report - 2026-04-13 to 2026-05-03",
+            "generation_version": "v2_project_evidence_index",
             "generated_at": "2026-04-29T10:00:00+08:00",
             "generation_summary": {
+                "generation_version": "v2_project_evidence_index",
+                "period_start": "2026-04-13",
+                "period_end": "2026-05-03",
+                "period_end_exclusive": "2026-05-04T00:00:00+08:00",
                 "total_batches": 1,
                 "max_batch_estimated_tokens": 1400,
                 "final_estimated_tokens": 900,
@@ -254,14 +273,14 @@ class _FakeMonthlyReportLocalAgentClient(_FakePRDReviewLocalAgentClient):
             "action": "team-dashboard-monthly-report-draft",
             "state": "completed",
             "progress": {"stage": "completed", "current": 1, "total": 1, "message": "Finished."},
-            "results": [{"draft_markdown": "## Shared Remote Monthly Report"}],
+            "results": [{"draft_markdown": "## Shared Remote Monthly Report", "subject": "Monthly Report - 2026-04-13 to 2026-05-08"}],
         }
 
     def team_dashboard_monthly_report_latest_draft(self):
         return {
             "status": "ok",
             "draft_markdown": "## Shared Remote Monthly Report",
-            "subject": "Monthly Report - 2026-04",
+            "subject": "Monthly Report - 2026-04-13 to 2026-05-08",
             "job_id": "remote-job-1",
             "generated_at": 1770000000,
         }
@@ -2314,7 +2333,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         payload = response.get_json()
         self.assertEqual(payload["status"], "ok")
-        self.assertEqual([row["jira_id"] for row in payload["rows"]], ["AF-1", "CR-1"])
+        self.assertEqual([row["jira_id"] for row in payload["rows"]], ["AF-1", "AF-2", "CR-1"])
         self.assertEqual(payload["rows"][0]["suggested_bpmis_id"], "")
         self.assertEqual(fake_client.project_calls, [])
 
@@ -2433,6 +2452,197 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertNotIn("AF Draft Project", af_option_titles)
         self.assertEqual(fake_client.project_calls, ["af@npt.sg", "cr@npt.sg"])
 
+    def test_team_dashboard_link_biz_project_special_titles_use_af_version_feature_parents(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_ALLOWED_EMAILS": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_DASHBOARD_JIRA_RELEASE_AFTER": "2026-04-29",
+            },
+            clear=True,
+        ):
+            app = create_app()
+            app.testing = True
+
+            class FakeLinkBizClient:
+                def __init__(self):
+                    self.version_searches = []
+                    self.issue_version_calls = []
+                    self.keyword_calls = []
+
+                def list_biz_projects_for_pm_email(self, email):
+                    return []
+
+                def list_jira_tasks_created_by_emails(self, emails, **kwargs):
+                    return []
+
+                def list_jira_tasks_for_project_created_by_email(self, project_issue_id, email):
+                    return []
+
+                def search_biz_projects_by_title_keywords(self, keywords, *, max_pages=None):
+                    self.keyword_calls.append((keywords, max_pages))
+                    return []
+
+                def search_versions(self, query):
+                    self.version_searches.append(query)
+                    return [
+                        {"id": 79, "fullName": "AF_v1.0.79_20260503"},
+                        {"id": 80, "fullName": "AF_v1.0.80_20260503"},
+                    ]
+
+                def list_issues_for_version(self, version_id):
+                    self.issue_version_calls.append(str(version_id))
+                    if str(version_id) == "79":
+                        return [
+                            {"jiraKey": "SPDBP-1", "summary": "[Feature] Productization", "parentIds": [225159]},
+                            {"jiraKey": "SPDBP-2", "summary": "[Feature] Productization 2", "parentIds": [225160]},
+                        ]
+                    return [{"jiraKey": "SPDBP-3", "summary": "[Feature] Wrong Version", "parentIds": [225999]}]
+
+                def get_issue_detail(self, issue_id):
+                    if str(issue_id) == "225159":
+                        return {"issue_id": "225159", "project_name": "AF Payment Guard", "market": "SG"}
+                    if str(issue_id) == "225160":
+                        return {"issue_id": "225160", "project_name": "AF Login Guard", "market": "ID"}
+                    return {"issue_id": str(issue_id), "project_name": "Wrong Version Project"}
+
+            fake_client = FakeLinkBizClient()
+            with patch("bpmis_jira_tool.web._build_bpmis_client_for_current_user", return_value=fake_client):
+                with app.test_client() as client:
+                    with client.session_transaction() as session:
+                        session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong"}
+                        session["google_credentials"] = {"token": "x"}
+                    response = client.post(
+                        "/api/team-dashboard/link-biz-projects/suggestions",
+                        json={
+                            "rows": [
+                                {
+                                    "team_key": "AF",
+                                    "jira_id": "AF-79",
+                                    "jira_title": "Sync AF productization 1.0.79 release check",
+                                    "reporter_email": "af@npt.sg",
+                                }
+                            ]
+                        },
+                    )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(fake_client.version_searches, ["AF_v1.0.79"])
+        self.assertEqual(fake_client.issue_version_calls, ["79"])
+        self.assertEqual(fake_client.keyword_calls, [])
+        row = payload["rows"][0]
+        self.assertEqual(row["special_version"], "1.0.79")
+        self.assertEqual(row["suggested_bpmis_id"], "225160")
+        self.assertEqual(row["suggested_project_title"], "AF Login Guard")
+        self.assertEqual(row["match_source"], "version")
+        self.assertEqual(
+            row["select_biz_project_options"],
+            [
+                {
+                    "bpmis_id": "225160",
+                    "project_name": "AF Login Guard",
+                    "team_key": "AF",
+                    "market": "ID",
+                    "match_score": 1.0,
+                    "match_source": "version",
+                },
+                {
+                    "bpmis_id": "225159",
+                    "project_name": "AF Payment Guard",
+                    "team_key": "AF",
+                    "market": "SG",
+                    "match_score": 1.0,
+                    "match_source": "version",
+                },
+            ],
+        )
+        self.assertEqual(payload["version_search_count"], 1)
+        self.assertEqual(payload["version_candidate_count"], 2)
+
+    def test_team_dashboard_link_biz_project_special_titles_without_feature_jira_stay_empty(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_ALLOWED_EMAILS": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_DASHBOARD_JIRA_RELEASE_AFTER": "2026-04-29",
+            },
+            clear=True,
+        ):
+            app = create_app()
+            app.testing = True
+
+            class FakeLinkBizClient:
+                def __init__(self):
+                    self.version_searches = []
+
+                def list_biz_projects_for_pm_email(self, email):
+                    return []
+
+                def list_jira_tasks_created_by_emails(self, emails, **kwargs):
+                    return []
+
+                def list_jira_tasks_for_project_created_by_email(self, project_issue_id, email):
+                    return []
+
+                def search_biz_projects_by_title_keywords(self, keywords, *, max_pages=None):
+                    return []
+
+                def search_versions(self, query):
+                    self.version_searches.append(query)
+                    return [{"id": 79, "fullName": "AF_v1.0.79_20260503"}]
+
+                def list_issues_for_version(self, version_id):
+                    return []
+
+                def get_issue_detail(self, issue_id):
+                    raise AssertionError("No parent BPMIS detail should be loaded when no Jira tasks exist.")
+
+            fake_client = FakeLinkBizClient()
+            with patch("bpmis_jira_tool.web._build_bpmis_client_for_current_user", return_value=fake_client):
+                with app.test_client() as client:
+                    with client.session_transaction() as session:
+                        session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong"}
+                        session["google_credentials"] = {"token": "x"}
+                    response = client.post(
+                        "/api/team-dashboard/link-biz-projects/suggestions",
+                        json={
+                            "rows": [
+                                {
+                                    "team_key": "AF",
+                                    "jira_id": "AF-79",
+                                    "jira_title": "Productisation upgrade 1.0.79 release check",
+                                    "reporter_email": "af@npt.sg",
+                                },
+                                {
+                                    "team_key": "AF",
+                                    "jira_id": "AF-7",
+                                    "jira_title": "Productisation upgrade 1.0.7 release check",
+                                    "reporter_email": "af@npt.sg",
+                                },
+                            ]
+                        },
+                    )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        rows = {row["jira_id"]: row for row in payload["rows"]}
+        self.assertEqual(fake_client.version_searches, ["AF_v1.0.79"])
+        self.assertEqual(rows["AF-79"]["special_version"], "1.0.79")
+        self.assertEqual(rows["AF-79"]["suggested_bpmis_id"], "")
+        self.assertEqual(rows["AF-79"]["suggested_project_title"], "")
+        self.assertEqual(rows["AF-79"]["select_biz_project_options"], [])
+        self.assertNotIn("special_version", rows["AF-7"])
+        self.assertEqual(rows["AF-7"]["suggested_bpmis_id"], "")
+        self.assertEqual(rows["AF-7"]["suggested_project_title"], "")
+
     def test_team_dashboard_link_biz_project_suggestions_can_use_loaded_task_payload_candidates(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
@@ -2511,7 +2721,7 @@ class WebPortalFeatureTests(unittest.TestCase):
             {"Busy Fraud Project": "AF", "Fraud Alert Revamp": "AF"},
         )
 
-    def test_team_dashboard_link_biz_project_links_real_bpmis_and_updates_portal_cache(self):
+    def test_team_dashboard_link_biz_project_links_real_bpmis_without_updating_my_projects(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
@@ -2578,9 +2788,8 @@ class WebPortalFeatureTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(fake_client.link_calls, [("AF-1", "225200")])
-        self.assertEqual(projects[0]["bpmis_id"], "225200")
-        self.assertEqual(projects[0]["jira_tickets"][0]["ticket_key"], "AF-1")
-        self.assertEqual(projects[0]["jira_tickets"][0]["status"], "linked")
+        self.assertEqual(projects, [])
+        self.assertEqual(response.get_json()["ticket"], {})
 
     def test_team_dashboard_link_biz_project_failure_does_not_update_portal_cache(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
@@ -3494,6 +3703,136 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertEqual(payload["status"], "error")
         self.assertIn("Unable to load upgrade tickets right now", payload["message"])
 
+    def test_productization_external_failure_matrix_returns_stable_json(self):
+        class FailingProductizationClient:
+            def __init__(self, message):
+                self.message = message
+
+            def search_versions(self, _query):
+                raise ToolError(self.message)
+
+            def list_issues_for_version(self, _version_id):
+                raise ToolError(self.message)
+
+        scenarios = [
+            ("versions timeout", "/api/productization-upgrade-summary/versions?q=26Q2", "BPMIS version search timed out."),
+            ("versions forbidden", "/api/productization-upgrade-summary/versions?q=26Q2", "BPMIS returned 403."),
+            ("issues timeout", "/api/productization-upgrade-summary/issues?version_id=88", "BPMIS issue lookup timed out."),
+            ("issues invalid", "/api/productization-upgrade-summary/issues?version_id=88", "BPMIS returned invalid JSON."),
+            ("llm issues upstream", "/api/productization-upgrade-summary/llm-descriptions?version_id=88", "BPMIS issue lookup returned 500."),
+        ]
+        for name, path, message in scenarios:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+                os.environ,
+                {
+                    "FLASK_SECRET_KEY": "test-secret",
+                    "TEAM_PORTAL_DATA_DIR": temp_dir,
+                    "TEAM_PORTAL_BASE_URL": "",
+                    "TEAM_ALLOWED_EMAILS": "",
+                    "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                    "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
+                },
+                clear=False,
+            ):
+                app = create_app()
+                app.testing = True
+                with patch(
+                    "bpmis_jira_tool.web._build_bpmis_client_for_current_user",
+                    return_value=FailingProductizationClient(message),
+                ):
+                    with app.test_client() as client:
+                        with client.session_transaction() as session:
+                            session["anonymous_user_key"] = "productization-user"
+                            session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
+                            session["google_credentials"] = {"token": "x"}
+                        response = client.get(path)
+
+            self.assertEqual(response.status_code, 400)
+            payload = response.get_json()
+            self.assertEqual(payload["status"], "error")
+            self.assertIn(message, payload["message"])
+            serialized = str(payload).lower()
+            self.assertNotIn("traceback", serialized)
+            self.assertNotIn("secret", serialized)
+            self.assertNotIn("token", serialized)
+
+    def test_productization_success_payload_reports_slow_bpmis_lookup_timing(self):
+        class SlowProductizationClient:
+            def search_versions(self, _query):
+                time.sleep(0.02)
+                return [{"id": 88, "fullName": "Planning_26Q2", "marketId": {"label": "SG"}}]
+
+            def list_issues_for_version(self, _version_id):
+                time.sleep(0.02)
+                return [{"jiraKey": "ABC-101", "summary": "Upgrade wallet flow"}]
+
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_ALLOWED_EMAILS": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
+            },
+            clear=False,
+        ):
+            app = create_app()
+            app.testing = True
+            fake_client = SlowProductizationClient()
+            with patch("bpmis_jira_tool.web._build_bpmis_client_for_current_user", return_value=fake_client):
+                with app.test_client() as client:
+                    with client.session_transaction() as session:
+                        session["anonymous_user_key"] = "productization-user"
+                        session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
+                        session["google_credentials"] = {"token": "x"}
+                    versions = client.get("/api/productization-upgrade-summary/versions?q=26Q2")
+                    issues = client.get("/api/productization-upgrade-summary/issues?version_id=88")
+
+        self.assertEqual(versions.status_code, 200)
+        self.assertEqual(issues.status_code, 200)
+        self.assertGreaterEqual(versions.get_json()["elapsed_seconds"], 0.02)
+        self.assertGreaterEqual(issues.get_json()["elapsed_seconds"], 0.02)
+
+    def test_productization_empty_and_malformed_rows_are_stable_for_non_admin(self):
+        class OddProductizationClient:
+            def list_issues_for_version(self, _version_id):
+                return [
+                    {},
+                    {"jiraKey": None, "summary": None, "desc": None, "jiraPrdLink": []},
+                    {"jiraKey": "ABC-101", "summary": "Usable row", "jiraPrdLink": ["https://confluence/prd"]},
+                ]
+
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_ALLOWED_EMAILS": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
+            },
+            clear=False,
+        ):
+            app = create_app()
+            app.testing = True
+            with patch("bpmis_jira_tool.web._build_bpmis_client_for_current_user", return_value=OddProductizationClient()):
+                with app.test_client() as client:
+                    with client.session_transaction() as session:
+                        session["anonymous_user_key"] = "productization-user"
+                        session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
+                        session["google_credentials"] = {"token": "x"}
+                    response = client.get("/api/productization-upgrade-summary/issues?version_id=88")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["raw_count"], 3)
+        self.assertEqual(len(payload["items"]), 3)
+        self.assertEqual(payload["items"][2]["jira_ticket_number"], "ABC-101")
+
     def test_productization_summary_helpers_normalize_missing_fields(self):
         normalized_version = _serialize_productization_version_candidate(
             {"id": 7, "fullName": "Planning_26Q2", "marketId": {"label": "SG"}}
@@ -3619,6 +3958,54 @@ class WebPortalFeatureTests(unittest.TestCase):
             self.assertEqual(response.status_code, 302)
             saved = app.config["CONFIG_STORE"].load("google:teammate@npt.sg")
             self.assertEqual(saved["sync_pm_email"], "teammate@npt.sg")
+
+    def test_save_route_endpoint_preserves_non_admin_sync_email_policy(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
+            },
+            clear=False,
+        ):
+            app = create_app()
+            app.testing = True
+
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
+                    session["google_credentials"] = {"token": "x"}
+
+                app.config["CONFIG_STORE"].save(
+                    {
+                        "pm_team": "AF",
+                        "sync_pm_email": "teammate@npt.sg",
+                        "system_header": "System",
+                        "market_header": "Market",
+                        "component_route_rules_text": "AF | SG | DBP-Anti-fraud",
+                        "component_default_rules_text": "DBP-Anti-fraud | teammate@npt.sg | teammate@npt.sg | teammate@npt.sg | Planning_26Q2",
+                    },
+                    "google:teammate@npt.sg",
+                )
+
+                response = client.post(
+                    "/config/save-route",
+                    json={
+                        "pm_team": "AF",
+                        "sync_pm_email": "someone-else@npt.sg",
+                        "system_header": "System",
+                        "market_header": "Market",
+                        "component_route_rules_text": "AF | SG | DBP-Anti-fraud\nDC | SG | Deposit",
+                    },
+                )
+
+            self.assertEqual(response.status_code, 200)
+            saved = app.config["CONFIG_STORE"].load("google:teammate@npt.sg")
+            self.assertEqual(saved["sync_pm_email"], "teammate@npt.sg")
+            self.assertIn("DC | SG | Deposit", saved["component_route_rules_text"])
 
     def test_save_mapping_config_allows_sync_email_for_allowlisted_user(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
@@ -4349,6 +4736,7 @@ class WebPortalFeatureTests(unittest.TestCase):
     @patch("bpmis_jira_tool.web._load_all_team_dashboard_task_payloads", return_value=[{"team_key": "AF"}])
     def test_team_dashboard_monthly_report_draft_can_route_to_local_agent(self, _mock_payloads, _mock_enabled):
         fake_client = _FakeMonthlyReportLocalAgentClient()
+        fixed_period = resolve_monthly_report_period(datetime(2026, 5, 3, 10, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE))
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
@@ -4358,7 +4746,10 @@ class WebPortalFeatureTests(unittest.TestCase):
                 "TEAM_ALLOWED_EMAIL_DOMAINS": "",
             },
             clear=False,
-        ), patch("bpmis_jira_tool.web._build_local_agent_client", return_value=fake_client):
+        ), patch("bpmis_jira_tool.web._build_local_agent_client", return_value=fake_client), patch(
+            "bpmis_jira_tool.web.resolve_monthly_report_period",
+            return_value=fixed_period,
+        ):
             app = create_app()
             app.testing = True
             app.config["TEAM_DASHBOARD_CONFIG_STORE"].save({"monthly_report_template": "# Template"})
@@ -4380,10 +4771,15 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertEqual(job_payload["results"][0]["draft_markdown"], "## Remote Monthly Report")
         self.assertEqual(fake_client.draft_payload["template"], "# Template")
         self.assertEqual(fake_client.draft_payload["team_payloads"], [{"team_key": "AF"}])
+        self.assertEqual(fake_client.draft_payload["period_start"], "2026-04-13T00:00:00+08:00")
+        self.assertEqual(fake_client.draft_payload["period_end"], "2026-05-03")
+        self.assertEqual(fake_client.draft_payload["period_end_exclusive"], "2026-05-04T00:00:00+08:00")
+        self.assertEqual(fake_client.draft_payload["product_scope"], ["Anti-fraud", "Credit Risk", "Ops Risk"])
 
     @patch("bpmis_jira_tool.web._load_all_team_dashboard_task_payloads", return_value=[{"team_key": "AF"}])
     def test_team_dashboard_monthly_report_uses_shared_local_agent_jobs_when_remote_config_enabled(self, _mock_payloads):
         fake_client = _FakeMonthlyReportLocalAgentClient()
+        fixed_period = resolve_monthly_report_period(datetime(2026, 5, 3, 10, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE))
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
@@ -4397,7 +4793,10 @@ class WebPortalFeatureTests(unittest.TestCase):
                 "LOCAL_AGENT_BPMIS_ENABLED": "true",
             },
             clear=False,
-        ), patch("bpmis_jira_tool.web._build_local_agent_client", return_value=fake_client):
+        ), patch("bpmis_jira_tool.web._build_local_agent_client", return_value=fake_client), patch(
+            "bpmis_jira_tool.web.resolve_monthly_report_period",
+            return_value=fixed_period,
+        ):
             app = create_app()
             app.testing = True
             with app.test_client() as client:
@@ -4416,8 +4815,13 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertEqual(job_payload["state"], "completed")
         self.assertEqual(job_payload["results"][0]["draft_markdown"], "## Shared Remote Monthly Report")
         self.assertEqual(latest_payload["draft_markdown"], "## Shared Remote Monthly Report")
+        self.assertEqual(latest_payload["subject"], "Monthly Report - 2026-04-13 to 2026-05-08")
         self.assertEqual(fake_client.started_payload["template"], DEFAULT_MONTHLY_REPORT_TEMPLATE)
         self.assertEqual(fake_client.started_payload["team_payloads"], [{"team_key": "AF"}])
+        self.assertEqual(fake_client.started_payload["period_start"], "2026-04-13T00:00:00+08:00")
+        self.assertEqual(fake_client.started_payload["period_end"], "2026-05-03")
+        self.assertEqual(fake_client.started_payload["period_end_exclusive"], "2026-05-04T00:00:00+08:00")
+        self.assertEqual(fake_client.started_payload["product_scope"], ["Anti-fraud", "Credit Risk", "Ops Risk"])
 
     @patch("bpmis_jira_tool.web._build_prd_review_service", return_value=_FakePRDReviewService())
     def test_team_dashboard_prd_summary_returns_portal_result(self, _mock_service):

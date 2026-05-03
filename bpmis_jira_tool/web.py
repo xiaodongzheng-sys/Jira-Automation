@@ -71,9 +71,11 @@ from bpmis_jira_tool.meeting_recorder import (
 from bpmis_jira_tool.monthly_report import (
     DEFAULT_MONTHLY_REPORT_RECIPIENT,
     DEFAULT_MONTHLY_REPORT_TEMPLATE,
+    MONTHLY_REPORT_PRODUCT_SCOPE,
     MonthlyReportService,
     monthly_report_subject,
     normalize_monthly_report_template,
+    resolve_monthly_report_period,
     send_monthly_report_email,
 )
 from bpmis_jira_tool.report_intelligence import (
@@ -102,6 +104,9 @@ from prd_briefing.text_generation import CodexTextGenerationClient
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+SOURCE_CODE_QA_EFFORT_DICTIONARY_PATH = PROJECT_ROOT / "config" / "source_code_qa_effort_dictionaries.json"
+SOURCE_CODE_QA_DOMAIN_PROFILES_PATH = PROJECT_ROOT / "config" / "source_code_qa_domain_profiles.json"
+SOURCE_CODE_QA_DOMAIN_KNOWLEDGE_PATH = PROJECT_ROOT / "config" / "source_code_qa_domain_knowledge_packs.json"
 load_dotenv(PROJECT_ROOT / ".env")
 MARKET_KEYS = ["ID", "SG", "PH", "Regional"]
 PORTAL_ADMIN_EMAIL = "xiaodong.zheng@npt.sg"
@@ -486,18 +491,18 @@ class SourceCodeQAQueryScheduler:
         self.job_store = job_store
         self.max_running = max(1, int(max_running or 2))
         self._lock = threading.Lock()
-        self._user_queues: dict[str, deque[tuple[str, Flask, dict[str, Any]]]] = {}
+        self._user_queues: dict[str, deque[tuple[str, Flask, dict[str, Any], Any]]] = {}
         self._user_order: deque[str] = deque()
         self._running: set[str] = set()
         self._running_users: dict[str, int] = {}
 
-    def submit(self, *, app: Flask, job_id: str, payload: dict[str, Any], owner_email: str) -> None:
+    def submit(self, *, app: Flask, job_id: str, payload: dict[str, Any], owner_email: str, runner: Any | None = None) -> None:
         user_key = str(owner_email or "local").strip().lower() or "local"
         with self._lock:
             if user_key not in self._user_queues:
                 self._user_queues[user_key] = deque()
                 self._user_order.append(user_key)
-            self._user_queues[user_key].append((job_id, app, dict(payload)))
+            self._user_queues[user_key].append((job_id, app, dict(payload), runner))
             self.job_store.set_owner(job_id, user_key)
             self.job_store.set_query_mode(job_id, _source_code_qa_query_mode(payload.get("query_mode")))
             self._refresh_queue_metadata_locked()
@@ -519,7 +524,7 @@ class SourceCodeQAQueryScheduler:
             next_item = self._pop_next_locked()
             if next_item is None:
                 break
-            user_key, job_id, app, payload = next_item
+            user_key, job_id, app, payload, runner = next_item
             self._running.add(job_id)
             self._running_users[user_key] = self._running_users.get(user_key, 0) + 1
             self.job_store.update_queue_metadata(
@@ -531,13 +536,13 @@ class SourceCodeQAQueryScheduler:
             )
             thread = threading.Thread(
                 target=self._run_job,
-                args=(app, job_id, payload, user_key),
+                args=(app, job_id, payload, user_key, runner),
                 daemon=True,
             )
             thread.start()
         self._refresh_queue_metadata_locked()
 
-    def _pop_next_locked(self) -> tuple[str, str, Flask, dict[str, Any]] | None:
+    def _pop_next_locked(self) -> tuple[str, str, Flask, dict[str, Any], Any] | None:
         self._user_order = deque(user_key for user_key in self._user_order if self._user_queues.get(user_key))
         if not self._user_order:
             return None
@@ -548,12 +553,12 @@ class SourceCodeQAQueryScheduler:
         if not queue:
             self._user_queues.pop(selected_user, None)
             return None
-        job_id, app, payload = queue.popleft()
+        job_id, app, payload, runner = queue.popleft()
         if queue:
             self._user_order.append(selected_user)
         else:
             self._user_queues.pop(selected_user, None)
-        return selected_user, job_id, app, payload
+        return selected_user, job_id, app, payload, runner
 
     def _refresh_queue_metadata_locked(self) -> None:
         ordered_jobs = self._simulated_round_robin_locked()
@@ -572,7 +577,7 @@ class SourceCodeQAQueryScheduler:
 
     def _simulated_round_robin_locked(self) -> list[tuple[str, str]]:
         queues = {
-            user_key: deque((job_id, user_key) for job_id, _app, _payload in queue)
+            user_key: deque((job_id, user_key) for job_id, _app, _payload, _runner in queue)
             for user_key, queue in self._user_queues.items()
             if queue
         }
@@ -588,9 +593,9 @@ class SourceCodeQAQueryScheduler:
                 order.append(user_key)
         return result
 
-    def _run_job(self, app: Flask, job_id: str, payload: dict[str, Any], owner_email: str) -> None:
+    def _run_job(self, app: Flask, job_id: str, payload: dict[str, Any], owner_email: str, runner: Any | None = None) -> None:
         try:
-            _run_source_code_qa_query_job(app, job_id, payload)
+            (runner or _run_source_code_qa_query_job)(app, job_id, payload)
         finally:
             self.finish(job_id, owner_email)
 
@@ -1094,6 +1099,15 @@ def _safe_int(value: Any) -> int:
         return int(value or 0)
     except (TypeError, ValueError):
         return 0
+
+
+def _safe_float(value: Any) -> float | None:
+    try:
+        if value in (None, ""):
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 class SourceCodeQASessionStore:
@@ -3095,6 +3109,52 @@ def create_app() -> Flask:
                 HTTPStatus.INTERNAL_SERVER_ERROR,
             )
 
+    @app.post("/api/source-code-qa/effort-assessment")
+    def source_code_qa_effort_assessment_api():
+        access_gate = _require_source_code_qa_manage_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        payload = request.get_json(silent=True) or {}
+        requirement = str(payload.get("requirement") or "").strip()
+        if not requirement:
+            return jsonify({"status": "error", "message": "Business requirement is empty."}), HTTPStatus.BAD_REQUEST
+        if not _source_code_qa_provider_available(payload.get("llm_provider")):
+            return jsonify({"status": "error", "message": "Selected Source Code Q&A model is unavailable."}), HTTPStatus.BAD_REQUEST
+
+        job_store: JobStore = current_app.config["JOB_STORE"]
+        job = job_store.create("source-code-qa-effort-assessment", title="Source Code Q&A Effort Assessment")
+        app_obj = current_app._get_current_object()
+        assessment_payload = {
+            "pm_team": str(payload.get("pm_team") or ""),
+            "country": str(payload.get("country") or ""),
+            "language": _source_code_qa_effort_assessment_language(payload.get("language")),
+            "requirement": requirement,
+            "llm_provider": str(payload.get("llm_provider") or ""),
+            "answer_mode": "auto",
+            "query_mode": "deep",
+            "_session_owner_email": _current_google_email() or "local",
+        }
+        scheduler: SourceCodeQAQueryScheduler = current_app.config["SOURCE_CODE_QA_QUERY_SCHEDULER"]
+        scheduler.submit(
+            app=app_obj,
+            job_id=job.job_id,
+            payload=assessment_payload,
+            owner_email=assessment_payload["_session_owner_email"],
+            runner=_run_source_code_qa_effort_assessment_job,
+        )
+        snapshot = _public_source_code_qa_job_snapshot(job_store.snapshot(job.job_id) or {})
+        return jsonify({**snapshot, "status": "queued", "job_id": job.job_id})
+
+    @app.get("/api/source-code-qa/effort-assessment/latest")
+    def source_code_qa_effort_assessment_latest_api():
+        access_gate = _require_source_code_qa_manage_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        result = current_app.config["JOB_STORE"].latest_completed_result("source-code-qa-effort-assessment")
+        if not result:
+            return jsonify({"status": "empty", "result": {}})
+        return jsonify({"status": "ok", "result": result})
+
     @app.post("/api/source-code-qa/feedback")
     def source_code_qa_feedback_api():
         access_gate = _require_source_code_qa_access(settings, api=True)
@@ -3843,6 +3903,27 @@ def create_app() -> Flask:
             "reason": str(payload.get("reason") or "").strip()[:80],
             "outcome": str(payload.get("outcome") or "").strip()[:80],
             "page_path": str(payload.get("page_path") or "").strip()[:240],
+            "capture_path": str(payload.get("capture_path") or "").strip()[:120],
+            "meeting_link_present": bool(payload.get("meeting_link_present")),
+            "get_user_media_supported": bool(payload.get("get_user_media_supported")),
+            "media_recorder_supported": bool(payload.get("media_recorder_supported")),
+            "selected_mime_type": str(payload.get("selected_mime_type") or "").strip()[:120],
+            "recorder_mime_type": str(payload.get("recorder_mime_type") or "").strip()[:120],
+            "recorder_state": str(payload.get("recorder_state") or "").strip()[:80],
+            "stop_outcome": str(payload.get("stop_outcome") or "").strip()[:80],
+            "active_track_label": str(payload.get("active_track_label") or "").strip()[:160],
+            "preferred_device_label": str(payload.get("preferred_device_label") or "").strip()[:160],
+            "input_device_count": int(payload.get("input_device_count") or 0),
+            "audio_input_labels": str(payload.get("audio_input_labels") or "").strip()[:800],
+            "preflight_rms_db": _safe_float(payload.get("preflight_rms_db")),
+            "preflight_peak_db": _safe_float(payload.get("preflight_peak_db")),
+            "blob_size": int(payload.get("blob_size") or 0),
+            "chunk_count": int(payload.get("chunk_count") or 0),
+            "elapsed_ms": int(payload.get("elapsed_ms") or 0),
+            "record_id": str(payload.get("record_id") or "").strip()[:120],
+            "protocol": str(payload.get("protocol") or "").strip()[:40],
+            "host": str(payload.get("host") or "").strip()[:200],
+            "error_name": str(payload.get("error_name") or "").strip()[:120],
             "meeting_count": int(payload.get("meeting_count") or 0),
             "suppressed_count": int(payload.get("suppressed_count") or 0),
             "active_recording": bool(payload.get("active_recording")),
@@ -3898,7 +3979,7 @@ def create_app() -> Flask:
             meeting_link = str(payload.get("meeting_link") or payload.get("meetingLink") or "").strip()
             recording_mode = str(payload.get("recording_mode") or payload.get("recordingMode") or "").strip()
             if not recording_mode:
-                recording_mode = "screen_audio" if meeting_link else "audio_only"
+                recording_mode = "audio_only"
             if _local_agent_meeting_recorder_enabled(settings):
                 remote_payload = dict(payload)
                 remote_payload.update(
@@ -3906,7 +3987,7 @@ def create_app() -> Flask:
                         "owner_email": _current_google_email(),
                         "meeting_link": meeting_link,
                         "recording_mode": recording_mode,
-                        "platform": str(payload.get("platform") or meeting_platform_from_link(meeting_link)).strip(),
+                        "platform": str(payload.get("platform") or meeting_platform_from_link(meeting_link) or "unknown").strip(),
                     }
                 )
                 result = _build_local_agent_client(settings).meeting_recorder_start(remote_payload)
@@ -3914,7 +3995,7 @@ def create_app() -> Flask:
             record = _get_meeting_recorder_runtime().start_recording(
                 owner_email=_current_google_email(),
                 title=str(payload.get("title") or "Untitled meeting").strip(),
-                platform=str(payload.get("platform") or meeting_platform_from_link(meeting_link)).strip(),
+                platform=str(payload.get("platform") or meeting_platform_from_link(meeting_link) or "unknown").strip(),
                 meeting_link=meeting_link,
                 recording_mode=recording_mode,
                 calendar_event_id=str(payload.get("calendar_event_id") or payload.get("calendarEventId") or "").strip(),
@@ -3943,6 +4024,120 @@ def create_app() -> Flask:
         except ToolError as error:
             return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
 
+    @app.post("/api/meeting-recorder/records/<record_id>/signal-check")
+    def meeting_recorder_signal_check_api(record_id: str):
+        access_gate = _require_meeting_recorder_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        try:
+            if _local_agent_meeting_recorder_enabled(settings):
+                result = _build_local_agent_client(settings).meeting_recorder_signal_check(
+                    record_id=record_id,
+                    owner_email=_current_google_email(),
+                )
+                return jsonify({"status": "ok", "record": result.get("record") or {}})
+            record = _get_meeting_recorder_runtime().check_recording_signal(record_id=record_id, owner_email=_current_google_email())
+            return jsonify({"status": "ok", "record": _meeting_record_summary(record)})
+        except ToolError as error:
+            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
+
+    @app.post("/api/meeting-recorder/browser-audio")
+    def meeting_recorder_browser_audio_api():
+        access_gate = _require_meeting_recorder_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        payload = request.get_json(silent=True) or {}
+        try:
+            audio_base64 = str(payload.get("audio_base64") or "")
+            if not audio_base64:
+                raise ToolError("Browser audio upload was empty.")
+            meeting_link = str(payload.get("meeting_link") or payload.get("meetingLink") or "").strip()
+            capture_source = str(payload.get("browser_audio_capture_source") or payload.get("capture_source") or "").strip()
+            capture_path = capture_source or ("browser_tab_audio_linked" if meeting_link else "browser_audio_f2f")
+            _log_portal_event(
+                "meeting_recorder_browser_audio_received",
+                **_build_request_log_context(
+                    settings,
+                    user_identity=_get_user_identity(settings),
+                    extra={
+                        "capture_path": capture_path,
+                        "audio_base64_length": len(audio_base64),
+                        "mime_type": str(payload.get("mime_type") or "").strip()[:120],
+                        "browser_audio_device_label": str(payload.get("browser_audio_device_label") or "").strip()[:160],
+                        "started_at_present": bool(str(payload.get("recording_started_at") or payload.get("started_at") or "").strip()),
+                        "stopped_at_present": bool(str(payload.get("recording_stopped_at") or payload.get("stopped_at") or "").strip()),
+                    },
+                ),
+            )
+            recording_mode = "audio_only"
+            remote_payload = {
+                "owner_email": _current_google_email(),
+                "title": str(payload.get("title") or "Untitled meeting").strip(),
+                "meeting_link": meeting_link,
+                "recording_mode": recording_mode,
+                "platform": str(payload.get("platform") or meeting_platform_from_link(meeting_link)).strip(),
+                "recording_started_at": str(payload.get("recording_started_at") or payload.get("started_at") or "").strip(),
+                "recording_stopped_at": str(payload.get("recording_stopped_at") or payload.get("stopped_at") or "").strip(),
+                "mime_type": str(payload.get("mime_type") or "").strip(),
+                "audio_base64": audio_base64,
+                "browser_audio_device_label": str(payload.get("browser_audio_device_label") or "").strip(),
+                "browser_audio_capture_source": capture_path,
+                "browser_audio_preflight": payload.get("browser_audio_preflight") if isinstance(payload.get("browser_audio_preflight"), dict) else {},
+            }
+            if _local_agent_meeting_recorder_enabled(settings):
+                result = _build_local_agent_client(settings).meeting_recorder_browser_audio(remote_payload)
+                record = result.get("record") or {}
+                _log_portal_event(
+                    "meeting_recorder_browser_audio_forwarded",
+                    **_build_request_log_context(
+                        settings,
+                        user_identity=_get_user_identity(settings),
+                        extra={
+                            "capture_path": capture_path,
+                            "record_id": str(record.get("record_id") or "").strip()[:120],
+                            "record_status": str(record.get("status") or "").strip()[:80],
+                            "max_volume_db": ((record.get("recording_health") or {}) if isinstance(record.get("recording_health"), dict) else {}).get("max_volume_db"),
+                            "audio_capture_profile": str(((record.get("media") or {}) if isinstance(record.get("media"), dict) else {}).get("audio_capture_profile") or "").strip()[:120],
+                        },
+                    ),
+                )
+                return jsonify({"status": "ok", "record": result.get("record") or {}})
+            try:
+                audio_bytes = base64.b64decode(audio_base64, validate=True)
+            except (ValueError, TypeError) as error:
+                raise ToolError("Browser audio upload was not valid base64.") from error
+            record = _get_meeting_recorder_runtime().import_browser_audio_recording(
+                owner_email=_current_google_email(),
+                title=remote_payload["title"],
+                platform=remote_payload["platform"],
+                meeting_link=meeting_link,
+                started_at=remote_payload["recording_started_at"],
+                stopped_at=remote_payload["recording_stopped_at"],
+                audio_bytes=audio_bytes,
+                mime_type=remote_payload["mime_type"],
+                device_label=remote_payload["browser_audio_device_label"],
+                capture_source=remote_payload["browser_audio_capture_source"],
+                preflight_metrics=remote_payload["browser_audio_preflight"],
+            )
+            _log_portal_event(
+                "meeting_recorder_browser_audio_saved",
+                **_build_request_log_context(
+                    settings,
+                    user_identity=_get_user_identity(settings),
+                    extra={
+                        "capture_path": capture_path,
+                        "record_id": str(record.get("record_id") or "").strip()[:120],
+                        "record_status": str(record.get("status") or "").strip()[:80],
+                        "duration_seconds": float(((record.get("recording_health") or {}) if isinstance(record.get("recording_health"), dict) else {}).get("duration_seconds") or 0),
+                        "max_volume_db": ((record.get("recording_health") or {}) if isinstance(record.get("recording_health"), dict) else {}).get("max_volume_db"),
+                        "audio_capture_profile": str(((record.get("media") or {}) if isinstance(record.get("media"), dict) else {}).get("audio_capture_profile") or "").strip()[:120],
+                    },
+                ),
+            )
+            return jsonify({"status": "ok", "record": _meeting_record_summary(record)})
+        except (ConfigError, ToolError) as error:
+            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
+
     @app.post("/api/meeting-recorder/records/<record_id>/process")
     def meeting_recorder_process_api(record_id: str):
         access_gate = _require_meeting_recorder_access(settings, api=True)
@@ -3968,20 +4163,10 @@ def create_app() -> Flask:
         access_gate = _require_meeting_recorder_access(settings, api=True)
         if access_gate is not None:
             return access_gate
-        try:
-            if _local_agent_meeting_recorder_enabled(settings):
-                result = _build_local_agent_client(settings).meeting_recorder_repair_video(
-                    record_id=record_id,
-                    owner_email=_current_google_email(),
-                )
-                return jsonify({"status": "ok", "record": result.get("record") or {}})
-            record = _get_meeting_recorder_runtime().repair_video_playback(
-                record_id=record_id,
-                owner_email=_current_google_email(),
-            )
-            return jsonify({"status": "ok", "record": _meeting_record_summary(record)})
-        except (ConfigError, ToolError, requests.RequestException) as error:
-            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
+        return jsonify({
+            "status": "error",
+            "message": "Video recording and playback repair are no longer supported. Meeting Recorder is audio-only.",
+        }), HTTPStatus.BAD_REQUEST
 
     @app.post("/api/meeting-recorder/records/<record_id>/send-email")
     def meeting_recorder_send_email_api(record_id: str):
@@ -4044,7 +4229,7 @@ def create_app() -> Flask:
                     upstream.close()
                     return jsonify({
                         "status": "error",
-                        "message": "Meeting video download returned an HTML response instead of a video file. Refresh the page and sign in again, then retry.",
+                        "message": "Meeting audio download returned an HTML response instead of the requested file. Refresh the page and sign in again, then retry.",
                     }), HTTPStatus.BAD_GATEWAY
                 excluded_headers = {"content-encoding", "connection", "transfer-encoding"}
                 headers = [
@@ -4408,13 +4593,22 @@ def create_app() -> Flask:
         draft_markdown = str((result or {}).get("draft_markdown") or "").strip()
         if not draft_markdown:
             return jsonify({"status": "empty", "draft_markdown": ""})
+        generation_summary = (result or {}).get("generation_summary") if isinstance((result or {}).get("generation_summary"), dict) else {}
+        generation_version = str((result or {}).get("generation_version") or generation_summary.get("generation_version") or "").strip()
+        if not generation_version and not generation_summary.get("period_start"):
+            return jsonify({"status": "empty", "draft_markdown": "", "message": "Latest Monthly Report draft was generated by an older format."})
+        subject = str((result or {}).get("subject") or "").strip() or monthly_report_subject()
         return jsonify(
             {
                 "status": "ok",
                 "draft_markdown": draft_markdown,
-                "subject": monthly_report_subject(),
+                "subject": subject,
                 "job_id": (result or {}).get("job_id") or "",
                 "generated_at": (result or {}).get("generated_at") or 0,
+                "generation_version": generation_version,
+                "period_start": generation_summary.get("period_start") or "",
+                "period_end": generation_summary.get("period_end") or "",
+                "period_end_exclusive": generation_summary.get("period_end_exclusive") or "",
             }
         )
 
@@ -4900,31 +5094,6 @@ def create_app() -> Flask:
             if not jira_link:
                 jira_link = f"{_jira_browse_base_url()}{jira_id}"
 
-            store = _get_bpmis_project_store()
-            store.upsert_project(
-                user_key=str(user_identity.get("config_key") or ""),
-                bpmis_id=bpmis_id,
-                project_name=str(project.get("project_name") or bpmis_id),
-                brd_link="",
-                market=str(project.get("market") or ""),
-            )
-            ticket = store.upsert_synced_jira_ticket(
-                user_key=str(user_identity.get("config_key") or ""),
-                bpmis_id=bpmis_id,
-                component=str(linked_detail.get("component") or ""),
-                market=str(linked_detail.get("market") or project.get("market") or ""),
-                system=str(linked_detail.get("system") or ""),
-                jira_title=str(linked_detail.get("jira_title") or linked_detail.get("summary") or payload.get("jira_title") or ""),
-                prd_link="",
-                description=str(linked_detail.get("description") or linked_detail.get("desc") or ""),
-                fix_version_name=str(linked_detail.get("fix_version_name") or linked_detail.get("version") or ""),
-                fix_version_id=str(linked_detail.get("fix_version_id") or ""),
-                ticket_key=jira_id,
-                ticket_link=jira_link,
-                status="linked",
-                message="Linked from Team Dashboard Link Biz Project.",
-                raw_response=linked_detail if isinstance(linked_detail, dict) else {},
-            )
             _log_portal_event(
                 "team_dashboard_link_biz_project_success",
                 **_build_request_log_context(
@@ -4940,7 +5109,7 @@ def create_app() -> Flask:
                     "jira_link": jira_link,
                     "bpmis_id": bpmis_id,
                     "project": project,
-                    "ticket": ticket or {},
+                    "ticket": {},
                 }
             )
         except (BPMISError, ToolError) as error:
@@ -4978,10 +5147,15 @@ def create_app() -> Flask:
         try:
             config = _get_team_dashboard_config_store().load()
             team_payloads = _load_all_team_dashboard_task_payloads(settings, config)
+            report_period = resolve_monthly_report_period()
             request_payload = {
                 "template": normalize_monthly_report_template(config.get("monthly_report_template")),
                 "team_payloads": team_payloads,
                 "report_intelligence_config": normalize_report_intelligence_config(config.get("report_intelligence_config")),
+                "period_start": report_period.start.isoformat(),
+                "period_end": report_period.end_date,
+                "period_end_exclusive": report_period.end_exclusive.isoformat(),
+                "product_scope": list(MONTHLY_REPORT_PRODUCT_SCOPE),
             }
             if _remote_bpmis_config_enabled(settings):
                 data = _build_local_agent_client(settings).team_dashboard_monthly_report_draft_start(request_payload)
@@ -5533,6 +5707,7 @@ def create_app() -> Flask:
         if login_gate is not None:
             return login_gate
 
+        started_at = time.monotonic()
         query = str(request.args.get("q") or "").strip()
         if not query:
             return jsonify({"status": "error", "message": "Version keyword is required."}), HTTPStatus.BAD_REQUEST
@@ -5544,6 +5719,7 @@ def create_app() -> Flask:
                 {
                     "status": "ok",
                     "items": [_serialize_productization_version_candidate(item) for item in versions],
+                    "elapsed_seconds": round(time.monotonic() - started_at, 3),
                 }
             )
         except ToolError as error:
@@ -5577,6 +5753,7 @@ def create_app() -> Flask:
         if login_gate is not None:
             return login_gate
 
+        started_at = time.monotonic()
         version_id = str(request.args.get("version_id") or "").strip()
         show_all_before_team_filtering = str(request.args.get("show_all_before_team_filtering") or "").strip().lower() in {
             "1",
@@ -5608,6 +5785,7 @@ def create_app() -> Flask:
                     "llm_generated_count": 0,
                     "codex_detailed_feature": False,
                     "codex_generated_count": 0,
+                    "elapsed_seconds": round(time.monotonic() - started_at, 3),
                     **filter_metadata,
                 }
             )
@@ -5642,6 +5820,7 @@ def create_app() -> Flask:
         if login_gate is not None:
             return login_gate
 
+        started_at = time.monotonic()
         version_id = str(request.args.get("version_id") or "").strip()
         show_all_before_team_filtering = str(request.args.get("show_all_before_team_filtering") or "").strip().lower() in {
             "1",
@@ -5674,6 +5853,7 @@ def create_app() -> Flask:
                     "items": normalized_items,
                     "raw_count": raw_count,
                     "filtered_count": len(rows),
+                    "elapsed_seconds": round(time.monotonic() - started_at, 3),
                     **codex_metadata,
                     **filter_metadata,
                 }
@@ -5720,6 +5900,20 @@ def create_app() -> Flask:
                 except ToolError:
                     pass
             return jsonify({"status": "error", "message": "Job not found."}), 404
+        action = str(snapshot.get("action") or "")
+        if action == "source-code-qa-query":
+            access_gate = _require_source_code_qa_access(settings, api=True)
+            if access_gate is not None:
+                return access_gate
+            scoped_snapshot = _source_code_qa_job_snapshot_for_current_user(job_id)
+            if scoped_snapshot is None:
+                return jsonify({"status": "error", "message": "Job not found."}), 404
+            return jsonify(_public_source_code_qa_job_snapshot(scoped_snapshot))
+        if action == "source-code-qa-effort-assessment":
+            access_gate = _require_source_code_qa_manage_access(settings, api=True)
+            if access_gate is not None:
+                return access_gate
+            return jsonify(_public_source_code_qa_job_snapshot(snapshot))
         return jsonify(snapshot)
 
     @app.get("/api/source-code-qa/query-jobs/<job_id>")
@@ -5727,8 +5921,8 @@ def create_app() -> Flask:
         access_gate = _require_source_code_qa_access(settings, api=True)
         if access_gate is not None:
             return access_gate
-        snapshot = current_app.config["JOB_STORE"].snapshot(job_id)
-        if snapshot is None or snapshot.get("action") != "source-code-qa-query":
+        snapshot = _source_code_qa_job_snapshot_for_current_user(job_id)
+        if snapshot is None:
             return jsonify(
                 {
                     "status": "error",
@@ -5745,18 +5939,94 @@ def create_app() -> Flask:
         access_gate = _require_source_code_qa_access(settings, api=True)
         if access_gate is not None:
             return access_gate
+        if _source_code_qa_job_snapshot_for_current_user(job_id) is None:
+            return jsonify(
+                {
+                    "status": "error",
+                    "message": "Source Code Q&A job was not found.",
+                    "error_category": "job_not_found",
+                    "error_code": "job_not_found",
+                    "error_retryable": False,
+                }
+            ), HTTPStatus.NOT_FOUND
+
+        def event_stream():
+            last_payload = ""
+            deadline = time.time() + 900
+            while time.time() < deadline:
+                snapshot = _source_code_qa_job_snapshot_for_current_user(job_id)
+                if snapshot is None:
+                    payload = {
+                        "status": "error",
+                        "state": "failed",
+                        "message": "Source Code Q&A job was not found.",
+                        "error": "Source Code Q&A job was not found.",
+                        "error_category": "job_not_found",
+                        "error_code": "job_not_found",
+                        "error_retryable": False,
+                    }
+                    yield f"event: failed\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                    return
+                payload = _public_source_code_qa_job_snapshot(snapshot)
+                payload_text = json.dumps(payload, ensure_ascii=False)
+                if payload_text != last_payload:
+                    event_name = "message"
+                    if payload.get("state") == "completed":
+                        event_name = "completed"
+                    elif payload.get("state") == "failed":
+                        event_name = "failed"
+                    yield f"event: {event_name}\ndata: {payload_text}\n\n"
+                    last_payload = payload_text
+                    if payload.get("state") in {"completed", "failed"}:
+                        return
+                else:
+                    yield ": keepalive\n\n"
+                time.sleep(0.9)
+
+        return Response(
+            stream_with_context(event_stream()),
+            mimetype="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    @app.get("/api/source-code-qa/effort-assessment-jobs/<job_id>")
+    def source_code_qa_effort_assessment_job_api(job_id: str):
+        access_gate = _require_source_code_qa_manage_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        snapshot = current_app.config["JOB_STORE"].snapshot(job_id)
+        if snapshot is None or snapshot.get("action") != "source-code-qa-effort-assessment":
+            return jsonify(
+                {
+                    "status": "error",
+                    "message": "Source Code Q&A effort assessment job was not found.",
+                    "error_category": "job_not_found",
+                    "error_code": "job_not_found",
+                    "error_retryable": False,
+                }
+            ), HTTPStatus.NOT_FOUND
+        return jsonify(_public_source_code_qa_job_snapshot(snapshot))
+
+    @app.get("/api/source-code-qa/effort-assessment-jobs/<job_id>/events")
+    def source_code_qa_effort_assessment_job_events_api(job_id: str):
+        access_gate = _require_source_code_qa_manage_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
 
         def event_stream():
             last_payload = ""
             deadline = time.time() + 900
             while time.time() < deadline:
                 snapshot = current_app.config["JOB_STORE"].snapshot(job_id)
-                if snapshot is None or snapshot.get("action") != "source-code-qa-query":
+                if snapshot is None or snapshot.get("action") != "source-code-qa-effort-assessment":
                     payload = {
                         "status": "error",
                         "state": "failed",
-                        "message": "Source Code Q&A job was not found.",
-                        "error": "Source Code Q&A job was not found.",
+                        "message": "Source Code Q&A effort assessment job was not found.",
+                        "error": "Source Code Q&A effort assessment job was not found.",
                         "error_category": "job_not_found",
                         "error_code": "job_not_found",
                         "error_retryable": False,
@@ -6626,6 +6896,665 @@ def _source_code_qa_public_runtime_evidence(evidence: list[dict[str, Any]]) -> l
     ]
 
 
+def _source_code_qa_effort_assessment_language(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in {"en", "english"}:
+        return "en"
+    return "zh"
+
+
+def _source_code_qa_effort_sentences(text: str) -> list[str]:
+    raw = str(text or "").strip()
+    if not raw:
+        return []
+    parts = re.split(r"(?<=[。！？!?])\s+|\n+", raw)
+    return [part.strip() for part in parts if part.strip()]
+
+
+def _source_code_qa_effort_matches(text: str, patterns: list[str]) -> bool:
+    lowered = str(text or "").lower()
+    return any(re.search(pattern, lowered, flags=re.IGNORECASE) for pattern in patterns)
+
+
+def _source_code_qa_effort_unique(items: list[Any]) -> list[Any]:
+    seen: set[str] = set()
+    output: list[Any] = []
+    for item in items:
+        if item is None:
+            continue
+        key = json.dumps(item, ensure_ascii=False, sort_keys=True) if isinstance(item, dict) else str(item)
+        if key in seen:
+            continue
+        seen.add(key)
+        output.append(item)
+    return output
+
+
+def _source_code_qa_load_json_file(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+@lru_cache(maxsize=1)
+def _load_source_code_qa_effort_dictionaries() -> dict[str, Any]:
+    return _source_code_qa_load_json_file(SOURCE_CODE_QA_EFFORT_DICTIONARY_PATH)
+
+
+@lru_cache(maxsize=1)
+def _load_source_code_qa_domain_profile_config() -> dict[str, Any]:
+    return _source_code_qa_load_json_file(SOURCE_CODE_QA_DOMAIN_PROFILES_PATH)
+
+
+@lru_cache(maxsize=1)
+def _load_source_code_qa_domain_knowledge_config() -> dict[str, Any]:
+    return _source_code_qa_load_json_file(SOURCE_CODE_QA_DOMAIN_KNOWLEDGE_PATH)
+
+
+def _source_code_qa_effort_domain_entries(pm_team: str) -> list[dict[str, Any]]:
+    dictionaries = _load_source_code_qa_effort_dictionaries()
+    domain = ((dictionaries.get("domains") or {}).get(str(pm_team or "").upper()) or {})
+    entries = domain.get("entries") if isinstance(domain, dict) else []
+    entries = entries if isinstance(entries, list) else []
+    return [entry for entry in entries if isinstance(entry, dict)]
+
+
+def _source_code_qa_effort_seed_terms(pm_team: str) -> list[str]:
+    team = str(pm_team or "").upper()
+    terms: list[str] = []
+    profiles = _load_source_code_qa_domain_profile_config()
+    profile = profiles.get(team) if isinstance(profiles, dict) else {}
+    if isinstance(profile, dict):
+        for key in ("data_carriers", "source_terms", "api_terms", "config_terms", "logic_terms", "field_population_terms"):
+            terms.extend(str(item) for item in (profile.get(key) or []) if item)
+    knowledge = _load_source_code_qa_domain_knowledge_config()
+    domain = ((knowledge.get("domains") or {}).get(team) or {}) if isinstance(knowledge, dict) else {}
+    if isinstance(domain, dict):
+        for module in domain.get("module_map") or []:
+            if not isinstance(module, dict):
+                continue
+            terms.append(str(module.get("name") or ""))
+            terms.extend(str(item) for item in (module.get("aliases") or []) if item)
+            terms.extend(str(item) for item in (module.get("code_hints") or []) if item)
+        for term in domain.get("terminology") or []:
+            if not isinstance(term, dict):
+                continue
+            terms.append(str(term.get("term") or ""))
+            terms.extend(str(item) for item in (term.get("aliases") or []) if item)
+            terms.extend(str(item) for item in (term.get("code_terms") or []) if item)
+        retrieval_terms = domain.get("retrieval_terms") if isinstance(domain.get("retrieval_terms"), dict) else {}
+        for values in retrieval_terms.values():
+            terms.extend(str(item) for item in (values or []) if item)
+    return [str(item) for item in _source_code_qa_effort_unique([item for item in terms if str(item or "").strip()])]
+
+
+def _source_code_qa_effort_entry_applies(entry: dict[str, Any], *, country: str, requirement: str) -> bool:
+    countries = [str(item).upper() for item in (entry.get("country_terms") or []) if item]
+    if countries and str(country or "").upper() not in countries:
+        return False
+    aliases = [str(item) for item in (entry.get("business_aliases") or []) if str(item or "").strip()]
+    technical_terms = [str(item) for item in (entry.get("technical_terms") or []) if str(item or "").strip()]
+    haystack = str(requirement or "").lower()
+    for value in [*aliases, *technical_terms]:
+        normalized = value.lower().strip()
+        if not normalized:
+            continue
+        if normalized in haystack:
+            return True
+    return False
+
+
+def _source_code_qa_effort_group_typed_candidates(entries: list[dict[str, Any]], *, seed_terms: list[str]) -> dict[str, list[str]]:
+    grouped: dict[str, list[str]] = {
+        "backend_service": [],
+        "frontend_surface": [],
+        "table_or_config": [],
+        "workflow_rule": [],
+        "downstream_reporting": [],
+    }
+    for entry in entries:
+        terms = [str(item) for item in (entry.get("technical_terms") or []) if item]
+        for surface in entry.get("surfaces") or []:
+            surface_key = str(surface or "").strip()
+            if surface_key in grouped:
+                grouped[surface_key].extend(terms)
+    if seed_terms:
+        grouped["backend_service"].extend(seed_terms[:30])
+    return {key: _source_code_qa_effort_unique(values)[:60] for key, values in grouped.items()}
+
+
+def _build_source_code_qa_effort_business_plan(
+    *,
+    pm_team: str,
+    country: str,
+    language: str,
+    requirement: str,
+) -> dict[str, Any]:
+    raw_requirement = str(requirement or "").strip()
+    sentences = _source_code_qa_effort_sentences(raw_requirement)
+    option_matches = list(
+        re.finditer(
+            r"(方案\s*[一二12]|option\s*[12])\s*[:：]?\s*(.*?)(?=(?:方案\s*[一二12]|option\s*[12])\s*[:：]|$)",
+            raw_requirement,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+    )
+    options = []
+    for index, match in enumerate(option_matches, start=1):
+        body = re.sub(r"\s+", " ", match.group(2).strip())
+        if body:
+            options.append({"id": f"option_{index}", "label": match.group(1).strip(), "summary": body[:1200]})
+    if not options:
+        options.append({"id": "option_1", "label": "single proposed change", "summary": raw_requirement[:1200]})
+
+    user_segments = []
+    if _source_code_qa_effort_matches(raw_requirement, [r"高收入", r"annual\s*income", r"income\s*[><=]", r"120k"]):
+        user_segments.append("high income customers")
+    if _source_code_qa_effort_matches(raw_requirement, [r"好用户", r"good\s+customer", r"premium"]):
+        user_segments.append("qualified or good customers")
+
+    products = []
+    if _source_code_qa_effort_matches(raw_requirement, [r"信用卡", r"credit\s*card"]):
+        products.append("credit card")
+    if _source_code_qa_effort_matches(raw_requirement, [r"现金分期", r"cash\s*installment", r"cash\s*instalment"]):
+        products.append("cash installment")
+    if _source_code_qa_effort_matches(raw_requirement, [r"cashline", r"cash\s*line"]):
+        products.append("cashline")
+
+    limit_types = []
+    if _source_code_qa_effort_matches(raw_requirement, [r"额度", r"limit"]):
+        limit_types.append("limit amount")
+    if _source_code_qa_effort_matches(raw_requirement, [r"信用卡.*额度", r"credit\s*card.*limit"]):
+        limit_types.append("credit card limit")
+    if _source_code_qa_effort_matches(raw_requirement, [r"现金分期.*(专项)?额度", r"cash\s*installment.*limit"]):
+        limit_types.append("cash installment dedicated limit")
+    if _source_code_qa_effort_matches(raw_requirement, [r"103", r"104", r"sub\s*product", r"子产品"]):
+        limit_types.append("sub-product limit 103/104")
+
+    flow_changes = []
+    if _source_code_qa_effort_matches(raw_requirement, [r"申请", r"apply", r"application"]):
+        flow_changes.append("application flow")
+    if _source_code_qa_effort_matches(raw_requirement, [r"报送", r"submission", r"reporting"]):
+        flow_changes.append("reporting or downstream submission")
+    if _source_code_qa_effort_matches(raw_requirement, [r"用户教育", r"感知", r"引导", r"education", r"guide"]):
+        flow_changes.append("user education or guidance")
+
+    decision_points = [
+        sentence[:800]
+        for sentence in sentences
+        if _source_code_qa_effort_matches(sentence, [r"核心问题", r"是否", r"是不是", r"可以讨论", r"确认", r"how", r"whether"])
+    ]
+    goals = []
+    if _source_code_qa_effort_matches(raw_requirement, [r"策略区分", r"区分", r"separate", r"differentiat"]):
+        goals.append("differentiate limit strategy by customer/product context")
+    if _source_code_qa_effort_matches(raw_requirement, [r"感知", r"转化", r"教育", r"conversion"]):
+        goals.append("make the limit or product path understandable to customers")
+    if not goals:
+        goals.append("assess technical impact for the requested business change")
+
+    return {
+        "raw_requirement": raw_requirement,
+        "pm_team": pm_team,
+        "country": country,
+        "language": language,
+        "business_goals": _source_code_qa_effort_unique(goals),
+        "options": options,
+        "user_segments": _source_code_qa_effort_unique(user_segments),
+        "products": _source_code_qa_effort_unique(products),
+        "limit_types": _source_code_qa_effort_unique(limit_types),
+        "flow_changes": _source_code_qa_effort_unique(flow_changes),
+        "decision_points": _source_code_qa_effort_unique(decision_points)[:8],
+    }
+
+
+def _build_source_code_qa_effort_technical_candidates(
+    *,
+    pm_team: str,
+    country: str,
+    business_plan: dict[str, Any],
+    requirement: str,
+) -> dict[str, Any]:
+    raw_requirement = str(requirement or "")
+    seed_terms = _source_code_qa_effort_seed_terms(pm_team)
+    domain_entries = _source_code_qa_effort_domain_entries(pm_team)
+    matched_entries = [
+        entry for entry in domain_entries
+        if _source_code_qa_effort_entry_applies(entry, country=country, requirement=raw_requirement)
+    ]
+    terms = [
+        "limit",
+        "credit limit",
+        "product limit",
+        "sub product limit",
+        "API",
+        "config",
+        "strategy",
+        "workflow",
+        "front end screen",
+        "application flow",
+    ]
+    backend_surfaces = ["API validation", "service strategy", "workflow decision rule", "config lookup"]
+    frontend_surfaces = ["limit display", "application entry", "customer guidance copy"]
+    configs_or_tables = ["limitAmount", "productCode", "productType", "subProductCode"]
+    product_terms = []
+    limit_terms = []
+    evidence_hints = []
+    domain_notes = []
+    for entry in matched_entries:
+        terms.extend(str(item) for item in (entry.get("technical_terms") or []) if item)
+        product_terms.extend(str(item) for item in (entry.get("product_terms") or []) if item)
+        limit_terms.extend(str(item) for item in (entry.get("limit_terms") or []) if item)
+        evidence_hints.extend(str(item) for item in (entry.get("evidence_hints") or []) if item)
+        for surface in entry.get("surfaces") or []:
+            surface_value = str(surface or "")
+            if surface_value == "backend_service":
+                backend_surfaces.append(str(entry.get("id") or "backend service impact"))
+            elif surface_value == "frontend_surface":
+                frontend_surfaces.append(str(entry.get("id") or "frontend impact"))
+            elif surface_value in {"table_or_config", "downstream_reporting"}:
+                configs_or_tables.extend(str(item) for item in (entry.get("technical_terms") or []) if item)
+    terms.extend(seed_terms[:80])
+
+    if str(pm_team or "").upper() == "CRMS":
+        backend_surfaces.extend(
+            [
+                "CRMS underwriting and eligibility decision",
+                "borrower/product/sub-product limit calculation",
+                "cash installment limit strategy",
+                "credit card daily consumption limit strategy",
+                "cashline application or redirect flow",
+                "downstream reporting payload",
+            ]
+        )
+        frontend_surfaces.extend(
+            [
+                "credit card and cash installment limit display",
+                "cashline application entry",
+                "limit explanation and customer education",
+            ]
+        )
+        domain_notes.append("CRMS dictionary v1: income-based credit, cash installment, cashline, and product/sub-product limits.")
+
+    for key in ("products", "limit_types", "flow_changes"):
+        for value in business_plan.get(key) or []:
+            terms.append(str(value))
+    if _source_code_qa_effort_matches(raw_requirement, [r"报送", r"submission", r"reporting"]):
+        terms.extend(["reporting", "submission", "report payload"])
+    if _source_code_qa_effort_matches(raw_requirement, [r"前端", r"展示", r"入口", r"引导", r"screen", r"display", r"entry"]):
+        terms.extend(["screen", "display", "entry point", "guide copy"])
+
+    return {
+        "pm_team": pm_team,
+        "country": country,
+        "search_terms": _source_code_qa_effort_unique(terms)[:80],
+        "backend_surfaces": _source_code_qa_effort_unique(backend_surfaces)[:40],
+        "frontend_surfaces": _source_code_qa_effort_unique(frontend_surfaces)[:30],
+        "configs_or_tables": _source_code_qa_effort_unique(configs_or_tables)[:50],
+        "product_terms": _source_code_qa_effort_unique(product_terms)[:40],
+        "limit_terms": _source_code_qa_effort_unique(limit_terms)[:40],
+        "evidence_hints": _source_code_qa_effort_unique(evidence_hints)[:40],
+        "matched_dictionary_entries": [str(entry.get("id") or "") for entry in matched_entries if entry.get("id")],
+        "typed_candidates": _source_code_qa_effort_group_typed_candidates(matched_entries, seed_terms=seed_terms),
+        "domain_notes": domain_notes,
+    }
+
+
+def _build_source_code_qa_effort_estimation_rubric(
+    *,
+    business_plan: dict[str, Any],
+    technical_candidates: dict[str, Any],
+) -> dict[str, Any]:
+    text = " ".join(
+        [
+            " ".join(str(item) for item in business_plan.get("products") or []),
+            " ".join(str(item) for item in business_plan.get("limit_types") or []),
+            " ".join(str(item) for item in business_plan.get("flow_changes") or []),
+            " ".join(str(item) for item in technical_candidates.get("backend_surfaces") or []),
+            " ".join(str(item) for item in technical_candidates.get("frontend_surfaces") or []),
+        ]
+    )
+    high_complexity = _source_code_qa_effort_matches(
+        text,
+        [r"underwriting", r"borrower", r"sub[-\s]?product", r"reporting", r"submission", r"授信", r"额度模型"],
+    )
+    medium_complexity = _source_code_qa_effort_matches(text, [r"api", r"service", r"strategy", r"workflow", r"limit"])
+    frontend_required = bool(technical_candidates.get("frontend_surfaces"))
+    option_estimates = []
+    for index, option in enumerate(business_plan.get("options") or [], start=1):
+        option_text = str(option.get("summary") or "")
+        option_high = high_complexity or _source_code_qa_effort_matches(option_text, [r"cashline", r"独立", r"报送", r"模型", r"多产品"])
+        option_medium = medium_complexity or _source_code_qa_effort_matches(option_text, [r"额度", r"limit", r"策略", r"rule"])
+        be_range = "8-15 PD" if option_high else ("3-6 PD" if option_medium else "1-3 PD")
+        fe_range = "3-6 PD" if _source_code_qa_effort_matches(option_text, [r"用户教育", r"感知", r"入口", r"展示", r"guide", r"display"]) else ("1-3 PD" if frontend_required else "0-1 PD")
+        option_estimates.append(
+            {
+                "id": option.get("id") or f"option_{index}",
+                "label": option.get("label") or f"Option {index}",
+                "be_person_days": be_range,
+                "fe_person_days": fe_range,
+                "basis": "planning-grade estimate before Dev final sizing",
+            }
+        )
+    return {
+        "rules": [
+            "Config or rule parameter only: low complexity.",
+            "BE API plus service, strategy, or limit-flow change: medium complexity.",
+            "Underwriting engine, limit model, reporting, or multi-product limit linkage: high complexity.",
+            "FE display, guidance, application entry, and customer education are estimated separately.",
+            "Final answer must separate confirmed evidence, inferred impact, and missing evidence.",
+        ],
+        "complexity_drivers": {
+            "backend": "high" if high_complexity else ("medium" if medium_complexity else "low"),
+            "frontend": "medium" if frontend_required else "low",
+        },
+        "option_estimates": option_estimates,
+    }
+
+
+def _source_code_qa_effort_json_block(value: dict[str, Any]) -> str:
+    return json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True)[:12000]
+
+
+def _build_source_code_qa_effort_assessment_prompt(
+    *,
+    pm_team: str,
+    country: str,
+    language: str,
+    requirement: str,
+    llm_provider: str,
+    runtime_evidence: list[dict[str, Any]],
+    business_plan: dict[str, Any],
+    technical_candidates: dict[str, Any],
+    estimation_rubric: dict[str, Any],
+) -> str:
+    team_label = str((TEAM_PROFILE_DEFAULTS.get(pm_team) or {}).get("label") or pm_team or "Selected PM Team").strip()
+    output_language = "Chinese" if language == "zh" else "English"
+    runtime_items = [
+        item for item in runtime_evidence
+        if isinstance(item, dict)
+    ]
+    runtime_summary = ", ".join(
+        sorted(
+            {
+                f"{item.get('pm_team') or pm_team}:{item.get('country') or country}:{item.get('source_type') or 'runtime'}"
+                for item in runtime_items
+            }
+        )
+    ) or "none"
+    raw_requirement = str(requirement or "").strip()[:8000]
+    return "\n".join(
+        [
+            "You are performing a Source Code Q&A Effort Assessment for a new business requirement.",
+            "",
+            "Context:",
+            f"- PM Team: {pm_team} ({team_label})",
+            f"- Country: {country}",
+            f"- Answer language: {output_language}",
+            f"- Selected model provider: {llm_provider or 'default'}",
+            f"- Runtime evidence available: {len(runtime_items)} item(s): {runtime_summary}",
+            "",
+            "Original business requirement, verbatim:",
+            raw_requirement,
+            "",
+            "Business plan extracted from the requirement:",
+            _source_code_qa_effort_json_block(business_plan),
+            "",
+            "Technical candidates for repository evidence search:",
+            _source_code_qa_effort_json_block(technical_candidates),
+            "",
+            "Estimation rubric:",
+            _source_code_qa_effort_json_block(estimation_rubric),
+            "",
+            "Optimized assessment task:",
+            "- Use the business plan and technical candidates as the focused search map. Do not rely only on the original business wording.",
+            "- Map the requirement to likely impacted repositories, modules, files, APIs, tables, configs, scheduled jobs, front-end screens and components, and tests.",
+            "- Use current source-code evidence as the primary basis for implementation impact and person-day estimates.",
+            "- If exact table or path lookup misses, record it as a warning and continue with focused technical-candidate search.",
+            "- Use runtime evidence only as supporting context. Treat uploaded DB, Apollo, and log evidence separately from source-code proof and cite the evidence type distinctly.",
+            "- Separate confirmed code evidence from assumptions, inferred impact, and missing evidence. If a required evidence link is missing, say so explicitly instead of guessing.",
+            "- Estimate BE and FE work as ranges in person-days. Use 0 person-days if no FE or BE change is found, but explain why.",
+            "- Include QA/test and integration impact in the relevant BE/FE estimate notes instead of creating a third estimate bucket.",
+            "",
+            "Required output sections:",
+            "1. 业务理解",
+            "2. 方案 1/2 技术改造点",
+            "3. BE 人天",
+            "4. FE 人天",
+            "5. Confirmed / Inferred / Missing Evidence",
+            "6. Assumptions / Risks",
+            "7. Confirmation Questions",
+            "8. Source / Runtime Evidence",
+            "",
+            "Output rules:",
+            f"- Write the final answer in {output_language}.",
+            "- Keep the answer concise but specific enough for PM and engineering planning.",
+            "- Cite concrete file paths, classes, functions, APIs, tables, configs, tests, or runtime evidence filenames when available.",
+            "- Person-day estimates must be ranges such as 1-2 PD or 3-5 PD, with one sentence explaining the driver for each range.",
+            "- If source evidence is weak, still estimate with low confidence and explain missing evidence.",
+        ]
+    )
+
+
+def _source_code_qa_effort_missing_evidence(
+    *,
+    result: dict[str, Any],
+    technical_candidates: dict[str, Any],
+) -> list[str]:
+    missing: list[str] = []
+    matches = result.get("matches") if isinstance(result, dict) else []
+    if not isinstance(matches, list) or not matches:
+        missing.append("No confirmed source-code references were found for the technical candidates.")
+    exact_lookup = result.get("exact_lookup") if isinstance(result, dict) else None
+    if isinstance(exact_lookup, dict) and exact_lookup.get("terms") and not exact_lookup.get("matched_terms"):
+        missing.append("Exact table/path lookup did not match; assessment continued with focused candidate search.")
+    if technical_candidates.get("backend_surfaces") and (not isinstance(matches, list) or not matches):
+        missing.append("Backend impact surfaces need Dev confirmation against current repositories.")
+    return _source_code_qa_effort_unique(missing)
+
+
+def _source_code_qa_effort_confidence(result: dict[str, Any], missing_evidence: list[str]) -> str:
+    matches = result.get("matches") if isinstance(result, dict) else []
+    if str(result.get("status") or "").lower() == "no_match":
+        return "low"
+    if isinstance(matches, list) and len(matches) >= 3 and not missing_evidence:
+        return "high"
+    if isinstance(matches, list) and matches:
+        return "medium"
+    return "low"
+
+
+def _source_code_qa_effort_fallback_answer(
+    *,
+    language: str,
+    business_plan: dict[str, Any],
+    technical_candidates: dict[str, Any],
+    estimation_rubric: dict[str, Any],
+    missing_evidence: list[str],
+) -> str:
+    options = estimation_rubric.get("option_estimates") or []
+    option_lines = "\n".join(
+        f"- {item.get('label')}: BE {item.get('be_person_days')}, FE {item.get('fe_person_days')} ({item.get('basis')})"
+        for item in options
+        if isinstance(item, dict)
+    )
+    candidate_terms = ", ".join(str(item) for item in (technical_candidates.get("search_terms") or [])[:12])
+    missing_lines = "\n".join(f"- {item}" for item in missing_evidence) or "- More code evidence is required."
+    if language == "zh":
+        goals = ", ".join(str(item) for item in business_plan.get("business_goals") or [])
+        return "\n".join(
+            [
+                "业务理解",
+                f"- 目标: {goals or '评估业务需求对应的技术改造范围'}",
+                "",
+                "方案 1/2 技术改造点",
+                "- Confirmed: 当前没有足够 source-code 引用能确认具体文件。",
+                f"- Inferred: 需要围绕这些技术候选词继续确认影响面: {candidate_terms}",
+                "- Missing: 需要开发确认额度策略、申请流程、前端展示、报送或下游接口是否在当前 repo 覆盖。",
+                "",
+                "BE 人天 / FE 人天",
+                option_lines or "- 单方案: BE 3-6 PD, FE 1-3 PD，低置信度。",
+                "",
+                "Confirmed / Inferred / Missing Evidence",
+                missing_lines,
+                "",
+                "Assumptions / Risks",
+                "- 这是 planning-grade 低置信度估算，不替代 Dev final sizing。",
+                "- 如果涉及授信引擎、额度模型、报送或多产品额度联动，BE 复杂度应按高复杂度处理。",
+                "",
+                "Confirmation Questions",
+                "- 方案 1 和方案 2 是否二选一，还是都需要落地?",
+                "- 额度策略是否只改参数，还是需要新增产品/子产品额度模型?",
+                "- 是否需要前端新增 cashline 申请入口或额度解释文案?",
+            ]
+        )
+    return "\n".join(
+        [
+            "Business Understanding",
+            f"- Goals: {', '.join(str(item) for item in business_plan.get('business_goals') or [])}",
+            "",
+            "Option Technical Changes",
+            "- Confirmed: No concrete source-code references were found.",
+            f"- Inferred: Continue validation around these technical candidates: {candidate_terms}",
+            "- Missing: Dev confirmation is required for limit strategy, application flow, FE display, and downstream reporting impact.",
+            "",
+            "BE / FE Person-days",
+            option_lines or "- Single option: BE 3-6 PD, FE 1-3 PD, low confidence.",
+            "",
+            "Confirmed / Inferred / Missing Evidence",
+            missing_lines,
+            "",
+            "Assumptions / Risks",
+            "- This is a planning-grade low-confidence estimate and does not replace Dev final sizing.",
+        ]
+    )
+
+
+def _build_source_code_qa_effort_structured_assessment(
+    *,
+    result: dict[str, Any],
+    language: str,
+    business_plan: dict[str, Any],
+    technical_candidates: dict[str, Any],
+    estimation_rubric: dict[str, Any],
+    missing_evidence: list[str],
+    confidence: str,
+) -> dict[str, Any]:
+    matches = result.get("matches") if isinstance(result.get("matches"), list) else []
+    confirmed_evidence = [
+        {
+            "repo": str(match.get("repo") or ""),
+            "path": str(match.get("path") or ""),
+            "line_start": match.get("line_start") or 0,
+            "line_end": match.get("line_end") or 0,
+        }
+        for match in matches[:8]
+        if isinstance(match, dict)
+    ]
+    typed_candidates = technical_candidates.get("typed_candidates") if isinstance(technical_candidates.get("typed_candidates"), dict) else {}
+    inferred_impact = [
+        {
+            "surface": surface,
+            "terms": [str(item) for item in (terms or [])[:12]],
+        }
+        for surface, terms in typed_candidates.items()
+        if terms
+    ]
+    return {
+        "version": 1,
+        "language": language,
+        "confidence": confidence,
+        "business_understanding": {
+            "goals": business_plan.get("business_goals") or [],
+            "user_segments": business_plan.get("user_segments") or [],
+            "products": business_plan.get("products") or [],
+            "limit_types": business_plan.get("limit_types") or [],
+            "flow_changes": business_plan.get("flow_changes") or [],
+            "decision_points": business_plan.get("decision_points") or [],
+        },
+        "option_impacts": [
+            {
+                "id": item.get("id") or "",
+                "label": item.get("label") or "",
+                "summary": item.get("summary") or "",
+            }
+            for item in (business_plan.get("options") or [])
+            if isinstance(item, dict)
+        ],
+        "be_estimate": [
+            {
+                "option_id": item.get("id") or "",
+                "person_days": item.get("be_person_days") or "",
+                "basis": item.get("basis") or "",
+            }
+            for item in (estimation_rubric.get("option_estimates") or [])
+            if isinstance(item, dict)
+        ],
+        "fe_estimate": [
+            {
+                "option_id": item.get("id") or "",
+                "person_days": item.get("fe_person_days") or "",
+                "basis": item.get("basis") or "",
+            }
+            for item in (estimation_rubric.get("option_estimates") or [])
+            if isinstance(item, dict)
+        ],
+        "confirmed_evidence": confirmed_evidence,
+        "inferred_impact": inferred_impact,
+        "missing_evidence": missing_evidence,
+        "questions": [
+            "Are the listed options alternatives, or should more than one be implemented?",
+            "Is the requested limit change a config-only rule update or a new limit model?",
+            "Does the change require FE display, application entry, or customer education copy?",
+        ],
+        "dictionary_entries": technical_candidates.get("matched_dictionary_entries") or [],
+    }
+
+
+def _normalize_source_code_qa_effort_assessment_result(
+    *,
+    result: dict[str, Any],
+    language: str,
+    business_plan: dict[str, Any],
+    technical_candidates: dict[str, Any],
+    estimation_rubric: dict[str, Any],
+) -> dict[str, Any]:
+    normalized = dict(result or {})
+    missing_evidence = _source_code_qa_effort_missing_evidence(
+        result=normalized,
+        technical_candidates=technical_candidates,
+    )
+    confidence = _source_code_qa_effort_confidence(normalized, missing_evidence)
+    if str(normalized.get("status") or "").lower() == "no_match":
+        normalized["status"] = "ok"
+        normalized["effort_evidence_status"] = "warning"
+        normalized["summary"] = "Effort assessment completed with low confidence because source-code evidence is missing."
+        normalized["llm_answer"] = _source_code_qa_effort_fallback_answer(
+            language=language,
+            business_plan=business_plan,
+            technical_candidates=technical_candidates,
+            estimation_rubric=estimation_rubric,
+            missing_evidence=missing_evidence,
+        )
+    else:
+        normalized["effort_evidence_status"] = "warning" if missing_evidence else "confirmed"
+        if not normalized.get("summary"):
+            normalized["summary"] = "Effort assessment completed."
+    normalized["assessment_confidence"] = confidence
+    normalized["missing_evidence"] = missing_evidence
+    normalized["structured_assessment"] = _build_source_code_qa_effort_structured_assessment(
+        result=normalized,
+        language=language,
+        business_plan=business_plan,
+        technical_candidates=technical_candidates,
+        estimation_rubric=estimation_rubric,
+        missing_evidence=missing_evidence,
+        confidence=confidence,
+    )
+    return normalized
+
+
 def _compact_source_code_qa_session_payload(result: dict[str, Any]) -> dict[str, Any]:
     structured = result.get("structured_answer") if isinstance(result.get("structured_answer"), dict) else {}
     answer_claim_check = result.get("answer_claim_check") if isinstance(result.get("answer_claim_check"), dict) else {}
@@ -7236,6 +8165,7 @@ def _classify_source_code_qa_job_error(message: str) -> dict[str, Any]:
 
 def _public_source_code_qa_job_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     payload = dict(snapshot)
+    payload.pop("owner_email", None)
     payload.setdefault("status", "ok")
     payload["progress"] = snapshot.get("progress") if isinstance(snapshot.get("progress"), dict) else {
         "stage": snapshot.get("stage") or "",
@@ -7270,6 +8200,17 @@ def _public_source_code_qa_job_snapshot(snapshot: dict[str, Any]) -> dict[str, A
             if not payload.get(key):
                 payload[key] = value
     return payload
+
+
+def _source_code_qa_job_snapshot_for_current_user(job_id: str) -> dict[str, Any] | None:
+    snapshot = current_app.config["JOB_STORE"].snapshot(job_id)
+    if snapshot is None or snapshot.get("action") != "source-code-qa-query":
+        return None
+    owner_email = str(snapshot.get("owner_email") or "").strip().lower()
+    current_email = _current_google_email()
+    if owner_email and owner_email != current_email and not _can_manage_source_code_qa(current_app.config["SETTINGS"]):
+        return None
+    return snapshot
 
 
 def _serialize_results(results: list[object], *, include_skipped: bool = True) -> list[dict[str, Any]]:
@@ -7435,6 +8376,117 @@ def _run_source_code_qa_query_job(app: Flask, job_id: str, payload: dict[str, An
             job_store.fail(job_id, str(error), **_classify_source_code_qa_job_error(str(error)))
         except Exception as error:  # pragma: no cover - defensive guard for background worker failures.
             app.logger.exception("Source code QA query job failed unexpectedly.")
+            message = f"Unexpected error: {error}"
+            job_store.fail(job_id, message, **_classify_source_code_qa_job_error(message))
+
+
+def _run_source_code_qa_effort_assessment_job(app: Flask, job_id: str, payload: dict[str, Any]) -> None:
+    with app.app_context():
+        job_store: JobStore = app.config["JOB_STORE"]
+
+        def progress_callback(stage: str, message: str, current: int, total: int) -> None:
+            job_store.update(
+                job_id,
+                state="running",
+                stage=stage,
+                message=message,
+                current=current,
+                total=total,
+            )
+
+        try:
+            if not _source_code_qa_provider_available(payload.get("llm_provider")):
+                raise ToolError("Selected Source Code Q&A model is unavailable.")
+            service = _build_source_code_qa_service(payload.get("llm_provider"))
+            pm_team = str(payload.get("pm_team") or "")
+            country = str(payload.get("country") or "")
+            language = _source_code_qa_effort_assessment_language(payload.get("language"))
+            requirement = str(payload.get("requirement") or "").strip()
+            if not requirement:
+                raise ToolError("Business requirement is empty.")
+            progress_callback("assessment_prompt", "Building optimized effort assessment prompt.", 0, 1)
+            runtime_evidence = _resolve_source_code_qa_runtime_evidence(pm_team=pm_team, country=country)
+            business_plan = _build_source_code_qa_effort_business_plan(
+                pm_team=pm_team,
+                country=country,
+                language=language,
+                requirement=requirement,
+            )
+            technical_candidates = _build_source_code_qa_effort_technical_candidates(
+                pm_team=pm_team,
+                country=country,
+                business_plan=business_plan,
+                requirement=requirement,
+            )
+            estimation_rubric = _build_source_code_qa_effort_estimation_rubric(
+                business_plan=business_plan,
+                technical_candidates=technical_candidates,
+            )
+            optimized_prompt = _build_source_code_qa_effort_assessment_prompt(
+                pm_team=pm_team,
+                country=country,
+                language=language,
+                requirement=requirement,
+                llm_provider=str(payload.get("llm_provider") or ""),
+                runtime_evidence=runtime_evidence,
+                business_plan=business_plan,
+                technical_candidates=technical_candidates,
+                estimation_rubric=estimation_rubric,
+            )
+            result = service.query(
+                pm_team=pm_team,
+                country=country,
+                question=optimized_prompt,
+                answer_mode="auto",
+                llm_budget_mode="auto",
+                query_mode="deep",
+                conversation_context=None,
+                attachments=[],
+                runtime_evidence=runtime_evidence,
+                progress_callback=progress_callback,
+            )
+            result = _normalize_source_code_qa_effort_assessment_result(
+                result=result,
+                language=language,
+                business_plan=business_plan,
+                technical_candidates=technical_candidates,
+                estimation_rubric=estimation_rubric,
+            )
+            result["assessment"] = {
+                "type": "effort_assessment",
+                "pm_team": pm_team,
+                "country": country,
+                "language": language,
+                "requirement": requirement,
+                "business_plan": business_plan,
+                "technical_candidates": technical_candidates,
+                "estimation_rubric": estimation_rubric,
+                "structured_assessment": result.get("structured_assessment") or {},
+                "confidence": result.get("assessment_confidence") or "low",
+                "missing_evidence": result.get("missing_evidence") or [],
+                "evidence_status": result.get("effort_evidence_status") or "warning",
+            }
+            result["runtime_evidence"] = _source_code_qa_public_runtime_evidence(runtime_evidence)
+            status = str(result.get("status") or "ok")
+            notice_tone = "warning" if result.get("effort_evidence_status") == "warning" else ("success" if status == "ok" else "warning")
+            job_store.complete(
+                job_id,
+                results=[result],
+                notice={
+                    "title": "Effort Assessment",
+                    "tone": notice_tone,
+                    "summary": result.get("summary") or "Effort assessment completed.",
+                    "details": [
+                        f"Status: {status}",
+                        f"Evidence: {result.get('effort_evidence_status') or 'n/a'}",
+                        f"Trace: {result.get('trace_id') or 'n/a'}",
+                    ],
+                },
+            )
+        except ToolError as error:
+            job_store.fail(job_id, str(error), **_classify_source_code_qa_job_error(str(error)))
+        except Exception as error:  # pragma: no cover - defensive guard for background worker failures.
+            app.logger.exception("Source code QA effort assessment job failed unexpectedly.")
             message = f"Unexpected error: {error}"
             job_store.fail(job_id, message, **_classify_source_code_qa_job_error(message))
 
@@ -8182,8 +9234,6 @@ def _load_team_dashboard_link_biz_jira_rows(settings: Settings, config: dict[str
             task = _normalize_team_dashboard_task(raw_task)
             if str((task.get("parent_project") or {}).get("bpmis_id") or "").strip():
                 continue
-            if _team_dashboard_link_biz_title_excluded(str(task.get("jira_title") or "")):
-                continue
             status_key = str(task.get("jira_status") or "").strip().casefold()
             if status_key not in TEAM_DASHBOARD_UNDER_PRD_STATUSES and status_key in TEAM_DASHBOARD_EXCLUDED_PENDING_STATUSES:
                 continue
@@ -8211,7 +9261,7 @@ def _build_team_dashboard_link_biz_project_rows(team_payloads: list[dict[str, An
                     candidate_projects.append(project)
                     continue
                 for ticket in tickets:
-                    if isinstance(ticket, dict) and not _team_dashboard_link_biz_title_excluded(str(ticket.get("jira_title") or "")):
+                    if isinstance(ticket, dict):
                         unlinked_items.append((team_key, ticket))
 
     rows: list[dict[str, Any]] = []
@@ -8230,13 +9280,21 @@ def _build_team_dashboard_link_biz_project_rows(team_payloads: list[dict[str, An
     return rows
 
 
-def _team_dashboard_link_biz_row_from_ticket(team_key: str, ticket: dict[str, Any], suggestion: dict[str, Any]) -> dict[str, Any]:
+def _team_dashboard_link_biz_row_from_ticket(
+    team_key: str,
+    ticket: dict[str, Any],
+    suggestion: dict[str, Any],
+    *,
+    select_options: list[dict[str, str]] | None = None,
+) -> dict[str, Any]:
     jira_id = str(ticket.get("jira_id") or ticket.get("issue_id") or "").strip()
-    return {
+    jira_title = str(ticket.get("jira_title") or "").strip()
+    special_version = _team_dashboard_link_biz_special_version(jira_title)
+    row = {
         "team_key": team_key,
         "jira_id": jira_id,
         "jira_link": str(ticket.get("jira_link") or (f"{_jira_browse_base_url()}{jira_id}" if jira_id else "")).strip(),
-        "jira_title": str(ticket.get("jira_title") or "").strip(),
+        "jira_title": jira_title,
         "reporter_email": str(ticket.get("pm_email") or ticket.get("reporter_email") or "").strip().lower(),
         "suggested_bpmis_id": str(suggestion.get("bpmis_id") or ""),
         "suggested_project_title": str(suggestion.get("project_name") or ""),
@@ -8244,6 +9302,12 @@ def _team_dashboard_link_biz_row_from_ticket(team_key: str, ticket: dict[str, An
         "match_source": str(suggestion.get("match_source") or ""),
         "select_biz_project_options": list(suggestion.get("select_biz_project_options") or []),
     }
+    if special_version:
+        row["special_version"] = special_version
+        row["match_source"] = row["match_source"] or "version"
+    if select_options is not None:
+        row["select_biz_project_options"] = select_options
+    return row
 
 
 def _suggest_team_dashboard_link_biz_project_rows(
@@ -8277,7 +9341,30 @@ def _suggest_team_dashboard_link_biz_project_rows(
     )
     suggested_rows: list[dict[str, Any]] = []
     all_options: dict[str, dict[str, str]] = {}
+    version_candidate_count = 0
+    version_search_count = 0
+    version_option_cache: dict[str, list[dict[str, str]]] = {}
     for team_key, ticket in parsed_tickets:
+        special_version = _team_dashboard_link_biz_special_version(ticket["jira_title"])
+        if special_version:
+            version_search_count += 1
+            if special_version not in version_option_cache:
+                version_option_cache[special_version] = _team_dashboard_link_biz_version_project_options(
+                    bpmis_client,
+                    special_version,
+                )
+            version_options = version_option_cache[special_version]
+            version_candidate_count += len(version_options)
+            suggestion = version_options[0] if version_options else {}
+            suggested_rows.append(
+                _team_dashboard_link_biz_row_from_ticket(
+                    team_key,
+                    ticket,
+                    suggestion,
+                    select_options=version_options,
+                )
+            )
+            continue
         pm_candidates = candidates_by_pm.get(ticket["pm_email"], [])
         row_options = _team_dashboard_link_biz_project_options(pm_candidates)
         for option in row_options:
@@ -8299,6 +9386,8 @@ def _suggest_team_dashboard_link_biz_project_rows(
         "team_candidate_count": len(unique_candidate_ids),
         "keyword_candidate_count": 0,
         "keyword_search_count": 0,
+        "version_candidate_count": version_candidate_count,
+        "version_search_count": version_search_count,
         "select_biz_project_options": sorted(
             all_options.values(),
             key=lambda item: (str(item.get("project_name") or "").casefold(), str(item.get("bpmis_id") or "").casefold()),
@@ -8454,6 +9543,85 @@ def _team_dashboard_link_biz_keywords(title: str) -> str:
 def _team_dashboard_link_biz_title_excluded(title: str) -> bool:
     normalized = str(title or "").casefold()
     return any(phrase in normalized for phrase in TEAM_DASHBOARD_LINK_BIZ_EXCLUDED_TITLE_PHRASES)
+
+
+def _team_dashboard_link_biz_special_version(title: str) -> str:
+    if not _team_dashboard_link_biz_title_excluded(title):
+        return ""
+    match = re.search(r"(?<!\d)(\d+\.\d+\.\d{2})(?!\d)", str(title or ""))
+    return match.group(1) if match else ""
+
+
+def _team_dashboard_link_biz_version_project_options(bpmis_client: Any, version: str) -> list[dict[str, str]]:
+    prefix = f"AF_v{version}"
+    if not version or not hasattr(bpmis_client, "search_versions") or not hasattr(bpmis_client, "list_issues_for_version"):
+        return []
+    try:
+        version_rows = bpmis_client.search_versions(prefix) or []
+    except Exception:  # noqa: BLE001 - version hints are best-effort; normal linking must still work.
+        return []
+
+    matching_versions: list[dict[str, str]] = []
+    for raw_version in version_rows:
+        if not isinstance(raw_version, dict):
+            continue
+        version_item = _serialize_productization_version_candidate(raw_version)
+        version_name = str(version_item.get("version_name") or "").strip()
+        version_id = str(version_item.get("version_id") or "").strip()
+        if version_id and version_name.casefold().startswith(prefix.casefold()):
+            matching_versions.append(version_item)
+
+    options: dict[str, dict[str, str]] = {}
+    for version_item in matching_versions:
+        version_id = str(version_item.get("version_id") or "").strip()
+        if not version_id:
+            continue
+        try:
+            issue_rows = bpmis_client.list_issues_for_version(version_id) or []
+        except Exception:  # noqa: BLE001 - ignore one bad version and keep other candidate versions usable.
+            continue
+        for issue in issue_rows:
+            if not isinstance(issue, dict):
+                continue
+            for parent_id in sorted(_extract_parent_issue_ids_from_any(issue)):
+                if parent_id in options:
+                    continue
+                project = _team_dashboard_link_biz_project_option_from_parent(bpmis_client, parent_id)
+                if project:
+                    options[parent_id] = project
+    return sorted(options.values(), key=lambda item: (item["project_name"].casefold(), item["bpmis_id"].casefold()))
+
+
+def _team_dashboard_link_biz_project_option_from_parent(bpmis_client: Any, parent_id: str) -> dict[str, str]:
+    bpmis_id = str(parent_id or "").strip()
+    if not bpmis_id:
+        return {}
+    detail: dict[str, Any] = {}
+    if hasattr(bpmis_client, "get_issue_detail"):
+        try:
+            raw_detail = bpmis_client.get_issue_detail(bpmis_id)
+            detail = raw_detail if isinstance(raw_detail, dict) else {}
+        except Exception:  # noqa: BLE001 - a parent ID without detail should not break all suggestions.
+            detail = {}
+    project = _normalize_team_dashboard_project({**detail, "bpmis_id": bpmis_id, "issue_id": bpmis_id})
+    project_name = str(project.get("project_name") or "").strip() or _extract_first_text(
+        detail,
+        "project_name",
+        "summary",
+        "title",
+        "name",
+        "issueName",
+    )
+    if not project_name:
+        project_name = f"BPMIS {bpmis_id}"
+    return {
+        "bpmis_id": bpmis_id,
+        "project_name": project_name,
+        "team_key": "AF",
+        "market": str(project.get("market") or "").strip(),
+        "match_score": 1.0,
+        "match_source": "version",
+    }
 
 
 def _normalize_team_dashboard_link_match_text(value: str) -> str:

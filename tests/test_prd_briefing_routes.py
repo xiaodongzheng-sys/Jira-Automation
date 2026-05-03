@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from bpmis_jira_tool.errors import ToolError
 from bpmis_jira_tool.web import create_app
 from prd_briefing import blueprint as prd_blueprint_module
 
@@ -657,6 +658,64 @@ class PRDBriefingRouteTests(unittest.TestCase):
         self.assertTrue(payload["cached"])
         self.assertEqual(payload["review"]["result_markdown"], "### Remote Review")
         self.assertEqual(fake_client.payload["language"], "en")
+
+    def test_prd_self_assessment_external_failure_matrix_returns_stable_json(self):
+        class FailingService:
+            def __init__(self, message):
+                self.message = message
+
+            def review_url(self, _request):
+                raise ToolError(self.message)
+
+            def summarize_url(self, _request):
+                raise ToolError(self.message)
+
+        scenarios = [
+            ("review", "/api/prd-self-assessment/review", "PRD upstream timed out."),
+            ("summary", "/api/prd-self-assessment/summary", "PRD upstream returned 403."),
+            ("summary", "/api/prd-self-assessment/summary", "PRD upstream returned an empty response."),
+        ]
+        for action, path, message in scenarios:
+            with self.subTest(action=action, message=message), patch(
+                "bpmis_jira_tool.web._build_prd_review_service",
+                return_value=FailingService(message),
+            ):
+                with self.app.test_client() as client:
+                    with client.session_transaction() as session:
+                        session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
+                        session["google_credentials"] = {"token": "x"}
+                    response = client.post(path, json={"prd_url": "https://example.atlassian.net/wiki/pages/123", "language": "en"})
+
+            self.assertEqual(response.status_code, 400)
+            payload = response.get_json()
+            self.assertEqual(payload["status"], "error")
+            self.assertIn(message, payload["message"])
+            serialized = str(payload).lower()
+            self.assertNotIn("traceback", serialized)
+            self.assertNotIn("secret", serialized)
+            self.assertNotIn("token", serialized)
+
+    @patch("bpmis_jira_tool.web._local_agent_source_code_qa_enabled", return_value=True)
+    def test_prd_self_assessment_local_agent_timeout_returns_stable_json(self, _mock_enabled):
+        class TimeoutLocalAgentClient:
+            def prd_self_assessment_review(self, _payload):
+                raise ToolError("local-agent request timed out.")
+
+        with patch("bpmis_jira_tool.web._build_local_agent_client", return_value=TimeoutLocalAgentClient()):
+            with self.app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
+                    session["google_credentials"] = {"token": "x"}
+                response = client.post(
+                    "/api/prd-self-assessment/review",
+                    json={"prd_url": "https://example.atlassian.net/wiki/pages/123", "language": "en"},
+                )
+
+        self.assertEqual(response.status_code, 400)
+        payload = response.get_json()
+        self.assertEqual(payload["status"], "error")
+        self.assertIn("timed out", payload["message"])
+        self.assertNotIn("traceback", str(payload).lower())
 
     @patch("prd_briefing.blueprint._build_service", return_value=FakeImageProxyService())
     def test_image_proxy_allows_confluence_attachment_without_session(self, mock_service):
