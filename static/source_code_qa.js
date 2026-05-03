@@ -1696,7 +1696,7 @@
     renderFallbackNotice({});
     renderLlmAnswer({});
     if (selectedLlmProvider() === 'codex_cli_bridge') {
-      renderLiveAnswer('Codex is preparing the read-only investigation...', { pending: true });
+      renderLiveAnswer('Codex is preparing a scoped read-only search...', { pending: true });
     } else {
       renderLiveAnswer('');
     }
@@ -1823,7 +1823,7 @@
       auto_sync: 'Sync Check',
       evidence_pack: 'Building Evidence',
       auto_deep: 'Deep Verification',
-      llm_generation: 'Codex Reasoning',
+      llm_generation: 'Scoped Codex Search',
       codex_session_lock: 'Waiting for Codex Session',
       codex_deep_investigation: 'Deep Investigation',
       completed: 'Quality Check Complete',

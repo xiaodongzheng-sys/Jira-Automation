@@ -7875,6 +7875,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         ]
 
         candidate_paths = self.service._codex_candidate_paths(entries=[entry], key=key, matches=matches)
+        scope_roots = self.service._codex_scope_roots(entries=[entry], key=key)
         brief = self.service._codex_investigation_brief(
             pm_team="AF",
             country="All",
@@ -7882,6 +7883,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             candidate_paths=candidate_paths,
             evidence_pack={"entry_points": ["IssueRepository [S1]"]},
             quality_gate={"status": "sufficient", "confidence": "high", "missing": []},
+            scope_roots=scope_roots,
             followup_context={
                 "question": "previous question",
                 "answer": "previous answer",
@@ -7925,7 +7927,10 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertIn("missing_production_evidence", brief)
         self.assertIn("source_code_evidence must name concrete files/functions/classes/fields/tables or APIs", brief)
         self.assertIn("full rule/config definitions from status-only migration updates", brief)
-        self.assertIn("Candidate path layers:", brief)
+        self.assertIn("Strict scope boundary: search only the allowed scope roots", brief)
+        self.assertIn("Scoped Codex search allowlist:", brief)
+        self.assertIn("Starting path hints from local retrieval:", brief)
+        self.assertIn("Candidate paths are starting hints from local retrieval", brief)
         self.assertIn("current_high_confidence_paths", brief)
         self.assertIn(str(repo_path), brief)
         self.assertIn("relative_root=AF-All", brief)
@@ -8012,6 +8017,9 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertRegex(prompt_logs[0]["prompt_sha256"], r"^[0-9a-f]{16}$")
         self.assertEqual(prompt_logs[0]["candidate_path_count"], 1)
         self.assertEqual(prompt_logs[0]["candidate_repo_count"], 1)
+        self.assertEqual(prompt_logs[0]["scope_repo_count"], 1)
+        self.assertEqual(prompt_logs[0]["retrieval_role"], "hints")
+        self.assertEqual(prompt_logs[0]["repair_policy"], "severe_only")
         self.assertGreater(prompt_logs[0]["prompt_chars"], 0)
         self.assertGreater(prompt_logs[0]["prompt_bytes"], 0)
         self.assertGreater(prompt_logs[0]["estimated_prompt_tokens"], 0)
@@ -8125,10 +8133,83 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             '"missing_evidence":[],"confidence":"high"}'
         )
 
-        validation = self.service._validate_codex_citations(answer, candidate_paths, [{"repo": "Portal Repo", "path": "repository/IssueRepository.java"}])
+        validation = self.service._validate_codex_citations(
+            answer,
+            candidate_paths,
+            [{"repo": "Portal Repo", "path": "repository/IssueRepository.java"}],
+            scope_roots=self.service._codex_scope_roots(entries=[entry], key=key),
+        )
 
         self.assertEqual(validation["status"], "ok")
         self.assertEqual(validation["cited_path_count"], 1)
+        self.assertEqual(validation["scoped_file_refs"][0]["path"], "repository/IssueRepository.java")
+
+    def test_codex_citation_validation_accepts_scoped_file_outside_candidate_paths(self):
+        entry = RepositoryEntry("Portal Repo", "https://git.example.com/team/portal.git")
+        key = "AF:All"
+        repo_path = self.service._repo_path(key, entry)
+        candidate_file = repo_path / "repository" / "IssueRepository.java"
+        service_file = repo_path / "service" / "IssueService.java"
+        candidate_file.parent.mkdir(parents=True)
+        service_file.parent.mkdir(parents=True)
+        candidate_file.write_text("class IssueRepository {}\n", encoding="utf-8")
+        service_file.write_text("class IssueService {\n  void route() {}\n}\n", encoding="utf-8")
+        candidate_paths = self.service._codex_candidate_paths(
+            entries=[entry],
+            key=key,
+            matches=[{"repo": "Portal Repo", "path": "repository/IssueRepository.java", "line_start": 1, "line_end": 1}],
+        )
+        answer = (
+            '{"direct_answer":"IssueService routes the request.",'
+            '"claims":[{"text":"IssueService routes the request",'
+            '"citations":["service/IssueService.java:1-2"]}],'
+            '"missing_evidence":[],"confidence":"high"}'
+        )
+
+        validation = self.service._validate_codex_citations(
+            answer,
+            candidate_paths,
+            [{"repo": "Portal Repo", "path": "repository/IssueRepository.java"}],
+            scope_roots=self.service._codex_scope_roots(entries=[entry], key=key),
+        )
+
+        self.assertEqual(validation["status"], "ok")
+        self.assertEqual(validation["scoped_file_refs"][0]["path"], "service/IssueService.java")
+
+    def test_codex_citation_validation_rejects_out_of_scope_reference(self):
+        allowed_entry = RepositoryEntry("Portal Repo", "https://git.example.com/team/portal.git")
+        other_entry = RepositoryEntry("Other Repo", "https://git.example.com/team/other.git")
+        allowed_key = "AF:All"
+        other_key = "GRC:All"
+        allowed_root = self.service._repo_path(allowed_key, allowed_entry)
+        other_root = self.service._repo_path(other_key, other_entry)
+        allowed_file = allowed_root / "repository" / "IssueRepository.java"
+        other_file = other_root / "service" / "OtherService.java"
+        allowed_file.parent.mkdir(parents=True)
+        other_file.parent.mkdir(parents=True)
+        allowed_file.write_text("class IssueRepository {}\n", encoding="utf-8")
+        other_file.write_text("class OtherService {\n  void leak() {}\n}\n", encoding="utf-8")
+        other_ref = other_file.relative_to(self.service.repo_root)
+        candidate_paths = self.service._codex_candidate_paths(
+            entries=[allowed_entry],
+            key=allowed_key,
+            matches=[{"repo": "Portal Repo", "path": "repository/IssueRepository.java", "line_start": 1, "line_end": 1}],
+        )
+        answer = (
+            '{"direct_answer":"OtherService reads issue_table.",'
+            f'"claims":[{{"text":"OtherService reads issue_table from table issue_table","citations":["{other_ref}:1-2"]}}],'
+            '"missing_evidence":[],"confidence":"high"}'
+        )
+
+        validation = self.service._validate_codex_citations(
+            answer,
+            candidate_paths,
+            [{"repo": "Portal Repo", "path": "repository/IssueRepository.java"}],
+            scope_roots=self.service._codex_scope_roots(entries=[allowed_entry], key=allowed_key),
+        )
+
+        self.assertEqual(validation["status"], "needs_citation")
+        self.assertEqual(validation["out_of_scope_refs"][0]["status"], "out_of_scope")
 
     def test_codex_deep_investigation_triggers_on_missing_business_chain(self):
         structured = {
@@ -8161,7 +8242,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertIn("querymerchantinfo", terms)
         self.assertIn("merchantuid", terms)
 
-    def test_codex_raw_passthrough_still_runs_citation_repair(self):
+    def test_codex_raw_passthrough_keeps_mild_citation_warning_without_repair(self):
         service = SourceCodeQAService(
             data_root=Path(self.temp_dir.name),
             team_profiles=TEAM_PROFILE_DEFAULTS,
@@ -8199,8 +8280,98 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             exec_count = len([item for item in calls if "exec" in item[0]])
             if exec_count == 1:
                 Path(output_path).write_text(
-                    '{"direct_answer":"IssueRepository reads issue_table.",'
-                    '"claims":[{"text":"IssueRepository reads issue_table","citations":[]}],'
+                    '{"direct_answer":"IssueRepository is in repository/IssueRepository.java.",'
+                    '"claims":[{"text":"IssueRepository is in repository/IssueRepository.java","citations":[]}],'
+                    '"missing_evidence":[],"confidence":"high"}',
+                    encoding="utf-8",
+                )
+            else:
+                Path(output_path).write_text(
+                    '{"direct_answer":"IssueRepository is in repository/IssueRepository.java.",'
+                    '"claims":[{"text":"IssueRepository is in repository/IssueRepository.java","citations":["S1"]}],'
+                    '"missing_evidence":[],"confidence":"high"}',
+                    encoding="utf-8",
+                )
+            return SimpleNamespace(returncode=0, stdout='{"type":"done"}\n', stderr="")
+
+        with patch("bpmis_jira_tool.source_code_qa.shutil.which", return_value="/usr/local/bin/codex"), patch(
+            "bpmis_jira_tool.source_code_qa.subprocess.run",
+            side_effect=fake_run,
+        ):
+            payload = service._build_llm_answer(
+                entries=[entry],
+                key=key,
+                pm_team="AF",
+                country="All",
+                question="where is IssueRepository",
+                matches=matches,
+                llm_budget_mode="auto",
+                followup_context={"question": "previous", "answer": "previous answer"},
+                requested_answer_mode="auto",
+            )
+
+        exec_calls = [item for item in calls if "exec" in item[0]]
+        self.assertEqual(len(exec_calls), 1)
+        self.assertEqual(payload["llm_route"]["prompt_mode"], "codex_investigation_brief_v5")
+        self.assertIn("candidate_path_layers", payload["llm_route"])
+        self.assertFalse(payload["llm_route"]["codex_repair_attempted"])
+        self.assertTrue(payload["llm_route"]["codex_repair_allowed"])
+        self.assertEqual(payload["llm_route"]["codex_repair_policy"], "severe_only")
+        self.assertEqual(payload["llm_route"]["retrieval_role"], "hints")
+        self.assertEqual(payload["llm_route"]["codex_repair_skipped_reason"], "")
+        self.assertGreater(payload["llm_route"]["codex_validation_warning_count"], 0)
+        self.assertEqual(payload["answer_claim_check"]["status"], "ok")
+        self.assertEqual(payload["codex_cli_summary"]["citation_validation_status"], "warn")
+        self.assertEqual(payload["codex_cli_summary"]["repair_policy"], "severe_only")
+        self.assertEqual(payload["codex_cli_summary"]["retrieval_role"], "hints")
+        self.assertGreater(payload["codex_cli_summary"]["warning_count"], 0)
+        self.assertEqual(payload["codex_cli_summary"]["repair_skipped_reason"], "")
+        self.assertEqual(payload["answer_contract"]["status"], "model_answer")
+        self.assertIn("IssueRepository is in repository/IssueRepository.java", payload["llm_answer"])
+
+    def test_codex_out_of_scope_citation_triggers_severe_repair(self):
+        service = SourceCodeQAService(
+            data_root=Path(self.temp_dir.name),
+            team_profiles=TEAM_PROFILE_DEFAULTS,
+            llm_provider="codex_cli_bridge",
+            gitlab_token="secret-token",
+            git_timeout_seconds=5,
+            max_file_bytes=200_000,
+        )
+        entry = RepositoryEntry("Portal Repo", "https://git.example.com/team/portal.git")
+        key = "AF:All"
+        repo_path = service._repo_path(key, entry)
+        source_file = repo_path / "repository" / "IssueRepository.java"
+        outside_file = Path(self.temp_dir.name) / "outside" / "Outside.java"
+        source_file.parent.mkdir(parents=True)
+        outside_file.parent.mkdir(parents=True)
+        source_file.write_text("class IssueRepository {\n  void find(){ jdbc.query(\"select * from issue_table\"); }\n}\n", encoding="utf-8")
+        outside_file.write_text("class Outside {\n  void leak() {}\n}\n", encoding="utf-8")
+        matches = [
+            {
+                "repo": "Portal Repo",
+                "path": "repository/IssueRepository.java",
+                "line_start": 1,
+                "line_end": 3,
+                "retrieval": "persistent_index",
+                "trace_stage": "direct",
+                "reason": "repository and table matched",
+                "score": 10,
+                "snippet": "class IssueRepository { void find(){ jdbc.query(\"select * from issue_table\"); } }",
+            }
+        ]
+        calls = []
+
+        def fake_run(command, **kwargs):
+            calls.append((command, kwargs))
+            if "login" in command and "status" in command:
+                return SimpleNamespace(returncode=0, stdout="Logged in using ChatGPT\n", stderr="")
+            output_path = command[command.index("--output-last-message") + 1]
+            exec_count = len([item for item in calls if "exec" in item[0]])
+            if exec_count == 1:
+                Path(output_path).write_text(
+                    '{"direct_answer":"Outside handles issue_table.",'
+                    f'"claims":[{{"text":"Outside handles issue_table","citations":["{outside_file}:1-2"]}}],'
                     '"missing_evidence":[],"confidence":"high"}',
                     encoding="utf-8",
                 )
@@ -8222,25 +8393,19 @@ class SourceCodeQAServiceTests(unittest.TestCase):
                 key=key,
                 pm_team="AF",
                 country="All",
-                question="what table does IssueRepository read",
+                question="why does IssueRepository read issue_table",
                 matches=matches,
                 llm_budget_mode="auto",
-                followup_context={"question": "previous", "answer": "previous answer"},
+                followup_context={},
                 requested_answer_mode="auto",
             )
 
         exec_calls = [item for item in calls if "exec" in item[0]]
         self.assertEqual(len(exec_calls), 2)
-        self.assertEqual(payload["llm_route"]["prompt_mode"], "codex_investigation_brief_v5")
-        self.assertIn("candidate_path_layers", payload["llm_route"])
         self.assertTrue(payload["llm_route"]["codex_repair_attempted"])
-        self.assertTrue(payload["llm_route"]["codex_repair_allowed"])
-        self.assertEqual(payload["llm_route"]["codex_repair_skipped_reason"], "")
-        self.assertEqual(payload["answer_claim_check"]["status"], "ok")
+        self.assertIn("out_of_scope_citations", payload["llm_route"]["codex_repair_reason"])
         self.assertEqual(payload["codex_cli_summary"]["citation_validation_status"], "ok")
-        self.assertEqual(payload["codex_cli_summary"]["repair_skipped_reason"], "")
         self.assertEqual(payload["answer_contract"]["status"], "model_answer")
-        self.assertIn("IssueRepository reads issue_table", payload["llm_answer"])
 
     def test_codex_repair_bad_request_keeps_initial_answer(self):
         service = SourceCodeQAService(
@@ -8255,8 +8420,11 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         key = "AF:All"
         repo_path = service._repo_path(key, entry)
         source_file = repo_path / "repository" / "IssueRepository.java"
+        outside_file = Path(self.temp_dir.name) / "outside-repair" / "Outside.java"
         source_file.parent.mkdir(parents=True)
+        outside_file.parent.mkdir(parents=True)
         source_file.write_text("class IssueRepository {\n  void find(){ jdbc.query(\"select * from issue_table\"); }\n}\n", encoding="utf-8")
+        outside_file.write_text("class Outside {\n  void leak() {}\n}\n", encoding="utf-8")
         matches = [
             {
                 "repo": "Portal Repo",
@@ -8281,7 +8449,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             if exec_count == 1:
                 Path(output_path).write_text(
                     '{"direct_answer":"Initial answer survived repair failure.",'
-                    '"claims":[{"text":"IssueRepository reads issue_table","citations":[]}],'
+                    f'"claims":[{{"text":"IssueRepository reads issue_table","citations":["{outside_file}:1-2"]}}],'
                     '"missing_evidence":[],"confidence":"medium"}',
                     encoding="utf-8",
                 )

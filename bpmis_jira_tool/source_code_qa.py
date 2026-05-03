@@ -4401,7 +4401,10 @@ class SourceCodeQAService:
         if normalized_answer_mode in {ANSWER_MODE_GEMINI, ANSWER_MODE_AUTO}:
             llm_service = self
             payload["llm_provider"] = llm_service.llm_provider.name
-            report("llm_generation", "Calling LLM with retrieved evidence.", 0, 0)
+            if llm_service.llm_provider.name == LLM_PROVIDER_CODEX_CLI_BRIDGE:
+                report("llm_generation", f"Scoped Codex search · {pm_team}:{country}. Retrieval is navigation hints.", 0, 0)
+            else:
+                report("llm_generation", "Calling LLM with retrieved evidence.", 0, 0)
             llm_payload = llm_service._build_llm_answer(
                 entries=query_entries,
                 key=key,
@@ -4425,6 +4428,10 @@ class SourceCodeQAService:
             payload["deadline_seconds"] = 0
             payload["retrieval_latency_ms"] = retrieval_latency_ms
             payload["codex_latency_ms"] = payload.get("llm_latency_ms") if llm_service.llm_provider.name == LLM_PROVIDER_CODEX_CLI_BRIDGE else 0
+            if isinstance(payload.get("llm_route"), dict):
+                payload["llm_route"]["retrieval_hints_ms"] = retrieval_latency_ms
+            if isinstance(payload.get("codex_cli_summary"), dict):
+                payload["codex_cli_summary"]["retrieval_hints_ms"] = retrieval_latency_ms
             payload["background_deep_job_id"] = payload.get("background_deep_job_id") or ""
             payload["evidence_outline"] = self._build_evidence_outline(payload.get("evidence_pack") or evidence_pack, top_matches)
             payload["answer_mode"] = normalized_answer_mode
@@ -15245,6 +15252,7 @@ class SourceCodeQAService:
         candidate_paths = self._codex_candidate_paths(entries=entries, key=key, matches=candidate_matches)
         candidate_paths = self._merge_codex_followup_candidate_paths(candidate_paths, followup_context)
         candidate_path_layers = self._codex_candidate_path_layers(candidate_paths, followup_context)
+        scope_roots = self._codex_scope_roots(entries=entries, key=key)
         llm_route = {
             **llm_route,
             "answer_model": selected_model,
@@ -15253,8 +15261,12 @@ class SourceCodeQAService:
             "candidate_path_layers": candidate_path_layers,
             "candidate_repo_count": len({item.get("repo") for item in candidate_paths}),
             "candidate_path_count": len(candidate_paths),
+            "scope_repo_roots": scope_roots,
+            "scope_repo_count": len(scope_roots),
+            "retrieval_role": "hints",
             "codex_repair_enabled": self.codex_repair_enabled,
             "codex_repair_allowed": bool(self.codex_repair_enabled),
+            "codex_repair_policy": "severe_only",
             "codex_repair_skipped_reason": "",
             "query_mode": query_mode,
             "deadline_seconds": 0,
@@ -15272,6 +15284,7 @@ class SourceCodeQAService:
             followup_context=followup_context,
             attachments=attachments or [],
             runtime_evidence=runtime_evidence or [],
+            scope_roots=scope_roots,
         )
         initial_prompt_stats = self._codex_prompt_stats(prompt_context)
         candidate_repo_count = len({item.get("repo") for item in candidate_paths})
@@ -15290,6 +15303,9 @@ class SourceCodeQAService:
             country=country,
             candidate_path_count=len(candidate_paths),
             candidate_repo_count=candidate_repo_count,
+            scope_repo_count=len(scope_roots),
+            retrieval_role="hints",
+            repair_policy="severe_only",
             prompt_chars=initial_prompt_stats["prompt_chars"],
             prompt_bytes=initial_prompt_stats["prompt_bytes"],
             estimated_prompt_tokens=initial_prompt_stats["estimated_prompt_tokens"],
@@ -15309,7 +15325,7 @@ class SourceCodeQAService:
             cached_structured = self._parse_structured_answer(cached_answer)
             cached_validation = timed_call(
                 "citation_validation",
-                lambda: self._validate_codex_citations(cached_answer, candidate_paths, candidate_paths),
+                lambda: self._validate_codex_citations(cached_answer, candidate_paths, candidate_paths, scope_roots=scope_roots),
                 phase="cache_refresh_check",
             )
             cached_claim_check = self._merge_codex_validation(self._trusted_provider_check(), cached_validation)
@@ -15318,21 +15334,17 @@ class SourceCodeQAService:
                 lambda: self._run_answer_judge(question, cached_answer, evidence_pack, cached_claim_check),
                 phase="cache_refresh_check",
             )
-            cached_needs_refresh = self.codex_repair_enabled and self._codex_deep_investigation_needed(
+            cached_repair_reasons = self._codex_severe_repair_reasons(
                 question=question,
                 answer=cached_answer,
                 structured_answer=cached_structured,
                 quality_gate=cached.get("answer_quality") or quality_gate,
+                evidence_pack=evidence_pack,
                 answer_judge=cached_judge,
                 codex_validation=cached_validation,
+                finish_reason=cached.get("finish_reason") or "cache_hit",
             )
-            cached_needs_refresh = cached_needs_refresh or (
-                self.codex_repair_enabled
-                and (
-                    cached_validation.get("status") not in {"ok", "skipped"}
-                    or str(cached_judge.get("status") or "").lower() in {"repair", "warn", "insufficient_evidence"}
-                )
-            )
+            cached_needs_refresh = self.codex_repair_enabled and bool(cached_repair_reasons)
             if cached_needs_refresh:
                 cached = None
         if cached is not None:
@@ -15340,7 +15352,7 @@ class SourceCodeQAService:
             cached_structured = self._parse_structured_answer(cached_answer)
             cached_validation = timed_call(
                 "citation_validation",
-                lambda: self._validate_codex_citations(cached_answer, candidate_paths, candidate_paths),
+                lambda: self._validate_codex_citations(cached_answer, candidate_paths, candidate_paths, scope_roots=scope_roots),
                 phase="cache_hit",
             )
             cached_claim_check = self._merge_codex_validation(self._trusted_provider_check(), cached_validation)
@@ -15367,8 +15379,18 @@ class SourceCodeQAService:
                 "candidate_path_count": llm_route.get("candidate_path_count"),
                 "cited_path_count": 0,
                 "citation_validation_status": cached_validation.get("status"),
+                "scoped_file_refs": cached_validation.get("scoped_file_refs") or [],
+                "out_of_scope_refs": cached_validation.get("out_of_scope_refs") or [],
+                "warning_count": cached_validation.get("warning_count", 0),
                 "repair_attempted": False,
+                "repair_policy": "severe_only",
+                "repair_reason": "",
+                "retrieval_role": "hints",
+                "scope_repo_count": len(scope_roots),
                 "cli_latency_ms": 0,
+                "codex_initial_ms": 0,
+                "soft_validation_ms": int(timing.get("citation_validation", 0) + timing.get("answer_judge", 0)),
+                "repair_ms": 0,
                 "exit_codes": [],
                 "timeout": False,
             }
@@ -15429,7 +15451,7 @@ class SourceCodeQAService:
         codex_cli_trace = result.payload.get("codex_cli_trace") if isinstance(result.payload.get("codex_cli_trace"), dict) else {}
         codex_validation = timed_call(
             "citation_validation",
-            lambda: self._validate_codex_citations(answer, candidate_paths, candidate_paths),
+            lambda: self._validate_codex_citations(answer, candidate_paths, candidate_paths, scope_roots=scope_roots),
             phase="initial",
         )
         claim_check = self._merge_codex_validation(self._trusted_provider_check(), codex_validation)
@@ -15440,13 +15462,12 @@ class SourceCodeQAService:
         )
         repair_attempted = False
         repair_skipped_reason = ""
+        repair_reason = ""
         deep_investigation_rounds = 0
         deep_investigation_terms: list[str] = []
         deep_investigation_added = 0
         repair_prepare_started = time.perf_counter()
-        repair_issues = list(codex_validation.get("issues") or [])
-        repair_issues.extend(answer_judge.get("issues") or [])
-        deep_needed = self._codex_deep_investigation_needed(
+        deep_needed_raw = self._codex_deep_investigation_needed(
             question=question,
             answer=answer,
             structured_answer=structured_answer,
@@ -15454,7 +15475,23 @@ class SourceCodeQAService:
             answer_judge=answer_judge,
             codex_validation=codex_validation,
         )
+        severe_repair_reasons = self._codex_severe_repair_reasons(
+            question=question,
+            answer=answer,
+            structured_answer=structured_answer,
+            quality_gate=quality_gate,
+            evidence_pack=evidence_pack,
+            answer_judge=answer_judge,
+            codex_validation=codex_validation,
+            finish_reason=finish_reason,
+        )
+        if deep_needed_raw and self._codex_high_risk_question(question):
+            severe_repair_reasons.append("deep_investigation_needed_for_high_risk_question")
+        severe_repair_reasons = list(dict.fromkeys([reason for reason in severe_repair_reasons if reason]))
+        repair_issues = severe_repair_reasons
+        deep_needed = any(reason == "deep_investigation_needed_for_high_risk_question" for reason in severe_repair_reasons)
         repair_issue_count = len([issue for issue in repair_issues if issue]) + (1 if deep_needed else 0)
+        repair_will_run = bool(self.codex_repair_enabled and severe_repair_reasons)
         _log_source_code_qa_timing(
             "codex_repair_prepare",
             elapsed_ms=int((time.perf_counter() - repair_prepare_started) * 1000),
@@ -15464,14 +15501,18 @@ class SourceCodeQAService:
             query_mode=query_mode,
             phase="repair_prepare",
             repair_enabled=self.codex_repair_enabled,
-            repair_will_run=bool(self.codex_repair_enabled and (repair_issues or deep_needed)),
+            repair_policy="severe_only",
+            repair_will_run=repair_will_run,
+            repair_reason="; ".join(severe_repair_reasons[:6]),
             repair_issue_count=repair_issue_count,
             validation_issue_count=len([issue for issue in codex_validation.get("issues") or [] if issue]),
+            validation_warning_count=len([issue for issue in codex_validation.get("warnings") or [] if issue]),
             judge_issue_count=len([issue for issue in answer_judge.get("issues") or [] if issue]),
             deep_investigation_needed=bool(deep_needed),
         )
-        if self.codex_repair_enabled and (repair_issues or deep_needed):
+        if repair_will_run:
             repair_attempted = True
+            repair_reason = "; ".join(severe_repair_reasons[:6])
             if deep_needed:
                 deep_started = time.perf_counter()
                 if progress_callback:
@@ -15580,15 +15621,13 @@ class SourceCodeQAService:
                     deep_investigation_rounds=deep_investigation_rounds,
                     term_count=len(deep_investigation_terms),
                 )
-            repair_context = self._codex_investigation_brief(
+            repair_context = self._codex_repair_brief(
                 pm_team=pm_team,
                 country=country,
                 question=question,
+                initial_answer=answer,
+                scope_roots=scope_roots,
                 candidate_paths=candidate_paths,
-                evidence_pack=evidence_pack,
-                quality_gate=quality_gate,
-                followup_context=followup_context,
-                attachments=attachments or [],
                 runtime_evidence=runtime_evidence or [],
                 repair_issues=list(dict.fromkeys([
                     *[str(issue) for issue in repair_issues if issue],
@@ -15612,10 +15651,14 @@ class SourceCodeQAService:
                 country=country,
                 candidate_path_count=len(candidate_paths),
                 candidate_repo_count=repair_candidate_repo_count,
+                scope_repo_count=len(scope_roots),
+                retrieval_role="hints",
+                repair_policy="severe_only",
                 prompt_chars=repair_prompt_stats["prompt_chars"],
                 prompt_bytes=repair_prompt_stats["prompt_bytes"],
                 estimated_prompt_tokens=repair_prompt_stats["estimated_prompt_tokens"],
                 repair_issue_count=repair_issue_count,
+                repair_reason=repair_reason,
                 deep_investigation_added=deep_investigation_added,
             )
             if int(repair_prompt_stats["estimated_prompt_tokens"]) > self.codex_repair_prompt_token_limit:
@@ -15672,7 +15715,7 @@ class SourceCodeQAService:
                     repair_structured = self._parse_structured_answer(repair_answer)
                     repair_validation = timed_call(
                         "citation_validation",
-                        lambda: self._validate_codex_citations(repair_answer, candidate_paths, candidate_paths),
+                        lambda: self._validate_codex_citations(repair_answer, candidate_paths, candidate_paths, scope_roots=scope_roots),
                         phase="repair",
                     )
                     repair_claim_check = self._merge_codex_validation(self._trusted_provider_check(), repair_validation)
@@ -15712,8 +15755,13 @@ class SourceCodeQAService:
             **llm_route,
             "codex_citation_validation_status": codex_validation.get("status"),
             "codex_repair_attempted": repair_attempted,
+            "codex_repair_policy": "severe_only",
+            "codex_repair_reason": repair_reason,
             "codex_repair_skipped_reason": repair_skipped_reason,
             "codex_cited_path_count": codex_validation.get("cited_path_count", 0),
+            "codex_scoped_file_ref_count": len(codex_validation.get("scoped_file_refs") or []),
+            "codex_out_of_scope_ref_count": len(codex_validation.get("out_of_scope_refs") or []),
+            "codex_validation_warning_count": int(codex_validation.get("warning_count") or 0),
             "codex_deep_investigation_rounds": deep_investigation_rounds,
             "codex_deep_investigation_terms": deep_investigation_terms[:12],
             "codex_deep_investigation_added": deep_investigation_added,
@@ -15738,9 +15786,19 @@ class SourceCodeQAService:
             "candidate_path_count": llm_route.get("candidate_path_count"),
             "cited_path_count": codex_validation.get("cited_path_count", 0),
             "citation_validation_status": codex_validation.get("status"),
+            "scoped_file_refs": codex_validation.get("scoped_file_refs") or [],
+            "out_of_scope_refs": codex_validation.get("out_of_scope_refs") or [],
+            "warning_count": codex_validation.get("warning_count", 0),
             "repair_attempted": repair_attempted,
+            "repair_policy": "severe_only",
+            "repair_reason": repair_reason,
             "repair_skipped_reason": repair_skipped_reason,
+            "retrieval_role": "hints",
+            "scope_repo_count": len(scope_roots),
             "cli_latency_ms": llm_latency_ms,
+            "codex_initial_ms": int(result.latency_ms or 0),
+            "soft_validation_ms": int(timing.get("citation_validation", 0) + timing.get("answer_judge", 0)),
+            "repair_ms": max(0, int(llm_latency_ms or 0) - int(result.latency_ms or 0)),
             "exit_codes": [item.get("exit_code") for item in llm_attempt_log if item.get("exit_code") is not None],
             "timeout": any(bool(item.get("timeout")) for item in llm_attempt_log),
             "stream_message_count": len(codex_cli_trace.get("stream_messages") or []),
@@ -16014,6 +16072,67 @@ class SourceCodeQAService:
         )
         return expanded or selected_matches
 
+    def _codex_repair_brief(
+        self,
+        *,
+        pm_team: str,
+        country: str,
+        question: str,
+        initial_answer: str,
+        scope_roots: list[dict[str, str]],
+        candidate_paths: list[dict[str, Any]],
+        runtime_evidence: list[dict[str, Any]],
+        repair_issues: list[str],
+    ) -> str:
+        answer = str(initial_answer or "").strip()
+        if len(answer) > 7000:
+            answer = f"{answer[:7000]}\n...[initial answer truncated]"
+        lines = [
+            f"Prompt mode: {CODEX_INVESTIGATION_PROMPT_MODE}",
+            f"PM Team: {pm_team}",
+            f"Country: {country}",
+            f"Question: {question}",
+            "",
+            "Task: repair the previous Codex answer only for the severe issues below.",
+            "- Search only the allowed scope roots for this PM team/country.",
+            "- Do not cite sibling PM teams, countries, or repos outside the allowed scope roots.",
+            "- Use candidate paths only as starting hints; run scoped `rg`/file reads when needed.",
+            "- Return the same JSON contract as the initial answer.",
+            "",
+            "Allowed scope roots:",
+        ]
+        for item in scope_roots:
+            lines.append(
+                f"- repo={item.get('repo')} root={item.get('repo_root')} "
+                f"relative_root={item.get('repo_relative_root')}"
+            )
+        lines.extend(["", "Severe repair reasons:"])
+        lines.extend(f"- {issue}" for issue in repair_issues[:10])
+        if candidate_paths:
+            lines.extend(["", "Starting path hints:"])
+            for item in candidate_paths[:10]:
+                lines.append(
+                    f"- {item.get('id')} repo={item.get('repo')} root={item.get('repo_root')} "
+                    f"relative_root={item.get('repo_relative_root')} path={item.get('path')} "
+                    f"file_exists={item.get('file_exists')} lines={item.get('line_start')}-{item.get('line_end')}"
+                )
+        attachment_section = self._context_attachment_section([], runtime_evidence)
+        if attachment_section:
+            lines.extend(["", attachment_section])
+        lines.extend(
+            [
+                "",
+                "Previous answer to repair:",
+                answer or "(empty)",
+                "",
+                "Final answer contract:",
+                '- Return JSON: {"direct_answer":"...","investigation_steps":{"candidate_evidence":["..."],"gap_verification":["..."],"certainty_split":["..."]},"attachment_facts":["..."],"screenshot_evidence":["..."],"source_code_evidence":["file/function/field evidence..."],"confirmed_from_code":["..."],"inferred_from_code":["..."],"not_found":["..."],"missing_production_evidence":["..."],"next_checks":["..."],"claims":[{"text":"...","citations":["S1 or scoped/file/path.java:10-20"]}],"missing_evidence":[],"confidence":"high|medium|low"}.',
+                "- Cite concrete code claims with S ids from starting hints or direct file:line references inside the allowed scope roots.",
+                "- If evidence is missing, state the exact missing link instead of guessing.",
+            ]
+        )
+        return "\n".join(lines)
+
     def _codex_payload(
         self,
         prompt: str,
@@ -16265,6 +16384,24 @@ class SourceCodeQAService:
                 }
             )
         return rows
+
+    def _codex_scope_roots(self, *, entries: list[RepositoryEntry], key: str) -> list[dict[str, str]]:
+        roots: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for entry in entries:
+            repo_root = self._repo_path(key, entry).resolve()
+            root_text = str(repo_root)
+            if root_text in seen:
+                continue
+            seen.add(root_text)
+            roots.append(
+                {
+                    "repo": entry.display_name,
+                    "repo_root": root_text,
+                    "repo_relative_root": self._repo_relative_root(repo_root),
+                }
+            )
+        return roots
 
     def _codex_candidate_path_status(self, repo_root: Path, path: str) -> dict[str, Any]:
         relative_path = str(path or "").strip()
@@ -16542,10 +16679,15 @@ class SourceCodeQAService:
         followup_context: dict[str, Any] | None,
         attachments: list[dict[str, Any]] | None = None,
         runtime_evidence: list[dict[str, Any]] | None = None,
+        scope_roots: list[dict[str, str]] | None = None,
         repair_issues: list[str] | None = None,
     ) -> str:
         candidate_path_layers = self._codex_candidate_path_layers(candidate_paths, followup_context)
         pm_team_label = str(pm_team or "selected").strip() or "selected"
+        normalized_scope_roots = [
+            item for item in (scope_roots or [])
+            if isinstance(item, dict) and str(item.get("repo_root") or "").strip()
+        ]
         lines = [
             f"Prompt mode: {CODEX_INVESTIGATION_PROMPT_MODE}",
             f"PM Team: {pm_team}",
@@ -16579,11 +16721,26 @@ class SourceCodeQAService:
             "- Do not write files, run formatters, install packages, commit, push, deploy, or mutate runtime state.",
             "- Prefer `rg` when available; if it is unavailable, use `grep -R`, `find`, `sed -n`, `nl -ba`, and direct file reads.",
             f"- Codex starts in the synced repos parent directory: {self.repo_root}.",
-            "- Candidate `root` values are absolute synced repo roots. Candidate `relative_root` values are relative to the current repos parent.",
+            "- Strict scope boundary: search only the allowed scope roots listed below for the selected PM team/country.",
+            "- Do not search or cite sibling PM teams, countries, or repos outside the allowed scope roots.",
+            "- Candidate paths are starting hints from local retrieval, not the answer-quality boundary and not the only files you may inspect.",
+            "- Allowed scope `root` values are absolute synced repo roots. Allowed `relative_root` values are relative to the current repos parent.",
             "- Use either `cd relative_root` from the repos parent or use the absolute `root`; do not use only the final directory basename.",
             "- Candidate `path` values are relative to that repo root; inspect files as root/path.",
-            "- First confirm the cwd/repo root, then read at least one candidate file or run one repository search before answering unless there are no candidate paths.",
-            "- Prioritize confirmed_previous_paths, then current_high_confidence_paths, then current_supporting_paths; use maybe_relevant_paths only to redirect a search.",
+            "- First confirm the cwd/repo root, then run at least one `rg` or read at least one file inside the allowed scope before answering.",
+            "- Use confirmed_previous_paths, current_high_confidence_paths, and current_supporting_paths as hints; use maybe_relevant_paths only to redirect a scoped search.",
+            "",
+            "Scoped Codex search allowlist:",
+        ]
+        if normalized_scope_roots:
+            for item in normalized_scope_roots:
+                lines.append(
+                    f"- repo={item.get('repo')} root={item.get('repo_root')} "
+                    f"relative_root={item.get('repo_relative_root')}"
+                )
+        else:
+            lines.append("- No explicit allowlist was provided; stay within the selected synced repository workspace.")
+        lines.extend([
             "",
             "Three-stage investigation required:",
             "- Stage 1 candidate evidence: identify the most relevant files/configs/SQL/tests/routes from candidate paths and direct searches. Record this in investigation_steps.candidate_evidence.",
@@ -16601,8 +16758,8 @@ class SourceCodeQAService:
             "- Do not rewrite code, suggest architectural refactoring, or instruct developers how to build new features unless the user explicitly asks for implementation guidance.",
             "- Maintain an objective, professional, analytical tone.",
             "",
-            "Candidate path layers:",
-        ]
+            "Starting path hints from local retrieval:",
+        ])
         for layer_name, layer_items in candidate_path_layers.items():
             if not layer_items:
                 continue
@@ -16753,10 +16910,13 @@ class SourceCodeQAService:
     def _merge_codex_validation(self, claim_check: dict[str, Any], validation: dict[str, Any]) -> dict[str, Any]:
         merged = dict(claim_check or {})
         merged["codex_citation_validation"] = validation
-        if validation.get("status") == "ok" and str(merged.get("status") or "") == "skipped":
+        if validation.get("status") in {"ok", "warn"} and str(merged.get("status") or "") == "skipped":
             merged["status"] = "ok"
             merged["reason"] = "codex_citation_validation"
-        elif validation.get("status") != "ok":
+        if validation.get("warnings"):
+            warnings = [*(merged.get("warnings") or []), *(validation.get("warnings") or [])]
+            merged["warnings"] = list(dict.fromkeys(str(item) for item in warnings if item))
+        if validation.get("status") == "needs_citation":
             issues = [*(merged.get("issues") or []), *(validation.get("issues") or [])]
             merged["issues"] = list(dict.fromkeys(str(issue) for issue in issues if issue))
             merged["status"] = "needs_citation"
@@ -16778,6 +16938,8 @@ class SourceCodeQAService:
         answer: str,
         candidate_paths: list[dict[str, Any]],
         selected_matches: list[dict[str, Any]],
+        *,
+        scope_roots: list[dict[str, str]] | None = None,
     ) -> dict[str, Any]:
         structured = self._parse_structured_answer(answer)
         claims = [
@@ -16786,8 +16948,11 @@ class SourceCodeQAService:
         ]
         valid_s_ids = {str(index) for index in range(1, len(selected_matches) + 1)}
         issues: list[str] = []
+        warnings: list[str] = []
         unsupported_claims: list[str] = []
         direct_refs: list[dict[str, Any]] = []
+        out_of_scope_refs: list[dict[str, Any]] = []
+        invalid_refs: list[str] = []
         checked_claims = 0
         for claim in claims:
             claim_text = str(claim.get("text") or "").strip()
@@ -16804,30 +16969,38 @@ class SourceCodeQAService:
             ]
             direct_candidates.extend(self._extract_direct_file_refs(claim_text))
             if s_ids and not s_ids <= valid_s_ids:
-                issues.append("Codex cited evidence ids outside the candidate path list")
+                warnings.append("Codex cited evidence ids outside the retrieval hint list")
             valid_s = s_ids & valid_s_ids
             valid_direct = []
-            invalid_direct = []
             for raw_ref in direct_candidates:
-                resolved = self._resolve_codex_file_ref(raw_ref, candidate_paths)
+                resolved = self._resolve_codex_file_ref(raw_ref, candidate_paths, scope_roots=scope_roots)
                 if resolved.get("status") == "ok":
                     valid_direct.append(resolved)
+                elif resolved.get("status") == "out_of_scope":
+                    out_of_scope_refs.append(resolved)
                 else:
-                    invalid_direct.append(raw_ref)
+                    invalid_refs.append(raw_ref)
             direct_refs.extend(valid_direct)
-            if invalid_direct:
-                issues.append(f"Codex returned invalid file references: {', '.join(invalid_direct[:4])}")
             if not valid_s and not valid_direct:
                 unsupported_claims.append(claim_text[:220])
+        if invalid_refs:
+            warnings.append(f"Codex returned unresolved file references: {', '.join(invalid_refs[:4])}")
+        if out_of_scope_refs:
+            issues.append("Codex cited files outside the selected PM team/country scope")
         if unsupported_claims:
-            issues.append("Codex concrete claims need valid S-id or file:line citations")
+            warnings.append("Codex concrete claims lack valid retrieval-hint S-id or scoped file:line citations")
+        status = "needs_citation" if issues else ("warn" if warnings else "ok")
         return {
-            "status": "ok" if not issues else "needs_citation",
+            "status": status,
             "checked_claims": checked_claims,
             "issues": list(dict.fromkeys(issues)),
+            "warnings": list(dict.fromkeys(warnings)),
+            "warning_count": len(list(dict.fromkeys(warnings))),
             "unsupported_claims": unsupported_claims[:6],
             "cited_path_count": len({item.get("absolute_path") for item in direct_refs if item.get("absolute_path")}),
             "direct_file_refs": direct_refs[:12],
+            "scoped_file_refs": direct_refs[:12],
+            "out_of_scope_refs": out_of_scope_refs[:12],
         }
 
     @staticmethod
@@ -16837,7 +17010,13 @@ class SourceCodeQAService:
             refs.append(match.group(1))
         return refs
 
-    def _resolve_codex_file_ref(self, raw_ref: str, candidate_paths: list[dict[str, Any]]) -> dict[str, Any]:
+    def _resolve_codex_file_ref(
+        self,
+        raw_ref: str,
+        candidate_paths: list[dict[str, Any]],
+        *,
+        scope_roots: list[dict[str, str]] | None = None,
+    ) -> dict[str, Any]:
         ref = str(raw_ref or "").strip().strip("[]`'\"")
         match = re.match(r"^(?:(?P<repo>[^:]+):)?(?P<path>.+):(?P<start>\d+)(?:-(?P<end>\d+))?$", ref)
         if not match:
@@ -16847,38 +17026,251 @@ class SourceCodeQAService:
         end = int(match.group("end") or start)
         if start <= 0 or end < start:
             return {"status": "invalid", "reason": "invalid line range", "ref": ref}
-        if path.startswith("/") or ".." in Path(path).parts:
+        if ".." in Path(path).parts:
             return {"status": "invalid", "reason": "unsafe path", "ref": ref}
         repo_hint = str(match.group("repo") or "").strip()
-        repo_roots = []
-        for item in candidate_paths:
-            if repo_hint and repo_hint not in {str(item.get("repo") or ""), Path(str(item.get("repo_root") or "")).name}:
-                continue
+        root_items: list[dict[str, str]] = []
+        if scope_roots:
+            root_items = [dict(item) for item in scope_roots if isinstance(item, dict)]
+        else:
+            seen_roots: set[str] = set()
+            for item in candidate_paths:
+                root = str(item.get("repo_root") or "").strip()
+                if not root or root in seen_roots:
+                    continue
+                seen_roots.add(root)
+                root_items.append(
+                    {
+                        "repo": str(item.get("repo") or ""),
+                        "repo_root": root,
+                        "repo_relative_root": str(item.get("repo_relative_root") or ""),
+                    }
+                )
+        normalized_roots: list[dict[str, Any]] = []
+        for item in root_items:
             root = str(item.get("repo_root") or "").strip()
-            if root and root not in repo_roots:
-                repo_roots.append(root)
-        for root in repo_roots:
-            candidate = (Path(root) / path).resolve()
+            if not root:
+                continue
+            root_path = Path(root).resolve()
+            relative_root = str(item.get("repo_relative_root") or self._repo_relative_root(root_path)).strip()
+            repo = str(item.get("repo") or root_path.name).strip()
+            hint_values = {repo, root_path.name, relative_root, relative_root.replace("/", ":")}
+            if repo_hint and repo_hint not in hint_values:
+                continue
+            normalized_roots.append(
+                {
+                    "repo": repo,
+                    "root": root_path,
+                    "repo_relative_root": relative_root,
+                }
+            )
+        if not normalized_roots:
+            return {"status": "invalid", "reason": "no scoped repo root matched", "ref": ref}
+
+        requested_path = Path(path).expanduser()
+        if requested_path.is_absolute():
+            resolved_requested = requested_path.resolve()
+            for item in normalized_roots:
+                root = item["root"]
+                try:
+                    relative_path = resolved_requested.relative_to(root)
+                except ValueError:
+                    continue
+                return self._codex_resolved_file_ref_payload(
+                    ref=ref,
+                    candidate=resolved_requested,
+                    relative_path=relative_path,
+                    root=root,
+                    repo=str(item["repo"]),
+                    repo_relative_root=str(item["repo_relative_root"]),
+                    start=start,
+                    end=end,
+                )
+            return {"status": "out_of_scope", "reason": "absolute path outside selected scope", "ref": ref, "path": path}
+
+        known_relative_roots = {str(item["repo_relative_root"]) for item in normalized_roots if item.get("repo_relative_root")}
+        for relative_root in known_relative_roots:
+            prefix = f"{relative_root.rstrip('/')}/"
+            if path == relative_root or path.startswith(prefix):
+                trimmed_path = path[len(prefix):] if path.startswith(prefix) else ""
+                for item in normalized_roots:
+                    if str(item.get("repo_relative_root") or "") != relative_root:
+                        continue
+                    candidate = (item["root"] / trimmed_path).resolve()
+                    return self._codex_resolved_file_ref_payload(
+                        ref=ref,
+                        candidate=candidate,
+                        relative_path=Path(trimmed_path),
+                        root=item["root"],
+                        repo=str(item["repo"]),
+                        repo_relative_root=str(item["repo_relative_root"]),
+                        start=start,
+                        end=end,
+                    )
+        repo_parent = self.repo_root.resolve()
+        candidate_from_parent = (repo_parent / path).resolve()
+        for item in normalized_roots:
             try:
-                candidate.relative_to(Path(root).resolve())
+                relative_path = candidate_from_parent.relative_to(item["root"])
             except ValueError:
                 continue
-            if not candidate.exists() or not candidate.is_file():
-                continue
+            return self._codex_resolved_file_ref_payload(
+                ref=ref,
+                candidate=candidate_from_parent,
+                relative_path=relative_path,
+                root=item["root"],
+                repo=str(item["repo"]),
+                repo_relative_root=str(item["repo_relative_root"]),
+                start=start,
+                end=end,
+            )
+        if candidate_from_parent.exists():
+            return {"status": "out_of_scope", "reason": "relative repo path outside selected scope", "ref": ref, "path": path}
+
+        for item in normalized_roots:
+            root = item["root"]
+            candidate = (root / path).resolve()
             try:
-                line_count = len(candidate.read_text(encoding="utf-8", errors="ignore").splitlines())
-            except OSError:
+                relative_path = candidate.relative_to(root)
+            except ValueError:
                 continue
-            if end <= line_count:
-                return {
-                    "status": "ok",
-                    "ref": ref,
-                    "path": path,
-                    "absolute_path": str(candidate),
-                    "line_start": start,
-                    "line_end": end,
-                }
+            payload = self._codex_resolved_file_ref_payload(
+                ref=ref,
+                candidate=candidate,
+                relative_path=relative_path,
+                root=root,
+                repo=str(item["repo"]),
+                repo_relative_root=str(item["repo_relative_root"]),
+                start=start,
+                end=end,
+            )
+            if payload.get("status") == "ok":
+                return payload
         return {"status": "invalid", "reason": "file or line range not found", "ref": ref}
+
+    @staticmethod
+    def _codex_resolved_file_ref_payload(
+        *,
+        ref: str,
+        candidate: Path,
+        relative_path: Path,
+        root: Path,
+        repo: str,
+        repo_relative_root: str,
+        start: int,
+        end: int,
+    ) -> dict[str, Any]:
+        try:
+            candidate.relative_to(root)
+        except ValueError:
+            return {"status": "out_of_scope", "reason": "resolved path outside selected scope", "ref": ref, "path": str(candidate)}
+        if not candidate.exists() or not candidate.is_file():
+            return {"status": "invalid", "reason": "file not found", "ref": ref}
+        try:
+            line_count = len(candidate.read_text(encoding="utf-8", errors="ignore").splitlines())
+        except OSError as error:
+            return {"status": "invalid", "reason": f"file unreadable: {error}", "ref": ref}
+        if end > line_count:
+            return {"status": "invalid", "reason": "line range not found", "ref": ref}
+        return {
+            "status": "ok",
+            "ref": ref,
+            "repo": repo,
+            "repo_relative_root": repo_relative_root,
+            "path": str(relative_path),
+            "absolute_path": str(candidate),
+            "line_start": start,
+            "line_end": end,
+        }
+
+    def _codex_high_risk_question(self, question: str) -> bool:
+        if self._is_simple_symbol_lookup_question(question):
+            return False
+        intent = self._question_intent(question)
+        if any(
+            intent.get(key)
+            for key in (
+                "data_source",
+                "error",
+                "impact_analysis",
+                "message_flow",
+                "module_dependency",
+                "operational_boundary",
+                "rule_logic",
+            )
+        ):
+            return True
+        lowered = str(question or "").lower()
+        return any(
+            marker in lowered
+            for marker in (
+                "root cause",
+                "why",
+                "reject",
+                "fail",
+                "failure",
+                "production",
+                "live",
+                "为什么",
+                "原因",
+                "拒绝",
+                "失败",
+                "报错",
+                "线上",
+                "生产",
+            )
+        )
+
+    def _codex_severe_repair_reasons(
+        self,
+        *,
+        question: str,
+        answer: str,
+        structured_answer: dict[str, Any],
+        quality_gate: dict[str, Any],
+        evidence_pack: dict[str, Any],
+        answer_judge: dict[str, Any],
+        codex_validation: dict[str, Any],
+        finish_reason: str,
+    ) -> list[str]:
+        reasons: list[str] = []
+        answer_text = str(answer or "").strip()
+        if not answer_text:
+            reasons.append("empty_codex_answer")
+        if self._finish_reason_needs_generation_repair(finish_reason):
+            reasons.append(f"finish_reason_{finish_reason or 'unknown'}")
+        if structured_answer.get("format") == "prose_fallback" and answer_text.startswith("{"):
+            reasons.append("malformed_json_answer")
+        if '{"detail":"Bad Request"}' in answer_text or '"Bad Request"' in answer_text:
+            reasons.append("bad_request_answer")
+        if codex_validation.get("out_of_scope_refs"):
+            reasons.append("out_of_scope_citations")
+        high_risk = self._codex_high_risk_question(question)
+        if high_risk and codex_validation.get("unsupported_claims"):
+            reasons.append("high_risk_claims_missing_scoped_file_evidence")
+        judge_status = str(answer_judge.get("status") or "").lower()
+        if high_risk and judge_status in {"repair", "insufficient_evidence"} and codex_validation.get("status") == "needs_citation":
+            reasons.append("high_risk_answer_judge_requires_repair")
+        lowered_answer = answer_text.lower()
+        not_foundish = any(
+            marker in lowered_answer
+            for marker in (
+                "not present in the provided source code",
+                "not present in the provided source code or runtime evidence",
+                "not found",
+                "not in the repository",
+                "未找到",
+                "没有找到",
+                "不存在",
+            )
+        )
+        evidence_hint_count = 0
+        if isinstance(evidence_pack, dict):
+            for key_name in ("entry_points", "call_chain", "read_write_points", "tables", "apis", "configs", "items"):
+                evidence_hint_count += len(evidence_pack.get(key_name) or [])
+        if not_foundish and evidence_hint_count and str(quality_gate.get("status") or "") == "sufficient":
+            reasons.append("not_found_answer_conflicts_with_retrieval_hints")
+        return list(dict.fromkeys(reason for reason in reasons if reason))
 
     def _resolve_llm_budget(
         self,
