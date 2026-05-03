@@ -707,7 +707,9 @@
     const selectedPm = String(pmFilterState[teamKey] || '').trim().toLowerCase();
     const filteredUnderPrd = sortUnderPrdProjects(filterProjectsByKeyProject(filterProjectsByPm(underPrd, selectedPm)));
     const filteredPendingLive = filterProjectsByKeyProject(filterProjectsByPm(pendingLive, selectedPm));
-    const actionLabel = team.loaded || team.error ? 'Reload Jira' : 'Load Jira';
+    const anyTeamLoading = taskTeams.some((item) => item.loading);
+    const anyTeamLoadedOrErrored = taskTeams.some((item) => item.loaded || item.error);
+    const actionLabel = anyTeamLoadedOrErrored ? 'Reload Jira' : 'Load Jira';
     return `
       <section class="team-dashboard-team${team.loading ? ' is-loading' : ''}" data-team-dashboard-track-panel="${escapeHtml(teamKey)}">
         <div class="team-dashboard-team-head">
@@ -725,14 +727,14 @@
               class="button button-secondary"
               type="button"
               data-team-dashboard-load-team="${escapeHtml(teamKey)}"
-              ${team.loading ? 'disabled' : ''}
+              ${anyTeamLoading ? 'disabled' : ''}
             >${escapeHtml(actionLabel)}</button>
           </div>
         </div>
         ${error}
         ${loading}
         ${renderTeamLoadMeta(team)}
-        ${notLoaded ? '<p class="productization-inline-status" data-tone="neutral">Not loaded. Click Load Jira to fetch only this team.</p>' : ''}
+        ${notLoaded ? '<p class="productization-inline-status" data-tone="neutral">Not loaded. Click Load Jira to fetch all teams.</p>' : ''}
         ${team.loading || notLoaded ? '' : renderSection('Under PRD', filteredUnderPrd, `${teamKey}-under-prd-${selectedPm || 'all'}`)}
         ${team.loading || notLoaded ? '' : renderSection('Pending Live', filteredPendingLive, `${teamKey}-pending-live-${selectedPm || 'all'}`)}
       </section>
@@ -976,9 +978,11 @@
     });
   };
 
-  const teamTaskUrl = (teamKey, reload = false) => {
+  const teamTaskUrl = (teamKey = '', reload = false) => {
     const url = new URL(root.dataset.tasksUrl || '/api/team-dashboard/tasks', window.location.origin);
-    url.searchParams.set('team', teamKey);
+    if (teamKey) {
+      url.searchParams.set('team', teamKey);
+    }
     if (reload) {
       url.searchParams.set('reload', '1');
       url.searchParams.set('_reload', String(Date.now()));
@@ -1013,58 +1017,88 @@
     }
   };
 
-  const loadTeamTasks = async (teamKey) => {
-    const index = taskTeams.findIndex((team) => team.team_key === teamKey);
-    if (index < 0) return;
-    const currentTeam = taskTeams[index];
-    taskTeams[index] = {
-      ...currentTeam,
+  const mergeLoadedTeam = (currentTeam, loadedTeam, payloadStatus = 'ok') => {
+    const safeTeam = loadedTeam && typeof loadedTeam === 'object' ? loadedTeam : {};
+    const hadTeamError = Boolean(safeTeam.error || payloadStatus === 'partial');
+    return {
+      ...safeTeam,
+      team_key: safeTeam.team_key || currentTeam.team_key,
+      label: safeTeam.label || currentTeam.label,
+      member_emails: safeTeam.member_emails || currentTeam.member_emails || [],
+      under_prd: Array.isArray(safeTeam.under_prd) ? safeTeam.under_prd : [],
+      pending_live: Array.isArray(safeTeam.pending_live) ? safeTeam.pending_live : [],
+      loading: false,
+      loaded: !hadTeamError,
+      error: safeTeam.error || '',
+      progress_text: hadTeamError ? 'Failed' : 'Done',
+    };
+  };
+
+  const loadAllTeamTasks = async () => {
+    if (!taskTeams.length) return;
+    const loadingCount = taskTeams.length;
+    taskTeams = taskTeams.map((team) => ({
+      ...team,
       loading: true,
       error: '',
-      progress_text: `Loading ${currentTeam.label || currentTeam.team_key} Jira tasks...`,
-    };
+      progress_text: `Loading ${team.label || team.team_key} Jira tasks...`,
+    }));
     renderTeams(taskTeams);
     updateTaskSummary(taskTeams);
-    setStatus(taskStatus, `Loading ${currentTeam.label || currentTeam.team_key} Jira tasks...`, 'neutral');
+    setStatus(taskStatus, `Loading Jira tasks for ${loadingCount} teams...`, 'neutral');
     try {
-      const response = await fetch(teamTaskUrl(teamKey, true), {
+      const response = await fetch(teamTaskUrl('', true), {
         headers: { Accept: 'application/json' },
         credentials: 'same-origin',
         cache: 'no-store',
       });
-      const payload = await readJson(response, `Could not load ${currentTeam.label || currentTeam.team_key} tasks.`);
-      const loadedTeam = payload.team || (Array.isArray(payload.teams) ? payload.teams[0] : null) || {};
-      const hadTeamError = Boolean(loadedTeam.error || payload.status === 'partial');
-      taskTeams[index] = {
-        ...loadedTeam,
-        team_key: loadedTeam.team_key || currentTeam.team_key,
-        label: loadedTeam.label || currentTeam.label,
-        member_emails: loadedTeam.member_emails || currentTeam.member_emails || [],
-        under_prd: Array.isArray(loadedTeam.under_prd) ? loadedTeam.under_prd : [],
-        pending_live: Array.isArray(loadedTeam.pending_live) ? loadedTeam.pending_live : [],
-        loading: false,
-        loaded: !hadTeamError,
-        error: loadedTeam.error || '',
-        progress_text: hadTeamError ? 'Failed' : 'Done',
-      };
-      saveCachedTeam(taskTeams[index]);
+      const payload = await readJson(response, 'Could not load team Jira tasks.');
+      const loadedTeams = Array.isArray(payload.teams) ? payload.teams : [];
+      const loadedByKey = new Map(loadedTeams.map((team) => [String(team?.team_key || ''), team]));
+      let loadedCount = 0;
+      let failedCount = 0;
+      taskTeams = taskTeams.map((currentTeam) => {
+        const loadedTeam = loadedByKey.get(String(currentTeam.team_key || ''));
+        if (!loadedTeam) {
+          failedCount += 1;
+          return {
+            ...currentTeam,
+            loading: false,
+            error: `No Jira payload returned for ${currentTeam.label || currentTeam.team_key}.`,
+            progress_text: 'Failed',
+          };
+        }
+        const mergedTeam = mergeLoadedTeam(currentTeam, loadedTeam);
+        if (mergedTeam.error) {
+          failedCount += 1;
+        } else {
+          loadedCount += 1;
+          saveCachedTeam(mergedTeam);
+        }
+        return mergedTeam;
+      });
       setStatus(
         taskStatus,
-        hadTeamError ? `${currentTeam.label || currentTeam.team_key} updated with an error.` : `${currentTeam.label || currentTeam.team_key} Jira tasks loaded.`,
-        hadTeamError ? 'error' : 'success',
+        failedCount
+          ? `Reloaded Jira for ${loadedCount}/${loadingCount} teams; ${failedCount} failed.`
+          : `Reloaded Jira for ${loadedCount} teams.`,
+        failedCount ? 'error' : 'success',
       );
     } catch (error) {
-      taskTeams[index] = {
-        ...currentTeam,
+      taskTeams = taskTeams.map((team) => ({
+        ...team,
         loading: false,
-        loaded: false,
-        error: error.message || `Could not load ${currentTeam.label || currentTeam.team_key} tasks.`,
+        error: error.message || 'Could not load team Jira tasks.',
         progress_text: 'Failed',
-      };
-      setStatus(taskStatus, taskTeams[index].error, 'error');
+      }));
+      setStatus(taskStatus, error.message || 'Could not load team Jira tasks.', 'error');
     }
     renderTeams(taskTeams);
     updateTaskSummary(taskTeams);
+  };
+
+  const loadTeamTasks = async () => {
+    await loadAllTeamTasks();
   };
 
   const emailsFromTextarea = (node) => String(node?.value || '')
