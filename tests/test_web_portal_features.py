@@ -2700,11 +2700,19 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertIn("seatalk-name-mapping", script)
         self.assertIn("loadSeaTalkNameMappings(false)", script)
 
+    def test_team_dashboard_name_mapping_page_size_options(self):
+        script = Path("static/team_dashboard.js").read_text(encoding="utf-8")
+        self.assertIn("seatalkNameMappingDefaultPageSize = 20", script)
+        self.assertIn("seatalkNameMappingPageSizeOptions = [20, 50, 100, 200]", script)
+        self.assertIn("data-seatalk-name-mapping-page-size", script)
+        self.assertIn("Rows per page", script)
+
     def test_team_dashboard_seatalk_name_mapping_has_grid_styles(self):
         stylesheet = Path("static/style.css").read_text(encoding="utf-8")
         self.assertIn(".seatalk-mapping-row", stylesheet)
         self.assertIn("grid-template-columns: minmax(0, 1fr) minmax(80px, 0.45fr) minmax(0, 1.2fr)", stylesheet)
         self.assertIn(".seatalk-mapping-example", stylesheet)
+        self.assertIn(".seatalk-mapping-page-size", stylesheet)
 
     def test_team_dashboard_backfills_empty_project_jira_tasks_by_parent_id(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(

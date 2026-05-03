@@ -70,7 +70,8 @@
   const jiraPageSize = 10;
   const taskCacheKey = 'team-dashboard:jira-tasks:v7';
   const monthlyReportDraftCacheKey = 'team-dashboard:monthly-report-draft:v1';
-  const seatalkNameMappingPageSize = 20;
+  const seatalkNameMappingDefaultPageSize = 20;
+  const seatalkNameMappingPageSizeOptions = [20, 50, 100, 200];
 
   let initialConfig = (() => {
     try {
@@ -1529,7 +1530,7 @@
   const seatalkMappingStateFor = (mappingRoot) => {
     if (!mappingRoot) return { rows: [], mappings: {}, page: 1 };
     if (!seatalkNameMappingState.has(mappingRoot)) {
-      seatalkNameMappingState.set(mappingRoot, { rows: [], mappings: {}, page: 1 });
+      seatalkNameMappingState.set(mappingRoot, { rows: [], mappings: {}, page: 1, pageSize: seatalkNameMappingDefaultPageSize });
     }
     return seatalkNameMappingState.get(mappingRoot);
   };
@@ -1550,10 +1551,14 @@
     const actionContainers = [...mappingRoot.querySelectorAll('[data-seatalk-name-mapping-actions]')];
     const state = seatalkMappingStateFor(mappingRoot);
     const rows = Array.isArray(state.rows) ? state.rows : [];
-    const totalPages = Math.max(1, Math.ceil(rows.length / seatalkNameMappingPageSize));
+    const pageSize = seatalkNameMappingPageSizeOptions.includes(Number(state.pageSize))
+      ? Number(state.pageSize)
+      : seatalkNameMappingDefaultPageSize;
+    state.pageSize = pageSize;
+    const totalPages = Math.max(1, Math.ceil(rows.length / pageSize));
     state.page = Math.min(Math.max(Number(state.page || 1), 1), totalPages);
-    const start = (state.page - 1) * seatalkNameMappingPageSize;
-    const pageRows = rows.slice(start, start + seatalkNameMappingPageSize);
+    const start = (state.page - 1) * pageSize;
+    const pageRows = rows.slice(start, start + pageSize);
     if (!rows.length) {
       body.innerHTML = '<article class="seatalk-insight-item"><p>No frequent or recently surfaced SeaTalk source IDs were found.</p></article>';
       body.hidden = false;
@@ -1564,6 +1569,14 @@
       <div class="seatalk-mapping-pagination" data-seatalk-name-mapping-pagination>
         <span>Showing ${start + 1}-${start + pageRows.length} of ${rows.length}</span>
         <div class="button-row">
+          <label class="seatalk-mapping-page-size">
+            <span>Rows per page</span>
+            <select data-seatalk-name-mapping-page-size aria-label="Rows per page">
+              ${seatalkNameMappingPageSizeOptions.map((option) => `
+                <option value="${option}" ${option === pageSize ? 'selected' : ''}>${option}</option>
+              `).join('')}
+            </select>
+          </label>
           <button class="button button-secondary" type="button" data-seatalk-name-mapping-prev ${state.page <= 1 ? 'disabled' : ''}>Previous</button>
           <span>Page ${state.page} / ${totalPages}</span>
           <button class="button button-secondary" type="button" data-seatalk-name-mapping-next ${state.page >= totalPages ? 'disabled' : ''}>Next</button>
@@ -1590,6 +1603,14 @@
     actionContainers.forEach((actions) => { actions.hidden = false; });
     body.querySelectorAll('[data-seatalk-mapping-input]').forEach((input) => {
       input.addEventListener('input', () => syncVisibleNameMappingInputs(mappingRoot));
+    });
+    body.querySelector('[data-seatalk-name-mapping-page-size]')?.addEventListener('change', (event) => {
+      syncVisibleNameMappingInputs(mappingRoot);
+      const currentStart = (state.page - 1) * pageSize;
+      const nextPageSize = Number(event.target.value || seatalkNameMappingDefaultPageSize);
+      state.pageSize = seatalkNameMappingPageSizeOptions.includes(nextPageSize) ? nextPageSize : seatalkNameMappingDefaultPageSize;
+      state.page = Math.floor(currentStart / state.pageSize) + 1;
+      renderNameMappingPage();
     });
     body.querySelector('[data-seatalk-name-mapping-prev]')?.addEventListener('click', () => {
       syncVisibleNameMappingInputs(mappingRoot);
@@ -1653,6 +1674,9 @@
       state.mappings[row.id] = mappingValueFor(row.id);
     });
     state.page = 1;
+    state.pageSize = seatalkNameMappingPageSizeOptions.includes(Number(state.pageSize))
+      ? Number(state.pageSize)
+      : seatalkNameMappingDefaultPageSize;
     renderNameMappingPage();
   };
 
