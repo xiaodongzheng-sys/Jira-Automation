@@ -505,13 +505,30 @@ def create_local_agent_app() -> Flask:
         )
 
     def _send_meeting_recorder_asset(*, record_id: str, owner_email: str, relative_path: str):
-        _meeting_record_for_owner(record_id=record_id, owner_email=owner_email)
+        record = _meeting_record_for_owner(record_id=record_id, owner_email=owner_email)
         root_dir = _get_meeting_record_store().record_dir(record_id).resolve()
         asset_path = (root_dir / relative_path).resolve()
         if root_dir not in asset_path.parents and asset_path != root_dir:
             raise ToolError("Invalid meeting asset path.")
         if not asset_path.exists() or not asset_path.is_file():
             raise ToolError("Meeting asset not found.")
+        media = record.get("media") if isinstance(record.get("media"), dict) else {}
+        active_media_paths = [str(media.get("audio_path") or "").strip(), str(media.get("video_path") or "").strip()]
+        active_asset_paths = {
+            (_get_meeting_record_store().root_dir / media_path).resolve()
+            for media_path in active_media_paths
+            if media_path
+        }
+        active_asset_paths.update(
+            (root_dir / Path(media_path).name).resolve()
+            for media_path in active_media_paths
+            if media_path
+        )
+        if str(record.get("status") or "") == "recording" and asset_path in active_asset_paths:
+            return jsonify({
+                "status": "error",
+                "message": "Stop the recording before downloading the meeting media file.",
+            }), HTTPStatus.CONFLICT
         as_download = str(request.args.get("download") or "").strip().lower() in {"1", "true", "yes"}
         response = send_file(
             asset_path,

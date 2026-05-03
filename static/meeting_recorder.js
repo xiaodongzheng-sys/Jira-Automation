@@ -388,8 +388,9 @@
     const minutes = record.minutes || {};
     const media = record.media || {};
     const isAudioOnly = media.recording_mode === 'audio_only';
+    const isRecording = record.status === 'recording';
     const videoUrl = media.playback_video_url || media.video_url || '';
-    const recordingUrl = isAudioOnly ? (media.audio_url || '') : videoUrl;
+    const recordingUrl = isRecording ? '' : (isAudioOnly ? (media.audio_url || '') : videoUrl);
     const recordingDownloadUrl = downloadUrl(recordingUrl);
     const transcriptUrl = transcript.asset_url || '';
     const transcriptDownloadUrl = downloadUrl(transcriptUrl);
@@ -437,7 +438,9 @@
           <h3>${isAudioOnly ? 'Audio Recording' : 'Screen Recording'}</h3>
           ${audioSummary ? `<span>${escapeHtml(audioSummary)}</span>` : ''}
         </div>
-        ${recordingUrl ? `
+        ${isRecording ? `
+          <p class="empty-state">${isAudioOnly ? 'Audio download will be available after stopping the recording.' : 'Video download will be available after stopping the recording.'}</p>
+        ` : recordingUrl ? `
           <div class="button-row meeting-video-actions">
             <button class="button" type="button" data-record-download-asset="${escapeHtml(recordingDownloadUrl)}" data-download-filename="${escapeHtml(filenameFromUrl(recordingUrl, isAudioOnly ? 'meeting.wav' : 'meeting-recording.mp4'))}" data-download-status-selector="[data-media-download-status]">${isAudioOnly ? 'Download audio file' : 'Download video file'}</button>
             <span class="inline-status" data-media-download-status>${isAudioOnly ? 'Downloads the face-to-face meeting audio.' : (usingPlaybackCopy ? 'Downloads the browser-compatible playback copy.' : 'Downloads the original recording for local playback.')}</span>

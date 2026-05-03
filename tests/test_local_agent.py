@@ -345,6 +345,31 @@ class LocalAgentServerTests(unittest.TestCase):
         self.assertIn("meeting.mp4", response.headers.get("Content-Disposition", ""))
         response.close()
 
+    def test_signed_meeting_recorder_asset_rejects_active_recording_media(self):
+        store = self.app.config["MEETING_RECORD_STORE"]
+        record = store.create_record(
+            owner_email="owner@npt.sg",
+            title="Active",
+            platform="unknown",
+            meeting_link="",
+        )
+        asset_path = store.record_dir(record["record_id"]) / "meeting.wav"
+        asset_path.write_bytes(b"partial-audio")
+        record["status"] = "recording"
+        record["media"] = {
+            "recording_mode": "audio_only",
+            "audio_path": str(asset_path.relative_to(store.root_dir)),
+        }
+        store.save_record(record)
+        route_path = f"/api/local-agent/meeting-recorder/assets/{record['record_id']}/meeting.wav"
+        headers = sign_headers(secret="shared-secret", method="GET", path=route_path, body=b"")
+
+        response = self.app.test_client().get(f"{route_path}?owner_email=owner@npt.sg&download=1", headers=headers)
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("Stop the recording", response.get_json()["message"])
+        response.close()
+
     def test_signed_meeting_recorder_repair_video_delegates_to_runtime(self):
         fake_runtime = Mock()
         fake_runtime.repair_video_playback.return_value = {

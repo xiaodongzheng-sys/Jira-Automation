@@ -1290,6 +1290,7 @@ class MeetingRecorderRouteTests(unittest.TestCase):
 
         self.assertIn("Download video file", source)
         self.assertIn("Download audio file", source)
+        self.assertIn("Audio download will be available after stopping the recording.", source)
         self.assertIn("Download transcript", source)
         self.assertIn("download=1", source)
         self.assertIn("data-record-download-asset", source)

@@ -4093,6 +4093,23 @@ def create_app() -> Flask:
                 return jsonify({"status": "error", "message": "Invalid meeting asset path."}), HTTPStatus.BAD_REQUEST
             if not asset_path.exists():
                 return jsonify({"status": "error", "message": "Meeting asset not found."}), HTTPStatus.NOT_FOUND
+            media = record.get("media") if isinstance(record.get("media"), dict) else {}
+            active_media_paths = [str(media.get("audio_path") or "").strip(), str(media.get("video_path") or "").strip()]
+            active_asset_paths = {
+                (_get_meeting_record_store().root_dir / media_path).resolve()
+                for media_path in active_media_paths
+                if media_path
+            }
+            active_asset_paths.update(
+                (root_dir / Path(media_path).name).resolve()
+                for media_path in active_media_paths
+                if media_path
+            )
+            if str(record.get("status") or "") == "recording" and asset_path in active_asset_paths:
+                return jsonify({
+                    "status": "error",
+                    "message": "Stop the recording before downloading the meeting media file.",
+                }), HTTPStatus.CONFLICT
             return send_file(asset_path, conditional=True, as_attachment=as_download, download_name=asset_path.name)
         except ToolError as error:
             return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
