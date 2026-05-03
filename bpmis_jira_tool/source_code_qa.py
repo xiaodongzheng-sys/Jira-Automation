@@ -15102,6 +15102,20 @@ class SourceCodeQAService:
             attachments=attachments or [],
             runtime_evidence=runtime_evidence or [],
         )
+        _log_source_code_qa_timing(
+            "codex_prompt",
+            elapsed_ms=0,
+            trace_id=trace_id,
+            provider=self.llm_provider.name,
+            model=selected_model,
+            query_mode=query_mode,
+            phase="initial",
+            prompt_mode=CODEX_INVESTIGATION_PROMPT_MODE,
+            prompt_sha256=hashlib.sha256(prompt_context.encode("utf-8")).hexdigest()[:16],
+            role_prompt_present="Source Code & Runtime Evidence Assistant" in prompt_context,
+            pm_team=pm_team,
+            country=country,
+        )
         is_followup = bool(followup_context and (followup_context.get("used") or followup_context.get("question") or followup_context.get("recent_turns")))
         cache_key = self._answer_cache_key(
             provider=self.llm_provider.name,
@@ -15327,6 +15341,20 @@ class SourceCodeQAService:
                     *[str(issue) for issue in repair_issues if issue],
                     *(["Deep investigation: use the expanded candidate paths and explicitly resolve business ambiguity, caller/callee gaps, and missing source hops before finalizing."] if deep_needed else []),
                 ])),
+            )
+            _log_source_code_qa_timing(
+                "codex_prompt",
+                elapsed_ms=0,
+                trace_id=trace_id,
+                provider=self.llm_provider.name,
+                model=selected_model,
+                query_mode=query_mode,
+                phase="repair",
+                prompt_mode=CODEX_INVESTIGATION_PROMPT_MODE,
+                prompt_sha256=hashlib.sha256(repair_context.encode("utf-8")).hexdigest()[:16],
+                role_prompt_present="Source Code & Runtime Evidence Assistant" in repair_context,
+                pm_team=pm_team,
+                country=country,
             )
             repair_payload = self._codex_payload(
                 repair_context,

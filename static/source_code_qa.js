@@ -286,6 +286,19 @@
     if (llmProviders[provider]) return Boolean(llmProviders[provider].ready);
     return provider === (llmPolicy.provider?.provider || 'codex_cli_bridge') ? llmReady : false;
   };
+  const scrollLatestAssistantAnswerToStart = () => {
+    if (!sessionMessages) return;
+    const messageNodes = Array.from(sessionMessages.querySelectorAll('[data-source-message-role]'));
+    const latestMessage = messageNodes[messageNodes.length - 1];
+    if (!latestMessage) return;
+    const role = latestMessage.getAttribute('data-source-message-role') || '';
+    const isLive = latestMessage.getAttribute('data-source-message-live') === '1';
+    if (role === 'assistant' && !isLive) {
+      latestMessage.scrollIntoView({ behavior: 'smooth', block: 'start', inline: 'nearest' });
+      return;
+    }
+    sessionMessages.scrollTop = sessionMessages.scrollHeight;
+  };
   const formatElapsed = (startedAt) => {
     const seconds = Math.max(0, (performance.now() - startedAt) / 1000);
     return seconds < 10 ? `${seconds.toFixed(1)}s` : `${Math.round(seconds)}s`;
@@ -816,7 +829,7 @@
         </div>
       ` : '';
       return `
-        <article class="source-qa-message source-qa-message-${escapeHtml(message.role || 'assistant')}${message.live ? ' is-live' : ''}">
+        <article class="source-qa-message source-qa-message-${escapeHtml(message.role || 'assistant')}${message.live ? ' is-live' : ''}" data-source-message-role="${escapeHtml(message.role || 'assistant')}" data-source-message-live="${message.live ? '1' : '0'}">
           <div class="source-qa-message-head">
             <strong>
               ${message.live ? `${escapeHtml(message.title || 'Codex Live')} <em>${message.stopped ? 'Stopped' : 'Running - not final answer'}</em>` : (message.role === 'user' ? 'You' : 'Assistant')}
@@ -832,7 +845,7 @@
         </article>
       `;
     }).join('');
-    sessionMessages.scrollTop = sessionMessages.scrollHeight;
+    scrollLatestAssistantAnswerToStart();
   };
 
   const renderOptimisticUserMessage = (question, attachments = []) => {

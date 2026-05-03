@@ -150,6 +150,10 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertIn("query_mode: 'deep'", script)
         self.assertIn("llm_budget_mode: 'auto'", script)
         self.assertIn("source-qa-raw-codex-answer", script)
+        self.assertIn("scrollLatestAssistantAnswerToStart", script)
+        self.assertIn("scrollIntoView({ behavior: 'smooth', block: 'start'", script)
+        self.assertIn("data-source-message-role", script)
+        self.assertIn("data-source-message-live", script)
         self.assertNotIn("Continue with Deep Mode", script)
 
     def test_removed_fast_query_mode_normalizes_to_deep(self):
@@ -7887,6 +7891,74 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertIn("earlier session question", brief)
         self.assertIn("service/EarlierService.java", brief)
         self.assertNotIn("x" * 100, brief)
+
+    def test_codex_prompt_logging_marks_role_prompt_present(self):
+        service = SourceCodeQAService(
+            data_root=Path(self.temp_dir.name),
+            team_profiles=TEAM_PROFILE_DEFAULTS,
+            llm_provider="codex_cli_bridge",
+            gitlab_token="secret-token",
+            git_timeout_seconds=5,
+            max_file_bytes=200_000,
+        )
+        entry = RepositoryEntry("Portal Repo", "https://git.example.com/team/portal.git")
+        key = "AF:All"
+        repo_path = service._repo_path(key, entry)
+        (repo_path / ".git").mkdir(parents=True)
+        source_file = repo_path / "repository" / "IssueRepository.java"
+        source_file.parent.mkdir(parents=True)
+        source_file.write_text("class IssueRepository {\n  void find(){ jdbc.query(\"select * from issue_table\"); }\n}\n", encoding="utf-8")
+        matches = [
+            {
+                "repo": "Portal Repo",
+                "path": "repository/IssueRepository.java",
+                "line_start": 1,
+                "line_end": 3,
+                "retrieval": "persistent_index",
+                "trace_stage": "direct",
+                "reason": "repository and table matched",
+                "score": 10,
+                "snippet": "class IssueRepository { void find(){ jdbc.query(\"select * from issue_table\"); } }",
+            }
+        ]
+        timing_logs = []
+
+        def fake_run(command, **kwargs):
+            if "login" in command and "status" in command:
+                return SimpleNamespace(returncode=0, stdout="Logged in using ChatGPT\n", stderr="")
+            output_path = command[command.index("--output-last-message") + 1]
+            Path(output_path).write_text(
+                '{"direct_answer":"IssueRepository reads issue_table.",'
+                '"claims":[{"text":"IssueRepository reads issue_table","citations":["S1"]}],'
+                '"missing_evidence":[],"confidence":"high"}',
+                encoding="utf-8",
+            )
+            return SimpleNamespace(returncode=0, stdout='{"type":"done"}\n', stderr="")
+
+        with patch("bpmis_jira_tool.source_code_qa.shutil.which", return_value="/usr/local/bin/codex"), patch(
+            "bpmis_jira_tool.source_code_qa.subprocess.run",
+            side_effect=fake_run,
+        ), patch("bpmis_jira_tool.source_code_qa._log_source_code_qa_timing", side_effect=lambda component, **fields: timing_logs.append((component, fields))):
+            service._build_llm_answer(
+                entries=[entry],
+                key=key,
+                pm_team="AF",
+                country="All",
+                question="what table does IssueRepository read",
+                matches=matches,
+                llm_budget_mode="auto",
+                followup_context={},
+                requested_answer_mode="auto",
+                trace_id="trace-prompt",
+            )
+
+        prompt_logs = [fields for component, fields in timing_logs if component == "codex_prompt"]
+        self.assertTrue(prompt_logs)
+        self.assertTrue(prompt_logs[0]["role_prompt_present"])
+        self.assertEqual(prompt_logs[0]["prompt_mode"], "codex_investigation_brief_v5")
+        self.assertEqual(prompt_logs[0]["pm_team"], "AF")
+        self.assertEqual(prompt_logs[0]["country"], "All")
+        self.assertRegex(prompt_logs[0]["prompt_sha256"], r"^[0-9a-f]{16}$")
 
     def test_codex_candidate_paths_resolve_stale_path_by_filename(self):
         entry = RepositoryEntry("Portal Repo", "https://git.example.com/team/portal.git")
