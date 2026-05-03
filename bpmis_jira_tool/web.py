@@ -4478,18 +4478,19 @@ def create_app() -> Flask:
         if request.method == "POST":
             payload = request.get_json(silent=True) or {}
             mappings = mapping_store.merge_mappings(payload.get("mappings") or {})
+            SeaTalkDashboardService.clear_cache()
             return jsonify({"status": "ok", "mappings": mappings})
         force_refresh = str(request.args.get("refresh") or "").strip().lower() in {"1", "true", "yes"}
         try:
-            candidates = _seatalk_name_candidates(settings) if force_refresh else _get_seatalk_name_candidate_store(settings).load()
-            return jsonify(
-                {
-                    "status": "ok",
-                    "mappings": mapping_store.load(),
-                    "candidates": candidates,
-                    "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                }
-            )
+            candidates = _build_seatalk_dashboard_service(settings).build_name_mappings(force_refresh=force_refresh)
+            mappings = mapping_store.mappings()
+            mapped_keys = {alias for key in mappings for alias in SeaTalkNameMappingStore.equivalent_keys(key)}
+            candidates = dict(candidates)
+            candidates["unknown_ids"] = _dedupe_seatalk_name_mapping_candidates([
+                row for row in (candidates.get("unknown_ids") or [])
+                if isinstance(row, dict) and not (SeaTalkNameMappingStore.equivalent_keys(row.get("id")) & mapped_keys)
+            ])
+            return jsonify({"status": "ok", "mappings": mappings, **candidates})
         except (ConfigError, ToolError) as error:
             _log_portal_event(
                 "team_dashboard_report_intelligence_name_mapping_tool_error",

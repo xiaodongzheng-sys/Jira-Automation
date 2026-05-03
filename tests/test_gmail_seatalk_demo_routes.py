@@ -729,6 +729,44 @@ class GmailSeaTalkDemoRouteTests(unittest.TestCase):
         self.assertEqual(payload["mappings"]["UID 456"], "Important DM")
         self.assertEqual(payload["unknown_ids"], [])
 
+    def test_team_dashboard_name_mapping_uses_existing_seatalk_store_and_payload_shape(self):
+        class FakeSeaTalkService:
+            def build_name_mappings(self, *, force_refresh=False):
+                return {
+                    "unknown_ids": [
+                        {"id": "group-123", "type": "group", "count": 12, "example": "2026-04-21: kickoff"},
+                        {"id": "UID 456", "type": "uid", "count": 6, "example": "2026-04-21: hello"},
+                    ],
+                    "generated_at": "2026-04-21T21:00:00+08:00",
+                    "period_days": 7,
+                }
+
+        with patch("bpmis_jira_tool.web._build_seatalk_dashboard_service", return_value=FakeSeaTalkService()):
+            with self.app.test_client() as client:
+                self._login_owner(client, scopes=[GMAIL_READONLY_SCOPE])
+                saved = client.post(
+                    "/api/gmail-sea-talk-demo/seatalk/name-mappings",
+                    json={"mappings": {"group-123": "Risk Project Group", "UID 456": "Important DM"}},
+                )
+                loaded = client.get("/api/team-dashboard/report-intelligence/seatalk/name-mappings")
+                updated = client.post(
+                    "/api/team-dashboard/report-intelligence/seatalk/name-mappings",
+                    json={"mappings": {"UID 888": "Alice"}},
+                )
+                legacy_loaded = client.get("/api/gmail-sea-talk-demo/seatalk/name-mappings")
+
+        self.assertEqual(saved.status_code, 200)
+        self.assertEqual(loaded.status_code, 200)
+        payload = loaded.get_json()
+        self.assertEqual(payload["mappings"]["group-123"], "Risk Project Group")
+        self.assertEqual(payload["mappings"]["UID 456"], "Important DM")
+        self.assertEqual(payload["mappings"]["buddy-456"], "Important DM")
+        self.assertEqual(payload["unknown_ids"], [])
+        self.assertNotIn("candidates", payload)
+        self.assertEqual(updated.status_code, 200)
+        self.assertEqual(legacy_loaded.status_code, 200)
+        self.assertEqual(legacy_loaded.get_json()["mappings"]["UID 888"], "Alice")
+
     def test_seatalk_name_mapping_script_paginates_candidates(self):
         source = Path("static/gmail_seatalk_demo.js").read_text(encoding="utf-8")
 
