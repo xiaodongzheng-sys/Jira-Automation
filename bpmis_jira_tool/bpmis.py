@@ -228,6 +228,14 @@ class BPMISDirectApiClient(BPMISClient):
             configured = default
         return max(1, min(max(1, hard_cap), configured))
 
+    def _tree_page_size(self) -> int:
+        raw_value = str(os.getenv("TEAM_DASHBOARD_TREE_PAGE_SIZE") or "").strip()
+        try:
+            configured = int(raw_value) if raw_value else 500
+        except ValueError:
+            configured = 500
+        return max(50, min(1000, configured))
+
     def _bpmis_session_for_current_thread(self) -> requests.Session:
         if threading.get_ident() == self._main_thread_id:
             return self.session
@@ -964,7 +972,7 @@ class BPMISDirectApiClient(BPMISClient):
     ) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
         page = 1
-        page_size = 200
+        page_size = self._tree_page_size()
         while True:
             if max_pages is not None and page > max(0, int(max_pages)):
                 self._increment_stat("issue_list_page_cap_hit")

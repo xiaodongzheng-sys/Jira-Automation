@@ -243,6 +243,43 @@ class BPMISClientTests(unittest.TestCase):
         self.assertIn("issue_tree_reporter", client.request_timings)
         self.assertIn("issue_tree_jiraRegionalPmPicId", client.request_timings)
 
+    def test_team_dashboard_tree_query_uses_larger_page_size(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {"TEAM_DASHBOARD_TREE_WORKERS": "1", "TEAM_DASHBOARD_TREE_PAGE_SIZE": "500"},
+            clear=False,
+        ):
+            client = BPMISDirectApiClient(self._settings(temp_dir))
+            client._resolve_bpmis_user_ids_by_emails = lambda emails: {"pm@npt.sg": [101]}  # type: ignore[method-assign]
+            page_sizes: list[int] = []
+
+            def fake_api_request(path, method="GET", params=None, body=None):
+                self.assertEqual(path, "/api/v1/issues/tree")
+                search = json.loads((params or {}).get("search") or "{}")
+                page_sizes.append(search.get("pageSize"))
+                if "jiraRegionalPmPicId" in search:
+                    return {"data": {"rows": []}}
+                return {
+                    "data": {
+                        "rows": [
+                            {
+                                "id": 1,
+                                "jiraKey": "AF-1",
+                                "summary": "Task",
+                                "reporter": {"id": 101},
+                                "status": {"label": "Testing"},
+                            }
+                        ]
+                    }
+                }
+
+            client._api_request = fake_api_request  # type: ignore[method-assign]
+
+            tasks = client.list_jira_tasks_created_by_emails(["pm@npt.sg"], enrich_missing_parent=False)
+
+        self.assertEqual([task["jira_id"] for task in tasks], ["AF-1"])
+        self.assertEqual(page_sizes, [500, 500])
+
     def test_team_dashboard_parallel_tree_single_field_failure_uses_list_fallback(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
@@ -1683,6 +1720,7 @@ class BPMISClientTests(unittest.TestCase):
                 "JIRA_BASE_URL": "https://jira.example.test",
                 "JIRA_USERNAME": "",
                 "JIRA_EMAIL": "",
+                "TEAM_DASHBOARD_TREE_PAGE_SIZE": "200",
             }
             with patch.dict(os.environ, env), patch("bpmis_jira_tool.bpmis.requests.request", side_effect=fake_request):
                 detail = client.get_jira_ticket_detail("AF-101")
@@ -1734,6 +1772,7 @@ class BPMISClientTests(unittest.TestCase):
                 "JIRA_BASE_URL": "https://jira.example.test",
                 "JIRA_USERNAME": "",
                 "JIRA_EMAIL": "",
+                "TEAM_DASHBOARD_TREE_PAGE_SIZE": "200",
             }
             with patch.dict(os.environ, env), patch("bpmis_jira_tool.bpmis.requests.request", side_effect=fake_request):
                 detail = client.update_jira_ticket_status("AF-101", "Closed")
@@ -2394,6 +2433,7 @@ class BPMISClientTests(unittest.TestCase):
                 "JIRA_BASE_URL": "https://jira.example.test",
                 "JIRA_USERNAME": "",
                 "JIRA_EMAIL": "",
+                "TEAM_DASHBOARD_TREE_PAGE_SIZE": "200",
             }
             client._api_request = fake_api_request  # type: ignore[method-assign]
             with patch.dict(os.environ, env), patch("bpmis_jira_tool.bpmis.requests.request", side_effect=fake_request):
@@ -2513,11 +2553,12 @@ class BPMISClientTests(unittest.TestCase):
 
             client._api_request = fake_api_request  # type: ignore[method-assign]
 
-            tasks = client.list_jira_tasks_created_by_emails(
-                ["pm@npt.sg"],
-                max_pages=1,
-                enrich_missing_parent=False,
-            )
+            with patch.dict(os.environ, {"TEAM_DASHBOARD_TREE_PAGE_SIZE": "200"}, clear=False):
+                tasks = client.list_jira_tasks_created_by_emails(
+                    ["pm@npt.sg"],
+                    max_pages=1,
+                    enrich_missing_parent=False,
+                )
 
             self.assertEqual(len(calls), 2)
             self.assertEqual(len(tasks), 200)

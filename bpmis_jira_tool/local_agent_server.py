@@ -892,6 +892,7 @@ def create_local_agent_app() -> Flask:
                         "error_type": type(error).__name__,
                         "error_message": str(error),
                         "request_stats": getattr(client, "request_stats", {}),
+                        "request_timings": getattr(client, "request_timings", {}),
                     },
                     ensure_ascii=False,
                     sort_keys=True,
@@ -910,6 +911,7 @@ def create_local_agent_app() -> Flask:
                     "elapsed_seconds": elapsed_seconds,
                     "result_summary": _summarize_bpmis_proxy_result(result),
                     "request_stats": getattr(client, "request_stats", {}),
+                    "request_timings": getattr(client, "request_timings", {}),
                 },
                 ensure_ascii=False,
                 sort_keys=True,
@@ -920,6 +922,7 @@ def create_local_agent_app() -> Flask:
                 "status": "ok",
                 "result": _serialize_bpmis_result(result),
                 "request_stats": getattr(client, "request_stats", {}),
+                "request_timings": getattr(client, "request_timings", {}),
             }
         )
 

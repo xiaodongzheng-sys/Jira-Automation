@@ -69,6 +69,7 @@ class LocalAgentClient:
         self.connect_timeout_seconds = max(1, min(int(connect_timeout_seconds or 10), self.timeout_seconds))
         self.session = session or _LOCAL_AGENT_SESSION
         self.last_bpmis_request_stats: dict[str, int] = {}
+        self.last_bpmis_request_timings: dict[str, float] = {}
         if not self.base_url.strip("/"):
             raise ToolError("LOCAL_AGENT_BASE_URL is required before using Mac local-agent capabilities.")
         if not self.hmac_secret:
@@ -323,6 +324,8 @@ class LocalAgentClient:
         )
         request_stats = payload.get("request_stats")
         self.last_bpmis_request_stats = request_stats if isinstance(request_stats, dict) else {}
+        request_timings = payload.get("request_timings")
+        self.last_bpmis_request_timings = request_timings if isinstance(request_timings, dict) else {}
         return payload.get("result")
 
     def bpmis_config_load(self, *, user_key: str) -> dict[str, Any] | None:
@@ -814,6 +817,7 @@ class RemoteBPMISClient:
         self.client = client
         self.access_token = access_token
         self.request_stats: dict[str, int] = {}
+        self.request_timings: dict[str, float] = {}
 
     def ping(self) -> None:
         self._call("ping")
@@ -925,6 +929,7 @@ class RemoteBPMISClient:
             kwargs=kwargs,
         )
         self._merge_request_stats(getattr(self.client, "last_bpmis_request_stats", {}))
+        self._merge_request_timings(getattr(self.client, "last_bpmis_request_timings", {}))
         return result
 
     def _merge_request_stats(self, stats: dict[str, Any]) -> None:
@@ -939,6 +944,16 @@ class RemoteBPMISClient:
                 self.request_stats[key] = int(self.request_stats.get(key) or 0) + numeric_value
             else:
                 self.request_stats[key] = max(int(self.request_stats.get(key) or 0), numeric_value)
+
+    def _merge_request_timings(self, timings: dict[str, Any]) -> None:
+        if not isinstance(timings, dict):
+            return
+        for key, value in timings.items():
+            try:
+                numeric_value = float(value or 0.0)
+            except (TypeError, ValueError):
+                continue
+            self.request_timings[str(key)] = round(float(self.request_timings.get(str(key)) or 0.0) + numeric_value, 3)
 
 
 class RemoteBPMISProjectStore:

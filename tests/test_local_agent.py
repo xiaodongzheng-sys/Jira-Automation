@@ -433,6 +433,7 @@ class LocalAgentServerTests(unittest.TestCase):
             def __init__(self, settings, access_token=None):
                 self.access_token = access_token
                 self.request_stats = {"api_call_count": 1}
+                self.request_timings = {"issue_tree_reporter": 1.2}
 
             def list_biz_projects_for_pm_email(self, email):
                 return [{"issue_id": "123", "project_name": email, "market": "SG"}]
@@ -451,9 +452,11 @@ class LocalAgentServerTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()["result"][0]["issue_id"], "123")
         self.assertEqual(response.get_json()["request_stats"], {"api_call_count": 1})
+        self.assertEqual(response.get_json()["request_timings"], {"issue_tree_reporter": 1.2})
         log_text = "\n".join(captured.output)
         self.assertIn('"event": "local_agent_bpmis_call_start"', log_text)
         self.assertIn('"event": "local_agent_bpmis_call_done"', log_text)
+        self.assertIn('"request_timings": {"issue_tree_reporter": 1.2}', log_text)
         self.assertIn('"operation": "list_biz_projects_for_pm_email"', log_text)
         self.assertIn('"has_access_token": true', log_text)
         self.assertNotIn("user-token", log_text)
@@ -639,6 +642,9 @@ class LocalAgentClientTests(unittest.TestCase):
         calls = []
 
         class FakeClient:
+            last_bpmis_request_stats = {"api_call_count": 2}
+            last_bpmis_request_timings = {"issue_tree_reporter": 1.2}
+
             def bpmis_call(self, *, operation, access_token, args=None, kwargs=None):
                 calls.append((operation, access_token, args or [], kwargs or {}))
                 if operation == "get_jira_ticket_detail":
@@ -672,6 +678,8 @@ class LocalAgentClientTests(unittest.TestCase):
         self.assertEqual(remote.link_jira_ticket_to_project("SPDBP-95742", "221664")["parentIds"], [221664])
         self.assertEqual(remote.delink_jira_ticket_from_project("SPDBP-95742", "221664")["parentIds"], [])
         self.assertEqual(calls[0], ("get_jira_ticket_detail", "token", ["SPDBP-95742"], {}))
+        self.assertGreaterEqual(remote.request_stats["api_call_count"], 2)
+        self.assertGreaterEqual(remote.request_timings["issue_tree_reporter"], 1.2)
 
     def test_remote_source_code_qa_service_reuses_config_payload_within_instance(self):
         class FakeClient:
