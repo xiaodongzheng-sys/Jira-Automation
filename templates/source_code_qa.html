@@ -48,7 +48,9 @@
           <span>Model</span>
           <select data-source-llm-provider>
             {% for provider in options.llm_providers %}
-              <option value="{{ provider.value }}" {% if provider.disabled %}disabled{% endif %}>{{ provider.label }}</option>
+              {% if provider.available %}
+                <option value="{{ provider.value }}">{{ provider.label }}</option>
+              {% endif %}
             {% endfor %}
           </select>
         </label>

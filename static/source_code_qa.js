@@ -1091,8 +1091,12 @@
   const updateLlmProviderOptions = (providerOptions = []) => {
     if (!llmProvider || !Array.isArray(providerOptions) || !providerOptions.length) return;
     const previousValue = llmProvider.value;
-    llmProvider.innerHTML = providerOptions.map((provider) => `
-      <option value="${escapeHtml(provider.value)}" ${provider.disabled ? 'disabled' : ''}>${escapeHtml(provider.label)}</option>
+    const visibleProviders = providerOptions.filter((provider) => provider && !provider.disabled && provider.available !== false);
+    const selectableProviders = visibleProviders.length
+      ? visibleProviders
+      : providerOptions.filter((provider) => provider && !provider.disabled);
+    llmProvider.innerHTML = selectableProviders.map((provider) => `
+      <option value="${escapeHtml(provider.value)}">${escapeHtml(provider.label).replace(/\s*\(Unavailable\)\s*/i, '')}</option>
     `).join('');
     if (providerOptionIsEnabled(previousValue)) {
       llmProvider.value = previousValue;

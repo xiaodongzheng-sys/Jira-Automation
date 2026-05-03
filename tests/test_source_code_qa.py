@@ -123,7 +123,8 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertIn(b"data-source-new-session", teammate_response.data)
         self.assertIn(b"data-source-session-messages", teammate_response.data)
         self.assertIn(b"Codex", teammate_response.data)
-        self.assertIn(b'value="gemini" disabled', teammate_response.data)
+        self.assertNotIn(b'<option value="gemini"', teammate_response.data)
+        self.assertNotIn(b'value="gemini" disabled', teammate_response.data)
         self.assertIn(b"Vertex AI", teammate_response.data)
         self.assertIn(b"Model Availability", owner_response.data)
         self.assertNotIn(b"Model Availability", teammate_response.data)
@@ -315,7 +316,8 @@ class SourceCodeQARouteTests(unittest.TestCase):
         codex_option = next(item for item in payload["options"]["llm_providers"] if item["value"] == "codex_cli_bridge")
         self.assertTrue(vertex_option["disabled"])
         self.assertFalse(codex_option["disabled"])
-        self.assertIn(b'value="vertex_ai" disabled', page_response.data)
+        self.assertNotIn(b'<option value="vertex_ai"', page_response.data)
+        self.assertNotIn(b'value="vertex_ai" disabled', page_response.data)
 
     def test_query_api_rejects_unavailable_model_provider(self):
         with self.app.test_client() as client:
