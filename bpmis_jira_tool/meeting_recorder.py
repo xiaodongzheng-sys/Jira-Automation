@@ -47,6 +47,7 @@ MEETING_PLAYBACK_AUDIO_CHANNELS = 2
 MEETING_PLAYBACK_AUDIO_SAMPLE_RATE = 48000
 MEETING_RECORDING_MODE_AUDIO_ONLY = "audio_only"
 MEETING_RECORDING_MODE_SCREEN_AUDIO = "screen_audio"
+MEETING_AUDIO_POST_STOP_PAD_PROFILE = "post_stop_pad_v1"
 MEETING_TRANSCRIPT_REPETITIVE_DOMINANT_RATIO = 0.6
 MEETING_TRANSCRIPT_REPETITIVE_UNIQUE_RATIO = 0.35
 MEETING_TRANSCRIPT_EXPECTED_LANGUAGES = {
@@ -543,8 +544,72 @@ class MeetingRecorderRuntime:
             self._terminate_persisted_recorder_process(record)
         record["status"] = "recorded"
         record["recording_stopped_at"] = _utc_now()
+        record = self._finalize_audio_only_recording(record)
         record["recording_health"] = self._recording_health(record)
         self.store.save_record(record)
+        return record
+
+    def _finalize_audio_only_recording(self, record: dict[str, Any]) -> dict[str, Any]:
+        media = record.get("media") if isinstance(record.get("media"), dict) else {}
+        if str(media.get("recording_mode") or "") != MEETING_RECORDING_MODE_AUDIO_ONLY:
+            return record
+        relative = str(media.get("audio_path") or "").strip()
+        if not relative:
+            return record
+        audio_path = (self.store.root_dir / relative).resolve()
+        if not audio_path.exists() or not audio_path.is_file():
+            return record
+        elapsed_seconds = _recording_elapsed_seconds(record)
+        duration_seconds = _audio_duration_seconds(audio_path)
+        if not elapsed_seconds or duration_seconds <= 0:
+            return record
+        minimum_expected_seconds = max(10.0, elapsed_seconds * 0.7)
+        if duration_seconds >= minimum_expected_seconds:
+            return record
+        ffmpeg_path = _resolve_ffmpeg_bin(self.config.ffmpeg_bin)
+        if not ffmpeg_path:
+            media = dict(media)
+            media["audio_finalization_warning"] = "ffmpeg is required to pad short meeting audio after Stop."
+            record["media"] = media
+            return record
+        record_id = str(record.get("record_id") or "")
+        record_dir = self.store.record_dir(record_id)
+        output_path = record_dir / "meeting.padded.wav"
+        command = _build_ffmpeg_audio_post_stop_pad_command(
+            ffmpeg_path=ffmpeg_path,
+            source_path=audio_path,
+            output_path=output_path,
+            target_duration_seconds=elapsed_seconds,
+        )
+        media = dict(media)
+        try:
+            _run_command(
+                command,
+                "Could not finalize meeting audio timeline.",
+                timeout_seconds=max(60, int(elapsed_seconds) + 30),
+            )
+        except ToolError as error:
+            media["audio_finalization_warning"] = str(error)
+            record["media"] = media
+            return record
+        if not output_path.exists() or output_path.stat().st_size <= 0:
+            media["audio_finalization_warning"] = "Meeting audio finalization produced no audio bytes."
+            record["media"] = media
+            return record
+        media.update(
+            {
+                "source_audio_path": relative,
+                "audio_path": str(output_path.relative_to(self.store.root_dir)),
+                "audio_url": f"/meeting-recorder/assets/{record_id}/meeting.padded.wav",
+                "audio_finalization_profile": MEETING_AUDIO_POST_STOP_PAD_PROFILE,
+                "audio_finalized_at": _utc_now(),
+                "audio_finalization_command": _redact_command(command),
+                "audio_original_duration_seconds": duration_seconds,
+                "audio_target_duration_seconds": elapsed_seconds,
+            }
+        )
+        media.pop("audio_finalization_warning", None)
+        record["media"] = media
         return record
 
     def _terminate_persisted_recorder_process(self, record: dict[str, Any]) -> None:
@@ -1694,12 +1759,8 @@ def _build_ffmpeg_audio_recording_command(*, ffmpeg_path: str, audio_input: str,
         "-y",
         "-f",
         "avfoundation",
-        "-use_wallclock_as_timestamps",
-        "1",
         "-i",
         f":{audio_input}",
-        "-af",
-        "aresample=async=1:first_pts=0",
         "-acodec",
         "pcm_s16le",
         "-ar",
@@ -1707,6 +1768,36 @@ def _build_ffmpeg_audio_recording_command(*, ffmpeg_path: str, audio_input: str,
         "-ac",
         "1",
         str(audio_path),
+    ]
+
+
+def _build_ffmpeg_audio_post_stop_pad_command(
+    *,
+    ffmpeg_path: str,
+    source_path: Path,
+    output_path: Path,
+    target_duration_seconds: float,
+) -> list[str]:
+    target = f"{max(0.1, float(target_duration_seconds)):.3f}"
+    return [
+        ffmpeg_path,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-i",
+        str(source_path),
+        "-af",
+        f"apad=whole_dur={target}",
+        "-t",
+        target,
+        "-acodec",
+        "pcm_s16le",
+        "-ar",
+        "16000",
+        "-ac",
+        "1",
+        str(output_path),
     ]
 
 

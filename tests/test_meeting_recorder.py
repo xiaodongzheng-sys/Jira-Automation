@@ -13,6 +13,7 @@ from bpmis_jira_tool.meeting_recorder import (
     MeetingRecorderRuntime,
     MeetingRecordStore,
     _audio_capture_status,
+    _build_ffmpeg_audio_post_stop_pad_command,
     _build_ffmpeg_audio_recording_command,
     _build_ffmpeg_playback_repair_command,
     _build_ffmpeg_recording_command,
@@ -178,17 +179,30 @@ class MeetingRecorderParsingTests(unittest.TestCase):
         )
 
         self.assertIn("-i", command)
-        self.assertIn("-use_wallclock_as_timestamps", command)
-        self.assertEqual(command[command.index("-use_wallclock_as_timestamps") + 1], "1")
         self.assertEqual(command[command.index("-i") + 1], ":Meeting Recorder Aggregate")
-        self.assertIn("-af", command)
-        self.assertEqual(command[command.index("-af") + 1], "aresample=async=1:first_pts=0")
+        self.assertNotIn("-use_wallclock_as_timestamps", command)
+        self.assertNotIn("aresample=async=1:first_pts=0", command)
+        self.assertNotIn("-af", command)
         self.assertNotIn("Capture screen 0", command)
         self.assertNotIn("-framerate", command)
         self.assertNotIn("-c:v", command)
         self.assertIn("-acodec", command)
         self.assertEqual(command[command.index("-acodec") + 1], "pcm_s16le")
         self.assertEqual(command[-1], "/tmp/meeting.wav")
+
+    def test_ffmpeg_audio_post_stop_pad_command_pads_after_recording(self):
+        command = _build_ffmpeg_audio_post_stop_pad_command(
+            ffmpeg_path="/opt/homebrew/bin/ffmpeg",
+            source_path=Path("/tmp/meeting.wav"),
+            output_path=Path("/tmp/meeting.padded.wav"),
+            target_duration_seconds=43.2,
+        )
+
+        self.assertEqual(command[command.index("-i") + 1], "/tmp/meeting.wav")
+        self.assertEqual(command[command.index("-af") + 1], "apad=whole_dur=43.200")
+        self.assertEqual(command[command.index("-t") + 1], "43.200")
+        self.assertEqual(command[command.index("-acodec") + 1], "pcm_s16le")
+        self.assertEqual(command[-1], "/tmp/meeting.padded.wav")
 
     def test_ffmpeg_playback_repair_command_copies_video_and_rebuilds_stereo_audio(self):
         command = _build_ffmpeg_playback_repair_command(
@@ -428,6 +442,83 @@ class MeetingRecorderRuntimeTests(unittest.TestCase):
 
         self.assertEqual(health["status"], "warning")
         self.assertIn("277s for a 32s recording", health["warning"])
+
+    def test_audio_only_stop_finalization_pads_short_audio_after_recording(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = MeetingRecordStore(root)
+            runtime = MeetingRecorderRuntime(store=store, config=MeetingRecorderConfig())
+            record = store.create_record(
+                owner_email="owner@npt.sg",
+                title="Face to face",
+                platform="unknown",
+                meeting_link="",
+            )
+            audio_path = store.record_dir(record["record_id"]) / "meeting.wav"
+            audio_path.write_bytes(b"audio")
+            record.update(
+                {
+                    "recording_started_at": "2026-05-03T00:00:00+00:00",
+                    "recording_stopped_at": "2026-05-03T00:00:43+00:00",
+                    "media": {
+                        "recording_mode": "audio_only",
+                        "audio_path": str(audio_path.relative_to(store.root_dir)),
+                        "audio_url": f"/meeting-recorder/assets/{record['record_id']}/meeting.wav",
+                    },
+                }
+            )
+
+            def fake_run(command, *_args, **_kwargs):
+                Path(command[-1]).write_bytes(b"padded-audio")
+                return Mock(stdout="", stderr="")
+
+            with patch("bpmis_jira_tool.meeting_recorder._audio_duration_seconds", return_value=11.0), patch(
+                "bpmis_jira_tool.meeting_recorder._resolve_ffmpeg_bin",
+                return_value="/opt/homebrew/bin/ffmpeg",
+            ), patch("bpmis_jira_tool.meeting_recorder._run_command", side_effect=fake_run) as run_command:
+                finalized = runtime._finalize_audio_only_recording(record)
+
+        media = finalized["media"]
+        self.assertEqual(media["source_audio_path"], f"records/{record['record_id']}/meeting.wav")
+        self.assertEqual(media["audio_path"], f"records/{record['record_id']}/meeting.padded.wav")
+        self.assertEqual(media["audio_url"], f"/meeting-recorder/assets/{record['record_id']}/meeting.padded.wav")
+        self.assertEqual(media["audio_finalization_profile"], "post_stop_pad_v1")
+        self.assertEqual(media["audio_original_duration_seconds"], 11.0)
+        self.assertEqual(media["audio_target_duration_seconds"], 43.0)
+        self.assertEqual(run_command.call_args.args[0][run_command.call_args.args[0].index("-af") + 1], "apad=whole_dur=43.000")
+
+    def test_audio_only_stop_finalization_leaves_normal_duration_audio_untouched(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = MeetingRecordStore(root)
+            runtime = MeetingRecorderRuntime(store=store, config=MeetingRecorderConfig())
+            record = store.create_record(
+                owner_email="owner@npt.sg",
+                title="Face to face",
+                platform="unknown",
+                meeting_link="",
+            )
+            audio_path = store.record_dir(record["record_id"]) / "meeting.wav"
+            audio_path.write_bytes(b"audio")
+            record.update(
+                {
+                    "recording_started_at": "2026-05-03T00:00:00+00:00",
+                    "recording_stopped_at": "2026-05-03T00:00:43+00:00",
+                    "media": {
+                        "recording_mode": "audio_only",
+                        "audio_path": str(audio_path.relative_to(store.root_dir)),
+                    },
+                }
+            )
+
+            with patch("bpmis_jira_tool.meeting_recorder._audio_duration_seconds", return_value=42.0), patch(
+                "bpmis_jira_tool.meeting_recorder._run_command",
+            ) as run_command:
+                finalized = runtime._finalize_audio_only_recording(record)
+
+        self.assertEqual(finalized["media"]["audio_path"], f"records/{record['record_id']}/meeting.wav")
+        self.assertNotIn("source_audio_path", finalized["media"])
+        run_command.assert_not_called()
 
     def test_stop_recording_terminates_persisted_recorder_process_after_restart(self):
         with tempfile.TemporaryDirectory() as temp_dir:
