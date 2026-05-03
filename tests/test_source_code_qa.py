@@ -7625,6 +7625,27 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertIn("queue_wait_ms", result.attempt_log[0])
         self.assertIn("--sandbox", result.attempt_log[0]["command"])
 
+    def test_codex_cli_bridge_provider_rejects_successful_bad_request_payload(self):
+        provider = CodexCliBridgeSourceCodeQALLMProvider(
+            workspace_root=Path(self.temp_dir.name),
+            timeout_seconds=20,
+            codex_binary="codex",
+        )
+
+        def fake_run(command, **kwargs):
+            if "login" in command and "status" in command:
+                return SimpleNamespace(returncode=0, stdout="Logged in using ChatGPT\n", stderr="")
+            output_path = command[command.index("--output-last-message") + 1]
+            Path(output_path).write_text('{"detail":"Bad Request"}', encoding="utf-8")
+            return SimpleNamespace(returncode=0, stdout='{"type":"done"}\n', stderr="")
+
+        with patch("bpmis_jira_tool.source_code_qa.shutil.which", return_value="/usr/local/bin/codex"), patch(
+            "bpmis_jira_tool.source_code_qa.subprocess.run",
+            side_effect=fake_run,
+        ):
+            with self.assertRaisesRegex(ToolError, "Codex CLI returned API error: Bad Request"):
+                provider.generate(payload={"contents": [{"parts": [{"text": "hi"}]}]}, primary_model="codex-cli", fallback_model="codex-cli")
+
     def test_codex_cli_bridge_adds_rg_directory_to_exec_path(self):
         provider = CodexCliBridgeSourceCodeQALLMProvider(
             workspace_root=Path(self.temp_dir.name),

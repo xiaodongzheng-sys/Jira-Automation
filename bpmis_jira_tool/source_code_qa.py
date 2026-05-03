@@ -1048,6 +1048,9 @@ class CodexCliBridgeSourceCodeQALLMProvider(SourceCodeQALLMProvider):
             raise ToolError(f"Codex unavailable; used code search fallback. Codex CLI exited with {result.returncode}. {detail[:500]}")
         if not answer:
             answer = self._extract_last_json_event_message(result.stdout)
+        error_answer = self._codex_error_answer_detail(answer)
+        if error_answer:
+            raise ToolError(f"Codex unavailable; used code search fallback. Codex CLI returned API error: {error_answer[:500]}")
         if not answer:
             raise ToolError("Codex unavailable; used code search fallback. Codex CLI returned no readable answer.")
         latency_ms = int((time.time() - started_at) * 1000)
@@ -1272,6 +1275,31 @@ class CodexCliBridgeSourceCodeQALLMProvider(SourceCodeQALLMProvider):
         if text:
             return text
         raise ToolError("Codex CLI returned no readable answer.")
+
+    @staticmethod
+    def _codex_error_answer_detail(answer: str) -> str:
+        text = str(answer or "").strip()
+        if not text:
+            return ""
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            return ""
+        if not isinstance(payload, dict):
+            return ""
+        fields = [
+            payload.get("detail"),
+            payload.get("error"),
+            payload.get("message"),
+            (payload.get("error") or {}).get("message") if isinstance(payload.get("error"), dict) else "",
+        ]
+        detail = " ".join(str(item or "").strip() for item in fields if str(item or "").strip())
+        if not detail:
+            return ""
+        lowered = detail.lower()
+        if "bad request" in lowered or "invalid request" in lowered or "api error" in lowered:
+            return detail
+        return ""
 
     def public_config(self) -> dict[str, Any]:
         return {
