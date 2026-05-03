@@ -3159,7 +3159,7 @@ def create_app() -> Flask:
         access_gate = _require_gmail_seatalk_demo_access(settings)
         if access_gate is not None:
             return access_gate
-        return redirect(url_for("team_dashboard_page", tab="report-intelligence"))
+        return redirect(url_for("team_dashboard_page", tab="seatalk-name-mapping"))
 
     @app.get("/api/gmail-sea-talk-demo/dashboard")
     def gmail_seatalk_demo_dashboard_api():

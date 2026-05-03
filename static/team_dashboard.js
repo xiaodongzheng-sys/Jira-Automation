@@ -247,12 +247,18 @@
       }
       if (name === 'report-intelligence') {
         loadReportIntelligence();
+      }
+      if (name === 'seatalk-name-mapping') {
         loadSeaTalkNameMappings(false);
       }
     };
     triggers.forEach((trigger) => {
       trigger.addEventListener('click', () => activate(trigger.dataset.teamDashboardTab || 'tasks'));
     });
+    const requestedTab = new URLSearchParams(window.location.search).get('tab');
+    if (requestedTab && triggers.some((trigger) => trigger.dataset.teamDashboardTab === requestedTab)) {
+      activate(requestedTab);
+    }
   };
 
   const renderLink = (url, label) => {

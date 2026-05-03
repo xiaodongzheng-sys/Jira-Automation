@@ -1090,6 +1090,9 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertIn(b"Team Admin", dashboard_response.data)
         self.assertIn(b"Monthly Report", dashboard_response.data)
         self.assertIn(b'data-team-dashboard-tab="monthly-report"', dashboard_response.data)
+        self.assertIn(b'data-team-dashboard-tab="report-intelligence"', dashboard_response.data)
+        self.assertIn(b'data-team-dashboard-tab="seatalk-name-mapping"', dashboard_response.data)
+        self.assertIn(b'data-team-dashboard-panel="seatalk-name-mapping"', dashboard_response.data)
         self.assertIn(b"data-team-dashboard", dashboard_response.data)
         self.assertIn(b"team-dashboard-track-tabs", dashboard_response.data)
         self.assertNotIn(b"data-team-dashboard-update", dashboard_response.data)
@@ -2690,6 +2693,12 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertIn("reporter_email: button.dataset.reporterEmail", script)
         self.assertIn("Finding...", script)
         self.assertIn("Refreshed at", script)
+
+    def test_team_dashboard_frontend_activates_requested_tab(self):
+        script = Path("static/team_dashboard.js").read_text(encoding="utf-8")
+        self.assertIn("new URLSearchParams(window.location.search).get('tab')", script)
+        self.assertIn("seatalk-name-mapping", script)
+        self.assertIn("loadSeaTalkNameMappings(false)", script)
 
     def test_team_dashboard_backfills_empty_project_jira_tasks_by_parent_id(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
