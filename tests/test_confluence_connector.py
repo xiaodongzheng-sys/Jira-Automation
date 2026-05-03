@@ -117,6 +117,47 @@ class ConfluenceConnectorTests(unittest.TestCase):
         self.assertEqual(page.version_number, "3")
         self.assertEqual(page.sections[0].content, "Export body")
 
+    @patch("prd_briefing.confluence.requests.get")
+    def test_ingest_uses_export_view_when_storage_contains_image_macros(self, mock_get):
+        response = Mock()
+        response.json.return_value = {
+            "id": "12345",
+            "title": "Image Macro PRD",
+            "version": {"when": "2026-04-15T12:00:00Z", "number": 3},
+            "body": {
+                "storage": {
+                    "value": """
+                    <h2>Status Machine</h2>
+                    <table>
+                      <tr><th>Status Machine</th><th>Remarks</th></tr>
+                      <tr><td><ac:image><ri:attachment ri:filename="status.png" /></ac:image></td><td>Storage text</td></tr>
+                    </table>
+                    """
+                },
+                "export_view": {
+                    "value": """
+                    <h2>Status Machine</h2>
+                    <div class="table-wrap"><table>
+                      <tr><th>Status Machine</th><th>Remarks</th></tr>
+                      <tr><td><img src="https://confluence.shopee.io/download/attachments/embedded-page/SPDB/Page/status.png?api=v2" /></td><td>Export text</td></tr>
+                    </table></div>
+                    """
+                },
+            },
+        }
+        response.raise_for_status.return_value = None
+        mock_get.return_value = response
+
+        page = self.connector.ingest_page("https://confluence.shopee.io/pages/viewpage.action?pageId=12345", "session-1")
+
+        self.assertIn("[MEDIA_ID_1]", page.sections[0].content)
+        table_html = page.media_dict["MEDIA_ID_1"]["content"]
+        self.assertIn("Export text", table_html)
+        self.assertNotIn("Storage text", table_html)
+        self.assertIn("<img", table_html)
+        self.assertIn("/prd-briefing/image-proxy?src=", table_html)
+        self.assertIn("embedded-page", table_html)
+
     def test_media_extraction_filters_noise_and_sanitizes_tables(self):
         media = {}
         sections = self.connector._parse_sections(

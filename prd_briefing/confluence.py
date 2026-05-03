@@ -81,7 +81,9 @@ class ConfluenceConnector:
         resolved = self._resolve_page(page_ref)
         payload = self._fetch_page_payload(resolved)
         body = payload.get("body", {}) if isinstance(payload.get("body"), dict) else {}
-        html = body.get("storage", {}).get("value") or body.get("export_view", {}).get("value", "")
+        storage_html = body.get("storage", {}).get("value") or ""
+        export_view_html = body.get("export_view", {}).get("value") or ""
+        html = self._select_page_html(storage_html=storage_html, export_view_html=export_view_html)
         page_id = str(payload.get("id") or resolved.page_id or "")
         title = payload.get("title") or f"Confluence Page {page_id or 'unknown'}"
         version = payload.get("version", {}) if isinstance(payload.get("version"), dict) else {}
@@ -107,6 +109,14 @@ class ConfluenceConnector:
             media_dict=media_dict,
             presentation_source_text=self._build_source_text_with_media(sections),
         )
+
+    @staticmethod
+    def _select_page_html(*, storage_html: str, export_view_html: str) -> str:
+        storage_html = str(storage_html or "")
+        export_view_html = str(export_view_html or "")
+        if export_view_html and "<img" in export_view_html and ("<ac:image" in storage_html or "<ri:attachment" in storage_html):
+            return export_view_html
+        return storage_html or export_view_html
 
     def _resolve_page(self, page_ref: str) -> ResolvedPageRef:
         value = page_ref.strip()

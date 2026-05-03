@@ -31,7 +31,7 @@ WALKTHROUGH_SCRIPT_PROMPT_VERSION = "v2_codex_pm_briefing"
 WALKTHROUGH_BLOCK_PROMPT_VERSION = "v2_codex_pm_briefing_block"
 SESSION_BRIEF_PROMPT_VERSION = "v7_two_part_chinese_summary"
 WALKTHROUGH_PREWARM_LIMIT = 12
-PRESENTATION_PROMPT_VERSION = "v4_codex_gpt55_prd_presentation_chunks_media"
+PRESENTATION_PROMPT_VERSION = "v5_codex_gpt55_prd_presentation_chunks_media"
 PRESENTATION_MAX_SOURCE_CHARS = 52000
 
 STOPWORDS = {
