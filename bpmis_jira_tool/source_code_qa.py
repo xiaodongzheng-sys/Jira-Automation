@@ -974,6 +974,7 @@ class CodexCliBridgeSourceCodeQALLMProvider(SourceCodeQALLMProvider):
         self.workspace_root.mkdir(parents=True, exist_ok=True)
         progress_callback = payload.get("_progress_callback") if callable(payload.get("_progress_callback")) else None
         prompt = self._prompt_from_gemini_payload(payload)
+        failure_context = self._codex_failure_context_from_payload(payload)
         image_paths = [
             str(path or "").strip()
             for path in (payload.get("_codex_image_paths") or [])
@@ -1034,24 +1035,89 @@ class CodexCliBridgeSourceCodeQALLMProvider(SourceCodeQALLMProvider):
                             env=self._codex_env(),
                             timeout=timeout_seconds,
                             check=False,
-                        )
+                    )
                 finally:
                     semaphore.release()
             except subprocess.TimeoutExpired as error:
+                self._log_codex_failure(
+                    reason="timeout",
+                    command=command,
+                    command_mode=command_mode,
+                    model=model,
+                    prompt_mode=prompt_mode,
+                    queue_wait_ms=queue_wait_ms,
+                    started_at=started_at,
+                    attempt_started=attempt_started,
+                    timeout=True,
+                    error=str(error),
+                    context=failure_context,
+                )
                 raise ToolError(f"Codex unavailable; used code search fallback. Codex CLI timed out after {timeout_seconds}s.") from error
             except OSError as error:
+                self._log_codex_failure(
+                    reason="os_error",
+                    command=command,
+                    command_mode=command_mode,
+                    model=model,
+                    prompt_mode=prompt_mode,
+                    queue_wait_ms=queue_wait_ms,
+                    started_at=started_at,
+                    attempt_started=attempt_started,
+                    error=str(error),
+                    context=failure_context,
+                )
                 raise ToolError(f"Codex unavailable; used code search fallback. {error}") from error
             output_file.seek(0)
             answer = output_file.read().strip()
         if result.returncode != 0:
             detail = self._sanitize_cli_output(f"{result.stderr}\n{result.stdout}")
+            self._log_codex_failure(
+                reason="nonzero_exit",
+                command=command,
+                command_mode=command_mode,
+                model=model,
+                prompt_mode=prompt_mode,
+                queue_wait_ms=queue_wait_ms,
+                started_at=started_at,
+                attempt_started=attempt_started,
+                result=result,
+                answer=answer,
+                error=detail[:500],
+                context=failure_context,
+            )
             raise ToolError(f"Codex unavailable; used code search fallback. Codex CLI exited with {result.returncode}. {detail[:500]}")
         if not answer:
             answer = self._extract_last_json_event_message(result.stdout)
         error_answer = self._codex_error_answer_detail(answer)
         if error_answer:
+            self._log_codex_failure(
+                reason="api_error_payload",
+                command=command,
+                command_mode=command_mode,
+                model=model,
+                prompt_mode=prompt_mode,
+                queue_wait_ms=queue_wait_ms,
+                started_at=started_at,
+                attempt_started=attempt_started,
+                result=result,
+                answer=answer,
+                error=error_answer,
+                context=failure_context,
+            )
             raise ToolError(f"Codex unavailable; used code search fallback. Codex CLI returned API error: {error_answer[:500]}")
         if not answer:
+            self._log_codex_failure(
+                reason="empty_answer",
+                command=command,
+                command_mode=command_mode,
+                model=model,
+                prompt_mode=prompt_mode,
+                queue_wait_ms=queue_wait_ms,
+                started_at=started_at,
+                attempt_started=attempt_started,
+                result=result,
+                context=failure_context,
+            )
             raise ToolError("Codex unavailable; used code search fallback. Codex CLI returned no readable answer.")
         latency_ms = int((time.time() - started_at) * 1000)
         trace = self._extract_codex_trace(result.stdout, result.stderr)
@@ -1300,6 +1366,70 @@ class CodexCliBridgeSourceCodeQALLMProvider(SourceCodeQALLMProvider):
         if "bad request" in lowered or "invalid request" in lowered or "api error" in lowered:
             return detail
         return ""
+
+    @staticmethod
+    def _codex_failure_context_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
+        fields = (
+            "_codex_trace_id",
+            "_codex_phase",
+            "_codex_prompt_chars",
+            "_codex_prompt_bytes",
+            "_codex_estimated_prompt_tokens",
+            "_codex_candidate_path_count",
+            "_codex_candidate_repo_count",
+            "_codex_repair_issue_count",
+        )
+        return {
+            key.removeprefix("_codex_"): payload.get(key)
+            for key in fields
+            if isinstance(payload.get(key), (str, int, float, bool))
+        }
+
+    @classmethod
+    def _tail_for_log(cls, text: str, limit: int = 1200) -> str:
+        return cls._sanitize_cli_output(text)[-max(100, int(limit)):]
+
+    @classmethod
+    def _log_codex_failure(
+        cls,
+        *,
+        reason: str,
+        command: list[str],
+        command_mode: str,
+        model: str,
+        prompt_mode: str,
+        queue_wait_ms: int,
+        started_at: float,
+        attempt_started: float,
+        context: dict[str, Any],
+        result: Any | None = None,
+        answer: str = "",
+        error: str = "",
+        timeout: bool = False,
+    ) -> None:
+        payload: dict[str, Any] = {
+            "event": "source_code_qa_codex_failure",
+            "reason": str(reason or "unknown"),
+            "provider": LLM_PROVIDER_CODEX_CLI_BRIDGE,
+            "model": str(model or ""),
+            "prompt_mode": str(prompt_mode or ""),
+            "command_mode": str(command_mode or ""),
+            "command": cls._command_summary(command),
+            "queue_wait_ms": max(0, int(queue_wait_ms or 0)),
+            "latency_ms": max(0, int((time.time() - started_at) * 1000)),
+            "attempt_latency_ms": max(0, int((time.time() - attempt_started) * 1000)),
+            "timeout": bool(timeout),
+        }
+        payload.update({key: value for key, value in (context or {}).items() if isinstance(value, (str, int, float, bool))})
+        if result is not None:
+            payload["exit_code"] = getattr(result, "returncode", None)
+            payload["stdout_tail"] = cls._tail_for_log(str(getattr(result, "stdout", "") or ""))
+            payload["stderr_tail"] = cls._tail_for_log(str(getattr(result, "stderr", "") or ""))
+        if answer:
+            payload["answer_tail"] = cls._tail_for_log(answer)
+        if error:
+            payload["error"] = cls._tail_for_log(error, limit=500)
+        LOGGER.warning("source_code_qa_codex_failure %s", json.dumps(payload, ensure_ascii=False, sort_keys=True))
 
     def public_config(self) -> dict[str, Any]:
         return {
@@ -15130,6 +15260,8 @@ class SourceCodeQAService:
             attachments=attachments or [],
             runtime_evidence=runtime_evidence or [],
         )
+        initial_prompt_stats = self._codex_prompt_stats(prompt_context)
+        candidate_repo_count = len({item.get("repo") for item in candidate_paths})
         _log_source_code_qa_timing(
             "codex_prompt",
             elapsed_ms=0,
@@ -15143,6 +15275,11 @@ class SourceCodeQAService:
             role_prompt_present="Source Code & Runtime Evidence Assistant" in prompt_context,
             pm_team=pm_team,
             country=country,
+            candidate_path_count=len(candidate_paths),
+            candidate_repo_count=candidate_repo_count,
+            prompt_chars=initial_prompt_stats["prompt_chars"],
+            prompt_bytes=initial_prompt_stats["prompt_bytes"],
+            estimated_prompt_tokens=initial_prompt_stats["estimated_prompt_tokens"],
         )
         is_followup = bool(followup_context and (followup_context.get("used") or followup_context.get("question") or followup_context.get("recent_turns")))
         cache_key = self._answer_cache_key(
@@ -15254,6 +15391,11 @@ class SourceCodeQAService:
             progress_callback=progress_callback,
             codex_cli_session_id=codex_cli_session_id,
             image_paths=self._attachment_image_paths(attachments or []),
+            trace_id=trace_id,
+            phase="initial",
+            prompt_stats=initial_prompt_stats,
+            candidate_path_count=len(candidate_paths),
+            candidate_repo_count=candidate_repo_count,
         )
         try:
             result = self.llm_provider.generate(
@@ -15370,6 +15512,9 @@ class SourceCodeQAService:
                     *(["Deep investigation: use the expanded candidate paths and explicitly resolve business ambiguity, caller/callee gaps, and missing source hops before finalizing."] if deep_needed else []),
                 ])),
             )
+            repair_prompt_stats = self._codex_prompt_stats(repair_context)
+            repair_candidate_repo_count = len({item.get("repo") for item in candidate_paths})
+            repair_issue_count = len([issue for issue in repair_issues if issue]) + (1 if deep_needed else 0)
             _log_source_code_qa_timing(
                 "codex_prompt",
                 elapsed_ms=0,
@@ -15383,12 +15528,25 @@ class SourceCodeQAService:
                 role_prompt_present="Source Code & Runtime Evidence Assistant" in repair_context,
                 pm_team=pm_team,
                 country=country,
+                candidate_path_count=len(candidate_paths),
+                candidate_repo_count=repair_candidate_repo_count,
+                prompt_chars=repair_prompt_stats["prompt_chars"],
+                prompt_bytes=repair_prompt_stats["prompt_bytes"],
+                estimated_prompt_tokens=repair_prompt_stats["estimated_prompt_tokens"],
+                repair_issue_count=repair_issue_count,
+                deep_investigation_added=deep_investigation_added,
             )
             repair_payload = self._codex_payload(
                 repair_context,
                 progress_callback=progress_callback,
                 codex_cli_session_id=codex_cli_session_id,
                 image_paths=self._attachment_image_paths(attachments or []),
+                trace_id=trace_id,
+                phase="repair",
+                prompt_stats=repair_prompt_stats,
+                candidate_path_count=len(candidate_paths),
+                candidate_repo_count=repair_candidate_repo_count,
+                repair_issue_count=repair_issue_count,
             )
             repair_result = self.llm_provider.generate(
                 payload=repair_payload,
@@ -15748,6 +15906,12 @@ class SourceCodeQAService:
         progress_callback: Any | None = None,
         codex_cli_session_id: str = "",
         image_paths: list[str] | None = None,
+        trace_id: str = "",
+        phase: str = "",
+        prompt_stats: dict[str, Any] | None = None,
+        candidate_path_count: int = 0,
+        candidate_repo_count: int = 0,
+        repair_issue_count: int = 0,
     ) -> dict[str, Any]:
         payload = {
             "codex_prompt_mode": CODEX_INVESTIGATION_PROMPT_MODE,
@@ -15755,6 +15919,15 @@ class SourceCodeQAService:
             "systemInstruction": {"parts": [{"text": self._codex_system_instruction()}]},
             "generationConfig": {"temperature": 0.1, "responseMimeType": "application/json"},
         }
+        stats = prompt_stats if isinstance(prompt_stats, dict) else self._codex_prompt_stats(prompt)
+        payload["_codex_trace_id"] = str(trace_id or "")
+        payload["_codex_phase"] = str(phase or "")
+        payload["_codex_prompt_chars"] = int(stats.get("prompt_chars") or 0)
+        payload["_codex_prompt_bytes"] = int(stats.get("prompt_bytes") or 0)
+        payload["_codex_estimated_prompt_tokens"] = int(stats.get("estimated_prompt_tokens") or 0)
+        payload["_codex_candidate_path_count"] = int(candidate_path_count or 0)
+        payload["_codex_candidate_repo_count"] = int(candidate_repo_count or 0)
+        payload["_codex_repair_issue_count"] = int(repair_issue_count or 0)
         if codex_cli_session_id:
             payload["codex_cli_session_id"] = codex_cli_session_id
         if image_paths:
@@ -15762,6 +15935,18 @@ class SourceCodeQAService:
         if progress_callback:
             payload["_progress_callback"] = progress_callback
         return payload
+
+    def _codex_prompt_stats(self, prompt: str) -> dict[str, int]:
+        payload = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "systemInstruction": {"parts": [{"text": self._codex_system_instruction()}]},
+        }
+        full_prompt = CodexCliBridgeSourceCodeQALLMProvider._prompt_from_gemini_payload(payload)
+        return {
+            "prompt_chars": len(full_prompt),
+            "prompt_bytes": len(full_prompt.encode("utf-8")),
+            "estimated_prompt_tokens": self._estimate_llm_tokens(full_prompt),
+        }
 
     @staticmethod
     def _public_attachment_metadata(attachment: dict[str, Any]) -> dict[str, Any]:

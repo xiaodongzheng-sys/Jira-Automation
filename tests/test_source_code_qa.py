@@ -7639,12 +7639,40 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             Path(output_path).write_text('{"detail":"Bad Request"}', encoding="utf-8")
             return SimpleNamespace(returncode=0, stdout='{"type":"done"}\n', stderr="")
 
+        payload = {
+            "contents": [{"parts": [{"text": "hi"}]}],
+            "_codex_trace_id": "trace-bad",
+            "_codex_phase": "initial",
+            "_codex_estimated_prompt_tokens": 123,
+            "_codex_candidate_path_count": 7,
+            "_codex_candidate_repo_count": 2,
+        }
+
         with patch("bpmis_jira_tool.source_code_qa.shutil.which", return_value="/usr/local/bin/codex"), patch(
             "bpmis_jira_tool.source_code_qa.subprocess.run",
             side_effect=fake_run,
-        ):
+        ), patch("bpmis_jira_tool.source_code_qa.LOGGER.warning") as warning_log:
             with self.assertRaisesRegex(ToolError, "Codex CLI returned API error: Bad Request"):
-                provider.generate(payload={"contents": [{"parts": [{"text": "hi"}]}]}, primary_model="codex-cli", fallback_model="codex-cli")
+                provider.generate(payload=payload, primary_model="codex-cli", fallback_model="codex-cli")
+
+        failure_logs = [
+            call.args
+            for call in warning_log.call_args_list
+            if call.args and call.args[0] == "source_code_qa_codex_failure %s"
+        ]
+        self.assertTrue(failure_logs)
+        failure_payload = json.loads(failure_logs[0][1])
+        self.assertEqual(failure_payload["reason"], "api_error_payload")
+        self.assertEqual(failure_payload["error"], "Bad Request")
+        self.assertEqual(failure_payload["exit_code"], 0)
+        self.assertEqual(failure_payload["trace_id"], "trace-bad")
+        self.assertEqual(failure_payload["phase"], "initial")
+        self.assertEqual(failure_payload["estimated_prompt_tokens"], 123)
+        self.assertEqual(failure_payload["candidate_path_count"], 7)
+        self.assertEqual(failure_payload["candidate_repo_count"], 2)
+        self.assertEqual(failure_payload["command_mode"], "ephemeral")
+        self.assertIn("Bad Request", failure_payload["answer_tail"])
+        self.assertIn("done", failure_payload["stdout_tail"])
 
     def test_codex_cli_bridge_adds_rg_directory_to_exec_path(self):
         provider = CodexCliBridgeSourceCodeQALLMProvider(
@@ -7980,6 +8008,11 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertEqual(prompt_logs[0]["pm_team"], "AF")
         self.assertEqual(prompt_logs[0]["country"], "All")
         self.assertRegex(prompt_logs[0]["prompt_sha256"], r"^[0-9a-f]{16}$")
+        self.assertEqual(prompt_logs[0]["candidate_path_count"], 1)
+        self.assertEqual(prompt_logs[0]["candidate_repo_count"], 1)
+        self.assertGreater(prompt_logs[0]["prompt_chars"], 0)
+        self.assertGreater(prompt_logs[0]["prompt_bytes"], 0)
+        self.assertGreater(prompt_logs[0]["estimated_prompt_tokens"], 0)
 
     def test_codex_candidate_paths_resolve_stale_path_by_filename(self):
         entry = RepositoryEntry("Portal Repo", "https://git.example.com/team/portal.git")
