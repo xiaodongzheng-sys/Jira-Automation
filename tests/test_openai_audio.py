@@ -4,7 +4,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from prd_briefing.openai_client import OpenAIClient
-from prd_briefing.service import VoiceService, optimize_tts_text
+from prd_briefing.service import VoiceService, normalize_prd_briefing_script_text, optimize_tts_text
 from prd_briefing.storage import BriefingStore
 
 
@@ -52,6 +52,8 @@ class OpenAIAudioTests(unittest.TestCase):
                 edge_mandarin_voice="zh-CN-XiaozhenNeural",
                 edge_english_voice="en-US-JennyNeural",
                 edge_rate="-12%",
+                edge_mandarin_rate="+0%",
+                edge_english_rate="-5%",
                 openai_mandarin_voice="sage",
                 openai_voice_speed=0.96,
                 openai_custom_voice_enabled=False,
@@ -84,6 +86,8 @@ class OpenAIAudioTests(unittest.TestCase):
                 edge_mandarin_voice="zh-CN-XiaozhenNeural",
                 edge_english_voice="en-US-JennyNeural",
                 edge_rate="-12%",
+                edge_mandarin_rate="+0%",
+                edge_english_rate="-5%",
                 openai_mandarin_voice="sage",
                 openai_voice_speed=0.96,
                 openai_custom_voice_enabled=False,
@@ -116,9 +120,11 @@ class OpenAIAudioTests(unittest.TestCase):
                 store=store,
                 openai_client=client,
                 tts_provider="edge",
-                edge_mandarin_voice="zh-CN-XiaozhenNeural",
-                edge_english_voice="en-US-JennyNeural",
+                edge_mandarin_voice="zh-CN-XiaoruiNeural",
+                edge_english_voice="en-SG-LunaNeural",
                 edge_rate="-12%",
+                edge_mandarin_rate="+0%",
+                edge_english_rate="-5%",
                 openai_mandarin_voice="sage",
                 openai_voice_speed=0.96,
                 openai_custom_voice_enabled=False,
@@ -138,7 +144,8 @@ class OpenAIAudioTests(unittest.TestCase):
 
             self.assertIsNotNone(audio_path)
             edge_tts.assert_called_once()
-            self.assertEqual(edge_tts.call_args.kwargs["voice_id"], "zh-CN-XiaozhenNeural")
+            self.assertEqual(edge_tts.call_args.kwargs["voice_id"], "zh-CN-XiaoruiNeural")
+            self.assertEqual(edge_tts.call_args.kwargs["rate"], "+0%")
             client.synthesize_speech.assert_not_called()
             self.assertEqual(
                 service.get_cached_audio_for_text(owner_key="anon:test", text="中文讲解", language_code="zh"),
@@ -147,11 +154,61 @@ class OpenAIAudioTests(unittest.TestCase):
         finally:
             temp_dir.cleanup()
 
+    def test_edge_tts_english_uses_singapore_voice_and_slow_rate(self):
+        temp_dir = tempfile.TemporaryDirectory()
+        try:
+            store = BriefingStore(Path(temp_dir.name))
+            client = Mock()
+            client.is_configured.return_value = False
+
+            service = VoiceService(
+                store=store,
+                openai_client=client,
+                tts_provider="edge",
+                edge_mandarin_voice="zh-CN-XiaoruiNeural",
+                edge_english_voice="en-SG-LunaNeural",
+                edge_rate="-12%",
+                edge_mandarin_rate="+0%",
+                edge_english_rate="-5%",
+                openai_mandarin_voice="sage",
+                openai_voice_speed=0.96,
+                openai_custom_voice_enabled=False,
+                openai_tts_fallback_enabled=True,
+                elevenlabs_api_key=None,
+                elevenlabs_mandarin_model_id="eleven_multilingual_v2",
+                elevenlabs_mandarin_voice_id=None,
+            )
+
+            with patch.object(service, "_synthesize_with_edge_tts", return_value=b"edge-audio") as edge_tts:
+                audio_path = service.synthesize(
+                    session_id="s4",
+                    text="We will build a new button.",
+                    language_code="en",
+                    owner_key="anon:test",
+                )
+
+            self.assertIsNotNone(audio_path)
+            self.assertEqual(edge_tts.call_args.kwargs["voice_id"], "en-SG-LunaNeural")
+            self.assertEqual(edge_tts.call_args.kwargs["rate"], "-5%")
+        finally:
+            temp_dir.cleanup()
+
     def test_optimize_tts_text_truncates_long_scripts(self):
         text = "这一块主要是说明字段规则。" * 80
         optimized = optimize_tts_text(text, language_code="zh")
         self.assertLessEqual(len(optimized), 421)
         self.assertTrue(optimized.endswith("。"))
+
+    def test_chinese_tts_script_normalization_spaces_english_terms_and_acronyms(self):
+        optimized = normalize_prd_briefing_script_text(
+            "调用api时，如果qps超过限制，那么返回json错误。正常flow继续。",
+            language_code="zh",
+        )
+
+        self.assertIn("调用 API 时", optimized)
+        self.assertIn("如果 QPS 超过限制", optimized)
+        self.assertIn("返回 JSON 错误", optimized)
+        self.assertIn("正常 flow 继续", optimized)
 
 
 if __name__ == "__main__":

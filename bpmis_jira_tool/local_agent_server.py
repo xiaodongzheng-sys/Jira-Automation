@@ -1600,6 +1600,8 @@ def _build_prd_briefing_service(settings: Settings) -> PRDBriefingService:
         edge_mandarin_voice=settings.prd_briefing_edge_mandarin_voice,
         edge_english_voice=settings.prd_briefing_edge_english_voice,
         edge_rate=settings.prd_briefing_edge_rate,
+        edge_mandarin_rate=settings.prd_briefing_edge_mandarin_rate,
+        edge_english_rate=settings.prd_briefing_edge_english_rate,
         openai_mandarin_voice=settings.prd_briefing_openai_mandarin_voice,
         openai_voice_speed=settings.prd_briefing_openai_voice_speed,
         openai_custom_voice_enabled=settings.prd_briefing_openai_custom_voice_enabled,

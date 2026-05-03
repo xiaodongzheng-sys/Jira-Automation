@@ -24,6 +24,7 @@ from prd_briefing.service import (
     WALKTHROUGH_SCRIPT_PROMPT_VERSION,
     VoiceService,
     attach_presentation_media,
+    build_presentation_system_prompt,
     build_pm_briefing_blocks,
     build_heuristic_session_overview,
     overview_is_low_signal,
@@ -152,6 +153,17 @@ class PRDBriefingServiceTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             parse_presentation_chunks('{"id":"chunk-1"}')
 
+    def test_presentation_prompts_include_language_specific_script_rules(self):
+        english_prompt = build_presentation_system_prompt("en")
+        chinese_prompt = build_presentation_system_prompt("zh")
+
+        self.assertIn("Singapore-neutral English", english_prompt)
+        self.assertIn("subject-verb-object", english_prompt)
+        self.assertIn("Avoid US or UK slang", english_prompt)
+        self.assertIn("中文汉字和英文单词", chinese_prompt)
+        self.assertIn("QPS", chinese_prompt)
+        self.assertIn("如果...那么", chinese_prompt)
+
     def test_presentation_cache_hit_reuses_outline_without_second_llm_call(self):
         self.openai_client.is_configured = lambda: True
         self.openai_client.answer_response = json.dumps([
@@ -242,6 +254,30 @@ class PRDBriefingServiceTests(unittest.TestCase):
 
         self.assertEqual(result["chunk"]["media"]["type"], "table")
         self.assertEqual(self.voice_service.synthesize_calls[-1]["presentation_cache_key"], "123_5")
+        self.assertEqual(self.voice_service.synthesize_calls[-1]["language_code"], "zh")
+
+    def test_presentation_audio_uses_english_session_language(self):
+        self.openai_client.is_configured = lambda: True
+        self.openai_client.answer_response = json.dumps([
+            {
+                "id": "chunk-1",
+                "title": "Main Flow",
+                "content": "We will build a new button.",
+            }
+        ])
+        payload = self.service.process_prd_for_presentation(
+            owner_key="anon:presentation-en",
+            page_ref="https://example.atlassian.net/wiki/pages/123",
+            language="en",
+        )
+
+        self.service.generate_presentation_audio(
+            owner_key="anon:presentation-en",
+            session_id=payload["session"]["session_id"],
+            chunk=dict(payload["chunks"][0]),
+        )
+
+        self.assertEqual(self.voice_service.synthesize_calls[-1]["language_code"], "en")
 
     def test_presentation_audio_cache_is_scoped_by_page_version_and_chunk(self):
         voice = VoiceService(
@@ -251,6 +287,8 @@ class PRDBriefingServiceTests(unittest.TestCase):
             edge_mandarin_voice="zh-CN-XiaozhenNeural",
             edge_english_voice="en-US-JennyNeural",
             edge_rate="-12%",
+            edge_mandarin_rate="+0%",
+            edge_english_rate="-5%",
             openai_mandarin_voice="alloy",
             openai_voice_speed=1.0,
             openai_custom_voice_enabled=False,
@@ -291,9 +329,48 @@ class PRDBriefingServiceTests(unittest.TestCase):
         )
 
         self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0]["rate"], "+0%")
         self.assertIn("audio/123_5/chunk-1-", first["audioUrl"])
         self.assertIn("audio/123_6/chunk-1-", second["audioUrl"])
         self.assertEqual(third["audioUrl"], first["audioUrl"])
+
+    def test_presentation_audio_cache_is_scoped_by_language_rate(self):
+        voice = VoiceService(
+            store=self.store,
+            openai_client=self.openai_client,
+            tts_provider="edge",
+            edge_mandarin_voice="zh-CN-XiaoruiNeural",
+            edge_english_voice="en-SG-LunaNeural",
+            edge_rate="-12%",
+            edge_mandarin_rate="+0%",
+            edge_english_rate="-5%",
+            openai_mandarin_voice="alloy",
+            openai_voice_speed=1.0,
+            openai_custom_voice_enabled=False,
+            openai_tts_fallback_enabled=False,
+            elevenlabs_api_key=None,
+            elevenlabs_mandarin_model_id="eleven_multilingual_v2",
+            elevenlabs_mandarin_voice_id=None,
+        )
+        calls = []
+        voice._synthesize_with_edge_tts_with_boundaries = lambda **kwargs: (calls.append(kwargs) or (b"mp3", []))
+        chunk = {
+            "id": "chunk-1",
+            "title": "Main Flow",
+            "content": "We will build a new button.",
+            "media": {"type": "none", "content": ""},
+        }
+
+        voice.synthesize_presentation_chunk(
+            session_id="session-1",
+            owner_key="anon:presentation-audio-language",
+            chunk=chunk,
+            language_code="en",
+            presentation_cache_key="123_5",
+        )
+
+        self.assertEqual(calls[0]["voice_id"], "en-SG-LunaNeural")
+        self.assertEqual(calls[0]["rate"], "-5%")
 
     def _settings(self) -> Settings:
         return Settings(

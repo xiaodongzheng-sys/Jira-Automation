@@ -31,8 +31,33 @@ WALKTHROUGH_SCRIPT_PROMPT_VERSION = "v2_codex_pm_briefing"
 WALKTHROUGH_BLOCK_PROMPT_VERSION = "v2_codex_pm_briefing_block"
 SESSION_BRIEF_PROMPT_VERSION = "v7_two_part_chinese_summary"
 WALKTHROUGH_PREWARM_LIMIT = 12
-PRESENTATION_PROMPT_VERSION = "v5_codex_gpt55_prd_presentation_chunks_media"
+PRESENTATION_PROMPT_VERSION = "v6_codex_gpt55_prd_presentation_chunks_voice_rules"
 PRESENTATION_MAX_SOURCE_CHARS = 52000
+TTS_TECH_ACRONYMS = {
+    "AI",
+    "AML",
+    "API",
+    "BE",
+    "CBS",
+    "CIF",
+    "CRMS",
+    "DAU",
+    "DB",
+    "DWH",
+    "FE",
+    "HTTP",
+    "HTTPS",
+    "JSON",
+    "LTS",
+    "MQ",
+    "MVP",
+    "PRD",
+    "QA",
+    "QPS",
+    "SQL",
+    "UI",
+    "UX",
+}
 
 STOPWORDS = {
     "a",
@@ -206,6 +231,8 @@ class VoiceService:
         edge_mandarin_voice: str,
         edge_english_voice: str,
         edge_rate: str,
+        edge_mandarin_rate: str | None,
+        edge_english_rate: str | None,
         openai_mandarin_voice: str,
         openai_voice_speed: float,
         openai_custom_voice_enabled: bool,
@@ -217,9 +244,11 @@ class VoiceService:
         self.store = store
         self.openai_client = openai_client
         self.tts_provider = str(tts_provider or "edge").strip().lower() or "edge"
-        self.edge_mandarin_voice = str(edge_mandarin_voice or "zh-CN-XiaozhenNeural").strip() or "zh-CN-XiaozhenNeural"
-        self.edge_english_voice = str(edge_english_voice or "en-US-JennyNeural").strip() or "en-US-JennyNeural"
+        self.edge_mandarin_voice = str(edge_mandarin_voice or "zh-CN-XiaoruiNeural").strip() or "zh-CN-XiaoruiNeural"
+        self.edge_english_voice = str(edge_english_voice or "en-SG-LunaNeural").strip() or "en-SG-LunaNeural"
         self.edge_rate = str(edge_rate or "-12%").strip() or "-12%"
+        self.edge_mandarin_rate = str(edge_mandarin_rate or self.edge_rate or "+0%").strip() or "+0%"
+        self.edge_english_rate = str(edge_english_rate or self.edge_rate or "-5%").strip() or "-5%"
         self.openai_mandarin_voice = openai_mandarin_voice
         self.openai_voice_speed = openai_voice_speed
         self.openai_custom_voice_enabled = openai_custom_voice_enabled
@@ -240,8 +269,9 @@ class VoiceService:
 
         if self.tts_provider == "edge":
             voice_id = self._edge_voice_for_language(language_code)
+            edge_rate = self._edge_rate_for_language(language_code)
             provider = "edge"
-            model_id = f"edge-tts:{self.edge_rate}"
+            model_id = f"edge-tts:{edge_rate}"
             cached = self.store.get_cached_audio(
                 owner_key=owner_key,
                 provider=provider,
@@ -253,7 +283,7 @@ class VoiceService:
             if cached:
                 return cached
             try:
-                audio_bytes = self._synthesize_with_edge_tts(text=normalized_text, voice_id=voice_id)
+                audio_bytes = self._synthesize_with_edge_tts(text=normalized_text, voice_id=voice_id, rate=edge_rate)
             except Exception:  # noqa: BLE001
                 audio_bytes = None
             suffix = "mp3"
@@ -329,10 +359,12 @@ class VoiceService:
         if not content:
             raise ValueError("Chunk content is required.")
         normalized_text = optimize_tts_text(content, language_code=language_code)
+        display_text = normalize_prd_briefing_script_text(content, language_code=language_code)
         text_hash = hashlib.sha256(normalized_text.encode("utf-8")).hexdigest()
         voice_id = self._edge_voice_for_language(language_code)
+        edge_rate = self._edge_rate_for_language(language_code)
         provider = "edge"
-        model_id = f"edge-tts:{self.edge_rate}:timed"
+        model_id = f"edge-tts:{edge_rate}:timed"
         chunk_id = str(chunk.get("id") or "chunk")
         cache_model_id = f"{model_id}:{presentation_cache_key}:{chunk_id}" if presentation_cache_key else model_id
         audio_path = self.store.get_cached_audio(
@@ -348,6 +380,7 @@ class VoiceService:
             audio_bytes, boundaries = self._synthesize_with_edge_tts_with_boundaries(
                 text=normalized_text,
                 voice_id=voice_id,
+                rate=edge_rate,
             )
             if not audio_bytes:
                 raise RuntimeError("Edge TTS did not return audio.")
@@ -372,11 +405,11 @@ class VoiceService:
             )
 
         duration = duration_from_edge_boundaries(boundaries) or estimate_tts_duration_seconds(normalized_text, language_code=language_code)
-        timestamps = build_sentence_timestamps(content, duration_seconds=duration)
+        timestamps = build_sentence_timestamps(display_text, duration_seconds=duration)
         return {
             "id": str(chunk.get("id") or uuid.uuid4().hex),
             "title": str(chunk.get("title") or "宣讲段落").strip() or "宣讲段落",
-            "content": content,
+            "content": display_text,
             "audioUrl": f"/prd-briefing/assets/{audio_path}",
             "duration": duration,
             "timestamps": timestamps,
@@ -402,10 +435,11 @@ class VoiceService:
     def _resolve_cache_target(self, *, language_code: str) -> dict[str, str] | None:
         elevenlabs_voice_id = self.elevenlabs_mandarin_voice_id
         if self.tts_provider == "edge":
+            edge_rate = self._edge_rate_for_language(language_code)
             return {
                 "provider": "edge",
                 "voice_id": self._edge_voice_for_language(language_code),
-                "model_id": f"edge-tts:{self.edge_rate}",
+                "model_id": f"edge-tts:{edge_rate}",
             }
         if self.tts_provider == "elevenlabs" and self.elevenlabs_api_key and elevenlabs_voice_id:
             return {
@@ -434,16 +468,19 @@ class VoiceService:
     def _edge_voice_for_language(self, language_code: str) -> str:
         return self.edge_mandarin_voice if str(language_code or "").lower().startswith("zh") else self.edge_english_voice
 
-    def _synthesize_with_edge_tts(self, *, text: str, voice_id: str) -> bytes:
-        return self._run_edge_tts_async(self._edge_tts_bytes(text=text, voice_id=voice_id))
+    def _edge_rate_for_language(self, language_code: str) -> str:
+        return self.edge_mandarin_rate if str(language_code or "").lower().startswith("zh") else self.edge_english_rate
 
-    def _synthesize_with_edge_tts_with_boundaries(self, *, text: str, voice_id: str) -> tuple[bytes, list[dict[str, Any]]]:
-        return self._run_edge_tts_async(self._edge_tts_bytes_and_boundaries(text=text, voice_id=voice_id))
+    def _synthesize_with_edge_tts(self, *, text: str, voice_id: str, rate: str) -> bytes:
+        return self._run_edge_tts_async(self._edge_tts_bytes(text=text, voice_id=voice_id, rate=rate))
 
-    async def _edge_tts_bytes(self, *, text: str, voice_id: str) -> bytes:
+    def _synthesize_with_edge_tts_with_boundaries(self, *, text: str, voice_id: str, rate: str) -> tuple[bytes, list[dict[str, Any]]]:
+        return self._run_edge_tts_async(self._edge_tts_bytes_and_boundaries(text=text, voice_id=voice_id, rate=rate))
+
+    async def _edge_tts_bytes(self, *, text: str, voice_id: str, rate: str) -> bytes:
         import edge_tts
 
-        communicate = edge_tts.Communicate(text, voice=voice_id, rate=self.edge_rate)
+        communicate = edge_tts.Communicate(text, voice=voice_id, rate=rate)
         chunks: list[bytes] = []
         async for chunk in communicate.stream():
             if chunk.get("type") == "audio":
@@ -452,10 +489,10 @@ class VoiceService:
                     chunks.append(bytes(data))
         return b"".join(chunks)
 
-    async def _edge_tts_bytes_and_boundaries(self, *, text: str, voice_id: str) -> tuple[bytes, list[dict[str, Any]]]:
+    async def _edge_tts_bytes_and_boundaries(self, *, text: str, voice_id: str, rate: str) -> tuple[bytes, list[dict[str, Any]]]:
         import edge_tts
 
-        communicate = edge_tts.Communicate(text, voice=voice_id, rate=self.edge_rate)
+        communicate = edge_tts.Communicate(text, voice=voice_id, rate=rate)
         chunks: list[bytes] = []
         boundaries: list[dict[str, Any]] = []
         async for chunk in communicate.stream():
@@ -707,6 +744,7 @@ class PRDBriefingService:
         session = self.store.get_session(session_id, owner_key)
         if not session:
             raise ValueError("Briefing session was not found.")
+        language = walkthrough_language_from_session(session)
         metadata = session.get("metadata") if isinstance(session.get("metadata"), dict) else {}
         presentation_cache_key = str(chunk.get("cacheKey") or metadata.get("presentation_cache_key") or "")
         return {
@@ -715,7 +753,7 @@ class PRDBriefingService:
                 session_id=session_id,
                 owner_key=owner_key,
                 chunk=chunk,
-                language_code="zh",
+                language_code=walkthrough_language_code(language),
                 presentation_cache_key=presentation_cache_key or None,
             ),
         }
@@ -746,7 +784,7 @@ class PRDBriefingService:
                 chunks = parse_presentation_chunks(repaired)
             except Exception as repair_error:  # noqa: BLE001
                 raise RuntimeError(f"Codex did not return valid presentation JSON: {repair_error}") from first_error
-        normalized = normalize_presentation_chunks(chunks)
+        normalized = normalize_presentation_chunks(chunks, language=language)
         return attach_presentation_media(normalized, media_dict or {})
 
     def get_session_payload(self, *, session_id: str, owner_key: str) -> dict[str, Any]:
@@ -2303,7 +2341,12 @@ def build_presentation_system_prompt(language: str | None = "zh") -> str:
             "Return only a strict JSON array, with no markdown fences and no explanation. "
             "Each object must contain: id, title, content, and optional imageUrls and media_ref. "
             "id must be stable like chunk-1, chunk-2. title must be short English. "
-            "content must be polished spoken English for PM-to-engineering briefing, 4 to 7 sentences, focused on user flow, system behavior, fields, validation, state changes, dependencies, edge cases, and QA attention points. "
+            "content must be polished spoken English for PM-to-engineering briefing, 4 to 7 short sentences, focused on user flow, system behavior, fields, validation, state changes, dependencies, edge cases, and QA attention points. "
+            "Use simple Singapore-neutral English. Avoid US or UK slang, idioms, filler phrases, and complex long sentences. "
+            "Prefer simple subject-verb-object sentences with one idea per sentence, for example: \"We will build a new button.\" "
+            "Do not write phrases like \"go ahead\", \"novel interactive element\", or \"utilize\" when a simple verb works. "
+            "Preserve API names, system names, status names, field names, and technical terms exactly as they appear in the PRD. "
+            "Use short sentences or line breaks to create clear pauses for preconditions, normal flow, exception handling, state changes, and if-then logic. "
             "If the input has [IMAGE] lines that are relevant to the chunk, include those exact URLs in imageUrls. "
             "The source may also contain markers like [MEDIA_ID_1]. Each marker represents one important image or table from the PRD. "
             "If one marker is important for the current chunk, output that marker id in media_ref, for example \"media_ref\":\"MEDIA_ID_1\". "
@@ -2316,6 +2359,11 @@ def build_presentation_system_prompt(language: str | None = "zh") -> str:
         "Each object must contain: id, title, content, and optional imageUrls and media_ref. "
         "id must be stable like chunk-1, chunk-2. title must be short Chinese. "
         "content must be polished spoken Mandarin for PM-to-engineering briefing, 4 to 7 sentences, focused on user flow, system behavior, fields, validation, state changes, dependencies, edge cases, and QA attention points. "
+        "在中文汉字和英文单词或英文缩写之间必须加一个空格，例如：调用 API 时，如果 QPS 超过限制，那么返回错误。 "
+        "常见英文缩写必须全部大写，例如 API, QPS, DAU, MVP, PRD, QA, UI, FE, BE, DB, HTTP, JSON。 "
+        "讲前置条件、正常流程、异常处理和状态分支时，要多用句号或换行制造停顿。 "
+        "开发最关心 if-else 逻辑，所以条件分支要尽量用“如果...那么...”表达。 "
+        "保留 PRD 里的系统名、接口名、状态名、字段名和技术名词，不要改写成口语外号。 "
         "If the input has [IMAGE] lines that are relevant to the chunk, include those exact URLs in imageUrls. "
         "The source may also contain markers like [MEDIA_ID_1]. Each marker represents one important image or table from the PRD. "
         "If one marker is important for the current chunk, output that marker id in media_ref, for example \"media_ref\":\"MEDIA_ID_1\". "
@@ -2330,6 +2378,8 @@ def build_presentation_user_prompt(*, source_text: str, image_urls: list[str], l
         return (
             "Create 4 to 10 English presentation chunks from this PRD. Merge tiny or metadata-only sections. "
             "Make each chunk useful for developers and QA to understand what to build and verify. "
+            "Use short direct English sentences. Avoid slang, idioms, and long clauses. "
+            "Use periods or line breaks when explaining preconditions, normal flow, exception handling, and if-then logic. "
             "Preserve useful [MEDIA_ID_x] references by assigning at most one media_ref to the chunk where that image or table helps the briefing.\n\n"
             f"Known image URLs:\n{image_hint}\n\n"
             f"PRD source:\n{source_text}"
@@ -2337,6 +2387,7 @@ def build_presentation_user_prompt(*, source_text: str, image_urls: list[str], l
     return (
         "Create 4 to 10 presentation chunks from this PRD. Merge tiny or metadata-only sections. "
         "Make each chunk useful for developers and QA to understand what to build and verify. "
+        "在中文和英文术语之间加空格。英文缩写用大写。说明前置条件、正常流程、异常处理和 if-else 分支时，用句号或换行制造停顿。 "
         "Preserve useful [MEDIA_ID_x] references by assigning at most one media_ref to the chunk where that image or table helps the briefing.\n\n"
         f"Known image URLs:\n{image_hint}\n\n"
         f"PRD source:\n{source_text}"
@@ -2417,11 +2468,12 @@ def proxy_confluence_image_url(url: str) -> str:
     return clean
 
 
-def normalize_presentation_chunks(chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def normalize_presentation_chunks(chunks: list[dict[str, Any]], *, language: str | None = "zh") -> list[dict[str, Any]]:
     normalized: list[dict[str, Any]] = []
+    language_code = walkthrough_language_code(language)
     for index, chunk in enumerate(chunks, start=1):
         title = str(chunk.get("title") or f"宣讲段落 {index}").strip()
-        content = str(chunk.get("content") or "").strip()
+        content = normalize_prd_briefing_script_text(str(chunk.get("content") or ""), language_code=language_code)
         if not content:
             continue
         normalized.append(
@@ -2491,8 +2543,32 @@ def build_sentence_timestamps(text: str, *, duration_seconds: float) -> list[dic
     return timestamps
 
 
+def normalize_prd_briefing_script_text(text: str, *, language_code: str) -> str:
+    normalized = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+    normalized = re.sub(r"[ \t]+", " ", normalized)
+    normalized = "\n".join(line.strip() for line in normalized.split("\n")).strip()
+    normalized = re.sub(r"\n{3,}", "\n\n", normalized)
+    if not str(language_code or "").lower().startswith("zh"):
+        return normalized
+
+    def _uppercase_known_acronym(match: re.Match[str]) -> str:
+        token = match.group(0)
+        upper = token.upper()
+        return upper if upper in TTS_TECH_ACRONYMS else token
+
+    normalized = re.sub(r"(?<![A-Za-z])(?:[A-Za-z]{2,8})(?![A-Za-z])", _uppercase_known_acronym, normalized)
+    normalized = re.sub(r"([\u3400-\u9fff])([A-Za-z0-9])", r"\1 \2", normalized)
+    normalized = re.sub(r"([A-Za-z0-9])([\u3400-\u9fff])", r"\1 \2", normalized)
+    normalized = re.sub(r"[ \t]+", " ", normalized)
+    normalized = re.sub(r" +([，。！？；：、])", r"\1", normalized)
+    normalized = re.sub(r"([（《【]) +", r"\1", normalized)
+    normalized = re.sub(r" +([）》】])", r"\1", normalized)
+    return normalized.strip()
+
+
 def optimize_tts_text(text: str, *, language_code: str) -> str:
-    normalized = re.sub(r"\s+", " ", text).strip()
+    normalized = normalize_prd_briefing_script_text(text, language_code=language_code)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
     if not str(language_code or "").lower().startswith("zh"):
         return normalized
     if len(normalized) <= 420:
