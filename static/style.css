@@ -6299,6 +6299,27 @@ select:focus {
   font-family: inherit;
 }
 
+.source-qa-answer-rendered {
+  display: grid;
+  gap: 12px;
+}
+
+.source-qa-answer-primary {
+  padding: 12px 14px;
+  border-left: 3px solid #3b82f6;
+  border-radius: 8px;
+  background: #f8fbff;
+  color: #26354d;
+}
+
+.source-qa-answer-evidence {
+  padding-top: 10px;
+  border-top: 1px solid #e6edf7;
+  color: #98a2b3;
+  font-size: 0.9em;
+  line-height: 1.55;
+}
+
 .source-qa-live-actions {
   display: flex;
   flex-wrap: wrap;
@@ -7887,8 +7908,30 @@ select:focus {
   margin-top: 20px;
 }
 
+.team-dashboard-report-intelligence-form {
+  margin-bottom: 24px;
+}
+
+.team-dashboard-report-intelligence-noise-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.team-dashboard-report-intelligence-mapping {
+  margin-top: 24px;
+}
+
+.team-dashboard-report-intelligence-mapping .mail-demo-card {
+  padding: 20px;
+}
+
 @media (max-width: 980px) {
   .team-dashboard-monthly-report-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .team-dashboard-report-intelligence-noise-grid {
     grid-template-columns: 1fr;
   }
 }
@@ -8280,20 +8323,12 @@ select:focus {
   align-items: start;
 }
 
-.meeting-video {
-  width: 100%;
-  max-height: 520px;
-  aspect-ratio: 16 / 9;
-  border-radius: 8px;
-  background: #111827;
-}
-
-.meeting-video-actions {
+.meeting-media-actions {
   margin-top: 10px;
   align-items: center;
 }
 
-.meeting-video-actions .is-attention {
+.meeting-media-actions .is-attention {
   border-color: #fed7aa;
   background: #fff7ed;
   color: #9a3412;

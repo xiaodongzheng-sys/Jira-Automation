@@ -350,6 +350,7 @@ def create_local_agent_app() -> Flask:
         result = service.generate_draft(
             template=normalize_monthly_report_template(payload.get("template")),
             team_payloads=[item for item in (payload.get("team_payloads") or []) if isinstance(item, dict)],
+            report_intelligence_config=payload.get("report_intelligence_config") if isinstance(payload.get("report_intelligence_config"), dict) else None,
         )
         return jsonify(result)
 
@@ -1400,6 +1401,7 @@ def _run_monthly_report_draft_job(app: Flask, job_id: str, payload: dict[str, An
             result = service.generate_draft(
                 template=normalize_monthly_report_template(payload.get("template")),
                 team_payloads=[item for item in (payload.get("team_payloads") or []) if isinstance(item, dict)],
+                report_intelligence_config=payload.get("report_intelligence_config") if isinstance(payload.get("report_intelligence_config"), dict) else None,
                 progress_callback=progress_callback,
             )
             job_store.complete(

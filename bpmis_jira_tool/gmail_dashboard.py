@@ -21,6 +21,7 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 from bpmis_jira_tool.errors import ToolError
+from bpmis_jira_tool.report_intelligence import is_gmail_noise, normalize_report_intelligence_config
 
 
 GMAIL_READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
@@ -267,9 +268,11 @@ def _clean_export_body_text(value: str) -> str:
     return cleaned or "[body unavailable]"
 
 
-def _is_export_noise(headers: dict[str, str]) -> bool:
+def _is_export_noise(headers: dict[str, str], report_intelligence_config: dict[str, Any] | None = None) -> bool:
     sender = _first_contact_address(headers.get("from", ""))
     subject = str(headers.get("subject") or "").strip().lower()
+    if report_intelligence_config and is_gmail_noise(headers, config=report_intelligence_config):
+        return True
     if sender in GMAIL_EXPORT_SELF_DAILY_BRIEF_SENDERS and subject.startswith("daily brief"):
         return True
     if sender in GMAIL_EXPORT_EXCLUDED_SENDERS:
@@ -337,10 +340,11 @@ class GmailDashboardService:
     _export_candidate_cache: dict[tuple[str, int, str], GmailExportCacheEntry] = {}
     _export_cache_lock = Lock()
 
-    def __init__(self, credentials, *, gmail_service=None, cache_key: str | None = None) -> None:
+    def __init__(self, credentials, *, gmail_service=None, cache_key: str | None = None, report_intelligence_config: dict[str, Any] | None = None) -> None:
         self.credentials = credentials
         self.service = gmail_service or build_gmail_api_service(credentials, cache_discovery=False)
         self.cache_key = str(cache_key or "").strip().lower()
+        self.report_intelligence_config = normalize_report_intelligence_config(report_intelligence_config)
 
     def build_dashboard(self, *, days: int = GMAIL_DASHBOARD_DEFAULT_DAYS, now: datetime | None = None) -> dict[str, Any]:
         overview = self.build_overview(days=days, now=now)
@@ -912,7 +916,7 @@ class GmailDashboardService:
                 continue
             mime_payload = message_payload.get("payload") or {}
             headers = _normalize_header_map(mime_payload.get("headers"))
-            if _is_export_noise(headers):
+            if _is_export_noise(headers, self.report_intelligence_config):
                 continue
             body_text = _clean_export_body_text(_extract_message_text_from_payload(mime_payload))
             body_truncated = len(body_text) > GMAIL_EXPORT_MAX_BODY_CHARS
@@ -997,7 +1001,7 @@ class GmailDashboardService:
                 next_ids = source_ids[scanned_count:scanned_count + chunk_size]
                 scanned_count += len(next_ids)
                 for record in self._fetch_message_metadata_many(next_ids):
-                    if not _is_export_noise(record.headers):
+                    if not _is_export_noise(record.headers, self.report_intelligence_config):
                         accepted_ids.append(record.message_id)
             fully_scanned = scanned_count >= len(source_ids)
             self._store_cached_export_candidates(

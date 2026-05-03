@@ -76,6 +76,9 @@ from bpmis_jira_tool.monthly_report import (
     normalize_monthly_report_template,
     send_monthly_report_email,
 )
+from bpmis_jira_tool.report_intelligence import (
+    normalize_report_intelligence_config,
+)
 from bpmis_jira_tool.seatalk_dashboard import SeaTalkDashboardService
 from bpmis_jira_tool.google_sheets import GoogleSheetsService
 from bpmis_jira_tool.bpmis_projects import BPMISProjectStore, PortalJiraCreationService, PortalProjectSyncService
@@ -640,6 +643,7 @@ class TeamDashboardConfigStore:
             },
             "key_project_overrides": {},
             "monthly_report_template": DEFAULT_MONTHLY_REPORT_TEMPLATE,
+            "report_intelligence_config": normalize_report_intelligence_config({}),
         }
 
     def normalize_config(self, config: dict[str, Any]) -> dict[str, Any]:
@@ -648,6 +652,7 @@ class TeamDashboardConfigStore:
         raw_key_project_overrides = config.get("key_project_overrides") if isinstance(config, dict) else {}
         raw_key_project_overrides = raw_key_project_overrides if isinstance(raw_key_project_overrides, dict) else {}
         raw_monthly_report_template = config.get("monthly_report_template") if isinstance(config, dict) else ""
+        raw_report_intelligence_config = config.get("report_intelligence_config") if isinstance(config, dict) else {}
         raw_task_cache = config.get("task_cache") if isinstance(config, dict) else {}
         raw_task_cache = raw_task_cache if isinstance(raw_task_cache, dict) else {}
         default = self.default_config()
@@ -678,6 +683,7 @@ class TeamDashboardConfigStore:
             "teams": normalized_teams,
             "key_project_overrides": normalized_key_project_overrides,
             "monthly_report_template": normalize_monthly_report_template(raw_monthly_report_template),
+            "report_intelligence_config": normalize_report_intelligence_config(raw_report_intelligence_config),
             "task_cache": self._normalize_task_cache(raw_task_cache),
         }
 
@@ -2426,7 +2432,6 @@ def create_app() -> Flask:
             )
         prd_tab = None
         prd_self_assessment_tab = None
-        seatalk_tab = None
         if _can_access_prd_self_assessment(settings):
             prd_self_assessment_tab = {
                 "label": "PRD Self-Assessment",
@@ -2438,12 +2443,6 @@ def create_app() -> Flask:
                 "label": "PRD Briefing Tool",
                 "href": url_for("prd_briefing.portal"),
                 "active": current_endpoint.startswith("prd_briefing"),
-            }
-        if _can_access_gmail_seatalk_demo(settings):
-            seatalk_tab = {
-                "label": "SeaTalk Management",
-                "href": url_for("gmail_seatalk_demo"),
-                "active": request.path.startswith("/gmail-sea-talk-demo"),
             }
         if _can_access_meeting_recorder(settings):
             site_tabs.append(
@@ -2465,8 +2464,6 @@ def create_app() -> Flask:
                     "active": current_endpoint == "team_dashboard_page",
                 }
             )
-        if seatalk_tab:
-            site_tabs.append(seatalk_tab)
         site_tabs.append(
             {
                 "label": "BPMIS Automation Tool",
@@ -2672,6 +2669,7 @@ def create_app() -> Flask:
             can_view_team_dashboard_monthly_report=_can_access_team_dashboard_monthly_report(
                 _get_user_identity(settings)
             ),
+            seatalk_configured=_seatalk_dashboard_is_configured(settings),
         )
 
     @app.get("/prd-self-assessment")
@@ -3161,21 +3159,7 @@ def create_app() -> Flask:
         access_gate = _require_gmail_seatalk_demo_access(settings)
         if access_gate is not None:
             return access_gate
-        user_identity = _get_user_identity(settings)
-        return render_template(
-            "gmail_seatalk_demo.html",
-            page_title="SeaTalk Management",
-            user_identity=user_identity,
-            google_connected="google_credentials" in session,
-            seatalk_configured=_seatalk_dashboard_is_configured(settings),
-            seatalk_insights_url=url_for("gmail_seatalk_demo_seatalk_insights_api"),
-            seatalk_project_updates_url=url_for("gmail_seatalk_demo_seatalk_project_updates_api"),
-            seatalk_todos_url=url_for("gmail_seatalk_demo_seatalk_todos_api"),
-            seatalk_open_todos_url=url_for("gmail_seatalk_demo_seatalk_open_todos_api"),
-            seatalk_todo_complete_url=url_for("gmail_seatalk_demo_seatalk_todo_complete"),
-            seatalk_name_mappings_url=url_for("gmail_seatalk_demo_seatalk_name_mappings"),
-            asset_revision=_current_release_revision(),
-        )
+        return redirect(url_for("team_dashboard_page", tab="report-intelligence"))
 
     @app.get("/api/gmail-sea-talk-demo/dashboard")
     def gmail_seatalk_demo_dashboard_api():
@@ -4380,6 +4364,7 @@ def create_app() -> Flask:
         if isinstance(existing_config.get("task_cache"), dict):
             payload["task_cache"] = existing_config["task_cache"]
         payload["monthly_report_template"] = existing_config.get("monthly_report_template") or DEFAULT_MONTHLY_REPORT_TEMPLATE
+        payload["report_intelligence_config"] = existing_config.get("report_intelligence_config") or normalize_report_intelligence_config({})
         saved = store.save(payload)
         _log_portal_event(
             "team_dashboard_members_save_success",
@@ -4457,6 +4442,70 @@ def create_app() -> Flask:
             ),
         )
         return jsonify({"status": "ok", "template": saved.get("monthly_report_template") or DEFAULT_MONTHLY_REPORT_TEMPLATE})
+
+    @app.post("/admin/team-dashboard/report-intelligence")
+    def save_team_dashboard_report_intelligence():
+        access_gate = _require_team_dashboard_monthly_report_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        user_identity = _get_user_identity(settings)
+        if not _can_manage_team_dashboard(user_identity):
+            return jsonify({"status": "error", "message": "Team Dashboard admin access is restricted."}), HTTPStatus.FORBIDDEN
+        payload = request.get_json(silent=True) or {}
+        store = _get_team_dashboard_config_store()
+        config = store.load()
+        config["report_intelligence_config"] = normalize_report_intelligence_config(payload.get("report_intelligence_config") or payload)
+        saved = store.save(config)
+        _log_portal_event(
+            "team_dashboard_report_intelligence_save_success",
+            **_build_request_log_context(
+                settings,
+                user_identity=user_identity,
+                extra={
+                    "vip_count": len(saved.get("report_intelligence_config", {}).get("vip_people") or []),
+                    "keyword_count": len(saved.get("report_intelligence_config", {}).get("priority_keywords") or []),
+                },
+            ),
+        )
+        return jsonify({"status": "ok", "report_intelligence_config": saved.get("report_intelligence_config") or normalize_report_intelligence_config({})})
+
+    @app.route("/api/team-dashboard/report-intelligence/seatalk/name-mappings", methods=["GET", "POST"])
+    def team_dashboard_report_intelligence_seatalk_name_mappings():
+        access_gate = _require_team_dashboard_monthly_report_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        mapping_store = _get_seatalk_name_mapping_store(settings)
+        if request.method == "POST":
+            payload = request.get_json(silent=True) or {}
+            mappings = mapping_store.merge_mappings(payload.get("mappings") or {})
+            return jsonify({"status": "ok", "mappings": mappings})
+        force_refresh = str(request.args.get("refresh") or "").strip().lower() in {"1", "true", "yes"}
+        try:
+            candidates = _seatalk_name_candidates(settings) if force_refresh else _get_seatalk_name_candidate_store(settings).load()
+            return jsonify(
+                {
+                    "status": "ok",
+                    "mappings": mapping_store.load(),
+                    "candidates": candidates,
+                    "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                }
+            )
+        except (ConfigError, ToolError) as error:
+            _log_portal_event(
+                "team_dashboard_report_intelligence_name_mapping_tool_error",
+                level=logging.WARNING,
+                **_build_request_log_context(settings, user_identity=_get_user_identity(settings), extra=_classify_portal_error(error)),
+            )
+            current_app.logger.warning("Team Dashboard Report Intelligence name mapping failed: %s", error)
+            return jsonify({"status": "error", "message": str(error), **_classify_portal_error(error)}), HTTPStatus.BAD_REQUEST
+        except Exception as error:  # noqa: BLE001
+            _log_portal_event(
+                "team_dashboard_report_intelligence_name_mapping_error",
+                level=logging.ERROR,
+                **_build_request_log_context(settings, user_identity=_get_user_identity(settings), extra=_classify_portal_error(error)),
+            )
+            current_app.logger.exception("Team Dashboard Report Intelligence name mapping failed.")
+            return jsonify({"status": "error", "message": "Could not load SeaTalk name mappings.", **_classify_portal_error(error)}), HTTPStatus.INTERNAL_SERVER_ERROR
 
     @app.get("/api/team-dashboard/tasks")
     def team_dashboard_tasks():
@@ -4931,6 +4980,7 @@ def create_app() -> Flask:
             request_payload = {
                 "template": normalize_monthly_report_template(config.get("monthly_report_template")),
                 "team_payloads": team_payloads,
+                "report_intelligence_config": normalize_report_intelligence_config(config.get("report_intelligence_config")),
             }
             if _remote_bpmis_config_enabled(settings):
                 data = _build_local_agent_client(settings).team_dashboard_monthly_report_draft_start(request_payload)

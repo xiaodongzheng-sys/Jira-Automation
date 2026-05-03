@@ -14,6 +14,11 @@ from google.oauth2.credentials import Credentials
 from bpmis_jira_tool.config import Settings
 from bpmis_jira_tool.errors import ConfigError, ToolError
 from bpmis_jira_tool.gmail_sender import GMAIL_SEND_SCOPE, StoredGoogleCredentials, credentials_from_payload, send_gmail_message
+from bpmis_jira_tool.report_intelligence import (
+    build_monthly_evidence_sidecar,
+    filter_text_by_noise,
+    normalize_report_intelligence_config,
+)
 from bpmis_jira_tool.seatalk_dashboard import SEATALK_INSIGHTS_TIMEZONE, SeaTalkDashboardService
 from bpmis_jira_tool.source_code_qa import CodexCliBridgeSourceCodeQALLMProvider
 from prd_briefing.confluence import ConfluenceConnector
@@ -75,26 +80,37 @@ class MonthlyReportService:
         seatalk_service: SeaTalkDashboardService,
         confluence: ConfluenceConnector | None = None,
         now: datetime | None = None,
+        report_intelligence_config: dict[str, Any] | None = None,
     ) -> None:
         self.settings = settings
         self.workspace_root = Path(workspace_root)
         self.seatalk_service = seatalk_service
         self.confluence = confluence
         self.now = (now or datetime.now(SEATALK_INSIGHTS_TIMEZONE)).astimezone(SEATALK_INSIGHTS_TIMEZONE)
+        self.report_intelligence_config = normalize_report_intelligence_config(report_intelligence_config)
 
     def generate_draft(
         self,
         *,
         template: str,
         team_payloads: list[dict[str, Any]],
+        report_intelligence_config: dict[str, Any] | None = None,
         progress_callback: Any | None = None,
     ) -> dict[str, Any]:
         started_at = time.monotonic()
+        if report_intelligence_config is not None:
+            self.report_intelligence_config = normalize_report_intelligence_config(report_intelligence_config)
         effective_template = normalize_monthly_report_template(template)
         _emit_monthly_report_progress(progress_callback, "preparing_sources", "Preparing Key Projects, Jira, PRD, and SeaTalk sources.", 0, 0)
         key_projects = self._key_projects(team_payloads)
         history_text = self._seatalk_history()
         prd_sources, prd_errors = self._prd_sources(key_projects)
+        evidence_sidecar = build_monthly_evidence_sidecar(
+            seatalk_history_text=history_text,
+            key_projects=key_projects,
+            prd_sources=prd_sources,
+            config=self.report_intelligence_config,
+        )
         batch_summaries = self._batch_summaries(
             template=effective_template,
             generated_at=self.now,
@@ -102,6 +118,7 @@ class MonthlyReportService:
             key_projects=key_projects,
             prd_sources=prd_sources,
             prd_errors=prd_errors,
+            evidence_sidecar=evidence_sidecar,
             progress_callback=progress_callback,
         )
         evidence_brief = self._merge_batch_summaries(
@@ -179,6 +196,7 @@ class MonthlyReportService:
                 "jira_ticket_count": sum(len(project.get("jira_tickets") or []) for project in key_projects),
                 "prd_page_count": len(prd_sources),
                 "prd_error_count": len(prd_errors),
+                "report_intelligence_evidence_count": len(evidence_sidecar),
             },
         }
 
@@ -191,9 +209,12 @@ class MonthlyReportService:
         key_projects: list[dict[str, Any]],
         prd_sources: list[dict[str, str]],
         prd_errors: list[str],
+        evidence_sidecar: list[dict[str, Any]],
         progress_callback: Any | None,
     ) -> list[dict[str, Any]]:
         batches: list[dict[str, Any]] = []
+        if evidence_sidecar:
+            batches.append({"source": "report_intelligence", "index": 1, "payload": evidence_sidecar})
         for index, chunk in enumerate(_split_text_for_token_limit(seatalk_history_text, MONTHLY_REPORT_BATCH_TARGET_TOKENS), start=1):
             batches.append({"source": "seatalk", "index": index, "payload": chunk})
         for index, chunk in enumerate(_split_json_items_for_token_limit(key_projects, MONTHLY_REPORT_BATCH_TARGET_TOKENS), start=1):
@@ -358,6 +379,7 @@ class MonthlyReportService:
             days=MONTHLY_REPORT_SEATALK_DAYS + 2,
         )
         history = self.seatalk_service._filter_system_generated_history(history)
+        history = filter_text_by_noise(history, config=self.report_intelligence_config, source="seatalk")
         return self.seatalk_service._compact_history_for_insights(
             history,
             max_chars=MONTHLY_REPORT_MAX_SEATALK_CHARS,
@@ -830,6 +852,7 @@ def _monthly_report_token_risk(estimated_tokens: int) -> str:
 def _monthly_report_source_label(source: str) -> str:
     return {
         "seatalk": "SeaTalk history",
+        "report_intelligence": "Report Intelligence matched evidence",
         "projects_jira": "Key Projects and Jira",
         "prd": "PRD and Confluence",
         "empty": "empty evidence",

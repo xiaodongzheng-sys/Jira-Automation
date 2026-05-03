@@ -757,6 +757,61 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         self.assertIn("GRC evaluation group", payload["watch_delegate_todos"][0]["evidence"])
         self.assertIn("GRC evaluation group", payload["team_member_reminders"][0]["evidence"])
 
+    def test_build_daily_briefing_injects_only_matched_report_intelligence(self):
+        class MatchedService(FakeSeaTalkService):
+            def _run_codex_insights_prompt(self, *, prompt, system_prompt):
+                self.last_prompt = prompt
+                return None, {
+                    "project_updates": [
+                        {
+                            "domain": "Credit Risk",
+                            "title": "Project Alpha approval",
+                            "summary": "Boss asked whether BSP approval may delay Project Alpha launch.",
+                            "status": "in_progress",
+                            "evidence": "Boss / BSP / BPMIS-1",
+                            "source_type": "seatalk",
+                        }
+                    ],
+                    "other_updates": [],
+                    "team_member_reminders": [],
+                    "my_todos": [
+                        {
+                            "task": "Follow up on BSP approval for Project Alpha.",
+                            "domain": "Credit Risk",
+                            "priority": "unknown",
+                            "due": "TBD",
+                            "evidence": "Boss / BSP / BPMIS-1",
+                            "source_type": "seatalk",
+                        }
+                    ],
+                    "team_todos": [],
+                }
+
+        config = {
+            "vip_people": [
+                {"display_name": "Boss", "role_tags": ["直属 Boss"], "aliases": ["Boss"]},
+                {"display_name": "Unused VIP", "role_tags": ["Finance"]},
+            ],
+            "priority_keywords": ["BSP", "OJK"],
+        }
+        service = MatchedService("SeaTalk Chat History Export\n[2026-04-29 09:00:00] Credit group / Boss: BSP approval may delay BPMIS-1.\n")
+        payload = build_daily_briefing(
+            service,
+            now=datetime(2026, 4, 29, 13, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE),
+            report_intelligence_config=config,
+            key_project_candidates=[{"bpmis_id": "BPMIS-1", "project_name": "Project Alpha", "jira_ids": ["CR-1"]}],
+        )
+
+        self.assertIn("Today's matched VIPs: Boss", service.last_prompt)
+        self.assertIn("Today's matched priority keywords: BSP", service.last_prompt)
+        self.assertIn("Today's matched key projects: BPMIS-1", service.last_prompt)
+        self.assertNotIn("Unused VIP", service.last_prompt)
+        self.assertNotIn("OJK", service.last_prompt)
+        self.assertEqual(payload["my_todos"][0]["matched_vips"], ["Boss"])
+        self.assertEqual(payload["my_todos"][0]["matched_keywords"], ["BSP"])
+        self.assertEqual(payload["my_todos"][0]["matched_key_projects"], ["BPMIS-1 / Project Alpha"])
+        self.assertEqual(payload["my_todos"][0]["priority"], "high")
+
     def test_render_email_handles_empty_partial_and_full_sections(self):
         now = datetime(2026, 4, 27, 19, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE)
         subject, text_body, html_body = render_email(briefing={"my_todos": [], "project_updates": []}, now=now)

@@ -42,19 +42,18 @@ class GmailSeaTalkDemoRouteTests(unittest.TestCase):
             session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
             session["google_credentials"] = {"token": "x", "scopes": [GMAIL_READONLY_SCOPE]}
 
-    def test_owner_sees_seatalk_management_tab_before_bpmis_on_index(self):
+    def test_owner_no_longer_sees_seatalk_management_tab_on_index(self):
         with self.app.test_client() as client:
             self._login_owner(client, scopes=[GMAIL_READONLY_SCOPE])
             response = client.get("/?workspace=run")
 
         self.assertEqual(response.status_code, 200)
         html = response.get_data(as_text=True)
-        self.assertIn("SeaTalk Management", html)
-        self.assertIn(b"/gmail-sea-talk-demo", response.data)
+        self.assertNotIn("SeaTalk Management", html)
+        self.assertNotIn(b"/gmail-sea-talk-demo", response.data)
         self.assertLess(html.index("Source Code Q&amp;A"), html.index("PRD Briefing Tool"))
         self.assertLess(html.index("PRD Briefing Tool"), html.index("Team Dashboard"))
-        self.assertLess(html.index("Team Dashboard"), html.index("SeaTalk Management"))
-        self.assertLess(html.index("SeaTalk Management"), html.index("BPMIS Automation Tool"))
+        self.assertLess(html.index("Team Dashboard"), html.index("BPMIS Automation Tool"))
         self.assertNotIn("SeaTalk Summary", html)
         self.assertNotIn("Gmail &amp; SeaTalk Demo", html)
 
@@ -76,7 +75,7 @@ class GmailSeaTalkDemoRouteTests(unittest.TestCase):
                 response = client.get("/?workspace=run")
 
         self.assertEqual(response.status_code, 200)
-        self.assertIn(b"SeaTalk Management", response.data)
+        self.assertNotIn(b"SeaTalk Management", response.data)
         self.assertNotIn(b"SeaTalk Summary", response.data)
 
     def test_non_owner_does_not_see_seatalk_summary_tab(self):
@@ -88,58 +87,13 @@ class GmailSeaTalkDemoRouteTests(unittest.TestCase):
         self.assertNotIn(b"SeaTalk Summary", response.data)
         self.assertNotIn(b"SeaTalk Management", response.data)
 
-    def test_owner_can_open_seatalk_summary_page(self):
+    def test_owner_seatalk_summary_page_redirects_to_team_dashboard_report_intelligence(self):
         with self.app.test_client() as client:
             self._login_owner(client, scopes=[GMAIL_READONLY_SCOPE])
-            response = client.get("/gmail-sea-talk-demo")
+            response = client.get("/gmail-sea-talk-demo", follow_redirects=False)
 
-        self.assertEqual(response.status_code, 200)
-        self.assertIn(b"SeaTalk Management", response.data)
-        self.assertNotIn(b"SeaTalk Summary", response.data)
-        self.assertNotIn(b"Map SeaTalk source IDs to readable names used in exports and Codex evidence.", response.data)
-        self.assertNotIn(b"Gmail", response.data)
-        self.assertNotIn(b"Mailbox Overview", response.data)
-        self.assertNotIn(b"Daily Received Volume", response.data)
-        self.assertNotIn(b"Daily Sent Volume", response.data)
-        self.assertNotIn(b"Received Today", response.data)
-        self.assertNotIn(b"Current Unread", response.data)
-        self.assertNotIn(b"Read Rate", response.data)
-        self.assertNotIn(b"Local Status", response.data)
-        self.assertNotIn(b"Data Scope", response.data)
-        self.assertNotIn(b"Download 7-Day Chat History", response.data)
-        self.assertNotIn(b"/api/gmail-sea-talk-demo/seatalk/export", response.data)
-        self.assertNotIn(b"Preparing Gmail download batches", response.data)
-        self.assertNotIn(b"data-gmail-demo-root", response.data)
-        self.assertNotIn(b"data-gmail-export-manifest-url", response.data)
-        self.assertNotIn(b"Top 10 Senders", response.data)
-        self.assertNotIn(b"SeaTalk Overview", response.data)
-        self.assertNotIn(b"Project Updates", response.data)
-        self.assertNotIn(b"data-seatalk-project-updates", response.data)
-        self.assertNotIn(b"Project update product lines", response.data)
-        self.assertNotIn(b"Anti-fraud", response.data)
-        self.assertNotIn(b"Credit Risk", response.data)
-        self.assertNotIn(b"Ops Risk", response.data)
-        self.assertNotIn(b"To-do Items", response.data)
-        self.assertNotIn(b"Summary</button>", response.data)
-        self.assertIn(b"Name Mapping", response.data)
-        self.assertIn(b"Refresh Candidates", response.data)
-        self.assertIn(b"data-seatalk-name-mapping-refresh", response.data)
-        self.assertIn(b"data-seatalk-name-mappings-url", response.data)
-        self.assertGreaterEqual(response.data.count(b"data-seatalk-name-mapping-save"), 2)
-        self.assertIn(b"data-seatalk-name-mapping-save-feedback", response.data)
-        self.assertIn(b"/api/gmail-sea-talk-demo/seatalk/name-mappings", response.data)
-        self.assertNotIn(b"data-seatalk-insights-url", response.data)
-        self.assertNotIn(b"data-seatalk-project-updates-url", response.data)
-        self.assertNotIn(b"data-seatalk-todos-url", response.data)
-        self.assertNotIn(b"data-seatalk-open-todos-url", response.data)
-        self.assertNotIn(b"Generate To-dos", response.data)
-        self.assertNotIn(b"Generate Project Updates", response.data)
-        self.assertNotIn(b"Loading saved to-dos", response.data)
-        self.assertNotIn(b"Click Generate Project Updates to load updates.", response.data)
-        self.assertNotIn(b"Loading SeaTalk summary", response.data)
-        self.assertNotIn(b"data-seatalk-todo-complete-url", response.data)
-        self.assertNotIn(b"Team / Follow-up To-dos", response.data)
-        self.assertIn(b"SeaTalk unavailable", response.data)
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.headers["Location"], "/team-dashboard?tab=report-intelligence")
 
     def test_owner_page_does_not_require_gmail_scope(self):
         with patch("bpmis_jira_tool.web._google_credentials_have_scopes") as scope_check:
@@ -147,10 +101,9 @@ class GmailSeaTalkDemoRouteTests(unittest.TestCase):
                 self._login_owner(client, scopes=[])
                 response = client.get("/gmail-sea-talk-demo")
 
-        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.status_code, 302)
         scope_check.assert_not_called()
-        self.assertNotIn(b"Reconnect Google to grant Gmail access", response.data)
-        self.assertNotIn(b"Download 7-Day Gmail History", response.data)
+        self.assertEqual(response.headers["Location"], "/team-dashboard?tab=report-intelligence")
 
     def test_non_owner_page_is_denied(self):
         with self.app.test_client() as client:

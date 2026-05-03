@@ -13,6 +13,9 @@
     data-monthly-report-latest-draft-url="{{ url_for('team_dashboard_monthly_report_latest_draft') }}"
     data-monthly-report-draft-url="{{ url_for('team_dashboard_monthly_report_draft') }}"
     data-monthly-report-send-url="{{ url_for('team_dashboard_monthly_report_send') }}"
+    data-report-intelligence-save-url="{{ url_for('save_team_dashboard_report_intelligence') }}"
+    data-report-intelligence-seatalk-name-mappings-url="{{ url_for('team_dashboard_report_intelligence_seatalk_name_mappings') }}"
+    data-seatalk-configured="{{ 'true' if seatalk_configured else 'false' }}"
   {% endif %}
   data-can-manage-key-projects="{{ 'true' if can_manage_team_dashboard else 'false' }}"
 >
@@ -27,6 +30,7 @@
     <button class="workspace-tab is-active" type="button" role="tab" aria-selected="true" data-team-dashboard-tab="tasks">Task List</button>
     {% if can_view_team_dashboard_monthly_report %}
       <button class="workspace-tab" type="button" role="tab" aria-selected="false" data-team-dashboard-tab="monthly-report">Monthly Report</button>
+      <button class="workspace-tab" type="button" role="tab" aria-selected="false" data-team-dashboard-tab="report-intelligence">Report Intelligence</button>
     {% endif %}
     <button class="workspace-tab" type="button" role="tab" aria-selected="false" data-team-dashboard-tab="link-biz-project">Link Biz Project</button>
     {% if can_manage_team_dashboard %}
@@ -95,6 +99,96 @@
           </div>
         </div>
       </div>
+    </section>
+  {% endif %}
+
+  {% if can_view_team_dashboard_monthly_report %}
+    <section data-team-dashboard-panel="report-intelligence" hidden>
+      <form method="post" action="{{ url_for('save_team_dashboard_report_intelligence') }}" class="stack team-dashboard-report-intelligence-form" data-report-intelligence-form>
+        <div class="productization-section-head">
+          <div>
+            <h3>Report Intelligence</h3>
+            <span>Configure the prioritization rules used by Daily Brief and Monthly Report.</span>
+          </div>
+          <div class="button-row">
+            <button class="button button-primary" type="submit">Save Intelligence Rules</button>
+          </div>
+        </div>
+        <p class="productization-inline-status" data-report-intelligence-status></p>
+        <div class="config-grid setup-grid">
+          <div class="config-card config-card-wide">
+            <div class="field-label-row">
+              <h3>VIP Management</h3>
+              <span class="field-badge">Daily + Monthly</span>
+            </div>
+            <p class="card-help">One person per line: Name | role tags | emails | SeaTalk IDs | aliases.</p>
+            <div class="field-group">
+              <label for="report_intelligence_vips">VIP People</label>
+              <textarea id="report_intelligence_vips" rows="10" spellcheck="false" data-report-intelligence-vips></textarea>
+            </div>
+          </div>
+          <div class="config-card config-card-wide">
+            <div class="field-label-row">
+              <h3>Project & Keyword Context</h3>
+              <span class="field-badge">Weighted</span>
+            </div>
+            <p class="card-help">One keyword per line. Daily Brief injects only keywords found in today's data; Monthly Report uses them for monthly evidence weighting.</p>
+            <div class="field-group">
+              <label for="report_intelligence_keywords">Priority Keywords</label>
+              <textarea id="report_intelligence_keywords" rows="10" spellcheck="false" data-report-intelligence-keywords></textarea>
+            </div>
+          </div>
+          <div class="config-card config-card-wide">
+            <div class="field-label-row">
+              <h3>Noise Reduction</h3>
+              <span class="field-badge">Input Filter</span>
+            </div>
+            <div class="team-dashboard-report-intelligence-noise-grid">
+              <div class="field-group">
+                <label for="report_intelligence_seatalk_blacklist">SeaTalk Group Blacklist</label>
+                <textarea id="report_intelligence_seatalk_blacklist" rows="8" spellcheck="false" data-report-intelligence-seatalk-blacklist></textarea>
+              </div>
+              <div class="field-group">
+                <label for="report_intelligence_gmail_sender_blacklist">Gmail Sender Blacklist</label>
+                <textarea id="report_intelligence_gmail_sender_blacklist" rows="8" spellcheck="false" data-report-intelligence-gmail-sender-blacklist></textarea>
+              </div>
+              <div class="field-group">
+                <label for="report_intelligence_gmail_subject_hints">Gmail Subject Hints</label>
+                <textarea id="report_intelligence_gmail_subject_hints" rows="8" spellcheck="false" data-report-intelligence-gmail-subject-hints></textarea>
+              </div>
+            </div>
+          </div>
+        </div>
+      </form>
+
+      <section
+        class="team-dashboard-report-intelligence-mapping"
+        data-seatalk-demo-root
+        data-seatalk-name-mappings-url="{{ url_for('team_dashboard_report_intelligence_seatalk_name_mappings') }}"
+        data-seatalk-configured="{{ 'true' if seatalk_configured else 'false' }}"
+      >
+        <article class="mail-demo-card">
+          <div class="field-label-row">
+            <h3>SeaTalk Name Mapping</h3>
+            <span class="field-badge">Evidence Names</span>
+          </div>
+          <p class="card-help">Map frequent or recently surfaced SeaTalk source IDs to readable names used in report evidence.</p>
+          <div class="button-row">
+            <span data-seatalk-name-mapping-actions hidden>
+              <button class="button button-primary" type="button" data-seatalk-name-mapping-save>Save Mappings</button>
+            </span>
+            <button class="button button-secondary" type="button" data-seatalk-name-mapping-refresh>Refresh Candidates</button>
+          </div>
+          <div class="empty-state mail-demo-status" data-seatalk-mapping-status data-tone="neutral">
+            <p>{% if seatalk_configured %}Open this tab to load frequent and recent source IDs.{% else %}SeaTalk desktop data is not available yet. Open the SeaTalk Mac app on this machine to enable name mapping.{% endif %}</p>
+          </div>
+          <div class="seatalk-mapping-table" data-seatalk-name-mapping-body hidden></div>
+          <div class="button-row" data-seatalk-name-mapping-actions hidden>
+            <button class="button button-primary" type="button" data-seatalk-name-mapping-save>Save Mappings</button>
+            <span class="seatalk-mapping-save-feedback" data-seatalk-name-mapping-save-feedback aria-live="polite"></span>
+          </div>
+        </article>
+      </section>
     </section>
   {% endif %}
 

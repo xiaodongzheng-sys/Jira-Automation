@@ -16,6 +16,15 @@ from bpmis_jira_tool.config import Settings
 from bpmis_jira_tool.errors import ConfigError
 from bpmis_jira_tool.gmail_dashboard import GMAIL_READONLY_SCOPE, GmailDashboardService
 from bpmis_jira_tool.gmail_sender import StoredGoogleCredentials, credentials_from_payload, send_gmail_message
+from bpmis_jira_tool.report_intelligence import (
+    build_daily_match_summary,
+    filter_text_by_noise,
+    key_project_candidates_from_team_config,
+    load_report_intelligence_config_from_data_root,
+    load_team_dashboard_config_from_data_root,
+    match_report_intelligence,
+    normalize_report_intelligence_config,
+)
 from bpmis_jira_tool.seatalk_dashboard import (
     SEATALK_DASHBOARD_DEFAULT_DAYS,
     SEATALK_INSIGHTS_TIMEZONE,
@@ -423,8 +432,11 @@ def build_daily_briefing(
     gmail_history_text: str = "",
     window_start: datetime | None = None,
     window_end: datetime | None = None,
+    report_intelligence_config: dict[str, Any] | None = None,
+    key_project_candidates: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     local_now = now.astimezone(SEATALK_INSIGHTS_TIMEZONE)
+    intelligence_config = normalize_report_intelligence_config(report_intelligence_config)
     local_window_start = window_start.astimezone(SEATALK_INSIGHTS_TIMEZONE) if window_start else None
     local_window_end = window_end.astimezone(SEATALK_INSIGHTS_TIMEZONE) if window_end else None
     if local_window_start and local_window_end:
@@ -437,6 +449,7 @@ def build_daily_briefing(
         history_text = service._filter_system_generated_history(export_rolling_history(service, now=local_now, hours=hours))
         period_hours = hours
         window_label = f"previous {hours} hours"
+    history_text = filter_text_by_noise(history_text, config=intelligence_config, source="seatalk")
     gmail_history_text = str(gmail_history_text or "").strip()
     seatalk_has_messages = any(line.startswith("[") for line in history_text.splitlines())
     gmail_has_messages = any(line.startswith("Message ") for line in gmail_history_text.splitlines())
@@ -475,6 +488,12 @@ def build_daily_briefing(
     )
     if gmail_history_text:
         gmail_history_text = gmail_history_text[:360_000]
+    daily_matches = match_report_intelligence(
+        f"{history_text}\n\n{gmail_history_text}",
+        config=intelligence_config,
+        key_projects=key_project_candidates or [],
+    )
+    daily_match_summary = build_daily_match_summary(daily_matches)
     _, parsed = service._run_codex_insights_prompt(
         system_prompt=_daily_brief_system_prompt(),
         prompt=_daily_brief_user_prompt(
@@ -483,6 +502,7 @@ def build_daily_briefing(
             hours=period_hours,
             local_now=local_now,
             window_label=window_label,
+            match_summary=daily_match_summary,
         ),
     )
     name_mappings = _load_seatalk_name_mappings(service)
@@ -503,6 +523,13 @@ def build_daily_briefing(
         text_fields=("person", "reminder"),
     )[:MAX_TEAM_MEMBER_REMINDERS]
     my_todos = SeaTalkDashboardService._sort_todos(my_todos)
+    _apply_report_intelligence_matches(
+        [*project_updates, *other_updates, *my_todos],
+        daily_matches=daily_matches,
+    )
+    project_updates = _sort_report_intelligence_items(project_updates)
+    other_updates = _sort_report_intelligence_items(other_updates)
+    my_todos = _sort_report_intelligence_items(my_todos)
     direct_action_todos, watch_delegate_todos = _split_todos_by_action_type(my_todos)
     deduped_topic_count = _apply_cross_section_topic_metadata(
         project_updates=project_updates,
@@ -634,6 +661,9 @@ def send_daily_email(
     window_label = email_window.label if email_window else ""
     data_root = data_root_from_settings(settings)
     run_store = DailyEmailRunStore(data_root / "seatalk" / "daily_email_runs.json")
+    team_dashboard_config = load_team_dashboard_config_from_data_root(data_root)
+    report_intelligence_config = load_report_intelligence_config_from_data_root(data_root)
+    key_project_candidates = key_project_candidates_from_team_config(team_dashboard_config)
     subject = f"Daily Brief - {run_date}"
     if window_label:
         subject = f"{subject} ({window_label})"
@@ -656,7 +686,12 @@ def send_daily_email(
     ensure_gmail_daily_scopes(credentials_payload)
     credentials = credentials_from_payload(credentials_payload)
     service = build_seatalk_service(settings, data_root=data_root)
-    gmail_brief_service = GmailDashboardService(credentials=credentials, gmail_service=gmail_service, cache_key=owner_email)
+    gmail_brief_service = GmailDashboardService(
+        credentials=credentials,
+        gmail_service=gmail_service,
+        cache_key=owner_email,
+        report_intelligence_config=report_intelligence_config,
+    )
     if email_window:
         gmail_history_text = _export_window_gmail_threads_with_timeout(
             gmail_brief_service,
@@ -669,11 +704,20 @@ def send_daily_email(
             gmail_history_text=gmail_history_text,
             window_start=email_window.start,
             window_end=email_window.end,
+            report_intelligence_config=report_intelligence_config,
+            key_project_candidates=key_project_candidates,
         )
     else:
         effective_hours = hours if hours is not None else DEFAULT_HOURS
         gmail_history_text = _export_rolling_gmail_threads_with_timeout(gmail_brief_service, now=local_now, hours=effective_hours)
-        briefing = build_daily_briefing(service, now=local_now, hours=effective_hours, gmail_history_text=gmail_history_text)
+        briefing = build_daily_briefing(
+            service,
+            now=local_now,
+            hours=effective_hours,
+            gmail_history_text=gmail_history_text,
+            report_intelligence_config=report_intelligence_config,
+            key_project_candidates=key_project_candidates,
+        )
     subject, text_body, html_body = render_email(briefing=briefing, now=local_now, window_label=window_label)
     if dry_run:
         return DailyEmailResult(
@@ -893,14 +937,23 @@ def _daily_brief_user_prompt(
     hours: int,
     local_now: datetime,
     window_label: str = "",
+    match_summary: str = "",
 ) -> str:
     window_text = window_label or f"previous {hours} hours"
+    match_block = (
+        "## Today's Report Intelligence Matches\n"
+        f"{match_summary}\n"
+        "Use these matches only as prioritization hints. Do not create items unless the source evidence supports them. "
+        "For matching output items, fill matched_vips, matched_keywords, matched_key_projects, and priority_reason.\n\n"
+        if str(match_summary or "").strip()
+        else ""
+    )
     return (
         "## Output Contract\n"
         "Return a JSON object with exactly these top-level keys: project_updates, other_updates, my_todos, team_member_reminders, team_todos.\n"
-        "project_updates: array of objects with keys domain, title, summary, status, evidence, source_type.\n"
-        "other_updates: array of objects with keys domain, title, summary, status, evidence, source_type, signal_type.\n"
-        "my_todos: array of objects with keys task, domain, priority, due, evidence, source_type, action_type.\n"
+        "project_updates: array of objects with keys domain, title, summary, status, evidence, source_type, matched_vips, matched_keywords, matched_key_projects, priority_reason.\n"
+        "other_updates: array of objects with keys domain, title, summary, status, evidence, source_type, signal_type, matched_vips, matched_keywords, matched_key_projects, priority_reason.\n"
+        "my_todos: array of objects with keys task, domain, priority, due, evidence, source_type, action_type, matched_vips, matched_keywords, matched_key_projects, priority_reason.\n"
         "team_member_reminders: array of objects with keys domain, person, reminder, evidence, source_type.\n"
         "team_todos must always be an empty array.\n\n"
         "## Allowed Values\n"
@@ -937,6 +990,7 @@ def _daily_brief_user_prompt(
         "Use status=done only when the outcome is fully complete. If an item says pending confirmation, still pending, tomorrow clarify, no fixed date, or awaiting confirmation, use status=in_progress or unknown, not done.\n"
         "If an item mentions MAS, launch before a fix, risk endorsement, ITC endorsement, blocked, or missing real-time fraud surveillance, treat it as high-risk and prefer status=blocked or signal_type=risk_compliance when appropriate.\n"
         "Avoid repeating the same topic across sections unless each section has a distinct role: Xiaodong next action, project state, or team member follow-up.\n\n"
+        f"{match_block}"
         "## Exclusions\n"
         "For other_updates and team_member_reminders, ignore bot-generated alerts, automated reminders, system notifications, Jira/Confluence/calendar reminders, and no-reply notification emails unless a human adds meaningful follow-up in the same thread.\n\n"
         "For team_member_reminders, always exclude SDLC Checker and SG BAU SDLC material check content; those are automated release hygiene signals, not human team follow-up requests.\n\n"
@@ -971,6 +1025,98 @@ def _load_seatalk_name_mappings(service: Any) -> dict[str, str]:
         for key in _seatalk_mapping_equivalent_keys(raw_key):
             normalized[key.lower()] = name[:180]
     return normalized
+
+
+def _apply_report_intelligence_matches(items: list[dict[str, Any]], *, daily_matches: dict[str, Any]) -> None:
+    matched_vips = daily_matches.get("matched_vips") if isinstance(daily_matches, dict) else []
+    matched_keywords = daily_matches.get("matched_keywords") if isinstance(daily_matches, dict) else []
+    matched_key_projects = daily_matches.get("matched_key_projects") if isinstance(daily_matches, dict) else []
+    if not (matched_vips or matched_keywords or matched_key_projects):
+        return
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        text = _item_text(item)
+        item_vips = _matching_labels(text, matched_vips, "display_name")
+        item_keywords = [keyword for keyword in (matched_keywords or []) if str(keyword).casefold() in text]
+        item_key_projects = [
+            _key_project_match_label(project)
+            for project in (matched_key_projects or [])
+            if _key_project_item_matches(text, project)
+        ]
+        if item_vips:
+            item["matched_vips"] = item_vips
+        else:
+            item.setdefault("matched_vips", [])
+        if item_keywords:
+            item["matched_keywords"] = item_keywords
+        else:
+            item.setdefault("matched_keywords", [])
+        if item_key_projects:
+            item["matched_key_projects"] = item_key_projects
+        else:
+            item.setdefault("matched_key_projects", [])
+        reasons = []
+        if item_vips:
+            reasons.append("VIP")
+        if item_keywords:
+            reasons.append("priority keyword")
+        if item_key_projects:
+            reasons.append("Key Project")
+        if reasons:
+            item["priority_reason"] = ", ".join(reasons)
+            if str(item.get("priority") or "").strip().lower() in {"", "unknown", "low"}:
+                item["priority"] = "high" if item_vips or item_key_projects else "medium"
+        else:
+            item.setdefault("priority_reason", "")
+
+
+def _sort_report_intelligence_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    priority_order = {"high": 0, "medium": 1, "low": 2, "unknown": 3}
+    status_order = {"blocked": 0, "in_progress": 1, "unknown": 2, "done": 3}
+
+    def key(item: dict[str, Any]) -> tuple[int, int, int, str]:
+        signal = 0
+        if item.get("matched_vips"):
+            signal -= 4
+        if item.get("matched_key_projects"):
+            signal -= 3
+        if item.get("matched_keywords"):
+            signal -= 2
+        return (
+            signal,
+            priority_order.get(str(item.get("priority") or "unknown").lower(), 3),
+            status_order.get(str(item.get("status") or "unknown").lower(), 2),
+            str(item.get("due") or item.get("title") or item.get("task") or "").casefold(),
+        )
+
+    return sorted(items, key=key)
+
+
+def _matching_labels(text: str, rows: Any, field: str) -> list[str]:
+    lowered = str(text or "").casefold()
+    labels = []
+    for row in rows or []:
+        label = str((row or {}).get(field) or "").strip()
+        if label and label.casefold() in lowered:
+            labels.append(label)
+    return labels
+
+
+def _key_project_match_label(project: Any) -> str:
+    bpmis_id = str((project or {}).get("bpmis_id") or "").strip()
+    name = str((project or {}).get("project_name") or "").strip()
+    return " / ".join(item for item in (bpmis_id, name) if item)
+
+
+def _key_project_item_matches(text: str, project: Any) -> bool:
+    lowered = str(text or "").casefold()
+    terms = [
+        (project or {}).get("bpmis_id"),
+        (project or {}).get("project_name"),
+        *((project or {}).get("jira_ids") or []),
+    ]
+    return any(str(term or "").strip().casefold() in lowered for term in terms if str(term or "").strip())
 
 
 def _seatalk_mapping_equivalent_keys(value: Any) -> set[str]:

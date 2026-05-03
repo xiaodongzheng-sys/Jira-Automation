@@ -194,7 +194,7 @@ class _FakePRDReviewLocalAgentClient:
 
 
 class _FakeMonthlyReportService:
-    def generate_draft(self, *, template, team_payloads, progress_callback=None):
+    def generate_draft(self, *, template, team_payloads, report_intelligence_config=None, progress_callback=None):
         if progress_callback:
             progress_callback("summarizing_seatalk", "Summarizing SeaTalk batch 1/1.", 1, 1, estimated_prompt_tokens=1200, token_risk="normal")
         return {
@@ -1168,12 +1168,77 @@ class WebPortalFeatureTests(unittest.TestCase):
         )
         self.assertEqual(config_payload["config"]["teams"]["GRC"]["member_emails"], ["sabrina.chan@npt.sg"])
         self.assertIn("Monthly Report", config_payload["config"]["monthly_report_template"])
+        self.assertIn("BSP", config_payload["config"]["report_intelligence_config"]["priority_keywords"])
+        self.assertIn("OJK", config_payload["config"]["report_intelligence_config"]["priority_keywords"])
         self.assertEqual(save_response.status_code, 200)
         self.assertEqual(sophia_config_response.status_code, 403)
         self.assertEqual(sophia_save_response.status_code, 403)
         saved_payload = save_response.get_json()
         self.assertEqual(saved_payload["config"]["teams"]["AF"]["member_emails"], ["pm1@npt.sg", "pm2@npt.sg"])
         self.assertEqual(saved_payload["config"]["teams"]["GRC"]["member_emails"], ["ops@npt.sg", "ops2@npt.sg"])
+
+    def test_team_dashboard_report_intelligence_save_normalizes_and_requires_admin(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_ALLOWED_EMAILS": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
+            },
+            clear=True,
+        ):
+            app = create_app()
+            app.testing = True
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong"}
+                    session["google_credentials"] = {"token": "x"}
+                save_response = client.post(
+                    "/admin/team-dashboard/report-intelligence",
+                    json={
+                        "report_intelligence_config": {
+                            "vip_people": [
+                                {
+                                    "display_name": " Boss ",
+                                    "role_tags": [" 直属 Boss ", "直属 Boss"],
+                                    "emails": ["boss@npt.sg", "BOSS@npt.sg"],
+                                    "seatalk_ids": ["st-boss"],
+                                    "aliases": ["Boss"],
+                                }
+                            ],
+                            "priority_keywords": ["BSP", "OJK", "BSP", " "],
+                            "noise": {
+                                "seatalk_group_blacklist": ["tea", "tea"],
+                                "gmail_sender_blacklist": ["alerts@npt.sg"],
+                                "gmail_subject_hints": ["weekly digest"],
+                            },
+                        }
+                    },
+                )
+                config_response = client.get("/api/team-dashboard/config")
+
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["google_profile"] = {"email": "sophia.wangzj@npt.sg", "name": "Sophia"}
+                    session["google_credentials"] = {"token": "x"}
+                forbidden_response = client.post(
+                    "/admin/team-dashboard/report-intelligence",
+                    json={"report_intelligence_config": {"priority_keywords": ["MAS"]}},
+                )
+
+        self.assertEqual(save_response.status_code, 200)
+        saved = save_response.get_json()["report_intelligence_config"]
+        self.assertEqual(saved["priority_keywords"], ["BSP", "OJK"])
+        self.assertEqual(saved["vip_people"][0]["display_name"], "Boss")
+        self.assertEqual(saved["vip_people"][0]["role_tags"], ["直属 Boss"])
+        self.assertEqual(saved["vip_people"][0]["emails"], ["boss@npt.sg"])
+        self.assertEqual(saved["noise"]["seatalk_group_blacklist"], ["tea"])
+        self.assertEqual(saved["noise"]["gmail_sender_blacklist"], ["alerts@npt.sg"])
+        self.assertEqual(saved["noise"]["gmail_subject_hints"], ["weekly digest"])
+        self.assertEqual(config_response.get_json()["config"]["report_intelligence_config"], saved)
+        self.assertEqual(forbidden_response.status_code, 403)
 
     def test_team_dashboard_legacy_default_members_migrate_even_when_order_changes(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(

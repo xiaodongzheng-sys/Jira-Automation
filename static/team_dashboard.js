@@ -48,6 +48,14 @@
   const monthlyReportTemplateForm = root.querySelector('[data-monthly-report-template-form]');
   const monthlyReportTemplate = root.querySelector('[data-monthly-report-template]');
   const monthlyReportTemplateStatus = root.querySelector('[data-monthly-report-template-status]');
+  const reportIntelligenceForm = root.querySelector('[data-report-intelligence-form]');
+  const reportIntelligenceStatus = root.querySelector('[data-report-intelligence-status]');
+  const reportIntelligenceVips = root.querySelector('[data-report-intelligence-vips]');
+  const reportIntelligenceKeywords = root.querySelector('[data-report-intelligence-keywords]');
+  const reportIntelligenceSeatalkBlacklist = root.querySelector('[data-report-intelligence-seatalk-blacklist]');
+  const reportIntelligenceGmailSenderBlacklist = root.querySelector('[data-report-intelligence-gmail-sender-blacklist]');
+  const reportIntelligenceGmailSubjectHints = root.querySelector('[data-report-intelligence-gmail-subject-hints]');
+  const seatalkNameMappingRoot = root.querySelector('[data-seatalk-demo-root]');
   const linkBizProjectStatus = root.querySelector('[data-link-biz-project-status]');
   const linkBizProjectRows = root.querySelector('[data-link-biz-project-rows]');
   const linkBizProjectFindJira = root.querySelector('[data-link-biz-project-find-jira]');
@@ -62,6 +70,7 @@
   const jiraPageSize = 10;
   const taskCacheKey = 'team-dashboard:jira-tasks:v7';
   const monthlyReportDraftCacheKey = 'team-dashboard:monthly-report-draft:v1';
+  const seatalkNameMappingPageSize = 20;
 
   let initialConfig = (() => {
     try {
@@ -75,6 +84,8 @@
   let keyProjectOnly = false;
   let monthlyReportSubject = 'Monthly Report';
   let monthlyReportLoaded = false;
+  let reportIntelligenceLoaded = false;
+  let seatalkNameMappingsLoaded = false;
   let linkBizProjectRowsState = [];
   let linkBizProjectSelectOptions = [];
   let linkBizProjectLoading = false;
@@ -84,6 +95,7 @@
   const pmFilterState = {};
   const expandedPanels = {};
   const jiraPageState = {};
+  const seatalkNameMappingState = new WeakMap();
 
   const setStatus = (node, message, tone = 'neutral') => {
     if (!node) return;
@@ -232,6 +244,10 @@
       });
       if (name === 'monthly-report') {
         loadMonthlyReportTemplate();
+      }
+      if (name === 'report-intelligence') {
+        loadReportIntelligence();
+        loadSeaTalkNameMappings(false);
       }
     };
     triggers.forEach((trigger) => {
@@ -1420,10 +1436,311 @@
     }
   };
 
+  const splitLines = (value) => String(value || '')
+    .split(/[\r\n;,]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+
+  const renderReportIntelligence = (config) => {
+    const intelligence = config?.report_intelligence_config || {};
+    if (reportIntelligenceVips) {
+      reportIntelligenceVips.value = (intelligence.vip_people || []).map((vip) => [
+        vip.display_name || '',
+        (vip.role_tags || []).join(', '),
+        (vip.emails || []).join(', '),
+        (vip.seatalk_ids || []).join(', '),
+        (vip.aliases || []).join(', '),
+      ].join(' | ')).join('\n');
+    }
+    if (reportIntelligenceKeywords) reportIntelligenceKeywords.value = (intelligence.priority_keywords || []).join('\n');
+    const noise = intelligence.noise || {};
+    if (reportIntelligenceSeatalkBlacklist) reportIntelligenceSeatalkBlacklist.value = (noise.seatalk_group_blacklist || []).join('\n');
+    if (reportIntelligenceGmailSenderBlacklist) reportIntelligenceGmailSenderBlacklist.value = (noise.gmail_sender_blacklist || []).join('\n');
+    if (reportIntelligenceGmailSubjectHints) reportIntelligenceGmailSubjectHints.value = (noise.gmail_subject_hints || []).join('\n');
+  };
+
+  const parseVipRows = () => splitLines(reportIntelligenceVips?.value || '').map((line) => {
+    const parts = line.split('|').map((item) => item.trim());
+    return {
+      display_name: parts[0] || '',
+      role_tags: splitLines(parts[1] || ''),
+      emails: splitLines(parts[2] || ''),
+      seatalk_ids: splitLines(parts[3] || ''),
+      aliases: splitLines(parts[4] || ''),
+    };
+  }).filter((item) => item.display_name || item.emails.length || item.seatalk_ids.length || item.aliases.length);
+
+  const collectReportIntelligence = () => ({
+    vip_people: parseVipRows(),
+    priority_keywords: splitLines(reportIntelligenceKeywords?.value || ''),
+    noise: {
+      seatalk_group_blacklist: splitLines(reportIntelligenceSeatalkBlacklist?.value || ''),
+      gmail_sender_blacklist: splitLines(reportIntelligenceGmailSenderBlacklist?.value || ''),
+      gmail_subject_hints: splitLines(reportIntelligenceGmailSubjectHints?.value || ''),
+    },
+  });
+
+  const loadReportIntelligence = async () => {
+    if (reportIntelligenceLoaded || !reportIntelligenceForm) return;
+    reportIntelligenceLoaded = true;
+    try {
+      if (!initialConfig?.report_intelligence_config) {
+        const response = await fetch(root.dataset.configUrl || '/api/team-dashboard/config', {
+          headers: { Accept: 'application/json' },
+          credentials: 'same-origin',
+        });
+        const payload = await readJson(response, 'Could not load Report Intelligence config.');
+        initialConfig = payload.config || initialConfig;
+      }
+      renderReportIntelligence(initialConfig);
+    } catch (error) {
+      setStatus(reportIntelligenceStatus, error.message || 'Could not load Report Intelligence config.', 'error');
+    }
+  };
+
+  const saveReportIntelligence = async (event) => {
+    event.preventDefault();
+    setStatus(reportIntelligenceStatus, 'Saving Report Intelligence rules...', 'neutral');
+    try {
+      const response = await fetch(root.dataset.reportIntelligenceSaveUrl || '/admin/team-dashboard/report-intelligence', {
+        method: 'POST',
+        headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ report_intelligence_config: collectReportIntelligence() }),
+      });
+      const payload = await readJson(response, 'Could not save Report Intelligence rules.');
+      initialConfig = {
+        ...initialConfig,
+        report_intelligence_config: payload.report_intelligence_config || collectReportIntelligence(),
+      };
+      renderReportIntelligence(initialConfig);
+      setStatus(reportIntelligenceStatus, 'Report Intelligence rules saved.', 'success');
+    } catch (error) {
+      setStatus(reportIntelligenceStatus, error.message || 'Could not save Report Intelligence rules.', 'error');
+    }
+  };
+
+  const seatalkMappingStateFor = (mappingRoot) => {
+    if (!mappingRoot) return { rows: [], mappings: {}, page: 1 };
+    if (!seatalkNameMappingState.has(mappingRoot)) {
+      seatalkNameMappingState.set(mappingRoot, { rows: [], mappings: {}, page: 1 });
+    }
+    return seatalkNameMappingState.get(mappingRoot);
+  };
+
+  const syncVisibleNameMappingInputs = (mappingRoot) => {
+    const state = seatalkMappingStateFor(mappingRoot);
+    mappingRoot?.querySelectorAll('[data-seatalk-mapping-row]').forEach((row) => {
+      const id = row.dataset.seatalkMappingId || '';
+      const input = row.querySelector('[data-seatalk-mapping-input]');
+      if (id && input) state.mappings[id] = String(input.value || '');
+    });
+  };
+
+  const renderNameMappingPage = () => {
+    const mappingRoot = seatalkNameMappingRoot;
+    const body = mappingRoot?.querySelector('[data-seatalk-name-mapping-body]');
+    if (!mappingRoot || !body) return;
+    const actionContainers = [...mappingRoot.querySelectorAll('[data-seatalk-name-mapping-actions]')];
+    const state = seatalkMappingStateFor(mappingRoot);
+    const rows = Array.isArray(state.rows) ? state.rows : [];
+    const totalPages = Math.max(1, Math.ceil(rows.length / seatalkNameMappingPageSize));
+    state.page = Math.min(Math.max(Number(state.page || 1), 1), totalPages);
+    const start = (state.page - 1) * seatalkNameMappingPageSize;
+    const pageRows = rows.slice(start, start + seatalkNameMappingPageSize);
+    if (!rows.length) {
+      body.innerHTML = '<article class="seatalk-insight-item"><p>No frequent or recently surfaced SeaTalk source IDs were found.</p></article>';
+      body.hidden = false;
+      actionContainers.forEach((actions) => { actions.hidden = true; });
+      return;
+    }
+    body.innerHTML = `
+      <div class="seatalk-mapping-pagination" data-seatalk-name-mapping-pagination>
+        <span>Showing ${start + 1}-${start + pageRows.length} of ${rows.length}</span>
+        <div class="button-row">
+          <button class="button button-secondary" type="button" data-seatalk-name-mapping-prev ${state.page <= 1 ? 'disabled' : ''}>Previous</button>
+          <span>Page ${state.page} / ${totalPages}</span>
+          <button class="button button-secondary" type="button" data-seatalk-name-mapping-next ${state.page >= totalPages ? 'disabled' : ''}>Next</button>
+        </div>
+      </div>
+      ${pageRows.map((row) => `
+        <div class="seatalk-mapping-row" data-seatalk-mapping-row data-seatalk-mapping-id="${escapeHtml(row.id)}">
+          <div class="seatalk-mapping-id">
+            <strong>${escapeHtml(row.id)}</strong>
+            <span>${escapeHtml(row.priorityReason || row.type || 'Frequent unknown ID')}</span>
+          </div>
+          <div class="seatalk-mapping-count">
+            <strong>${Number(row.count || 0)}</strong>
+            <span>mentions</span>
+          </div>
+          <div>
+            <input type="text" value="${escapeHtml(state.mappings[row.id] || '')}" placeholder="Display name" data-seatalk-mapping-input aria-label="Display name for ${escapeHtml(row.id)}">
+            ${row.example ? `<div class="seatalk-mapping-example">${escapeHtml(row.example)}</div>` : ''}
+          </div>
+        </div>
+      `).join('')}
+    `;
+    body.hidden = false;
+    actionContainers.forEach((actions) => { actions.hidden = false; });
+    body.querySelectorAll('[data-seatalk-mapping-input]').forEach((input) => {
+      input.addEventListener('input', () => syncVisibleNameMappingInputs(mappingRoot));
+    });
+    body.querySelector('[data-seatalk-name-mapping-prev]')?.addEventListener('click', () => {
+      syncVisibleNameMappingInputs(mappingRoot);
+      state.page -= 1;
+      renderNameMappingPage();
+    });
+    body.querySelector('[data-seatalk-name-mapping-next]')?.addEventListener('click', () => {
+      syncVisibleNameMappingInputs(mappingRoot);
+      state.page += 1;
+      renderNameMappingPage();
+    });
+  };
+
+  const renderNameMappings = (payload) => {
+    const mappingRoot = seatalkNameMappingRoot;
+    if (!mappingRoot) return;
+    const mappings = payload?.mappings && typeof payload.mappings === 'object' ? payload.mappings : {};
+    const unknownRows = Array.isArray(payload?.unknown_ids) ? payload.unknown_ids : [];
+    const rowsById = new Map();
+    const personAlias = (id) => {
+      const value = String(id || '');
+      if (value.startsWith('buddy-')) return `UID ${value.slice('buddy-'.length)}`;
+      if (value.startsWith('UID ')) return `buddy-${value.slice('UID '.length)}`;
+      return '';
+    };
+    const canonicalMappingId = (id) => String(id || '').startsWith('buddy-') ? `UID ${String(id).slice('buddy-'.length)}` : String(id || '');
+    const mappingValueFor = (id) => mappings[id] || mappings[personAlias(id)] || '';
+    unknownRows.forEach((row) => {
+      if (!row?.id) return;
+      const canonicalId = canonicalMappingId(row.id);
+      const existing = rowsById.get(canonicalId);
+      if (existing) {
+        existing.count += Number(row.count || 0);
+        if (!existing.example && row.example) existing.example = row.example;
+        return;
+      }
+      rowsById.set(canonicalId, {
+        id: canonicalId,
+        type: row.type || 'uid',
+        count: Number(row.count || 0),
+        example: row.example || '',
+        priorityReason: row.priority_reason || 'Frequent unknown ID',
+      });
+    });
+    Object.keys(mappings).sort().forEach((id) => {
+      const canonicalId = canonicalMappingId(id);
+      if (rowsById.has(canonicalId)) return;
+      rowsById.set(id, {
+        id,
+        type: id.startsWith('group-') ? 'group' : id.startsWith('buddy-') ? 'buddy' : 'uid',
+        count: 0,
+        example: '',
+        priorityReason: 'Saved mapping',
+      });
+    });
+    const rows = Array.from(rowsById.values());
+    const state = seatalkMappingStateFor(mappingRoot);
+    state.rows = rows;
+    state.mappings = {};
+    rows.forEach((row) => {
+      state.mappings[row.id] = mappingValueFor(row.id);
+    });
+    state.page = 1;
+    renderNameMappingPage();
+  };
+
+  const loadSeaTalkNameMappings = async (forceRefresh = false) => {
+    const mappingRoot = seatalkNameMappingRoot;
+    const mappingsUrl = root.dataset.reportIntelligenceSeatalkNameMappingsUrl || mappingRoot?.dataset.seatalkNameMappingsUrl || '';
+    if (!mappingRoot || !mappingsUrl || mappingRoot.dataset.seatalkConfigured !== 'true') return;
+    if (seatalkNameMappingsLoaded && !forceRefresh) return;
+    const refreshButton = mappingRoot.querySelector('[data-seatalk-name-mapping-refresh]');
+    const originalButtonText = refreshButton?.textContent || 'Refresh Candidates';
+    if (refreshButton && forceRefresh) {
+      refreshButton.disabled = true;
+      refreshButton.textContent = 'Refreshing...';
+    }
+    const mappingStatus = mappingRoot.querySelector('[data-seatalk-mapping-status]');
+    if (mappingStatus) mappingStatus.hidden = false;
+    setStatus(mappingStatus, forceRefresh ? 'Refreshing recent SeaTalk IDs...' : 'Loading frequent unknown IDs...', 'neutral');
+    try {
+      const url = forceRefresh ? `${mappingsUrl}${mappingsUrl.includes('?') ? '&' : '?'}refresh=1` : mappingsUrl;
+      const response = await fetch(url, { headers: { Accept: 'application/json' }, credentials: 'same-origin' });
+      const payload = await readJson(response, 'Could not load SeaTalk name mappings.');
+      renderNameMappings(payload);
+      const statusNode = mappingRoot.querySelector('[data-seatalk-mapping-status]');
+      if (statusNode) statusNode.hidden = true;
+      seatalkNameMappingsLoaded = true;
+    } catch (error) {
+      setStatus(mappingRoot.querySelector('[data-seatalk-mapping-status]'), error.message || 'Could not load SeaTalk name mappings.', 'error');
+    } finally {
+      if (refreshButton && forceRefresh) {
+        refreshButton.disabled = false;
+        refreshButton.textContent = originalButtonText;
+      }
+    }
+  };
+
+  const collectNameMappings = () => {
+    const mappingRoot = seatalkNameMappingRoot;
+    if (!mappingRoot) return {};
+    syncVisibleNameMappingInputs(mappingRoot);
+    const state = seatalkMappingStateFor(mappingRoot);
+    const mappings = {};
+    Object.entries(state.mappings || {}).forEach(([id, value]) => {
+      const trimmed = String(value || '').trim();
+      if (id && trimmed) mappings[id] = trimmed;
+    });
+    return mappings;
+  };
+
+  const saveSeaTalkNameMappings = async () => {
+    const mappingRoot = seatalkNameMappingRoot;
+    const mappingsUrl = root.dataset.reportIntelligenceSeatalkNameMappingsUrl || mappingRoot?.dataset.seatalkNameMappingsUrl || '';
+    if (!mappingRoot || !mappingsUrl) return;
+    const saveButtons = [...mappingRoot.querySelectorAll('[data-seatalk-name-mapping-save]')];
+    const feedbackNode = mappingRoot.querySelector('[data-seatalk-name-mapping-save-feedback]');
+    saveButtons.forEach((button) => {
+      button.disabled = true;
+      button.textContent = 'Saving...';
+    });
+    try {
+      const response = await fetch(mappingsUrl, {
+        method: 'POST',
+        headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ mappings: collectNameMappings() }),
+      });
+      await readJson(response, 'Could not save SeaTalk name mappings.');
+      if (feedbackNode) {
+        feedbackNode.textContent = 'Saved. Reports will use these names on the next load.';
+        feedbackNode.dataset.tone = 'success';
+      }
+      seatalkNameMappingsLoaded = false;
+      window.setTimeout(() => loadSeaTalkNameMappings(false), 500);
+    } catch (error) {
+      if (feedbackNode) {
+        feedbackNode.textContent = error.message || 'Could not save SeaTalk name mappings.';
+        feedbackNode.dataset.tone = 'error';
+      }
+    } finally {
+      saveButtons.forEach((button) => {
+        button.disabled = false;
+        button.textContent = 'Save Mappings';
+      });
+    }
+  };
+
   setupTabs();
   loadConfiguredTeams();
   restoreMonthlyReportDraft();
   adminForm?.addEventListener('submit', saveMembers);
+  reportIntelligenceForm?.addEventListener('submit', saveReportIntelligence);
+  seatalkNameMappingRoot?.querySelector('[data-seatalk-name-mapping-refresh]')?.addEventListener('click', () => loadSeaTalkNameMappings(true));
+  seatalkNameMappingRoot?.querySelectorAll('[data-seatalk-name-mapping-save]').forEach((button) => {
+    button.addEventListener('click', saveSeaTalkNameMappings);
+  });
   monthlyReportDraft?.addEventListener('input', () => updateMonthlyReportPreview({ persist: true }));
   monthlyReportGenerateButton?.addEventListener('click', generateMonthlyReport);
   monthlyReportSendButton?.addEventListener('click', sendMonthlyReport);
