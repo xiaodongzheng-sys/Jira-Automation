@@ -35,6 +35,7 @@ from bpmis_jira_tool.seatalk_daily_email import (
     resolve_daily_email_window,
     send_daily_email,
     seatalk_name_overrides_path,
+    should_skip_fixed_daily_email_window,
     sync_daily_summary_to_trello,
 )
 from bpmis_jira_tool.seatalk_dashboard import SEATALK_INSIGHTS_TIMEZONE
@@ -1186,6 +1187,34 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         self.assertEqual(morning.start.isoformat(), "2026-04-29T13:00:00+08:00")
         self.assertEqual(morning.end.isoformat(), "2026-04-30T08:00:00+08:00")
 
+    def test_monday_morning_window_covers_friday_13_to_monday_8(self):
+        morning = resolve_daily_email_window(
+            now=datetime(2026, 5, 4, 8, 5, tzinfo=SEATALK_INSIGHTS_TIMEZONE),
+            slot="auto",
+        )
+
+        self.assertEqual(morning.run_slot, "morning")
+        self.assertEqual(morning.run_date, "2026-05-04")
+        self.assertEqual(morning.start.isoformat(), "2026-05-01T13:00:00+08:00")
+        self.assertEqual(morning.end.isoformat(), "2026-05-04T08:00:00+08:00")
+
+    def test_fixed_daily_email_windows_skip_saturday_and_sunday(self):
+        self.assertTrue(
+            should_skip_fixed_daily_email_window(
+                now=datetime(2026, 5, 2, 8, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE),
+            )
+        )
+        self.assertTrue(
+            should_skip_fixed_daily_email_window(
+                now=datetime(2026, 5, 3, 13, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE),
+            )
+        )
+        self.assertFalse(
+            should_skip_fixed_daily_email_window(
+                now=datetime(2026, 5, 4, 8, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE),
+            )
+        )
+
     def test_daily_email_run_store_tracks_morning_and_midday_separately(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             store = DailyEmailRunStore(Path(temp_dir) / "runs.json")
@@ -1217,6 +1246,19 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
                 result = send_daily_email(settings=settings, now=now)
             briefing.assert_not_called()
             self.assertEqual(result.status, "skipped")
+
+    def test_send_daily_email_skips_weekend_before_work(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings = _settings(temp_dir)
+            now = datetime(2026, 5, 3, 13, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE)
+            with patch("bpmis_jira_tool.seatalk_daily_email.build_daily_briefing") as briefing:
+                result = send_daily_email(settings=settings, now=now, slot="midday")
+            briefing.assert_not_called()
+            self.assertEqual(result.status, "skipped")
+            self.assertEqual(result.run_date, "2026-05-03")
+            self.assertEqual(result.run_slot, "midday")
+            self.assertEqual(result.window_start, "2026-05-03T08:00:00+08:00")
+            self.assertEqual(result.window_end, "2026-05-03T13:00:00+08:00")
 
     def test_send_daily_email_syncs_trello_cards_before_marking_sent(self):
         class FakeTrelloClient:

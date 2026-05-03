@@ -45,6 +45,7 @@ MORNING_SLOT = "morning"
 MIDDAY_SLOT = "midday"
 LEGACY_SLOT = "daily"
 DAILY_EMAIL_SLOTS = {MORNING_SLOT, MIDDAY_SLOT}
+DAILY_EMAIL_WEEKDAY_RUNS = {0, 1, 2, 3, 4}
 GMAIL_EXPORT_TIMEOUT_SECONDS = 90
 MAX_MY_TODOS = 8
 MAX_PROJECT_UPDATES = 10
@@ -253,7 +254,8 @@ def resolve_daily_email_window(*, now: datetime, slot: str = "auto") -> DailyEma
         start = _local_datetime(local_now.date(), 8)
         end = _local_datetime(local_now.date(), 13)
     elif normalized_slot == MORNING_SLOT:
-        start = _local_datetime(local_now.date() - timedelta(days=1), 13)
+        previous_report_day_offset = 3 if local_now.weekday() == 0 else 1
+        start = _local_datetime(local_now.date() - timedelta(days=previous_report_day_offset), 13)
         end = _local_datetime(local_now.date(), 8)
     else:
         raise ConfigError(f"Unsupported daily email slot: {slot}. Use auto, morning, or midday.")
@@ -263,6 +265,11 @@ def resolve_daily_email_window(*, now: datetime, slot: str = "auto") -> DailyEma
         start=start,
         end=end,
     )
+
+
+def should_skip_fixed_daily_email_window(*, now: datetime) -> bool:
+    local_now = now.astimezone(SEATALK_INSIGHTS_TIMEZONE)
+    return local_now.weekday() not in DAILY_EMAIL_WEEKDAY_RUNS
 
 
 def _local_datetime(value: Any, hour: int) -> datetime:
@@ -659,14 +666,24 @@ def send_daily_email(
     window_start = email_window.start if email_window else None
     window_end = email_window.end if email_window else None
     window_label = email_window.label if email_window else ""
+    subject = f"Daily Brief - {run_date}"
+    if window_label:
+        subject = f"{subject} ({window_label})"
+    if email_window and should_skip_fixed_daily_email_window(now=local_now):
+        return DailyEmailResult(
+            status="skipped",
+            recipient=recipient,
+            subject=subject,
+            run_date=run_date,
+            run_slot=run_slot,
+            window_start=window_start.isoformat() if window_start else "",
+            window_end=window_end.isoformat() if window_end else "",
+        )
     data_root = data_root_from_settings(settings)
     run_store = DailyEmailRunStore(data_root / "seatalk" / "daily_email_runs.json")
     team_dashboard_config = load_team_dashboard_config_from_data_root(data_root)
     report_intelligence_config = load_report_intelligence_config_from_data_root(data_root)
     key_project_candidates = key_project_candidates_from_team_config(team_dashboard_config)
-    subject = f"Daily Brief - {run_date}"
-    if window_label:
-        subject = f"{subject} ({window_label})"
     if not force and run_store.already_sent(run_date=run_date, recipient=recipient, run_slot=run_slot):
         return DailyEmailResult(
             status="skipped",
