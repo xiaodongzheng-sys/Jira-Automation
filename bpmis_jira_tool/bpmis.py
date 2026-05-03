@@ -1133,7 +1133,8 @@ class BPMISDirectApiClient(BPMISClient):
                 break
             page += 1
 
-        enriched_rows: list[dict[str, Any]] = []
+        deduped_rows: list[dict[str, Any]] = []
+        enrichment_issue_ids: list[str] = []
         seen_issue_ids: set[str] = set()
         for row in rows:
             issue_id = self._extract_issue_identifier(row)
@@ -1145,7 +1146,22 @@ class BPMISDirectApiClient(BPMISClient):
                 seen_issue_ids.add(dedupe_key)
 
             if self._issue_requires_enrichment(row) and issue_id:
-                detail = self.get_issue_detail(issue_id)
+                enrichment_issue_ids.append(issue_id)
+            deduped_rows.append(row)
+
+        bulk_details: dict[str, dict[str, Any]] | None = {}
+        if enrichment_issue_ids:
+            bulk_details = self._get_issue_details_via_list_bulk(enrichment_issue_ids)
+
+        enriched_rows: list[dict[str, Any]] = []
+        for row in deduped_rows:
+            issue_id = self._extract_issue_identifier(row)
+            if self._issue_requires_enrichment(row) and issue_id:
+                detail = None
+                if bulk_details is not None:
+                    detail = bulk_details.get(issue_id)
+                if detail is None:
+                    detail = self.get_issue_detail(issue_id)
                 if detail:
                     row = self._merge_issue_payloads(row, detail)
             enriched_rows.append(row)

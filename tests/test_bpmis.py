@@ -1015,28 +1015,35 @@ class BPMISClientTests(unittest.TestCase):
             def fake_api_request(path, method="GET", params=None, body=None):
                 calls.append((path, params))
                 if path == "/api/v1/issues/list":
-                    return {
-                        "data": {
-                            "rows": [
-                                {
-                                    "id": 9001,
-                                    "summary": "Upgrade wallet flow",
-                                    "jiraLink": "https://jira.shopee.io/browse/ABC-101",
-                                }
-                            ]
-                        }
-                    }
-                if path == "/api/v1/issues/detail":
-                    return {
-                        "data": {
-                            "row": {
-                                "id": 9001,
-                                "desc": "Add wallet rollback handling.\nSupport new repayment path.",
-                                "jiraRegionalPmPicId": [{"displayName": "Alice PM"}],
-                                "jiraPrdLink": "https://confluence/prd-1",
+                    search_payload = json.loads((params or {})["search"])
+                    sub_queries = search_payload.get("subQueries") or []
+                    if any("fixVersionId" in item for item in sub_queries):
+                        return {
+                            "data": {
+                                "rows": [
+                                    {
+                                        "id": 9001,
+                                        "summary": "Upgrade wallet flow",
+                                        "jiraLink": "https://jira.shopee.io/browse/ABC-101",
+                                    }
+                                ]
                             }
                         }
-                    }
+                    if any("id" in item for item in sub_queries):
+                        return {
+                            "data": {
+                                "rows": [
+                                    {
+                                        "id": 9001,
+                                        "desc": "Add wallet rollback handling.\nSupport new repayment path.",
+                                        "jiraRegionalPmPicId": [{"displayName": "Alice PM"}],
+                                        "jiraPrdLink": "https://confluence/prd-1",
+                                    }
+                                ]
+                            }
+                        }
+                if path == "/api/v1/issues/detail":
+                    raise AssertionError("Productization issue enrichment should use bulk issues/list lookup.")
                 raise AssertionError(path)
 
             client._api_request = fake_api_request  # type: ignore[method-assign]
@@ -1052,9 +1059,93 @@ class BPMISClientTests(unittest.TestCase):
                     {"fixVersionId": [321]},
                 ],
             )
+            bulk_payload = json.loads(calls[1][1]["search"])
+            self.assertEqual(bulk_payload["subQueries"], [{"id": [9001]}])
+            self.assertEqual(client.request_stats["issue_detail_bulk_lookup_count"], 1)
+            self.assertEqual(client.request_stats["issue_detail_lookup_count"], 0)
             self.assertEqual(rows[0]["desc"], "Add wallet rollback handling.\nSupport new repayment path.")
             self.assertEqual(rows[0]["jiraPrdLink"], "https://confluence/prd-1")
             self.assertEqual(rows[0]["jiraRegionalPmPicId"][0]["displayName"], "Alice PM")
+
+    def test_list_issues_for_version_batches_many_missing_detail_rows(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings = Settings(
+                flask_secret_key="secret",
+                google_oauth_client_secret_file=Path(temp_dir) / "client.json",
+                google_oauth_redirect_uri=None,
+                team_portal_host="127.0.0.1",
+                team_portal_port=5000,
+                team_portal_base_url=None,
+                team_allowed_emails=(),
+                team_allowed_email_domains=(),
+                team_portal_data_dir=Path(temp_dir),
+                spreadsheet_id="sheet",
+                common_tab_name="Common",
+                input_tab_name="Input",
+                bpmis_base_url="https://example.com",
+                bpmis_api_access_token="token",
+            )
+
+            client = BPMISDirectApiClient(settings)
+            calls: list[tuple[str, dict | None]] = []
+
+            def fake_api_request(path, method="GET", params=None, body=None):
+                calls.append((path, params))
+                if path == "/api/v1/issues/list":
+                    search_payload = json.loads((params or {})["search"])
+                    sub_queries = search_payload.get("subQueries") or []
+                    if any("fixVersionId" in item for item in sub_queries):
+                        return {
+                            "data": {
+                                "rows": [
+                                    {
+                                        "id": issue_id,
+                                        "summary": f"Upgrade item {issue_id}",
+                                        "jiraLink": f"https://jira.shopee.io/browse/ABC-{issue_id}",
+                                    }
+                                    for issue_id in range(1, 73)
+                                ]
+                            }
+                        }
+                    id_query = next((item["id"] for item in sub_queries if "id" in item), [])
+                    return {
+                        "data": {
+                            "rows": [
+                                {
+                                    "id": issue_id,
+                                    "desc": f"Detail {issue_id}",
+                                    "jiraRegionalPmPicId": [{"displayName": "Alice PM"}],
+                                    "jiraPrdLink": f"https://confluence/prd-{issue_id}",
+                                }
+                                for issue_id in id_query
+                            ]
+                        }
+                    }
+                if path == "/api/v1/issues/detail":
+                    raise AssertionError("Productization issue enrichment should not perform per-issue detail calls.")
+                raise AssertionError(path)
+
+            client._api_request = fake_api_request  # type: ignore[method-assign]
+
+            rows = client.list_issues_for_version("321")
+
+            issue_list_payloads = [
+                json.loads((params or {})["search"])
+                for path, params in calls
+                if path == "/api/v1/issues/list"
+            ]
+            id_lookup_payloads = [
+                payload
+                for payload in issue_list_payloads
+                if any("id" in item for item in payload.get("subQueries") or [])
+            ]
+            self.assertEqual(len(rows), 72)
+            self.assertEqual(len(id_lookup_payloads), 2)
+            self.assertEqual(client.request_stats["issue_detail_bulk_lookup_count"], 2)
+            self.assertEqual(client.request_stats["issue_detail_bulk_issue_count"], 72)
+            self.assertEqual(client.request_stats["issue_detail_lookup_count"], 0)
+            self.assertEqual(rows[0]["desc"], "Detail 1")
+            self.assertEqual(rows[-1]["jiraPrdLink"], "https://confluence/prd-72")
 
     def test_get_jira_ticket_detail_uses_jira_key_detail_lookup(self):
         with tempfile.TemporaryDirectory() as temp_dir:
