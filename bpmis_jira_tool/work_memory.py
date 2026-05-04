@@ -105,6 +105,16 @@ def _normalize_email(value: Any) -> str:
     return str(value or "").strip().lower()
 
 
+def _normalize_string_list(value: Any) -> list[str]:
+    if isinstance(value, str):
+        values = [value]
+    elif isinstance(value, list):
+        values = value
+    else:
+        values = []
+    return [str(item or "").strip() for item in values if str(item or "").strip()]
+
+
 def normalize_visibility(value: Any, *, default: str = VISIBILITY_PRIVATE) -> str:
     normalized = str(value or "").strip().lower()
     return normalized if normalized in VISIBILITY_VALUES else default
@@ -802,6 +812,7 @@ class WorkMemoryStore:
         limit: int = 12,
     ) -> dict[str, Any]:
         entity_resolution = self.resolve_work_entity(query=query, owner_email=owner_email, entity_type="")
+        domain = self._domain_from_query(query)
         items = self._query_by_resolved_terms(
             query=query,
             owner_email=owner_email,
@@ -817,12 +828,18 @@ class WorkMemoryStore:
                 filters={"item_type": "todo"},
                 limit=max(1, min(int(limit or 12), 30)),
             )
-        items = self._sort_by_precedence([item for item in items if item.get("latest_feedback_action") not in {"ignore", "stale"}])
+        items = self._rerank_items_for_query(
+            [item for item in items if item.get("latest_feedback_action") not in {"ignore", "stale"}],
+            query=query,
+            task_type=task_type,
+            domain=domain,
+        )
         materialized = self._query_materialized(owner_email=owner_email, query=query, visibility_scope=visibility_scope, limit=8)
         return {
             "query": str(query or "").strip(),
             "task_type": str(task_type or "general").strip() or "general",
             "visibility_scope": visibility_scope,
+            "domain": domain,
             "entity_resolution": entity_resolution,
             "items": items[: max(1, min(int(limit or 12), 30))],
             "materialized": materialized,
@@ -834,12 +851,24 @@ class WorkMemoryStore:
     def generate_llm_superagent_answer(self, *, task_type: str, query: str, context: dict[str, Any]) -> dict[str, Any]:
         items = context.get("items") if isinstance(context.get("items"), list) else []
         materialized = context.get("materialized") if isinstance(context.get("materialized"), list) else []
+        visibility_scope = str(context.get("visibility_scope") or "owner").strip().lower() or "owner"
+        owner_view = visibility_scope != "team"
         evidence_items = items[:8]
-        evidence = [self._evidence_summary(item, include_private_summary=False) for item in evidence_items]
+        evidence = [
+            self._evidence_summary(
+                item,
+                include_private_summary=owner_view,
+                include_excerpt=owner_view,
+                query=query,
+            )
+            for item in evidence_items
+        ]
         if not evidence_items and not materialized:
             return {
                 "status": "ok",
                 "answer": "I do not have enough Work Memory evidence to answer this yet.",
+                "direct_answer": "I do not have enough Work Memory evidence to answer this yet.",
+                "supporting_evidence": [],
                 "evidence": [],
                 "confidence": "none",
                 "unknowns": ["No matching Work Memory evidence was found."],
@@ -854,10 +883,21 @@ class WorkMemoryStore:
             "monthly_focus": "Monthly focus",
             "open_loop_check": "Open loops",
         }.get(str(task_type or "").strip(), "Work Memory summary")
-        lines = [f"{label} based on Work Memory evidence:"]
+        direct_points = []
+        for item in evidence_items[:5]:
+            excerpt = self._evidence_excerpt(item, query=query, allow_private=owner_view)
+            if excerpt:
+                direct_points.append(excerpt)
+            else:
+                direct_points.append(str(item.get("summary") or item.get("content") or item.get("item_id") or "").strip())
+        direct_answer = "\n".join(f"- {point}" for point in direct_points if point).strip()
+        if not direct_answer:
+            direct_answer = "I found related Work Memory evidence, but it does not contain enough detail for a direct answer."
+        lines = [f"{label} based on Work Memory evidence:", direct_answer]
         for item in evidence_items[:5]:
             prefix = self._answer_prefix(item)
-            lines.append(f"- {prefix}{item.get('summary') or item.get('content') or item.get('item_id')}")
+            evidence_label = item.get("summary") or item.get("item_id")
+            lines.append(f"- Evidence: {prefix}{evidence_label}")
         if materialized:
             lines.append(f"- Materialized memory available: {', '.join(str(item.get('graph_type') or '') for item in materialized[:3] if item.get('graph_type'))}.")
         lines.append("This is read-only; no external system was updated.")
@@ -872,6 +912,8 @@ class WorkMemoryStore:
         return {
             "status": "ok",
             "answer": "\n".join(lines),
+            "direct_answer": direct_answer,
+            "supporting_evidence": evidence,
             "evidence": evidence,
             "confidence": "medium" if len(evidence_items) >= 2 or materialized else "low",
             "unknowns": unknowns,
@@ -1011,6 +1053,19 @@ class WorkMemoryStore:
                 if not question:
                     continue
                 task_type = str(case.get("task_type") or "general").strip() or "general"
+                metadata = dict(case.get("metadata") or {})
+                expected_answer_points = _normalize_string_list(case.get("expected_answer_points") or metadata.get("expected_answer_points") or [])
+                expected_sources = _normalize_string_list(case.get("expected_sources") or metadata.get("expected_sources") or [])
+                expected_links = _normalize_string_list(case.get("expected_links") or metadata.get("expected_links") or [])
+                domain = str(case.get("domain") or metadata.get("domain") or "").strip()
+                if expected_answer_points:
+                    metadata["expected_answer_points"] = expected_answer_points
+                if expected_sources:
+                    metadata["expected_sources"] = expected_sources
+                if expected_links:
+                    metadata["expected_links"] = expected_links
+                if domain:
+                    metadata["domain"] = domain
                 case_id = _memory_id(_normalize_email(owner_email), task_type, question)
                 connection.execute(
                     """
@@ -1031,10 +1086,10 @@ class WorkMemoryStore:
                         _normalize_email(owner_email),
                         question,
                         task_type,
-                        str(case.get("expected_source_type") or "").strip(),
-                        str(case.get("expected_text") or "").strip(),
+                        str(case.get("expected_source_type") or "").strip() or (expected_sources[0] if expected_sources else ""),
+                        str(case.get("expected_text") or "").strip() or "\n".join(expected_answer_points),
                         str(case.get("visibility_scope") or "owner").strip() or "owner",
-                        _stable_json(case.get("metadata") or {}),
+                        _stable_json(metadata),
                         timestamp,
                         timestamp,
                     ),
@@ -1068,12 +1123,31 @@ class WorkMemoryStore:
             answer = self.generate_llm_superagent_answer(task_type=row["task_type"], query=row["question"], context=context)
             items = context.get("items") if isinstance(context.get("items"), list) else []
             evidence_sources = {str(item.get("source_type") or "") for item in items}
+            metadata = _load_json(row["metadata_json"], {})
             expected_source = str(row["expected_source_type"] or "").strip()
+            expected_sources = _normalize_string_list(metadata.get("expected_sources") or ([expected_source] if expected_source else []))
+            normalized_expected_sources = self._normalize_expected_sources(expected_sources)
             expected_text = str(row["expected_text"] or "").strip().casefold()
+            expected_answer_points = _normalize_string_list(metadata.get("expected_answer_points") or [])
+            if not expected_answer_points and expected_text:
+                expected_answer_points = [expected_text]
             answer_text = str(answer.get("answer") or "").casefold()
+            searchable_text = " ".join(
+                [
+                    answer_text,
+                    str(answer.get("direct_answer") or "").casefold(),
+                    *[str(item.get("summary") or "").casefold() for item in items],
+                    *[str(item.get("content") or "").casefold() for item in items],
+                ]
+            )
             missing_evidence = not answer.get("evidence")
-            wrong_source = bool(expected_source and expected_source not in evidence_sources)
-            wrong_text = bool(expected_text and expected_text not in answer_text and not any(expected_text in str(item.get("summary") or "").casefold() or expected_text in str(item.get("content") or "").casefold() for item in items))
+            wrong_source = bool(normalized_expected_sources and evidence_sources.isdisjoint(normalized_expected_sources))
+            missing_answer_points = [
+                point
+                for point in expected_answer_points
+                if not self._answer_point_matches(point, searchable_text)
+            ]
+            wrong_text = bool(missing_answer_points)
             wrong_attribution = any(
                 item.get("source_type") == "meeting_recorder"
                 and (item.get("metadata") or {}).get("attribution_scope") == "meeting"
@@ -1091,10 +1165,14 @@ class WorkMemoryStore:
                     "missing_evidence": missing_evidence,
                     "wrong_source": wrong_source,
                     "wrong_text": wrong_text,
+                    "missing_answer_points": missing_answer_points,
                     "wrong_attribution": wrong_attribution,
                     "privacy_risk": privacy_risk,
                     "evidence_count": len(answer.get("evidence") or []),
                     "confidence": answer.get("confidence") or "",
+                    "expected_sources": expected_sources,
+                    "expected_links": _normalize_string_list(metadata.get("expected_links") or []),
+                    "domain": str(metadata.get("domain") or ""),
                 }
             )
         passed_count = sum(1 for item in results if item["passed"])
@@ -1357,7 +1435,12 @@ class WorkMemoryStore:
         if not by_id and task_type in {"what_changed", "monthly_focus"}:
             for item in self.query_work_memory(owner_email=owner_email, visibility_scope=visibility_scope, limit=max(limit, 30)):
                 by_id[str(item.get("item_id") or "")] = item
-        return self._sort_by_precedence([item for key, item in by_id.items() if key])[:limit]
+        return self._rerank_items_for_query(
+            [item for key, item in by_id.items() if key],
+            query=query,
+            task_type=task_type,
+            domain=self._domain_from_query(query),
+        )[:limit]
 
     def _detect_entity_type(self, query: str) -> str:
         if re.search(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", str(query or "")):
@@ -1392,6 +1475,107 @@ class WorkMemoryStore:
                 if candidate.get("entity_type") == "person":
                     return str(candidate.get("entity_key") or candidate.get("label") or "").lower()
         return normalized_query.strip()
+
+    def _domain_from_query(self, query: str) -> str:
+        lowered = str(query or "").casefold()
+        if any(token in lowered for token in ("anti-fraud", "fraud", "afasa", "scam", "centum", "singpass", "money lock", "kill switch", "sfv")):
+            return "Anti-Fraud"
+        if any(token in lowered for token in ("credit risk", "credit", "underwriting", "b score", "a-score", "dbr", "limit", "income extraction", "experian")):
+            return "Credit Risk"
+        if any(token in lowered for token in ("grc", "rcsa", "outsourcing", "incident management", "issue management", "ops risk")):
+            return "GRC"
+        return "Other"
+
+    def _query_tokens(self, query: str) -> list[str]:
+        stopwords = {
+            "the",
+            "and",
+            "for",
+            "with",
+            "what",
+            "when",
+            "where",
+            "which",
+            "how",
+            "why",
+            "project",
+            "status",
+            "市场",
+            "什么",
+            "如何",
+            "哪些",
+            "目前",
+        }
+        tokens = []
+        for token in re.findall(r"[A-Za-z][A-Za-z0-9_+-]{2,}|\d{2,}|[\u4e00-\u9fff]{2,}", str(query or "")):
+            normalized = token.casefold()
+            if normalized not in stopwords and normalized not in tokens:
+                tokens.append(normalized)
+        return tokens
+
+    def _rerank_items_for_query(self, items: list[dict[str, Any]], *, query: str, task_type: str, domain: str) -> list[dict[str, Any]]:
+        tokens = self._query_tokens(query)
+        task_type_key = str(task_type or "").strip()
+        preferred_types_by_task = {
+            "stakeholder_brief": {"stakeholder", "project", "key_project", "curated_report"},
+            "follow_up": {"todo", "open_loop", "risk", "blocker", "curated_report"},
+            "monthly_focus": {"curated_report", "key_project", "project"},
+            "project_status": {"curated_report", "key_project", "project", "decision", "risk", "todo"},
+        }
+        preferred_types = preferred_types_by_task.get(task_type_key, set())
+
+        def score(item: dict[str, Any]) -> tuple[float, str]:
+            metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+            text = f"{item.get('summary') or ''} {item.get('content') or ''} {json.dumps(metadata, ensure_ascii=False)}".casefold()
+            token_score = sum(1 for token in tokens if token and token in text)
+            source_score = SOURCE_PRECEDENCE.get(str(item.get("source_type") or ""), 0) / 10.0
+            type_score = 4.0 if item.get("item_type") in preferred_types else 0.0
+            domain_score = 0.0
+            if domain != "Other":
+                team_key = str(metadata.get("team_key") or "").casefold()
+                team_label = str(metadata.get("team_label") or "").casefold()
+                source_text = f"{team_key} {team_label} {text}"
+                if domain.casefold().replace("-", "") in source_text.replace("-", ""):
+                    domain_score = 6.0
+                elif domain == "GRC" and ("grc" in source_text or "ops risk" in source_text):
+                    domain_score = 6.0
+                elif domain == "Credit Risk" and ("credit" in source_text or "crms" in source_text):
+                    domain_score = 6.0
+            return (
+                float(item.get("weight") or 1.0) * 3.0 + source_score + type_score + domain_score + token_score * 2.0,
+                str(item.get("observed_at") or item.get("updated_at") or ""),
+            )
+
+        return sorted(items, key=score, reverse=True)
+
+    def _normalize_expected_sources(self, sources: list[str]) -> set[str]:
+        normalized: set[str] = set()
+        for source in sources:
+            lowered = source.casefold()
+            if "gmail" in lowered or "email" in lowered or "sent report" in lowered:
+                normalized.update({"gmail_sent_monthly_report", "gmail"})
+            if "meeting" in lowered:
+                normalized.add("meeting_recorder")
+            if "team dashboard" in lowered or "bpmis" in lowered or "jira" in lowered:
+                normalized.update({"team_dashboard", "bpmis", "jira"})
+            if "prd" in lowered or "confluence" in lowered:
+                normalized.update({"confluence", "team_dashboard"})
+            if "seatalk" in lowered:
+                normalized.add("seatalk")
+            if "source code" in lowered:
+                normalized.add("source_code_qa")
+        return normalized
+
+    def _answer_point_matches(self, point: str, searchable_text: str) -> bool:
+        normalized_point = str(point or "").strip().casefold()
+        if not normalized_point:
+            return True
+        if normalized_point in searchable_text:
+            return True
+        tokens = self._query_tokens(normalized_point)
+        if not tokens:
+            return False
+        return all(token in searchable_text for token in tokens[:6])
 
     def _candidate_project_refs(self, *, owner_email: str, sources: list[str] | None = None) -> list[str]:
         source_set = {str(source or "").strip() for source in sources or [] if str(source or "").strip()}
@@ -1454,11 +1638,18 @@ class WorkMemoryStore:
                     }
         return sorted(stakeholders.values(), key=lambda item: item["email"])
 
-    def _evidence_summary(self, item: dict[str, Any], *, include_private_summary: bool) -> dict[str, Any]:
+    def _evidence_summary(
+        self,
+        item: dict[str, Any],
+        *,
+        include_private_summary: bool,
+        include_excerpt: bool = False,
+        query: str = "",
+    ) -> dict[str, Any]:
         summary = str(item.get("summary") or "")
         if item.get("visibility") == VISIBILITY_PRIVATE and not include_private_summary:
             summary = "Private evidence available to owner."
-        return {
+        payload = {
             "item_id": item.get("item_id"),
             "source_type": item.get("source_type"),
             "source_id": item.get("source_id"),
@@ -1469,6 +1660,46 @@ class WorkMemoryStore:
             "latest_feedback_action": item.get("latest_feedback_action") or "",
             "weight": item.get("weight"),
         }
+        if include_excerpt:
+            excerpt = self._evidence_excerpt(item, query=query, allow_private=include_private_summary)
+            if excerpt:
+                payload["excerpt"] = excerpt
+        return payload
+
+    def _evidence_excerpt(self, item: dict[str, Any], *, query: str, allow_private: bool) -> str:
+        if item.get("visibility") == VISIBILITY_PRIVATE and not allow_private:
+            return ""
+        content = self._sanitize_evidence_text(str(item.get("content") or item.get("summary") or ""))
+        if not content:
+            return ""
+        tokens = self._query_tokens(query)
+        if tokens:
+            sentences = re.split(r"(?<=[.!?。！？])\s+|\n+", content)
+            scored = []
+            for sentence in sentences:
+                cleaned = sentence.strip()
+                if not cleaned:
+                    continue
+                lowered = cleaned.casefold()
+                score = sum(1 for token in tokens if token in lowered)
+                if score:
+                    scored.append((score, cleaned))
+            if scored:
+                scored.sort(key=lambda item: item[0], reverse=True)
+                return self._truncate_text(" ".join(sentence for _, sentence in scored[:2]), limit=420)
+        return self._truncate_text(content, limit=420)
+
+    def _sanitize_evidence_text(self, text: str) -> str:
+        value = re.sub(r"\s+", " ", str(text or "")).strip()
+        value = re.sub(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", "[email]", value)
+        value = re.sub(r"https?://\S+", "[link]", value)
+        return value
+
+    def _truncate_text(self, text: str, *, limit: int) -> str:
+        value = str(text or "").strip()
+        if len(value) <= limit:
+            return value
+        return value[: max(0, limit - 3)].rstrip() + "..."
 
     def _answer_prefix(self, item: dict[str, Any]) -> str:
         if item.get("source_type") == "gmail_sent_monthly_report":

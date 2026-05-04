@@ -320,6 +320,68 @@ class WorkMemoryStoreTests(unittest.TestCase):
             self.assertEqual(explanation["evidence"][0]["source_type"], "gmail_sent_monthly_report")
             self.assertEqual(eval_result["passed_count"], 1)
 
+    def test_gold_eval_tracks_answer_points_without_using_gold_as_answer_source(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = WorkMemoryStore(Path(temp_dir) / "memory.db")
+            store.record_memory_item(
+                source_type="gmail_sent_monthly_report",
+                source_id="msg-1",
+                item_type="curated_report",
+                owner_email="owner@npt.sg",
+                visibility=VISIBILITY_PRIVATE,
+                summary="PH AFASA Money Lock update",
+                content="Money Lock and Kill Switch are targeted for 2026 June end. Contact lead@example.com. See https://example.com/private.",
+                weight=2.0,
+            )
+
+            context = store.query_superagent_context(query="Money Lock AFASA deadline", owner_email="owner@npt.sg", task_type="project_status")
+            answer = store.generate_llm_superagent_answer(task_type="project_status", query="Money Lock AFASA deadline", context=context)
+            result = store.run_superagent_eval_cases(
+                owner_email="owner@npt.sg",
+                cases=[
+                    {
+                        "question": "Money Lock AFASA deadline?",
+                        "task_type": "project_status",
+                        "expected_answer_points": ["2026 June end", "not in evidence"],
+                        "expected_sources": ["Gmail Sent Report"],
+                        "expected_links": ["https://jira.shopee.io/browse/SPDBK-129093"],
+                        "domain": "Anti-Fraud",
+                    }
+                ],
+            )
+
+            self.assertIn("2026 June end", answer["direct_answer"])
+            self.assertNotIn("lead@example.com", answer["direct_answer"])
+            self.assertNotIn("https://example.com/private", answer["direct_answer"])
+            self.assertFalse(result["results"][0]["passed"])
+            self.assertEqual(result["results"][0]["missing_answer_points"], ["not in evidence"])
+            self.assertEqual(result["results"][0]["expected_links"], ["https://jira.shopee.io/browse/SPDBK-129093"])
+
+    def test_team_visible_superagent_does_not_show_private_excerpt(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = WorkMemoryStore(Path(temp_dir) / "memory.db")
+            store.record_memory_item(
+                source_type="gmail_sent_monthly_report",
+                source_id="msg-1",
+                item_type="curated_report",
+                owner_email="owner@npt.sg",
+                visibility=VISIBILITY_PRIVATE,
+                summary="Private Project Alpha update",
+                content="Private Project Alpha detail should not leak.",
+                weight=2.0,
+            )
+
+            context = store.query_superagent_context(
+                query="Private Project Alpha",
+                owner_email="teammate@npt.sg",
+                visibility_scope="team",
+                task_type="project_status",
+            )
+            answer = store.generate_llm_superagent_answer(task_type="project_status", query="Private Project Alpha", context=context)
+
+            self.assertEqual(answer["confidence"], "none")
+            self.assertNotIn("Private Project Alpha detail", answer["answer"])
+
     def test_team_dashboard_project_items_include_entities(self):
         items = team_dashboard_memory_items(
             {

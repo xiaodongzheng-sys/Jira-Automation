@@ -317,7 +317,7 @@
               <div>
                 <p class="eyebrow">readonly · ${escapeHtml(payload.confidence || 'low')} confidence</p>
                 <h3>Answer</h3>
-                <p>${escapeHtml(payload.answer || '').replaceAll('\n', '<br>')}</p>
+                <p>${escapeHtml(payload.direct_answer || payload.answer || '').replaceAll('\n', '<br>')}</p>
               </div>
             </article>
             ${evidence.length ? evidence.map((item) => `
@@ -325,7 +325,7 @@
                 <div>
                   <p class="eyebrow">${escapeHtml(item.source_type)} · ${escapeHtml(item.item_type)} · ${escapeHtml(item.visibility)}</p>
                   <h3>${escapeHtml(item.summary)}</h3>
-                  <p>${escapeHtml(item.observed_at || '')}</p>
+                  <p>${escapeHtml(item.excerpt || item.observed_at || '')}</p>
                 </div>
               </article>
             `).join('') : '<p class="empty-state">No evidence returned.</p>'}
