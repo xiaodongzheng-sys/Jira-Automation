@@ -1022,11 +1022,11 @@
 
   const loadUpcoming = async () => {
     if (!nodes.upcoming) return;
-    nodes.calendarStatus.textContent = 'Loading upcoming Meet and Zoom meetings…';
+    nodes.calendarStatus.textContent = 'Loading upcoming calendar meetings…';
     try {
       const payload = await api('/api/meeting-recorder/calendar/upcoming');
       const meetings = Array.isArray(payload.meetings) ? payload.meetings : [];
-      nodes.calendarStatus.textContent = meetings.length ? `${meetings.length} upcoming meeting(s).` : 'No upcoming Meet or Zoom meetings found.';
+      nodes.calendarStatus.textContent = meetings.length ? `${meetings.length} upcoming meeting(s).` : 'No upcoming calendar meetings found.';
       const defaultTranscriptLanguage = selectedTranscriptLanguage();
       nodes.upcoming.innerHTML = meetings.map((meeting, index) => `
         <article class="meeting-list-item">

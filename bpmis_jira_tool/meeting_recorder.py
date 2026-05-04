@@ -161,8 +161,6 @@ def normalize_calendar_event(event: dict[str, Any]) -> dict[str, Any] | None:
         event.get("description") or "",
         json.dumps(event.get("conferenceData") or {}, ensure_ascii=False),
     )
-    if not meeting_links:
-        return None
 
     start_payload = event.get("start") if isinstance(event.get("start"), dict) else {}
     end_payload = event.get("end") if isinstance(event.get("end"), dict) else {}
@@ -175,7 +173,7 @@ def normalize_calendar_event(event: dict[str, Any]) -> dict[str, Any] | None:
         if email or name:
             attendees.append({"email": email, "name": name})
 
-    first_link = meeting_links[0]
+    first_link = meeting_links[0] if meeting_links else ""
     return {
         "calendar_event_id": str(event.get("id") or "").strip(),
         "title": str(event.get("summary") or "Untitled meeting").strip(),

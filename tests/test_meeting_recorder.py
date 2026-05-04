@@ -75,6 +75,25 @@ class MeetingRecorderParsingTests(unittest.TestCase):
         self.assertEqual(payload["meeting_link"], "https://meet.google.com/abc-defg-hij")
         self.assertEqual(payload["attendees"], [{"email": "alice@npt.sg", "name": "Alice"}])
 
+    def test_normalize_calendar_event_keeps_calendar_invites_without_meeting_link(self):
+        event = {
+            "id": "event-2",
+            "summary": "In-person review",
+            "start": {"dateTime": "2026-05-04T11:00:00+08:00"},
+            "end": {"dateTime": "2026-05-04T11:30:00+08:00"},
+            "attendees": [{"email": "bob@npt.sg", "displayName": "Bob"}],
+        }
+
+        payload = normalize_calendar_event(event)
+
+        self.assertIsNotNone(payload)
+        self.assertEqual(payload["calendar_event_id"], "event-2")
+        self.assertEqual(payload["title"], "In-person review")
+        self.assertEqual(payload["platform"], "unknown")
+        self.assertEqual(payload["meeting_link"], "")
+        self.assertEqual(payload["meeting_links"], [])
+        self.assertEqual(payload["attendees"], [{"email": "bob@npt.sg", "name": "Bob"}])
+
     def test_parse_avfoundation_devices_and_audio_capture_modes(self):
         output = """
         [AVFoundation indev @ 0x123] AVFoundation video devices:
