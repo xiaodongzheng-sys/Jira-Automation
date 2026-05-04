@@ -6356,6 +6356,7 @@ def _meeting_recorder_config(settings: Settings) -> MeetingRecorderConfig:
         whisper_threads=settings.meeting_recorder_whisper_threads,
         background_nice=settings.meeting_recorder_background_nice,
         capture_status_every_buffers=settings.meeting_recorder_capture_status_every_buffers,
+        startup_silence_grace_seconds=settings.meeting_recorder_startup_silence_grace_seconds,
     )
 
 
@@ -10417,7 +10418,7 @@ def _normalize_team_dashboard_task(task: dict[str, Any]) -> dict[str, Any]:
         "pm_email": str(task.get("pm_email") or "").strip().lower(),
         "jira_status": str(task.get("jira_status") or task.get("status") or "").strip(),
         "created_at": str(task.get("created_at") or task.get("created") or "").strip(),
-        "release_date": str(task.get("release_date") or task.get("release") or "").strip(),
+        "release_date": _format_team_dashboard_release_date(task.get("release_date") or task.get("release")),
         "version": str(task.get("version") or task.get("fix_version_name") or "").strip(),
         "description": str(task.get("description") or task.get("desc") or task.get("jiraDescription") or "").strip(),
         "prd_links": prd_links,
@@ -10583,11 +10584,18 @@ def _apply_team_dashboard_project_release_date(project: dict[str, Any]) -> None:
         if parsed and (latest is None or parsed > latest):
             latest = parsed
     if latest:
-        project["release_date"] = time.strftime("%d-%m-%Y", latest)
+        project["release_date"] = time.strftime("%Y-%m-%d", latest)
         project["release_date_sort"] = time.strftime("%Y-%m-%d", latest)
     else:
         project["release_date"] = "-"
         project["release_date_sort"] = ""
+
+
+def _format_team_dashboard_release_date(value: Any) -> str:
+    parsed, text = _parse_team_dashboard_release_date(value)
+    if parsed:
+        return time.strftime("%Y-%m-%d", parsed)
+    return text
 
 
 def _parse_team_dashboard_release_date(value: Any) -> tuple[time.struct_time | None, str]:

@@ -1801,7 +1801,7 @@ class WebPortalFeatureTests(unittest.TestCase):
                                 "jira_title": "Pending item",
                                 "pm_email": "af@npt.sg",
                                 "jira_status": "Testing",
-                                "release_date": "2026-05-20",
+                                "release_date": "2026-05-20T16:00:00.000Z",
                                 "version": "Planning_26Q3",
                                 "prd_links": [],
                                 "parent_project": {
@@ -1892,8 +1892,9 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertNotIn("300200", af_under_prd)
         af_pending_live = {project["bpmis_id"]: project for project in teams["AF"]["pending_live"]}
         self.assertEqual([project["bpmis_id"] for project in teams["AF"]["pending_live"][:2]], ["225300", "225159"])
-        self.assertEqual([project["release_date"] for project in teams["AF"]["pending_live"][:2]], ["01-05-2026", "20-05-2026"])
+        self.assertEqual([project["release_date"] for project in teams["AF"]["pending_live"][:2]], ["2026-05-01", "2026-05-20"])
         self.assertEqual([item["jira_id"] for item in af_pending_live["225159"]["jira_tickets"]], ["AF-2"])
+        self.assertEqual(af_pending_live["225159"]["jira_tickets"][0]["release_date"], "2026-05-20")
         self.assertNotIn("300100", af_pending_live)
         self.assertNotIn("300200", af_pending_live)
         self.assertEqual(af_under_prd["225159"]["jira_tickets"][0]["jira_link"], "https://jira.shopee.io/browse/AF-1")

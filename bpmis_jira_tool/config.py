@@ -84,6 +84,7 @@ class Settings:
     meeting_recorder_whisper_threads: int = 0
     meeting_recorder_background_nice: int = 10
     meeting_recorder_capture_status_every_buffers: int = 250
+    meeting_recorder_startup_silence_grace_seconds: int = 300
     source_code_qa_owner_email: str = "xiaodong.zheng@npt.sg"
     source_code_qa_admin_emails: tuple[str, ...] = ()
     source_code_qa_git_timeout_seconds: int = 90
@@ -226,6 +227,7 @@ class Settings:
             meeting_recorder_whisper_threads=_env_int("MEETING_RECORDER_WHISPER_THREADS", 0),
             meeting_recorder_background_nice=_env_int("MEETING_RECORDER_BACKGROUND_NICE", 10),
             meeting_recorder_capture_status_every_buffers=_env_int("MEETING_RECORDER_CAPTURE_STATUS_EVERY_BUFFERS", 250),
+            meeting_recorder_startup_silence_grace_seconds=_env_int("MEETING_RECORDER_STARTUP_SILENCE_GRACE_SECONDS", 300),
             source_code_qa_owner_email=source_code_qa_owner_email,
             source_code_qa_admin_emails=source_code_qa_admin_emails,
             source_code_qa_git_timeout_seconds=int(_env_str("SOURCE_CODE_QA_GIT_TIMEOUT_SECONDS", "90")),

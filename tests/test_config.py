@@ -29,6 +29,7 @@ class ConfigTests(unittest.TestCase):
                 "MEETING_RECORDER_WHISPER_THREADS": "2",
                 "MEETING_RECORDER_BACKGROUND_NICE": "12",
                 "MEETING_RECORDER_CAPTURE_STATUS_EVERY_BUFFERS": "300",
+                "MEETING_RECORDER_STARTUP_SILENCE_GRACE_SECONDS": "180",
             },
             clear=True,
         ), patch("bpmis_jira_tool.config.find_dotenv", return_value=""):
@@ -38,6 +39,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(settings.meeting_recorder_whisper_threads, 2)
         self.assertEqual(settings.meeting_recorder_background_nice, 12)
         self.assertEqual(settings.meeting_recorder_capture_status_every_buffers, 300)
+        self.assertEqual(settings.meeting_recorder_startup_silence_grace_seconds, 180)
 
     def test_from_env_loads_dotenv_values(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -104,6 +106,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(settings.meeting_recorder_transcript_segment_workers, 2)
         self.assertEqual(settings.meeting_recorder_background_nice, 10)
         self.assertEqual(settings.meeting_recorder_capture_status_every_buffers, 250)
+        self.assertEqual(settings.meeting_recorder_startup_silence_grace_seconds, 300)
 
     def test_local_agent_connect_timeout_from_env(self):
         with patch.dict(os.environ, {"LOCAL_AGENT_CONNECT_TIMEOUT_SECONDS": "4"}, clear=True), patch(

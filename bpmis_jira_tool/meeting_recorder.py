@@ -98,6 +98,7 @@ class MeetingRecorderConfig:
     whisper_threads: int = 0
     background_nice: int = 10
     capture_status_every_buffers: int = 250
+    startup_silence_grace_seconds: int = 300
 
 
 def normalize_meeting_transcript_language(value: object) -> str:
@@ -427,6 +428,7 @@ class MeetingRecorderRuntime:
             "whisper_language": self.config.whisper_language,
             "recording_background_nice": _normalized_background_nice(self.config.background_nice),
             "capture_status_every_buffers": _normalized_status_every_buffers(self.config.capture_status_every_buffers),
+            "startup_silence_grace_seconds": _normalized_startup_silence_grace_seconds(self.config.startup_silence_grace_seconds),
             "transcript_segment_workers": _effective_transcript_segment_workers(self.config.transcript_segment_workers),
             "whisper_threads": _effective_whisper_threads(
                 whisper_threads=self.config.whisper_threads,
@@ -507,6 +509,7 @@ class MeetingRecorderRuntime:
             "transcript_language_label": MEETING_TRANSCRIPT_LANGUAGE_LABELS[transcript_language],
             "recording_background_nice": _normalized_background_nice(self.config.background_nice),
             "capture_status_every_buffers": _normalized_status_every_buffers(self.config.capture_status_every_buffers),
+            "startup_silence_grace_seconds": _normalized_startup_silence_grace_seconds(self.config.startup_silence_grace_seconds),
         }
         record["recording_health"] = {
             "status": "warning" if preflight.get("status") == "too_quiet" else preflight.get("status", "unknown"),
@@ -951,8 +954,16 @@ class MeetingRecorderRuntime:
             if path.exists() and path.is_file() and path.stat().st_size > 0 and _audio_duration_seconds(path) > 0
         ]
         media = dict(media)
-        media["screencapture_system_duration_seconds"] = _audio_duration_seconds(system_path) if system_path.exists() else 0
-        media["screencapture_microphone_duration_seconds"] = _audio_duration_seconds(microphone_path) if microphone_path.exists() else 0
+        system_duration = _audio_duration_seconds(system_path) if system_path.exists() else 0
+        microphone_duration = _audio_duration_seconds(microphone_path) if microphone_path.exists() else 0
+        media["screencapture_system_duration_seconds"] = system_duration
+        media["screencapture_microphone_duration_seconds"] = microphone_duration
+        longest_duration = max(system_duration, microphone_duration, 0.0)
+        if longest_duration > 0:
+            media["screencapture_system_duration_ratio"] = round(system_duration / longest_duration, 4)
+            media["screencapture_microphone_duration_ratio"] = round(microphone_duration / longest_duration, 4)
+            if system_duration >= longest_duration * 0.9 and microphone_duration > 0 and microphone_duration < longest_duration * 0.8:
+                media["screencapture_track_warning"] = "Microphone track is shorter than system audio; system audio is available for transcription."
         if not input_paths:
             media["audio_finalization_warning"] = "ScreenCaptureKit produced no usable system or microphone audio."
             record["media"] = media
@@ -1642,6 +1653,7 @@ class MeetingProcessingService:
             metrics = _audio_volume_metrics(audio_path, start_seconds=float(start), duration_seconds=current_duration)
             has_no_audio = any("[no audio]" in str(chunk.get("text") or "").lower() for chunk in chunks)
             low_audio = bool(metrics.get("low_audio")) or has_no_audio
+            startup_silence = low_audio and float(start) < _normalized_startup_silence_grace_seconds(self.config.startup_silence_grace_seconds)
             return {
                 "index": index,
                 "start_seconds": float(start),
@@ -1660,6 +1672,8 @@ class MeetingProcessingService:
                     "max_volume_db": metrics.get("max_volume_db"),
                     "quality": "low_audio" if low_audio else "ok",
                     "possible_missed_speech": low_audio,
+                    "no_audio": has_no_audio,
+                    "startup_silence": startup_silence,
                     "chunk_count": len(chunks),
                 },
             }
@@ -1725,7 +1739,9 @@ class MeetingProcessingService:
         quality["segment_count"] = int(segment_count)
         quality["segment_workers"] = int(segment_workers)
         quality["whisper_threads"] = int(whisper_threads)
-        quality["transcribe_elapsed_seconds"] = round(max(0.0, time.monotonic() - started_at), 3) if started_at else None
+        elapsed = round(max(0.0, time.monotonic() - started_at), 3) if started_at else None
+        quality["transcribe_elapsed_seconds"] = elapsed
+        quality["transcribe_realtime_ratio"] = round(elapsed / float(duration_seconds or 0), 4) if elapsed is not None and float(duration_seconds or 0) > 0 else None
         quality["language_retry_count"] = int(transcript.get("language_retry_count") or 0)
 
     def _extract_visual_evidence(self, record: dict[str, Any], video_path: Path) -> list[dict[str, Any]]:
@@ -1783,6 +1799,7 @@ class MeetingProcessingService:
             ]
             has_no_audio = any("[no audio]" in str(chunk.get("text") or "").lower() for chunk in segment_chunks)
             low_audio = bool(metrics.get("low_audio")) or has_no_audio
+            startup_silence = low_audio and start < _normalized_startup_silence_grace_seconds(self.config.startup_silence_grace_seconds)
             low_audio_count += 1 if low_audio else 0
             no_audio_count += 1 if has_no_audio else 0
             segments.append(
@@ -1796,6 +1813,8 @@ class MeetingProcessingService:
                     "max_volume_db": metrics.get("max_volume_db"),
                     "quality": "low_audio" if low_audio else "ok",
                     "possible_missed_speech": low_audio,
+                    "no_audio": has_no_audio,
+                    "startup_silence": startup_silence,
                     "chunk_count": len(segment_chunks),
                 }
             )
@@ -1810,17 +1829,26 @@ class MeetingProcessingService:
         chunks: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         low_audio_count = sum(1 for segment in segments if segment.get("quality") == "low_audio")
-        no_audio_count = sum(1 for segment in segments if segment.get("possible_missed_speech") and segment.get("chunk_count"))
+        no_audio_count = sum(1 for segment in segments if segment.get("no_audio"))
+        startup_silence_count = sum(1 for segment in segments if segment.get("startup_silence"))
+        risk_low_audio_count = sum(1 for segment in segments if segment.get("quality") == "low_audio" and not segment.get("startup_silence"))
+        risk_no_audio_count = sum(1 for segment in segments if segment.get("no_audio") and not segment.get("startup_silence"))
+        all_segments_startup_silence = bool(segments) and startup_silence_count == len(segments)
+        all_segments_no_audio = bool(segments) and all(bool(segment.get("no_audio")) for segment in segments)
+        recording_duration = max((float(segment.get("end_seconds") or 0) for segment in segments), default=0.0)
+        short_all_no_audio = all_segments_startup_silence and all_segments_no_audio and recording_duration <= _normalized_startup_silence_grace_seconds(self.config.startup_silence_grace_seconds)
+        if short_all_no_audio:
+            risk_no_audio_count = max(risk_no_audio_count, no_audio_count)
         languages = sorted({str(segment.get("language") or "").strip() for segment in segments if segment.get("language")})
         language = ",".join(languages) or default_language
         language_codes = {code.strip().lower() for code in language.split(",") if code.strip()}
         unusual_language = bool(language_codes) and not language_codes.issubset(MEETING_TRANSCRIPT_EXPECTED_LANGUAGES)
         repetition = _transcript_repetition_metrics(chunks or [])
         warnings = []
-        if low_audio_count:
+        if risk_low_audio_count:
             warnings.append("Some transcript segments have low audio and may miss Zoom/system audio or microphone speech.")
-        if no_audio_count:
-            warnings.append("One or more transcript segments may contain [no audio] or missed speech.")
+        if risk_no_audio_count:
+            warnings.append("One or more transcript segments contain [no audio] and may miss speech.")
         if unusual_language:
             warnings.append(f"Whisper detected unexpected language '{language}', so transcript may be unreliable.")
         if repetition.get("is_repetitive"):
@@ -1831,10 +1859,13 @@ class MeetingProcessingService:
             "segment_count": len(segments),
             "low_audio_segment_count": low_audio_count,
             "no_audio_segment_count": no_audio_count,
+            "startup_silence_segment_count": startup_silence_count,
+            "risk_low_audio_segment_count": risk_low_audio_count,
+            "risk_no_audio_segment_count": risk_no_audio_count,
             "repetitive_chunk_count": repetition.get("repetitive_chunk_count", 0),
             "unique_text_ratio": repetition.get("unique_text_ratio"),
             "dominant_chunk_ratio": repetition.get("dominant_chunk_ratio"),
-            "possible_incomplete": bool(low_audio_count or no_audio_count or unusual_language or repetition.get("is_repetitive")),
+            "possible_incomplete": bool(risk_low_audio_count or risk_no_audio_count or unusual_language or repetition.get("is_repetitive")),
             "warnings": warnings,
         }
 
@@ -2023,6 +2054,14 @@ def _normalized_status_every_buffers(value: object) -> int:
     except (TypeError, ValueError):
         configured = 250
     return max(1, configured)
+
+
+def _normalized_startup_silence_grace_seconds(value: object) -> int:
+    try:
+        configured = int(value or 300)
+    except (TypeError, ValueError):
+        configured = 300
+    return max(0, configured)
 
 
 def _background_command(command: list[str], nice_value: object) -> list[str]:
@@ -2853,8 +2892,8 @@ def _transcript_quality_score(quality: dict[str, Any]) -> int:
     language_codes = {code.strip() for code in language.split(",") if code.strip()}
     if language_codes and not language_codes.issubset(MEETING_TRANSCRIPT_EXPECTED_LANGUAGES):
         score -= 30
-    score -= 10 * int(quality.get("low_audio_segment_count") or 0)
-    score -= 10 * int(quality.get("no_audio_segment_count") or 0)
+    score -= 10 * int(quality.get("risk_low_audio_segment_count", quality.get("low_audio_segment_count")) or 0)
+    score -= 10 * int(quality.get("risk_no_audio_segment_count", quality.get("no_audio_segment_count")) or 0)
     return score
 
 

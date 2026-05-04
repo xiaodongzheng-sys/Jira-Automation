@@ -414,6 +414,16 @@
     return '';
   };
 
+  const formatReleaseDate = (value) => {
+    const text = String(value || '').trim();
+    if (!text || text === '-') return text || '-';
+    let match = text.match(/^(\d{4})[-/](\d{2})[-/](\d{2})/);
+    if (match) return `${match[1]}-${match[2]}-${match[3]}`;
+    match = text.match(/^(\d{2})[-/](\d{2})[-/](\d{4})/);
+    if (match) return `${match[3]}-${match[2]}-${match[1]}`;
+    return text;
+  };
+
   const sortUnderPrdProjects = (projects) => [...(Array.isArray(projects) ? projects : [])].sort((left, right) => {
     const leftDate = parseProjectDateSort(left);
     const rightDate = parseProjectDateSort(right);
@@ -514,7 +524,7 @@
         <td>${escapeHtml(item.jira_title || '-')}</td>
         <td>${escapeHtml(item.pm_email || '-')}</td>
         <td>${escapeHtml(item.jira_status || '-')}</td>
-        <td>${escapeHtml(item.release_date || '-')}</td>
+        <td>${escapeHtml(formatReleaseDate(item.release_date))}</td>
         <td>${escapeHtml(item.version || '-')}</td>
         <td>${renderPrdLinks(item.prd_links, item)}</td>
         <td>
@@ -575,7 +585,7 @@
           </div>
           <div class="bpmis-project-card-market">
             <span>Live Date</span>
-            <strong>${escapeHtml(project.release_date || '-')}</strong>
+            <strong>${escapeHtml(formatReleaseDate(project.release_date))}</strong>
           </div>
           <div class="bpmis-project-card-name">
             <span>Project Name</span>

@@ -787,6 +787,51 @@ class MeetingRecorderRuntimeTests(unittest.TestCase):
         self.assertIn("amix=inputs=2", " ".join(command))
         self.assertEqual(finalized["media"]["audio_path"], f"records/{record['record_id']}/meeting.wav")
         self.assertEqual(finalized["media"]["audio_mix_command"][:3], ["nice", "-n", "8"])
+        self.assertEqual(finalized["media"]["screencapture_system_duration_ratio"], 1.0)
+        self.assertEqual(finalized["media"]["screencapture_microphone_duration_ratio"], 1.0)
+
+    def test_screencapturekit_short_microphone_track_records_diagnostic_warning(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = MeetingRecordStore(root)
+            runtime = MeetingRecorderRuntime(store=store, config=MeetingRecorderConfig(background_nice=8))
+            record = store.create_record(
+                owner_email="owner@npt.sg",
+                title="Zoom review",
+                platform="zoom",
+                meeting_link="https://zoom.us/j/123",
+            )
+            record_dir = store.record_dir(record["record_id"])
+            system_path = record_dir / "screencapture-system.caf"
+            microphone_path = record_dir / "screencapture-microphone.caf"
+            system_path.write_bytes(b"system-audio")
+            microphone_path.write_bytes(b"mic-audio")
+            record["media"] = {
+                "audio_capture_profile": "screencapturekit_audio_v1",
+                "system_audio_path": str(system_path.relative_to(store.root_dir)),
+                "microphone_audio_path": str(microphone_path.relative_to(store.root_dir)),
+            }
+
+            def fake_duration(path):
+                return 1000.0 if Path(path).name == "screencapture-system.caf" else 120.0
+
+            def fake_run(command, *_args, **_kwargs):
+                Path(command[-1]).write_bytes(b"mixed-audio" * 8)
+                return Mock(stdout="", stderr="")
+
+            with patch("bpmis_jira_tool.meeting_recorder._resolve_ffmpeg_bin", return_value="/opt/homebrew/bin/ffmpeg"), patch(
+                "bpmis_jira_tool.meeting_recorder._audio_duration_seconds",
+                side_effect=fake_duration,
+            ), patch("bpmis_jira_tool.meeting_recorder._run_command", side_effect=fake_run):
+                finalized = runtime._finalize_screencapturekit_audio_recording(record)
+
+        media = finalized["media"]
+        self.assertEqual(media["screencapture_system_duration_seconds"], 1000.0)
+        self.assertEqual(media["screencapture_microphone_duration_seconds"], 120.0)
+        self.assertEqual(media["screencapture_system_duration_ratio"], 1.0)
+        self.assertEqual(media["screencapture_microphone_duration_ratio"], 0.12)
+        self.assertIn("Microphone track is shorter", media["screencapture_track_warning"])
+        self.assertNotIn("audio_finalization_warning", media)
 
     def test_stop_recording_terminates_persisted_recorder_process_after_restart(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1489,6 +1534,142 @@ class MeetingProcessingServiceTests(unittest.TestCase):
         self.assertIn("unexpected language", " ".join(quality["warnings"]))
         self.assertIn("repeated chunks", " ".join(quality["warnings"]))
 
+    def test_transcript_quality_keeps_startup_silence_out_of_incomplete_warning(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = MeetingProcessingService(
+                store=MeetingRecordStore(Path(temp_dir)),
+                config=MeetingRecorderConfig(startup_silence_grace_seconds=300),
+                text_client=FakeTextClient(),
+            )
+            segments = [
+                {
+                    "index": 0,
+                    "start_seconds": 0.0,
+                    "end_seconds": 60.0,
+                    "language": "en",
+                    "quality": "low_audio",
+                    "possible_missed_speech": True,
+                    "no_audio": True,
+                    "startup_silence": True,
+                    "chunk_count": 1,
+                },
+                {
+                    "index": 1,
+                    "start_seconds": 60.0,
+                    "end_seconds": 120.0,
+                    "language": "en",
+                    "quality": "low_audio",
+                    "possible_missed_speech": True,
+                    "no_audio": False,
+                    "startup_silence": True,
+                    "chunk_count": 2,
+                },
+                {
+                    "index": 6,
+                    "start_seconds": 360.0,
+                    "end_seconds": 420.0,
+                    "language": "en",
+                    "quality": "ok",
+                    "possible_missed_speech": False,
+                    "no_audio": False,
+                    "startup_silence": False,
+                    "chunk_count": 8,
+                },
+            ]
+
+            quality = service._quality_from_segments(segments, chunks=[{"text": "normal discussion"}])
+
+        self.assertFalse(quality["possible_incomplete"])
+        self.assertEqual(quality["low_audio_segment_count"], 2)
+        self.assertEqual(quality["no_audio_segment_count"], 1)
+        self.assertEqual(quality["startup_silence_segment_count"], 2)
+        self.assertEqual(quality["risk_low_audio_segment_count"], 0)
+        self.assertEqual(quality["risk_no_audio_segment_count"], 0)
+        self.assertEqual(quality["warnings"], [])
+
+    def test_transcript_quality_flags_no_audio_after_startup_grace(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = MeetingProcessingService(
+                store=MeetingRecordStore(Path(temp_dir)),
+                config=MeetingRecorderConfig(startup_silence_grace_seconds=300),
+                text_client=FakeTextClient(),
+            )
+            segments = [
+                {
+                    "index": 6,
+                    "start_seconds": 360.0,
+                    "end_seconds": 420.0,
+                    "language": "en",
+                    "quality": "low_audio",
+                    "possible_missed_speech": True,
+                    "no_audio": True,
+                    "startup_silence": False,
+                    "chunk_count": 1,
+                }
+            ]
+
+            quality = service._quality_from_segments(segments, chunks=[{"text": "[no audio]"}])
+
+        self.assertTrue(quality["possible_incomplete"])
+        self.assertEqual(quality["no_audio_segment_count"], 1)
+        self.assertEqual(quality["risk_no_audio_segment_count"], 1)
+        self.assertIn("[no audio]", " ".join(quality["warnings"]))
+
+    def test_transcript_quality_marks_short_all_no_audio_as_incomplete(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = MeetingProcessingService(
+                store=MeetingRecordStore(Path(temp_dir)),
+                config=MeetingRecorderConfig(startup_silence_grace_seconds=300),
+                text_client=FakeTextClient(),
+            )
+            segments = [
+                {
+                    "index": 0,
+                    "start_seconds": 0.0,
+                    "end_seconds": 30.0,
+                    "language": "en",
+                    "quality": "low_audio",
+                    "possible_missed_speech": True,
+                    "no_audio": True,
+                    "startup_silence": True,
+                    "chunk_count": 1,
+                }
+            ]
+
+            quality = service._quality_from_segments(segments, chunks=[{"text": "[no audio]"}])
+
+        self.assertTrue(quality["possible_incomplete"])
+        self.assertEqual(quality["startup_silence_segment_count"], 1)
+        self.assertEqual(quality["risk_no_audio_segment_count"], 1)
+
+    def test_transcript_quality_does_not_count_low_audio_as_no_audio(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = MeetingProcessingService(
+                store=MeetingRecordStore(Path(temp_dir)),
+                config=MeetingRecorderConfig(startup_silence_grace_seconds=0),
+                text_client=FakeTextClient(),
+            )
+            segments = [
+                {
+                    "index": 0,
+                    "start_seconds": 0.0,
+                    "end_seconds": 60.0,
+                    "language": "en",
+                    "quality": "low_audio",
+                    "possible_missed_speech": True,
+                    "no_audio": False,
+                    "startup_silence": False,
+                    "chunk_count": 3,
+                }
+            ]
+
+            quality = service._quality_from_segments(segments, chunks=[{"text": "quiet speech"}])
+
+        self.assertEqual(quality["low_audio_segment_count"], 1)
+        self.assertEqual(quality["no_audio_segment_count"], 0)
+        self.assertTrue(quality["possible_incomplete"])
+        self.assertNotIn("[no audio]", " ".join(quality["warnings"]))
+
     def test_transcribe_audio_splits_long_mixed_language_recordings(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -1554,6 +1735,7 @@ class MeetingProcessingServiceTests(unittest.TestCase):
         self.assertEqual(transcript["quality"]["whisper_threads"], 2)
         self.assertEqual(transcript["quality"]["language_retry_count"], 0)
         self.assertIsInstance(transcript["quality"]["transcribe_elapsed_seconds"], float)
+        self.assertIsInstance(transcript["quality"]["transcribe_realtime_ratio"], float)
 
     def test_transcribe_audio_auto_threads_split_cpu_across_workers(self):
         with tempfile.TemporaryDirectory() as temp_dir:

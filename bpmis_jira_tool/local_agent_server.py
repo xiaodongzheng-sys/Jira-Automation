@@ -1829,6 +1829,7 @@ def _meeting_recorder_config(settings: Settings) -> MeetingRecorderConfig:
         whisper_threads=settings.meeting_recorder_whisper_threads,
         background_nice=settings.meeting_recorder_background_nice,
         capture_status_every_buffers=settings.meeting_recorder_capture_status_every_buffers,
+        startup_silence_grace_seconds=settings.meeting_recorder_startup_silence_grace_seconds,
     )
 
 
