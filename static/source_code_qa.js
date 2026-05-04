@@ -2167,10 +2167,111 @@
     `;
   };
 
+  const effortReadableText = (value) => String(value || '')
+    .replace(/\\n/g, '\n')
+    .replace(/\r\n/g, '\n')
+    .replace(/[ \t]+/g, ' ')
+    .trim();
+
+  const effortSplitParagraphs = (value) => {
+    const normalized = effortReadableText(value)
+      .replace(/\s+(?=\d+\.\s+[A-Z\u4e00-\u9fff])/g, '\n')
+      .replace(/\s+(?=(?:BE|FE) Estimate\s*:)/gi, '\n')
+      .replace(/\s+(?=(?:Driver|Confidence|Missing|Confirmed|Inferred)\s*:)/gi, '\n');
+    return normalized.split(/\n+/).map((item) => item.trim()).filter(Boolean);
+  };
+
+  const effortDisplayValue = (value) => {
+    if (value === null || value === undefined) return '';
+    if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+      return effortReadableText(value);
+    }
+    if (Array.isArray(value)) {
+      return value.map(effortDisplayValue).filter(Boolean).join('; ');
+    }
+    if (typeof value === 'object') {
+      const preferred = [
+        value.title,
+        value.summary,
+        value.text,
+        value.path,
+        value.file,
+        value.repo,
+      ].map(effortDisplayValue).filter(Boolean);
+      if (preferred.length) {
+        const extras = ['line_start', 'line_end', 'status', 'confidence']
+          .filter((key) => value[key] !== undefined && value[key] !== null && value[key] !== '')
+          .map((key) => `${key}: ${effortDisplayValue(value[key])}`);
+        return [...preferred, ...extras].join(' · ');
+      }
+      return Object.entries(value)
+        .filter(([, item]) => item !== undefined && item !== null && item !== '')
+        .map(([key, item]) => `${key}: ${effortDisplayValue(item)}`)
+        .filter(Boolean)
+        .join(' · ');
+    }
+    return '';
+  };
+
+  const effortParsedAnswer = (value) => {
+    if (value && typeof value === 'object') return value;
+    const raw = String(value || '').trim();
+    if (!raw) return null;
+    const fenced = raw.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+    const candidate = fenced ? fenced[1].trim() : raw;
+    if (!candidate.startsWith('{') && !candidate.startsWith('[')) return null;
+    try {
+      const parsed = JSON.parse(candidate);
+      return parsed && typeof parsed === 'object' ? parsed : null;
+    } catch (_error) {
+      return null;
+    }
+  };
+
+  const effortRenderParagraphs = (value) => {
+    const paragraphs = effortSplitParagraphs(value);
+    if (!paragraphs.length) return '<span class="muted">None captured.</span>';
+    return paragraphs.map((item) => `<p>${escapeHtml(item)}</p>`).join('');
+  };
+
+  const effortListValues = (items) => Array.isArray(items) ? items.map(effortDisplayValue).filter(Boolean) : [];
+
+  const effortRenderList = (items, emptyText = 'None captured.') => {
+    const values = effortListValues(items);
+    if (!values.length) return `<span class="muted">${escapeHtml(emptyText)}</span>`;
+    return `<ul class="source-qa-effort-list">${values.map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</ul>`;
+  };
+
+  const effortRenderSection = (title, contentHtml) => {
+    const body = String(contentHtml || '').trim();
+    if (!body) return '';
+    return `
+      <section class="source-qa-effort-readable-section">
+        <strong>${escapeHtml(title)}</strong>
+        ${body}
+      </section>
+    `;
+  };
+
   const effortListPreview = (items, limit = 6) => {
     const values = Array.isArray(items) ? items.filter(Boolean).slice(0, limit) : [];
     if (!values.length) return '<span class="muted">None captured.</span>';
-    return `<ul>${values.map((item) => `<li>${escapeHtml(String(item))}</li>`).join('')}</ul>`;
+    return `<ul class="source-qa-effort-list">${values.map((item) => `<li>${escapeHtml(effortDisplayValue(item))}</li>`).join('')}</ul>`;
+  };
+
+  const effortOptionPreview = (items) => {
+    const values = Array.isArray(items) ? items.filter(Boolean).slice(0, 4) : [];
+    if (!values.length) return '<span class="muted">No proposed change captured.</span>';
+    return `<div class="source-qa-effort-option-list">${values.map((item) => {
+      const label = effortDisplayValue(item.label || item.id || 'Proposed change');
+      const summary = effortDisplayValue(item.summary || '');
+      return `
+        <article>
+          <strong>${escapeHtml(label)}</strong>
+          ${summary ? effortRenderParagraphs(summary) : ''}
+        </article>
+      `;
+    }).join('')}</div>`;
   };
 
   const renderEffortHybridSummary = (payload) => {
@@ -2183,12 +2284,9 @@
     const evidenceStatus = assessment.evidence_status || payload?.effort_evidence_status || 'unknown';
     const missingEvidence = assessment.missing_evidence || payload?.missing_evidence || [];
     const options = Array.isArray(businessPlan.options) ? businessPlan.options.slice(0, 3) : [];
-    const optionHtml = options.length
-      ? `<ul>${options.map((item) => `<li><strong>${escapeHtml(item.label || item.id || 'Option')}</strong>: ${escapeHtml(item.summary || '')}</li>`).join('')}</ul>`
-      : '<span class="muted">No option split detected.</span>';
     const estimates = Array.isArray(rubric.option_estimates) ? rubric.option_estimates : [];
     const estimateHtml = estimates.length
-      ? `<ul>${estimates.map((item) => `<li><strong>${escapeHtml(item.label || item.id || 'Option')}</strong>: BE ${escapeHtml(item.be_person_days || 'n/a')}, FE ${escapeHtml(item.fe_person_days || 'n/a')}</li>`).join('')}</ul>`
+      ? `<ul class="source-qa-effort-list">${estimates.map((item) => `<li><strong>${escapeHtml(item.label || item.id || 'Proposed change')}</strong>: BE ${escapeHtml(item.be_person_days || 'n/a')}, FE ${escapeHtml(item.fe_person_days || 'n/a')}</li>`).join('')}</ul>`
       : '<span class="muted">No rubric estimate available.</span>';
     return `
       <div class="source-qa-evidence-card source-qa-effort-hybrid-card">
@@ -2200,7 +2298,7 @@
           <section>
             <strong>Business Plan</strong>
             ${effortListPreview(businessPlan.business_goals, 4)}
-            ${optionHtml}
+            ${effortOptionPreview(options)}
           </section>
           <section>
             <strong>Technical Candidates</strong>
@@ -2215,6 +2313,41 @@
             ${effortListPreview(missingEvidence, 6)}
           </section>
         </div>
+      </div>
+    `;
+  };
+
+  const renderEffortStructuredAnswer = (payload) => {
+    const parsed = effortParsedAnswer(payload?.llm_answer || payload?.answer);
+    const structured = payload?.structured_answer || {};
+    const directAnswer = parsed?.direct_answer || structured.direct_answer || '';
+    if (!parsed && !directAnswer) return '';
+    const investigation = parsed?.investigation_steps && typeof parsed.investigation_steps === 'object'
+      ? parsed.investigation_steps
+      : {};
+    const evidenceSections = [
+      ['Confirmed From Code', parsed?.confirmed_from_code],
+      ['Inferred From Code', parsed?.inferred_from_code],
+      ['Missing Evidence', parsed?.not_found || parsed?.missing_evidence],
+      ['Runtime / Attachment Evidence', parsed?.runtime_evidence || parsed?.attachment_facts || parsed?.screenshot_evidence],
+      ['Next Checks', parsed?.next_checks || parsed?.confirmation_questions],
+    ];
+    const investigationHtml = [
+      ['Candidate Evidence', investigation.candidate_evidence],
+      ['Gap Verification', investigation.gap_verification],
+      ['Certainty Split', investigation.certainty_split],
+    ].filter(([, values]) => effortListValues(values).length)
+      .map(([title, values]) => effortRenderSection(title, effortRenderList(values)))
+      .join('');
+    const evidenceHtml = evidenceSections
+      .filter(([, values]) => effortListValues(values).length)
+      .map(([title, values]) => effortRenderSection(title, effortRenderList(values)))
+      .join('');
+    return `
+      <div class="source-qa-effort-readable">
+        ${directAnswer ? effortRenderSection('Assessment Summary', `<div class="source-qa-effort-paragraphs">${effortRenderParagraphs(directAnswer)}</div>`) : ''}
+        ${investigationHtml ? `<div class="source-qa-effort-readable-grid">${investigationHtml}</div>` : ''}
+        ${evidenceHtml ? `<div class="source-qa-effort-readable-grid">${evidenceHtml}</div>` : ''}
       </div>
     `;
   };
@@ -2286,9 +2419,10 @@
     ].filter(Boolean).join(' · ');
     if (effortMeta) effortMeta.textContent = meta || 'completed';
     const hybridSummary = renderEffortHybridSummary(payload);
-    const answerHtml = answer
+    const structuredAnswerHtml = renderEffortStructuredAnswer(payload);
+    const answerHtml = structuredAnswerHtml || (answer
       ? renderCodexAnswerHtml(answer)
-      : '<div class="source-qa-empty">Assessment completed without a generated answer.</div>';
+      : '<div class="source-qa-empty">Assessment completed without a generated answer.</div>');
     effortAnswer.innerHTML = `${hybridSummary}${answerHtml}`;
     renderEffortEvidence(payload);
     if (options.persist !== false) {

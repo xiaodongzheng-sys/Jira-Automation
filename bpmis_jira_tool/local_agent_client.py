@@ -254,6 +254,14 @@ class LocalAgentClient:
     def meeting_recorder_process(self, *, record_id: str, owner_email: str) -> dict[str, Any]:
         return self._request("POST", "/api/local-agent/meeting-recorder/process", {"record_id": record_id, "owner_email": owner_email})
 
+    def meeting_recorder_process_start(self, *, record_id: str, owner_email: str) -> dict[str, Any]:
+        return self._request("POST", "/api/local-agent/meeting-recorder/process-async", {"record_id": record_id, "owner_email": owner_email})
+
+    def meeting_recorder_process_job(self, *, job_id: str, owner_email: str) -> dict[str, Any]:
+        path = f"/api/local-agent/meeting-recorder/process-jobs/{quote(str(job_id or ''), safe='')}?{urlencode({'owner_email': owner_email})}"
+        result = self._request("GET", path, signed=True)
+        return result if isinstance(result, dict) else {}
+
     def meeting_recorder_repair_video(self, *, record_id: str, owner_email: str) -> dict[str, Any]:
         return self._request("POST", "/api/local-agent/meeting-recorder/repair-video", {"record_id": record_id, "owner_email": owner_email})
 

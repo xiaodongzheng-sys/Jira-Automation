@@ -5,6 +5,7 @@ import json
 import logging
 import mimetypes
 import os
+import re
 import tempfile
 import threading
 import time
@@ -89,6 +90,7 @@ BPMIS_PROXY_OPERATIONS = {
 _SOURCE_CODE_QA_AUTO_SYNC_LOCK = threading.Lock()
 _SOURCE_CODE_QA_AUTO_SYNC_KEYS: set[str] = set()
 _SOURCE_CODE_QA_QUERY_JOB_TTL_SECONDS = 3600
+MEETING_RECORDER_PROCESS_ACTION = "meeting-recorder-process"
 
 
 def create_local_agent_app() -> Flask:
@@ -99,6 +101,7 @@ def create_local_agent_app() -> Flask:
     app.config["SOURCE_CODE_QA_QUERY_JOBS"] = {}
     app.config["SOURCE_CODE_QA_QUERY_JOBS_LOCK"] = threading.Lock()
     app.config["TEAM_DASHBOARD_JOB_STORE"] = JobStore(_data_root(settings) / "run" / "jobs.json")
+    app.config["MEETING_RECORDER_JOB_STORE"] = JobStore(_data_root(settings) / "run" / "meeting_recorder_jobs.json")
     meeting_store = MeetingRecordStore(_data_root(settings) / "meeting_records")
     app.config["MEETING_RECORD_STORE"] = meeting_store
     app.config["MEETING_RECORDER_RUNTIME"] = MeetingRecorderRuntime(
@@ -539,6 +542,35 @@ def create_local_agent_app() -> Flask:
             owner_email=str(payload.get("owner_email") or ""),
         )
         return jsonify({"status": "ok", "record": _meeting_record_summary(record)})
+
+    @app.post("/api/local-agent/meeting-recorder/process-async")
+    def meeting_recorder_process_async():
+        payload = request.get_json(silent=True) or {}
+        try:
+            result = _queue_meeting_recorder_process_job(
+                app=current_app._get_current_object(),
+                record_id=str(payload.get("record_id") or ""),
+                owner_email=str(payload.get("owner_email") or ""),
+            )
+            return jsonify(result)
+        except ToolError as error:
+            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
+
+    @app.get("/api/local-agent/meeting-recorder/process-jobs/<job_id>")
+    def meeting_recorder_process_job_status(job_id: str):
+        snapshot = _meeting_recorder_process_job_snapshot(
+            job_id=job_id,
+            owner_email=str(request.args.get("owner_email") or ""),
+        )
+        if snapshot is None:
+            return jsonify({
+                "status": "error",
+                "message": "Meeting Recorder process job was not found.",
+                "error_category": "job_not_found",
+                "error_code": "job_not_found",
+                "error_retryable": False,
+            }), HTTPStatus.NOT_FOUND
+        return jsonify(_public_meeting_recorder_process_job_snapshot(snapshot))
 
     @app.post("/api/local-agent/meeting-recorder/repair-video")
     def meeting_recorder_repair_video():
@@ -1510,6 +1542,171 @@ def _run_monthly_report_draft_job(app: Flask, job_id: str, payload: dict[str, An
                 f"Mac local-agent Monthly Report job failed unexpectedly: {error}",
                 error_category="unexpected_internal",
                 error_code="server_error",
+                error_retryable=True,
+            )
+
+
+def _sanitize_meeting_recorder_job_error(error: object, *, unexpected: bool = False) -> str:
+    if unexpected:
+        return "Meeting processing failed unexpectedly. Check server logs for details."
+    message = " ".join(str(error or "").split()).strip() or "Meeting processing failed."
+    if re.search(r"traceback|token|secret|authorization|api[_ -]?key", message, re.IGNORECASE):
+        return "Meeting processing failed. Check server logs for details."
+    return message[:500]
+
+
+def _meeting_record_for_processing_job(record_id: str, owner_email: str) -> dict[str, Any]:
+    record = _meeting_record_for_owner(record_id=record_id, owner_email=owner_email)
+    status = str(record.get("status") or "").strip().lower()
+    if status in {"recorded", "failed", "completed", "processing"}:
+        return record
+    raise ToolError("Stop the recording before processing this meeting.")
+
+
+def _queue_meeting_recorder_process_job(*, app: Flask, record_id: str, owner_email: str) -> dict[str, Any]:
+    normalized_owner = str(owner_email or "").strip().lower()
+    record = _meeting_record_for_processing_job(record_id, normalized_owner)
+    job_store: JobStore = current_app.config["MEETING_RECORDER_JOB_STORE"]
+    active_job = job_store.active_for_record(
+        MEETING_RECORDER_PROCESS_ACTION,
+        owner_email=normalized_owner,
+        record_id=str(record.get("record_id") or record_id),
+    )
+    if active_job is not None:
+        return {
+            "status": "queued",
+            "state": active_job.get("state") or "queued",
+            "job_id": active_job.get("job_id") or "",
+            "record": _meeting_record_summary(record),
+        }
+    if str(record.get("status") or "").strip().lower() == "processing":
+        record["status"] = "recorded"
+        record["error"] = ""
+        _get_meeting_record_store().save_record(record)
+    job = job_store.create(
+        MEETING_RECORDER_PROCESS_ACTION,
+        title="Process Meeting Recording",
+        owner_email=normalized_owner,
+        record_id=str(record.get("record_id") or record_id),
+    )
+    job_store.update(
+        job.job_id,
+        state="queued",
+        stage="queued",
+        message="Meeting processing is queued.",
+        current=0,
+        total=1,
+    )
+    thread = threading.Thread(
+        target=_run_meeting_recorder_process_job,
+        args=(app, job.job_id, str(record.get("record_id") or record_id), normalized_owner),
+        daemon=True,
+    )
+    thread.start()
+    return {
+        "status": "queued",
+        "state": "queued",
+        "job_id": job.job_id,
+        "record": _meeting_record_summary(record),
+    }
+
+
+def _meeting_recorder_process_job_snapshot(*, job_id: str, owner_email: str) -> dict[str, Any] | None:
+    snapshot = current_app.config["MEETING_RECORDER_JOB_STORE"].snapshot(job_id)
+    if snapshot is None or snapshot.get("action") != MEETING_RECORDER_PROCESS_ACTION:
+        return None
+    if str(snapshot.get("owner_email") or "").strip().lower() != str(owner_email or "").strip().lower():
+        return None
+    return snapshot
+
+
+def _public_meeting_recorder_process_job_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(snapshot)
+    payload.pop("owner_email", None)
+    payload.setdefault("status", "ok")
+    payload["progress"] = snapshot.get("progress") if isinstance(snapshot.get("progress"), dict) else {
+        "stage": snapshot.get("stage") or "",
+        "current": snapshot.get("current") or 0,
+        "total": snapshot.get("total") or 0,
+        "message": snapshot.get("message") or "",
+    }
+    state = str(payload.get("state") or "")
+    if state == "queued":
+        payload.setdefault("message", "Meeting processing is queued.")
+        payload.setdefault("error_category", "job_queued")
+        payload.setdefault("error_code", "")
+        payload.setdefault("error_retryable", True)
+    elif state == "running":
+        payload.setdefault("message", "Meeting processing is running.")
+        payload.setdefault("error_category", "job_running")
+        payload.setdefault("error_code", "")
+        payload.setdefault("error_retryable", True)
+    elif state == "failed":
+        payload["error_category"] = payload.get("error_category") or "meeting_processing_failed"
+        payload["error_code"] = payload.get("error_code") or "meeting_processing_failed"
+        payload["error_retryable"] = bool(payload.get("error_retryable", True))
+    return payload
+
+
+def _mark_meeting_record_process_failed(record_id: str, owner_email: str, message: str) -> None:
+    try:
+        record = _meeting_record_for_owner(record_id=record_id, owner_email=owner_email)
+        record["status"] = "failed"
+        record["error"] = message
+        _get_meeting_record_store().save_record(record)
+    except Exception:  # pragma: no cover - best effort cleanup after a worker failure.
+        current_app.logger.exception("Failed to mark meeting recorder record as failed.")
+
+
+def _run_meeting_recorder_process_job(app: Flask, job_id: str, record_id: str, owner_email: str) -> None:
+    with app.app_context():
+        job_store: JobStore = current_app.config["MEETING_RECORDER_JOB_STORE"]
+        job_store.update(
+            job_id,
+            state="running",
+            stage="processing",
+            message="Transcribing audio and generating meeting minutes.",
+            current=0,
+            total=1,
+        )
+        try:
+            record = _build_meeting_processing_service(current_app.config["SETTINGS"]).process_recording(
+                record_id=record_id,
+                owner_email=owner_email,
+            )
+            job_store.complete(
+                job_id,
+                results=[{"record": _meeting_record_summary(record)}],
+                notice={
+                    "title": "Meeting Processing Completed",
+                    "tone": "success",
+                    "summary": "Transcript and minutes are ready.",
+                    "details": [f"Record: {record_id}"],
+                },
+            )
+        except ToolError as error:
+            message = _sanitize_meeting_recorder_job_error(error)
+            _mark_meeting_record_process_failed(record_id, owner_email, message)
+            job_store.fail(
+                job_id,
+                message,
+                error_category="meeting_processing_failed",
+                error_code="meeting_processing_failed",
+                error_retryable=True,
+            )
+        except Exception as error:  # noqa: BLE001 - keep async status JSON-readable for Cloud Run.
+            message = _sanitize_meeting_recorder_job_error(error, unexpected=True)
+            current_app.logger.error(
+                "Meeting Recorder local-agent process job failed unexpectedly. job_id=%s record_id=%s",
+                job_id,
+                record_id,
+            )
+            _mark_meeting_record_process_failed(record_id, owner_email, message)
+            job_store.fail(
+                job_id,
+                message,
+                error_category="meeting_processing_failed",
+                error_code="meeting_processing_unexpected_error",
                 error_retryable=True,
             )
 

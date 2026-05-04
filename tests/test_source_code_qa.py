@@ -27,6 +27,7 @@ from bpmis_jira_tool.web import (
     JobStore,
     SourceCodeQAQueryScheduler,
     SourceCodeQASessionStore,
+    _build_source_code_qa_effort_assessment_prompt,
     _build_source_code_qa_effort_business_plan,
     _build_source_code_qa_effort_estimation_rubric,
     _build_source_code_qa_effort_structured_assessment,
@@ -168,6 +169,9 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertIn("effortRequirement?.addEventListener('input', persistEffortAssessmentDraft)", script)
         self.assertIn("renderEffortAssessment(cached.result, { persist: false })", script)
         self.assertIn("renderEffortHybridSummary", script)
+        self.assertIn("renderEffortStructuredAnswer", script)
+        self.assertIn("effortParsedAnswer", script)
+        self.assertIn("Assessment Summary", script)
         self.assertIn("assessment.business_plan", script)
         self.assertIn("assessment.technical_candidates", script)
         self.assertIn("data-source-effort-copy", Path("templates/source_code_qa.html").read_text(encoding="utf-8"))
@@ -461,6 +465,47 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertTrue(structured["fe_estimate"])
         self.assertTrue(structured["inferred_impact"])
 
+    def test_effort_assessment_single_requirement_does_not_invent_options(self):
+        requirement = (
+            "Scope Retrieve and validate SME Keyman information from CIF using the SME CIF number from the DWH file. "
+            "Pass Keyman indicator and guarantor-level CBS account status into the DWH-driven review code category."
+        )
+        business_plan = _build_source_code_qa_effort_business_plan(
+            pm_team="CRMS",
+            country="SG",
+            language="en",
+            requirement=requirement,
+        )
+        candidates = _build_source_code_qa_effort_technical_candidates(
+            pm_team="CRMS",
+            country="SG",
+            business_plan=business_plan,
+            requirement=requirement,
+        )
+        rubric = _build_source_code_qa_effort_estimation_rubric(
+            business_plan=business_plan,
+            technical_candidates=candidates,
+        )
+        prompt = _build_source_code_qa_effort_assessment_prompt(
+            pm_team="CRMS",
+            country="SG",
+            language="en",
+            requirement=requirement,
+            llm_provider="codex_cli_bridge",
+            runtime_evidence=[],
+            business_plan=business_plan,
+            technical_candidates=candidates,
+            estimation_rubric=rubric,
+        )
+
+        self.assertFalse(business_plan["has_explicit_options"])
+        self.assertEqual(len(business_plan["options"]), 1)
+        self.assertEqual(business_plan["options"][0]["label"], "single proposed change")
+        self.assertEqual(rubric["option_estimates"][0]["label"], "single proposed change")
+        self.assertIn("do not invent option labels", prompt)
+        self.assertIn("2. 技术改造点", prompt)
+        self.assertNotIn("2. 方案 1/2 技术改造点", prompt)
+
     def test_effort_assessment_builds_optimized_prompt_and_passes_runtime_evidence(self):
         captured = {}
 
@@ -535,7 +580,9 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertIn("Estimation rubric:", captured["question"])
         self.assertIn("Required output sections:", captured["question"])
         self.assertIn("业务理解", captured["question"])
-        self.assertIn("方案 1/2 技术改造点", captured["question"])
+        self.assertIn("技术改造点", captured["question"])
+        self.assertIn("do not invent option labels", captured["question"])
+        self.assertNotIn("方案 1/2 技术改造点", captured["question"])
         self.assertIn("BE 人天", captured["question"])
         self.assertIn("FE 人天", captured["question"])
         self.assertIn("Confirmed / Inferred / Missing Evidence", captured["question"])

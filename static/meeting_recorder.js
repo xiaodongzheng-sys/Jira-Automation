@@ -73,6 +73,14 @@
     return payload;
   };
 
+  const delay = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms));
+
+  const meetingProcessStatusText = (payload) => {
+    const message = String(payload?.progress?.message || payload?.message || '').trim();
+    const stateLabel = statusLabel(payload?.state || payload?.status || '');
+    return message || (stateLabel ? `${stateLabel}...` : 'Processing...');
+  };
+
   const telemetry = (event, data = {}) => {
     fetch('/api/meeting-recorder/reminder-telemetry', {
       method: 'POST',
@@ -1089,7 +1097,7 @@
     const audioPreflight = record.audio_preflight || {};
     const recordingHealth = record.recording_health || {};
     const isFailed = record.status === 'failed';
-    const canProcess = record.status === 'recorded';
+    const canProcess = ['recorded', 'failed', 'completed', 'processing'].includes(record.status);
     const canDownloadAudio = Boolean(recordingUrl) && !isFailed;
     const warningText = audioPreflight.warning || recordingHealth.warning || '';
     const showWarningText = warningText && warningText !== record.error;
@@ -1109,7 +1117,7 @@
         <div class="meeting-detail-actions">
           <span class="badge badge-${escapeHtml(record.status || 'scheduled')}">${escapeHtml(statusLabel(record.status))}</span>
           ${record.status === 'recording' ? `<button class="button" type="button" data-record-stop="${escapeHtml(record.record_id)}">Stop</button>` : ''}
-          ${canProcess ? `<button class="button" type="button" data-record-process="${escapeHtml(record.record_id)}">Process</button>` : ''}
+          ${canProcess ? `<button class="button" type="button" data-record-process="${escapeHtml(record.record_id)}">${record.status === 'processing' ? 'Check processing' : 'Process'}</button>` : ''}
           ${minutes.markdown ? `<button class="button button-secondary" type="button" data-record-email="${escapeHtml(record.record_id)}">Send Email</button>` : ''}
           <button class="button button-danger" type="button" data-record-delete="${escapeHtml(record.record_id)}">Delete</button>
         </div>
@@ -1163,6 +1171,25 @@
     bindDetailActions(record.record_id);
   };
 
+  const pollMeetingProcessJob = async (recordId, jobId, button) => {
+    const deadline = Date.now() + (60 * 60 * 1000);
+    while (Date.now() < deadline) {
+      const payload = await api(`/api/meeting-recorder/process-jobs/${encodeURIComponent(jobId)}`);
+      const stateValue = String(payload.state || '').toLowerCase();
+      button.textContent = meetingProcessStatusText(payload);
+      if (stateValue === 'completed') {
+        await loadRecord(recordId);
+        await loadRecords();
+        return;
+      }
+      if (stateValue === 'failed') {
+        throw new Error(payload.error || payload.message || 'Meeting processing failed.');
+      }
+      await delay(1500);
+    }
+    throw new Error('Meeting processing is still running. Refresh this record later to check progress.');
+  };
+
   const bindDetailActions = (recordId) => {
     nodes.detail.querySelectorAll('[data-record-stop]').forEach((button) => {
       button.addEventListener('click', async () => {
@@ -1173,11 +1200,16 @@
     nodes.detail.querySelectorAll('[data-record-process]').forEach((button) => {
       button.addEventListener('click', async () => {
         button.disabled = true;
-        button.textContent = 'Processing…';
+        button.textContent = 'Queueing...';
         try {
-          await api(`/api/meeting-recorder/records/${encodeURIComponent(recordId)}/process`, { method: 'POST' });
-          await loadRecord(recordId);
-          await loadRecords();
+          const payload = await api(`/api/meeting-recorder/records/${encodeURIComponent(recordId)}/process`, { method: 'POST' });
+          const jobId = String(payload.job_id || '').trim();
+          if (!jobId) {
+            await loadRecord(recordId);
+            await loadRecords();
+            return;
+          }
+          await pollMeetingProcessJob(recordId, jobId, button);
         } catch (error) {
           button.textContent = error.message;
         }

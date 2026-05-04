@@ -157,6 +157,7 @@ TEAM_DASHBOARD_EXCLUDED_PENDING_STATUSES = {"icebox", "closed", "done"}
 TEAM_DASHBOARD_UNDER_PRD_BIZ_PROJECT_STATUSES = {"pending review", "confirmed"}
 TEAM_DASHBOARD_PENDING_LIVE_BIZ_PROJECT_STATUSES = {"developing", "testing", "uat"}
 TEAM_DASHBOARD_TASK_CACHE_VERSION = 2
+MEETING_RECORDER_PROCESS_ACTION = "meeting-recorder-process"
 TEAM_DASHBOARD_LINK_BIZ_EXCLUDED_TITLE_PHRASES = (
     "sync af productization",
     "productisation upgrade",
@@ -209,6 +210,7 @@ class JobState:
     error_code: str = ""
     error_retryable: bool = False
     owner_email: str = ""
+    record_id: str = ""
     query_mode: str = ""
     queued_position: int = 0
     eta_seconds_range: list[int] = field(default_factory=list)
@@ -283,13 +285,15 @@ class JobStore:
         except OSError:
             return
 
-    def create(self, action: str, title: str) -> JobState:
+    def create(self, action: str, title: str, *, owner_email: str = "", record_id: str = "") -> JobState:
         with self._lock:
             job = JobState(
                 job_id=uuid.uuid4().hex,
                 action=action,
                 title=title,
                 message="Queued and waiting to start.",
+                owner_email=str(owner_email or "").strip().lower(),
+                record_id=str(record_id or "").strip(),
             )
             self._jobs[job.job_id] = job
             self._persist_locked()
@@ -310,6 +314,15 @@ class JobStore:
                 self._refresh_locked()
             job = self._jobs[job_id]
             job.query_mode = str(query_mode or "").strip().lower()
+            job.updated_at = time.time()
+            self._persist_locked()
+
+    def set_record_id(self, job_id: str, record_id: str) -> None:
+        with self._lock:
+            if job_id not in self._jobs:
+                self._refresh_locked()
+            job = self._jobs[job_id]
+            job.record_id = str(record_id or "").strip()
             job.updated_at = time.time()
             self._persist_locked()
 
@@ -484,6 +497,24 @@ class JobStore:
                 "job_id": latest.job_id,
                 "generated_at": latest.updated_at,
             }
+
+    def active_for_record(self, action: str, *, owner_email: str, record_id: str) -> dict[str, Any] | None:
+        normalized_owner = str(owner_email or "").strip().lower()
+        normalized_record_id = str(record_id or "").strip()
+        with self._lock:
+            self._refresh_locked()
+            candidates = [
+                job
+                for job in self._jobs.values()
+                if job.action == action
+                and job.state in {"queued", "running"}
+                and str(job.owner_email or "").strip().lower() == normalized_owner
+                and str(job.record_id or "").strip() == normalized_record_id
+            ]
+            if not candidates:
+                return None
+            latest = max(candidates, key=lambda item: item.updated_at)
+            return asdict(latest)
 
 
 class SourceCodeQAQueryScheduler:
@@ -4145,16 +4176,48 @@ def create_app() -> Flask:
             return access_gate
         try:
             if _local_agent_meeting_recorder_enabled(settings):
-                result = _build_local_agent_client(settings).meeting_recorder_process(
+                result = _build_local_agent_client(settings).meeting_recorder_process_start(
                     record_id=record_id,
                     owner_email=_current_google_email(),
                 )
-                return jsonify({"status": "ok", "record": result.get("record") or {}})
-            record = _build_meeting_processing_service(settings).process_recording(
+                return jsonify({
+                    "status": "queued",
+                    "state": result.get("state") or "queued",
+                    "job_id": result.get("job_id") or "",
+                    "record": result.get("record") or {},
+                })
+            payload = _queue_meeting_recorder_process_job(
+                app=current_app._get_current_object(),
+                settings=settings,
                 record_id=record_id,
                 owner_email=_current_google_email(),
             )
-            return jsonify({"status": "ok", "record": _meeting_record_summary(record)})
+            return jsonify(payload)
+        except (ConfigError, ToolError, requests.RequestException) as error:
+            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
+
+    @app.get("/api/meeting-recorder/process-jobs/<job_id>")
+    def meeting_recorder_process_job_api(job_id: str):
+        access_gate = _require_meeting_recorder_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        try:
+            if _local_agent_meeting_recorder_enabled(settings):
+                snapshot = _build_local_agent_client(settings).meeting_recorder_process_job(
+                    job_id=job_id,
+                    owner_email=_current_google_email(),
+                )
+                return jsonify(_public_meeting_recorder_process_job_snapshot(snapshot))
+            snapshot = _meeting_recorder_process_job_snapshot_for_current_user(job_id)
+            if snapshot is None:
+                return jsonify({
+                    "status": "error",
+                    "message": "Meeting Recorder process job was not found.",
+                    "error_category": "job_not_found",
+                    "error_code": "job_not_found",
+                    "error_retryable": False,
+                }), HTTPStatus.NOT_FOUND
+            return jsonify(_public_meeting_recorder_process_job_snapshot(snapshot))
         except (ConfigError, ToolError, requests.RequestException) as error:
             return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
 
@@ -7046,6 +7109,7 @@ def _build_source_code_qa_effort_business_plan(
         body = re.sub(r"\s+", " ", match.group(2).strip())
         if body:
             options.append({"id": f"option_{index}", "label": match.group(1).strip(), "summary": body[:1200]})
+    has_explicit_options = bool(options)
     if not options:
         options.append({"id": "option_1", "label": "single proposed change", "summary": raw_requirement[:1200]})
 
@@ -7101,6 +7165,7 @@ def _build_source_code_qa_effort_business_plan(
         "language": language,
         "business_goals": _source_code_qa_effort_unique(goals),
         "options": options,
+        "has_explicit_options": has_explicit_options,
         "user_segments": _source_code_qa_effort_unique(user_segments),
         "products": _source_code_qa_effort_unique(products),
         "limit_types": _source_code_qa_effort_unique(limit_types),
@@ -7284,6 +7349,13 @@ def _build_source_code_qa_effort_assessment_prompt(
         )
     ) or "none"
     raw_requirement = str(requirement or "").strip()[:8000]
+    has_explicit_options = bool(business_plan.get("has_explicit_options"))
+    technical_change_section = "方案 1/2 技术改造点" if has_explicit_options else "技术改造点"
+    option_rule = (
+        "- The requirement contains explicit alternatives; keep the original option labels and compare each option separately."
+        if has_explicit_options
+        else "- The requirement does not contain explicit Option 1/Option 2 alternatives; do not invent option labels. Use 'proposed change' instead."
+    )
     return "\n".join(
         [
             "You are performing a Source Code Q&A Effort Assessment for a new business requirement.",
@@ -7319,7 +7391,7 @@ def _build_source_code_qa_effort_assessment_prompt(
             "",
             "Required output sections:",
             "1. 业务理解",
-            "2. 方案 1/2 技术改造点",
+            f"2. {technical_change_section}",
             "3. BE 人天",
             "4. FE 人天",
             "5. Confirmed / Inferred / Missing Evidence",
@@ -7329,6 +7401,7 @@ def _build_source_code_qa_effort_assessment_prompt(
             "",
             "Output rules:",
             f"- Write the final answer in {output_language}.",
+            option_rule,
             "- Keep the answer concise but specific enough for PM and engineering planning.",
             "- Cite concrete file paths, classes, functions, APIs, tables, configs, tests, or runtime evidence filenames when available.",
             "- Person-day estimates must be ranges such as 1-2 PD or 3-5 PD, with one sentence explaining the driver for each range.",
@@ -7374,6 +7447,7 @@ def _source_code_qa_effort_fallback_answer(
     missing_evidence: list[str],
 ) -> str:
     options = estimation_rubric.get("option_estimates") or []
+    has_explicit_options = bool(business_plan.get("has_explicit_options"))
     option_lines = "\n".join(
         f"- {item.get('label')}: BE {item.get('be_person_days')}, FE {item.get('fe_person_days')} ({item.get('basis')})"
         for item in options
@@ -7383,12 +7457,19 @@ def _source_code_qa_effort_fallback_answer(
     missing_lines = "\n".join(f"- {item}" for item in missing_evidence) or "- More code evidence is required."
     if language == "zh":
         goals = ", ".join(str(item) for item in business_plan.get("business_goals") or [])
+        technical_title = "方案 1/2 技术改造点" if has_explicit_options else "技术改造点"
+        confirmation_questions = [
+            "- 额度策略是否只改参数，还是需要新增产品/子产品额度模型?",
+            "- 是否需要前端新增 cashline 申请入口或额度解释文案?",
+        ]
+        if has_explicit_options:
+            confirmation_questions.insert(0, "- 方案 1 和方案 2 是否二选一，还是都需要落地?")
         return "\n".join(
             [
                 "业务理解",
                 f"- 目标: {goals or '评估业务需求对应的技术改造范围'}",
                 "",
-                "方案 1/2 技术改造点",
+                technical_title,
                 "- Confirmed: 当前没有足够 source-code 引用能确认具体文件。",
                 f"- Inferred: 需要围绕这些技术候选词继续确认影响面: {candidate_terms}",
                 "- Missing: 需要开发确认额度策略、申请流程、前端展示、报送或下游接口是否在当前 repo 覆盖。",
@@ -7404,17 +7485,22 @@ def _source_code_qa_effort_fallback_answer(
                 "- 如果涉及授信引擎、额度模型、报送或多产品额度联动，BE 复杂度应按高复杂度处理。",
                 "",
                 "Confirmation Questions",
-                "- 方案 1 和方案 2 是否二选一，还是都需要落地?",
-                "- 额度策略是否只改参数，还是需要新增产品/子产品额度模型?",
-                "- 是否需要前端新增 cashline 申请入口或额度解释文案?",
+                *confirmation_questions,
             ]
         )
+    technical_title = "Option Technical Changes" if has_explicit_options else "Technical Changes"
+    confirmation_questions = [
+        "- Is the requested limit change a config-only rule update or a new limit model?",
+        "- Does the change require FE display, application entry, or customer education copy?",
+    ]
+    if has_explicit_options:
+        confirmation_questions.insert(0, "- Are the listed options alternatives, or should more than one be implemented?")
     return "\n".join(
         [
             "Business Understanding",
             f"- Goals: {', '.join(str(item) for item in business_plan.get('business_goals') or [])}",
             "",
-            "Option Technical Changes",
+            technical_title,
             "- Confirmed: No concrete source-code references were found.",
             f"- Inferred: Continue validation around these technical candidates: {candidate_terms}",
             "- Missing: Dev confirmation is required for limit strategy, application flow, FE display, and downstream reporting impact.",
@@ -7427,6 +7513,9 @@ def _source_code_qa_effort_fallback_answer(
             "",
             "Assumptions / Risks",
             "- This is a planning-grade low-confidence estimate and does not replace Dev final sizing.",
+            "",
+            "Confirmation Questions",
+            *confirmation_questions,
         ]
     )
 
@@ -7503,8 +7592,11 @@ def _build_source_code_qa_effort_structured_assessment(
         "confirmed_evidence": confirmed_evidence,
         "inferred_impact": inferred_impact,
         "missing_evidence": missing_evidence,
-        "questions": [
-            "Are the listed options alternatives, or should more than one be implemented?",
+        "questions": (
+            ["Are the listed options alternatives, or should more than one be implemented?"]
+            if business_plan.get("has_explicit_options")
+            else []
+        ) + [
             "Is the requested limit change a config-only rule update or a new limit model?",
             "Does the change require FE display, application entry, or customer education copy?",
         ],
@@ -8211,6 +8303,183 @@ def _source_code_qa_job_snapshot_for_current_user(job_id: str) -> dict[str, Any]
     if owner_email and owner_email != current_email and not _can_manage_source_code_qa(current_app.config["SETTINGS"]):
         return None
     return snapshot
+
+
+def _sanitize_meeting_recorder_job_error(error: object, *, unexpected: bool = False) -> str:
+    if unexpected:
+        return "Meeting processing failed unexpectedly. Check server logs for details."
+    message = " ".join(str(error or "").split()).strip() or "Meeting processing failed."
+    if re.search(r"traceback|token|secret|authorization|api[_ -]?key", message, re.IGNORECASE):
+        return "Meeting processing failed. Check server logs for details."
+    return message[:500]
+
+
+def _meeting_recorder_process_job_snapshot_for_current_user(job_id: str) -> dict[str, Any] | None:
+    snapshot = current_app.config["JOB_STORE"].snapshot(job_id)
+    if snapshot is None or snapshot.get("action") != MEETING_RECORDER_PROCESS_ACTION:
+        return None
+    owner_email = str(snapshot.get("owner_email") or "").strip().lower()
+    if owner_email and owner_email != _current_google_email():
+        return None
+    return snapshot
+
+
+def _public_meeting_recorder_process_job_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(snapshot)
+    payload.pop("owner_email", None)
+    payload.setdefault("status", "ok")
+    payload["progress"] = snapshot.get("progress") if isinstance(snapshot.get("progress"), dict) else {
+        "stage": snapshot.get("stage") or "",
+        "current": snapshot.get("current") or 0,
+        "total": snapshot.get("total") or 0,
+        "message": snapshot.get("message") or "",
+    }
+    state = str(payload.get("state") or "")
+    if state == "queued":
+        payload.setdefault("message", "Meeting processing is queued.")
+        payload.setdefault("error_category", "job_queued")
+        payload.setdefault("error_code", "")
+        payload.setdefault("error_retryable", True)
+    elif state == "running":
+        payload.setdefault("message", "Meeting processing is running.")
+        payload.setdefault("error_category", "job_running")
+        payload.setdefault("error_code", "")
+        payload.setdefault("error_retryable", True)
+    elif state == "failed":
+        payload["error_category"] = payload.get("error_category") or "meeting_processing_failed"
+        payload["error_code"] = payload.get("error_code") or "meeting_processing_failed"
+        payload["error_retryable"] = bool(payload.get("error_retryable", True))
+    return payload
+
+
+def _meeting_record_for_processing_job(record_id: str, owner_email: str) -> dict[str, Any]:
+    record = _get_meeting_record_store().get_record(record_id)
+    if str(record.get("owner_email") or "").strip().lower() != str(owner_email or "").strip().lower():
+        raise ToolError("Meeting record is not available for this Google account.")
+    status = str(record.get("status") or "").strip().lower()
+    if status in {"recorded", "failed", "completed", "processing"}:
+        return record
+    raise ToolError("Stop the recording before processing this meeting.")
+
+
+def _queue_meeting_recorder_process_job(
+    *,
+    app: Flask,
+    settings: Settings,
+    record_id: str,
+    owner_email: str,
+) -> dict[str, Any]:
+    del settings
+    normalized_owner = str(owner_email or "").strip().lower()
+    record = _meeting_record_for_processing_job(record_id, normalized_owner)
+    job_store: JobStore = current_app.config["JOB_STORE"]
+    active_job = job_store.active_for_record(
+        MEETING_RECORDER_PROCESS_ACTION,
+        owner_email=normalized_owner,
+        record_id=str(record.get("record_id") or record_id),
+    )
+    if active_job is not None:
+        return {
+            "status": "queued",
+            "state": active_job.get("state") or "queued",
+            "job_id": active_job.get("job_id") or "",
+            "record": _meeting_record_summary(record),
+        }
+    if str(record.get("status") or "").strip().lower() == "processing":
+        record["status"] = "recorded"
+        record["error"] = ""
+        _get_meeting_record_store().save_record(record)
+    job = job_store.create(
+        MEETING_RECORDER_PROCESS_ACTION,
+        title="Process Meeting Recording",
+        owner_email=normalized_owner,
+        record_id=str(record.get("record_id") or record_id),
+    )
+    job_store.update(
+        job.job_id,
+        state="queued",
+        stage="queued",
+        message="Meeting processing is queued.",
+        current=0,
+        total=1,
+    )
+    thread = threading.Thread(
+        target=_run_meeting_recorder_process_job,
+        args=(app, job.job_id, str(record.get("record_id") or record_id), normalized_owner),
+        daemon=True,
+    )
+    thread.start()
+    return {
+        "status": "queued",
+        "state": "queued",
+        "job_id": job.job_id,
+        "record": _meeting_record_summary(record),
+    }
+
+
+def _mark_meeting_record_process_failed(record_id: str, owner_email: str, message: str) -> None:
+    try:
+        record = _get_meeting_record_store().get_record(record_id)
+        if str(record.get("owner_email") or "").strip().lower() != str(owner_email or "").strip().lower():
+            return
+        record["status"] = "failed"
+        record["error"] = message
+        _get_meeting_record_store().save_record(record)
+    except Exception:  # pragma: no cover - best effort cleanup after a worker failure.
+        current_app.logger.exception("Failed to mark meeting recorder record as failed.")
+
+
+def _run_meeting_recorder_process_job(app: Flask, job_id: str, record_id: str, owner_email: str) -> None:
+    with app.app_context():
+        job_store: JobStore = app.config["JOB_STORE"]
+        job_store.update(
+            job_id,
+            state="running",
+            stage="processing",
+            message="Transcribing audio and generating meeting minutes.",
+            current=0,
+            total=1,
+        )
+        try:
+            record = _build_meeting_processing_service(app.config["SETTINGS"]).process_recording(
+                record_id=record_id,
+                owner_email=owner_email,
+            )
+            job_store.complete(
+                job_id,
+                results=[{"record": _meeting_record_summary(record)}],
+                notice={
+                    "title": "Meeting Processing Completed",
+                    "tone": "success",
+                    "summary": "Transcript and minutes are ready.",
+                    "details": [f"Record: {record_id}"],
+                },
+            )
+        except ToolError as error:
+            message = _sanitize_meeting_recorder_job_error(error)
+            _mark_meeting_record_process_failed(record_id, owner_email, message)
+            job_store.fail(
+                job_id,
+                message,
+                error_category="meeting_processing_failed",
+                error_code="meeting_processing_failed",
+                error_retryable=True,
+            )
+        except Exception as error:  # pragma: no cover - defensive guard for background worker failures.
+            message = _sanitize_meeting_recorder_job_error(error, unexpected=True)
+            current_app.logger.error(
+                "Meeting Recorder process job failed unexpectedly. job_id=%s record_id=%s",
+                job_id,
+                record_id,
+            )
+            _mark_meeting_record_process_failed(record_id, owner_email, message)
+            job_store.fail(
+                job_id,
+                message,
+                error_category="meeting_processing_failed",
+                error_code="meeting_processing_unexpected_error",
+                error_retryable=True,
+            )
 
 
 def _serialize_results(results: list[object], *, include_skipped: bool = True) -> list[dict[str, Any]]:

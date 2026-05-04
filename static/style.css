@@ -6859,6 +6859,68 @@ select:focus {
   word-break: break-word;
 }
 
+.source-qa-effort-hybrid-card .source-qa-evidence-grid,
+.source-qa-effort-readable-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.source-qa-effort-list {
+  display: grid;
+  gap: 6px;
+}
+
+.source-qa-effort-option-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.source-qa-effort-option-list article {
+  display: grid;
+  gap: 6px;
+  padding-top: 8px;
+  border-top: 1px solid #edf2f7;
+}
+
+.source-qa-effort-option-list p {
+  margin: 0;
+  color: #475467;
+}
+
+.source-qa-effort-readable {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.source-qa-effort-readable-grid {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.source-qa-effort-readable-section {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  padding: 14px;
+  border: 1px solid #d9e4f0;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.source-qa-effort-readable-section p {
+  margin: 0;
+  color: #344054;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.source-qa-effort-paragraphs {
+  display: grid;
+  gap: 8px;
+}
+
 .source-qa-llm-card {
   display: grid;
   gap: 10px;
@@ -7117,6 +7179,10 @@ select:focus {
 
   .source-qa-evidence-grid {
     grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr));
+  }
+
+  .source-qa-effort-readable-grid {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .source-qa-claim-item {

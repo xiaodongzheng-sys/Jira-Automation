@@ -1,5 +1,7 @@
 import os
 import tempfile
+import threading
+import time
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -1491,6 +1493,18 @@ class MeetingRecorderRouteTests(unittest.TestCase):
             session["google_profile"] = {"email": email, "name": "Owner"}
             session["google_credentials"] = {"token": "x", "scopes": scopes or []}
 
+    def _wait_for_process_job(self, client, job_id, *, terminal_state="completed", timeout=2.0):
+        deadline = time.time() + timeout
+        last_payload = {}
+        while time.time() < deadline:
+            response = client.get(f"/api/meeting-recorder/process-jobs/{job_id}")
+            self.assertEqual(response.status_code, 200)
+            last_payload = response.get_json()
+            if last_payload.get("state") == terminal_state:
+                return last_payload
+            time.sleep(0.02)
+        self.fail(f"Meeting process job did not reach {terminal_state}: {last_payload}")
+
     def test_admin_can_open_page_and_non_admin_owner_is_denied(self):
         with self.app.test_client() as client:
             self._login(client, email="xiaodong.zheng@npt.sg")
@@ -1799,16 +1813,25 @@ class MeetingRecorderRouteTests(unittest.TestCase):
         self.assertNotIn("--timeout", runtime_source)
 
     def test_start_stop_process_and_email_routes_delegate_to_services(self):
+        stored_record = self.app.config["MEETING_RECORD_STORE"].create_record(
+            owner_email="xiaodong.zheng@npt.sg",
+            title="Review",
+            platform="zoom",
+            meeting_link="https://zoom.us/j/123",
+        )
+        stored_record["status"] = "recorded"
+        self.app.config["MEETING_RECORD_STORE"].save_record(stored_record)
+        record_id = stored_record["record_id"]
         fake_runtime = Mock()
         fake_runtime.start_recording.return_value = {
-            "record_id": "meeting-1",
+            "record_id": record_id,
             "title": "Review",
             "platform": "zoom",
             "meeting_link": "https://zoom.us/j/123",
             "status": "recording",
         }
         fake_runtime.stop_recording.return_value = {
-            "record_id": "meeting-1",
+            "record_id": record_id,
             "title": "Review",
             "platform": "zoom",
             "meeting_link": "https://zoom.us/j/123",
@@ -1818,7 +1841,7 @@ class MeetingRecorderRouteTests(unittest.TestCase):
 
         fake_processing = Mock()
         fake_processing.process_recording.return_value = {
-            "record_id": "meeting-1",
+            "record_id": record_id,
             "title": "Review",
             "platform": "zoom",
             "meeting_link": "https://zoom.us/j/123",
@@ -1841,13 +1864,17 @@ class MeetingRecorderRouteTests(unittest.TestCase):
                         "attendees": [{"email": "alice@npt.sg"}],
                     },
                 )
-                stop = client.post("/api/meeting-recorder/records/meeting-1/stop")
-                process = client.post("/api/meeting-recorder/records/meeting-1/process")
-                email = client.post("/api/meeting-recorder/records/meeting-1/send-email", json={})
+                stop = client.post(f"/api/meeting-recorder/records/{record_id}/stop")
+                process = client.post(f"/api/meeting-recorder/records/{record_id}/process")
+                process_payload = process.get_json()
+                process_status = self._wait_for_process_job(client, process_payload["job_id"])
+                email = client.post(f"/api/meeting-recorder/records/{record_id}/send-email", json={})
 
         self.assertEqual(start.status_code, 200)
         self.assertEqual(stop.status_code, 200)
         self.assertEqual(process.status_code, 200)
+        self.assertEqual(process.get_json()["status"], "queued")
+        self.assertEqual(process_status["state"], "completed")
         self.assertEqual(email.status_code, 200)
         fake_runtime.start_recording.assert_called_once_with(
             owner_email="xiaodong.zheng@npt.sg",
@@ -1860,9 +1887,121 @@ class MeetingRecorderRouteTests(unittest.TestCase):
             scheduled_end="2026-05-04T10:30:00+08:00",
             attendees=[{"email": "alice@npt.sg"}],
         )
-        fake_runtime.stop_recording.assert_called_once_with(record_id="meeting-1", owner_email="xiaodong.zheng@npt.sg")
-        fake_processing.process_recording.assert_called_once_with(record_id="meeting-1", owner_email="xiaodong.zheng@npt.sg")
+        fake_runtime.stop_recording.assert_called_once_with(record_id=record_id, owner_email="xiaodong.zheng@npt.sg")
+        fake_processing.process_recording.assert_called_once_with(record_id=record_id, owner_email="xiaodong.zheng@npt.sg")
         fake_processing.send_minutes_email.assert_called_once()
+
+    def test_process_route_returns_job_without_waiting_for_slow_processing(self):
+        record = self.app.config["MEETING_RECORD_STORE"].create_record(
+            owner_email="xiaodong.zheng@npt.sg",
+            title="Slow Review",
+            platform="zoom",
+            meeting_link="https://zoom.us/j/slow",
+        )
+        record["status"] = "recorded"
+        self.app.config["MEETING_RECORD_STORE"].save_record(record)
+        release_processing = threading.Event()
+        processing_started = threading.Event()
+        fake_processing = Mock()
+
+        def process_recording(**kwargs):
+            processing_started.set()
+            release_processing.wait(timeout=1)
+            return {
+                "record_id": kwargs["record_id"],
+                "title": "Slow Review",
+                "platform": "zoom",
+                "status": "completed",
+            }
+
+        fake_processing.process_recording.side_effect = process_recording
+
+        with patch("bpmis_jira_tool.web._build_meeting_processing_service", return_value=fake_processing):
+            with self.app.test_client() as client:
+                self._login(client, email="xiaodong.zheng@npt.sg")
+                started = time.perf_counter()
+                response = client.post(f"/api/meeting-recorder/records/{record['record_id']}/process")
+                elapsed = time.perf_counter() - started
+                payload = response.get_json()
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(payload["status"], "queued")
+                self.assertLess(elapsed, 0.5)
+                self.assertTrue(processing_started.wait(timeout=1))
+                release_processing.set()
+                completed = self._wait_for_process_job(client, payload["job_id"])
+
+        self.assertEqual(completed["state"], "completed")
+        fake_processing.process_recording.assert_called_once_with(
+            record_id=record["record_id"],
+            owner_email="xiaodong.zheng@npt.sg",
+        )
+
+    def test_failed_process_job_marks_record_failed_without_sensitive_error_leak(self):
+        record = self.app.config["MEETING_RECORD_STORE"].create_record(
+            owner_email="xiaodong.zheng@npt.sg",
+            title="Bad Review",
+            platform="zoom",
+            meeting_link="https://zoom.us/j/bad",
+        )
+        record["status"] = "recorded"
+        self.app.config["MEETING_RECORD_STORE"].save_record(record)
+        fake_processing = Mock()
+        fake_processing.process_recording.side_effect = RuntimeError("Traceback token=secret")
+
+        with patch("bpmis_jira_tool.web._build_meeting_processing_service", return_value=fake_processing):
+            with self.app.test_client() as client:
+                self._login(client, email="xiaodong.zheng@npt.sg")
+                response = client.post(f"/api/meeting-recorder/records/{record['record_id']}/process")
+                payload = response.get_json()
+                failed = self._wait_for_process_job(client, payload["job_id"], terminal_state="failed")
+                record_response = client.get(f"/api/meeting-recorder/records/{record['record_id']}")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(failed["state"], "failed")
+        self.assertNotIn("Traceback", failed["error"])
+        self.assertNotIn("secret", failed["error"])
+        failed_record = record_response.get_json()["record"]
+        self.assertEqual(failed_record["status"], "failed")
+        self.assertNotIn("token", failed_record["error"])
+
+    def test_stale_processing_record_can_be_requeued(self):
+        record = self.app.config["MEETING_RECORD_STORE"].create_record(
+            owner_email="xiaodong.zheng@npt.sg",
+            title="Stale Review",
+            platform="zoom",
+            meeting_link="https://zoom.us/j/stale",
+        )
+        record["status"] = "processing"
+        self.app.config["MEETING_RECORD_STORE"].save_record(record)
+        fake_processing = Mock()
+        fake_processing.process_recording.return_value = {
+            "record_id": record["record_id"],
+            "title": "Stale Review",
+            "platform": "zoom",
+            "status": "completed",
+        }
+
+        with patch("bpmis_jira_tool.web._build_meeting_processing_service", return_value=fake_processing):
+            with self.app.test_client() as client:
+                self._login(client, email="xiaodong.zheng@npt.sg")
+                response = client.post(f"/api/meeting-recorder/records/{record['record_id']}/process")
+                payload = response.get_json()
+                completed = self._wait_for_process_job(client, payload["job_id"])
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(completed["state"], "completed")
+        fake_processing.process_recording.assert_called_once_with(
+            record_id=record["record_id"],
+            owner_email="xiaodong.zheng@npt.sg",
+        )
+
+    def test_meeting_recorder_script_polls_process_jobs_and_uses_clear_errors(self):
+        source = Path("static/meeting_recorder.js").read_text(encoding="utf-8")
+
+        self.assertIn("/api/meeting-recorder/process-jobs/", source)
+        self.assertIn("pollMeetingProcessJob", source)
+        self.assertIn("Meeting processing failed.", source)
+        self.assertIn("Meeting processing is still running.", source)
 
     def test_manual_empty_link_start_route_uses_backend_screencapturekit(self):
         fake_runtime = Mock()

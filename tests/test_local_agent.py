@@ -1,6 +1,7 @@
 import json
 import os
 import tempfile
+import threading
 import time
 import unittest
 from unittest.mock import Mock, patch
@@ -83,6 +84,23 @@ class LocalAgentServerTests(unittest.TestCase):
     def _get_signed(self, path):
         headers = sign_headers(secret="shared-secret", method="GET", path=path, body=b"")
         return self.app.test_client().get(path, headers=headers)
+
+    def _get_signed_with_query(self, route_path, query_string):
+        headers = sign_headers(secret="shared-secret", method="GET", path=route_path, body=b"")
+        return self.app.test_client().get(f"{route_path}?{query_string}", headers=headers)
+
+    def _wait_for_meeting_process_job(self, job_id, *, owner_email="owner@npt.sg", terminal_state="completed", timeout=2.0):
+        route_path = f"/api/local-agent/meeting-recorder/process-jobs/{job_id}"
+        deadline = time.time() + timeout
+        last_payload = {}
+        while time.time() < deadline:
+            response = self._get_signed_with_query(route_path, f"owner_email={owner_email}")
+            self.assertEqual(response.status_code, 200)
+            last_payload = response.get_json()
+            if last_payload.get("state") == terminal_state:
+                return last_payload
+            time.sleep(0.02)
+        self.fail(f"Meeting Recorder local-agent job did not reach {terminal_state}: {last_payload}")
 
     def test_healthz_is_public_and_reports_capabilities(self):
         response = self.app.test_client().get("/healthz")
@@ -417,6 +435,104 @@ class LocalAgentServerTests(unittest.TestCase):
             scheduled_end="",
             attendees=[],
         )
+
+    def test_signed_meeting_recorder_process_async_returns_job_and_completes(self):
+        store = self.app.config["MEETING_RECORD_STORE"]
+        record = store.create_record(
+            owner_email="owner@npt.sg",
+            title="Async Review",
+            platform="zoom",
+            meeting_link="https://zoom.us/j/async",
+        )
+        record["status"] = "recorded"
+        store.save_record(record)
+        fake_processing = Mock()
+        fake_processing.process_recording.return_value = {
+            "record_id": record["record_id"],
+            "title": "Async Review",
+            "platform": "zoom",
+            "status": "completed",
+        }
+
+        with patch("bpmis_jira_tool.local_agent_server._build_meeting_processing_service", return_value=fake_processing):
+            response = self._post_signed(
+                "/api/local-agent/meeting-recorder/process-async",
+                {"record_id": record["record_id"], "owner_email": "owner@npt.sg"},
+            )
+            payload = response.get_json()
+            completed = self._wait_for_meeting_process_job(payload["job_id"])
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["status"], "queued")
+        self.assertEqual(completed["state"], "completed")
+        fake_processing.process_recording.assert_called_once_with(
+            record_id=record["record_id"],
+            owner_email="owner@npt.sg",
+        )
+
+    def test_signed_meeting_recorder_process_job_is_owner_scoped(self):
+        store = self.app.config["MEETING_RECORD_STORE"]
+        record = store.create_record(
+            owner_email="owner@npt.sg",
+            title="Scoped Review",
+            platform="zoom",
+            meeting_link="https://zoom.us/j/scoped",
+        )
+        record["status"] = "recorded"
+        store.save_record(record)
+        release_processing = threading.Event()
+        fake_processing = Mock()
+
+        def process_recording(**kwargs):
+            release_processing.wait(timeout=1)
+            return {
+                "record_id": kwargs["record_id"],
+                "title": "Scoped Review",
+                "platform": "zoom",
+                "status": "completed",
+            }
+
+        fake_processing.process_recording.side_effect = process_recording
+
+        with patch("bpmis_jira_tool.local_agent_server._build_meeting_processing_service", return_value=fake_processing):
+            response = self._post_signed(
+                "/api/local-agent/meeting-recorder/process-async",
+                {"record_id": record["record_id"], "owner_email": "owner@npt.sg"},
+            )
+            job_id = response.get_json()["job_id"]
+            route_path = f"/api/local-agent/meeting-recorder/process-jobs/{job_id}"
+            denied = self._get_signed_with_query(route_path, "owner_email=other@npt.sg")
+            release_processing.set()
+            completed = self._wait_for_meeting_process_job(job_id)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(denied.status_code, 404)
+        self.assertEqual(completed["state"], "completed")
+
+    def test_signed_meeting_recorder_process_async_failure_is_sanitized(self):
+        store = self.app.config["MEETING_RECORD_STORE"]
+        record = store.create_record(
+            owner_email="owner@npt.sg",
+            title="Failure Review",
+            platform="zoom",
+            meeting_link="https://zoom.us/j/failure",
+        )
+        record["status"] = "recorded"
+        store.save_record(record)
+        fake_processing = Mock()
+        fake_processing.process_recording.side_effect = RuntimeError("Traceback token=secret")
+
+        with patch("bpmis_jira_tool.local_agent_server._build_meeting_processing_service", return_value=fake_processing):
+            response = self._post_signed(
+                "/api/local-agent/meeting-recorder/process-async",
+                {"record_id": record["record_id"], "owner_email": "owner@npt.sg"},
+            )
+            failed = self._wait_for_meeting_process_job(response.get_json()["job_id"], terminal_state="failed")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(failed["state"], "failed")
+        self.assertNotIn("Traceback", failed["error"])
+        self.assertNotIn("secret", failed["error"])
 
     def test_signed_bpmis_config_save_and_load_use_agent_data_dir(self):
         save_response = self._post_signed(
