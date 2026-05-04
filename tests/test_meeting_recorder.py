@@ -2137,6 +2137,11 @@ class MeetingRecorderRouteTests(unittest.TestCase):
         self.assertIn(">Mixed<", template)
         self.assertIn("const value = String(nodes.transcriptLanguage?.value || 'zh')", source)
         self.assertIn("?.value || 'zh'", source)
+        self.assertIn("browser_fallback_enabled: false", source)
+        self.assertIn("Grant Screen & System Audio Recording and Microphone permissions, then start recording again.", source)
+        self.assertNotIn("click Start Recording again to use browser microphone fallback", source)
+        self.assertNotIn("using browser microphone fallback", source)
+        self.assertNotIn("f2fBrowserFallbackArmed", source)
         self.assertNotIn("screen_audio", source)
         self.assertNotIn("/repair-video", source)
         self.assertIn("Transcript may be incomplete", source)
@@ -2353,61 +2358,25 @@ class MeetingRecorderRouteTests(unittest.TestCase):
             send_email_on_complete=True,
         )
 
-    def test_browser_audio_upload_auto_queues_processing(self):
-        record = self.app.config["MEETING_RECORD_STORE"].create_record(
-            owner_email="xiaodong.zheng@npt.sg",
-            title="Browser Audio",
-            platform="unknown",
-            meeting_link="",
-        )
-        record["status"] = "recorded"
-        self.app.config["MEETING_RECORD_STORE"].save_record(record)
+    def test_browser_audio_upload_is_disabled(self):
         fake_runtime = Mock()
-        fake_runtime.import_browser_audio_recording.return_value = record
         self.app.config["MEETING_RECORDER_RUNTIME"] = fake_runtime
-        fake_processing = Mock()
-        fake_processing.process_recording.return_value = {
-            "record_id": record["record_id"],
-            "title": "Browser Audio",
-            "platform": "unknown",
-            "status": "completed",
-        }
-        fake_processing.send_minutes_email.return_value = {
-            "status": "sent",
-            "recipient": "xiaodong.zheng@npt.sg",
-            "message_id": "msg-browser",
-        }
 
-        with patch("bpmis_jira_tool.web._build_meeting_processing_service", return_value=fake_processing):
-            with self.app.test_client() as client:
-                self._login(client, email="xiaodong.zheng@npt.sg")
-                response = client.post(
-                    "/api/meeting-recorder/browser-audio",
-                    json={
-                        "title": "Browser Audio",
-                        "audio_base64": "YXVkaW8=",
-                        "mime_type": "audio/webm",
-                        "transcript_language": "en",
-                    },
-                )
-                payload = response.get_json()
-                completed = self._wait_for_process_job(client, payload["job_id"])
+        with self.app.test_client() as client:
+            self._login(client, email="xiaodong.zheng@npt.sg")
+            response = client.post(
+                "/api/meeting-recorder/browser-audio",
+                json={
+                    "title": "Browser Audio",
+                    "audio_base64": "YXVkaW8=",
+                    "mime_type": "audio/webm",
+                    "transcript_language": "en",
+                },
+            )
 
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(payload["state"], "queued")
-        self.assertEqual(completed["state"], "completed")
-        self.assertEqual(completed["results"][0]["email"]["status"], "sent")
-        fake_runtime.import_browser_audio_recording.assert_called_once()
-        self.assertEqual(fake_runtime.import_browser_audio_recording.call_args.kwargs["transcript_language"], "en")
-        fake_processing.process_recording.assert_called_once_with(
-            record_id=record["record_id"],
-            owner_email="xiaodong.zheng@npt.sg",
-        )
-        fake_processing.send_minutes_email.assert_called_once_with(
-            record_id=record["record_id"],
-            owner_email="xiaodong.zheng@npt.sg",
-            recipient="xiaodong.zheng@npt.sg",
-        )
+        self.assertEqual(response.status_code, 410)
+        self.assertIn("Browser recording fallback is disabled", response.get_json()["message"])
+        fake_runtime.import_browser_audio_recording.assert_not_called()
 
     def test_auto_process_email_failure_does_not_fail_completed_minutes_job(self):
         record = self.app.config["MEETING_RECORD_STORE"].create_record(

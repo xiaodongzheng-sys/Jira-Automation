@@ -8,8 +8,6 @@
     initialSelectionPending: Boolean(root.dataset.selectedRecordId),
     diagnostics: null,
     browserRecording: null,
-    f2fBrowserFallbackArmed: false,
-    f2fBrowserFallbackKey: '',
     signalCheckToken: 0,
     signalCheckTimer: null,
   };
@@ -369,12 +367,6 @@
     return '';
   };
 
-  const fallbackKeyForMeeting = (meeting) => {
-    const title = String(meeting?.title || '').trim();
-    const link = String(meeting?.meeting_link || '').trim();
-    return `${title}\n${link}`;
-  };
-
   const isScreenCaptureKitStartupFailure = (error) => {
     const message = String(error?.message || error || '');
     return /ScreenCaptureKit|Screen Recording|System Audio Recording|Microphone|TCC|helper|permission|declined TCCs|not authorized|unavailable/i.test(message);
@@ -648,25 +640,13 @@
     clearSignalChecks();
     const meetingLink = String(meeting?.meeting_link || '').trim();
     const support = browserAudioSupportSnapshot();
-    const fallbackKey = fallbackKeyForMeeting(meeting);
-    const browserFallbackAvailable = !meetingLink && navigator.mediaDevices?.getUserMedia && window.MediaRecorder;
-    const useBrowserFallback = browserFallbackAvailable && state.f2fBrowserFallbackArmed && state.f2fBrowserFallbackKey === fallbackKey;
     telemetry('recording_start_decision', {
-      capture_path: meetingLink ? 'screencapturekit_audio' : (useBrowserFallback ? 'browser_audio_f2f_fallback' : 'screencapturekit_f2f'),
+      capture_path: meetingLink ? 'screencapturekit_audio' : 'screencapturekit_f2f',
       meeting_link_present: Boolean(meetingLink),
       title_present: Boolean(String(meeting?.title || '').trim()),
-      browser_fallback_armed: Boolean(useBrowserFallback),
+      browser_fallback_enabled: false,
       ...support,
     });
-    if (useBrowserFallback) {
-      state.f2fBrowserFallbackArmed = false;
-      state.f2fBrowserFallbackKey = '';
-      if (nodes.recordingStatus) {
-        nodes.recordingStatus.textContent = 'ScreenCaptureKit unavailable, using browser microphone fallback.';
-      }
-      await startBrowserAudioRecording(meeting);
-      return;
-    }
     let payload;
     try {
       payload = await api('/api/meeting-recorder/start', {
@@ -683,31 +663,16 @@
           attendees: meeting?.attendees || [],
         }),
       });
-      state.f2fBrowserFallbackArmed = false;
-      state.f2fBrowserFallbackKey = '';
     } catch (error) {
-      if (!meetingLink && browserFallbackAvailable && isScreenCaptureKitStartupFailure(error)) {
-        state.f2fBrowserFallbackArmed = true;
-        state.f2fBrowserFallbackKey = fallbackKey;
-        telemetry('browser_audio_fallback_available', {
-          capture_path: 'browser_audio_f2f_fallback',
+      if (!meetingLink && isScreenCaptureKitStartupFailure(error)) {
+        telemetry('screencapturekit_permission_required', {
+          capture_path: 'screencapturekit_f2f',
           sck_error_message: error.message || '',
           ...support,
         });
         throw new Error(
           `${error.message || 'ScreenCaptureKit helper could not start.'} ` +
-          'ScreenCaptureKit unavailable. Grant Screen & System Audio Recording and Microphone permissions, or click Start Recording again to use browser microphone fallback.'
-        );
-      }
-      if (!meetingLink && !browserFallbackAvailable && isScreenCaptureKitStartupFailure(error)) {
-        telemetry('browser_audio_unavailable', {
-          capture_path: 'browser_audio_f2f_fallback',
-          sck_error_message: error.message || '',
-          ...support,
-        });
-        throw new Error(
-          `${error.message || 'ScreenCaptureKit helper could not start.'} ` +
-          'Grant Screen & System Audio Recording and Microphone permissions. Browser microphone fallback is not available in this browser.'
+          'Grant Screen & System Audio Recording and Microphone permissions, then start recording again.'
         );
       }
       throw error;

@@ -4095,6 +4095,10 @@ def create_app() -> Flask:
         access_gate = _require_meeting_recorder_access(settings, api=True)
         if access_gate is not None:
             return access_gate
+        return jsonify({
+            "status": "error",
+            "message": "Browser recording fallback is disabled. Grant Screen & System Audio Recording and Microphone permissions, then start recording again.",
+        }), HTTPStatus.GONE
         payload = request.get_json(silent=True) or {}
         try:
             audio_base64 = str(payload.get("audio_base64") or "")

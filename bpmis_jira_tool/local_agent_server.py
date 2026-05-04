@@ -484,6 +484,10 @@ def create_local_agent_app() -> Flask:
 
     @app.post("/api/local-agent/meeting-recorder/browser-audio")
     def meeting_recorder_browser_audio():
+        return jsonify({
+            "status": "error",
+            "message": "Browser recording fallback is disabled. Grant Screen & System Audio Recording and Microphone permissions, then start recording again.",
+        }), HTTPStatus.GONE
         payload = request.get_json(silent=True) or {}
         try:
             audio_bytes = base64.b64decode(str(payload.get("audio_base64") or ""), validate=True)
