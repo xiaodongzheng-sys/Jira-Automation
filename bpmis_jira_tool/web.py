@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import base64
 from collections import deque
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 import difflib
@@ -179,6 +179,8 @@ GOOGLE_DRIVE_READONLY_SCOPE = "https://www.googleapis.com/auth/drive.readonly"
 GMAIL_WORK_MEMORY_MAX_ATTACHMENT_BYTES = 12 * 1024 * 1024
 GMAIL_WORK_MEMORY_MAX_VIP_ATTACHMENTS_PER_MESSAGE = 5
 GMAIL_WORK_MEMORY_CONTENT_CHARS = 16000
+GMAIL_WORK_MEMORY_FETCH_BATCH_SIZE = 25
+GMAIL_WORK_MEMORY_FETCH_WORKERS = 4
 TEAM_DASHBOARD_LINK_BIZ_EXCLUDED_TITLE_PHRASES = (
     "sync af productization",
     "productisation upgrade",
@@ -7008,7 +7010,14 @@ def _backfill_gmail_work_memory(
     job_store: JobStore = current_app.config["JOB_STORE"]
     started_at = datetime.now(timezone.utc).isoformat()
     refs = service.list_work_memory_message_refs(days=days, max_messages=max_messages)
-    total = len(refs)
+    unique_message_ids: list[str] = []
+    seen_message_ids: set[str] = set()
+    for ref in refs:
+        message_id = str(ref.get("id") or "").strip()
+        if message_id and message_id not in seen_message_ids:
+            seen_message_ids.add(message_id)
+            unique_message_ids.append(message_id)
+    total = len(unique_message_ids)
     job_store.update(job_id, stage="scanning", message=f"Scanning {total} Gmail message(s).", current=0, total=total)
     vip_people = _gmail_work_memory_vip_people(report_intelligence_config)
     key_projects = _gmail_work_memory_key_projects()
@@ -7019,65 +7028,68 @@ def _backfill_gmail_work_memory(
     attachment_processed = 0
     drive_links_processed = 0
     last_error = ""
-    seen_message_ids: set[str] = set()
-    for ref in refs:
-        message_id = str(ref.get("id") or "").strip()
-        if not message_id or message_id in seen_message_ids:
-            continue
-        seen_message_ids.add(message_id)
-        scanned += 1
-        if scanned == 1 or scanned % 10 == 0 or scanned == total:
-            job_store.update(job_id, stage="scanning", message=f"Scanned {scanned}/{total} Gmail message(s).", current=scanned, total=total)
-        try:
-            record = service.fetch_work_memory_message(message_id)
-            headers = getattr(record, "headers", {}) or {}
-            if service.is_export_noise(headers):
-                continue
-            matched_vips, vip_roles = _gmail_work_memory_matched_vips(headers, vip_people)
-            body_text = str(getattr(record, "body_text", "") or "")
-            match_text = "\n".join(
-                [
-                    str(headers.get("subject") or ""),
-                    str(headers.get("from") or ""),
-                    str(headers.get("to") or ""),
-                    str(headers.get("cc") or ""),
-                    body_text,
-                ]
-            )
-            report_matches = _gmail_work_memory_report_matches(match_text, report_intelligence_config, key_projects)
-            items.append(
-                gmail_message_memory_item(
-                    owner_email=owner_email,
-                    record=record,
-                    matched_vips=matched_vips,
-                    vip_email_roles=vip_roles,
-                    report_matches=report_matches,
+    for batch_start in range(0, total, GMAIL_WORK_MEMORY_FETCH_BATCH_SIZE):
+        batch_ids = unique_message_ids[batch_start:batch_start + GMAIL_WORK_MEMORY_FETCH_BATCH_SIZE]
+        scanned += len(batch_ids)
+        if scanned == len(batch_ids) or scanned % 100 == 0 or scanned == total:
+            job_store.update(job_id, stage="fetching", message=f"Fetching {scanned}/{total} Gmail message(s).", current=scanned, total=total)
+        records, fetch_failures, fetch_error = _fetch_gmail_work_memory_records(service=service, message_ids=batch_ids)
+        failed += fetch_failures
+        if fetch_error:
+            last_error = fetch_error
+        for record in records:
+            try:
+                message_id = str(getattr(record, "message_id", "") or "").strip()
+                if not message_id:
+                    continue
+                headers = getattr(record, "headers", {}) or {}
+                if service.is_export_noise(headers):
+                    continue
+                matched_vips, vip_roles = _gmail_work_memory_matched_vips(headers, vip_people)
+                body_text = str(getattr(record, "body_text", "") or "")
+                match_text = "\n".join(
+                    [
+                        str(headers.get("subject") or ""),
+                        str(headers.get("from") or ""),
+                        str(headers.get("to") or ""),
+                        str(headers.get("cc") or ""),
+                        body_text,
+                    ]
                 )
-            )
-            matched += 1
-            if matched_vips:
-                attachment_items, attachment_failures = _gmail_work_memory_vip_attachment_items(
-                    service=service,
-                    owner_email=owner_email,
-                    record=record,
-                    matched_vips=matched_vips,
+                report_matches = _gmail_work_memory_report_matches(match_text, report_intelligence_config, key_projects)
+                items.append(
+                    gmail_message_memory_item(
+                        owner_email=owner_email,
+                        record=record,
+                        matched_vips=matched_vips,
+                        vip_email_roles=vip_roles,
+                        report_matches=report_matches,
+                    )
                 )
-                items.extend(attachment_items)
-                attachment_processed += len(attachment_items)
-                failed += attachment_failures
-                drive_items = _gmail_work_memory_vip_drive_items(
-                    credentials=credentials,
-                    owner_email=owner_email,
-                    record=record,
-                    matched_vips=matched_vips,
-                    drive_read_enabled=drive_read_enabled,
-                )
-                items.extend(drive_items)
-                drive_links_processed += len(drive_items)
-        except Exception as error:  # noqa: BLE001 - one bad message must not stop the backfill.
-            failed += 1
-            last_error = str(error)
-            current_app.logger.warning("Gmail Work Memory message backfill skipped message_id=%s: %s", message_id, error)
+                matched += 1
+                if matched_vips:
+                    attachment_items, attachment_failures = _gmail_work_memory_vip_attachment_items(
+                        service=service,
+                        owner_email=owner_email,
+                        record=record,
+                        matched_vips=matched_vips,
+                    )
+                    items.extend(attachment_items)
+                    attachment_processed += len(attachment_items)
+                    failed += attachment_failures
+                    drive_items = _gmail_work_memory_vip_drive_items(
+                        credentials=credentials,
+                        owner_email=owner_email,
+                        record=record,
+                        matched_vips=matched_vips,
+                        drive_read_enabled=drive_read_enabled,
+                    )
+                    items.extend(drive_items)
+                    drive_links_processed += len(drive_items)
+            except Exception as error:  # noqa: BLE001 - one bad message must not stop the backfill.
+                failed += 1
+                last_error = str(error)
+                current_app.logger.warning("Gmail Work Memory message backfill skipped message_id=%s: %s", message_id, error)
     result = _record_work_memory_items(items, event="gmail_backfill", owner_email=owner_email)
     failed += int(result.get("failed") or 0)
     status = "ok" if failed == 0 else "partial_error"
@@ -7116,6 +7128,37 @@ def _backfill_gmail_work_memory(
         "drive_links_processed": drive_links_processed,
         "distill": distilled,
     }
+
+
+def _gmail_work_memory_fetch_workers() -> int:
+    raw_value = str(os.getenv("GMAIL_WORK_MEMORY_FETCH_WORKERS") or "").strip()
+    if not raw_value:
+        return GMAIL_WORK_MEMORY_FETCH_WORKERS
+    try:
+        return max(1, min(int(raw_value), 8))
+    except ValueError:
+        return GMAIL_WORK_MEMORY_FETCH_WORKERS
+
+
+def _fetch_gmail_work_memory_records(*, service: GmailDashboardService, message_ids: list[str]) -> tuple[list[Any], int, str]:
+    if not message_ids:
+        return [], 0, ""
+    workers = min(_gmail_work_memory_fetch_workers(), len(message_ids))
+    records: list[Any] = []
+    failed = 0
+    last_error = ""
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {executor.submit(service.fetch_work_memory_message, message_id): message_id for message_id in message_ids}
+        for future in as_completed(futures):
+            message_id = futures[future]
+            try:
+                records.append(future.result())
+            except Exception as error:  # noqa: BLE001 - one message failure must not stop the backfill batch.
+                failed += 1
+                last_error = str(error)
+                current_app.logger.warning("Gmail Work Memory full fetch failed message_id=%s: %s", message_id, error)
+    records.sort(key=lambda item: getattr(item, "internal_date", datetime.min.replace(tzinfo=timezone.utc)), reverse=True)
+    return records, failed, last_error
 
 
 def _gmail_work_memory_vip_people(report_intelligence_config: dict[str, Any]) -> list[dict[str, Any]]:

@@ -17,6 +17,7 @@ from bpmis_jira_tool.gmail_dashboard import (
     _build_export_query,
     _build_thread_export_query,
     _clean_export_body_text,
+    _extract_drive_links_from_payload,
     _extract_drive_links_from_text,
     _extract_gmail_attachments_from_payload,
     _extract_message_text_from_payload,
@@ -111,16 +112,32 @@ class GmailDashboardServiceTests(unittest.TestCase):
                     "mimeType": "text/plain",
                     "body": {"data": base64.urlsafe_b64encode(b"See https://docs.google.com/presentation/d/slide123/edit").decode("utf-8")},
                 },
+                {
+                    "mimeType": "text/html",
+                    "body": {
+                        "data": base64.urlsafe_b64encode(
+                            b'<a href="https://drive.google.com/file/d/pdf456/view?usp=drive_link&amp;resourcekey=abc">Review deck</a>'
+                        ).decode("utf-8"),
+                    },
+                },
             ],
         }
 
         attachments = _extract_gmail_attachments_from_payload(payload)
         links = _extract_drive_links_from_text(_extract_message_text_from_payload(payload))
+        payload_links = _extract_drive_links_from_payload(payload)
 
         self.assertEqual(len(attachments), 1)
         self.assertEqual(attachments[0].filename, "Design Review.pdf")
         self.assertEqual(attachments[0].attachment_id, "att-1")
         self.assertEqual(links, ["https://docs.google.com/presentation/d/slide123/edit"])
+        self.assertEqual(
+            payload_links,
+            [
+                "https://docs.google.com/presentation/d/slide123/edit",
+                "https://drive.google.com/file/d/pdf456/view?usp=drive_link&resourcekey=abc",
+            ],
+        )
 
     def test_build_dashboard_aggregates_mailbox_metrics(self):
         now = datetime(2026, 4, 21, 16, 0).astimezone()

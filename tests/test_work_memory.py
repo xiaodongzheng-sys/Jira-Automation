@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from bpmis_jira_tool.errors import ToolError
 from bpmis_jira_tool.work_memory import (
     VISIBILITY_PRIVATE,
     VISIBILITY_TEAM,
@@ -614,6 +615,62 @@ class WorkMemoryRouteTests(unittest.TestCase):
         self.assertTrue(any(item["source_type"] == "gmail" for item in items))
         self.assertTrue(any(item["source_type"] == "gmail_attachment" for item in items))
         self.assertTrue(any(item["source_type"] == "gmail_drive_link" for item in items))
+
+    def test_gmail_backfill_isolates_single_message_fetch_failure(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            env = {
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                app = create_app()
+
+            class FakeGmailService:
+                def __init__(self, **_kwargs):
+                    pass
+
+                def list_work_memory_message_refs(self, *, days, max_messages, now=None):
+                    return [{"id": "msg-ok"}, {"id": "msg-fail"}]
+
+                def fetch_work_memory_message(self, message_id):
+                    if message_id == "msg-fail":
+                        raise ToolError("temporary Gmail failure")
+                    return SimpleNamespace(
+                        headers={
+                            "from": "PM <pm@npt.sg>",
+                            "to": "owner@npt.sg",
+                            "subject": "AF project update",
+                        },
+                        body_text="AF-123 is on track.",
+                        message_id=message_id,
+                        thread_id="thread-ok",
+                        label_ids={"INBOX"},
+                        attachments=[],
+                        drive_links=[],
+                        internal_date=SimpleNamespace(isoformat=lambda: "2026-05-04T10:00:00+08:00"),
+                    )
+
+                def is_export_noise(self, headers):
+                    return False
+
+            with app.app_context(), patch("bpmis_jira_tool.web.GmailDashboardService", FakeGmailService):
+                job = app.config["JOB_STORE"].create("work-memory-gmail-backfill", "Gmail Backfill", owner_email="owner@npt.sg")
+                result = _backfill_gmail_work_memory(
+                    owner_email="owner@npt.sg",
+                    credentials_payload={"token": "x"},
+                    report_intelligence_config={},
+                    days=90,
+                    max_messages=None,
+                    drive_read_enabled=False,
+                    job_id=job.job_id,
+                )
+                items = app.config["WORK_MEMORY_STORE"].query_work_memory(owner_email="owner@npt.sg", visibility_scope="owner", limit=20)
+
+        self.assertEqual(result["scanned"], 2)
+        self.assertEqual(result["matched"], 1)
+        self.assertEqual(result["failed"], 1)
+        self.assertTrue(any(item["source_type"] == "gmail" and item["source_id"] == "msg-ok" for item in items))
 
     def test_sent_monthly_report_ingestion_scans_gmail_sent_mail(self):
         with tempfile.TemporaryDirectory() as temp_dir:

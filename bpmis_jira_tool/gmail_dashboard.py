@@ -406,10 +406,36 @@ def _extract_drive_links_from_text(text: str) -> list[str]:
     links: list[str] = []
     seen: set[str] = set()
     for match in re.finditer(r"https?://(?:docs|drive)\.google\.com/[^\s<>\")']+", str(text or ""), flags=re.IGNORECASE):
-        link = match.group(0).rstrip(".,;]")
+        link = html.unescape(match.group(0).rstrip(".,;]"))
         if link not in seen:
             seen.add(link)
             links.append(link)
+    return links[:20]
+
+
+def _extract_drive_links_from_payload(payload: dict[str, Any] | None) -> list[str]:
+    links: list[str] = []
+    seen: set[str] = set()
+
+    def add_from_text(value: str) -> None:
+        for link in _extract_drive_links_from_text(value):
+            if link not in seen:
+                seen.add(link)
+                links.append(link)
+
+    def walk(part: dict[str, Any] | None) -> None:
+        if not isinstance(part, dict):
+            return
+        body = part.get("body") if isinstance(part.get("body"), dict) else {}
+        data = _decode_gmail_body_data(body.get("data"))
+        if data:
+            add_from_text(data)
+            if str(part.get("mimeType") or "").lower().startswith("text/html"):
+                add_from_text(_html_to_text(data))
+        for child in part.get("parts") or []:
+            walk(child)
+
+    walk(payload or {})
     return links[:20]
 
 
@@ -1116,7 +1142,7 @@ class GmailDashboardService:
             thread_id=str(payload.get("threadId") or ""),
             label_ids=set(payload.get("labelIds") or []),
             attachments=_extract_gmail_attachments_from_payload(message_payload),
-            drive_links=_extract_drive_links_from_text(body_text),
+            drive_links=_extract_drive_links_from_payload(message_payload),
         )
 
     def _fetch_thread_messages(self, *, thread_id: str, since: datetime, now: datetime) -> list[GmailExportRecord]:
@@ -1153,7 +1179,7 @@ class GmailDashboardService:
                 thread_id=str(message_payload.get("threadId") or thread_id),
                 label_ids=set(message_payload.get("labelIds") or []),
                 attachments=_extract_gmail_attachments_from_payload(mime_payload),
-                drive_links=_extract_drive_links_from_text(body_text),
+                drive_links=_extract_drive_links_from_payload(mime_payload),
             )
             if message_time < since:
                 record.context_only = True
