@@ -94,8 +94,10 @@ class MeetingRecorderConfig:
     whisper_cpp_bin: str = "whisper-cli"
     whisper_model: str = "~/.cache/whisper.cpp/ggml-medium.bin"
     whisper_language: str = "auto"
-    transcript_segment_workers: int = 3
+    transcript_segment_workers: int = 2
     whisper_threads: int = 0
+    background_nice: int = 10
+    capture_status_every_buffers: int = 250
 
 
 def normalize_meeting_transcript_language(value: object) -> str:
@@ -423,6 +425,13 @@ class MeetingRecorderRuntime:
             "whisper_model": str(Path(self.config.whisper_model).expanduser()),
             "whisper_model_exists": Path(self.config.whisper_model).expanduser().exists(),
             "whisper_language": self.config.whisper_language,
+            "recording_background_nice": _normalized_background_nice(self.config.background_nice),
+            "capture_status_every_buffers": _normalized_status_every_buffers(self.config.capture_status_every_buffers),
+            "transcript_segment_workers": _effective_transcript_segment_workers(self.config.transcript_segment_workers),
+            "whisper_threads": _effective_whisper_threads(
+                whisper_threads=self.config.whisper_threads,
+                segment_workers=_effective_transcript_segment_workers(self.config.transcript_segment_workers),
+            ),
             "meeting_audio_setup_note": "For linked or in-person recordings, keep speaker and microphone on normal devices; the local ScreenCaptureKit helper captures system output audio plus microphone.",
             "mac_permissions_note": "Microphone permission is required for the Python/terminal process that runs ffmpeg.",
             "system_audio_note": "Meetings use ScreenCaptureKit instead of BlackHole/Aggregate routing, so you can still hear linked meetings normally.",
@@ -496,6 +505,8 @@ class MeetingRecorderRuntime:
             "meeting_audio_setup_note": "Zoom/Meet speaker can stay on MacBook speakers or Default; Zoom/Meet microphone should stay on a real microphone.",
             "transcript_language": transcript_language,
             "transcript_language_label": MEETING_TRANSCRIPT_LANGUAGE_LABELS[transcript_language],
+            "recording_background_nice": _normalized_background_nice(self.config.background_nice),
+            "capture_status_every_buffers": _normalized_status_every_buffers(self.config.capture_status_every_buffers),
         }
         record["recording_health"] = {
             "status": "warning" if preflight.get("status") == "too_quiet" else preflight.get("status", "unknown"),
@@ -515,6 +526,8 @@ class MeetingRecorderRuntime:
                 microphone_audio_path=microphone_audio_path,
                 status_path=helper_status_path,
                 log_path=log_path,
+                background_nice=self.config.background_nice,
+                status_every_buffers=self.config.capture_status_every_buffers,
             )
             _stop_external_audio_monitor(self.store.root_dir)
             ready = recorder.start()
@@ -543,6 +556,8 @@ class MeetingRecorderRuntime:
             "audio_ready_checked_at": _utc_now(),
             "audio_ready_latency_seconds": ready.get("latency_seconds"),
             "audio_ready_bytes": ready.get("bytes"),
+            "recording_background_nice": _normalized_background_nice(self.config.background_nice),
+            "capture_status_every_buffers": _normalized_status_every_buffers(self.config.capture_status_every_buffers),
         }
         media.update(
             {
@@ -955,6 +970,7 @@ class MeetingRecorderRuntime:
                 microphone_path=microphone_path,
                 output_path=audio_path,
             )
+        command = _background_command(command, self.config.background_nice)
         try:
             _run_command(command, "Could not mix ScreenCaptureKit meeting audio.", timeout_seconds=120)
         except ToolError as error:
@@ -1542,6 +1558,7 @@ class MeetingProcessingService:
         ]
         if language:
             command.extend(["-l", language])
+        command = _background_command(command, self.config.background_nice)
         completed = _run_command(command, "whisper.cpp transcription failed.", timeout_seconds=7200)
         detected_language = _parse_whisper_language(f"{completed.stderr}\n{completed.stdout}", fallback=language or "auto")
         transcript_path = output_base.with_suffix(".txt")
@@ -1610,6 +1627,7 @@ class MeetingProcessingService:
                 "1",
                 str(segment_audio),
             ]
+            extract_command = _background_command(extract_command, self.config.background_nice)
             _run_command(extract_command, "Could not split meeting audio for transcription.")
             transcript = self._transcribe_audio_with_language_selection(
                 audio_path=segment_audio,
@@ -1684,16 +1702,13 @@ class MeetingProcessingService:
         return transcript
 
     def _transcript_segment_workers(self) -> int:
-        configured = int(self.config.transcript_segment_workers or 1)
-        cpu_count = os.cpu_count() or configured
-        return max(1, min(configured, cpu_count))
+        return _effective_transcript_segment_workers(self.config.transcript_segment_workers)
 
     def _whisper_threads(self, *, segment_workers: int) -> int:
-        configured = int(self.config.whisper_threads or 0)
-        if configured > 0:
-            return configured
-        cpu_count = os.cpu_count() or 1
-        return max(1, cpu_count // max(1, int(segment_workers or 1)))
+        return _effective_whisper_threads(
+            whisper_threads=self.config.whisper_threads,
+            segment_workers=segment_workers,
+        )
 
     def _attach_transcript_telemetry(
         self,
@@ -1992,6 +2007,53 @@ def _assert_record_owner(record: dict[str, Any], owner_email: str) -> None:
     owner = str(owner_email or "").strip().lower()
     if not owner or str(record.get("owner_email") or "").strip().lower() != owner:
         raise ToolError("Meeting record is not available for this Google account.")
+
+
+def _normalized_background_nice(value: object) -> int:
+    try:
+        configured = int(value or 0)
+    except (TypeError, ValueError):
+        configured = 0
+    return max(0, min(configured, 20))
+
+
+def _normalized_status_every_buffers(value: object) -> int:
+    try:
+        configured = int(value or 250)
+    except (TypeError, ValueError):
+        configured = 250
+    return max(1, configured)
+
+
+def _background_command(command: list[str], nice_value: object) -> list[str]:
+    normalized = _normalized_background_nice(nice_value)
+    if normalized <= 0 or not shutil.which("nice"):
+        return command
+    return ["nice", "-n", str(normalized), *command]
+
+
+def _effective_transcript_segment_workers(configured_workers: object) -> int:
+    try:
+        configured = int(configured_workers or 1)
+    except (TypeError, ValueError):
+        configured = 1
+    cpu_count = os.cpu_count() or configured
+    return max(1, min(configured, cpu_count))
+
+
+def _effective_whisper_threads(*, whisper_threads: object, segment_workers: object) -> int:
+    try:
+        configured = int(whisper_threads or 0)
+    except (TypeError, ValueError):
+        configured = 0
+    if configured > 0:
+        return configured
+    cpu_count = os.cpu_count() or 1
+    try:
+        workers = int(segment_workers or 1)
+    except (TypeError, ValueError):
+        workers = 1
+    return max(1, cpu_count // max(1, workers))
 
 
 def _run_command(command: list[str], error_message: str, *, timeout_seconds: int = 600) -> subprocess.CompletedProcess[str]:
@@ -2353,6 +2415,8 @@ class _ScreenCaptureKitAudioRecorder:
         microphone_audio_path: Path,
         status_path: Path,
         log_path: Path,
+        background_nice: int = 10,
+        status_every_buffers: int = 250,
     ) -> None:
         self.helper_path = helper_path
         self.system_audio_path = system_audio_path
@@ -2360,7 +2424,9 @@ class _ScreenCaptureKitAudioRecorder:
         self.status_path = status_path
         self.log_path = log_path
         self._process: subprocess.Popen[str] | None = None
-        self.command = [
+        self.background_nice = _normalized_background_nice(background_nice)
+        self.status_every_buffers = _normalized_status_every_buffers(status_every_buffers)
+        self.command = _background_command([
             str(self.helper_path),
             "--system-output",
             str(self.system_audio_path),
@@ -2368,7 +2434,9 @@ class _ScreenCaptureKitAudioRecorder:
             str(self.microphone_audio_path),
             "--status-output",
             str(self.status_path),
-        ]
+            "--status-every-buffers",
+            str(self.status_every_buffers),
+        ], self.background_nice)
 
     @property
     def pid(self) -> int:

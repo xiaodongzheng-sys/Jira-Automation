@@ -395,8 +395,15 @@ class MeetingRecorderRuntimeTests(unittest.TestCase):
         self.assertEqual(record["diagnostics_snapshot"]["audio_capture_mode"], "screencapturekit_f2f")
         self.assertEqual(record["diagnostics_snapshot"]["configured_audio_input"], "Meeting Recorder Aggregate")
         command = runtime._processes[record["record_id"]].command
+        self.assertEqual(command[:3], ["nice", "-n", "10"])
         self.assertIn("--system-output", command)
         self.assertIn("--microphone-output", command)
+        self.assertIn("--status-every-buffers", command)
+        self.assertNotIn("--sample-rate", command)
+        self.assertNotIn("--channel-count", command)
+        self.assertEqual(command[command.index("--status-every-buffers") + 1], "250")
+        self.assertEqual(record["media"]["recording_background_nice"], 10)
+        self.assertEqual(record["media"]["capture_status_every_buffers"], 250)
 
     def test_audio_only_linked_fallback_keeps_aggregate_input(self):
         self.assertEqual(
@@ -743,6 +750,44 @@ class MeetingRecorderRuntimeTests(unittest.TestCase):
         self.assertEqual(media["audio_original_duration_seconds"], 60.0)
         self.assertIn("audio_concat_command", media)
 
+    def test_screencapturekit_audio_mix_runs_at_background_priority(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = MeetingRecordStore(root)
+            runtime = MeetingRecorderRuntime(store=store, config=MeetingRecorderConfig(background_nice=8))
+            record = store.create_record(
+                owner_email="owner@npt.sg",
+                title="Zoom review",
+                platform="zoom",
+                meeting_link="https://zoom.us/j/123",
+            )
+            record_dir = store.record_dir(record["record_id"])
+            system_path = record_dir / "screencapture-system.caf"
+            microphone_path = record_dir / "screencapture-microphone.caf"
+            system_path.write_bytes(b"system-audio")
+            microphone_path.write_bytes(b"mic-audio")
+            record["media"] = {
+                "audio_capture_profile": "screencapturekit_audio_v1",
+                "system_audio_path": str(system_path.relative_to(store.root_dir)),
+                "microphone_audio_path": str(microphone_path.relative_to(store.root_dir)),
+            }
+
+            def fake_run(command, *_args, **_kwargs):
+                Path(command[-1]).write_bytes(b"mixed-audio" * 8)
+                return Mock(stdout="", stderr="")
+
+            with patch("bpmis_jira_tool.meeting_recorder._resolve_ffmpeg_bin", return_value="/opt/homebrew/bin/ffmpeg"), patch(
+                "bpmis_jira_tool.meeting_recorder._audio_duration_seconds",
+                return_value=60.0,
+            ), patch("bpmis_jira_tool.meeting_recorder._run_command", side_effect=fake_run) as run_command:
+                finalized = runtime._finalize_screencapturekit_audio_recording(record)
+
+        command = run_command.call_args.args[0]
+        self.assertEqual(command[:3], ["nice", "-n", "8"])
+        self.assertIn("amix=inputs=2", " ".join(command))
+        self.assertEqual(finalized["media"]["audio_path"], f"records/{record['record_id']}/meeting.wav")
+        self.assertEqual(finalized["media"]["audio_mix_command"][:3], ["nice", "-n", "8"])
+
     def test_stop_recording_terminates_persisted_recorder_process_after_restart(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -815,8 +860,10 @@ class MeetingRecorderRuntimeTests(unittest.TestCase):
         self.assertNotIn("video_path", record["media"])
         self.assertEqual(record["diagnostics_snapshot"]["requested_recording_mode"], "screen_audio")
         command = runtime._processes[record["record_id"]].command
+        self.assertEqual(command[:3], ["nice", "-n", "10"])
         self.assertIn("--system-output", command)
         self.assertIn("--microphone-output", command)
+        self.assertIn("--status-every-buffers", command)
         self.assertNotIn(":BlackHole 2ch", command)
 
     def test_linked_meeting_audio_only_never_calls_legacy_screen_preflight(self):
@@ -1298,6 +1345,7 @@ class MeetingProcessingServiceTests(unittest.TestCase):
         self.assertIn("quality", transcript)
         self.assertIn("segments", transcript)
         command = next(call.args[0] for call in run_command.call_args_list if "-osrt" in call.args[0])
+        self.assertEqual(command[:3], ["nice", "-n", "10"])
         self.assertIn("/usr/local/bin/whisper-cli", command)
         self.assertIn(str(model_path), command)
         self.assertIn("-t", command)
@@ -1487,7 +1535,11 @@ class MeetingProcessingServiceTests(unittest.TestCase):
                 transcript = service._transcribe_audio(audio_path)
 
         whisper_calls = [call.args[0] for call in run_command.call_args_list if "-of" in call.args[0]]
+        split_calls = [call.args[0] for call in run_command.call_args_list if "audio-segment-" in " ".join(call.args[0])]
+        self.assertTrue(split_calls)
+        self.assertTrue(all(command[:3] == ["nice", "-n", "10"] for command in split_calls))
         self.assertEqual(len(whisper_calls), 3)
+        self.assertTrue(all(command[:3] == ["nice", "-n", "10"] for command in whisper_calls))
         self.assertTrue(all(command[command.index("-t") + 1] == "2" for command in whisper_calls))
         self.assertTrue(transcript["text"].startswith("English content\n中文内容\nEnglish content"))
         self.assertIn("中文内容", transcript["text"])
@@ -1514,6 +1566,18 @@ class MeetingProcessingServiceTests(unittest.TestCase):
             with patch("bpmis_jira_tool.meeting_recorder.os.cpu_count", return_value=10):
                 self.assertEqual(service._transcript_segment_workers(), 3)
                 self.assertEqual(service._whisper_threads(segment_workers=3), 3)
+
+    def test_default_transcript_workers_are_conservative(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = MeetingProcessingService(
+                store=MeetingRecordStore(Path(temp_dir)),
+                config=MeetingRecorderConfig(),
+                text_client=FakeTextClient(),
+            )
+
+            with patch("bpmis_jira_tool.meeting_recorder.os.cpu_count", return_value=10):
+                self.assertEqual(service._transcript_segment_workers(), 2)
+                self.assertEqual(service._whisper_threads(segment_workers=2), 5)
 
     def test_conservative_transcribe_speed_config_uses_four_workers_two_threads(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1907,6 +1971,9 @@ class MeetingRecorderRouteTests(unittest.TestCase):
 
         self.assertIn("await withCheckedContinuation", source)
         self.assertIn("try await stream.stopCapture()", source)
+        self.assertIn("statusEveryBuffers", source)
+        self.assertIn("options: [])", source)
+        self.assertNotIn(".prettyPrinted", source)
         self.assertNotIn("asyncAfter", source)
         self.assertNotIn("--duration", runtime_source)
         self.assertNotIn("--timeout", runtime_source)
@@ -1997,7 +2064,12 @@ class MeetingRecorderRouteTests(unittest.TestCase):
         fake_runtime.stop_recording.assert_called_once_with(record_id=record_id, owner_email="xiaodong.zheng@npt.sg")
         self.assertEqual(fake_processing.process_recording.call_count, 2)
         fake_processing.process_recording.assert_called_with(record_id=record_id, owner_email="xiaodong.zheng@npt.sg")
-        fake_processing.send_minutes_email.assert_called_once()
+        self.assertEqual(fake_processing.send_minutes_email.call_count, 2)
+        fake_processing.send_minutes_email.assert_called_with(
+            record_id=record_id,
+            owner_email="xiaodong.zheng@npt.sg",
+            recipient="xiaodong.zheng@npt.sg",
+        )
 
     def test_stop_route_auto_queues_processing_without_waiting_for_slow_processing(self):
         record = self.app.config["MEETING_RECORD_STORE"].create_record(
@@ -2031,6 +2103,11 @@ class MeetingRecorderRouteTests(unittest.TestCase):
             }
 
         fake_processing.process_recording.side_effect = process_recording
+        fake_processing.send_minutes_email.return_value = {
+            "status": "sent",
+            "recipient": "xiaodong.zheng@npt.sg",
+            "message_id": "msg-auto",
+        }
 
         with patch("bpmis_jira_tool.web._build_meeting_processing_service", return_value=fake_processing):
             with self.app.test_client() as client:
@@ -2051,9 +2128,15 @@ class MeetingRecorderRouteTests(unittest.TestCase):
                 completed = self._wait_for_process_job(client, payload["job_id"])
 
         self.assertEqual(completed["state"], "completed")
+        self.assertEqual(completed["results"][0]["email"]["status"], "sent")
         fake_processing.process_recording.assert_called_once_with(
             record_id=record["record_id"],
             owner_email="xiaodong.zheng@npt.sg",
+        )
+        fake_processing.send_minutes_email.assert_called_once_with(
+            record_id=record["record_id"],
+            owner_email="xiaodong.zheng@npt.sg",
+            recipient="xiaodong.zheng@npt.sg",
         )
 
     def test_local_agent_stop_auto_queues_processing(self):
@@ -2085,6 +2168,7 @@ class MeetingRecorderRouteTests(unittest.TestCase):
         fake_client.meeting_recorder_process_start.assert_called_once_with(
             record_id="meeting-1",
             owner_email="xiaodong.zheng@npt.sg",
+            send_email_on_complete=True,
         )
 
     def test_browser_audio_upload_auto_queues_processing(self):
@@ -2106,6 +2190,11 @@ class MeetingRecorderRouteTests(unittest.TestCase):
             "platform": "unknown",
             "status": "completed",
         }
+        fake_processing.send_minutes_email.return_value = {
+            "status": "sent",
+            "recipient": "xiaodong.zheng@npt.sg",
+            "message_id": "msg-browser",
+        }
 
         with patch("bpmis_jira_tool.web._build_meeting_processing_service", return_value=fake_processing):
             with self.app.test_client() as client:
@@ -2125,12 +2214,64 @@ class MeetingRecorderRouteTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(payload["state"], "queued")
         self.assertEqual(completed["state"], "completed")
+        self.assertEqual(completed["results"][0]["email"]["status"], "sent")
         fake_runtime.import_browser_audio_recording.assert_called_once()
         self.assertEqual(fake_runtime.import_browser_audio_recording.call_args.kwargs["transcript_language"], "en")
         fake_processing.process_recording.assert_called_once_with(
             record_id=record["record_id"],
             owner_email="xiaodong.zheng@npt.sg",
         )
+        fake_processing.send_minutes_email.assert_called_once_with(
+            record_id=record["record_id"],
+            owner_email="xiaodong.zheng@npt.sg",
+            recipient="xiaodong.zheng@npt.sg",
+        )
+
+    def test_auto_process_email_failure_does_not_fail_completed_minutes_job(self):
+        record = self.app.config["MEETING_RECORD_STORE"].create_record(
+            owner_email="xiaodong.zheng@npt.sg",
+            title="Email Failure",
+            platform="zoom",
+            meeting_link="https://zoom.us/j/email",
+        )
+        record["status"] = "recorded"
+        self.app.config["MEETING_RECORD_STORE"].save_record(record)
+        fake_runtime = Mock()
+        fake_runtime.stop_recording.return_value = {
+            "record_id": record["record_id"],
+            "title": "Email Failure",
+            "platform": "zoom",
+            "status": "recorded",
+        }
+        self.app.config["MEETING_RECORDER_RUNTIME"] = fake_runtime
+        fake_processing = Mock()
+
+        def process_recording(**kwargs):
+            stored = self.app.config["MEETING_RECORD_STORE"].get_record(kwargs["record_id"])
+            stored["status"] = "completed"
+            stored["minutes"] = {"status": "completed", "markdown": "Minutes"}
+            self.app.config["MEETING_RECORD_STORE"].save_record(stored)
+            return stored
+
+        fake_processing.process_recording.side_effect = process_recording
+        fake_processing.send_minutes_email.side_effect = ToolError("token=secret traceback")
+
+        with patch("bpmis_jira_tool.web._build_meeting_processing_service", return_value=fake_processing):
+            with self.app.test_client() as client:
+                self._login(client, email="xiaodong.zheng@npt.sg")
+                response = client.post(f"/api/meeting-recorder/records/{record['record_id']}/stop")
+                payload = response.get_json()
+                completed = self._wait_for_process_job(client, payload["job_id"])
+                record_response = client.get(f"/api/meeting-recorder/records/{record['record_id']}")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(completed["state"], "completed")
+        self.assertEqual(completed["results"][0]["email"]["status"], "failed")
+        self.assertNotIn("secret", completed["results"][0]["email"]["error"])
+        updated = record_response.get_json()["record"]
+        self.assertEqual(updated["status"], "completed")
+        self.assertEqual(updated["email"]["status"], "failed")
+        self.assertNotIn("traceback", updated["email"]["error"].lower())
 
     def test_process_route_returns_job_without_waiting_for_slow_processing(self):
         record = self.app.config["MEETING_RECORD_STORE"].create_record(

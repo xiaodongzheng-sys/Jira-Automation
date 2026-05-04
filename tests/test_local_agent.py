@@ -460,11 +460,16 @@ class LocalAgentServerTests(unittest.TestCase):
             "platform": "zoom",
             "status": "completed",
         }
+        fake_processing.send_minutes_email.return_value = {
+            "status": "sent",
+            "recipient": "owner@npt.sg",
+            "message_id": "msg-1",
+        }
 
         with patch("bpmis_jira_tool.local_agent_server._build_meeting_processing_service", return_value=fake_processing):
             response = self._post_signed(
                 "/api/local-agent/meeting-recorder/process-async",
-                {"record_id": record["record_id"], "owner_email": "owner@npt.sg"},
+                {"record_id": record["record_id"], "owner_email": "owner@npt.sg", "send_email_on_complete": True},
             )
             payload = response.get_json()
             completed = self._wait_for_meeting_process_job(payload["job_id"])
@@ -472,9 +477,15 @@ class LocalAgentServerTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(payload["status"], "queued")
         self.assertEqual(completed["state"], "completed")
+        self.assertEqual(completed["results"][0]["email"]["status"], "sent")
         fake_processing.process_recording.assert_called_once_with(
             record_id=record["record_id"],
             owner_email="owner@npt.sg",
+        )
+        fake_processing.send_minutes_email.assert_called_once_with(
+            record_id=record["record_id"],
+            owner_email="owner@npt.sg",
+            recipient="owner@npt.sg",
         )
 
     def test_signed_meeting_recorder_process_job_is_owner_scoped(self):

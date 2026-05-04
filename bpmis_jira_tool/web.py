@@ -66,6 +66,7 @@ from bpmis_jira_tool.meeting_recorder import (
     MeetingRecorderRuntime,
     normalize_meeting_transcript_language,
     MeetingRecordStore,
+    _utc_now,
     meeting_platform_from_link,
     reminder_eligible_meetings,
 )
@@ -6353,6 +6354,8 @@ def _meeting_recorder_config(settings: Settings) -> MeetingRecorderConfig:
         whisper_language=settings.meeting_recorder_whisper_language,
         transcript_segment_workers=settings.meeting_recorder_transcript_segment_workers,
         whisper_threads=settings.meeting_recorder_whisper_threads,
+        background_nice=settings.meeting_recorder_background_nice,
+        capture_status_every_buffers=settings.meeting_recorder_capture_status_every_buffers,
     )
 
 
@@ -8400,6 +8403,7 @@ def _meeting_recorder_auto_process_payload(*, settings: Settings, record_id: str
             result = _build_local_agent_client(settings).meeting_recorder_process_start(
                 record_id=record_id,
                 owner_email=owner_email,
+                send_email_on_complete=True,
             )
             return {
                 "state": result.get("state") or "queued",
@@ -8410,6 +8414,7 @@ def _meeting_recorder_auto_process_payload(*, settings: Settings, record_id: str
             settings=settings,
             record_id=record_id,
             owner_email=owner_email,
+            send_email_on_complete=True,
         )
         return {
             "state": payload.get("state") or "queued",
@@ -8430,6 +8435,7 @@ def _queue_meeting_recorder_process_job(
     settings: Settings,
     record_id: str,
     owner_email: str,
+    send_email_on_complete: bool = False,
 ) -> dict[str, Any]:
     del settings
     normalized_owner = str(owner_email or "").strip().lower()
@@ -8467,7 +8473,7 @@ def _queue_meeting_recorder_process_job(
     )
     thread = threading.Thread(
         target=_run_meeting_recorder_process_job,
-        args=(app, job.job_id, str(record.get("record_id") or record_id), normalized_owner),
+        args=(app, job.job_id, str(record.get("record_id") or record_id), normalized_owner, bool(send_email_on_complete)),
         daemon=True,
     )
     thread.start()
@@ -8491,7 +8497,52 @@ def _mark_meeting_record_process_failed(record_id: str, owner_email: str, messag
         current_app.logger.exception("Failed to mark meeting recorder record as failed.")
 
 
-def _run_meeting_recorder_process_job(app: Flask, job_id: str, record_id: str, owner_email: str) -> None:
+def _mark_meeting_record_email_failed(record_id: str, owner_email: str, message: str) -> None:
+    try:
+        record = _get_meeting_record_store().get_record(record_id)
+        if str(record.get("owner_email") or "").strip().lower() != str(owner_email or "").strip().lower():
+            return
+        record["email"] = {
+            "status": "failed",
+            "error": message,
+            "failed_at": _utc_now(),
+            "recipient": str(owner_email or "").strip().lower(),
+        }
+        _get_meeting_record_store().save_record(record)
+    except Exception:  # pragma: no cover - best effort annotation after processing succeeds.
+        current_app.logger.exception("Failed to mark meeting recorder email as failed.")
+
+
+def _send_meeting_recorder_minutes_email_after_process(
+    *,
+    settings: Settings,
+    record_id: str,
+    owner_email: str,
+) -> dict[str, Any] | None:
+    try:
+        return _build_meeting_processing_service(settings).send_minutes_email(
+            record_id=record_id,
+            owner_email=owner_email,
+            recipient=owner_email,
+        )
+    except (ConfigError, ToolError) as error:
+        message = _sanitize_meeting_recorder_job_error(error)
+        _mark_meeting_record_email_failed(record_id, owner_email, message)
+        current_app.logger.warning(
+            "Meeting Recorder auto email failed. record_id=%s",
+            record_id,
+            exc_info=True,
+        )
+        return {"status": "failed", "error": message, "recipient": str(owner_email or "").strip().lower()}
+
+
+def _run_meeting_recorder_process_job(
+    app: Flask,
+    job_id: str,
+    record_id: str,
+    owner_email: str,
+    send_email_on_complete: bool = False,
+) -> None:
     with app.app_context():
         job_store: JobStore = app.config["JOB_STORE"]
         job_store.update(
@@ -8507,14 +8558,30 @@ def _run_meeting_recorder_process_job(app: Flask, job_id: str, record_id: str, o
                 record_id=record_id,
                 owner_email=owner_email,
             )
+            email_payload = (
+                _send_meeting_recorder_minutes_email_after_process(
+                    settings=app.config["SETTINGS"],
+                    record_id=record_id,
+                    owner_email=owner_email,
+                )
+                if send_email_on_complete
+                else None
+            )
+            completed_record = _get_meeting_record_store().get_record(record_id)
+            details = [f"Record: {record_id}"]
+            if email_payload:
+                if email_payload.get("status") == "sent":
+                    details.append(f"Email sent to {email_payload.get('recipient') or owner_email}")
+                elif email_payload.get("status") == "failed":
+                    details.append("Email was not sent automatically.")
             job_store.complete(
                 job_id,
-                results=[{"record": _meeting_record_summary(record)}],
+                results=[{"record": _meeting_record_summary(completed_record), "email": email_payload or {}}],
                 notice={
                     "title": "Meeting Processing Completed",
                     "tone": "success",
                     "summary": "Transcript and minutes are ready.",
-                    "details": [f"Record: {record_id}"],
+                    "details": details,
                 },
             )
         except ToolError as error:

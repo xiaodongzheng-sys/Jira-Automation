@@ -48,14 +48,16 @@ final class CaptureOutput: NSObject, SCStreamOutput, SCStreamDelegate {
     let systemSink: AudioFileSink
     let microphoneSink: AudioFileSink
     private let statusURL: URL
+    private let statusEveryBuffers: Int
     private let lock = NSLock()
     private var systemBuffers = 0
     private var microphoneBuffers = 0
 
-    init(systemURL: URL, microphoneURL: URL, statusURL: URL) {
+    init(systemURL: URL, microphoneURL: URL, statusURL: URL, statusEveryBuffers: Int) {
         self.systemSink = AudioFileSink(url: systemURL)
         self.microphoneSink = AudioFileSink(url: microphoneURL)
         self.statusURL = statusURL
+        self.statusEveryBuffers = max(1, statusEveryBuffers)
     }
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
@@ -90,7 +92,7 @@ final class CaptureOutput: NSObject, SCStreamOutput, SCStreamDelegate {
         let currentSystem = systemBuffers
         let currentMicrophone = microphoneBuffers
         lock.unlock()
-        if (currentSystem + currentMicrophone) % 25 == 0 {
+        if (currentSystem + currentMicrophone) % statusEveryBuffers == 0 {
             writeStatus("recording", "system_buffers=\(currentSystem), microphone_buffers=\(currentMicrophone)")
         }
     }
@@ -103,7 +105,7 @@ final class CaptureOutput: NSObject, SCStreamOutput, SCStreamDelegate {
             "microphone_buffers": microphoneBuffers,
             "updated_at": ISO8601DateFormatter().string(from: Date()),
         ]
-        if let data = try? JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted]) {
+        if let data = try? JSONSerialization.data(withJSONObject: payload, options: []) {
             try? data.write(to: statusURL)
         }
     }
@@ -113,6 +115,7 @@ struct Arguments {
     let systemOutput: URL
     let microphoneOutput: URL
     let statusOutput: URL
+    let statusEveryBuffers: Int
 
     init() throws {
         var values: [String: String] = [:]
@@ -125,12 +128,13 @@ struct Arguments {
               let microphone = values["microphone-output"],
               let status = values["status-output"] else {
             throw NSError(domain: "MeetingRecorder", code: 2, userInfo: [
-                NSLocalizedDescriptionKey: "Usage: meeting-screencapture-helper --system-output system.caf --microphone-output microphone.caf --status-output status.json"
+                NSLocalizedDescriptionKey: "Usage: meeting-screencapture-helper --system-output system.caf --microphone-output microphone.caf --status-output status.json [--status-every-buffers 250]"
             ])
         }
         self.systemOutput = URL(fileURLWithPath: system)
         self.microphoneOutput = URL(fileURLWithPath: microphone)
         self.statusOutput = URL(fileURLWithPath: status)
+        self.statusEveryBuffers = max(1, Int(values["status-every-buffers"] ?? "250") ?? 250)
     }
 }
 
@@ -159,7 +163,12 @@ struct MeetingScreenCaptureHelper {
                 configuration.captureMicrophone = true
             }
 
-            let output = CaptureOutput(systemURL: args.systemOutput, microphoneURL: args.microphoneOutput, statusURL: args.statusOutput)
+            let output = CaptureOutput(
+                systemURL: args.systemOutput,
+                microphoneURL: args.microphoneOutput,
+                statusURL: args.statusOutput,
+                statusEveryBuffers: args.statusEveryBuffers
+            )
             let stream = SCStream(filter: filter, configuration: configuration, delegate: output)
             let queue = DispatchQueue(label: "meeting-recorder.screencapture.audio")
             try stream.addStreamOutput(output, type: .audio, sampleHandlerQueue: queue)
@@ -204,7 +213,7 @@ struct MeetingScreenCaptureHelper {
                     "message": message,
                     "updated_at": ISO8601DateFormatter().string(from: Date()),
                 ]
-                if let data = try? JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted]) {
+                if let data = try? JSONSerialization.data(withJSONObject: payload, options: []) {
                     try? data.write(to: args.statusOutput)
                 }
             }
