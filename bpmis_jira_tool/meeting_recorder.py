@@ -2621,13 +2621,23 @@ def _resolve_screencapturekit_helper(store_root: Path) -> Path:
     if not source_path.exists():
         raise ConfigError(f"ScreenCaptureKit helper source was not found at {source_path}.")
     output_dir = store_root.parent / "bin"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    helper_path = output_dir / "meeting-screencapture-helper"
-    if helper_path.exists() and helper_path.stat().st_mtime >= source_path.stat().st_mtime:
+    app_path = output_dir / "Meeting Recorder Capture Helper.app"
+    macos_dir = app_path / "Contents" / "MacOS"
+    resources_dir = app_path / "Contents" / "Resources"
+    helper_path = macos_dir / "meeting-screencapture-helper"
+    info_plist_path = app_path / "Contents" / "Info.plist"
+    bundle_is_current = (
+        helper_path.exists()
+        and info_plist_path.exists()
+        and helper_path.stat().st_mtime >= source_path.stat().st_mtime
+    )
+    if bundle_is_current:
         return helper_path
     swiftc = _resolve_executable("xcrun", ("/usr/bin/xcrun",))
     if not swiftc:
         raise ConfigError("xcrun is required to build the ScreenCaptureKit helper.")
+    macos_dir.mkdir(parents=True, exist_ok=True)
+    resources_dir.mkdir(parents=True, exist_ok=True)
     command = [
         swiftc,
         "swiftc",
@@ -2643,6 +2653,45 @@ def _resolve_screencapturekit_helper(store_root: Path) -> Path:
         "CoreMedia",
     ]
     _run_command(command, "Could not build ScreenCaptureKit helper.", timeout_seconds=120)
+    info_plist_path.write_text(
+        """<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleDevelopmentRegion</key>
+  <string>en</string>
+  <key>CFBundleDisplayName</key>
+  <string>Meeting Recorder Capture Helper</string>
+  <key>CFBundleExecutable</key>
+  <string>meeting-screencapture-helper</string>
+  <key>CFBundleIdentifier</key>
+  <string>sg.npt.meeting-recorder.capture-helper</string>
+  <key>CFBundleName</key>
+  <string>Meeting Recorder Capture Helper</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleShortVersionString</key>
+  <string>1.0</string>
+  <key>CFBundleVersion</key>
+  <string>1</string>
+  <key>LSBackgroundOnly</key>
+  <true/>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Meeting Recorder captures microphone audio for local meeting transcription.</string>
+  <key>NSScreenCaptureUsageDescription</key>
+  <string>Meeting Recorder captures system audio for local meeting transcription.</string>
+</dict>
+</plist>
+""",
+        encoding="utf-8",
+    )
+    codesign = _resolve_executable("codesign", ("/usr/bin/codesign",))
+    if codesign:
+        _run_command(
+            [codesign, "--force", "--deep", "--sign", "-", str(app_path)],
+            "Could not sign ScreenCaptureKit helper app.",
+            timeout_seconds=60,
+        )
     return helper_path
 
 
