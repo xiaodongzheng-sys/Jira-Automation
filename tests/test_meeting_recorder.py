@@ -1515,6 +1515,17 @@ class MeetingProcessingServiceTests(unittest.TestCase):
                 self.assertEqual(service._transcript_segment_workers(), 3)
                 self.assertEqual(service._whisper_threads(segment_workers=3), 3)
 
+    def test_conservative_transcribe_speed_config_uses_four_workers_two_threads(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = MeetingProcessingService(
+                store=MeetingRecordStore(Path(temp_dir)),
+                config=MeetingRecorderConfig(transcript_segment_workers=4, whisper_threads=2),
+                text_client=FakeTextClient(),
+            )
+
+            self.assertEqual(service._transcript_segment_workers(), 4)
+            self.assertEqual(service._whisper_threads(segment_workers=4), 2)
+
     def test_transcribe_audio_caps_segment_workers_to_cpu_count(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             service = MeetingProcessingService(
@@ -1954,6 +1965,8 @@ class MeetingRecorderRouteTests(unittest.TestCase):
                     },
                 )
                 stop = client.post(f"/api/meeting-recorder/records/{record_id}/stop")
+                stop_payload = stop.get_json()
+                stop_status = self._wait_for_process_job(client, stop_payload["job_id"])
                 process = client.post(f"/api/meeting-recorder/records/{record_id}/process")
                 process_payload = process.get_json()
                 process_status = self._wait_for_process_job(client, process_payload["job_id"])
@@ -1961,6 +1974,10 @@ class MeetingRecorderRouteTests(unittest.TestCase):
 
         self.assertEqual(start.status_code, 200)
         self.assertEqual(stop.status_code, 200)
+        self.assertEqual(stop_payload["status"], "ok")
+        self.assertEqual(stop_payload["state"], "queued")
+        self.assertTrue(stop_payload["job_id"])
+        self.assertEqual(stop_status["state"], "completed")
         self.assertEqual(process.status_code, 200)
         self.assertEqual(process.get_json()["status"], "queued")
         self.assertEqual(process_status["state"], "completed")
@@ -1978,8 +1995,142 @@ class MeetingRecorderRouteTests(unittest.TestCase):
             transcript_language="en",
         )
         fake_runtime.stop_recording.assert_called_once_with(record_id=record_id, owner_email="xiaodong.zheng@npt.sg")
-        fake_processing.process_recording.assert_called_once_with(record_id=record_id, owner_email="xiaodong.zheng@npt.sg")
+        self.assertEqual(fake_processing.process_recording.call_count, 2)
+        fake_processing.process_recording.assert_called_with(record_id=record_id, owner_email="xiaodong.zheng@npt.sg")
         fake_processing.send_minutes_email.assert_called_once()
+
+    def test_stop_route_auto_queues_processing_without_waiting_for_slow_processing(self):
+        record = self.app.config["MEETING_RECORD_STORE"].create_record(
+            owner_email="xiaodong.zheng@npt.sg",
+            title="Auto Process",
+            platform="zoom",
+            meeting_link="https://zoom.us/j/auto",
+        )
+        record["status"] = "recorded"
+        self.app.config["MEETING_RECORD_STORE"].save_record(record)
+        fake_runtime = Mock()
+        fake_runtime.stop_recording.return_value = {
+            "record_id": record["record_id"],
+            "title": "Auto Process",
+            "platform": "zoom",
+            "status": "recorded",
+        }
+        self.app.config["MEETING_RECORDER_RUNTIME"] = fake_runtime
+        release_processing = threading.Event()
+        processing_started = threading.Event()
+        fake_processing = Mock()
+
+        def process_recording(**kwargs):
+            processing_started.set()
+            release_processing.wait(timeout=1)
+            return {
+                "record_id": kwargs["record_id"],
+                "title": "Auto Process",
+                "platform": "zoom",
+                "status": "completed",
+            }
+
+        fake_processing.process_recording.side_effect = process_recording
+
+        with patch("bpmis_jira_tool.web._build_meeting_processing_service", return_value=fake_processing):
+            with self.app.test_client() as client:
+                self._login(client, email="xiaodong.zheng@npt.sg")
+                started = time.perf_counter()
+                response = client.post(f"/api/meeting-recorder/records/{record['record_id']}/stop")
+                elapsed = time.perf_counter() - started
+                payload = response.get_json()
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(payload["status"], "ok")
+                self.assertEqual(payload["state"], "queued")
+                self.assertTrue(payload["job_id"])
+                self.assertLess(elapsed, 0.5)
+                self.assertTrue(processing_started.wait(timeout=1))
+                duplicate = client.post(f"/api/meeting-recorder/records/{record['record_id']}/process")
+                self.assertEqual(duplicate.get_json()["job_id"], payload["job_id"])
+                release_processing.set()
+                completed = self._wait_for_process_job(client, payload["job_id"])
+
+        self.assertEqual(completed["state"], "completed")
+        fake_processing.process_recording.assert_called_once_with(
+            record_id=record["record_id"],
+            owner_email="xiaodong.zheng@npt.sg",
+        )
+
+    def test_local_agent_stop_auto_queues_processing(self):
+        fake_client = Mock()
+        fake_client.meeting_recorder_stop.return_value = {
+            "record": {"record_id": "meeting-1", "title": "Review", "status": "recorded"}
+        }
+        fake_client.meeting_recorder_process_start.return_value = {
+            "status": "queued",
+            "state": "queued",
+            "job_id": "job-1",
+            "record": {"record_id": "meeting-1", "title": "Review", "status": "recorded"},
+        }
+
+        with patch("bpmis_jira_tool.web._local_agent_meeting_recorder_enabled", return_value=True):
+            with patch("bpmis_jira_tool.web._build_local_agent_client", return_value=fake_client):
+                with self.app.test_client() as client:
+                    self._login(client, email="xiaodong.zheng@npt.sg")
+                    response = client.post("/api/meeting-recorder/records/meeting-1/stop")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["job_id"], "job-1")
+        self.assertEqual(payload["state"], "queued")
+        fake_client.meeting_recorder_stop.assert_called_once_with(
+            record_id="meeting-1",
+            owner_email="xiaodong.zheng@npt.sg",
+        )
+        fake_client.meeting_recorder_process_start.assert_called_once_with(
+            record_id="meeting-1",
+            owner_email="xiaodong.zheng@npt.sg",
+        )
+
+    def test_browser_audio_upload_auto_queues_processing(self):
+        record = self.app.config["MEETING_RECORD_STORE"].create_record(
+            owner_email="xiaodong.zheng@npt.sg",
+            title="Browser Audio",
+            platform="unknown",
+            meeting_link="",
+        )
+        record["status"] = "recorded"
+        self.app.config["MEETING_RECORD_STORE"].save_record(record)
+        fake_runtime = Mock()
+        fake_runtime.import_browser_audio_recording.return_value = record
+        self.app.config["MEETING_RECORDER_RUNTIME"] = fake_runtime
+        fake_processing = Mock()
+        fake_processing.process_recording.return_value = {
+            "record_id": record["record_id"],
+            "title": "Browser Audio",
+            "platform": "unknown",
+            "status": "completed",
+        }
+
+        with patch("bpmis_jira_tool.web._build_meeting_processing_service", return_value=fake_processing):
+            with self.app.test_client() as client:
+                self._login(client, email="xiaodong.zheng@npt.sg")
+                response = client.post(
+                    "/api/meeting-recorder/browser-audio",
+                    json={
+                        "title": "Browser Audio",
+                        "audio_base64": "YXVkaW8=",
+                        "mime_type": "audio/webm",
+                        "transcript_language": "en",
+                    },
+                )
+                payload = response.get_json()
+                completed = self._wait_for_process_job(client, payload["job_id"])
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["state"], "queued")
+        self.assertEqual(completed["state"], "completed")
+        fake_runtime.import_browser_audio_recording.assert_called_once()
+        self.assertEqual(fake_runtime.import_browser_audio_recording.call_args.kwargs["transcript_language"], "en")
+        fake_processing.process_recording.assert_called_once_with(
+            record_id=record["record_id"],
+            owner_email="xiaodong.zheng@npt.sg",
+        )
 
     def test_process_route_returns_job_without_waiting_for_slow_processing(self):
         record = self.app.config["MEETING_RECORD_STORE"].create_record(
@@ -2094,6 +2245,9 @@ class MeetingRecorderRouteTests(unittest.TestCase):
         self.assertIn("Meeting processing is still running.", source)
         self.assertIn("Connection interrupted. Refreshing status...", source)
         self.assertIn("isNetworkError", source)
+        self.assertIn("monitorAutoProcessJob", source)
+        self.assertIn("Transcribing audio and generating meeting minutes...", source)
+        self.assertIn("Meeting processing was not queued:", source)
         self.assertNotIn("button.textContent = 'Failed to fetch'", source)
 
     def test_manual_empty_link_start_route_uses_backend_screencapturekit(self):
