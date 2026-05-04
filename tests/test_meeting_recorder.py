@@ -94,6 +94,17 @@ class MeetingRecorderParsingTests(unittest.TestCase):
         self.assertEqual(payload["meeting_links"], [])
         self.assertEqual(payload["attendees"], [{"email": "bob@npt.sg", "name": "Bob"}])
 
+    def test_normalize_calendar_event_filters_working_location_events(self):
+        event = {
+            "id": "office-1",
+            "summary": "Office",
+            "eventType": "workingLocation",
+            "start": {"date": "2026-05-04"},
+            "end": {"date": "2026-05-05"},
+        }
+
+        self.assertIsNone(normalize_calendar_event(event))
+
     def test_parse_avfoundation_devices_and_audio_capture_modes(self):
         output = """
         [AVFoundation indev @ 0x123] AVFoundation video devices:

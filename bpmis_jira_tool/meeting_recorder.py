@@ -155,6 +155,10 @@ def meeting_platform_from_link(link: str) -> str:
 
 
 def normalize_calendar_event(event: dict[str, Any]) -> dict[str, Any] | None:
+    event_type = str(event.get("eventType") or "default").strip() or "default"
+    if event_type != "default":
+        return None
+
     meeting_links = extract_meeting_links(
         event.get("hangoutLink") or "",
         event.get("location") or "",
