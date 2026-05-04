@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 import difflib
+from email.utils import getaddresses
 from functools import lru_cache
 import hashlib
 import html
@@ -24,12 +25,15 @@ import subprocess
 import threading
 import time
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 import uuid
 import zipfile
 
 from flask import Flask, Response, current_app, flash, g, has_app_context, jsonify, redirect, render_template, request, send_file, session, stream_with_context, url_for
 from dotenv import load_dotenv
 from google.oauth2.credentials import Credentials
+from googleapiclient.discovery import build as build_google_api
+from googleapiclient.errors import HttpError
 from openpyxl import Workbook
 from openpyxl.styles import Font
 import requests
@@ -100,6 +104,9 @@ from bpmis_jira_tool.user_config import (
 )
 from bpmis_jira_tool.work_memory import (
     WorkMemoryStore,
+    gmail_attachment_memory_item,
+    gmail_drive_link_memory_item,
+    gmail_message_memory_item,
     meeting_record_memory_items,
     sent_monthly_report_memory_item_from_gmail_record,
     source_code_qa_memory_item,
@@ -167,6 +174,11 @@ TEAM_DASHBOARD_UNDER_PRD_BIZ_PROJECT_STATUSES = {"pending review", "confirmed"}
 TEAM_DASHBOARD_PENDING_LIVE_BIZ_PROJECT_STATUSES = {"developing", "testing", "uat"}
 TEAM_DASHBOARD_TASK_CACHE_VERSION = 2
 MEETING_RECORDER_PROCESS_ACTION = "meeting-recorder-process"
+WORK_MEMORY_GMAIL_BACKFILL_ACTION = "work-memory-gmail-backfill"
+GOOGLE_DRIVE_READONLY_SCOPE = "https://www.googleapis.com/auth/drive.readonly"
+GMAIL_WORK_MEMORY_MAX_ATTACHMENT_BYTES = 12 * 1024 * 1024
+GMAIL_WORK_MEMORY_MAX_VIP_ATTACHMENTS_PER_MESSAGE = 5
+GMAIL_WORK_MEMORY_CONTENT_CHARS = 16000
 TEAM_DASHBOARD_LINK_BIZ_EXCLUDED_TITLE_PHRASES = (
     "sync af productization",
     "productisation upgrade",
@@ -506,6 +518,21 @@ class JobStore:
                 "job_id": latest.job_id,
                 "generated_at": latest.updated_at,
             }
+
+    def list_snapshots(self, *, action: str = "", owner_email: str = "", limit: int = 20) -> list[dict[str, Any]]:
+        normalized_action = str(action or "").strip()
+        normalized_owner = str(owner_email or "").strip().lower()
+        with self._lock:
+            self._refresh_locked()
+            jobs = [
+                job
+                for job in self._jobs.values()
+                if (not normalized_action or job.action == normalized_action)
+                and (not normalized_owner or str(job.owner_email or "").strip().lower() == normalized_owner)
+            ]
+            jobs.sort(key=lambda item: item.updated_at, reverse=True)
+            job_ids = [job.job_id for job in jobs[: max(1, min(int(limit or 20), 100))]]
+        return [snapshot for job_id in job_ids if (snapshot := self.snapshot(job_id)) is not None]
 
     def active_for_record(self, action: str, *, owner_email: str, record_id: str) -> dict[str, Any] | None:
         normalized_owner = str(owner_email or "").strip().lower()
@@ -3367,6 +3394,62 @@ def create_app() -> Flask:
         except (ConfigError, ToolError) as error:
             return jsonify({"status": "error", "message": str(error), **_classify_portal_error(error)}), HTTPStatus.BAD_REQUEST
 
+    @app.post("/api/work-memory/backfill-gmail")
+    def work_memory_backfill_gmail_api():
+        access_gate = _require_work_memory_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        if not _google_credentials_have_scopes(GMAIL_READONLY_SCOPE):
+            return jsonify(
+                {
+                    "status": "error",
+                    "message": "Gmail read permission is missing. Reconnect Google once to grant gmail.readonly.",
+                }
+            ), HTTPStatus.BAD_REQUEST
+        payload = request.get_json(silent=True) or {}
+        owner_email = _current_google_email()
+        job_store: JobStore = current_app.config["JOB_STORE"]
+        active = job_store.active_for_record(WORK_MEMORY_GMAIL_BACKFILL_ACTION, owner_email=owner_email, record_id=owner_email)
+        if active:
+            return jsonify({**active, "status": "queued" if active.get("state") == "queued" else "running"}), HTTPStatus.ACCEPTED
+        try:
+            days = max(1, min(int(payload.get("days") or 90), 365))
+            max_messages_raw = payload.get("max_messages")
+            max_messages = None
+            if max_messages_raw is not None and str(max_messages_raw).strip():
+                max_messages = max(1, min(int(max_messages_raw), 10000))
+        except (TypeError, ValueError):
+            return jsonify({"status": "error", "message": "days and max_messages must be numbers."}), HTTPStatus.BAD_REQUEST
+        job = job_store.create(WORK_MEMORY_GMAIL_BACKFILL_ACTION, "Gmail Work Memory Backfill", owner_email=owner_email, record_id=owner_email)
+        app_obj = current_app._get_current_object()
+        runner_payload = {
+            "owner_email": owner_email,
+            "days": days,
+            "max_messages": max_messages,
+            "credentials": dict(session.get("google_credentials") or {}),
+            "report_intelligence_config": _get_team_dashboard_config_store().load().get("report_intelligence_config") or {},
+            "drive_read_enabled": _google_credentials_have_scopes(GOOGLE_DRIVE_READONLY_SCOPE),
+        }
+        threading.Thread(target=_run_work_memory_gmail_backfill_job, args=(app_obj, job.job_id, runner_payload), daemon=True).start()
+        snapshot = job_store.snapshot(job.job_id) or asdict(job)
+        return jsonify({**snapshot, "status": "queued", "job_id": job.job_id}), HTTPStatus.ACCEPTED
+
+    @app.get("/api/work-memory/ingestion-jobs")
+    def work_memory_ingestion_jobs_api():
+        access_gate = _require_work_memory_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        try:
+            limit = max(1, min(int(request.args.get("limit") or 20), 100))
+        except (TypeError, ValueError):
+            return jsonify({"status": "error", "message": "limit must be a number."}), HTTPStatus.BAD_REQUEST
+        snapshots = current_app.config["JOB_STORE"].list_snapshots(
+            action=WORK_MEMORY_GMAIL_BACKFILL_ACTION,
+            owner_email=_current_google_email(),
+            limit=limit,
+        )
+        return jsonify({"status": "ok", "items": snapshots})
+
     @app.get("/api/superagent/health")
     def superagent_health_api():
         access_gate = _require_work_memory_access(settings, api=True)
@@ -3426,6 +3509,7 @@ def create_app() -> Flask:
             owner_email=_current_google_email(),
             cases=payload.get("cases") if isinstance(payload.get("cases"), list) else None,
             limit=int(payload.get("limit") or 30),
+            suite_id=str(request.args.get("suite_id") or payload.get("suite_id") or "").strip(),
         )
         return jsonify(result)
 
@@ -6586,7 +6670,12 @@ def _build_sheets_service(settings: Settings, config_data: dict[str, object] | N
 
 def _build_gmail_dashboard_service() -> GmailDashboardService:
     credentials = get_google_credentials()
-    return GmailDashboardService(credentials=credentials, cache_key=_current_google_email())
+    report_config = {}
+    try:
+        report_config = _get_team_dashboard_config_store().load().get("report_intelligence_config") or {}
+    except Exception:
+        report_config = {}
+    return GmailDashboardService(credentials=credentials, cache_key=_current_google_email(), report_intelligence_config=report_config)
 
 
 def _meeting_recorder_config(settings: Settings) -> MeetingRecorderConfig:
@@ -6626,7 +6715,7 @@ def _get_work_memory_store() -> WorkMemoryStore:
     return current_app.config["WORK_MEMORY_STORE"]
 
 
-def _record_work_memory_items(items: list[dict[str, Any]], *, event: str) -> dict[str, int]:
+def _record_work_memory_items(items: list[dict[str, Any]], *, event: str, owner_email: str = "") -> dict[str, int]:
     recorded = 0
     failed = 0
     duplicate = 0
@@ -6634,7 +6723,7 @@ def _record_work_memory_items(items: list[dict[str, Any]], *, event: str) -> dic
         try:
             _get_work_memory_store().record_ingestion_run(
                 source_type=event,
-                owner_email=_current_google_email(),
+                owner_email=owner_email or _current_google_email(),
                 status="ok",
                 recorded_count=0,
                 failed_count=0,
@@ -6662,7 +6751,7 @@ def _record_work_memory_items(items: list[dict[str, Any]], *, event: str) -> dic
     try:
         store.record_ingestion_run(
             source_type=event,
-            owner_email=_current_google_email(),
+            owner_email=owner_email or _current_google_email(),
             status="ok" if failed == 0 else "partial_error",
             scanned_count=len(items),
             matched_count=len(items),
@@ -6857,6 +6946,379 @@ def _run_incremental_memory_ingestion(settings: Settings, *, window: str = "7d",
         metadata={"sources": sources, "reconciliation": bool(reconciliation)},
     )
     return result
+
+
+def _run_work_memory_gmail_backfill_job(app: Flask, job_id: str, payload: dict[str, Any]) -> None:
+    with app.app_context():
+        job_store: JobStore = current_app.config["JOB_STORE"]
+        owner_email = str(payload.get("owner_email") or "").strip().lower()
+        try:
+            job_store.update(job_id, state="running", stage="starting", message="Starting Gmail Work Memory backfill.")
+            result = _backfill_gmail_work_memory(
+                owner_email=owner_email,
+                credentials_payload=payload.get("credentials") if isinstance(payload.get("credentials"), dict) else {},
+                report_intelligence_config=payload.get("report_intelligence_config") if isinstance(payload.get("report_intelligence_config"), dict) else {},
+                days=int(payload.get("days") or 90),
+                max_messages=payload.get("max_messages") if payload.get("max_messages") is not None else None,
+                drive_read_enabled=bool(payload.get("drive_read_enabled")),
+                job_id=job_id,
+            )
+            job_store.complete(
+                job_id,
+                results=[result],
+                notice={"level": "success" if int(result.get("failed") or 0) == 0 else "warning", "message": "Gmail Work Memory backfill completed."},
+            )
+        except Exception as error:  # noqa: BLE001 - keep background job failures visible in the job store.
+            current_app.logger.exception("Gmail Work Memory backfill failed.")
+            _get_work_memory_store().record_ingestion_run(
+                source_type="gmail_backfill",
+                owner_email=owner_email,
+                status="error",
+                failed_count=1,
+                error=str(error),
+            )
+            error_details = _classify_portal_error(error)
+            job_store.fail(
+                job_id,
+                str(error),
+                error_category=str(error_details.get("error_category") or ""),
+                error_code=str(error_details.get("error_code") or ""),
+                error_retryable=bool(error_details.get("error_retryable")),
+            )
+
+
+def _backfill_gmail_work_memory(
+    *,
+    owner_email: str,
+    credentials_payload: dict[str, Any],
+    report_intelligence_config: dict[str, Any],
+    days: int,
+    max_messages: int | None,
+    drive_read_enabled: bool,
+    job_id: str,
+) -> dict[str, Any]:
+    if not credentials_payload:
+        raise ConfigError("Google credentials are missing for Gmail backfill. Reconnect Google and retry.")
+    credentials = Credentials(**credentials_payload)
+    service = GmailDashboardService(
+        credentials=credentials,
+        cache_key=owner_email,
+        report_intelligence_config=report_intelligence_config,
+    )
+    job_store: JobStore = current_app.config["JOB_STORE"]
+    started_at = datetime.now(timezone.utc).isoformat()
+    refs = service.list_work_memory_message_refs(days=days, max_messages=max_messages)
+    total = len(refs)
+    job_store.update(job_id, stage="scanning", message=f"Scanning {total} Gmail message(s).", current=0, total=total)
+    vip_people = _gmail_work_memory_vip_people(report_intelligence_config)
+    key_projects = _gmail_work_memory_key_projects()
+    items: list[dict[str, Any]] = []
+    scanned = 0
+    matched = 0
+    failed = 0
+    attachment_processed = 0
+    drive_links_processed = 0
+    last_error = ""
+    seen_message_ids: set[str] = set()
+    for ref in refs:
+        message_id = str(ref.get("id") or "").strip()
+        if not message_id or message_id in seen_message_ids:
+            continue
+        seen_message_ids.add(message_id)
+        scanned += 1
+        if scanned == 1 or scanned % 10 == 0 or scanned == total:
+            job_store.update(job_id, stage="scanning", message=f"Scanned {scanned}/{total} Gmail message(s).", current=scanned, total=total)
+        try:
+            record = service.fetch_work_memory_message(message_id)
+            headers = getattr(record, "headers", {}) or {}
+            if service.is_export_noise(headers):
+                continue
+            matched_vips, vip_roles = _gmail_work_memory_matched_vips(headers, vip_people)
+            body_text = str(getattr(record, "body_text", "") or "")
+            match_text = "\n".join(
+                [
+                    str(headers.get("subject") or ""),
+                    str(headers.get("from") or ""),
+                    str(headers.get("to") or ""),
+                    str(headers.get("cc") or ""),
+                    body_text,
+                ]
+            )
+            report_matches = _gmail_work_memory_report_matches(match_text, report_intelligence_config, key_projects)
+            items.append(
+                gmail_message_memory_item(
+                    owner_email=owner_email,
+                    record=record,
+                    matched_vips=matched_vips,
+                    vip_email_roles=vip_roles,
+                    report_matches=report_matches,
+                )
+            )
+            matched += 1
+            if matched_vips:
+                attachment_items, attachment_failures = _gmail_work_memory_vip_attachment_items(
+                    service=service,
+                    owner_email=owner_email,
+                    record=record,
+                    matched_vips=matched_vips,
+                )
+                items.extend(attachment_items)
+                attachment_processed += len(attachment_items)
+                failed += attachment_failures
+                drive_items = _gmail_work_memory_vip_drive_items(
+                    credentials=credentials,
+                    owner_email=owner_email,
+                    record=record,
+                    matched_vips=matched_vips,
+                    drive_read_enabled=drive_read_enabled,
+                )
+                items.extend(drive_items)
+                drive_links_processed += len(drive_items)
+        except Exception as error:  # noqa: BLE001 - one bad message must not stop the backfill.
+            failed += 1
+            last_error = str(error)
+            current_app.logger.warning("Gmail Work Memory message backfill skipped message_id=%s: %s", message_id, error)
+    result = _record_work_memory_items(items, event="gmail_backfill", owner_email=owner_email)
+    failed += int(result.get("failed") or 0)
+    status = "ok" if failed == 0 else "partial_error"
+    _get_work_memory_store().record_ingestion_run(
+        source_type="gmail_backfill",
+        owner_email=owner_email,
+        cursor=f"days={days};messages={scanned}",
+        status=status,
+        scanned_count=scanned,
+        matched_count=matched,
+        recorded_count=int(result.get("recorded") or 0),
+        duplicate_count=int(result.get("duplicate") or 0),
+        failed_count=failed,
+        error=last_error,
+        metadata={
+            "days": days,
+            "max_messages": max_messages,
+            "vip_people_count": len(vip_people),
+            "attachment_processed": attachment_processed,
+            "drive_links_processed": drive_links_processed,
+            "drive_read_enabled": drive_read_enabled,
+        },
+        started_at=started_at,
+        completed_at=datetime.now(timezone.utc).isoformat(),
+    )
+    distilled = _get_work_memory_store().distill_work_memory(owner_email=owner_email, date_range=f"{days}d", sources=["gmail", "gmail_attachment", "gmail_drive_link"])
+    return {
+        "status": status,
+        "days": days,
+        "scanned": scanned,
+        "matched": matched,
+        "recorded": int(result.get("recorded") or 0),
+        "duplicate": int(result.get("duplicate") or 0),
+        "failed": failed,
+        "attachment_processed": attachment_processed,
+        "drive_links_processed": drive_links_processed,
+        "distill": distilled,
+    }
+
+
+def _gmail_work_memory_vip_people(report_intelligence_config: dict[str, Any]) -> list[dict[str, Any]]:
+    normalized = normalize_report_intelligence_config(report_intelligence_config)
+    return [vip for vip in normalized.get("vip_people") or [] if isinstance(vip, dict)]
+
+
+def _gmail_work_memory_key_projects() -> list[dict[str, Any]]:
+    try:
+        config = _get_team_dashboard_config_store().load()
+        task_cache = config.get("task_cache") if isinstance(config.get("task_cache"), dict) else {}
+        teams = task_cache.get("teams") if isinstance(task_cache.get("teams"), dict) else {}
+        projects: list[dict[str, Any]] = []
+        for team in teams.values():
+            if not isinstance(team, dict):
+                continue
+            for section_key in ("under_prd", "pending_live"):
+                projects.extend(project for project in (team.get(section_key) or []) if isinstance(project, dict))
+        return projects
+    except Exception:
+        return []
+
+
+def _gmail_work_memory_matched_vips(headers: dict[str, str], vip_people: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, list[str]]]:
+    role_addresses = {
+        "from": _gmail_header_addresses(headers.get("from", "")),
+        "to": _gmail_header_addresses(headers.get("to", "")),
+        "cc": _gmail_header_addresses(headers.get("cc", "")),
+    }
+    matched: list[dict[str, Any]] = []
+    roles: dict[str, list[str]] = {}
+    for vip in vip_people:
+        emails = {str(email or "").strip().lower() for email in vip.get("emails") or [] if str(email or "").strip()}
+        if not emails:
+            continue
+        vip_roles = sorted(role for role, addresses in role_addresses.items() if emails.intersection(addresses))
+        if not vip_roles:
+            continue
+        label = str(vip.get("display_name") or sorted(emails)[0]).strip()
+        matched.append({"display_name": label, "role_tags": vip.get("role_tags") or [], "emails": sorted(emails)})
+        roles[label] = vip_roles
+    return matched, roles
+
+
+def _gmail_header_addresses(value: str) -> set[str]:
+    return {str(address or "").strip().lower() for _name, address in getaddresses([value or ""]) if str(address or "").strip()}
+
+
+def _gmail_work_memory_report_matches(text: str, report_intelligence_config: dict[str, Any], key_projects: list[dict[str, Any]]) -> dict[str, Any]:
+    try:
+        from bpmis_jira_tool.report_intelligence import match_report_intelligence
+
+        return match_report_intelligence(text, config=report_intelligence_config, key_projects=key_projects)
+    except Exception:
+        return {"matched_vips": [], "matched_keywords": [], "matched_key_projects": []}
+
+
+def _gmail_work_memory_vip_attachment_items(
+    *,
+    service: GmailDashboardService,
+    owner_email: str,
+    record: Any,
+    matched_vips: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], int]:
+    items: list[dict[str, Any]] = []
+    failed = 0
+    message_id = str(getattr(record, "message_id", "") or "").strip()
+    attachments = [
+        attachment
+        for attachment in (getattr(record, "attachments", []) or [])
+        if _gmail_attachment_is_pdf(attachment)
+    ][:GMAIL_WORK_MEMORY_MAX_VIP_ATTACHMENTS_PER_MESSAGE]
+    for attachment in attachments:
+        try:
+            if int(getattr(attachment, "size", 0) or 0) > GMAIL_WORK_MEMORY_MAX_ATTACHMENT_BYTES:
+                continue
+            content = service.download_attachment(message_id=message_id, attachment_id=str(getattr(attachment, "attachment_id") or ""))
+            if len(content) > GMAIL_WORK_MEMORY_MAX_ATTACHMENT_BYTES:
+                continue
+            text = _extract_pdf_text_for_work_memory(content)
+            sha256 = hashlib.sha256(content).hexdigest()
+            items.append(
+                gmail_attachment_memory_item(
+                    owner_email=owner_email,
+                    record=record,
+                    attachment=attachment,
+                    text=text[:GMAIL_WORK_MEMORY_CONTENT_CHARS],
+                    sha256=sha256,
+                    matched_vips=matched_vips,
+                )
+            )
+        except Exception as error:  # noqa: BLE001 - attachment failures are counted but isolated.
+            failed += 1
+            current_app.logger.info("VIP Gmail PDF attachment skipped: %s", error)
+    return items, failed
+
+
+def _gmail_attachment_is_pdf(attachment: Any) -> bool:
+    filename = str(getattr(attachment, "filename", "") or "").strip().lower()
+    mime_type = str(getattr(attachment, "mime_type", "") or "").strip().lower()
+    return filename.endswith(".pdf") or mime_type == "application/pdf"
+
+
+def _extract_pdf_text_for_work_memory(content: bytes) -> str:
+    try:
+        from pypdf import PdfReader  # type: ignore
+    except ImportError as error:
+        raise ToolError("PDF attachments are supported only when pypdf is installed on the server.") from error
+    reader = PdfReader(io.BytesIO(content))
+    lines: list[str] = []
+    for page in reader.pages[:12]:
+        lines.append(str(page.extract_text() or ""))
+    text = "\n".join(lines).strip()
+    if not text:
+        raise ToolError("Unable to extract readable text from this PDF attachment.")
+    return text[:GMAIL_WORK_MEMORY_CONTENT_CHARS]
+
+
+def _gmail_work_memory_vip_drive_items(
+    *,
+    credentials: Credentials,
+    owner_email: str,
+    record: Any,
+    matched_vips: list[dict[str, Any]],
+    drive_read_enabled: bool,
+) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    links = list(dict.fromkeys(str(link or "").strip() for link in (getattr(record, "drive_links", []) or []) if str(link or "").strip()))
+    for link in links[:GMAIL_WORK_MEMORY_MAX_VIP_ATTACHMENTS_PER_MESSAGE]:
+        title = ""
+        text = ""
+        access_status = "unavailable"
+        if drive_read_enabled:
+            try:
+                title, text = _read_google_drive_link_text(credentials=credentials, url=link)
+                access_status = "ok" if text else "unavailable"
+            except HttpError as error:
+                status = getattr(getattr(error, "resp", None), "status", 0)
+                access_status = "permission_denied" if int(status or 0) in {401, 403, 404} else "unavailable"
+            except Exception:
+                access_status = "unavailable"
+        else:
+            access_status = "missing_drive_scope"
+        items.append(
+            gmail_drive_link_memory_item(
+                owner_email=owner_email,
+                record=record,
+                url=link,
+                title=title,
+                text=text[:GMAIL_WORK_MEMORY_CONTENT_CHARS],
+                access_status=access_status,
+                matched_vips=matched_vips,
+            )
+        )
+    return items
+
+
+def _read_google_drive_link_text(*, credentials: Credentials, url: str) -> tuple[str, str]:
+    file_id = _google_drive_file_id_from_url(url)
+    if not file_id:
+        return "", ""
+    service = build_google_api("drive", "v3", credentials=credentials, cache_discovery=False)
+    metadata = service.files().get(fileId=file_id, fields="id,name,mimeType,size").execute()
+    title = str(metadata.get("name") or file_id)
+    mime_type = str(metadata.get("mimeType") or "")
+    if mime_type.startswith("application/vnd.google-apps."):
+        for export_mime in ("text/plain", "text/csv"):
+            try:
+                content = service.files().export_media(fileId=file_id, mimeType=export_mime).execute()
+                return title, _bytes_to_text(content)
+            except HttpError:
+                continue
+        return title, ""
+    if mime_type == "application/pdf":
+        content = service.files().get_media(fileId=file_id).execute()
+        return title, _extract_pdf_text_for_work_memory(content)
+    return title, ""
+
+
+def _google_drive_file_id_from_url(url: str) -> str:
+    parsed = urlparse(str(url or ""))
+    path_parts = [part for part in parsed.path.split("/") if part]
+    if "d" in path_parts:
+        index = path_parts.index("d")
+        if index + 1 < len(path_parts):
+            return path_parts[index + 1]
+    query = parse_qs(parsed.query)
+    if query.get("id"):
+        return str(query["id"][0] or "").strip()
+    if path_parts and path_parts[0] == "open" and query.get("id"):
+        return str(query["id"][0] or "").strip()
+    return ""
+
+
+def _bytes_to_text(value: bytes | str) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    for encoding in ("utf-8-sig", "utf-8", "latin-1"):
+        try:
+            return value.decode(encoding).strip()
+        except UnicodeDecodeError:
+            continue
+    return ""
 
 
 def _build_calendar_meeting_service() -> GoogleCalendarMeetingService:

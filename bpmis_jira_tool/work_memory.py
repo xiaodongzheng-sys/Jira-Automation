@@ -24,6 +24,8 @@ SOURCE_PRECEDENCE = {
     "jira": 65,
     "confluence": 60,
     "meeting_recorder": 50,
+    "gmail_attachment": 46,
+    "gmail_drive_link": 46,
     "gmail": 40,
     "seatalk": 40,
     "source_code_qa": 20,
@@ -1058,6 +1060,7 @@ class WorkMemoryStore:
                 expected_sources = _normalize_string_list(case.get("expected_sources") or metadata.get("expected_sources") or [])
                 expected_links = _normalize_string_list(case.get("expected_links") or metadata.get("expected_links") or [])
                 domain = str(case.get("domain") or metadata.get("domain") or "").strip()
+                suite_id = str(case.get("suite_id") or metadata.get("suite_id") or "").strip()
                 if expected_answer_points:
                     metadata["expected_answer_points"] = expected_answer_points
                 if expected_sources:
@@ -1066,6 +1069,8 @@ class WorkMemoryStore:
                     metadata["expected_links"] = expected_links
                 if domain:
                     metadata["domain"] = domain
+                if suite_id:
+                    metadata["suite_id"] = suite_id
                 case_id = _memory_id(_normalize_email(owner_email), task_type, question)
                 connection.execute(
                     """
@@ -1094,13 +1099,22 @@ class WorkMemoryStore:
                         timestamp,
                     ),
                 )
-                stored.append({"case_id": case_id, "question": question, "task_type": task_type})
+                stored.append({"case_id": case_id, "question": question, "task_type": task_type, "suite_id": suite_id})
             connection.commit()
         return stored
 
-    def run_superagent_eval_cases(self, *, owner_email: str, cases: list[dict[str, Any]] | None = None, limit: int = 30) -> dict[str, Any]:
+    def run_superagent_eval_cases(
+        self,
+        *,
+        owner_email: str,
+        cases: list[dict[str, Any]] | None = None,
+        limit: int = 30,
+        suite_id: str = "",
+    ) -> dict[str, Any]:
         if cases:
             self.upsert_superagent_eval_cases(owner_email=owner_email, cases=cases)
+        normalized_suite_id = str(suite_id or "").strip()
+        row_limit = 200 if normalized_suite_id else max(1, min(int(limit or 30), 100))
         with self._connect() as connection:
             rows = connection.execute(
                 """
@@ -1109,10 +1123,15 @@ class WorkMemoryStore:
                 ORDER BY updated_at DESC
                 LIMIT ?
                 """,
-                (_normalize_email(owner_email), max(1, min(int(limit or 30), 100))),
+                (_normalize_email(owner_email), row_limit),
             ).fetchall()
         results = []
         for row in rows:
+            metadata = _load_json(row["metadata_json"], {})
+            if normalized_suite_id and str(metadata.get("suite_id") or "") != normalized_suite_id:
+                continue
+            if len(results) >= max(1, min(int(limit or 30), 100)):
+                break
             context = self.query_superagent_context(
                 query=row["question"],
                 owner_email=owner_email,
@@ -1123,7 +1142,6 @@ class WorkMemoryStore:
             answer = self.generate_llm_superagent_answer(task_type=row["task_type"], query=row["question"], context=context)
             items = context.get("items") if isinstance(context.get("items"), list) else []
             evidence_sources = {str(item.get("source_type") or "") for item in items}
-            metadata = _load_json(row["metadata_json"], {})
             expected_source = str(row["expected_source_type"] or "").strip()
             expected_sources = _normalize_string_list(metadata.get("expected_sources") or ([expected_source] if expected_source else []))
             normalized_expected_sources = self._normalize_expected_sources(expected_sources)
@@ -1173,6 +1191,7 @@ class WorkMemoryStore:
                     "expected_sources": expected_sources,
                     "expected_links": _normalize_string_list(metadata.get("expected_links") or []),
                     "domain": str(metadata.get("domain") or ""),
+                    "suite_id": str(metadata.get("suite_id") or ""),
                 }
             )
         passed_count = sum(1 for item in results if item["passed"])
@@ -1181,6 +1200,7 @@ class WorkMemoryStore:
             "case_count": len(results),
             "passed_count": passed_count,
             "failed_count": len(results) - passed_count,
+            "suite_id": normalized_suite_id,
             "results": results,
         }
 
@@ -1553,7 +1573,7 @@ class WorkMemoryStore:
         for source in sources:
             lowered = source.casefold()
             if "gmail" in lowered or "email" in lowered or "sent report" in lowered:
-                normalized.update({"gmail_sent_monthly_report", "gmail"})
+                normalized.update({"gmail_sent_monthly_report", "gmail", "gmail_attachment", "gmail_drive_link"})
             if "meeting" in lowered:
                 normalized.add("meeting_recorder")
             if "team dashboard" in lowered or "bpmis" in lowered or "jira" in lowered:
@@ -2012,3 +2032,167 @@ def sent_monthly_report_memory_item_from_gmail_record(*, owner_email: str, recor
         message_id=message_id,
         observed_at=observed_at,
     )
+
+
+def gmail_message_memory_item(
+    *,
+    owner_email: str,
+    record: Any,
+    matched_vips: list[dict[str, Any]] | None = None,
+    vip_email_roles: dict[str, list[str]] | None = None,
+    report_matches: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    headers = getattr(record, "headers", {}) if record is not None else {}
+    subject = str((headers or {}).get("subject") or "[no subject]").strip()
+    message_id = str(getattr(record, "message_id", "") or "").strip()
+    thread_id = str(getattr(record, "thread_id", "") or "").strip()
+    observed = getattr(record, "internal_date", None)
+    observed_at = observed.isoformat() if hasattr(observed, "isoformat") else ""
+    body = str(getattr(record, "body_text", "") or "").strip()
+    text = f"{subject}\n{body}".strip()
+    entities = _entities_from_text(text)
+    item_type = _gmail_fact_item_type(text)
+    matched_vips = matched_vips or []
+    metadata = {
+        "subject": subject,
+        "from": str((headers or {}).get("from") or "").strip(),
+        "to": str((headers or {}).get("to") or "").strip(),
+        "cc": str((headers or {}).get("cc") or "").strip(),
+        "message_id": message_id,
+        "thread_id": thread_id,
+        "labels": sorted(str(item) for item in (getattr(record, "label_ids", None) or [])),
+        "matched_vips": matched_vips,
+        "vip_email_roles": vip_email_roles or {},
+        "report_intelligence_matches": report_matches or {},
+        "drive_links": list(getattr(record, "drive_links", []) or [])[:20],
+        "attachment_count": len(getattr(record, "attachments", []) or []),
+    }
+    return {
+        "source_type": "gmail",
+        "source_id": message_id or _memory_id(owner_email, thread_id, subject, body[:200]),
+        "item_type": item_type,
+        "owner_email": owner_email,
+        "visibility": VISIBILITY_PRIVATE,
+        "observed_at": observed_at,
+        "summary": f"Gmail: {subject}",
+        "content": body,
+        "evidence": {"message_id": message_id, "thread_id": thread_id, "source": "gmail"},
+        "metadata": metadata,
+        "entities": entities,
+        "weight": 1.35 if matched_vips else 0.75,
+    }
+
+
+def gmail_attachment_memory_item(
+    *,
+    owner_email: str,
+    record: Any,
+    attachment: Any,
+    text: str,
+    sha256: str,
+    matched_vips: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    headers = getattr(record, "headers", {}) if record is not None else {}
+    subject = str((headers or {}).get("subject") or "[no subject]").strip()
+    message_id = str(getattr(record, "message_id", "") or "").strip()
+    thread_id = str(getattr(record, "thread_id", "") or "").strip()
+    filename = str(getattr(attachment, "filename", "") or "").strip()
+    attachment_id = str(getattr(attachment, "attachment_id", "") or "").strip()
+    observed = getattr(record, "internal_date", None)
+    observed_at = observed.isoformat() if hasattr(observed, "isoformat") else ""
+    content = str(text or "").strip()
+    return {
+        "source_type": "gmail_attachment",
+        "source_id": f"{message_id}:{attachment_id}:{sha256}",
+        "item_type": "attachment_evidence",
+        "owner_email": owner_email,
+        "visibility": VISIBILITY_PRIVATE,
+        "observed_at": observed_at,
+        "summary": f"Gmail PDF attachment: {filename or subject}",
+        "content": content,
+        "evidence": {
+            "message_id": message_id,
+            "thread_id": thread_id,
+            "attachment_id": attachment_id,
+            "filename": filename,
+            "sha256": sha256,
+            "source": "gmail_attachment",
+        },
+        "metadata": {
+            "subject": subject,
+            "message_id": message_id,
+            "thread_id": thread_id,
+            "filename": filename,
+            "mime_type": str(getattr(attachment, "mime_type", "") or ""),
+            "size": int(getattr(attachment, "size", 0) or 0),
+            "sha256": sha256,
+            "matched_vips": matched_vips or [],
+        },
+        "entities": _entities_from_text(f"{subject}\n{filename}\n{content}"),
+        "weight": 1.45,
+    }
+
+
+def gmail_drive_link_memory_item(
+    *,
+    owner_email: str,
+    record: Any,
+    url: str,
+    title: str = "",
+    text: str = "",
+    access_status: str = "ok",
+    matched_vips: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    headers = getattr(record, "headers", {}) if record is not None else {}
+    subject = str((headers or {}).get("subject") or "[no subject]").strip()
+    message_id = str(getattr(record, "message_id", "") or "").strip()
+    thread_id = str(getattr(record, "thread_id", "") or "").strip()
+    observed = getattr(record, "internal_date", None)
+    observed_at = observed.isoformat() if hasattr(observed, "isoformat") else ""
+    clean_url = str(url or "").strip()
+    content = str(text or "").strip()
+    return {
+        "source_type": "gmail_drive_link",
+        "source_id": f"{message_id}:{_memory_id(clean_url)}",
+        "item_type": "drive_evidence",
+        "owner_email": owner_email,
+        "visibility": VISIBILITY_PRIVATE,
+        "observed_at": observed_at,
+        "summary": f"Gmail Drive link: {title or clean_url}",
+        "content": content or f"Drive link could not be read: {access_status}",
+        "evidence": {"message_id": message_id, "thread_id": thread_id, "url": clean_url, "source": "gmail_drive_link"},
+        "metadata": {
+            "subject": subject,
+            "message_id": message_id,
+            "thread_id": thread_id,
+            "url": clean_url,
+            "title": title,
+            "access_status": access_status,
+            "matched_vips": matched_vips or [],
+        },
+        "entities": _entities_from_text(f"{subject}\n{title}\n{content}\n{clean_url}"),
+        "ingestion_status": "ok" if access_status == "ok" else "partial",
+        "weight": 1.45 if access_status == "ok" else 0.55,
+    }
+
+
+def _entities_from_text(text: str) -> list[dict[str, Any]]:
+    entities = []
+    for jira_key in _extract_jira_keys(text):
+        entities.append({"entity_type": "jira_key", "entity_key": jira_key, "label": jira_key, "relation": "mentions"})
+    for bpmis_id in _extract_bpmis_ids(text):
+        entities.append({"entity_type": "bpmis_id", "entity_key": bpmis_id, "label": bpmis_id, "relation": "mentions"})
+    return entities
+
+
+def _gmail_fact_item_type(text: str) -> str:
+    lowered = str(text or "").casefold()
+    if any(token in lowered for token in ("approval", "approved", "approve", "sign-off", "signoff", "批准", "审批")):
+        return "decision"
+    if any(token in lowered for token in ("risk", "blocked", "blocker", "issue", "delay", "延期", "风险", "阻塞")):
+        return "risk"
+    if any(token in lowered for token in ("todo", "follow up", "follow-up", "action item", "next step", "owner:", "due", "待办")):
+        return "todo"
+    if any(token in lowered for token in ("deadline", "target", "go-live", "launch", "上线")):
+        return "project"
+    return "email_evidence"

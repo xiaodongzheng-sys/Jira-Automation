@@ -3,7 +3,7 @@ from __future__ import annotations
 import base64
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta
 from email.utils import getaddresses
 from urllib.parse import quote
@@ -101,6 +101,17 @@ class GmailExportRecord:
     thread_id: str = ""
     label_ids: set[str] | None = None
     context_only: bool = False
+    attachments: list["GmailAttachmentRecord"] = field(default_factory=list)
+    drive_links: list[str] = field(default_factory=list)
+
+
+@dataclass
+class GmailAttachmentRecord:
+    filename: str
+    mime_type: str
+    attachment_id: str
+    size: int = 0
+    part_id: str = ""
 
 
 @dataclass
@@ -363,6 +374,43 @@ def _extract_message_text_from_payload(payload: dict[str, Any] | None) -> str:
     if first_html_candidate.strip():
         return first_html_candidate.strip()
     return "[body unavailable]"
+
+
+def _extract_gmail_attachments_from_payload(payload: dict[str, Any] | None) -> list[GmailAttachmentRecord]:
+    attachments: list[GmailAttachmentRecord] = []
+
+    def walk(part: dict[str, Any] | None) -> None:
+        if not isinstance(part, dict):
+            return
+        filename = str(part.get("filename") or "").strip()
+        body = part.get("body") if isinstance(part.get("body"), dict) else {}
+        attachment_id = str(body.get("attachmentId") or "").strip()
+        if filename and attachment_id:
+            attachments.append(
+                GmailAttachmentRecord(
+                    filename=filename,
+                    mime_type=str(part.get("mimeType") or "").strip(),
+                    attachment_id=attachment_id,
+                    size=int(body.get("size") or 0),
+                    part_id=str(part.get("partId") or "").strip(),
+                )
+            )
+        for child in part.get("parts") or []:
+            walk(child)
+
+    walk(payload or {})
+    return attachments
+
+
+def _extract_drive_links_from_text(text: str) -> list[str]:
+    links: list[str] = []
+    seen: set[str] = set()
+    for match in re.finditer(r"https?://(?:docs|drive)\.google\.com/[^\s<>\")']+", str(text or ""), flags=re.IGNORECASE):
+        link = match.group(0).rstrip(".,;]")
+        if link not in seen:
+            seen.add(link)
+            links.append(link)
+    return links[:20]
 
 
 class GmailDashboardService:
@@ -982,6 +1030,39 @@ class GmailDashboardService:
                 self._sleep_before_gmail_retry(attempt)
         raise ToolError(transient_message)
 
+    def is_export_noise(self, headers: dict[str, str]) -> bool:
+        return _is_export_noise(headers, self.report_intelligence_config)
+
+    def list_work_memory_message_refs(
+        self,
+        *,
+        days: int = 90,
+        now: datetime | None = None,
+        max_messages: int | None = None,
+    ) -> list[dict[str, str]]:
+        now = now or datetime.now().astimezone()
+        period_start = _start_of_local_day(now - timedelta(days=max(1, int(days or 90)) - 1))
+        query = _build_thread_export_query(period_start, now)
+        return self._list_message_refs(query=query, max_messages=max_messages)
+
+    def fetch_work_memory_message(self, message_id: str) -> GmailExportRecord:
+        return self._fetch_message_full(message_id)
+
+    def download_attachment(self, *, message_id: str, attachment_id: str) -> bytes:
+        users_api = self.service.users().messages().attachments()
+        payload = self._execute_gmail_request(
+            lambda: users_api.get(userId="me", messageId=message_id, id=attachment_id),
+            transient_message="Gmail attachment could not be downloaded right now. Please try again shortly.",
+        )
+        encoded = str(payload.get("data") or "").strip()
+        if not encoded:
+            return b""
+        padded = encoded + ("=" * (-len(encoded) % 4))
+        try:
+            return base64.urlsafe_b64decode(padded.encode("utf-8"))
+        except (ValueError, TypeError) as error:
+            raise ToolError("Gmail attachment payload was unreadable.") from error
+
     @staticmethod
     def _sleep_before_gmail_retry(attempt: int) -> None:
         delay = GMAIL_REQUEST_RETRY_DELAYS_SECONDS[min(attempt, len(GMAIL_REQUEST_RETRY_DELAYS_SECONDS) - 1)]
@@ -1016,7 +1097,7 @@ class GmailDashboardService:
                 userId="me",
                 id=message_id,
                 format="full",
-                fields="id,threadId,internalDate,labelIds,payload(mimeType,filename,headers,body/data,parts)",
+                fields="id,threadId,internalDate,labelIds,payload",
             ),
             transient_message="Gmail mail history could not be exported right now. Please try again shortly.",
         )
@@ -1034,6 +1115,8 @@ class GmailDashboardService:
             message_id=str(payload.get("id") or message_id),
             thread_id=str(payload.get("threadId") or ""),
             label_ids=set(payload.get("labelIds") or []),
+            attachments=_extract_gmail_attachments_from_payload(message_payload),
+            drive_links=_extract_drive_links_from_text(body_text),
         )
 
     def _fetch_thread_messages(self, *, thread_id: str, since: datetime, now: datetime) -> list[GmailExportRecord]:
@@ -1043,7 +1126,7 @@ class GmailDashboardService:
                 userId="me",
                 id=thread_id,
                 format="full",
-                fields="id,messages(id,threadId,internalDate,labelIds,payload(mimeType,filename,headers,body/data,parts))",
+                fields="id,messages(id,threadId,internalDate,labelIds,payload)",
             ),
             transient_message="Gmail thread history could not be exported right now. Please try again shortly.",
         )
@@ -1069,6 +1152,8 @@ class GmailDashboardService:
                 message_id=str(message_payload.get("id") or ""),
                 thread_id=str(message_payload.get("threadId") or thread_id),
                 label_ids=set(message_payload.get("labelIds") or []),
+                attachments=_extract_gmail_attachments_from_payload(mime_payload),
+                drive_links=_extract_drive_links_from_text(body_text),
             )
             if message_time < since:
                 record.context_only = True

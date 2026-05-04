@@ -17,6 +17,8 @@ from bpmis_jira_tool.gmail_dashboard import (
     _build_export_query,
     _build_thread_export_query,
     _clean_export_body_text,
+    _extract_drive_links_from_text,
+    _extract_gmail_attachments_from_payload,
     _extract_message_text_from_payload,
 )
 
@@ -94,6 +96,31 @@ class GmailDashboardServiceTests(unittest.TestCase):
         auth_http_cls.assert_called_once_with(credentials, http=http_cls.return_value)
         build_mock.assert_called_once_with("gmail", "v1", http=auth_http_cls.return_value, cache_discovery=False)
         self.assertEqual(result, build_mock.return_value)
+
+    def test_extracts_attachment_metadata_and_drive_links_from_full_payload(self):
+        payload = {
+            "mimeType": "multipart/mixed",
+            "parts": [
+                {
+                    "partId": "0",
+                    "filename": "Design Review.pdf",
+                    "mimeType": "application/pdf",
+                    "body": {"attachmentId": "att-1", "size": 1234},
+                },
+                {
+                    "mimeType": "text/plain",
+                    "body": {"data": base64.urlsafe_b64encode(b"See https://docs.google.com/presentation/d/slide123/edit").decode("utf-8")},
+                },
+            ],
+        }
+
+        attachments = _extract_gmail_attachments_from_payload(payload)
+        links = _extract_drive_links_from_text(_extract_message_text_from_payload(payload))
+
+        self.assertEqual(len(attachments), 1)
+        self.assertEqual(attachments[0].filename, "Design Review.pdf")
+        self.assertEqual(attachments[0].attachment_id, "att-1")
+        self.assertEqual(links, ["https://docs.google.com/presentation/d/slide123/edit"])
 
     def test_build_dashboard_aggregates_mailbox_metrics(self):
         now = datetime(2026, 4, 21, 16, 0).astimezone()

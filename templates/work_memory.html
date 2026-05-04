@@ -11,6 +11,7 @@
         <button class="button button-secondary" type="button" data-memory-refresh>Refresh</button>
         <button class="button button-secondary" type="button" data-memory-incremental>Incremental Ingest</button>
         <button class="button button-secondary" type="button" data-memory-backfill>Backfill Existing Data</button>
+        <button class="button button-secondary" type="button" data-memory-gmail-backfill>Backfill Gmail 90d</button>
         <button class="button button-secondary" type="button" data-memory-distill>Distill Work Graph</button>
         <button class="button" type="button" data-memory-ingest-monthly>Scan Sent Reports</button>
       </div>
@@ -262,6 +263,22 @@
         }
         setStatus(`Backfilled meetings ${payload.meeting_records || 0}, Team Dashboard caches ${payload.team_dashboard_cache || 0}, recorded ${payload.recorded || 0}.`);
         await Promise.all([loadHealth(), loadCandidates()]);
+      });
+
+      document.querySelector('[data-memory-gmail-backfill]')?.addEventListener('click', async () => {
+        setStatus('Starting Gmail 90-day background backfill. VIP PDF and Drive evidence will be processed in the background.');
+        const response = await fetch('/api/work-memory/backfill-gmail', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ days: 90 }),
+        });
+        const payload = await response.json();
+        if (!response.ok) {
+          setStatus(payload.message || 'Gmail backfill could not be started.');
+          return;
+        }
+        setStatus(`Gmail backfill ${payload.state || payload.status || 'queued'} · job ${payload.job_id || ''}`);
+        await loadHealth();
       });
 
       document.querySelector('[data-memory-distill]')?.addEventListener('click', async () => {

@@ -11,11 +11,14 @@ from bpmis_jira_tool.work_memory import (
     VISIBILITY_PRIVATE,
     VISIBILITY_TEAM,
     WorkMemoryStore,
+    gmail_attachment_memory_item,
+    gmail_drive_link_memory_item,
+    gmail_message_memory_item,
     meeting_record_memory_items,
     sent_monthly_report_memory_item_from_gmail_record,
     team_dashboard_memory_items,
 )
-from bpmis_jira_tool.web import create_app, _is_sent_monthly_report_subject
+from bpmis_jira_tool.web import create_app, _backfill_gmail_work_memory, _is_sent_monthly_report_subject
 
 
 class WorkMemoryStoreTests(unittest.TestCase):
@@ -481,6 +484,56 @@ class WorkMemoryStoreTests(unittest.TestCase):
         self.assertEqual(item["source_type"], "gmail_sent_monthly_report")
         self.assertEqual(item["visibility"], VISIBILITY_PRIVATE)
 
+    def test_gmail_message_and_vip_evidence_items_are_private_and_searchable(self):
+        record = SimpleNamespace(
+            headers={
+                "from": "Boss <boss@npt.sg>",
+                "to": "owner@npt.sg",
+                "cc": "",
+                "subject": "AF-123 approval for BPMIS 225159",
+            },
+            body_text="Approved launch scope. Please follow up on risk.",
+            message_id="msg-1",
+            thread_id="thread-1",
+            label_ids={"INBOX"},
+            drive_links=["https://docs.google.com/presentation/d/slide123/edit"],
+            attachments=[],
+            internal_date=SimpleNamespace(isoformat=lambda: "2026-05-04T10:00:00+08:00"),
+        )
+        attachment = SimpleNamespace(filename="Design.pdf", mime_type="application/pdf", attachment_id="att-1", size=100)
+
+        message_item = gmail_message_memory_item(
+            owner_email="owner@npt.sg",
+            record=record,
+            matched_vips=[{"display_name": "Boss", "emails": ["boss@npt.sg"]}],
+            vip_email_roles={"Boss": ["from"]},
+        )
+        attachment_item = gmail_attachment_memory_item(
+            owner_email="owner@npt.sg",
+            record=record,
+            attachment=attachment,
+            text="PDF mentions AF-123 and BPMIS 225159.",
+            sha256="abc",
+            matched_vips=[{"display_name": "Boss"}],
+        )
+        drive_item = gmail_drive_link_memory_item(
+            owner_email="owner@npt.sg",
+            record=record,
+            url="https://docs.google.com/presentation/d/slide123/edit",
+            title="Design Review",
+            text="Slides mention approval chain.",
+            access_status="ok",
+            matched_vips=[{"display_name": "Boss"}],
+        )
+
+        self.assertEqual(message_item["source_type"], "gmail")
+        self.assertEqual(message_item["visibility"], VISIBILITY_PRIVATE)
+        self.assertEqual(message_item["item_type"], "decision")
+        self.assertGreater(message_item["weight"], 1.0)
+        self.assertEqual(attachment_item["source_type"], "gmail_attachment")
+        self.assertEqual(drive_item["source_type"], "gmail_drive_link")
+        self.assertTrue(any(entity["entity_key"] == "AF-123" for entity in attachment_item["entities"]))
+
     def test_sent_monthly_report_subject_requires_banking_product_update_format(self):
         self.assertTrue(_is_sent_monthly_report_subject("[Banking] Product Update (01 Apr - 30 Apr) - Anti-Fraud, Credit Risk & Ops Risk"))
         self.assertTrue(_is_sent_monthly_report_subject("[Banking] Product Update (1 Apr - 7 Apr) - Anti-Fraud, Credit Risk & Ops Risk"))
@@ -490,6 +543,78 @@ class WorkMemoryStoreTests(unittest.TestCase):
 
 
 class WorkMemoryRouteTests(unittest.TestCase):
+    def test_gmail_backfill_records_vip_pdf_and_drive_evidence_without_crashing(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            env = {
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                app = create_app()
+
+            class FakeGmailService:
+                def __init__(self, **_kwargs):
+                    pass
+
+                def list_work_memory_message_refs(self, *, days, max_messages, now=None):
+                    return [{"id": "msg-1"}]
+
+                def fetch_work_memory_message(self, message_id):
+                    return SimpleNamespace(
+                        headers={
+                            "from": "Boss <boss@npt.sg>",
+                            "to": "owner@npt.sg",
+                            "subject": "AF launch approval",
+                        },
+                        body_text="Boss approved AF launch. See https://docs.google.com/presentation/d/slide123/edit",
+                        message_id=message_id,
+                        thread_id="thread-1",
+                        label_ids={"INBOX"},
+                        attachments=[
+                            SimpleNamespace(filename="AF Design.pdf", mime_type="application/pdf", attachment_id="att-1", size=100)
+                        ],
+                        drive_links=["https://docs.google.com/presentation/d/slide123/edit"],
+                        internal_date=SimpleNamespace(isoformat=lambda: "2026-05-04T10:00:00+08:00"),
+                    )
+
+                def is_export_noise(self, headers):
+                    return False
+
+                def download_attachment(self, *, message_id, attachment_id):
+                    return b"%PDF fake"
+
+            with app.app_context(), patch("bpmis_jira_tool.web.GmailDashboardService", FakeGmailService), patch(
+                "bpmis_jira_tool.web._extract_pdf_text_for_work_memory",
+                return_value="PDF evidence says AF launch is approved.",
+            ), patch(
+                "bpmis_jira_tool.web._read_google_drive_link_text",
+                return_value=("AF Slides", "Slides evidence says deadline is June."),
+            ):
+                app.config["TEAM_DASHBOARD_CONFIG_STORE"].save(
+                    {
+                        "report_intelligence_config": {
+                            "vip_people": [{"display_name": "Boss", "emails": ["boss@npt.sg"]}],
+                        }
+                    }
+                )
+                job = app.config["JOB_STORE"].create("work-memory-gmail-backfill", "Gmail Backfill", owner_email="owner@npt.sg")
+                result = _backfill_gmail_work_memory(
+                    owner_email="owner@npt.sg",
+                    credentials_payload={"token": "x"},
+                    report_intelligence_config={"vip_people": [{"display_name": "Boss", "emails": ["boss@npt.sg"]}]},
+                    days=90,
+                    max_messages=None,
+                    drive_read_enabled=True,
+                    job_id=job.job_id,
+                )
+                items = app.config["WORK_MEMORY_STORE"].query_work_memory(owner_email="owner@npt.sg", visibility_scope="owner", limit=20)
+
+        self.assertEqual(result["failed"], 0)
+        self.assertTrue(any(item["source_type"] == "gmail" for item in items))
+        self.assertTrue(any(item["source_type"] == "gmail_attachment" for item in items))
+        self.assertTrue(any(item["source_type"] == "gmail_drive_link" for item in items))
+
     def test_sent_monthly_report_ingestion_scans_gmail_sent_mail(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             env = {
@@ -674,6 +799,24 @@ class WorkMemoryRouteTests(unittest.TestCase):
                 )
                 self.assertEqual(eval_response.status_code, 200)
                 self.assertEqual(eval_response.get_json()["case_count"], 1)
+
+                gold_eval_response = client.post(
+                    "/api/superagent/eval?suite_id=gold_v1",
+                    json={
+                        "cases": [
+                            {
+                                "question": "CRC Revamp gold status?",
+                                "task_type": "project_status",
+                                "expected_source_type": "team_dashboard",
+                                "suite_id": "gold_v1",
+                            }
+                        ],
+                        "suite_id": "gold_v1",
+                    },
+                )
+                self.assertEqual(gold_eval_response.status_code, 200)
+                self.assertEqual(gold_eval_response.get_json()["suite_id"], "gold_v1")
+                self.assertEqual(gold_eval_response.get_json()["case_count"], 1)
 
                 incremental = client.post("/api/work-memory/ingest-incremental", json={"window": "7d"})
                 self.assertEqual(incremental.status_code, 200)
