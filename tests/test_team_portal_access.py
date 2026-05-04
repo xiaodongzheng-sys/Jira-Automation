@@ -2,6 +2,7 @@ import os
 import time
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from bs4 import BeautifulSoup
@@ -135,6 +136,16 @@ class TeamPortalAccessTests(unittest.TestCase):
                 self.assertNotIn(b"Manage My Projects", response.data)
                 self.assertNotIn(b"Report Intelligence", response.data)
                 self.assertNotIn(b"PRD Self-Assessment", response.data)
+
+    def test_login_image_gate_css_contract_is_present(self):
+        stylesheet = Path("static/style.css").read_text(encoding="utf-8")
+
+        self.assertIn(".page-shell.page-shell-login-image", stylesheet)
+        self.assertIn(".login-image-hero", stylesheet)
+        self.assertIn(".login-image-stage", stylesheet)
+        self.assertIn(".login-image-hero-bg", stylesheet)
+        self.assertIn(".login-image-google-button", stylesheet)
+        self.assertIn(".login-image-accessibility-copy", stylesheet)
 
     def test_shared_mode_redirects_protected_route_to_login_gate(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(

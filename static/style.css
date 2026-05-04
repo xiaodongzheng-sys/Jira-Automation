@@ -8678,6 +8678,107 @@ select:focus {
   color: #b42318;
 }
 
+.page-shell.page-shell-login-image {
+  max-width: none;
+  min-height: 100vh;
+  padding: 0;
+  overflow: hidden;
+  background: #ffffff;
+}
+
+.page-shell-login-image::before,
+.page-shell-login-image::after {
+  display: none;
+}
+
+.page-shell-login-image .flash-stack {
+  display: none;
+}
+
+.login-image-hero {
+  position: relative;
+  min-height: 100vh;
+  overflow: hidden;
+  background: #f8fbff;
+}
+
+.login-image-stage {
+  position: absolute;
+  top: 0;
+  left: 50%;
+  width: min(100vw, calc(100vh * 1586 / 992));
+  aspect-ratio: 1586 / 992;
+  transform: translateX(-50%);
+}
+
+.login-image-hero-bg {
+  display: block;
+  width: 100%;
+  height: auto;
+  user-select: none;
+}
+
+.login-image-google-button {
+  position: absolute;
+  z-index: 3;
+  top: 60.89%;
+  left: 3.22%;
+  width: 18.73%;
+  height: 6.96%;
+  border-radius: 8px;
+  background: transparent;
+  color: transparent;
+}
+
+.login-image-google-button:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.login-image-google-button:focus-visible {
+  outline: 3px solid rgba(10, 102, 255, 0.62);
+  outline-offset: 4px;
+}
+
+.login-image-button-text {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.login-image-accessibility-copy {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+@media (max-width: 760px) {
+  .page-shell.page-shell-login-image {
+    padding: 0;
+  }
+
+  .page-shell-login-image .flash-stack {
+    top: 10px;
+    left: 10px;
+    right: 10px;
+  }
+
+  .login-image-hero {
+    min-height: 100svh;
+  }
+
+  .login-image-stage {
+    width: min(100vw, calc(100svh * 1586 / 992));
+  }
+}
+
 @media (max-width: 900px) {
   .meeting-recorder-hero,
   .meeting-recorder-grid,
