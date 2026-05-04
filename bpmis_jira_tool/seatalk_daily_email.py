@@ -53,6 +53,8 @@ MAX_OTHER_UPDATES = 8
 MAX_TEAM_MEMBER_REMINDERS = 8
 MAX_USEFUL_AWARENESS_OTHER_UPDATES = 5
 MAX_TOP_FOCUS_ITEMS = 3
+LOW_SIGNAL_EMAIL_SUMMARY = "No clear action, blocker, key project update, or team follow-up was found in this window."
+EMPTY_TODO_SECTION_SUMMARY = "No Xiaodong-owned action or watch/delegate item found."
 ALLOWED_OTHER_UPDATE_SIGNAL_TYPES = {
     "incident",
     "launch",
@@ -590,59 +592,63 @@ def render_email(*, briefing: dict[str, Any], now: datetime, window_label: str =
     watch_delegate_todos = [item for item in briefing.get("watch_delegate_todos") or [] if isinstance(item, dict)]
     if not direct_action_todos and not watch_delegate_todos:
         direct_action_todos, watch_delegate_todos = _split_todos_by_action_type(_normalize_todo_items(todos))
-    updates = [item for item in briefing.get("project_updates") or [] if isinstance(item, dict)]
-    other_updates = [item for item in briefing.get("other_updates") or [] if isinstance(item, dict)]
+    updates = [
+        item
+        for item in (briefing.get("project_updates") or [])
+        if isinstance(item, dict) and _is_display_project_update_signal(item)
+    ]
+    other_updates = [
+        item
+        for item in (briefing.get("other_updates") or [])
+        if isinstance(item, dict) and _is_display_other_update_signal(item)
+    ]
     reminders = [item for item in briefing.get("team_member_reminders") or [] if isinstance(item, dict)]
+    has_any_display_signal = bool(direct_action_todos or watch_delegate_todos or updates or other_updates or reminders)
     text_lines = [
         f"Subject: {subject}",
         f"Window: {label}" if label else "",
         "",
         "To-do",
-        "",
-        "Xiaodong Action Required",
     ]
-    if not direct_action_todos:
-        text_lines.append("- No clear Xiaodong-owned to-do found in the briefing window.")
-    else:
+    if not has_any_display_signal:
+        text_lines.append(f"- {LOW_SIGNAL_EMAIL_SUMMARY}")
+    elif not direct_action_todos and not watch_delegate_todos:
+        text_lines.append(f"- {EMPTY_TODO_SECTION_SUMMARY}")
+    if direct_action_todos:
+        text_lines.extend(["", "Xiaodong Action Required"])
         text_lines.extend(_render_grouped_text(direct_action_todos, kind="todo"))
-    text_lines.extend(["", "Watch / Delegate"])
-    if not watch_delegate_todos:
-        text_lines.append("- No watch/delegate item found.")
-    else:
+    if watch_delegate_todos:
+        text_lines.extend(["", "Watch / Delegate"])
         text_lines.extend(_render_grouped_text(watch_delegate_todos, kind="todo"))
-    text_lines.extend(["", "Project Updates"])
-    if not updates:
-        text_lines.append("- No clear project update found in the briefing window.")
-    else:
+    if updates:
+        text_lines.extend(["", "Project Updates"])
         text_lines.extend(_render_grouped_text(updates, kind="update"))
-    text_lines.extend(["", "Other Update"])
-    if not other_updates:
-        text_lines.append("- No additional high-value awareness update found in the briefing window.")
-    else:
+    if other_updates:
+        text_lines.extend(["", "Other Update"])
         text_lines.extend(_render_grouped_text(other_updates, kind="update"))
-    text_lines.extend(["", "Suggested Team Follow-up"])
-    if not reminders:
-        text_lines.append("- No unresolved SeaTalk team-member mention found in the briefing window.")
-    else:
+    if reminders:
+        text_lines.extend(["", "Suggested Team Follow-up"])
         text_lines.extend(_render_grouped_text(reminders, kind="reminder"))
     text_body = "\n".join(text_lines).strip() + "\n"
     html_body = "<html><body>" f"<h2>{html.escape(subject)}</h2>"
     if label:
         html_body += f"<p><strong>Window:</strong> {html.escape(label)}</p>"
-    html_body += (
-        "<h3>To-do</h3>"
-        "<h4>Xiaodong Action Required</h4>"
-        f"{_render_grouped_html(direct_action_todos, kind='todo')}"
-        "<h4>Watch / Delegate</h4>"
-        f"{_render_grouped_html(watch_delegate_todos, kind='watch_todo')}"
-        "<h3>Project Updates</h3>"
-        f"{_render_grouped_html(updates, kind='update')}"
-        "<h3>Other Update</h3>"
-        f"{_render_grouped_html(other_updates, kind='other')}"
-        "<h3>Suggested Team Follow-up</h3>"
-        f"{_render_grouped_html(reminders, kind='reminder')}"
-        "</body></html>"
-    )
+    html_body += "<h3>To-do</h3>"
+    if not has_any_display_signal:
+        html_body += f"<p>{html.escape(LOW_SIGNAL_EMAIL_SUMMARY)}</p>"
+    elif not direct_action_todos and not watch_delegate_todos:
+        html_body += f"<p>{html.escape(EMPTY_TODO_SECTION_SUMMARY)}</p>"
+    if direct_action_todos:
+        html_body += "<h4>Xiaodong Action Required</h4>" + _render_grouped_html(direct_action_todos, kind="todo")
+    if watch_delegate_todos:
+        html_body += "<h4>Watch / Delegate</h4>" + _render_grouped_html(watch_delegate_todos, kind="watch_todo")
+    if updates:
+        html_body += "<h3>Project Updates</h3>" + _render_grouped_html(updates, kind="update")
+    if other_updates:
+        html_body += "<h3>Other Update</h3>" + _render_grouped_html(other_updates, kind="other")
+    if reminders:
+        html_body += "<h3>Suggested Team Follow-up</h3>" + _render_grouped_html(reminders, kind="reminder")
+    html_body += "</body></html>"
     return subject, text_body, html_body
 
 
@@ -972,7 +978,8 @@ def _daily_brief_user_prompt(
         "other_updates: array of objects with keys domain, title, summary, status, evidence, source_type, signal_type, matched_vips, matched_keywords, matched_key_projects, priority_reason.\n"
         "my_todos: array of objects with keys task, domain, priority, due, evidence, source_type, action_type, matched_vips, matched_keywords, matched_key_projects, priority_reason.\n"
         "team_member_reminders: array of objects with keys domain, person, reminder, evidence, source_type.\n"
-        "team_todos must always be an empty array.\n\n"
+        "team_todos must always be an empty array.\n"
+        "Empty arrays are expected when a section has no important signal. Do not fill sections just to produce a report.\n\n"
         "## Allowed Values\n"
         "domain: Anti-fraud, Credit Risk, Ops Risk, General.\n"
         "status: done, in_progress, blocked, unknown.\n"
@@ -985,7 +992,7 @@ def _daily_brief_user_prompt(
         "my_todos: include only Xiaodong-owned actions, decisions needed from Xiaodong, follow-ups Xiaodong clearly needs to drive, or watch/delegate items where Xiaodong should ensure another owner follows through. Do not include tasks fully owned by other people with no Xiaodong follow-up value. Max 8 items. Sort high priority first, then earliest due date, then most actionable.\n"
         "For each my_todos item, set action_type=direct_action only when Xiaodong must personally reply, decide, review, approve, attend, provide, or drive the next step. Set action_type=watch_delegate when Xiaodong mainly needs to monitor, ensure, follow up with someone, check with a team, or confirm another owner follows through.\n"
         "project_updates: include updates from SeaTalk or Gmail where Xiaodong is involved, mentioned, directly asked, or clearly participating. Summarize the decision, milestone, blocker, or current state. Max 10 items. Sort blocked and in_progress before done.\n"
-        "other_updates: include useful awareness from SeaTalk or Gmail where Xiaodong is not directly involved but the information may matter to a Digital Banking PM. Prioritize incident, launch, policy/process, risk/compliance, cross-team dependency, leadership decision, and cross-product milestone. Include at most 5 useful_awareness items and at most 8 other_updates total. Do not include generic chatter, greetings, pure thanks, meeting logistics with no decision, or low-value FYI.\n"
+        "other_updates: include useful awareness from SeaTalk or Gmail where Xiaodong is not directly involved but the information may matter to a Digital Banking PM. Prioritize incident, launch, policy/process, risk/compliance, cross-team dependency, leadership decision, and cross-product milestone. useful_awareness should be rare and only included when genuinely PM-relevant, especially when matched to a VIP, priority keyword, or key project. Include at most 5 useful_awareness items and at most 8 other_updates total. Do not include generic chatter, greetings, pure thanks, meeting logistics with no decision, or low-value FYI.\n"
         "team_member_reminders: use SeaTalk only. Never create these from Gmail. Only include people from the explicit allowed reminder list below. Max 8 items. Sort by most actionable first.\n\n"
         "## Team Member Reminder Scan\n"
         "Before writing team_member_reminders, scan every SeaTalk group conversation for human mentions of these people: Ker Yin, Rene Chong, Sabrina Chan, Liye, Hui Xian, Sophia Wang Zijun, Ming Ming, Zoey Lu, Wang Chang, Jireh.\n"
@@ -1396,6 +1403,28 @@ def _focus_from_update(item: dict[str, Any], *, section: str) -> dict[str, Any]:
         "source": item.get("evidence") or "Unknown",
         "section": section,
     }
+
+
+def _has_report_intelligence_match(item: dict[str, Any]) -> bool:
+    if item.get("matched_vips") or item.get("matched_keywords") or item.get("matched_key_projects"):
+        return True
+    return bool(str(item.get("priority_reason") or "").strip())
+
+
+def _is_display_project_update_signal(item: dict[str, Any]) -> bool:
+    if _has_report_intelligence_match(item):
+        return True
+    status = _correct_update_status(item)
+    return status in {"blocked", "in_progress"} or item.get("risk_level") == "high"
+
+
+def _is_display_other_update_signal(item: dict[str, Any]) -> bool:
+    if _has_report_intelligence_match(item):
+        return True
+    signal_type = _normalize_signal_type(item.get("signal_type"))
+    if not signal_type:
+        signal_type = "useful_awareness"
+    return signal_type in STRONG_OTHER_UPDATE_SIGNAL_TYPES
 
 
 def _build_quality_metadata(

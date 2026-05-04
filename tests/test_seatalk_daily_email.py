@@ -37,6 +37,7 @@ from bpmis_jira_tool.seatalk_daily_email import (
     seatalk_name_overrides_path,
     should_skip_fixed_daily_email_window,
     sync_daily_summary_to_trello,
+    _daily_brief_user_prompt,
 )
 from bpmis_jira_tool.seatalk_dashboard import SEATALK_INSIGHTS_TIMEZONE
 from bpmis_jira_tool.trello_daily_summary import TrelloDailySummaryClient, TrelloDailySummaryStore
@@ -817,17 +818,24 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         now = datetime(2026, 4, 27, 19, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE)
         subject, text_body, html_body = render_email(briefing={"my_todos": [], "project_updates": []}, now=now)
         self.assertEqual(subject, "Daily Brief - 2026-04-27")
-        self.assertIn("No clear Xiaodong-owned to-do", text_body)
-        self.assertIn("No clear project update", html_body)
-        self.assertIn("No additional high-value awareness update", text_body)
-        self.assertIn("No unresolved SeaTalk team-member mention", text_body)
+        self.assertIn("No clear action, blocker, key project update, or team follow-up was found", text_body)
+        self.assertIn("To-do", text_body)
+        self.assertNotIn("Xiaodong Action Required", text_body)
+        self.assertNotIn("Watch / Delegate", text_body)
+        self.assertNotIn("Project Updates", html_body)
+        self.assertNotIn("No clear project update", text_body)
+        self.assertNotIn("No additional high-value awareness update", text_body)
+        self.assertNotIn("No unresolved SeaTalk team-member mention", text_body)
 
         _, text_body, _ = render_email(
             briefing={"my_todos": [{"task": "Review", "domain": "General", "priority": "high", "due": "today", "evidence": "Alice"}]},
             now=now,
         )
         self.assertIn("General\n[High] Review. Due: today (Source: Alice)", text_body)
-        self.assertIn("No clear project update", text_body)
+        self.assertIn("Xiaodong Action Required", text_body)
+        self.assertNotIn("Watch / Delegate", text_body)
+        self.assertNotIn("Project Updates", text_body)
+        self.assertNotIn("No clear project update", text_body)
 
         payload = build_daily_briefing(
             FakeSeaTalkService("SeaTalk Chat History Export\n[2026-04-27 18:30:00] Bob: please review\n"),
@@ -835,7 +843,7 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         )
         _, text_body, html_body = render_email(briefing=payload, now=now)
         self.assertIn("Review rollout note", text_body)
-        self.assertIn("Deck was refreshed. [Status: Done]", html_body)
+        self.assertNotIn("Deck was refreshed. [Status: Done]", html_body)
         self.assertIn("Other Update", text_body)
         self.assertIn("A policy dependency may affect downstream rollout planning. [Status: In Progress]", html_body)
         self.assertIn("Suggested Team Follow-up", text_body)
@@ -843,9 +851,122 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         self.assertNotIn("Today Focus", text_body)
         self.assertNotIn("Today Focus", html_body)
         self.assertIn("Xiaodong Action Required", text_body)
-        self.assertIn("Watch / Delegate", text_body)
+        self.assertNotIn("Watch / Delegate", text_body)
         self.assertNotIn("Generation Quality", text_body)
         self.assertNotIn("Generation Quality", html_body)
+
+    def test_render_email_compacts_sections_independently(self):
+        now = datetime(2026, 4, 27, 19, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE)
+
+        _, text_body, _ = render_email(
+            briefing={
+                "watch_delegate_todos": [
+                    {"task": "Monitor closure", "domain": "General", "priority": "medium", "due": "TBD", "evidence": "Bob"}
+                ]
+            },
+            now=now,
+        )
+        self.assertIn("Watch / Delegate", text_body)
+        self.assertIn("Monitor closure", text_body)
+        self.assertNotIn("Xiaodong Action Required", text_body)
+        self.assertNotIn("No Xiaodong-owned action", text_body)
+
+        _, text_body, html_body = render_email(
+            briefing={
+                "project_updates": [
+                    {
+                        "domain": "Credit Risk",
+                        "title": "Done update",
+                        "summary": "A routine update was completed.",
+                        "status": "done",
+                        "evidence": "Routine thread",
+                    },
+                    {
+                        "domain": "Credit Risk",
+                        "title": "Blocked update",
+                        "summary": "Approval is blocked by a policy dependency.",
+                        "status": "blocked",
+                        "evidence": "Policy thread",
+                    },
+                    {
+                        "domain": "Credit Risk",
+                        "title": "Key project update",
+                        "summary": "Project Alpha completed a routine checkpoint.",
+                        "status": "done",
+                        "evidence": "Project thread",
+                        "matched_key_projects": ["BPMIS-1 / Project Alpha"],
+                    },
+                ]
+            },
+            now=now,
+        )
+        self.assertIn("No Xiaodong-owned action or watch/delegate item found.", text_body)
+        self.assertIn("Project Updates", text_body)
+        self.assertIn("Approval is blocked by a policy dependency", html_body)
+        self.assertIn("Project Alpha completed a routine checkpoint", html_body)
+        self.assertNotIn("A routine update was completed", html_body)
+
+        _, text_body, html_body = render_email(
+            briefing={
+                "other_updates": [
+                    {
+                        "domain": "General",
+                        "title": "FYI",
+                        "summary": "A useful but routine awareness note was shared.",
+                        "status": "unknown",
+                        "signal_type": "useful_awareness",
+                        "evidence": "FYI thread",
+                    },
+                    {
+                        "domain": "General",
+                        "title": "VIP FYI",
+                        "summary": "Boss mentioned a routine follow-up.",
+                        "status": "unknown",
+                        "signal_type": "useful_awareness",
+                        "matched_vips": ["Boss"],
+                        "evidence": "Boss thread",
+                    },
+                    {
+                        "domain": "Ops Risk",
+                        "title": "Risk",
+                        "summary": "A risk compliance dependency may affect launch.",
+                        "status": "in_progress",
+                        "signal_type": "risk_compliance",
+                        "evidence": "Risk thread",
+                    },
+                ]
+            },
+            now=now,
+        )
+        self.assertIn("Other Update", text_body)
+        self.assertIn("Boss mentioned a routine follow-up", html_body)
+        self.assertIn("A risk compliance dependency may affect launch", html_body)
+        self.assertNotIn("A useful but routine awareness note was shared", html_body)
+
+        _, text_body, html_body = render_email(
+            briefing={
+                "team_member_reminders": [
+                    {"domain": "Anti-fraud", "person": "Rene Chong", "reminder": "Check the case.", "evidence": "Group"}
+                ]
+            },
+            now=now,
+        )
+        self.assertIn("Suggested Team Follow-up", text_body)
+        self.assertIn("Rene Chong: Check the case.", html_body)
+
+    def test_daily_brief_prompt_allows_empty_low_signal_sections(self):
+        prompt = _daily_brief_user_prompt(
+            history_text="SeaTalk Chat History Export\n",
+            gmail_history_text="Gmail thread history export\n",
+            hours=24,
+            local_now=datetime(2026, 4, 27, 19, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE),
+            match_summary="Today's matched VIPs: Boss.",
+        )
+
+        self.assertIn("Empty arrays are expected when a section has no important signal", prompt)
+        self.assertIn("Do not fill sections just to produce a report", prompt)
+        self.assertIn("Report Intelligence Matches", prompt)
+        self.assertIn("Use these matches only as prioritization hints", prompt)
 
     def test_build_trello_card_specs_includes_direct_watch_and_followups(self):
         briefing = {
