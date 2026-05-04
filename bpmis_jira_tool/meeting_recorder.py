@@ -1262,18 +1262,31 @@ class MeetingProcessingService:
         try:
             audio_path = self._recorded_audio_path(record)
             transcript = self._transcribe_audio(audio_path, transcript_language=record.get("transcript_language"))
+            owner_speech = self._transcribe_owner_speech_candidates(record, transcript_language=record.get("transcript_language"))
             transcript_text = str(transcript.get("text") or "").strip()
             minutes = self._generate_minutes(
                 record=record,
                 transcript_text=transcript_text,
                 transcript_quality=transcript.get("quality") or {},
             )
+            owner_speech_asset_url = ""
+            if owner_speech.get("status") == "completed" and str(owner_speech.get("text") or "").strip():
+                owner_speech_asset_url = f"/meeting-recorder/assets/{record_id}/owner-microphone-transcript.txt"
+                (self.store.record_dir(record_id) / "owner-microphone-transcript.txt").write_text(
+                    str(owner_speech.get("text") or "").strip(),
+                    encoding="utf-8",
+                )
             record["transcript"] = {
                 "status": "completed",
                 "text": transcript_text,
                 "chunks": transcript.get("chunks") or [{"start_seconds": 0, "text": transcript_text}],
                 "segments": transcript.get("segments") or [],
                 "quality": transcript.get("quality") or {},
+                "owner_speech_status": owner_speech.get("status") or "skipped",
+                "owner_speech_candidates": owner_speech.get("chunks") or [],
+                "owner_speech_quality": owner_speech.get("quality") or {},
+                "owner_speech_warning": owner_speech.get("warning") or "",
+                "owner_speech_asset_url": owner_speech_asset_url,
                 "asset_url": f"/meeting-recorder/assets/{record_id}/transcript.txt",
             }
             (self.store.record_dir(record_id) / "transcript.txt").write_text(transcript_text, encoding="utf-8")
@@ -1403,7 +1416,15 @@ class MeetingProcessingService:
         _run_command(command, "Could not extract audio from meeting video.")
         return audio_path
 
-    def _transcribe_audio(self, audio_path: Path, *, transcript_language: str | None = None) -> dict[str, Any]:
+    def _transcribe_audio(
+        self,
+        audio_path: Path,
+        *,
+        transcript_language: str | None = None,
+        output_prefix: str = "whisper-transcript",
+        segment_audio_prefix: str = "audio-segment",
+        segment_output_prefix: str = "whisper-segment",
+    ) -> dict[str, Any]:
         started_at = time.monotonic()
         provider = str(self.config.transcribe_provider or "whisper_cpp").strip().lower()
         if provider != "whisper_cpp":
@@ -1424,8 +1445,10 @@ class MeetingProcessingService:
                 whisper_bin=whisper_bin,
                 model_path=model_path,
                 transcript_language=transcript_language,
+                segment_audio_prefix=segment_audio_prefix,
+                segment_output_prefix=segment_output_prefix,
             )
-        output_base = self.store.record_dir(audio_path.parent.name) / "whisper-transcript"
+        output_base = self.store.record_dir(audio_path.parent.name) / output_prefix
         configured_language = meeting_transcript_whisper_language(transcript_language, fallback=self.config.whisper_language)
         return self._transcribe_audio_with_language_selection(
             audio_path=audio_path,
@@ -1596,6 +1619,8 @@ class MeetingProcessingService:
         whisper_bin: str,
         model_path: Path,
         transcript_language: str | None = None,
+        segment_audio_prefix: str = "audio-segment",
+        segment_output_prefix: str = "whisper-segment",
     ) -> dict[str, Any]:
         ffmpeg_path = _resolve_ffmpeg_bin(self.config.ffmpeg_bin)
         if not ffmpeg_path:
@@ -1616,8 +1641,8 @@ class MeetingProcessingService:
 
         def process_segment(spec: tuple[int, int, float]) -> dict[str, Any]:
             index, start, current_duration = spec
-            segment_audio = record_dir / f"audio-segment-{index:04d}.wav"
-            output_base = record_dir / f"whisper-segment-{index:04d}"
+            segment_audio = record_dir / f"{segment_audio_prefix}-{index:04d}.wav"
+            output_base = record_dir / f"{segment_output_prefix}-{index:04d}"
             extract_command = [
                 ffmpeg_path,
                 "-hide_banner",
@@ -1714,6 +1739,61 @@ class MeetingProcessingService:
             started_at=started_at,
         )
         return transcript
+
+    def _transcribe_owner_speech_candidates(self, record: dict[str, Any], *, transcript_language: str | None = None) -> dict[str, Any]:
+        media = record.get("media") if isinstance(record.get("media"), dict) else {}
+        if str(media.get("audio_capture_profile") or "") != MEETING_SCREENCAPTUREKIT_AUDIO_PROFILE:
+            return {"status": "skipped", "warning": "No separate local microphone track is available for owner speech candidates."}
+        relative = str(media.get("microphone_audio_path") or "").strip()
+        if not relative:
+            return {"status": "skipped", "warning": "No local microphone track is available for owner speech candidates."}
+        microphone_path = (self.store.root_dir / relative).resolve()
+        if not microphone_path.exists() or not microphone_path.is_file() or microphone_path.stat().st_size <= 44:
+            return {"status": "skipped", "warning": "Local microphone track is empty or missing."}
+        try:
+            duration_seconds = _audio_duration_seconds(microphone_path)
+        except Exception:
+            duration_seconds = 0
+        if not duration_seconds or duration_seconds <= 0:
+            return {"status": "skipped", "warning": "Local microphone track has no usable audio duration."}
+        try:
+            transcript = self._transcribe_audio(
+                microphone_path,
+                transcript_language=transcript_language,
+                output_prefix="owner-microphone-transcript",
+                segment_audio_prefix="owner-microphone-segment",
+                segment_output_prefix="owner-whisper-segment",
+            )
+        except Exception as error:  # noqa: BLE001
+            return {"status": "failed", "warning": f"Could not transcribe local microphone owner speech candidates: {error}"}
+
+        chunks = []
+        for chunk in transcript.get("chunks") or []:
+            text = str(chunk.get("text") or "").strip()
+            if not text or "[no audio]" in text.casefold():
+                continue
+            chunks.append(
+                {
+                    **dict(chunk),
+                    "text": text,
+                    "speaker": "me_candidate",
+                    "speaker_source": "local_microphone",
+                    "speaker_confidence": "candidate",
+                    "attribution_note": "Candidate owner speech from the local microphone track; not diarized speaker proof.",
+                }
+            )
+        return {
+            "status": "completed" if chunks else "empty",
+            "text": "\n".join(str(chunk.get("text") or "").strip() for chunk in chunks),
+            "chunks": chunks,
+            "segments": transcript.get("segments") or [],
+            "quality": {
+                **(transcript.get("quality") or {}),
+                "speaker_source": "local_microphone",
+                "speaker_confidence": "candidate",
+                "capture_source": media.get("screencapture_capture_source") or "",
+            },
+        }
 
     def _transcript_segment_workers(self) -> int:
         return _effective_transcript_segment_workers(self.config.transcript_segment_workers)

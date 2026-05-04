@@ -484,6 +484,28 @@
   const renderTranscript = (transcript) => {
     const qualityMarkup = renderTranscriptQuality(transcript);
     const chunks = Array.isArray(transcript?.chunks) ? transcript.chunks.filter((chunk) => String(chunk?.text || '').trim()) : [];
+    const ownerSpeechChunks = Array.isArray(transcript?.owner_speech_candidates)
+      ? transcript.owner_speech_candidates.filter((chunk) => String(chunk?.text || '').trim())
+      : [];
+    const ownerSpeechMarkup = ownerSpeechChunks.length ? `
+      <div class="meeting-transcript-quality">
+        <strong>Me candidate from local microphone</strong>
+        <span>Candidate only; not diarized speaker proof.</span>
+      </div>
+      <div class="meeting-transcript-list">
+        ${ownerSpeechChunks.map((chunk) => `
+          <div class="meeting-transcript-row">
+            <time>${escapeHtml(formatTimestamp(chunk.start_seconds || 0))}</time>
+            <p><strong>Me candidate:</strong> ${escapeHtml(chunk.text || '')}</p>
+          </div>
+        `).join('')}
+      </div>
+    ` : (transcript?.owner_speech_status === 'failed' && transcript?.owner_speech_warning ? `
+      <div class="meeting-transcript-quality">
+        <strong>Me candidate unavailable</strong>
+        <span>${escapeHtml(transcript.owner_speech_warning)}</span>
+      </div>
+    ` : '');
     if (chunks.length) {
       return `
         ${qualityMarkup}
@@ -495,10 +517,11 @@
             </div>
           `).join('')}
         </div>
+        ${ownerSpeechMarkup}
       `;
     }
     const text = String(transcript?.text || '').trim();
-    if (!text) return `${qualityMarkup}<p class="empty-state">Transcript is not generated yet.</p>`;
+    if (!text) return `${qualityMarkup}<p class="empty-state">Transcript is not generated yet.</p>${ownerSpeechMarkup}`;
     return `
       ${qualityMarkup}
       <div class="meeting-transcript-list">
@@ -509,6 +532,7 @@
           </div>
         `).join('')}
       </div>
+      ${ownerSpeechMarkup}
     `;
   };
 

@@ -1,0 +1,396 @@
+{% extends "base.html" %}
+
+{% block body %}
+  <section class="workspace-shell source-qa-page work-memory-page">
+    <div class="source-qa-header">
+      <div>
+        <p class="eyebrow">Superagent Foundation</p>
+        <h1>AI Memory</h1>
+      </div>
+      <div class="button-row">
+        <button class="button button-secondary" type="button" data-memory-refresh>Refresh</button>
+        <button class="button button-secondary" type="button" data-memory-incremental>Incremental Ingest</button>
+        <button class="button button-secondary" type="button" data-memory-backfill>Backfill Existing Data</button>
+        <button class="button button-secondary" type="button" data-memory-distill>Distill Work Graph</button>
+        <button class="button" type="button" data-memory-ingest-monthly>Scan Sent Reports</button>
+      </div>
+    </div>
+
+    <section class="panel panel-wide">
+      <div class="section-heading-row">
+        <div>
+          <h2>Memory Health</h2>
+          <p class="card-help">Owner-only view of Work Memory ingestion status and candidate facts.</p>
+        </div>
+      </div>
+      <div class="metric-grid" data-memory-health>
+        <article class="metric-card">
+          <span>Items</span>
+          <strong data-memory-item-count>0</strong>
+        </article>
+        <article class="metric-card">
+          <span>Feedback</span>
+          <strong data-memory-feedback-count>0</strong>
+        </article>
+        <article class="metric-card">
+          <span>Materialized</span>
+          <strong data-memory-materialized-count>0</strong>
+        </article>
+      </div>
+      <div class="source-qa-status" data-memory-status>Loading memory health.</div>
+      <div class="work-memory-list compact" data-memory-ingestion-runs></div>
+    </section>
+
+    <section class="panel panel-wide">
+      <div class="section-heading-row">
+        <div>
+          <h2>Superagent Read-only Chat</h2>
+          <p class="card-help">Evidence-backed owner-only answers. No Jira, BPMIS, Gmail, SeaTalk, or Confluence writes are performed.</p>
+        </div>
+      </div>
+      <form class="inline-form" data-superagent-form>
+        <select name="task_type">
+          <option value="general">General</option>
+          <option value="what_changed">What changed</option>
+          <option value="project_status">Project status</option>
+          <option value="follow_up">Follow-up</option>
+          <option value="meeting_prep">Meeting prep</option>
+          <option value="stakeholder_brief">Stakeholder brief</option>
+          <option value="monthly_focus">Monthly focus</option>
+          <option value="open_loop_check">Open loops</option>
+        </select>
+        <input name="query" type="search" placeholder="Ask about a project, stakeholder, report, or follow-up">
+        <button class="button button-secondary" type="submit">Ask</button>
+        <button class="button button-secondary" type="button" data-superagent-explain>Explain</button>
+      </form>
+      <div class="button-row">
+        <button class="button button-secondary" type="button" data-superagent-task="what_changed" data-superagent-query="">What changed</button>
+        <button class="button button-secondary" type="button" data-superagent-task="follow_up" data-superagent-query="">Need follow-up</button>
+        <button class="button button-secondary" type="button" data-superagent-task="meeting_prep" data-superagent-query="">Prepare meeting</button>
+        <button class="button button-secondary" type="button" data-superagent-task="project_status" data-superagent-query="">Project brief</button>
+        <button class="button button-secondary" type="button" data-superagent-task="monthly_focus" data-superagent-query="">Monthly focus</button>
+      </div>
+      <div class="work-memory-list" data-superagent-answer></div>
+    </section>
+
+    <section class="panel panel-wide">
+      <div class="section-heading-row">
+        <div>
+          <h2>Review Candidates</h2>
+          <p class="card-help">Only high-value facts are shown here: projects, risks, decisions, todos, blockers, stakeholders, and preference candidates.</p>
+        </div>
+      </div>
+      <div class="work-memory-list" data-memory-candidates></div>
+    </section>
+
+    <section class="panel panel-wide">
+      <div class="section-heading-row">
+        <div>
+          <h2>Project Timeline</h2>
+          <p class="card-help">Search by BPMIS ID, Jira key, project name, or report text.</p>
+        </div>
+      </div>
+      <form class="inline-form" data-memory-timeline-form>
+        <input name="project_ref" type="search" placeholder="BPMIS ID, Jira key, or project name">
+        <button class="button button-secondary" type="submit">Search</button>
+      </form>
+      <div class="work-memory-list" data-memory-timeline></div>
+    </section>
+  </section>
+
+  <script>
+    (() => {
+      const status = document.querySelector('[data-memory-status]');
+      const candidates = document.querySelector('[data-memory-candidates]');
+      const timeline = document.querySelector('[data-memory-timeline]');
+      const ingestionRuns = document.querySelector('[data-memory-ingestion-runs]');
+      const superagentAnswer = document.querySelector('[data-superagent-answer]');
+      const itemCount = document.querySelector('[data-memory-item-count]');
+      const feedbackCount = document.querySelector('[data-memory-feedback-count]');
+      const materializedCount = document.querySelector('[data-memory-materialized-count]');
+      let lastSuperagentRequest = null;
+      const escapeHtml = (value) => String(value ?? '')
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#39;');
+
+      const setStatus = (message) => {
+        if (status) status.textContent = message;
+      };
+
+      const postFeedback = async (itemId, action, correctionText = '') => {
+        const response = await fetch('/api/work-memory/feedback', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ item_id: itemId, action, correction_text: correctionText }),
+        });
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.message || 'Could not save feedback.');
+        await loadCandidates();
+      };
+
+      const renderItems = (node, items, { review = false } = {}) => {
+        if (!node) return;
+        if (!items.length) {
+          node.innerHTML = '<p class="empty-state">No memory items found.</p>';
+          return;
+        }
+        node.innerHTML = items.map((item) => `
+          <article class="work-memory-item">
+            <div>
+              <p class="eyebrow">${escapeHtml(item.source_type)} · ${escapeHtml(item.item_type)} · ${escapeHtml(item.visibility)}</p>
+              <h3>${escapeHtml(item.summary)}</h3>
+              <p>${escapeHtml(item.observed_at || item.updated_at || '')}</p>
+              ${item.metadata?.attribution_scope === 'meeting' ? `
+                <p class="card-help">Meeting-level fact · speaker unknown · not attributed to the memory owner personally</p>
+              ` : ''}
+              ${item.metadata?.attribution_scope === 'owner_speech_candidate' ? `
+                <p class="card-help">Owner speech candidate · local microphone · candidate only</p>
+              ` : ''}
+            </div>
+            ${review ? `
+              <div class="button-row">
+                <button class="button button-secondary" type="button" data-memory-action="accept" data-item-id="${escapeHtml(item.item_id)}">Accept</button>
+                ${item.metadata?.attribution_scope === 'owner_speech_candidate' || item.item_type === 'personal_preference' ? `
+                  <button class="button button-secondary" type="button" data-memory-action="about_me" data-item-id="${escapeHtml(item.item_id)}">About Me</button>
+                  <button class="button button-secondary" type="button" data-memory-action="not_about_me" data-item-id="${escapeHtml(item.item_id)}">Not Me</button>
+                ` : ''}
+                <button class="button button-secondary" type="button" data-memory-action="correct" data-item-id="${escapeHtml(item.item_id)}">Correct</button>
+                <button class="button button-secondary" type="button" data-memory-action="private" data-item-id="${escapeHtml(item.item_id)}">Private</button>
+                <button class="button button-secondary" type="button" data-memory-action="stale" data-item-id="${escapeHtml(item.item_id)}">Stale</button>
+                <button class="button button-secondary" type="button" data-memory-action="ignore" data-item-id="${escapeHtml(item.item_id)}">Ignore</button>
+              </div>
+            ` : ''}
+          </article>
+        `).join('');
+      };
+
+      const loadHealth = async () => {
+        const response = await fetch('/api/work-memory/health');
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.message || 'Could not load memory health.');
+        if (itemCount) itemCount.textContent = payload.item_count || 0;
+        if (feedbackCount) feedbackCount.textContent = payload.feedback_count || 0;
+        if (materializedCount) materializedCount.textContent = payload.materialized_count || 0;
+        const sourceSummary = (payload.by_source || []).map((item) => `${item.source_type}: ${item.count}`).join(' · ');
+        setStatus(sourceSummary || 'No memory has been ingested yet.');
+        if (ingestionRuns) {
+          const runs = payload.ingestion_runs || [];
+          ingestionRuns.innerHTML = runs.length ? runs.map((run) => `
+            <article class="work-memory-item compact">
+              <div>
+                <p class="eyebrow">${escapeHtml(run.source_type)} · ${escapeHtml(run.status)}</p>
+                <h3>${escapeHtml(run.completed_at || '')}</h3>
+                <p>scanned ${escapeHtml(run.scanned_count || 0)} · matched ${escapeHtml(run.matched_count || 0)} · recorded ${escapeHtml(run.recorded_count || 0)} · duplicate ${escapeHtml(run.duplicate_count || 0)} · failed ${escapeHtml(run.failed_count || 0)}</p>
+                ${run.error ? `<p class="card-help">${escapeHtml(run.error)}</p>` : ''}
+              </div>
+            </article>
+          `).join('') : '<p class="empty-state">No ingestion runs recorded yet.</p>';
+        }
+      };
+
+      const loadCandidates = async () => {
+        const response = await fetch('/api/work-memory/review-candidates?limit=40');
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.message || 'Could not load review candidates.');
+        renderItems(candidates, payload.items || [], { review: true });
+      };
+
+      document.addEventListener('click', async (event) => {
+        const button = event.target.closest('[data-memory-action]');
+        if (!button) return;
+        const itemId = button.getAttribute('data-item-id');
+        const action = button.getAttribute('data-memory-action');
+        let correction = '';
+        if (action === 'correct') {
+          correction = window.prompt('Correct this memory fact:') || '';
+          if (!correction.trim()) return;
+        }
+        try {
+          await postFeedback(itemId, action, correction);
+          await loadHealth();
+        } catch (error) {
+          setStatus(error.message || 'Feedback failed.');
+        }
+      });
+
+      document.querySelector('[data-memory-refresh]')?.addEventListener('click', async () => {
+        await Promise.all([loadHealth(), loadCandidates()]);
+      });
+
+      document.querySelector('[data-memory-ingest-monthly]')?.addEventListener('click', async () => {
+        setStatus('Scanning sent Banking Product Update emails.');
+        const response = await fetch('/api/work-memory/ingest-sent-monthly-reports', { method: 'POST' });
+        const payload = await response.json();
+        if (!response.ok) {
+          setStatus(payload.message || 'Sent report scan failed.');
+          return;
+        }
+        setStatus(`Scanned ${payload.scanned || 0}, matched ${payload.matched || 0}, recorded ${payload.recorded || 0}.`);
+        await Promise.all([loadHealth(), loadCandidates()]);
+      });
+
+      document.querySelector('[data-memory-incremental]')?.addEventListener('click', async () => {
+        setStatus('Running incremental Work Memory ingestion for recent data.');
+        const response = await fetch('/api/work-memory/ingest-incremental', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ window: '7d' }),
+        });
+        const payload = await response.json();
+        if (!response.ok) {
+          setStatus(payload.message || 'Incremental ingestion failed.');
+          return;
+        }
+        setStatus(`Incremental ingest recorded ${payload.recorded || 0}, duplicate ${payload.duplicate || 0}, failed ${payload.failed || 0}.`);
+        await Promise.all([loadHealth(), loadCandidates()]);
+      });
+
+      document.querySelector('[data-memory-backfill]')?.addEventListener('click', async () => {
+        setStatus('Backfilling existing Meeting Recorder and Team Dashboard cache data.');
+        const response = await fetch('/api/work-memory/backfill-existing', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ date_range: '90d' }),
+        });
+        const payload = await response.json();
+        if (!response.ok) {
+          setStatus(payload.message || 'Backfill failed.');
+          return;
+        }
+        setStatus(`Backfilled meetings ${payload.meeting_records || 0}, Team Dashboard caches ${payload.team_dashboard_cache || 0}, recorded ${payload.recorded || 0}.`);
+        await Promise.all([loadHealth(), loadCandidates()]);
+      });
+
+      document.querySelector('[data-memory-distill]')?.addEventListener('click', async () => {
+        setStatus('Distilling Work Memory into project profiles and personal profile candidates.');
+        const response = await fetch('/api/work-memory/distill', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ date_range: '90d' }),
+        });
+        const payload = await response.json();
+        if (!response.ok) {
+          setStatus(payload.message || 'Distillation failed.');
+          return;
+        }
+        setStatus(`Distilled ${payload.project_profiles?.length || 0} project profiles.`);
+        await Promise.all([loadHealth(), loadCandidates()]);
+      });
+
+      document.querySelector('[data-memory-timeline-form]')?.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        const form = event.currentTarget;
+        const projectRef = new FormData(form).get('project_ref') || '';
+        const response = await fetch(`/api/work-memory/project-timeline?project_ref=${encodeURIComponent(projectRef)}`);
+        const payload = await response.json();
+        if (!response.ok) {
+          renderItems(timeline, []);
+          setStatus(payload.message || 'Timeline search failed.');
+          return;
+        }
+        renderItems(timeline, payload.items || []);
+      });
+
+      const askSuperagent = async (taskType, query) => {
+        const response = await fetch('/api/superagent/query', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            task_type: taskType || 'general',
+            query: query || '',
+            visibility_scope: 'owner',
+          }),
+        });
+        const payload = await response.json();
+        lastSuperagentRequest = { task_type: taskType || 'general', query: query || '' };
+        if (!response.ok) {
+          if (superagentAnswer) superagentAnswer.innerHTML = `<p class="empty-state">${escapeHtml(payload.message || 'Superagent query failed.')}</p>`;
+          return;
+        }
+        const evidence = payload.evidence || [];
+        if (superagentAnswer) {
+          superagentAnswer.innerHTML = `
+            <article class="work-memory-item">
+              <div>
+                <p class="eyebrow">readonly · ${escapeHtml(payload.confidence || 'low')} confidence</p>
+                <h3>Answer</h3>
+                <p>${escapeHtml(payload.answer || '').replaceAll('\n', '<br>')}</p>
+              </div>
+            </article>
+            ${evidence.length ? evidence.map((item) => `
+              <article class="work-memory-item compact">
+                <div>
+                  <p class="eyebrow">${escapeHtml(item.source_type)} · ${escapeHtml(item.item_type)} · ${escapeHtml(item.visibility)}</p>
+                  <h3>${escapeHtml(item.summary)}</h3>
+                  <p>${escapeHtml(item.observed_at || '')}</p>
+                </div>
+              </article>
+            `).join('') : '<p class="empty-state">No evidence returned.</p>'}
+            ${(payload.unknowns || []).length ? `
+              <article class="work-memory-item compact">
+                <div>
+                  <p class="eyebrow">unknowns</p>
+                  <h3>Open assumptions</h3>
+                  <p>${escapeHtml((payload.unknowns || []).join(' · '))}</p>
+                </div>
+              </article>
+            ` : ''}
+          `;
+        }
+      };
+
+      document.querySelector('[data-superagent-form]')?.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        const form = event.currentTarget;
+        const formData = new FormData(form);
+        await askSuperagent(formData.get('task_type') || 'general', formData.get('query') || '');
+      });
+
+      document.querySelectorAll('[data-superagent-task]').forEach((button) => {
+        button.addEventListener('click', async () => {
+          const task = button.getAttribute('data-superagent-task') || 'general';
+          const query = document.querySelector('[data-superagent-form] input[name="query"]')?.value || button.getAttribute('data-superagent-query') || '';
+          const select = document.querySelector('[data-superagent-form] select[name="task_type"]');
+          if (select) select.value = task;
+          await askSuperagent(task, query);
+        });
+      });
+
+      document.querySelector('[data-superagent-explain]')?.addEventListener('click', async () => {
+        const form = document.querySelector('[data-superagent-form]');
+        const formData = form ? new FormData(form) : new FormData();
+        const request = lastSuperagentRequest || {
+          task_type: formData.get('task_type') || 'general',
+          query: formData.get('query') || '',
+        };
+        const response = await fetch('/api/superagent/explain', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ...request, visibility_scope: 'owner' }),
+        });
+        const payload = await response.json();
+        if (!response.ok) {
+          setStatus(payload.message || 'Explain failed.');
+          return;
+        }
+        const evidence = payload.evidence || [];
+        if (superagentAnswer) {
+          superagentAnswer.innerHTML = evidence.length ? evidence.map((item) => `
+            <article class="work-memory-item compact">
+              <div>
+                <p class="eyebrow">${escapeHtml(item.source_type)} · precedence ${escapeHtml(item.source_precedence || 0)}</p>
+                <h3>${escapeHtml(item.summary)}</h3>
+                <p>${escapeHtml(item.attribution_rule_id || item.attribution_scope || 'No attribution rule')}</p>
+              </div>
+            </article>
+          `).join('') : '<p class="empty-state">No evidence to explain.</p>';
+        }
+      });
+
+      Promise.all([loadHealth(), loadCandidates()]).catch((error) => setStatus(error.message || 'Could not load AI Memory.'));
+    })();
+  </script>
+{% endblock %}

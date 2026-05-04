@@ -98,6 +98,13 @@ from bpmis_jira_tool.user_config import (
     TEAM_PROFILE_DEFAULTS,
     WebConfigStore,
 )
+from bpmis_jira_tool.work_memory import (
+    WorkMemoryStore,
+    meeting_record_memory_items,
+    sent_monthly_report_memory_item_from_gmail_record,
+    source_code_qa_memory_item,
+    team_dashboard_memory_items,
+)
 from prd_briefing import create_prd_briefing_blueprint
 from prd_briefing.confluence import ConfluenceConnector
 from prd_briefing.reviewer import PRDBriefingReviewRequest, PRDReviewRequest, PRDReviewService
@@ -2367,6 +2374,7 @@ def create_app() -> Flask:
     app.config["CONFIG_STORE"] = config_store
     app.config["BPMIS_PROJECT_STORE"] = BPMISProjectStore(config_store.db_path)
     app.config["TEAM_DASHBOARD_CONFIG_STORE"] = TeamDashboardConfigStore(config_store.db_path)
+    app.config["WORK_MEMORY_STORE"] = WorkMemoryStore(data_root / "work_memory" / "memory.db")
     app.config["JOB_STORE"] = JobStore(data_root / "run" / "jobs.json")
     app.config["SOURCE_CODE_QA_QUERY_SCHEDULER"] = SourceCodeQAQueryScheduler(
         job_store=app.config["JOB_STORE"],
@@ -2520,6 +2528,14 @@ def create_app() -> Flask:
                 "active": current_endpoint == "index",
             }
         )
+        if _can_access_work_memory(settings):
+            site_tabs.append(
+                {
+                    "label": "AI Memory",
+                    "href": url_for("work_memory_page"),
+                    "active": request.path.startswith("/work-memory"),
+                }
+            )
         return {
             "site_tabs": site_tabs,
             "site_requires_google_login": _site_requires_google_login(settings),
@@ -3125,6 +3141,14 @@ def create_app() -> Flask:
                 if session_payload is not None:
                     result["session"] = session_payload
                     result["session_id"] = session_id
+            _record_source_code_qa_work_memory(
+                owner_email=owner_email,
+                pm_team=pm_team,
+                country=country,
+                question=str(payload.get("question") or ""),
+                result=result,
+                session_id=session_id,
+            )
             return jsonify(result)
         except ToolError as error:
             return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
@@ -3204,6 +3228,221 @@ def create_app() -> Flask:
             return jsonify(result)
         except ToolError as error:
             return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
+
+    @app.get("/work-memory")
+    def work_memory_page():
+        access_gate = _require_work_memory_access(settings)
+        if access_gate is not None:
+            return access_gate
+        return render_template("work_memory.html", page_title="AI Memory")
+
+    @app.get("/api/work-memory/health")
+    def work_memory_health_api():
+        access_gate = _require_work_memory_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        return jsonify(_get_work_memory_store().health())
+
+    @app.get("/api/work-memory/recent")
+    def work_memory_recent_api():
+        access_gate = _require_work_memory_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        items = _get_work_memory_store().query_work_memory(
+            owner_email=_current_google_email(),
+            visibility_scope=str(request.args.get("scope") or "owner").strip().lower() or "owner",
+            query=str(request.args.get("q") or ""),
+            filters={
+                "source_type": str(request.args.get("source_type") or "").strip(),
+                "item_type": str(request.args.get("item_type") or "").strip(),
+            },
+            limit=int(request.args.get("limit") or 50),
+        )
+        return jsonify({"status": "ok", "items": items})
+
+    @app.get("/api/work-memory/review-candidates")
+    def work_memory_review_candidates_api():
+        access_gate = _require_work_memory_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        items = _get_work_memory_store().review_candidates(owner_email=_current_google_email(), limit=int(request.args.get("limit") or 50))
+        return jsonify({"status": "ok", "items": items})
+
+    @app.get("/api/work-memory/project-timeline")
+    def work_memory_project_timeline_api():
+        access_gate = _require_work_memory_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        project_ref = str(request.args.get("project_ref") or request.args.get("q") or "").strip()
+        items = _get_work_memory_store().project_timeline(
+            project_ref=project_ref,
+            owner_email=_current_google_email(),
+            visibility_scope=str(request.args.get("scope") or "owner").strip().lower() or "owner",
+            limit=int(request.args.get("limit") or 100),
+        )
+        return jsonify({"status": "ok", "items": items})
+
+    @app.get("/api/work-memory/entity-resolution")
+    def work_memory_entity_resolution_api():
+        access_gate = _require_work_memory_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        result = _get_work_memory_store().resolve_work_entity(
+            query=str(request.args.get("q") or request.args.get("query") or "").strip(),
+            owner_email=_current_google_email(),
+            entity_type=str(request.args.get("entity_type") or "").strip(),
+        )
+        return jsonify(result)
+
+    @app.post("/api/work-memory/feedback")
+    def work_memory_feedback_api():
+        access_gate = _require_work_memory_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        payload = request.get_json(silent=True) or {}
+        try:
+            result = _get_work_memory_store().record_memory_feedback(
+                item_id=str(payload.get("item_id") or "").strip(),
+                action=str(payload.get("action") or "").strip(),
+                owner_email=_current_google_email(),
+                correction_text=str(payload.get("correction_text") or "").strip(),
+                visibility_override=str(payload.get("visibility_override") or "").strip(),
+                reason=str(payload.get("reason") or "").strip(),
+            )
+            return jsonify(result)
+        except (KeyError, ValueError) as error:
+            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
+
+    @app.post("/api/work-memory/ingest-sent-monthly-reports")
+    def work_memory_ingest_sent_monthly_reports_api():
+        access_gate = _require_work_memory_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        try:
+            result = _ingest_sent_monthly_reports_from_gmail(settings)
+            return jsonify({"status": "ok", **result})
+        except (ConfigError, ToolError) as error:
+            return jsonify({"status": "error", "message": str(error), **_classify_portal_error(error)}), HTTPStatus.BAD_REQUEST
+
+    @app.post("/api/work-memory/backfill-existing")
+    def work_memory_backfill_existing_api():
+        access_gate = _require_work_memory_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        payload = request.get_json(silent=True) or {}
+        result = _ingest_existing_work_memory_sources(
+            settings,
+            date_range=str(payload.get("date_range") or "90d").strip() or "90d",
+            sources=[str(item or "").strip() for item in payload.get("sources") or [] if str(item or "").strip()] if isinstance(payload.get("sources"), list) else [],
+        )
+        return jsonify({"status": "ok", **result})
+
+    @app.post("/api/work-memory/distill")
+    def work_memory_distill_api():
+        access_gate = _require_work_memory_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        payload = request.get_json(silent=True) or {}
+        result = _get_work_memory_store().distill_work_memory(
+            owner_email=_current_google_email(),
+            date_range=str(payload.get("date_range") or "90d").strip() or "90d",
+            sources=[str(item or "").strip() for item in payload.get("sources") or [] if str(item or "").strip()] if isinstance(payload.get("sources"), list) else [],
+            project_refs=[str(item or "").strip() for item in payload.get("project_refs") or [] if str(item or "").strip()] if isinstance(payload.get("project_refs"), list) else [],
+        )
+        return jsonify({"status": "ok", **result})
+
+    @app.post("/api/work-memory/ingest-incremental")
+    def work_memory_ingest_incremental_api():
+        access_gate = _require_work_memory_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        payload = request.get_json(silent=True) or {}
+        try:
+            result = _run_incremental_memory_ingestion(
+                settings,
+                window=str(payload.get("window") or "7d").strip() or "7d",
+                reconciliation=bool(payload.get("reconciliation")),
+            )
+            return jsonify({"status": "ok", **result})
+        except (ConfigError, ToolError) as error:
+            return jsonify({"status": "error", "message": str(error), **_classify_portal_error(error)}), HTTPStatus.BAD_REQUEST
+
+    @app.get("/api/superagent/health")
+    def superagent_health_api():
+        access_gate = _require_work_memory_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        return jsonify(_get_work_memory_store().superagent_health(owner_email=_current_google_email()))
+
+    @app.post("/api/superagent/query")
+    def superagent_query_api():
+        access_gate = _require_work_memory_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        payload = request.get_json(silent=True) or {}
+        task_type = str(payload.get("task_type") or "general").strip() or "general"
+        query_text = str(payload.get("query") or "").strip()
+        context = _get_work_memory_store().query_superagent_context(
+            query=query_text,
+            owner_email=_current_google_email(),
+            visibility_scope=str(payload.get("visibility_scope") or "owner").strip().lower() or "owner",
+            task_type=task_type,
+            limit=int(payload.get("limit") or 12),
+        )
+        result = _get_work_memory_store().generate_llm_superagent_answer(task_type=task_type, query=query_text, context=context)
+        audit = _get_work_memory_store().record_superagent_audit_log(
+            owner_email=_current_google_email(),
+            user_email=_current_google_email(),
+            query=query_text,
+            task_type=task_type,
+            visibility_scope=str(payload.get("visibility_scope") or "owner").strip().lower() or "owner",
+            context=context,
+            answer=result,
+            metadata={"route": "/api/superagent/query"},
+        )
+        return jsonify({"status": "ok", "context": context, "audit": audit, **result})
+
+    @app.post("/api/superagent/explain")
+    def superagent_explain_api():
+        access_gate = _require_work_memory_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        payload = request.get_json(silent=True) or {}
+        result = _get_work_memory_store().explain_superagent_answer(
+            owner_email=_current_google_email(),
+            query=str(payload.get("query") or "").strip(),
+            task_type=str(payload.get("task_type") or "general").strip() or "general",
+            visibility_scope=str(payload.get("visibility_scope") or "owner").strip().lower() or "owner",
+        )
+        return jsonify(result)
+
+    @app.post("/api/superagent/eval")
+    def superagent_eval_api():
+        access_gate = _require_work_memory_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        payload = request.get_json(silent=True) or {}
+        result = _get_work_memory_store().run_superagent_eval_cases(
+            owner_email=_current_google_email(),
+            cases=payload.get("cases") if isinstance(payload.get("cases"), list) else None,
+            limit=int(payload.get("limit") or 30),
+        )
+        return jsonify(result)
+
+    @app.get("/api/superagent/audit")
+    def superagent_audit_api():
+        access_gate = _require_work_memory_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        return jsonify(
+            {
+                "status": "ok",
+                "items": _get_work_memory_store().superagent_audit_log(
+                    owner_email=_current_google_email(),
+                    limit=int(request.args.get("limit") or 50),
+                ),
+            }
+        )
 
     @app.get("/auth/google/login")
     def google_login():
@@ -4833,6 +5072,7 @@ def create_app() -> Flask:
                     route_started_at=route_started_at,
                     key_project_overrides=key_project_overrides,
                 )
+                _record_team_dashboard_work_memory(team_payloads, owner_email=_current_google_email())
                 response = jsonify(
                     {
                         "status": "ok",
@@ -4951,6 +5191,7 @@ def create_app() -> Flask:
                         "timing_stats": timing_stats,
                     }
                 )
+        _record_team_dashboard_work_memory(team_payloads, owner_email=_current_google_email())
         response = jsonify(
             {
                 "status": "partial" if has_error else "ok",
@@ -5344,6 +5585,15 @@ def create_app() -> Flask:
                     extra={"recipient": recipient, "subject": subject, "message_id": str(data.get("message_id") or "")},
                 ),
             )
+            memory_result = {"recorded": 0, "failed": 0}
+            if _google_credentials_have_scopes(GMAIL_READONLY_SCOPE):
+                try:
+                    memory_result = _ingest_sent_monthly_reports_from_gmail(settings)
+                except Exception:  # noqa: BLE001 - sent-mail memory ingestion must not block email sending.
+                    current_app.logger.exception("Monthly Report sent-mail Work Memory ingestion failed.")
+            else:
+                current_app.logger.info("Skipping Monthly Report sent-mail Work Memory ingestion because gmail.readonly scope is absent.")
+            data["work_memory"] = memory_result
             return jsonify({"status": "ok", **data})
         except ToolError as error:
             error_details = _classify_portal_error(error)
@@ -6372,6 +6622,243 @@ def _get_meeting_recorder_runtime() -> MeetingRecorderRuntime:
     return current_app.config["MEETING_RECORDER_RUNTIME"]
 
 
+def _get_work_memory_store() -> WorkMemoryStore:
+    return current_app.config["WORK_MEMORY_STORE"]
+
+
+def _record_work_memory_items(items: list[dict[str, Any]], *, event: str) -> dict[str, int]:
+    recorded = 0
+    failed = 0
+    duplicate = 0
+    if not items:
+        try:
+            _get_work_memory_store().record_ingestion_run(
+                source_type=event,
+                owner_email=_current_google_email(),
+                status="ok",
+                recorded_count=0,
+                failed_count=0,
+            )
+        except Exception:
+            current_app.logger.debug("Work Memory empty ingestion ledger write failed for %s.", event, exc_info=True)
+        return {"recorded": 0, "failed": 0, "duplicate": 0}
+    store = _get_work_memory_store()
+    for item in items:
+        try:
+            source_type = str(item.get("source_type") or "").strip()
+            source_id = str(item.get("source_id") or "").strip()
+            item_type = str(item.get("item_type") or "").strip()
+            owner_email = str(item.get("owner_email") or "").strip().lower()
+            existing_id = None
+            if source_type and source_id and item_type and owner_email:
+                existing_id = hashlib.sha256("\x1f".join([source_type, source_id, item_type, owner_email]).encode("utf-8")).hexdigest()[:32]
+                if store.get_item(existing_id):
+                    duplicate += 1
+            store.record_memory_item(**item)
+            recorded += 1
+        except Exception:  # noqa: BLE001 - memory ingestion must not break the primary tool flow.
+            failed += 1
+            current_app.logger.exception("Work Memory ingestion failed for %s.", event)
+    try:
+        store.record_ingestion_run(
+            source_type=event,
+            owner_email=_current_google_email(),
+            status="ok" if failed == 0 else "partial_error",
+            scanned_count=len(items),
+            matched_count=len(items),
+            recorded_count=recorded,
+            duplicate_count=duplicate,
+            failed_count=failed,
+        )
+    except Exception:
+        current_app.logger.debug("Work Memory ingestion ledger write failed for %s.", event, exc_info=True)
+    return {"recorded": recorded, "failed": failed, "duplicate": duplicate}
+
+
+def _record_team_dashboard_work_memory(team_payloads: list[dict[str, Any]], *, owner_email: str) -> dict[str, int]:
+    items: list[dict[str, Any]] = []
+    for team_payload in team_payloads or []:
+        if isinstance(team_payload, dict) and not team_payload.get("error"):
+            items.extend(team_dashboard_memory_items(team_payload, owner_email=owner_email))
+    return _record_work_memory_items(items, event="team_dashboard")
+
+
+def _record_meeting_work_memory(record: dict[str, Any]) -> dict[str, int]:
+    return _record_work_memory_items(meeting_record_memory_items(record), event="meeting_recorder")
+
+
+def _record_source_code_qa_work_memory(
+    *,
+    owner_email: str,
+    pm_team: str,
+    country: str,
+    question: str,
+    result: dict[str, Any],
+    session_id: str = "",
+    job_id: str = "",
+) -> dict[str, int]:
+    item = source_code_qa_memory_item(
+        owner_email=owner_email,
+        pm_team=pm_team,
+        country=country,
+        question=question,
+        result=result,
+        session_id=session_id,
+        job_id=job_id,
+    )
+    return _record_work_memory_items([item], event="source_code_qa")
+
+
+SENT_MONTHLY_REPORT_SUBJECT_PATTERN = re.compile(
+    r"^\[Banking\]\s+Product\s+Update\s+\("
+    r"\d{1,2}\s+[A-Za-z]{3}\s*-\s*\d{1,2}\s+[A-Za-z]{3}"
+    r"\)\s+-\s+Anti-Fraud,\s+Credit\s+Risk\s+&\s+Ops\s+Risk$",
+    re.IGNORECASE,
+)
+
+
+def _is_sent_monthly_report_subject(subject: str) -> bool:
+    return bool(SENT_MONTHLY_REPORT_SUBJECT_PATTERN.match(str(subject or "").strip()))
+
+
+def _ingest_existing_work_memory_sources(settings: Settings, *, date_range: str = "90d", sources: list[str] | None = None) -> dict[str, Any]:
+    owner_email = _current_google_email()
+    items: list[dict[str, Any]] = []
+    source_counts = {"meeting_records": 0, "team_dashboard_cache": 0}
+    source_filter = {str(source or "").strip() for source in sources or [] if str(source or "").strip()}
+
+    if not source_filter or "meeting_recorder" in source_filter:
+        try:
+            if _local_agent_meeting_recorder_enabled(settings):
+                records = _build_local_agent_client(settings).meeting_recorder_records(owner_email=owner_email)
+            else:
+                records = _get_meeting_record_store().list_records(owner_email=owner_email)
+            for record in records:
+                if str(record.get("status") or "").strip().lower() != "completed":
+                    continue
+                record_items = meeting_record_memory_items(record)
+                if record_items:
+                    source_counts["meeting_records"] += 1
+                    items.extend(record_items)
+        except Exception:
+            current_app.logger.exception("Work Memory meeting backfill failed.")
+
+    if not source_filter or "team_dashboard" in source_filter:
+        try:
+            config = _get_team_dashboard_config_store().load()
+            task_cache = config.get("task_cache") if isinstance(config.get("task_cache"), dict) else {}
+            cached_teams = task_cache.get("teams") if isinstance(task_cache.get("teams"), dict) else {}
+            for team_key, cached_team in cached_teams.items():
+                if not isinstance(cached_team, dict):
+                    continue
+                team_payload = {
+                    **cached_team,
+                    "team_key": str(cached_team.get("team_key") or team_key),
+                    "member_emails": _normalize_team_dashboard_emails(cached_team.get("member_emails") or []),
+                    "loading": False,
+                    "loaded": True,
+                    "error": "",
+                    "progress_text": "",
+                    "cache_source": "backfill",
+                }
+                team_items = team_dashboard_memory_items(team_payload, owner_email=owner_email)
+                if team_items:
+                    source_counts["team_dashboard_cache"] += 1
+                    items.extend(team_items)
+        except Exception:
+            current_app.logger.exception("Work Memory Team Dashboard cache backfill failed.")
+
+    result = _record_work_memory_items(items, event="work_memory_existing_backfill")
+    return {**result, **source_counts, "date_range": date_range, "sources": sorted(source_filter)}
+
+
+def _ingest_sent_monthly_reports_from_gmail(settings: Settings) -> dict[str, Any]:
+    del settings
+    if not _google_credentials_have_scopes(GMAIL_READONLY_SCOPE):
+        raise ConfigError("Gmail read permission is missing. Reconnect Google once to grant gmail.readonly.")
+    service = _build_gmail_dashboard_service()
+    owner_email = _current_google_email()
+    queries = [
+        'in:sent newer_than:180d from:me subject:"[Banking] Product Update"',
+        'in:sent newer_than:180d from:me subject:"Anti-Fraud, Credit Risk & Ops Risk"',
+        'in:sent newer_than:180d from:me "[Banking] Product Update" "Anti-Fraud, Credit Risk & Ops Risk"',
+    ]
+    seen_ids: set[str] = set()
+    records = []
+    for query in queries:
+        for message_id in service._list_message_ids(query=query, max_messages=20):
+            if message_id in seen_ids:
+                continue
+            seen_ids.add(message_id)
+            records.append(service._fetch_message_full(message_id))
+    items = []
+    for record in records:
+        headers = getattr(record, "headers", {}) or {}
+        sender_text = str(headers.get("from") or "").casefold()
+        if owner_email and owner_email not in sender_text:
+            continue
+        if not _is_sent_monthly_report_subject(str(headers.get("subject") or "")):
+            continue
+        items.append(sent_monthly_report_memory_item_from_gmail_record(owner_email=owner_email, record=record))
+    result = _record_work_memory_items(items, event="gmail_sent_monthly_report_scan")
+    return {"scanned": len(records), "matched": len(items), **result}
+
+
+def _run_incremental_memory_ingestion(settings: Settings, *, window: str = "7d", reconciliation: bool = False) -> dict[str, Any]:
+    effective_window = "90d" if reconciliation else (str(window or "7d").strip() or "7d")
+    sources = ["meeting_recorder", "team_dashboard"]
+    result: dict[str, Any] = {
+        "window": effective_window,
+        "reconciliation": bool(reconciliation),
+        "sources": {},
+        "recorded": 0,
+        "failed": 0,
+        "duplicate": 0,
+    }
+    existing = _ingest_existing_work_memory_sources(settings, date_range=effective_window, sources=sources)
+    result["sources"]["existing"] = existing
+    for key in ("recorded", "failed", "duplicate"):
+        result[key] += int(existing.get(key) or 0)
+    if _google_credentials_have_scopes(GMAIL_READONLY_SCOPE):
+        try:
+            sent_reports = _ingest_sent_monthly_reports_from_gmail(settings)
+            result["sources"]["gmail_sent_monthly_report"] = sent_reports
+            for key in ("recorded", "failed", "duplicate"):
+                result[key] += int(sent_reports.get(key) or 0)
+        except Exception as error:  # noqa: BLE001 - incremental ingestion should keep partial source results.
+            current_app.logger.exception("Work Memory incremental Gmail sent report ingestion failed.")
+            result["sources"]["gmail_sent_monthly_report"] = {"status": "error", "message": str(error)}
+            result["failed"] += 1
+            _get_work_memory_store().record_ingestion_run(
+                source_type="gmail_sent_monthly_report_incremental",
+                owner_email=_current_google_email(),
+                cursor=effective_window,
+                status="error",
+                failed_count=1,
+                error=str(error),
+            )
+    else:
+        result["sources"]["gmail_sent_monthly_report"] = {
+            "status": "skipped",
+            "message": "Gmail readonly scope is missing.",
+        }
+    distilled = _get_work_memory_store().distill_work_memory(owner_email=_current_google_email(), date_range=effective_window)
+    result["sources"]["distill"] = distilled
+    _get_work_memory_store().record_ingestion_run(
+        source_type="work_memory_incremental",
+        owner_email=_current_google_email(),
+        cursor=effective_window,
+        status="ok" if result["failed"] == 0 else "partial_error",
+        scanned_count=sum(int((source_result or {}).get("scanned") or (source_result or {}).get("meeting_records") or 0) for source_result in result["sources"].values() if isinstance(source_result, dict)),
+        matched_count=result["recorded"],
+        recorded_count=result["recorded"],
+        duplicate_count=result["duplicate"],
+        failed_count=result["failed"],
+        metadata={"sources": sources, "reconciliation": bool(reconciliation)},
+    )
+    return result
+
+
 def _build_calendar_meeting_service() -> GoogleCalendarMeetingService:
     return GoogleCalendarMeetingService(get_google_credentials())
 
@@ -6692,6 +7179,10 @@ def _can_access_source_code_qa(settings: Settings) -> bool:
 
 
 def _can_manage_source_code_qa(settings: Settings) -> bool:
+    return _is_portal_admin()
+
+
+def _can_access_work_memory(settings: Settings) -> bool:
     return _is_portal_admin()
 
 
@@ -7962,6 +8453,19 @@ def _require_source_code_qa_manage_access(settings: Settings, *, api: bool = Fal
     return None
 
 
+def _require_work_memory_access(settings: Settings, *, api: bool = False):
+    login_gate = _require_google_login(settings, api=api)
+    if login_gate is not None:
+        return login_gate
+    message = f"AI Memory is restricted to {PORTAL_ADMIN_EMAIL}."
+    if not _can_access_work_memory(settings):
+        if api:
+            return jsonify({"status": "error", "message": message}), HTTPStatus.FORBIDDEN
+        flash(message, "error")
+        return redirect(url_for("index"))
+    return None
+
+
 def _require_team_dashboard_access(settings: Settings, *, api: bool = False):
     login_gate = _require_google_login(settings, api=api)
     if login_gate is not None:
@@ -8573,6 +9077,7 @@ def _run_meeting_recorder_process_job(
                 else None
             )
             completed_record = _get_meeting_record_store().get_record(record_id)
+            _record_meeting_work_memory(completed_record)
             details = [f"Record: {record_id}"]
             if email_payload:
                 if email_payload.get("status") == "sent":
@@ -8765,6 +9270,15 @@ def _run_source_code_qa_query_job(app: Flask, job_id: str, payload: dict[str, An
                     elapsed_seconds,
                     str((job_store.snapshot(job_id) or {}).get("stage") or ""),
                 )
+            _record_source_code_qa_work_memory(
+                owner_email=owner_email,
+                pm_team=pm_team,
+                country=country,
+                question=str(payload.get("question") or ""),
+                result=result,
+                session_id=session_id,
+                job_id=job_id,
+            )
             job_store.complete(
                 job_id,
                 results=[result],

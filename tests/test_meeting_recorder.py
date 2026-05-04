@@ -1209,6 +1209,66 @@ class MeetingProcessingServiceTests(unittest.TestCase):
         self.assertEqual(processed["visual_evidence"], [])
         self.assertEqual(processed["transcript"]["text"], "Alice approved.")
 
+    def test_process_screencapture_recording_marks_local_microphone_owner_speech_candidates(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = MeetingRecordStore(root)
+            record = store.create_record(
+                owner_email="owner@npt.sg",
+                title="Zoom",
+                platform="zoom",
+                meeting_link="https://zoom.us/j/123",
+            )
+            record_dir = store.record_dir(record["record_id"])
+            mixed_path = record_dir / "meeting.wav"
+            microphone_path = record_dir / "screencapture-microphone.caf"
+            mixed_path.write_bytes(b"audio")
+            microphone_path.write_bytes(b"microphone audio" * 8)
+            record["status"] = "recorded"
+            record["media"] = {
+                "audio_capture_profile": "screencapturekit_audio_v1",
+                "screencapture_capture_source": "screencapturekit_audio",
+                "audio_path": str(mixed_path.relative_to(root)),
+                "audio_url": f"/meeting-recorder/assets/{record['record_id']}/meeting.wav",
+                "microphone_audio_path": str(microphone_path.relative_to(root)),
+            }
+            store.save_record(record)
+            service = MeetingProcessingService(
+                store=store,
+                config=MeetingRecorderConfig(),
+                text_client=FakeTextClient(),
+            )
+
+            def transcribe(audio_path, **kwargs):
+                if Path(audio_path).name == "screencapture-microphone.caf":
+                    self.assertEqual(kwargs["output_prefix"], "owner-microphone-transcript")
+                    return {
+                        "text": "I will confirm the release date.",
+                        "chunks": [{"start_seconds": 3.0, "end_seconds": 5.0, "text": "I will confirm the release date."}],
+                        "segments": [],
+                        "quality": {},
+                    }
+                return {
+                    "text": "Team discussed release date.",
+                    "chunks": [{"start_seconds": 0.0, "end_seconds": 8.0, "text": "Team discussed release date."}],
+                    "segments": [],
+                    "quality": {},
+                }
+
+            with patch.object(service, "_transcribe_audio", side_effect=transcribe) as transcribe_audio, patch(
+                "bpmis_jira_tool.meeting_recorder._audio_duration_seconds",
+                return_value=10.0,
+            ):
+                processed = service.process_recording(record_id=record["record_id"], owner_email="owner@npt.sg")
+                owner_transcript_exists = (store.record_dir(record["record_id"]) / "owner-microphone-transcript.txt").exists()
+
+        self.assertEqual(transcribe_audio.call_count, 2)
+        candidates = processed["transcript"]["owner_speech_candidates"]
+        self.assertEqual(candidates[0]["speaker"], "me_candidate")
+        self.assertEqual(candidates[0]["speaker_source"], "local_microphone")
+        self.assertEqual(candidates[0]["speaker_confidence"], "candidate")
+        self.assertTrue(owner_transcript_exists)
+
     def test_extract_audio_preserves_sparse_meeting_audio_timeline(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

@@ -8844,6 +8844,34 @@ select:focus {
   white-space: nowrap;
 }
 
+.work-memory-list {
+  display: grid;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.work-memory-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 16px;
+  align-items: start;
+  border: 1px solid rgba(15, 23, 42, 0.12);
+  border-radius: 8px;
+  padding: 14px;
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.work-memory-item h3 {
+  margin: 4px 0 6px;
+  font-size: 1rem;
+  line-height: 1.35;
+}
+
+.work-memory-item p {
+  margin: 0;
+  color: var(--muted-text);
+}
+
 @media (max-width: 760px) {
   .page-shell.page-shell-login-image {
     padding: 0;
@@ -8865,6 +8893,10 @@ select:focus {
 }
 
 @media (max-width: 900px) {
+  .work-memory-item {
+    grid-template-columns: 1fr;
+  }
+
   .meeting-recorder-hero,
   .meeting-recorder-grid,
   .meeting-record-layout {

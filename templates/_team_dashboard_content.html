@@ -31,9 +31,11 @@
     {% if can_view_team_dashboard_monthly_report %}
       <button class="workspace-tab" type="button" role="tab" aria-selected="false" data-team-dashboard-tab="monthly-report">Monthly Report</button>
       <button class="workspace-tab" type="button" role="tab" aria-selected="false" data-team-dashboard-tab="report-intelligence">Report Intelligence</button>
-      <button class="workspace-tab" type="button" role="tab" aria-selected="false" data-team-dashboard-tab="seatalk-name-mapping">SeaTalk Name Mapping</button>
     {% endif %}
     <button class="workspace-tab" type="button" role="tab" aria-selected="false" data-team-dashboard-tab="link-biz-project">Link Biz Project</button>
+    {% if can_view_team_dashboard_monthly_report %}
+      <button class="workspace-tab" type="button" role="tab" aria-selected="false" data-team-dashboard-tab="seatalk-name-mapping">SeaTalk Name Mapping</button>
+    {% endif %}
     {% if can_manage_team_dashboard %}
       <button class="workspace-tab" type="button" role="tab" aria-selected="false" data-team-dashboard-tab="admin">Team Admin</button>
     {% endif %}
