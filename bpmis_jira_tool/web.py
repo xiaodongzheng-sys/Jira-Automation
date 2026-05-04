@@ -4049,16 +4049,27 @@ def create_app() -> Flask:
         access_gate = _require_meeting_recorder_access(settings, api=True)
         if access_gate is not None:
             return access_gate
+        owner_email = _current_google_email()
         try:
             if _local_agent_meeting_recorder_enabled(settings):
                 result = _build_local_agent_client(settings).meeting_recorder_stop(
                     record_id=record_id,
-                    owner_email=_current_google_email(),
+                    owner_email=owner_email,
                 )
-                return jsonify({"status": "ok", "record": result.get("record") or {}})
-            record = _get_meeting_recorder_runtime().stop_recording(record_id=record_id, owner_email=_current_google_email())
-            return jsonify({"status": "ok", "record": _meeting_record_summary(record)})
-        except ToolError as error:
+                process_payload = _meeting_recorder_auto_process_payload(
+                    settings=settings,
+                    record_id=record_id,
+                    owner_email=owner_email,
+                )
+                return jsonify({"status": "ok", "record": result.get("record") or {}, **process_payload})
+            record = _get_meeting_recorder_runtime().stop_recording(record_id=record_id, owner_email=owner_email)
+            process_payload = _meeting_recorder_auto_process_payload(
+                settings=settings,
+                record_id=record_id,
+                owner_email=owner_email,
+            )
+            return jsonify({"status": "ok", "record": _meeting_record_summary(record), **process_payload})
+        except (ToolError, requests.RequestException) as error:
             return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
 
     @app.post("/api/meeting-recorder/records/<record_id>/signal-check")
@@ -4119,11 +4130,18 @@ def create_app() -> Flask:
                 "audio_base64": audio_base64,
                 "browser_audio_device_label": str(payload.get("browser_audio_device_label") or "").strip(),
                 "browser_audio_capture_source": capture_path,
+                "transcript_language": normalize_meeting_transcript_language(payload.get("transcript_language") or payload.get("transcriptLanguage")),
                 "browser_audio_preflight": payload.get("browser_audio_preflight") if isinstance(payload.get("browser_audio_preflight"), dict) else {},
             }
             if _local_agent_meeting_recorder_enabled(settings):
                 result = _build_local_agent_client(settings).meeting_recorder_browser_audio(remote_payload)
                 record = result.get("record") or {}
+                record_id = str(record.get("record_id") or "").strip()
+                process_payload = _meeting_recorder_auto_process_payload(
+                    settings=settings,
+                    record_id=record_id,
+                    owner_email=_current_google_email(),
+                ) if record_id else {"auto_process_error": "Meeting processing could not be queued because the recording id was missing."}
                 _log_portal_event(
                     "meeting_recorder_browser_audio_forwarded",
                     **_build_request_log_context(
@@ -4138,7 +4156,7 @@ def create_app() -> Flask:
                         },
                     ),
                 )
-                return jsonify({"status": "ok", "record": result.get("record") or {}})
+                return jsonify({"status": "ok", "record": record, **process_payload})
             try:
                 audio_bytes = base64.b64decode(audio_base64, validate=True)
             except (ValueError, TypeError) as error:
@@ -4157,6 +4175,11 @@ def create_app() -> Flask:
                 preflight_metrics=remote_payload["browser_audio_preflight"],
                 transcript_language=normalize_meeting_transcript_language(payload.get("transcript_language") or payload.get("transcriptLanguage")),
             )
+            process_payload = _meeting_recorder_auto_process_payload(
+                settings=settings,
+                record_id=str(record.get("record_id") or ""),
+                owner_email=_current_google_email(),
+            )
             _log_portal_event(
                 "meeting_recorder_browser_audio_saved",
                 **_build_request_log_context(
@@ -4172,7 +4195,7 @@ def create_app() -> Flask:
                     },
                 ),
             )
-            return jsonify({"status": "ok", "record": _meeting_record_summary(record)})
+            return jsonify({"status": "ok", "record": _meeting_record_summary(record), **process_payload})
         except (ConfigError, ToolError) as error:
             return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
 
@@ -8369,6 +8392,36 @@ def _meeting_record_for_processing_job(record_id: str, owner_email: str) -> dict
     if status in {"recorded", "failed", "completed", "processing"}:
         return record
     raise ToolError("Stop the recording before processing this meeting.")
+
+
+def _meeting_recorder_auto_process_payload(*, settings: Settings, record_id: str, owner_email: str) -> dict[str, Any]:
+    try:
+        if _local_agent_meeting_recorder_enabled(settings):
+            result = _build_local_agent_client(settings).meeting_recorder_process_start(
+                record_id=record_id,
+                owner_email=owner_email,
+            )
+            return {
+                "state": result.get("state") or "queued",
+                "job_id": result.get("job_id") or "",
+            }
+        payload = _queue_meeting_recorder_process_job(
+            app=current_app._get_current_object(),
+            settings=settings,
+            record_id=record_id,
+            owner_email=owner_email,
+        )
+        return {
+            "state": payload.get("state") or "queued",
+            "job_id": payload.get("job_id") or "",
+        }
+    except (ConfigError, ToolError, requests.RequestException) as error:
+        current_app.logger.warning(
+            "Meeting Recorder auto process queue failed. record_id=%s",
+            record_id,
+            exc_info=True,
+        )
+        return {"auto_process_error": _sanitize_meeting_recorder_job_error(error)}
 
 
 def _queue_meeting_recorder_process_job(

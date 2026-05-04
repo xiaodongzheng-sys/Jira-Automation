@@ -61,16 +61,16 @@
   };
 
   const selectedTranscriptLanguage = () => {
-    const value = String(nodes.transcriptLanguage?.value || 'mixed').trim().toLowerCase();
-    return ['en', 'zh', 'mixed'].includes(value) ? value : 'mixed';
+    const value = String(nodes.transcriptLanguage?.value || 'zh').trim().toLowerCase();
+    return ['zh', 'en', 'mixed'].includes(value) ? value : 'zh';
   };
 
-  const transcriptLanguageOptionsHtml = (selected = 'mixed') => {
-    const safeSelected = ['en', 'zh', 'mixed'].includes(String(selected || '').toLowerCase()) ? String(selected).toLowerCase() : 'mixed';
+  const transcriptLanguageOptionsHtml = (selected = 'zh') => {
+    const safeSelected = ['zh', 'en', 'mixed'].includes(String(selected || '').toLowerCase()) ? String(selected).toLowerCase() : 'zh';
     return [
-      ['mixed', 'Mixed Chinese/English'],
-      ['en', 'English'],
       ['zh', 'Chinese'],
+      ['en', 'English'],
+      ['mixed', 'Mixed'],
     ].map(([value, label]) => `<option value="${value}" ${value === safeSelected ? 'selected' : ''}>${escapeHtml(label)}</option>`).join('');
   };
 
@@ -114,6 +114,28 @@
     const message = String(payload?.progress?.message || payload?.message || '').trim();
     const stateLabel = statusLabel(payload?.state || payload?.status || '');
     return message || (stateLabel ? `${stateLabel}...` : 'Processing...');
+  };
+
+  const processStatusTarget = () => ({
+    set textContent(value) {
+      if (nodes.recordingStatus) nodes.recordingStatus.textContent = value;
+    },
+  });
+
+  const monitorAutoProcessJob = async (recordId, payload) => {
+    const autoProcessError = String(payload?.auto_process_error || '').trim();
+    if (autoProcessError) {
+      if (nodes.recordingStatus) nodes.recordingStatus.textContent = `Meeting processing was not queued: ${autoProcessError}`;
+      return;
+    }
+    const jobId = String(payload?.job_id || '').trim();
+    if (!recordId || !jobId) return;
+    if (nodes.recordingStatus) nodes.recordingStatus.textContent = 'Transcribing audio and generating meeting minutes...';
+    try {
+      await pollMeetingProcessJob(recordId, jobId, processStatusTarget());
+    } catch (error) {
+      if (nodes.recordingStatus) nodes.recordingStatus.textContent = error.message || 'Meeting processing failed.';
+    }
   };
 
   const telemetry = (event, data = {}) => {
@@ -706,6 +728,7 @@
     setRecordingState(null);
     await loadRecords();
     await loadRecord(payload.record.record_id);
+    await monitorAutoProcessJob(payload.record.record_id, payload);
   };
 
   const startBrowserAudioRecording = async (meeting) => {
@@ -1005,6 +1028,7 @@
     setRecordingState(null);
     await loadRecords();
     await loadRecord(payload.record.record_id);
+    await monitorAutoProcessJob(payload.record.record_id, payload);
   };
 
   const loadUpcoming = async () => {
@@ -1032,7 +1056,7 @@
       nodes.upcoming.querySelectorAll('[data-meeting-start-index]').forEach((button) => {
         button.addEventListener('click', async () => {
           const meeting = meetings[Number(button.dataset.meetingStartIndex) || 0];
-          const rowLanguage = nodes.upcoming.querySelector(`[data-meeting-row-transcript-language="${button.dataset.meetingStartIndex}"]`)?.value || 'mixed';
+          const rowLanguage = nodes.upcoming.querySelector(`[data-meeting-row-transcript-language="${button.dataset.meetingStartIndex}"]`)?.value || 'zh';
           button.disabled = true;
           try {
             await startRecording({
