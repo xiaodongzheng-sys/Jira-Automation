@@ -64,6 +64,7 @@ from bpmis_jira_tool.meeting_recorder import (
     MeetingProcessingService,
     MeetingRecorderConfig,
     MeetingRecorderRuntime,
+    normalize_meeting_transcript_language,
     MeetingRecordStore,
     meeting_platform_from_link,
     reminder_eligible_meetings,
@@ -2109,6 +2110,8 @@ def _meeting_record_summary(record: dict[str, Any]) -> dict[str, Any]:
         "scheduled_start": record.get("scheduled_start"),
         "scheduled_end": record.get("scheduled_end"),
         "status": record.get("status"),
+        "transcript_language": normalize_meeting_transcript_language(record.get("transcript_language")),
+        "transcript_language_label": record.get("transcript_language_label") or "",
         "recording_started_at": record.get("recording_started_at"),
         "recording_stopped_at": record.get("recording_stopped_at"),
         "created_at": record.get("created_at"),
@@ -4009,6 +4012,7 @@ def create_app() -> Flask:
         try:
             meeting_link = str(payload.get("meeting_link") or payload.get("meetingLink") or "").strip()
             recording_mode = str(payload.get("recording_mode") or payload.get("recordingMode") or "").strip()
+            transcript_language = normalize_meeting_transcript_language(payload.get("transcript_language") or payload.get("transcriptLanguage"))
             if not recording_mode:
                 recording_mode = "audio_only"
             if _local_agent_meeting_recorder_enabled(settings):
@@ -4018,6 +4022,7 @@ def create_app() -> Flask:
                         "owner_email": _current_google_email(),
                         "meeting_link": meeting_link,
                         "recording_mode": recording_mode,
+                        "transcript_language": transcript_language,
                         "platform": str(payload.get("platform") or meeting_platform_from_link(meeting_link) or "unknown").strip(),
                     }
                 )
@@ -4033,6 +4038,7 @@ def create_app() -> Flask:
                 scheduled_start=str(payload.get("scheduled_start") or payload.get("scheduledStart") or "").strip(),
                 scheduled_end=str(payload.get("scheduled_end") or payload.get("scheduledEnd") or "").strip(),
                 attendees=payload.get("attendees") if isinstance(payload.get("attendees"), list) else [],
+                transcript_language=transcript_language,
             )
             return jsonify({"status": "ok", "record": _meeting_record_summary(record)})
         except (ConfigError, ToolError) as error:
@@ -4149,6 +4155,7 @@ def create_app() -> Flask:
                 device_label=remote_payload["browser_audio_device_label"],
                 capture_source=remote_payload["browser_audio_capture_source"],
                 preflight_metrics=remote_payload["browser_audio_preflight"],
+                transcript_language=normalize_meeting_transcript_language(payload.get("transcript_language") or payload.get("transcriptLanguage")),
             )
             _log_portal_event(
                 "meeting_recorder_browser_audio_saved",
@@ -6321,6 +6328,8 @@ def _meeting_recorder_config(settings: Settings) -> MeetingRecorderConfig:
         whisper_cpp_bin=settings.meeting_recorder_whisper_cpp_bin,
         whisper_model=settings.meeting_recorder_whisper_model,
         whisper_language=settings.meeting_recorder_whisper_language,
+        transcript_segment_workers=settings.meeting_recorder_transcript_segment_workers,
+        whisper_threads=settings.meeting_recorder_whisper_threads,
     )
 
 

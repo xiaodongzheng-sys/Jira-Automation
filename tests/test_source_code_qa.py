@@ -178,6 +178,10 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertIn("data-effort-latest-url", Path("templates/source_code_qa.html").read_text(encoding="utf-8"))
         self.assertIn("loadLatestEffortAssessment", script)
         self.assertIn("copyEffortPmDevSummary", script)
+        self.assertIn("effortDisplayedAssessmentText", script)
+        self.assertIn("navigator.clipboard.writeText(text)", script)
+        self.assertNotIn("data-source-effort-summary", Path("templates/source_code_qa.html").read_text(encoding="utf-8"))
+        self.assertNotIn("Effort Assessment PM/Dev Summary", script)
 
     def test_frontend_uses_deep_mode_and_raw_codex_answer(self):
         template = Path("templates/source_code_qa.html").read_text(encoding="utf-8")

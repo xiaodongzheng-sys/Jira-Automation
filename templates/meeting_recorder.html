@@ -42,8 +42,12 @@
           <input name="title" type="text" placeholder="Meeting title">
         </label>
         <label>
-          <span>Meet or Zoom link (optional)</span>
-          <input name="meeting_link" type="url" placeholder="Leave blank for face-to-face meeting">
+          <span>Transcript language</span>
+          <select name="transcript_language" data-meeting-transcript-language>
+            <option value="mixed">Mixed Chinese/English</option>
+            <option value="en">English</option>
+            <option value="zh">Chinese</option>
+          </select>
         </label>
         <div class="button-row">
           <button class="button" type="submit">Start Recording</button>

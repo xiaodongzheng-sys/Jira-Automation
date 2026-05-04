@@ -6485,6 +6485,10 @@ select:focus {
   resize: none;
 }
 
+.source-qa-effort-requirement textarea {
+  font-weight: 400;
+}
+
 .source-qa-attachment-bar {
   position: absolute;
   left: 14px;
@@ -8497,6 +8501,21 @@ select:focus {
   display: block;
   color: #667085;
   font-size: 0.85rem;
+}
+
+.meeting-list-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.meeting-list-actions select {
+  width: 190px;
+  max-width: 100%;
+  min-height: 42px;
+  padding: 8px 10px;
 }
 
 .meeting-start-form label {

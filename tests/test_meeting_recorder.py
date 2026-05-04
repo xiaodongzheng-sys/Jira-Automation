@@ -25,6 +25,7 @@ from bpmis_jira_tool.meeting_recorder import (
     _build_ffmpeg_screen_preflight_command,
     _effective_audio_input,
     _effective_recording_audio_input,
+    _meeting_minutes_markdown_to_html,
     _parse_avfoundation_devices,
     _parse_srt_transcript,
     _SegmentedAudioRecorder,
@@ -1056,9 +1057,28 @@ class MeetingProcessingServiceTests(unittest.TestCase):
         self.assertIn("Codex minutes", minutes)
         self.assertEqual(len(text_client.calls), 1)
         self.assertIn("Alice: approve the launch.", text_client.calls[0]["user_prompt"])
+        self.assertIn("## Key Discussion Topics", text_client.calls[0]["user_prompt"])
+        self.assertIn("- **Topic Name**", text_client.calls[0]["user_prompt"])
+        self.assertIn("  - Factual discussion point grounded in the transcript.", text_client.calls[0]["user_prompt"])
+        self.assertIn("  - [Follow up] Action, question, or check needed before the next discussion.", text_client.calls[0]["user_prompt"])
+        self.assertIn("Do not return separate Summary, Decisions, Action Items", text_client.calls[0]["user_prompt"])
+        self.assertIn("[Follow up]", text_client.calls[0]["system_prompt"])
         self.assertNotIn("Screen Evidence", text_client.calls[0]["user_prompt"])
         self.assertNotIn("keyframe", text_client.calls[0]["user_prompt"])
         self.assertNotIn("screen evidence", text_client.calls[0]["system_prompt"].lower())
+
+    def test_meeting_minutes_markdown_to_html_renders_nested_bullets_and_escapes_text(self):
+        html = _meeting_minutes_markdown_to_html(
+            "## Key Discussion Topics\n"
+            "- **Collection <Ownership>**\n"
+            "  - [Follow up] Check `owner` & confirm.\n",
+            portal_url="https://portal.example.test/meeting?x=1&y=2",
+        )
+
+        self.assertIn("<h3>Key Discussion Topics</h3>", html)
+        self.assertIn("<strong>Collection &lt;Ownership&gt;</strong>", html)
+        self.assertIn("[Follow up] Check <code>owner</code> &amp; confirm.", html)
+        self.assertIn('href="https://portal.example.test/meeting?x=1&amp;y=2"', html)
 
     def test_process_audio_only_recording_transcribes_recorded_audio_directly(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1193,7 +1213,10 @@ class MeetingProcessingServiceTests(unittest.TestCase):
                 meeting_link="https://zoom.us/j/123",
             )
             record["status"] = "completed"
-            record["minutes"] = {"status": "completed", "markdown": "## Summary\nApproved."}
+            record["minutes"] = {
+                "status": "completed",
+                "markdown": "## Key Discussion Topics\n- **Launch**\n  - Approved.",
+            }
             record["transcript"] = {"status": "completed", "text": "Alice approved the launch."}
             transcript_path = store.record_dir(record["record_id"]) / "transcript.txt"
             transcript_path.write_text("Alice approved the launch.", encoding="utf-8")
@@ -1216,6 +1239,10 @@ class MeetingProcessingServiceTests(unittest.TestCase):
 
         self.assertEqual(email["status"], "sent")
         self.assertTrue(email["transcript_attached"])
+        self.assertIn("## Key Discussion Topics", send_message.call_args.kwargs["text_body"])
+        self.assertIn("<h3>Key Discussion Topics</h3>", send_message.call_args.kwargs["html_body"])
+        self.assertIn("<strong>Launch</strong>", send_message.call_args.kwargs["html_body"])
+        self.assertIn("Full transcript and recording archive", send_message.call_args.kwargs["html_body"])
         attachment = send_message.call_args.kwargs["attachments"][0]
         self.assertEqual(attachment["filename"], "meeting-transcript.txt")
         self.assertEqual(attachment["mime_type"], "text/plain")
@@ -1256,7 +1283,7 @@ class MeetingProcessingServiceTests(unittest.TestCase):
             )
             service = MeetingProcessingService(
                 store=MeetingRecordStore(root),
-                config=MeetingRecorderConfig(whisper_cpp_bin="whisper-cli", whisper_model=str(model_path)),
+                config=MeetingRecorderConfig(whisper_cpp_bin="whisper-cli", whisper_model=str(model_path), whisper_threads=4),
                 text_client=FakeTextClient(),
             )
 
@@ -1273,9 +1300,13 @@ class MeetingProcessingServiceTests(unittest.TestCase):
         command = next(call.args[0] for call in run_command.call_args_list if "-osrt" in call.args[0])
         self.assertIn("/usr/local/bin/whisper-cli", command)
         self.assertIn(str(model_path), command)
+        self.assertIn("-t", command)
+        self.assertEqual(command[command.index("-t") + 1], "4")
         self.assertIn("-osrt", command)
         self.assertIn("-l", command)
         self.assertIn("auto", command)
+        self.assertEqual(transcript["quality"]["segment_count"], 1)
+        self.assertEqual(transcript["quality"]["whisper_threads"], 4)
 
     def test_transcribe_audio_selects_english_when_auto_language_is_repetitive(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1421,7 +1452,12 @@ class MeetingProcessingServiceTests(unittest.TestCase):
             audio_path.write_bytes(b"audio")
             service = MeetingProcessingService(
                 store=MeetingRecordStore(root),
-                config=MeetingRecorderConfig(whisper_cpp_bin="whisper-cli", whisper_model=str(model_path)),
+                config=MeetingRecorderConfig(
+                    whisper_cpp_bin="whisper-cli",
+                    whisper_model=str(model_path),
+                    transcript_segment_workers=3,
+                    whisper_threads=2,
+                ),
                 text_client=FakeTextClient(),
             )
 
@@ -1429,6 +1465,8 @@ class MeetingProcessingServiceTests(unittest.TestCase):
                 if "-of" in command:
                     output_base = Path(command[command.index("-of") + 1])
                     index = int(output_base.name.rsplit("-", 1)[-1])
+                    if index == 0:
+                        time.sleep(0.05)
                     text = "中文内容" if index == 1 else "English content"
                     output_base.with_suffix(".txt").write_text(text, encoding="utf-8")
                     output_base.with_suffix(".srt").write_text(
@@ -1450,10 +1488,43 @@ class MeetingProcessingServiceTests(unittest.TestCase):
 
         whisper_calls = [call.args[0] for call in run_command.call_args_list if "-of" in call.args[0]]
         self.assertEqual(len(whisper_calls), 3)
+        self.assertTrue(all(command[command.index("-t") + 1] == "2" for command in whisper_calls))
+        self.assertTrue(transcript["text"].startswith("English content\n中文内容\nEnglish content"))
         self.assertIn("中文内容", transcript["text"])
         self.assertIn("English content", transcript["text"])
         self.assertEqual(transcript["segments"][1]["language"], "zh")
+        self.assertEqual([segment["index"] for segment in transcript["segments"]], [0, 1, 2])
+        self.assertEqual([chunk["start_seconds"] for chunk in transcript["chunks"]], [0.0, 60.0, 120.0])
         self.assertEqual(transcript["chunks"][1]["start_seconds"], 60.0)
+        self.assertEqual(transcript["quality"]["duration_seconds"], 125.0)
+        self.assertEqual(transcript["quality"]["segment_count"], 3)
+        self.assertEqual(transcript["quality"]["segment_workers"], 3)
+        self.assertEqual(transcript["quality"]["whisper_threads"], 2)
+        self.assertEqual(transcript["quality"]["language_retry_count"], 0)
+        self.assertIsInstance(transcript["quality"]["transcribe_elapsed_seconds"], float)
+
+    def test_transcribe_audio_auto_threads_split_cpu_across_workers(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = MeetingProcessingService(
+                store=MeetingRecordStore(Path(temp_dir)),
+                config=MeetingRecorderConfig(transcript_segment_workers=3, whisper_threads=0),
+                text_client=FakeTextClient(),
+            )
+
+            with patch("bpmis_jira_tool.meeting_recorder.os.cpu_count", return_value=10):
+                self.assertEqual(service._transcript_segment_workers(), 3)
+                self.assertEqual(service._whisper_threads(segment_workers=3), 3)
+
+    def test_transcribe_audio_caps_segment_workers_to_cpu_count(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = MeetingProcessingService(
+                store=MeetingRecordStore(Path(temp_dir)),
+                config=MeetingRecorderConfig(transcript_segment_workers=99, whisper_threads=0),
+                text_client=FakeTextClient(),
+            )
+
+            with patch("bpmis_jira_tool.meeting_recorder.os.cpu_count", return_value=4):
+                self.assertEqual(service._transcript_segment_workers(), 4)
 
     def test_transcribe_rejects_non_whisper_provider(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1777,6 +1848,7 @@ class MeetingRecorderRouteTests(unittest.TestCase):
 
     def test_meeting_recorder_script_reports_audio_status_and_transcript_quality(self):
         source = Path("static/meeting_recorder.js").read_text(encoding="utf-8")
+        template = Path("templates/meeting_recorder.html").read_text(encoding="utf-8")
 
         self.assertNotIn("Download video file", source)
         self.assertIn("Download audio file", source)
@@ -1784,6 +1856,9 @@ class MeetingRecorderRouteTests(unittest.TestCase):
         self.assertIn("Download transcript", source)
         self.assertIn("meeting-transcript-panel", source)
         self.assertIn("meeting-transcript-scroll", source)
+        self.assertIn("let listDepth = 0", source)
+        self.assertIn("const depth = bullet[1].replace", source)
+        self.assertIn("closeLists(depth)", source)
         self.assertNotIn("data-meeting-stop-current", source)
         self.assertIn("download=1", source)
         self.assertIn("data-record-download-asset", source)
@@ -1791,12 +1866,23 @@ class MeetingRecorderRouteTests(unittest.TestCase):
         self.assertIn("Checking microphone/audio input", source)
         self.assertIn("Starting...", source)
         self.assertIn("audio_only", source)
+        self.assertIn("data-meeting-transcript-language", template)
+        self.assertNotIn("Meet or Zoom link (optional)", template)
+        self.assertNotIn("name=\"meeting_link\"", template)
+        self.assertIn("transcriptLanguageOptionsHtml", source)
+        self.assertIn("data-meeting-row-transcript-language", source)
+        self.assertIn("const rowLanguage = nodes.upcoming.querySelector", source)
+        self.assertIn("transcript_language: rowLanguage", source)
+        self.assertIn("meeting_link: ''", source)
+        self.assertIn("transcript_language", source)
+        self.assertIn("Mixed Chinese/English", template)
+        self.assertIn("English", template)
+        self.assertIn("Chinese", template)
         self.assertNotIn("screen_audio", source)
         self.assertNotIn("/repair-video", source)
         self.assertIn("Transcript may be incomplete", source)
         self.assertIn("low_audio", source)
         self.assertIn("repeated chunk", source)
-        template = Path("templates/meeting_recorder.html").read_text(encoding="utf-8")
         self.assertIn('data-meeting-record-date', template)
         self.assertNotIn("data-meeting-stop-current", template)
         self.assertIn("recordDateValue(record) === selectedDate", source)
@@ -1862,6 +1948,7 @@ class MeetingRecorderRouteTests(unittest.TestCase):
                         "scheduled_start": "2026-05-04T10:00:00+08:00",
                         "scheduled_end": "2026-05-04T10:30:00+08:00",
                         "attendees": [{"email": "alice@npt.sg"}],
+                        "transcript_language": "en",
                     },
                 )
                 stop = client.post(f"/api/meeting-recorder/records/{record_id}/stop")
@@ -1886,6 +1973,7 @@ class MeetingRecorderRouteTests(unittest.TestCase):
             scheduled_start="2026-05-04T10:00:00+08:00",
             scheduled_end="2026-05-04T10:30:00+08:00",
             attendees=[{"email": "alice@npt.sg"}],
+            transcript_language="en",
         )
         fake_runtime.stop_recording.assert_called_once_with(record_id=record_id, owner_email="xiaodong.zheng@npt.sg")
         fake_processing.process_recording.assert_called_once_with(record_id=record_id, owner_email="xiaodong.zheng@npt.sg")
@@ -2002,6 +2090,9 @@ class MeetingRecorderRouteTests(unittest.TestCase):
         self.assertIn("pollMeetingProcessJob", source)
         self.assertIn("Meeting processing failed.", source)
         self.assertIn("Meeting processing is still running.", source)
+        self.assertIn("Connection interrupted. Refreshing status...", source)
+        self.assertIn("isNetworkError", source)
+        self.assertNotIn("button.textContent = 'Failed to fetch'", source)
 
     def test_manual_empty_link_start_route_uses_backend_screencapturekit(self):
         fake_runtime = Mock()
@@ -2023,7 +2114,7 @@ class MeetingRecorderRouteTests(unittest.TestCase):
             self._login(client, email="xiaodong.zheng@npt.sg")
             response = client.post(
                 "/api/meeting-recorder/start",
-                json={"title": "Face to face", "meeting_link": "", "recording_mode": "audio_only"},
+                json={"title": "Face to face", "meeting_link": "", "recording_mode": "audio_only", "transcript_language": "zh"},
             )
 
         self.assertEqual(response.status_code, 200)
@@ -2038,6 +2129,7 @@ class MeetingRecorderRouteTests(unittest.TestCase):
             scheduled_start="",
             scheduled_end="",
             attendees=[],
+            transcript_language="zh",
         )
 
 

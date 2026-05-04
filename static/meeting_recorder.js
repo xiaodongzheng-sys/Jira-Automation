@@ -21,6 +21,7 @@
     refresh: root.querySelector('[data-meeting-refresh]'),
     startForm: root.querySelector('[data-meeting-start-form]'),
     recordingStatus: root.querySelector('[data-meeting-recording-status]'),
+    transcriptLanguage: root.querySelector('[data-meeting-transcript-language]'),
     records: root.querySelector('[data-meeting-records]'),
     recordsRefresh: root.querySelector('[data-meeting-records-refresh]'),
     recordDate: root.querySelector('[data-meeting-record-date]'),
@@ -59,11 +60,33 @@
     return plainMatch ? plainMatch[1].trim() : '';
   };
 
+  const selectedTranscriptLanguage = () => {
+    const value = String(nodes.transcriptLanguage?.value || 'mixed').trim().toLowerCase();
+    return ['en', 'zh', 'mixed'].includes(value) ? value : 'mixed';
+  };
+
+  const transcriptLanguageOptionsHtml = (selected = 'mixed') => {
+    const safeSelected = ['en', 'zh', 'mixed'].includes(String(selected || '').toLowerCase()) ? String(selected).toLowerCase() : 'mixed';
+    return [
+      ['mixed', 'Mixed Chinese/English'],
+      ['en', 'English'],
+      ['zh', 'Chinese'],
+    ].map(([value, label]) => `<option value="${value}" ${value === safeSelected ? 'selected' : ''}>${escapeHtml(label)}</option>`).join('');
+  };
+
   const api = async (url, options = {}) => {
-    const response = await fetch(url, {
-      headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
-      ...options,
-    });
+    let response;
+    try {
+      response = await fetch(url, {
+        headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
+        ...options,
+      });
+    } catch (error) {
+      const networkError = new Error('Connection interrupted. Refreshing status...');
+      networkError.isNetworkError = true;
+      networkError.cause = error;
+      throw networkError;
+    }
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) {
       const error = new Error(payload.message || 'Request failed.');
@@ -74,6 +97,18 @@
   };
 
   const delay = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms));
+
+  const isNetworkError = (error) => Boolean(error?.isNetworkError);
+
+  const refreshRecordState = async (recordId) => {
+    try {
+      await loadRecord(recordId);
+      await loadRecords();
+      return true;
+    } catch (_error) {
+      return false;
+    }
+  };
 
   const meetingProcessStatusText = (payload) => {
     const message = String(payload?.progress?.message || payload?.message || '').trim();
@@ -372,38 +407,40 @@
     if (!cleaned) return '<p class="empty-state">Minutes are not generated yet.</p>';
     const lines = cleaned.split(/\r?\n/);
     const html = [];
-    let listOpen = false;
-    const closeList = () => {
-      if (listOpen) {
+    let listDepth = 0;
+    const closeLists = (targetDepth = 0) => {
+      while (listDepth > targetDepth) {
         html.push('</ul>');
-        listOpen = false;
+        listDepth -= 1;
       }
     };
     lines.forEach((line) => {
       const trimmed = line.trim();
       if (!trimmed) {
-        closeList();
+        closeLists();
         return;
       }
       const heading = trimmed.match(/^(?:#{1,6}\s+|\*\*)([^*#].*?)(?:\*\*)?$/);
       if (heading && !trimmed.startsWith('- ') && !trimmed.startsWith('* ')) {
-        closeList();
+        closeLists();
         html.push(`<h4>${renderInlineMarkdown(heading[1].trim())}</h4>`);
         return;
       }
-      const bullet = trimmed.match(/^[-*]\s+(.+)$/);
+      const bullet = line.match(/^(\s*)[-*]\s+(.+)$/);
       if (bullet) {
-        if (!listOpen) {
+        const depth = bullet[1].replace(/\t/g, '  ').length >= 2 ? 2 : 1;
+        while (listDepth < depth) {
           html.push('<ul>');
-          listOpen = true;
+          listDepth += 1;
         }
-        html.push(`<li>${renderInlineMarkdown(bullet[1])}</li>`);
+        closeLists(depth);
+        html.push(`<li>${renderInlineMarkdown(bullet[2])}</li>`);
         return;
       }
-      closeList();
+      closeLists();
       html.push(`<p>${renderInlineMarkdown(trimmed)}</p>`);
     });
-    closeList();
+    closeLists();
     return html.join('');
   };
 
@@ -617,6 +654,7 @@
           platform: platformFromLink(meetingLink) || meeting?.platform || 'unknown',
           meeting_link: meetingLink,
           recording_mode: meeting?.recording_mode || 'audio_only',
+          transcript_language: meeting?.transcript_language || selectedTranscriptLanguage(),
           calendar_event_id: meeting?.calendar_event_id || '',
           scheduled_start: meeting?.scheduled_start || '',
           scheduled_end: meeting?.scheduled_end || '',
@@ -788,6 +826,7 @@
       title: meeting?.title || 'Untitled meeting',
       meetingLink,
       platform: meeting?.platform || '',
+      transcriptLanguage: meeting?.transcript_language || selectedTranscriptLanguage(),
       mimeType: recorder.mimeType || mimeType || 'audio/webm',
       activeTrackLabel,
       preferredDeviceLabel: preferredDevice?.label || '',
@@ -923,6 +962,7 @@
             active.activeTrackLabel ? `mic: ${active.activeTrackLabel}` : '',
           ].filter(Boolean).join(' | ') || active.activeTrackLabel || '',
           browser_audio_capture_source: active.capturePath || 'browser_audio_f2f',
+          transcript_language: active.transcriptLanguage || 'mixed',
           browser_audio_preflight: active.preflight || {},
         }),
       });
@@ -974,18 +1014,25 @@
       const payload = await api('/api/meeting-recorder/calendar/upcoming');
       const meetings = Array.isArray(payload.meetings) ? payload.meetings : [];
       nodes.calendarStatus.textContent = meetings.length ? `${meetings.length} upcoming meeting(s).` : 'No upcoming Meet or Zoom meetings found.';
+      const defaultTranscriptLanguage = selectedTranscriptLanguage();
       nodes.upcoming.innerHTML = meetings.map((meeting, index) => `
         <article class="meeting-list-item">
           <div>
             <strong>${escapeHtml(meeting.title || 'Untitled meeting')}</strong>
             <span>${escapeHtml(platformLabel(meeting.platform))} · ${escapeHtml(meeting.start || '')}</span>
           </div>
-          <button class="button button-secondary" type="button" data-meeting-start-index="${index}">Start</button>
+          <div class="meeting-list-actions">
+            <select aria-label="Transcript language for ${escapeHtml(meeting.title || 'calendar meeting')}" data-meeting-row-transcript-language="${index}">
+              ${transcriptLanguageOptionsHtml(defaultTranscriptLanguage)}
+            </select>
+            <button class="button button-secondary" type="button" data-meeting-start-index="${index}">Start</button>
+          </div>
         </article>
       `).join('');
       nodes.upcoming.querySelectorAll('[data-meeting-start-index]').forEach((button) => {
         button.addEventListener('click', async () => {
           const meeting = meetings[Number(button.dataset.meetingStartIndex) || 0];
+          const rowLanguage = nodes.upcoming.querySelector(`[data-meeting-row-transcript-language="${button.dataset.meetingStartIndex}"]`)?.value || 'mixed';
           button.disabled = true;
           try {
             await startRecording({
@@ -993,6 +1040,7 @@
               platform: meeting.platform,
               meeting_link: meeting.meeting_link,
               recording_mode: 'audio_only',
+              transcript_language: rowLanguage,
               calendar_event_id: meeting.calendar_event_id,
               scheduled_start: meeting.start,
               scheduled_end: meeting.end,
@@ -1112,6 +1160,7 @@
             ${formatDateTime(record.recording_started_at || record.created_at) ? `<span>${escapeHtml(formatDateTime(record.recording_started_at || record.created_at))}</span>` : ''}
             ${durationLabel(record.recording_started_at, record.recording_stopped_at) ? `<span>${escapeHtml(durationLabel(record.recording_started_at, record.recording_stopped_at))}</span>` : ''}
             <span>${escapeHtml(statusLabel(record.status))}</span>
+            ${record.transcript_language_label ? `<span>${escapeHtml(record.transcript_language_label)} transcript</span>` : ''}
           </div>
         </div>
         <div class="meeting-detail-actions">
@@ -1174,7 +1223,17 @@
   const pollMeetingProcessJob = async (recordId, jobId, button) => {
     const deadline = Date.now() + (60 * 60 * 1000);
     while (Date.now() < deadline) {
-      const payload = await api(`/api/meeting-recorder/process-jobs/${encodeURIComponent(jobId)}`);
+      let payload;
+      try {
+        payload = await api(`/api/meeting-recorder/process-jobs/${encodeURIComponent(jobId)}`);
+      } catch (error) {
+        if (!isNetworkError(error)) throw error;
+        button.textContent = error.message;
+        await delay(2000);
+        await refreshRecordState(recordId);
+        await delay(1500);
+        continue;
+      }
       const stateValue = String(payload.state || '').toLowerCase();
       button.textContent = meetingProcessStatusText(payload);
       if (stateValue === 'completed') {
@@ -1211,6 +1270,14 @@
           }
           await pollMeetingProcessJob(recordId, jobId, button);
         } catch (error) {
+          if (isNetworkError(error)) {
+            button.textContent = error.message;
+            const refreshed = await refreshRecordState(recordId);
+            if (!refreshed) {
+              button.disabled = false;
+            }
+            return;
+          }
           button.textContent = error.message;
         }
       });
@@ -1310,7 +1377,6 @@
     const originalText = submitButton?.textContent || 'Start Recording';
     if (submitButton?.disabled) return;
     const data = new FormData(nodes.startForm);
-    const meetingLink = String(data.get('meeting_link') || '').trim();
     if (submitButton) {
       submitButton.disabled = true;
       submitButton.textContent = 'Starting...';
@@ -1321,8 +1387,9 @@
     try {
       await startRecording({
         title: data.get('title') || 'Untitled meeting',
-        meeting_link: meetingLink,
+        meeting_link: '',
         recording_mode: 'audio_only',
+        transcript_language: data.get('transcript_language') || selectedTranscriptLanguage(),
       });
     } catch (error) {
       nodes.recordingStatus.textContent = error.message;

@@ -28,6 +28,7 @@ from bpmis_jira_tool.meeting_recorder import (
     MeetingRecorderRuntime,
     MeetingRecordStore,
     meeting_platform_from_link,
+    normalize_meeting_transcript_language,
 )
 from bpmis_jira_tool.models import ProjectMatch
 from bpmis_jira_tool.monthly_report import (
@@ -445,6 +446,7 @@ def create_local_agent_app() -> Flask:
         payload = request.get_json(silent=True) or {}
         meeting_link = str(payload.get("meeting_link") or payload.get("meetingLink") or "").strip()
         recording_mode = str(payload.get("recording_mode") or payload.get("recordingMode") or "").strip()
+        transcript_language = normalize_meeting_transcript_language(payload.get("transcript_language") or payload.get("transcriptLanguage"))
         if not recording_mode:
             recording_mode = "audio_only"
         record = _get_meeting_recorder_runtime().start_recording(
@@ -457,6 +459,7 @@ def create_local_agent_app() -> Flask:
             scheduled_start=str(payload.get("scheduled_start") or payload.get("scheduledStart") or "").strip(),
             scheduled_end=str(payload.get("scheduled_end") or payload.get("scheduledEnd") or "").strip(),
             attendees=payload.get("attendees") if isinstance(payload.get("attendees"), list) else [],
+            transcript_language=transcript_language,
         )
         return jsonify({"status": "ok", "record": _meeting_record_summary(record)})
 
@@ -516,6 +519,7 @@ def create_local_agent_app() -> Flask:
             device_label=str(payload.get("browser_audio_device_label") or "").strip(),
             capture_source=capture_path,
             preflight_metrics=payload.get("browser_audio_preflight") if isinstance(payload.get("browser_audio_preflight"), dict) else {},
+            transcript_language=normalize_meeting_transcript_language(payload.get("transcript_language") or payload.get("transcriptLanguage")),
         )
         current_app.logger.warning(
             "local_agent_event %s",
@@ -1754,6 +1758,8 @@ def _meeting_recorder_config(settings: Settings) -> MeetingRecorderConfig:
         whisper_cpp_bin=settings.meeting_recorder_whisper_cpp_bin,
         whisper_model=settings.meeting_recorder_whisper_model,
         whisper_language=settings.meeting_recorder_whisper_language,
+        transcript_segment_workers=settings.meeting_recorder_transcript_segment_workers,
+        whisper_threads=settings.meeting_recorder_whisper_threads,
     )
 
 
@@ -1798,6 +1804,8 @@ def _meeting_record_summary(record: dict[str, Any]) -> dict[str, Any]:
         "scheduled_start": record.get("scheduled_start"),
         "scheduled_end": record.get("scheduled_end"),
         "status": record.get("status"),
+        "transcript_language": normalize_meeting_transcript_language(record.get("transcript_language")),
+        "transcript_language_label": record.get("transcript_language_label") or "",
         "recording_started_at": record.get("recording_started_at"),
         "recording_stopped_at": record.get("recording_stopped_at"),
         "created_at": record.get("created_at"),

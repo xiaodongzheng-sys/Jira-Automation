@@ -21,6 +21,20 @@ class ConfigTests(unittest.TestCase):
 
         self.assertEqual(settings.team_portal_stage, "uat")
 
+    def test_from_env_loads_meeting_recorder_transcription_performance_settings(self):
+        with patch.dict(
+            os.environ,
+            {
+                "MEETING_RECORDER_TRANSCRIPT_SEGMENT_WORKERS": "4",
+                "MEETING_RECORDER_WHISPER_THREADS": "2",
+            },
+            clear=True,
+        ), patch("bpmis_jira_tool.config.find_dotenv", return_value=""):
+            settings = Settings.from_env()
+
+        self.assertEqual(settings.meeting_recorder_transcript_segment_workers, 4)
+        self.assertEqual(settings.meeting_recorder_whisper_threads, 2)
+
     def test_from_env_loads_dotenv_values(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             original_cwd = os.getcwd()

@@ -36,6 +36,16 @@ def _env_str(name: str, default: str | None = None) -> str | None:
     return value or default
 
 
+def _env_int(name: str, default: int) -> int:
+    value = _env_str(name)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
+
+
 @dataclass(frozen=True)
 class Settings:
     flask_secret_key: str
@@ -70,6 +80,8 @@ class Settings:
     meeting_recorder_whisper_cpp_bin: str = "whisper-cli"
     meeting_recorder_whisper_model: str = "~/.cache/whisper.cpp/ggml-medium.bin"
     meeting_recorder_whisper_language: str = "auto"
+    meeting_recorder_transcript_segment_workers: int = 3
+    meeting_recorder_whisper_threads: int = 0
     source_code_qa_owner_email: str = "xiaodong.zheng@npt.sg"
     source_code_qa_admin_emails: tuple[str, ...] = ()
     source_code_qa_git_timeout_seconds: int = 90
@@ -208,6 +220,8 @@ class Settings:
             meeting_recorder_whisper_cpp_bin=_env_str("MEETING_RECORDER_WHISPER_CPP_BIN", "whisper-cli"),
             meeting_recorder_whisper_model=_env_str("MEETING_RECORDER_WHISPER_MODEL", "~/.cache/whisper.cpp/ggml-medium.bin"),
             meeting_recorder_whisper_language=_env_str("MEETING_RECORDER_WHISPER_LANGUAGE", "auto"),
+            meeting_recorder_transcript_segment_workers=_env_int("MEETING_RECORDER_TRANSCRIPT_SEGMENT_WORKERS", 3),
+            meeting_recorder_whisper_threads=_env_int("MEETING_RECORDER_WHISPER_THREADS", 0),
             source_code_qa_owner_email=source_code_qa_owner_email,
             source_code_qa_admin_emails=source_code_qa_admin_emails,
             source_code_qa_git_timeout_seconds=int(_env_str("SOURCE_CODE_QA_GIT_TIMEOUT_SECONDS", "90")),

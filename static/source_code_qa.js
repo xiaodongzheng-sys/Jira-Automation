@@ -2322,81 +2322,14 @@
     const structured = payload?.structured_answer || {};
     const directAnswer = parsed?.direct_answer || structured.direct_answer || '';
     if (!parsed && !directAnswer) return '';
-    const investigation = parsed?.investigation_steps && typeof parsed.investigation_steps === 'object'
-      ? parsed.investigation_steps
-      : {};
-    const evidenceSections = [
-      ['Confirmed From Code', parsed?.confirmed_from_code],
-      ['Inferred From Code', parsed?.inferred_from_code],
-      ['Missing Evidence', parsed?.not_found || parsed?.missing_evidence],
-      ['Runtime / Attachment Evidence', parsed?.runtime_evidence || parsed?.attachment_facts || parsed?.screenshot_evidence],
-      ['Next Checks', parsed?.next_checks || parsed?.confirmation_questions],
-    ];
-    const investigationHtml = [
-      ['Candidate Evidence', investigation.candidate_evidence],
-      ['Gap Verification', investigation.gap_verification],
-      ['Certainty Split', investigation.certainty_split],
-    ].filter(([, values]) => effortListValues(values).length)
-      .map(([title, values]) => effortRenderSection(title, effortRenderList(values)))
-      .join('');
-    const evidenceHtml = evidenceSections
-      .filter(([, values]) => effortListValues(values).length)
-      .map(([title, values]) => effortRenderSection(title, effortRenderList(values)))
-      .join('');
     return `
       <div class="source-qa-effort-readable">
         ${directAnswer ? effortRenderSection('Assessment Summary', `<div class="source-qa-effort-paragraphs">${effortRenderParagraphs(directAnswer)}</div>`) : ''}
-        ${investigationHtml ? `<div class="source-qa-effort-readable-grid">${investigationHtml}</div>` : ''}
-        ${evidenceHtml ? `<div class="source-qa-effort-readable-grid">${evidenceHtml}</div>` : ''}
       </div>
     `;
   };
 
-  const effortPmDevSummaryText = (payload) => {
-    const assessment = payload?.assessment || {};
-    const structured = assessment.structured_assessment || payload?.structured_assessment || {};
-    const business = structured.business_understanding || {};
-    const options = structured.option_impacts || [];
-    const beEstimates = structured.be_estimate || [];
-    const feEstimates = structured.fe_estimate || [];
-    const missing = structured.missing_evidence || assessment.missing_evidence || payload?.missing_evidence || [];
-    const inferred = structured.inferred_impact || [];
-    const evidence = structured.confirmed_evidence || [];
-    const questions = structured.questions || [];
-    const lines = [
-      'Effort Assessment PM/Dev Summary',
-      `Scope: ${[assessment.pm_team || payload?.pm_team || '', assessment.country || payload?.country || ''].filter(Boolean).join(' / ')}`,
-      `Confidence: ${assessment.confidence || payload?.assessment_confidence || 'unknown'}`,
-      '',
-      'Business understanding:',
-      `- Goals: ${(business.goals || []).join(', ') || 'n/a'}`,
-      `- Products: ${(business.products || []).join(', ') || 'n/a'}`,
-      `- Limits: ${(business.limit_types || []).join(', ') || 'n/a'}`,
-      `- Flow changes: ${(business.flow_changes || []).join(', ') || 'n/a'}`,
-      '',
-      'Options:',
-      ...(options.length ? options.map((item) => `- ${item.label || item.id || 'Option'}: ${item.summary || ''}`) : ['- n/a']),
-      '',
-      'BE estimate:',
-      ...(beEstimates.length ? beEstimates.map((item) => `- ${item.option_id || 'option'}: ${item.person_days || 'n/a'} (${item.basis || 'planning-grade'})`) : ['- n/a']),
-      '',
-      'FE estimate:',
-      ...(feEstimates.length ? feEstimates.map((item) => `- ${item.option_id || 'option'}: ${item.person_days || 'n/a'} (${item.basis || 'planning-grade'})`) : ['- n/a']),
-      '',
-      'Inferred impact:',
-      ...(inferred.length ? inferred.map((item) => `- ${item.surface}: ${(item.terms || []).slice(0, 8).join(', ')}`) : ['- n/a']),
-      '',
-      'Confirmed evidence:',
-      ...(evidence.length ? evidence.map((item) => `- ${[item.repo, item.path, item.line_start ? `L${item.line_start}` : ''].filter(Boolean).join(':')}`) : ['- No confirmed code evidence returned.']),
-      '',
-      'Missing evidence:',
-      ...(missing.length ? missing.map((item) => `- ${item}`) : ['- none']),
-      '',
-      'Confirmation questions:',
-      ...(questions.length ? questions.map((item) => `- ${item}`) : ['- none']),
-    ];
-    return lines.join('\n');
-  };
+  const effortDisplayedAssessmentText = () => String(effortAnswer?.innerText || effortAnswer?.textContent || '').trim();
 
   const renderEffortAssessment = (payload, options = {}) => {
     if (!effortOutput || !effortAnswer) return;
@@ -2404,7 +2337,6 @@
     const answer = String(payload?.llm_answer || payload?.summary || '').trim();
     const payloadScope = payload?.cache_scope || payload?.scope || {};
     effortOutput.hidden = false;
-    if (effortSummary) effortSummary.textContent = payload?.summary || 'Effort assessment completed.';
     if (effortProvider) effortProvider.textContent = providerLabel(payload?.llm_provider || payloadScope.llm_provider || selectedLlmProvider());
     if (effortScope) {
       effortScope.textContent = [
@@ -2418,13 +2350,15 @@
       payload?.status ? `status: ${payload.status}` : '',
     ].filter(Boolean).join(' · ');
     if (effortMeta) effortMeta.textContent = meta || 'completed';
-    const hybridSummary = renderEffortHybridSummary(payload);
     const structuredAnswerHtml = renderEffortStructuredAnswer(payload);
     const answerHtml = structuredAnswerHtml || (answer
       ? renderCodexAnswerHtml(answer)
       : '<div class="source-qa-empty">Assessment completed without a generated answer.</div>');
-    effortAnswer.innerHTML = `${hybridSummary}${answerHtml}`;
-    renderEffortEvidence(payload);
+    effortAnswer.innerHTML = answerHtml;
+    if (effortEvidence) {
+      effortEvidence.hidden = true;
+      effortEvidence.innerHTML = '';
+    }
     if (options.persist !== false) {
       persistEffortAssessmentCache({ result: cachedEffortPayload(payload), status: 'completed' });
     }
@@ -2448,14 +2382,13 @@
   };
 
   const copyEffortPmDevSummary = async () => {
-    const cached = loadEffortAssessmentCache();
-    const payload = lastEffortPayload || cached?.result || null;
-    if (!payload) {
+    const text = effortDisplayedAssessmentText();
+    if (!text) {
       if (effortStatus) effortStatus.textContent = 'No effort assessment result to copy.';
       return;
     }
     try {
-      await navigator.clipboard.writeText(effortPmDevSummaryText(payload));
+      await navigator.clipboard.writeText(text);
       if (effortStatus) effortStatus.textContent = 'PM/Dev summary copied.';
     } catch (_error) {
       if (effortStatus) effortStatus.textContent = 'Copy failed. Please copy from the assessment manually.';

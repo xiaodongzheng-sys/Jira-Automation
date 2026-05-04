@@ -419,7 +419,13 @@ class LocalAgentServerTests(unittest.TestCase):
 
         response = self._post_signed(
             "/api/local-agent/meeting-recorder/start",
-            {"owner_email": "owner@npt.sg", "title": "Face to face", "meeting_link": "", "recording_mode": "audio_only"},
+            {
+                "owner_email": "owner@npt.sg",
+                "title": "Face to face",
+                "meeting_link": "",
+                "recording_mode": "audio_only",
+                "transcript_language": "en",
+            },
         )
 
         self.assertEqual(response.status_code, 200)
@@ -434,6 +440,7 @@ class LocalAgentServerTests(unittest.TestCase):
             scheduled_start="",
             scheduled_end="",
             attendees=[],
+            transcript_language="en",
         )
 
     def test_signed_meeting_recorder_process_async_returns_job_and_completes(self):

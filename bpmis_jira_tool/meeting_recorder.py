@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import html
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -25,7 +27,7 @@ from bpmis_jira_tool.gmail_sender import credentials_from_payload, send_gmail_me
 
 
 CALENDAR_READONLY_SCOPE = "https://www.googleapis.com/auth/calendar.readonly"
-MEETING_RECORDER_PROMPT_VERSION = "v2_audio_only_english_minutes"
+MEETING_RECORDER_PROMPT_VERSION = "v3_topic_bullets_english_minutes"
 MEETING_RECORD_STATUSES = {
     "scheduled",
     "recording",
@@ -66,6 +68,13 @@ MEETING_TRANSCRIPT_EXPECTED_LANGUAGES = {
     "zh",
     "cn",
 }
+MEETING_TRANSCRIPT_LANGUAGE_DEFAULT = "mixed"
+MEETING_TRANSCRIPT_LANGUAGE_MODES = {"en", "zh", "mixed"}
+MEETING_TRANSCRIPT_LANGUAGE_LABELS = {
+    "en": "English",
+    "zh": "Chinese",
+    "mixed": "Mixed Chinese/English",
+}
 
 
 @dataclass(frozen=True)
@@ -85,6 +94,33 @@ class MeetingRecorderConfig:
     whisper_cpp_bin: str = "whisper-cli"
     whisper_model: str = "~/.cache/whisper.cpp/ggml-medium.bin"
     whisper_language: str = "auto"
+    transcript_segment_workers: int = 3
+    whisper_threads: int = 0
+
+
+def normalize_meeting_transcript_language(value: object) -> str:
+    normalized = str(value or "").strip().lower().replace("-", "_")
+    aliases = {
+        "english": "en",
+        "eng": "en",
+        "chinese": "zh",
+        "mandarin": "zh",
+        "zh_cn": "zh",
+        "cn": "zh",
+        "auto": "mixed",
+        "mix": "mixed",
+        "zh_en": "mixed",
+        "en_zh": "mixed",
+    }
+    normalized = aliases.get(normalized, normalized)
+    return normalized if normalized in MEETING_TRANSCRIPT_LANGUAGE_MODES else MEETING_TRANSCRIPT_LANGUAGE_DEFAULT
+
+
+def meeting_transcript_whisper_language(value: object, *, fallback: str = "auto") -> str:
+    normalized = normalize_meeting_transcript_language(value)
+    if normalized == "mixed":
+        return str(fallback or "auto").strip().lower() or "auto"
+    return normalized
 
 
 def build_calendar_api_service(credentials: Any, *, cache_discovery: bool = False) -> Any:
@@ -405,6 +441,7 @@ class MeetingRecorderRuntime:
         scheduled_start: str = "",
         scheduled_end: str = "",
         attendees: list[dict[str, Any]] | None = None,
+        transcript_language: str = "",
     ) -> dict[str, Any]:
         ffmpeg_path = _resolve_ffmpeg_bin(self.config.ffmpeg_bin)
         if not ffmpeg_path:
@@ -435,6 +472,9 @@ class MeetingRecorderRuntime:
             scheduled_end=scheduled_end,
             attendees=attendees,
         )
+        transcript_language = normalize_meeting_transcript_language(transcript_language)
+        record["transcript_language"] = transcript_language
+        record["transcript_language_label"] = MEETING_TRANSCRIPT_LANGUAGE_LABELS[transcript_language]
         record_dir = self.store.record_dir(record["record_id"])
         audio_path = record_dir / "meeting.wav"
         log_path = record_dir / "ffmpeg.log"
@@ -454,6 +494,8 @@ class MeetingRecorderRuntime:
             "audio_signal_note": "Signal is verified from the real recorder output after Stop; Start avoids a separate microphone preflight because reopening macOS audio devices can delay or break short recordings.",
             "audio_devices": devices.get("audio_devices") or [],
             "meeting_audio_setup_note": "Zoom/Meet speaker can stay on MacBook speakers or Default; Zoom/Meet microphone should stay on a real microphone.",
+            "transcript_language": transcript_language,
+            "transcript_language_label": MEETING_TRANSCRIPT_LANGUAGE_LABELS[transcript_language],
         }
         record["recording_health"] = {
             "status": "warning" if preflight.get("status") == "too_quiet" else preflight.get("status", "unknown"),
@@ -678,6 +720,7 @@ class MeetingRecorderRuntime:
         device_label: str = "",
         capture_source: str = "",
         preflight_metrics: dict[str, Any] | None = None,
+        transcript_language: str = "",
     ) -> dict[str, Any]:
         if not audio_bytes:
             raise ToolError("Browser audio upload was empty.")
@@ -690,6 +733,9 @@ class MeetingRecorderRuntime:
             platform=platform,
             meeting_link=meeting_link,
         )
+        transcript_language = normalize_meeting_transcript_language(transcript_language)
+        record["transcript_language"] = transcript_language
+        record["transcript_language_label"] = MEETING_TRANSCRIPT_LANGUAGE_LABELS[transcript_language]
         record_dir = self.store.record_dir(record["record_id"])
         extension = _browser_audio_extension(mime_type)
         source_path = record_dir / f"browser-audio{extension}"
@@ -748,6 +794,8 @@ class MeetingRecorderRuntime:
             "configured_audio_input": self.config.audio_input,
             "audio_signal_verified": duration_seconds > 0,
             "audio_signal_note": capture_note,
+            "transcript_language": transcript_language,
+            "transcript_language_label": MEETING_TRANSCRIPT_LANGUAGE_LABELS[transcript_language],
         }
         if device_label:
             record["diagnostics_snapshot"]["browser_audio_device_label"] = str(device_label).strip()
@@ -1186,7 +1234,7 @@ class MeetingProcessingService:
         self.store.save_record(record)
         try:
             audio_path = self._recorded_audio_path(record)
-            transcript = self._transcribe_audio(audio_path)
+            transcript = self._transcribe_audio(audio_path, transcript_language=record.get("transcript_language"))
             transcript_text = str(transcript.get("text") or "").strip()
             minutes = self._generate_minutes(
                 record=record,
@@ -1235,6 +1283,7 @@ class MeetingProcessingService:
         portal_url = self._record_url(record_id)
         subject = f"Meeting Minutes - {record.get('title') or 'Untitled meeting'}"
         body = f"{minutes}\n\nFull transcript and recording archive: {portal_url}\n"
+        html_body = _meeting_minutes_markdown_to_html(minutes, portal_url=portal_url)
         attachments = self._transcript_email_attachments(record_id=record_id, record=record)
         result = send_gmail_message(
             credentials=credentials,
@@ -1242,6 +1291,7 @@ class MeetingProcessingService:
             recipient=target,
             subject=subject,
             text_body=body,
+            html_body=html_body,
             attachments=attachments,
         )
         record["email"] = {
@@ -1326,7 +1376,8 @@ class MeetingProcessingService:
         _run_command(command, "Could not extract audio from meeting video.")
         return audio_path
 
-    def _transcribe_audio(self, audio_path: Path) -> dict[str, Any]:
+    def _transcribe_audio(self, audio_path: Path, *, transcript_language: str | None = None) -> dict[str, Any]:
+        started_at = time.monotonic()
         provider = str(self.config.transcribe_provider or "whisper_cpp").strip().lower()
         if provider != "whisper_cpp":
             raise ConfigError("Meeting Recorder transcription is restricted to whisper.cpp.")
@@ -1345,9 +1396,10 @@ class MeetingProcessingService:
                 duration_seconds=duration,
                 whisper_bin=whisper_bin,
                 model_path=model_path,
+                transcript_language=transcript_language,
             )
         output_base = self.store.record_dir(audio_path.parent.name) / "whisper-transcript"
-        configured_language = str(self.config.whisper_language or "auto").strip().lower()
+        configured_language = meeting_transcript_whisper_language(transcript_language, fallback=self.config.whisper_language)
         return self._transcribe_audio_with_language_selection(
             audio_path=audio_path,
             output_base=output_base,
@@ -1355,6 +1407,9 @@ class MeetingProcessingService:
             model_path=model_path,
             configured_language=configured_language,
             offset_seconds=0,
+            whisper_threads=self._whisper_threads(segment_workers=1),
+            started_at=started_at,
+            duration_seconds=duration,
         )
 
     def _transcribe_audio_with_language_selection(
@@ -1366,6 +1421,9 @@ class MeetingProcessingService:
         model_path: Path,
         configured_language: str,
         offset_seconds: float,
+        whisper_threads: int,
+        started_at: float | None = None,
+        duration_seconds: float | None = None,
     ) -> dict[str, Any]:
         language = configured_language or "auto"
         transcript = self._transcribe_audio_once(
@@ -1375,6 +1433,7 @@ class MeetingProcessingService:
             model_path=model_path,
             language=language,
             offset_seconds=offset_seconds,
+            whisper_threads=whisper_threads,
         )
         segments, quality = self._transcript_quality(
             audio_path=audio_path,
@@ -1387,12 +1446,22 @@ class MeetingProcessingService:
             "segments": segments,
             "quality": quality,
             "language": quality.get("language") or transcript["language"],
+            "language_retry_count": 0,
         }
         if configured_language not in {"", "auto"} or not _should_retry_transcript_languages(quality):
+            self._attach_transcript_telemetry(
+                candidate,
+                duration_seconds=duration_seconds,
+                segment_count=1,
+                segment_workers=1,
+                whisper_threads=whisper_threads,
+                started_at=started_at,
+            )
             return candidate
 
         original_language = quality.get("language") or transcript["language"]
         candidates = [candidate]
+        retry_count = 0
         for retry_language in ("zh", "en"):
             retry_base = output_base.with_name(f"{output_base.name}-{retry_language}")
             retry_transcript = self._transcribe_audio_once(
@@ -1402,7 +1471,9 @@ class MeetingProcessingService:
                 model_path=model_path,
                 language=retry_language,
                 offset_seconds=offset_seconds,
+                whisper_threads=whisper_threads,
             )
+            retry_count += 1
             retry_segments, retry_quality = self._transcript_quality(
                 audio_path=audio_path,
                 chunks=retry_transcript["chunks"],
@@ -1417,9 +1488,11 @@ class MeetingProcessingService:
                     "segments": retry_segments,
                     "quality": retry_quality,
                     "language": retry_quality.get("language") or retry_transcript["language"],
+                    "language_retry_count": retry_count,
                 }
             )
         best = max(candidates, key=lambda item: _transcript_quality_score(item.get("quality") or {}))
+        best["language_retry_count"] = retry_count
         best_quality = best.get("quality") or {}
         if best is not candidate:
             best_quality["warnings"] = [
@@ -1433,6 +1506,14 @@ class MeetingProcessingService:
                 *best_quality.get("warnings", []),
                 "Auto language transcription looked unreliable; Chinese and English retries did not improve transcript quality.",
             ]
+        self._attach_transcript_telemetry(
+            best,
+            duration_seconds=duration_seconds,
+            segment_count=1,
+            segment_workers=1,
+            whisper_threads=whisper_threads,
+            started_at=started_at,
+        )
         return best
 
     def _transcribe_audio_once(
@@ -1444,6 +1525,7 @@ class MeetingProcessingService:
         model_path: Path,
         language: str,
         offset_seconds: float,
+        whisper_threads: int,
     ) -> dict[str, Any]:
         command = [
             whisper_bin,
@@ -1451,6 +1533,8 @@ class MeetingProcessingService:
             str(model_path),
             "-f",
             str(audio_path),
+            "-t",
+            str(max(1, int(whisper_threads or 1))),
             "-otxt",
             "-osrt",
             "-of",
@@ -1483,21 +1567,27 @@ class MeetingProcessingService:
         duration_seconds: float,
         whisper_bin: str,
         model_path: Path,
+        transcript_language: str | None = None,
     ) -> dict[str, Any]:
         ffmpeg_path = _resolve_ffmpeg_bin(self.config.ffmpeg_bin)
         if not ffmpeg_path:
             raise ConfigError("ffmpeg is required to split meeting audio for mixed-language transcription.")
         record_dir = self.store.record_dir(audio_path.parent.name)
         segment_seconds = MEETING_TRANSCRIPT_SEGMENT_SECONDS
-        all_chunks: list[dict[str, Any]] = []
-        text_parts: list[str] = []
-        segment_metadata: list[dict[str, Any]] = []
-        configured_language = str(self.config.whisper_language or "auto").strip().lower()
+        segment_workers = self._transcript_segment_workers()
+        whisper_threads = self._whisper_threads(segment_workers=segment_workers)
+        configured_language = meeting_transcript_whisper_language(transcript_language, fallback=self.config.whisper_language)
+        started_at = time.monotonic()
+        segment_specs = []
         for index, start in enumerate(range(0, int(duration_seconds + segment_seconds - 1), segment_seconds)):
             remaining = max(0.0, duration_seconds - start)
             if remaining <= 0:
                 continue
             current_duration = min(segment_seconds, remaining)
+            segment_specs.append((index, start, current_duration))
+
+        def process_segment(spec: tuple[int, int, float]) -> dict[str, Any]:
+            index, start, current_duration = spec
             segment_audio = record_dir / f"audio-segment-{index:04d}.wav"
             output_base = record_dir / f"whisper-segment-{index:04d}"
             extract_command = [
@@ -1528,15 +1618,21 @@ class MeetingProcessingService:
                 model_path=model_path,
                 configured_language=configured_language,
                 offset_seconds=float(start),
+                whisper_threads=whisper_threads,
             )
-            text_parts.append(str(transcript.get("text") or "").strip())
             chunks = transcript.get("chunks") or []
-            all_chunks.extend(chunks)
             metrics = _audio_volume_metrics(audio_path, start_seconds=float(start), duration_seconds=current_duration)
             has_no_audio = any("[no audio]" in str(chunk.get("text") or "").lower() for chunk in chunks)
             low_audio = bool(metrics.get("low_audio")) or has_no_audio
-            segment_metadata.append(
-                {
+            return {
+                "index": index,
+                "start_seconds": float(start),
+                "end_seconds": float(start + current_duration),
+                "language": transcript.get("language") or configured_language or "auto",
+                "language_retry_count": int(transcript.get("language_retry_count") or 0),
+                "text": str(transcript.get("text") or "").strip(),
+                "chunks": chunks,
+                "metadata": {
                     "index": index,
                     "start_seconds": float(start),
                     "end_seconds": float(start + current_duration),
@@ -1547,13 +1643,75 @@ class MeetingProcessingService:
                     "quality": "low_audio" if low_audio else "ok",
                     "possible_missed_speech": low_audio,
                     "chunk_count": len(chunks),
-                }
-            )
+                },
+            }
+
+        if segment_workers == 1:
+            segment_results = [process_segment(spec) for spec in segment_specs]
+        else:
+            with ThreadPoolExecutor(max_workers=segment_workers) as executor:
+                segment_results = list(executor.map(process_segment, segment_specs))
+
+        all_chunks: list[dict[str, Any]] = []
+        text_parts: list[str] = []
+        segment_metadata: list[dict[str, Any]] = []
+        language_retry_count = 0
+        for result in sorted(segment_results, key=lambda item: int(item.get("index") or 0)):
+            text_parts.append(str(result.get("text") or "").strip())
+            chunks = result.get("chunks") or []
+            all_chunks.extend(chunks)
+            language_retry_count += int(result.get("language_retry_count") or 0)
+            segment_metadata.append(result["metadata"])
         text = "\n".join(part for part in text_parts if part).strip()
         if not text:
             raise ToolError("whisper.cpp transcription produced no text.")
         quality = self._quality_from_segments(segment_metadata, chunks=all_chunks)
-        return {"text": text, "chunks": all_chunks, "segments": segment_metadata, "quality": quality}
+        transcript = {
+            "text": text,
+            "chunks": all_chunks,
+            "segments": segment_metadata,
+            "quality": quality,
+            "language_retry_count": language_retry_count,
+        }
+        self._attach_transcript_telemetry(
+            transcript,
+            duration_seconds=duration_seconds,
+            segment_count=len(segment_specs),
+            segment_workers=segment_workers,
+            whisper_threads=whisper_threads,
+            started_at=started_at,
+        )
+        return transcript
+
+    def _transcript_segment_workers(self) -> int:
+        configured = int(self.config.transcript_segment_workers or 1)
+        cpu_count = os.cpu_count() or configured
+        return max(1, min(configured, cpu_count))
+
+    def _whisper_threads(self, *, segment_workers: int) -> int:
+        configured = int(self.config.whisper_threads or 0)
+        if configured > 0:
+            return configured
+        cpu_count = os.cpu_count() or 1
+        return max(1, cpu_count // max(1, int(segment_workers or 1)))
+
+    def _attach_transcript_telemetry(
+        self,
+        transcript: dict[str, Any],
+        *,
+        duration_seconds: float | None,
+        segment_count: int,
+        segment_workers: int,
+        whisper_threads: int,
+        started_at: float | None,
+    ) -> None:
+        quality = transcript.setdefault("quality", {})
+        quality["duration_seconds"] = float(duration_seconds or 0)
+        quality["segment_count"] = int(segment_count)
+        quality["segment_workers"] = int(segment_workers)
+        quality["whisper_threads"] = int(whisper_threads)
+        quality["transcribe_elapsed_seconds"] = round(max(0.0, time.monotonic() - started_at), 3) if started_at else None
+        quality["language_retry_count"] = int(transcript.get("language_retry_count") or 0)
 
     def _extract_visual_evidence(self, record: dict[str, Any], video_path: Path) -> list[dict[str, Any]]:
         ffmpeg_path = _resolve_ffmpeg_bin(self.config.ffmpeg_bin)
@@ -1671,8 +1829,9 @@ class MeetingProcessingService:
             "You write concise, evidence-grounded English meeting minutes for product managers. "
             "Use only the provided spoken transcript and meeting metadata. "
             "Do not use screen recordings, screenshots, keyframes, or visual context. "
-            "Do not invent owners, decisions, dates, or follow-ups. "
-            "If transcript quality warnings are present, include a short warning before the Summary section and do not infer decisions or action items from repeated low-audio text."
+            "Do not invent owners, decisions, dates, deadlines, or action items. "
+            "If a next step is implied but owner, timing, or decision is unclear, write it as a [Follow up] item instead of pretending it is confirmed. "
+            "If transcript quality warnings are present, include a short warning before Key Discussion Topics and do not infer decisions or follow-ups from repeated low-audio text."
         )
         user_prompt = (
             f"Meeting title: {record.get('title')}\n"
@@ -1682,7 +1841,18 @@ class MeetingProcessingService:
             f"Transcript quality: {json.dumps(quality, ensure_ascii=False)}\n\n"
             "# Transcript\n"
             f"{transcript_text or 'No transcript text was produced.'}\n\n"
-            "Return Markdown with these sections: Warning if needed, Summary, Decisions, Action Items, Risks/Blockers, Open Questions, Follow-ups."
+            "Return English Markdown in this exact PM-readable format:\n"
+            "## Key Discussion Topics\n"
+            "- **Topic Name**\n"
+            "  - Factual discussion point grounded in the transcript.\n"
+            "  - [Follow up] Action, question, or check needed before the next discussion.\n\n"
+            "Rules:\n"
+            "- Group related points under 4-8 concise topic bullets.\n"
+            "- Use top-level bullets only for topic names and make every topic name bold.\n"
+            "- Use indented second-level bullets for details under each topic.\n"
+            "- Prefix uncertain next steps, unresolved questions, or checks with [Follow up].\n"
+            "- Do not return separate Summary, Decisions, Action Items, Risks/Blockers, Open Questions, or Follow-ups sections.\n"
+            "- Do not include transcript excerpts unless needed for clarity."
         )
         return self.text_client.create_answer(system_prompt=system_prompt, user_prompt=user_prompt).strip()
 
@@ -1833,6 +2003,51 @@ def _run_command(command: list[str], error_message: str, *, timeout_seconds: int
         detail = (completed.stderr or completed.stdout or "").strip()[-1200:]
         raise ToolError(f"{error_message} {detail}".strip())
     return completed
+
+
+def _meeting_minutes_inline_html(value: str) -> str:
+    escaped = html.escape(str(value or ""))
+    escaped = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", escaped)
+    return re.sub(r"`([^`]+)`", r"<code>\1</code>", escaped)
+
+
+def _meeting_minutes_markdown_to_html(markdown: str, *, portal_url: str) -> str:
+    lines = str(markdown or "").splitlines()
+    body: list[str] = []
+    list_depth = 0
+
+    def close_lists(target_depth: int = 0) -> None:
+        nonlocal list_depth
+        while list_depth > target_depth:
+            body.append("</ul>")
+            list_depth -= 1
+
+    for line in lines:
+        if not line.strip():
+            close_lists()
+            continue
+        heading = line.strip()
+        heading_match = re.match(r"^#{1,6}\s+(.+)$", heading)
+        if heading_match:
+            close_lists()
+            body.append(f"<h3>{_meeting_minutes_inline_html(heading_match.group(1).strip())}</h3>")
+            continue
+        bullet_match = re.match(r"^(\s*)[-*]\s+(.+)$", line)
+        if bullet_match:
+            depth = 2 if len(bullet_match.group(1).replace("\t", "  ")) >= 2 else 1
+            while list_depth < depth:
+                body.append("<ul>")
+                list_depth += 1
+            close_lists(depth)
+            body.append(f"<li>{_meeting_minutes_inline_html(bullet_match.group(2).strip())}</li>")
+            continue
+        close_lists()
+        body.append(f"<p>{_meeting_minutes_inline_html(heading)}</p>")
+    close_lists()
+    if portal_url:
+        safe_url = html.escape(portal_url, quote=True)
+        body.append(f'<p>Full transcript and recording archive: <a href="{safe_url}">{safe_url}</a></p>')
+    return "<div>" + "\n".join(body) + "</div>"
 
 
 @contextmanager
