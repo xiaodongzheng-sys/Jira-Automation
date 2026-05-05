@@ -8453,15 +8453,65 @@ def _source_code_qa_public_generated_artifacts(artifacts: list[dict[str, Any]]) 
 
 
 SQL_CODE_BLOCK_PATTERN = re.compile(r"```(?:sql|mysql|postgresql|postgres|sqlite|plsql|tsql)\s*\n(.*?)```", re.IGNORECASE | re.DOTALL)
+SQL_INLINE_MARKER_PATTERN = re.compile(
+    r"\bSQL\s*:\s*((?:WITH|SELECT|INSERT|UPDATE|DELETE|CREATE|ALTER|DROP|MERGE)\b.*)",
+    re.IGNORECASE | re.DOTALL,
+)
+SQL_START_PATTERN = re.compile(r"^\s*(?:WITH|SELECT|INSERT|UPDATE|DELETE|CREATE|ALTER|DROP|MERGE)\b", re.IGNORECASE)
 
 
 def _extract_source_code_qa_sql_blocks(answer: str) -> list[str]:
     blocks: list[str] = []
-    for match in SQL_CODE_BLOCK_PATTERN.finditer(str(answer or "")):
-        sql = str(match.group(1) or "").strip()
-        if sql:
-            blocks.append(sql)
+    for text in _source_code_qa_answer_text_candidates(answer):
+        for match in SQL_CODE_BLOCK_PATTERN.finditer(text):
+            sql = _normalize_source_code_qa_sql_text(match.group(1))
+            if sql:
+                blocks.append(sql)
+        if blocks:
+            continue
+        inline_sql = _extract_source_code_qa_inline_sql(text)
+        if inline_sql:
+            blocks.append(inline_sql)
     return blocks
+
+
+def _source_code_qa_answer_text_candidates(answer: str) -> list[str]:
+    raw = str(answer or "").strip()
+    candidates = [raw] if raw else []
+    if not raw or not raw.startswith("{"):
+        return candidates
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return candidates
+    if isinstance(parsed, dict):
+        for key in ("sql", "query_sql", "generated_sql", "direct_answer", "answer", "summary"):
+            value = parsed.get(key)
+            if isinstance(value, str) and value.strip():
+                candidates.append(value.strip())
+    return candidates
+
+
+def _normalize_source_code_qa_sql_text(value: Any) -> str:
+    sql = str(value or "").strip()
+    if not sql:
+        return ""
+    sql = re.split(r"\n```", sql, maxsplit=1)[0].strip()
+    if ";" in sql:
+        sql = sql[: sql.rfind(";") + 1].strip()
+    return sql if SQL_START_PATTERN.search(sql) else ""
+
+
+def _extract_source_code_qa_inline_sql(text: str) -> str:
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+    match = SQL_INLINE_MARKER_PATTERN.search(raw)
+    if match:
+        return _normalize_source_code_qa_sql_text(match.group(1))
+    if SQL_START_PATTERN.search(raw):
+        return _normalize_source_code_qa_sql_text(raw)
+    return ""
 
 
 def _build_source_code_qa_sql_readme(
@@ -8523,7 +8573,8 @@ def _build_source_code_qa_generated_artifacts(
     result: dict[str, Any],
     runtime_evidence: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    sql_blocks = _extract_source_code_qa_sql_blocks(str(result.get("llm_answer") or ""))
+    answer_text = str(result.get("llm_answer") or result.get("answer") or result.get("rendered_answer") or "")
+    sql_blocks = _extract_source_code_qa_sql_blocks(answer_text)
     if not sql_blocks:
         return []
     try:

@@ -1264,6 +1264,56 @@ class SourceCodeQARouteTests(unittest.TestCase):
             self.assertIn("mapper/GlobalLockMapper.xml", readme)
         self.assertEqual(blocked.status_code, 404)
 
+    def test_source_code_qa_json_direct_answer_sql_creates_downloadable_package(self):
+        def fake_query(**kwargs):
+            return {
+                "status": "ok",
+                "answer_mode": "auto",
+                "summary": "SQL generated",
+                "answer": json.dumps(
+                    {
+                        "direct_answer": (
+                            "Use reviewer tables. SQL: WITH latest_ticket AS "
+                            "(SELECT * FROM ticket_info WHERE authorization_type = 'Incident - Authorize New Incident') "
+                            "SELECT event_id FROM latest_ticket;"
+                        )
+                    }
+                ),
+                "llm_provider": "codex_cli_bridge",
+                "llm_model": "codex-cli",
+                "trace_id": "trace-json-sql-package",
+                "matches": [{"repo": "GRC Portal", "path": "mapper/TicketMapper.xml", "line_start": 8}],
+            }
+
+        with self.app.test_client() as client:
+            self._login(client, "xiaodong.zheng@npt.sg")
+            created = client.post("/api/source-code-qa/sessions", json={"pm_team": "GRC", "country": "All", "llm_provider": "codex_cli_bridge"})
+            session_id = created.get_json()["session"]["id"]
+            with patch("bpmis_jira_tool.source_code_qa.SourceCodeQAService.ensure_synced_today", return_value={"attempted": False, "status": "fresh"}), patch(
+                "bpmis_jira_tool.source_code_qa.SourceCodeQAService.query",
+                side_effect=fake_query,
+            ):
+                response = client.post(
+                    "/api/source-code-qa/query",
+                    json={
+                        "session_id": session_id,
+                        "pm_team": "GRC",
+                        "country": "All",
+                        "question": "write SQL for reviewer status",
+                        "llm_provider": "codex_cli_bridge",
+                    },
+                )
+            payload = response.get_json()
+            artifact = payload["generated_artifacts"][0]
+            download = client.get(f"/api/source-code-qa/generated-artifacts/{artifact['id']}?session_id={session_id}")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(download.status_code, 200)
+        with zipfile.ZipFile(io.BytesIO(download.data)) as archive:
+            sql = archive.read("query.sql").decode("utf-8")
+        self.assertIn("WITH latest_ticket", sql)
+        self.assertIn("SELECT event_id", sql)
+
     def test_source_code_qa_config_includes_runtime_capabilities(self):
         with self.app.test_client() as client:
             self._login(client, "xiaodong.zheng@npt.sg")
