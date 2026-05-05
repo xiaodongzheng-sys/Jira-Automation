@@ -1271,6 +1271,10 @@ class SourceCodeQARouteTests(unittest.TestCase):
             self.assertIn("GRC:SG", readme)
             self.assertIn("grc-dictionary.csv", readme)
             self.assertIn("mapper/GlobalLockMapper.xml", readme)
+            self.assertIn("## SQL Rough Logic", readme)
+            self.assertIn("Uses table(s): bcf_global_lock", readme)
+            self.assertIn("## Tables Used", readme)
+            self.assertIn("`bcf_global_lock`", readme)
         self.assertEqual(blocked.status_code, 404)
 
     def test_source_code_qa_json_direct_answer_sql_creates_downloadable_package(self):
@@ -1321,9 +1325,12 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertEqual(download.status_code, 200)
         with zipfile.ZipFile(io.BytesIO(download.data)) as archive:
             sql = archive.read("query.sql").decode("utf-8")
+            readme = archive.read("README.md").decode("utf-8")
         self.assertIn("WITH latest_ticket", sql)
         self.assertIn("SELECT event_id", sql)
         self.assertNotIn("should_not_leak", sql)
+        self.assertIn("Builds intermediate CTE(s): latest_ticket", readme)
+        self.assertIn("`ticket_info`", readme)
 
     def test_source_code_qa_config_includes_runtime_capabilities(self):
         with self.app.test_client() as client:

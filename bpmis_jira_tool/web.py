@@ -8478,6 +8478,11 @@ SQL_INLINE_MARKER_PATTERN = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 SQL_START_PATTERN = re.compile(r"^\s*(?:WITH|SELECT|INSERT|UPDATE|DELETE|CREATE|ALTER|DROP|MERGE)\b", re.IGNORECASE)
+SQL_CTE_PATTERN = re.compile(r"(?:\bWITH|,)\s+([A-Za-z_][\w$]*)\s+AS\s*\(", re.IGNORECASE)
+SQL_TABLE_REFERENCE_PATTERN = re.compile(
+    r"\b(?:FROM|JOIN|UPDATE|INTO)\s+([`\"\[]?[A-Za-z_][\w$]*(?:[.`\"\]]+[A-Za-z_][\w$]*){0,2}[`\"\]]?)",
+    re.IGNORECASE,
+)
 
 
 def _extract_source_code_qa_sql_blocks(answer: str) -> list[str]:
@@ -8553,11 +8558,70 @@ def _format_source_code_qa_sql_text(sql: str) -> str:
     return formatted or raw
 
 
+def _clean_source_code_qa_sql_identifier(value: str) -> str:
+    identifier = str(value or "").strip().strip("`\"[]")
+    identifier = re.sub(r"[`\"\[\]]", "", identifier)
+    return identifier
+
+
+def _source_code_qa_sql_ctes(sql: str) -> list[str]:
+    ctes: list[str] = []
+    seen: set[str] = set()
+    for match in SQL_CTE_PATTERN.finditer(str(sql or "")):
+        cte = _clean_source_code_qa_sql_identifier(match.group(1))
+        key = cte.lower()
+        if cte and key not in seen:
+            seen.add(key)
+            ctes.append(cte)
+    return ctes
+
+
+def _source_code_qa_sql_tables(sql: str) -> list[str]:
+    raw = str(sql or "")
+    ctes = {cte.lower() for cte in _source_code_qa_sql_ctes(raw)}
+    tables: list[str] = []
+    seen: set[str] = set()
+    for match in SQL_TABLE_REFERENCE_PATTERN.finditer(raw):
+        table = _clean_source_code_qa_sql_identifier(match.group(1))
+        key = table.lower()
+        if not table or key in ctes or key in {"select", "values"} or key in seen:
+            continue
+        seen.add(key)
+        tables.append(table)
+    return tables
+
+
+def _source_code_qa_sql_logic_summary(sql: str) -> list[str]:
+    raw = str(sql or "")
+    upper = raw.upper()
+    ctes = _source_code_qa_sql_ctes(raw)
+    tables = _source_code_qa_sql_tables(raw)
+    lines: list[str] = []
+    if ctes:
+        lines.append(f"- Builds intermediate CTE(s): {', '.join(ctes[:8])}.")
+    if tables:
+        lines.append(f"- Uses table(s): {', '.join(tables[:12])}.")
+    if re.search(r"\bSELECT\b", upper):
+        lines.append("- Returns rows from the final SELECT projection.")
+    if re.search(r"\bJOIN\b", upper):
+        lines.append("- Combines data through JOIN clause(s).")
+    if re.search(r"\bWHERE\b", upper):
+        lines.append("- Applies WHERE filter condition(s) from the generated SQL.")
+    if re.search(r"\bGROUP\s+BY\b", upper) or re.search(r"\b(COUNT|SUM|AVG|MIN|MAX)\s*\(", upper):
+        lines.append("- Performs aggregation or grouping logic.")
+    if re.search(r"\bORDER\s+BY\b", upper):
+        lines.append("- Sorts the result set with ORDER BY.")
+    if re.search(r"\bLIMIT\b|\bFETCH\s+FIRST\b", upper):
+        lines.append("- Limits the number of returned rows.")
+    return lines or ["- No rough SQL logic could be inferred automatically; review `query.sql` directly."]
+
+
 def _build_source_code_qa_sql_readme(
     *,
     pm_team: str,
     country: str,
     question: str,
+    sql: str,
     result: dict[str, Any],
     runtime_evidence: list[dict[str, Any]],
 ) -> str:
@@ -8576,6 +8640,8 @@ def _build_source_code_qa_sql_readme(
             location = f"{location}:{match.get('line_start')}"
         repo = str(match.get("repo") or "")
         code_lines.append(f"- S{index}: {repo} {location}".strip())
+    tables = _source_code_qa_sql_tables(sql)
+    logic_lines = _source_code_qa_sql_logic_summary(sql)
     return "\n".join(
         [
             "# Source Code Q&A SQL Package",
@@ -8587,6 +8653,13 @@ def _build_source_code_qa_sql_readme(
             "## Files",
             "- `query.sql`: AI-generated SQL text.",
             "- `README.md`: this context and evidence summary.",
+            "",
+            "## SQL Rough Logic",
+            *logic_lines,
+            "",
+            "## Tables Used",
+            *(f"- `{table}`" for table in tables[:24]),
+            *(["- No base table reference could be inferred automatically."] if not tables else []),
             "",
             "## Runtime Evidence",
             *(evidence_lines or ["- No runtime evidence was attached to this package."]),
@@ -8628,6 +8701,7 @@ def _build_source_code_qa_generated_artifacts(
                 pm_team=pm_team,
                 country=country,
                 question=question,
+                sql=sql_blocks[0],
                 result=result,
                 runtime_evidence=runtime_evidence,
             ),
