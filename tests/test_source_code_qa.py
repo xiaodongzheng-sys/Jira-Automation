@@ -1257,7 +1257,9 @@ class SourceCodeQARouteTests(unittest.TestCase):
         with zipfile.ZipFile(io.BytesIO(download.data)) as archive:
             self.assertIn("query.sql", archive.namelist())
             self.assertIn("README.md", archive.namelist())
-            self.assertIn("select lock_key", archive.read("query.sql").decode("utf-8"))
+            sql = archive.read("query.sql").decode("utf-8")
+            self.assertIn("SELECT lock_key", sql)
+            self.assertRegex(sql, r"\n\s+FROM bcf_global_lock")
             readme = archive.read("README.md").decode("utf-8")
             self.assertIn("GRC:SG", readme)
             self.assertIn("grc-dictionary.csv", readme)

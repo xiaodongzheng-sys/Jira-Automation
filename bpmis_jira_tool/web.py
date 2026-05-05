@@ -39,6 +39,7 @@ import httplib2
 from openpyxl import Workbook
 from openpyxl.styles import Font
 import requests
+import sqlparse
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 from bpmis_jira_tool.config import Settings
@@ -2223,6 +2224,7 @@ class SourceCodeQAGeneratedArtifactStore:
         normalized_sql = str(sql or "").strip()
         if not normalized_sql:
             raise ToolError("Generated SQL content is empty.")
+        normalized_sql = _format_source_code_qa_sql_text(normalized_sql)
         sql_bytes = normalized_sql.encode("utf-8")
         if len(sql_bytes) > self.MAX_SQL_BYTES:
             raise ToolError("Generated SQL content is too large to package.")
@@ -8515,6 +8517,22 @@ def _extract_source_code_qa_inline_sql(text: str) -> str:
     if SQL_START_PATTERN.search(raw):
         return _normalize_source_code_qa_sql_text(raw)
     return ""
+
+
+def _format_source_code_qa_sql_text(sql: str) -> str:
+    raw = str(sql or "").strip()
+    if not raw:
+        return ""
+    formatted = sqlparse.format(
+        raw,
+        keyword_case="upper",
+        strip_whitespace=True,
+        reindent_aligned=True,
+        indent_width=2,
+        wrap_after=88,
+        use_space_around_operators=True,
+    ).strip()
+    return formatted or raw
 
 
 def _build_source_code_qa_sql_readme(

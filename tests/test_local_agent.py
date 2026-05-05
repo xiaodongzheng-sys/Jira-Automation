@@ -207,7 +207,9 @@ class LocalAgentServerTests(unittest.TestCase):
         self.assertEqual(get_response.status_code, 200)
         encoded = get_response.get_json()["content_base64"]
         with zipfile.ZipFile(io.BytesIO(base64.b64decode(encoded))) as archive:
-            self.assertIn("select lock_key", archive.read("query.sql").decode("utf-8"))
+            sql = archive.read("query.sql").decode("utf-8")
+            self.assertIn("SELECT lock_key", sql)
+            self.assertRegex(sql, r"\n\s+FROM bcf_global_lock")
 
     def test_signed_source_code_async_query_streams_progress(self):
         class ImmediateThread:
