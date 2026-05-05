@@ -305,6 +305,7 @@ if [[ -n "$LOCAL_AGENT_URL" ]]; then
 fi
 
 DEPLOY_SECRET_ARGS=(--update-secrets "LOCAL_AGENT_HMAC_SECRET=$UAT_LOCAL_AGENT_SECRET_NAME:latest")
+ENV_DEPLOY_MODE="set"
 if [[ "${CLOUD_RUN_UAT_LOCAL_AGENT_SECRET_SOURCE:-secret_manager}" == "env" ]]; then
   uat_hmac_secret="${CLOUD_RUN_UAT_LOCAL_AGENT_HMAC_SECRET:-}"
   if [[ -z "$uat_hmac_secret" ]]; then
@@ -320,12 +321,17 @@ if [[ "${CLOUD_RUN_UAT_LOCAL_AGENT_SECRET_SOURCE:-secret_manager}" == "env" ]]; 
   fi
   ENV_VARS+=("LOCAL_AGENT_HMAC_SECRET=$uat_hmac_secret")
   DEPLOY_SECRET_ARGS=(--remove-secrets LOCAL_AGENT_HMAC_SECRET)
+  ENV_DEPLOY_MODE="update"
   echo "Using UAT local-agent HMAC from env fallback because CLOUD_RUN_UAT_LOCAL_AGENT_SECRET_SOURCE=env."
 fi
 
 IFS='|'
 ENV_VARS_JOINED="${ENV_VARS[*]}"
 unset IFS
+ENV_DEPLOY_ARGS=(--set-env-vars "^|^$ENV_VARS_JOINED")
+if [[ "$ENV_DEPLOY_MODE" == "update" ]]; then
+  ENV_DEPLOY_ARGS=(--update-env-vars "^|^$ENV_VARS_JOINED")
+fi
 
 RUNTIME_ARGS=()
 if [[ -n "${CLOUD_RUN_MIN_INSTANCES:-}" ]]; then
@@ -381,7 +387,7 @@ cd "$ROOT_DIR"
   --no-traffic \
   --tag "$UAT_TAG" \
   ${DEPLOY_SECRET_ARGS[@]+"${DEPLOY_SECRET_ARGS[@]}"} \
-  --set-env-vars "^|^$ENV_VARS_JOINED"
+  "${ENV_DEPLOY_ARGS[@]}"
 
 SERVICE_DESCRIBE_JSON="$(describe_service)"
 UAT_REVISION="$(printf '%s' "$SERVICE_DESCRIBE_JSON" | UAT_TAG_VALUE="$UAT_TAG" "$PYTHON_BIN" -c 'import json, os, sys; p=json.load(sys.stdin); tag=os.environ["UAT_TAG_VALUE"]; matches=[t for t in p.get("status", {}).get("traffic", []) if t.get("tag")==tag]; print(matches[0].get("revisionName", "") if matches else "")')"

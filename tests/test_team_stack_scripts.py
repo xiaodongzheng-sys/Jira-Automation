@@ -267,6 +267,7 @@ exit 0
             self.assertEqual(len(deploy_calls), 1, msg=calls)
             self.assertNotIn("--update-secrets LOCAL_AGENT_HMAC_SECRET=", deploy_calls[0])
             self.assertIn("--remove-secrets LOCAL_AGENT_HMAC_SECRET", deploy_calls[0])
+            self.assertIn("--update-env-vars", deploy_calls[0])
             self.assertIn("LOCAL_AGENT_HMAC_SECRET=uat-only-secret", deploy_calls[0])
             self.assertIn("CLOUD_RUN_UAT_LOCAL_AGENT_SECRET_SOURCE=env", completed.stdout)
 
