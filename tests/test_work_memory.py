@@ -19,7 +19,7 @@ from bpmis_jira_tool.work_memory import (
     sent_monthly_report_memory_item_from_gmail_record,
     team_dashboard_memory_items,
 )
-from bpmis_jira_tool.web import create_app, _backfill_gmail_work_memory, _is_sent_monthly_report_subject
+from bpmis_jira_tool.web import create_app, _backfill_gmail_work_memory, _build_google_drive_service, _is_sent_monthly_report_subject
 
 
 class WorkMemoryStoreTests(unittest.TestCase):
@@ -544,6 +544,19 @@ class WorkMemoryStoreTests(unittest.TestCase):
 
 
 class WorkMemoryRouteTests(unittest.TestCase):
+    def test_google_drive_service_uses_bounded_http_timeout(self):
+        credentials = object()
+        with patch.dict("os.environ", {"GOOGLE_DRIVE_HTTP_TIMEOUT_SECONDS": "9"}):
+            with patch("bpmis_jira_tool.web.httplib2.Http") as http_cls:
+                with patch("bpmis_jira_tool.web.google_auth_httplib2.AuthorizedHttp") as auth_http_cls:
+                    with patch("bpmis_jira_tool.web.build_google_api") as build_mock:
+                        result = _build_google_drive_service(credentials)
+
+        http_cls.assert_called_once_with(timeout=9)
+        auth_http_cls.assert_called_once_with(credentials, http=http_cls.return_value)
+        build_mock.assert_called_once_with("drive", "v3", http=auth_http_cls.return_value, cache_discovery=False)
+        self.assertEqual(result, build_mock.return_value)
+
     def test_gmail_backfill_records_vip_pdf_and_drive_evidence_without_crashing(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             env = {

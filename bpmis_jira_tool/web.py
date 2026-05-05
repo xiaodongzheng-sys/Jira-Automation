@@ -31,9 +31,11 @@ import zipfile
 
 from flask import Flask, Response, current_app, flash, g, has_app_context, jsonify, redirect, render_template, request, send_file, session, stream_with_context, url_for
 from dotenv import load_dotenv
+import google_auth_httplib2
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build as build_google_api
 from googleapiclient.errors import HttpError
+import httplib2
 from openpyxl import Workbook
 from openpyxl.styles import Font
 import requests
@@ -181,6 +183,7 @@ GMAIL_WORK_MEMORY_MAX_VIP_ATTACHMENTS_PER_MESSAGE = 5
 GMAIL_WORK_MEMORY_CONTENT_CHARS = 16000
 GMAIL_WORK_MEMORY_FETCH_BATCH_SIZE = 25
 GMAIL_WORK_MEMORY_FETCH_WORKERS = 4
+GOOGLE_DRIVE_HTTP_TIMEOUT_SECONDS = 20
 TEAM_DASHBOARD_LINK_BIZ_EXCLUDED_TITLE_PHRASES = (
     "sync af productization",
     "productisation upgrade",
@@ -7340,7 +7343,7 @@ def _read_google_drive_link_text(*, credentials: Credentials, url: str) -> tuple
     file_id = _google_drive_file_id_from_url(url)
     if not file_id:
         return "", ""
-    service = build_google_api("drive", "v3", credentials=credentials, cache_discovery=False)
+    service = _build_google_drive_service(credentials)
     metadata = service.files().get(fileId=file_id, fields="id,name,mimeType,size").execute()
     title = str(metadata.get("name") or file_id)
     mime_type = str(metadata.get("mimeType") or "")
@@ -7356,6 +7359,22 @@ def _read_google_drive_link_text(*, credentials: Credentials, url: str) -> tuple
         content = service.files().get_media(fileId=file_id).execute()
         return title, _extract_pdf_text_for_work_memory(content)
     return title, ""
+
+
+def _google_drive_http_timeout_seconds() -> int:
+    raw_value = str(os.getenv("GOOGLE_DRIVE_HTTP_TIMEOUT_SECONDS") or "").strip()
+    if not raw_value:
+        return GOOGLE_DRIVE_HTTP_TIMEOUT_SECONDS
+    try:
+        return max(5, min(int(raw_value), 120))
+    except ValueError:
+        return GOOGLE_DRIVE_HTTP_TIMEOUT_SECONDS
+
+
+def _build_google_drive_service(credentials: Credentials) -> Any:
+    http = httplib2.Http(timeout=_google_drive_http_timeout_seconds())
+    authed_http = google_auth_httplib2.AuthorizedHttp(credentials, http=http)
+    return build_google_api("drive", "v3", http=authed_http, cache_discovery=False)
 
 
 def _google_drive_file_id_from_url(url: str) -> str:
