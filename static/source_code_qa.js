@@ -837,19 +837,71 @@
   };
 
   const citationPattern = /\[((?:S\d+|[\w./-]+\.(?:java|xml|kt|groovy|md|sql|yml|yaml|properties|json|ts|tsx|js):\d+(?:-\d+)?)(?:\]\s*\[)?(?:[^\]]*)?)\]/g;
+  const answerHeadingPattern = /^(?:#{1,4}\s*)?(?:\*\*)?\s*(.+?)\s*(?:\*\*)?\s*$/;
+  const isAnswerHeadingLine = (line) => {
+    const value = String(line || '').trim();
+    if (!value) return false;
+    if (/^#{1,4}\s+\S/.test(value)) return true;
+    return /^\*\*[^*]+?\*\*$/.test(value);
+  };
+  const renderAnswerInline = (text) => escapeHtml(text)
+    .replace(/`([^`]+)`/g, '<code class="source-qa-inline-code">$1</code>')
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
   const renderAnswerText = (text) => {
-    const paragraphs = String(text || '')
-      .split(/\n{2,}/)
-      .map((paragraph) => paragraph.trim())
-      .filter(Boolean);
-    if (!paragraphs.length) return '<p>Answer completed.</p>';
-    return paragraphs.map((paragraph) => {
-      const lines = paragraph.split('\n').map((line) => line.trim()).filter(Boolean);
-      if (lines.length && lines.every((line) => line.startsWith('- '))) {
-        return `<ul class="source-qa-answer-list">${lines.map((line) => renderAnswerLine(line.slice(2), 'li')).join('')}</ul>`;
+    const lines = String(text || '').replace(/\r\n/g, '\n').split('\n');
+    const html = [];
+    let paragraphLines = [];
+    let listType = '';
+    let listItems = [];
+
+    const flushList = () => {
+      if (!listItems.length) return;
+      const tagName = listType === 'ol' ? 'ol' : 'ul';
+      const numberedClass = tagName === 'ol' ? ' source-qa-answer-numbered' : '';
+      html.push(`<${tagName} class="source-qa-answer-list${numberedClass}">${listItems.map((item) => renderAnswerLine(item, 'li')).join('')}</${tagName}>`);
+      listType = '';
+      listItems = [];
+    };
+    const flushParagraph = () => {
+      const lineCount = paragraphLines.length;
+      const paragraph = paragraphLines.join('\n').trim();
+      paragraphLines = [];
+      if (!paragraph) return;
+      if (lineCount === 1 && isAnswerHeadingLine(paragraph)) {
+        const heading = paragraph.replace(answerHeadingPattern, '$1').trim();
+        html.push(renderAnswerLine(heading, 'h4'));
+        return;
       }
       return renderAnswerLine(paragraph, 'p');
-    }).join('');
+    };
+
+    lines.forEach((line) => {
+      const trimmed = line.trim();
+      if (!trimmed) {
+        flushList();
+        const paragraphHtml = flushParagraph();
+        if (paragraphHtml) html.push(paragraphHtml);
+        return;
+      }
+      const bulletMatch = trimmed.match(/^[-*]\s+(.+)$/);
+      const numberedMatch = trimmed.match(/^\d+[.)]\s+(.+)$/);
+      if (bulletMatch || numberedMatch) {
+        const nextListType = numberedMatch ? 'ol' : 'ul';
+        const itemText = (numberedMatch || bulletMatch)[1];
+        const paragraphHtml = flushParagraph();
+        if (paragraphHtml) html.push(paragraphHtml);
+        if (listType && listType !== nextListType) flushList();
+        listType = nextListType;
+        listItems.push(itemText);
+        return;
+      }
+      flushList();
+      paragraphLines.push(trimmed);
+    });
+    flushList();
+    const paragraphHtml = flushParagraph();
+    if (paragraphHtml) html.push(paragraphHtml);
+    return html.join('') || '<p>Answer completed.</p>';
   };
   const renderAnswerLine = (text, tagName) => {
     const citations = [];
@@ -863,7 +915,8 @@
     const citationHtml = citations.length
       ? `<span class="source-qa-inline-citations">${citations.map((item) => `<span>${escapeHtml(item)}</span>`).join('')}</span>`
       : '';
-    return `<${tagName}>${escapeHtml(cleanText)}${citationHtml}</${tagName}>`;
+    const className = tagName === 'h4' ? ' class="source-qa-answer-heading"' : '';
+    return `<${tagName}${className}>${renderAnswerInline(cleanText)}${citationHtml}</${tagName}>`;
   };
 
   const answerEvidenceHeadingPattern = /^(?:\*\*)?\s*(?:source[-\s]?code evidence|source evidence|evidence|references|citations|confirmed from code|not found|missing evidence|代码证据|证据|引用|来源)(?:\s*[:：])?\s*(?:\*\*)?$/i;
@@ -886,13 +939,10 @@
       return `<pre class="source-qa-raw-codex-answer">${escapeHtml(raw)}</pre>`;
     }
     const { primary, evidence } = splitAnswerEvidence(raw);
-    if (!evidence) {
-      return `<pre class="source-qa-raw-codex-answer">${escapeHtml(raw)}</pre>`;
-    }
     return `
       <div class="source-qa-answer-rendered">
-        ${primary ? `<pre class="source-qa-raw-codex-answer source-qa-answer-primary">${escapeHtml(primary)}</pre>` : ''}
-        <pre class="source-qa-raw-codex-answer source-qa-answer-evidence">${escapeHtml(evidence)}</pre>
+        ${primary ? `<div class="source-qa-answer-primary">${renderAnswerText(primary)}</div>` : ''}
+        ${evidence ? `<div class="source-qa-answer-evidence">${renderAnswerText(evidence)}</div>` : ''}
       </div>
     `;
   };
