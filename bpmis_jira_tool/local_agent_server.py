@@ -44,6 +44,7 @@ from bpmis_jira_tool.gmail_sender import StoredGoogleCredentials
 from bpmis_jira_tool.seatalk_dashboard import SeaTalkDashboardService
 from bpmis_jira_tool.source_code_qa import SourceCodeQAService
 from bpmis_jira_tool.user_config import TEAM_PROFILE_DEFAULTS, WebConfigStore
+from bpmis_jira_tool.work_memory import WorkMemoryStore, meeting_record_memory_items, team_dashboard_memory_items
 from bpmis_jira_tool.web import (
     JobStore,
     SeaTalkNameMappingStore,
@@ -103,6 +104,7 @@ def create_local_agent_app() -> Flask:
     app.config["SOURCE_CODE_QA_QUERY_JOBS"] = {}
     app.config["SOURCE_CODE_QA_QUERY_JOBS_LOCK"] = threading.Lock()
     app.config["TEAM_DASHBOARD_JOB_STORE"] = JobStore(_data_root(settings) / "run" / "jobs.json")
+    app.config["WORK_MEMORY_STORE"] = WorkMemoryStore(_data_root(settings) / "work_memory" / "memory.db")
     app.config["MEETING_RECORDER_JOB_STORE"] = JobStore(_data_root(settings) / "run" / "meeting_recorder_jobs.json")
     meeting_store = MeetingRecordStore(_data_root(settings) / "meeting_records")
     app.config["MEETING_RECORD_STORE"] = meeting_store
@@ -622,6 +624,200 @@ def create_local_agent_app() -> Flask:
             record_id=record_id,
             owner_email=str(request.args.get("owner_email") or ""),
             relative_path=relative_path,
+        )
+
+    @app.post("/api/local-agent/work-memory/health")
+    def work_memory_health():
+        return jsonify(_get_work_memory_store().health())
+
+    @app.post("/api/local-agent/work-memory/recent")
+    def work_memory_recent():
+        payload = request.get_json(silent=True) or {}
+        items = _get_work_memory_store().query_work_memory(
+            owner_email=str(payload.get("owner_email") or "").strip().lower(),
+            visibility_scope=str(payload.get("visibility_scope") or "owner").strip().lower() or "owner",
+            query=str(payload.get("query") or ""),
+            filters=payload.get("filters") if isinstance(payload.get("filters"), dict) else {},
+            limit=int(payload.get("limit") or 50),
+        )
+        return jsonify({"status": "ok", "items": items})
+
+    @app.post("/api/local-agent/work-memory/review-candidates")
+    def work_memory_review_candidates():
+        payload = request.get_json(silent=True) or {}
+        items = _get_work_memory_store().review_candidates(
+            owner_email=str(payload.get("owner_email") or "").strip().lower(),
+            limit=int(payload.get("limit") or 50),
+        )
+        return jsonify({"status": "ok", "items": items})
+
+    @app.post("/api/local-agent/work-memory/project-timeline")
+    def work_memory_project_timeline():
+        payload = request.get_json(silent=True) or {}
+        items = _get_work_memory_store().project_timeline(
+            project_ref=str(payload.get("project_ref") or "").strip(),
+            owner_email=str(payload.get("owner_email") or "").strip().lower(),
+            visibility_scope=str(payload.get("visibility_scope") or "owner").strip().lower() or "owner",
+            limit=int(payload.get("limit") or 100),
+        )
+        return jsonify({"status": "ok", "items": items})
+
+    @app.post("/api/local-agent/work-memory/entity-resolution")
+    def work_memory_entity_resolution():
+        payload = request.get_json(silent=True) or {}
+        return jsonify(
+            _get_work_memory_store().resolve_work_entity(
+                query=str(payload.get("query") or "").strip(),
+                owner_email=str(payload.get("owner_email") or "").strip().lower(),
+                entity_type=str(payload.get("entity_type") or "").strip(),
+            )
+        )
+
+    @app.post("/api/local-agent/work-memory/feedback")
+    def work_memory_feedback():
+        payload = request.get_json(silent=True) or {}
+        try:
+            return jsonify(
+                _get_work_memory_store().record_memory_feedback(
+                    item_id=str(payload.get("item_id") or "").strip(),
+                    action=str(payload.get("action") or "").strip(),
+                    owner_email=str(payload.get("owner_email") or "").strip().lower(),
+                    correction_text=str(payload.get("correction_text") or "").strip(),
+                    visibility_override=str(payload.get("visibility_override") or "").strip(),
+                    reason=str(payload.get("reason") or "").strip(),
+                )
+            )
+        except (KeyError, ValueError) as error:
+            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
+
+    @app.post("/api/local-agent/work-memory/distill")
+    def work_memory_distill():
+        payload = request.get_json(silent=True) or {}
+        return jsonify(
+            {
+                "status": "ok",
+                **_get_work_memory_store().distill_work_memory(
+                    owner_email=str(payload.get("owner_email") or "").strip().lower(),
+                    date_range=str(payload.get("date_range") or "90d").strip() or "90d",
+                    sources=[str(item or "").strip() for item in payload.get("sources") or [] if str(item or "").strip()] if isinstance(payload.get("sources"), list) else [],
+                    project_refs=[str(item or "").strip() for item in payload.get("project_refs") or [] if str(item or "").strip()] if isinstance(payload.get("project_refs"), list) else [],
+                ),
+            }
+        )
+
+    @app.post("/api/local-agent/work-memory/backfill-existing")
+    def work_memory_backfill_existing():
+        payload = request.get_json(silent=True) or {}
+        result = _backfill_existing_work_memory_on_local_agent(
+            owner_email=str(payload.get("owner_email") or "").strip().lower(),
+            date_range=str(payload.get("date_range") or "90d").strip() or "90d",
+            sources=[str(item or "").strip() for item in payload.get("sources") or [] if str(item or "").strip()] if isinstance(payload.get("sources"), list) else [],
+        )
+        return jsonify({"status": "ok", **result})
+
+    @app.post("/api/local-agent/work-memory/ingest-incremental")
+    def work_memory_ingest_incremental():
+        payload = request.get_json(silent=True) or {}
+        owner_email = str(payload.get("owner_email") or "").strip().lower()
+        effective_window = "90d" if bool(payload.get("reconciliation")) else (str(payload.get("window") or "7d").strip() or "7d")
+        existing = _backfill_existing_work_memory_on_local_agent(
+            owner_email=owner_email,
+            date_range=effective_window,
+            sources=["meeting_recorder", "team_dashboard"],
+        )
+        distilled = _get_work_memory_store().distill_work_memory(owner_email=owner_email, date_range=effective_window)
+        _get_work_memory_store().record_ingestion_run(
+            source_type="work_memory_incremental",
+            owner_email=owner_email,
+            cursor=effective_window,
+            status="ok" if int(existing.get("failed") or 0) == 0 else "partial_error",
+            scanned_count=int(existing.get("meeting_records") or 0) + int(existing.get("team_dashboard_cache") or 0),
+            matched_count=int(existing.get("recorded") or 0),
+            recorded_count=int(existing.get("recorded") or 0),
+            duplicate_count=int(existing.get("duplicate") or 0),
+            failed_count=int(existing.get("failed") or 0),
+            metadata={"sources": ["meeting_recorder", "team_dashboard"], "reconciliation": bool(payload.get("reconciliation"))},
+        )
+        return jsonify(
+            {
+                "status": "ok",
+                "window": effective_window,
+                "reconciliation": bool(payload.get("reconciliation")),
+                "sources": {"existing": existing, "distill": distilled, "gmail_sent_monthly_report": {"status": "skipped", "message": "Gmail ingestion runs from the Cloud Run session."}},
+                "recorded": int(existing.get("recorded") or 0),
+                "failed": int(existing.get("failed") or 0),
+                "duplicate": int(existing.get("duplicate") or 0),
+            }
+        )
+
+    @app.post("/api/local-agent/superagent/health")
+    def superagent_health():
+        payload = request.get_json(silent=True) or {}
+        return jsonify(_get_work_memory_store().superagent_health(owner_email=str(payload.get("owner_email") or "").strip().lower()))
+
+    @app.post("/api/local-agent/superagent/query")
+    def superagent_query():
+        payload = request.get_json(silent=True) or {}
+        owner_email = str(payload.get("owner_email") or "").strip().lower()
+        user_email = str(payload.get("user_email") or owner_email).strip().lower()
+        task_type = str(payload.get("task_type") or "general").strip() or "general"
+        query_text = str(payload.get("query") or "").strip()
+        visibility_scope = str(payload.get("visibility_scope") or "owner").strip().lower() or "owner"
+        context = _get_work_memory_store().query_superagent_context(
+            query=query_text,
+            owner_email=owner_email,
+            visibility_scope=visibility_scope,
+            task_type=task_type,
+            limit=int(payload.get("limit") or 12),
+        )
+        result = _get_work_memory_store().generate_llm_superagent_answer(task_type=task_type, query=query_text, context=context)
+        audit = _get_work_memory_store().record_superagent_audit_log(
+            owner_email=owner_email,
+            user_email=user_email,
+            query=query_text,
+            task_type=task_type,
+            visibility_scope=visibility_scope,
+            context=context,
+            answer=result,
+            metadata={"route": "/api/local-agent/superagent/query"},
+        )
+        return jsonify({"status": "ok", "context": context, "audit": audit, **result})
+
+    @app.post("/api/local-agent/superagent/explain")
+    def superagent_explain():
+        payload = request.get_json(silent=True) or {}
+        return jsonify(
+            _get_work_memory_store().explain_superagent_answer(
+                owner_email=str(payload.get("owner_email") or "").strip().lower(),
+                query=str(payload.get("query") or "").strip(),
+                task_type=str(payload.get("task_type") or "general").strip() or "general",
+                visibility_scope=str(payload.get("visibility_scope") or "owner").strip().lower() or "owner",
+            )
+        )
+
+    @app.post("/api/local-agent/superagent/eval")
+    def superagent_eval():
+        payload = request.get_json(silent=True) or {}
+        return jsonify(
+            _get_work_memory_store().run_superagent_eval_cases(
+                owner_email=str(payload.get("owner_email") or "").strip().lower(),
+                cases=payload.get("cases") if isinstance(payload.get("cases"), list) else None,
+                limit=int(payload.get("limit") or 30),
+                suite_id=str(payload.get("suite_id") or "").strip(),
+            )
+        )
+
+    @app.post("/api/local-agent/superagent/audit")
+    def superagent_audit():
+        payload = request.get_json(silent=True) or {}
+        return jsonify(
+            {
+                "status": "ok",
+                "items": _get_work_memory_store().superagent_audit_log(
+                    owner_email=str(payload.get("owner_email") or "").strip().lower(),
+                    limit=int(payload.get("limit") or 50),
+                ),
+            }
         )
 
     def _send_meeting_recorder_asset(*, record_id: str, owner_email: str, relative_path: str):
@@ -1843,6 +2039,88 @@ def _get_meeting_record_store() -> MeetingRecordStore:
 
 def _get_meeting_recorder_runtime() -> MeetingRecorderRuntime:
     return current_app.config["MEETING_RECORDER_RUNTIME"]
+
+
+def _get_work_memory_store() -> WorkMemoryStore:
+    return current_app.config["WORK_MEMORY_STORE"]
+
+
+def _record_local_work_memory_items(items: list[dict[str, Any]], *, event: str, owner_email: str) -> dict[str, int]:
+    recorded = 0
+    failed = 0
+    duplicate = 0
+    store = _get_work_memory_store()
+    seen: set[tuple[str, str, str, str]] = set()
+    for item in items:
+        try:
+            key = (
+                str(item.get("source_type") or ""),
+                str(item.get("source_id") or ""),
+                str(item.get("item_type") or ""),
+                str(item.get("owner_email") or owner_email or "").lower(),
+            )
+            if key in seen:
+                duplicate += 1
+            seen.add(key)
+            store.record_memory_item(**item)
+            recorded += 1
+        except Exception:
+            failed += 1
+            current_app.logger.exception("Failed to record local-agent Work Memory item.")
+    store.record_ingestion_run(
+        source_type=event,
+        owner_email=owner_email,
+        cursor="local_agent",
+        status="ok" if failed == 0 else "partial_error",
+        scanned_count=len(items),
+        matched_count=len(items),
+        recorded_count=recorded,
+        duplicate_count=duplicate,
+        failed_count=failed,
+    )
+    return {"recorded": recorded, "failed": failed, "duplicate": duplicate}
+
+
+def _backfill_existing_work_memory_on_local_agent(*, owner_email: str, date_range: str = "90d", sources: list[str] | None = None) -> dict[str, Any]:
+    source_filter = {str(source or "").strip() for source in sources or [] if str(source or "").strip()}
+    items: list[dict[str, Any]] = []
+    source_counts = {"meeting_records": 0, "team_dashboard_cache": 0}
+    if not source_filter or "meeting_recorder" in source_filter:
+        try:
+            for record in _get_meeting_record_store().list_records(owner_email=owner_email):
+                if str(record.get("status") or "").strip().lower() != "completed":
+                    continue
+                record_items = meeting_record_memory_items(record)
+                if record_items:
+                    source_counts["meeting_records"] += 1
+                    items.extend(record_items)
+        except Exception:
+            current_app.logger.exception("Local-agent Work Memory meeting backfill failed.")
+    if not source_filter or "team_dashboard" in source_filter:
+        try:
+            config = _build_team_dashboard_config_store(current_app.config["SETTINGS"]).load()
+            task_cache = config.get("task_cache") if isinstance(config.get("task_cache"), dict) else {}
+            cached_teams = task_cache.get("teams") if isinstance(task_cache.get("teams"), dict) else {}
+            for team_key, cached_team in cached_teams.items():
+                if not isinstance(cached_team, dict):
+                    continue
+                team_payload = {
+                    **cached_team,
+                    "team_key": str(cached_team.get("team_key") or team_key),
+                    "loading": False,
+                    "loaded": True,
+                    "error": "",
+                    "progress_text": "",
+                    "cache_source": "local_agent_backfill",
+                }
+                team_items = team_dashboard_memory_items(team_payload, owner_email=owner_email)
+                if team_items:
+                    source_counts["team_dashboard_cache"] += 1
+                    items.extend(team_items)
+        except Exception:
+            current_app.logger.exception("Local-agent Work Memory Team Dashboard cache backfill failed.")
+    result = _record_local_work_memory_items(items, event="work_memory_existing_backfill", owner_email=owner_email)
+    return {**result, **source_counts, "date_range": date_range, "sources": sorted(source_filter)}
 
 
 def _build_meeting_processing_service(settings: Settings) -> MeetingProcessingService:

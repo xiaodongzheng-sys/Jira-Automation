@@ -3275,6 +3275,8 @@ def create_app() -> Flask:
         access_gate = _require_work_memory_access(settings, api=True)
         if access_gate is not None:
             return access_gate
+        if _local_agent_work_memory_enabled(settings):
+            return jsonify(_build_local_agent_client(settings).work_memory_health())
         return jsonify(_get_work_memory_store().health())
 
     @app.get("/api/work-memory/recent")
@@ -3282,16 +3284,20 @@ def create_app() -> Flask:
         access_gate = _require_work_memory_access(settings, api=True)
         if access_gate is not None:
             return access_gate
-        items = _get_work_memory_store().query_work_memory(
-            owner_email=_current_google_email(),
-            visibility_scope=str(request.args.get("scope") or "owner").strip().lower() or "owner",
-            query=str(request.args.get("q") or ""),
-            filters={
+        query_args = {
+            "owner_email": _current_google_email(),
+            "visibility_scope": str(request.args.get("scope") or "owner").strip().lower() or "owner",
+            "query": str(request.args.get("q") or ""),
+            "filters": {
                 "source_type": str(request.args.get("source_type") or "").strip(),
                 "item_type": str(request.args.get("item_type") or "").strip(),
             },
-            limit=int(request.args.get("limit") or 50),
-        )
+            "limit": int(request.args.get("limit") or 50),
+        }
+        if _local_agent_work_memory_enabled(settings):
+            items = _build_local_agent_client(settings).work_memory_recent(**query_args)
+        else:
+            items = _get_work_memory_store().query_work_memory(**query_args)
         return jsonify({"status": "ok", "items": items})
 
     @app.get("/api/work-memory/review-candidates")
@@ -3299,7 +3305,10 @@ def create_app() -> Flask:
         access_gate = _require_work_memory_access(settings, api=True)
         if access_gate is not None:
             return access_gate
-        items = _get_work_memory_store().review_candidates(owner_email=_current_google_email(), limit=int(request.args.get("limit") or 50))
+        if _local_agent_work_memory_enabled(settings):
+            items = _build_local_agent_client(settings).work_memory_review_candidates(owner_email=_current_google_email(), limit=int(request.args.get("limit") or 50))
+        else:
+            items = _get_work_memory_store().review_candidates(owner_email=_current_google_email(), limit=int(request.args.get("limit") or 50))
         return jsonify({"status": "ok", "items": items})
 
     @app.get("/api/work-memory/project-timeline")
@@ -3308,12 +3317,16 @@ def create_app() -> Flask:
         if access_gate is not None:
             return access_gate
         project_ref = str(request.args.get("project_ref") or request.args.get("q") or "").strip()
-        items = _get_work_memory_store().project_timeline(
-            project_ref=project_ref,
-            owner_email=_current_google_email(),
-            visibility_scope=str(request.args.get("scope") or "owner").strip().lower() or "owner",
-            limit=int(request.args.get("limit") or 100),
-        )
+        query_args = {
+            "project_ref": project_ref,
+            "owner_email": _current_google_email(),
+            "visibility_scope": str(request.args.get("scope") or "owner").strip().lower() or "owner",
+            "limit": int(request.args.get("limit") or 100),
+        }
+        if _local_agent_work_memory_enabled(settings):
+            items = _build_local_agent_client(settings).work_memory_project_timeline(**query_args)
+        else:
+            items = _get_work_memory_store().project_timeline(**query_args)
         return jsonify({"status": "ok", "items": items})
 
     @app.get("/api/work-memory/entity-resolution")
@@ -3321,11 +3334,15 @@ def create_app() -> Flask:
         access_gate = _require_work_memory_access(settings, api=True)
         if access_gate is not None:
             return access_gate
-        result = _get_work_memory_store().resolve_work_entity(
-            query=str(request.args.get("q") or request.args.get("query") or "").strip(),
-            owner_email=_current_google_email(),
-            entity_type=str(request.args.get("entity_type") or "").strip(),
-        )
+        query_args = {
+            "query": str(request.args.get("q") or request.args.get("query") or "").strip(),
+            "owner_email": _current_google_email(),
+            "entity_type": str(request.args.get("entity_type") or "").strip(),
+        }
+        if _local_agent_work_memory_enabled(settings):
+            result = _build_local_agent_client(settings).work_memory_entity_resolution(**query_args)
+        else:
+            result = _get_work_memory_store().resolve_work_entity(**query_args)
         return jsonify(result)
 
     @app.post("/api/work-memory/feedback")
@@ -3335,14 +3352,18 @@ def create_app() -> Flask:
             return access_gate
         payload = request.get_json(silent=True) or {}
         try:
-            result = _get_work_memory_store().record_memory_feedback(
-                item_id=str(payload.get("item_id") or "").strip(),
-                action=str(payload.get("action") or "").strip(),
-                owner_email=_current_google_email(),
-                correction_text=str(payload.get("correction_text") or "").strip(),
-                visibility_override=str(payload.get("visibility_override") or "").strip(),
-                reason=str(payload.get("reason") or "").strip(),
-            )
+            feedback_args = {
+                "item_id": str(payload.get("item_id") or "").strip(),
+                "action": str(payload.get("action") or "").strip(),
+                "owner_email": _current_google_email(),
+                "correction_text": str(payload.get("correction_text") or "").strip(),
+                "visibility_override": str(payload.get("visibility_override") or "").strip(),
+                "reason": str(payload.get("reason") or "").strip(),
+            }
+            if _local_agent_work_memory_enabled(settings):
+                result = _build_local_agent_client(settings).work_memory_feedback(**feedback_args)
+            else:
+                result = _get_work_memory_store().record_memory_feedback(**feedback_args)
             return jsonify(result)
         except (KeyError, ValueError) as error:
             return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
@@ -3364,11 +3385,15 @@ def create_app() -> Flask:
         if access_gate is not None:
             return access_gate
         payload = request.get_json(silent=True) or {}
-        result = _ingest_existing_work_memory_sources(
-            settings,
-            date_range=str(payload.get("date_range") or "90d").strip() or "90d",
-            sources=[str(item or "").strip() for item in payload.get("sources") or [] if str(item or "").strip()] if isinstance(payload.get("sources"), list) else [],
-        )
+        backfill_args = {
+            "owner_email": _current_google_email(),
+            "date_range": str(payload.get("date_range") or "90d").strip() or "90d",
+            "sources": [str(item or "").strip() for item in payload.get("sources") or [] if str(item or "").strip()] if isinstance(payload.get("sources"), list) else [],
+        }
+        if _local_agent_work_memory_enabled(settings):
+            result = _build_local_agent_client(settings).work_memory_backfill_existing(**backfill_args)
+        else:
+            result = _ingest_existing_work_memory_sources(settings, date_range=backfill_args["date_range"], sources=backfill_args["sources"])
         return jsonify({"status": "ok", **result})
 
     @app.post("/api/work-memory/distill")
@@ -3377,12 +3402,16 @@ def create_app() -> Flask:
         if access_gate is not None:
             return access_gate
         payload = request.get_json(silent=True) or {}
-        result = _get_work_memory_store().distill_work_memory(
-            owner_email=_current_google_email(),
-            date_range=str(payload.get("date_range") or "90d").strip() or "90d",
-            sources=[str(item or "").strip() for item in payload.get("sources") or [] if str(item or "").strip()] if isinstance(payload.get("sources"), list) else [],
-            project_refs=[str(item or "").strip() for item in payload.get("project_refs") or [] if str(item or "").strip()] if isinstance(payload.get("project_refs"), list) else [],
-        )
+        distill_args = {
+            "owner_email": _current_google_email(),
+            "date_range": str(payload.get("date_range") or "90d").strip() or "90d",
+            "sources": [str(item or "").strip() for item in payload.get("sources") or [] if str(item or "").strip()] if isinstance(payload.get("sources"), list) else [],
+            "project_refs": [str(item or "").strip() for item in payload.get("project_refs") or [] if str(item or "").strip()] if isinstance(payload.get("project_refs"), list) else [],
+        }
+        if _local_agent_work_memory_enabled(settings):
+            result = _build_local_agent_client(settings).work_memory_distill(**distill_args)
+        else:
+            result = _get_work_memory_store().distill_work_memory(**distill_args)
         return jsonify({"status": "ok", **result})
 
     @app.post("/api/work-memory/ingest-incremental")
@@ -3392,11 +3421,18 @@ def create_app() -> Flask:
             return access_gate
         payload = request.get_json(silent=True) or {}
         try:
-            result = _run_incremental_memory_ingestion(
-                settings,
-                window=str(payload.get("window") or "7d").strip() or "7d",
-                reconciliation=bool(payload.get("reconciliation")),
-            )
+            if _local_agent_work_memory_enabled(settings):
+                result = _build_local_agent_client(settings).work_memory_ingest_incremental(
+                    owner_email=_current_google_email(),
+                    window=str(payload.get("window") or "7d").strip() or "7d",
+                    reconciliation=bool(payload.get("reconciliation")),
+                )
+            else:
+                result = _run_incremental_memory_ingestion(
+                    settings,
+                    window=str(payload.get("window") or "7d").strip() or "7d",
+                    reconciliation=bool(payload.get("reconciliation")),
+                )
             return jsonify({"status": "ok", **result})
         except (ConfigError, ToolError) as error:
             return jsonify({"status": "error", "message": str(error), **_classify_portal_error(error)}), HTTPStatus.BAD_REQUEST
@@ -3462,6 +3498,8 @@ def create_app() -> Flask:
         access_gate = _require_work_memory_access(settings, api=True)
         if access_gate is not None:
             return access_gate
+        if _local_agent_work_memory_enabled(settings):
+            return jsonify(_build_local_agent_client(settings).superagent_health(owner_email=_current_google_email()))
         return jsonify(_get_work_memory_store().superagent_health(owner_email=_current_google_email()))
 
     @app.post("/api/superagent/query")
@@ -3472,6 +3510,17 @@ def create_app() -> Flask:
         payload = request.get_json(silent=True) or {}
         task_type = str(payload.get("task_type") or "general").strip() or "general"
         query_text = str(payload.get("query") or "").strip()
+        if _local_agent_work_memory_enabled(settings):
+            return jsonify(
+                _build_local_agent_client(settings).superagent_query(
+                    owner_email=_current_google_email(),
+                    user_email=_current_google_email(),
+                    query=query_text,
+                    task_type=task_type,
+                    visibility_scope=str(payload.get("visibility_scope") or "owner").strip().lower() or "owner",
+                    limit=int(payload.get("limit") or 12),
+                )
+            )
         context = _get_work_memory_store().query_superagent_context(
             query=query_text,
             owner_email=_current_google_email(),
@@ -3498,6 +3547,15 @@ def create_app() -> Flask:
         if access_gate is not None:
             return access_gate
         payload = request.get_json(silent=True) or {}
+        if _local_agent_work_memory_enabled(settings):
+            return jsonify(
+                _build_local_agent_client(settings).superagent_explain(
+                    owner_email=_current_google_email(),
+                    query=str(payload.get("query") or "").strip(),
+                    task_type=str(payload.get("task_type") or "general").strip() or "general",
+                    visibility_scope=str(payload.get("visibility_scope") or "owner").strip().lower() or "owner",
+                )
+            )
         result = _get_work_memory_store().explain_superagent_answer(
             owner_email=_current_google_email(),
             query=str(payload.get("query") or "").strip(),
@@ -3512,6 +3570,15 @@ def create_app() -> Flask:
         if access_gate is not None:
             return access_gate
         payload = request.get_json(silent=True) or {}
+        if _local_agent_work_memory_enabled(settings):
+            return jsonify(
+                _build_local_agent_client(settings).superagent_eval(
+                    owner_email=_current_google_email(),
+                    cases=payload.get("cases") if isinstance(payload.get("cases"), list) else None,
+                    limit=int(payload.get("limit") or 30),
+                    suite_id=str(request.args.get("suite_id") or payload.get("suite_id") or "").strip(),
+                )
+            )
         result = _get_work_memory_store().run_superagent_eval_cases(
             owner_email=_current_google_email(),
             cases=payload.get("cases") if isinstance(payload.get("cases"), list) else None,
@@ -3525,6 +3592,16 @@ def create_app() -> Flask:
         access_gate = _require_work_memory_access(settings, api=True)
         if access_gate is not None:
             return access_gate
+        if _local_agent_work_memory_enabled(settings):
+            return jsonify(
+                {
+                    "status": "ok",
+                    "items": _build_local_agent_client(settings).superagent_audit(
+                        owner_email=_current_google_email(),
+                        limit=int(request.args.get("limit") or 50),
+                    ),
+                }
+            )
         return jsonify(
             {
                 "status": "ok",
@@ -7959,6 +8036,14 @@ def _local_agent_seatalk_enabled(settings: Settings) -> bool:
 
 
 def _local_agent_meeting_recorder_enabled(settings: Settings) -> bool:
+    return bool(
+        _local_agent_mode_enabled(settings)
+        and settings.local_agent_base_url
+        and settings.local_agent_hmac_secret
+    )
+
+
+def _local_agent_work_memory_enabled(settings: Settings) -> bool:
     return bool(
         _local_agent_mode_enabled(settings)
         and settings.local_agent_base_url

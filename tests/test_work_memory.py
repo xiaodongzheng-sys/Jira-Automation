@@ -927,6 +927,57 @@ class WorkMemoryRouteTests(unittest.TestCase):
                 self.assertEqual(health["guardrails"]["external_writes_enabled"], False)
                 self.assertGreaterEqual(health["materialized_count"], 1)
 
+    def test_work_memory_routes_use_local_agent_when_enabled(self):
+        class FakeLocalAgentClient:
+            def work_memory_health(self):
+                return {"status": "ok", "item_count": 2994, "feedback_count": 0, "materialized_count": 53, "ingestion_runs": []}
+
+            def work_memory_review_candidates(self, *, owner_email, limit):
+                return [{"item_id": "item-1", "owner_email": owner_email, "summary": f"limit={limit}"}]
+
+            def superagent_health(self, *, owner_email):
+                return {
+                    "status": "ok",
+                    "readonly": True,
+                    "owner_email": owner_email,
+                    "item_count": 2994,
+                    "feedback_count": 0,
+                    "materialized_count": 53,
+                    "ingestion_runs": [],
+                    "guardrails": {"external_writes_enabled": False},
+                }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            env = {
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_BASE_URL": "https://uat.example.run.app",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg",
+                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
+                "LOCAL_AGENT_MODE": "sync",
+                "LOCAL_AGENT_BASE_URL": "https://live.example/uat-local-agent",
+                "LOCAL_AGENT_HMAC_SECRET": "uat-secret",
+            }
+            with patch.dict(os.environ, env, clear=False), patch(
+                "bpmis_jira_tool.web._build_local_agent_client",
+                return_value=FakeLocalAgentClient(),
+            ):
+                app = create_app()
+
+                with app.test_client() as client:
+                    with client.session_transaction() as session:
+                        session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Owner"}
+                        session["google_credentials"] = {"token": "x"}
+
+                    health = client.get("/api/work-memory/health").get_json()
+                    candidates = client.get("/api/work-memory/review-candidates?limit=7").get_json()
+                    superagent = client.get("/api/superagent/health").get_json()
+
+        self.assertEqual(health["item_count"], 2994)
+        self.assertEqual(health["materialized_count"], 53)
+        self.assertEqual(candidates["items"][0]["owner_email"], "xiaodong.zheng@npt.sg")
+        self.assertEqual(candidates["items"][0]["summary"], "limit=7")
+        self.assertEqual(superagent["item_count"], 2994)
+
     def test_superagent_support_routes_expose_resolution_audit_explain_eval_and_incremental_ingest(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             env = {
