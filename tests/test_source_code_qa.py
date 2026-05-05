@@ -1190,7 +1190,10 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertIn("Data dictionary handling", section)
         self.assertIn("AF and GRC, data_dictionary uploads apply to all country selections", section)
         self.assertIn("SG, ID, and PH share the same table and data-field definitions", section)
+        self.assertIn("first explain the actual SQL/table logic", section)
+        self.assertIn("chosen table names, key filters, joins, reviewer/status rows, and timestamp assumptions", section)
         self.assertIn("selected country points to that country's separate runtime DB instance", section)
+        self.assertIn("This DB-routing rule is not a complete answer by itself", section)
 
     def test_crms_cannot_use_all_country_runtime_evidence(self):
         with self.app.test_client() as client:
