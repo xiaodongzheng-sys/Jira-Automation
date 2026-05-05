@@ -106,7 +106,8 @@
           </div>
           <div class="source-qa-live-answer" data-source-live-answer hidden></div>
           <div class="source-qa-chat-composer source-qa-composer">
-            <textarea data-source-question rows="4"></textarea>
+            <div class="source-qa-attachment-list" data-source-attachments hidden></div>
+            <textarea data-source-question rows="8"></textarea>
             <input
               type="file"
               data-source-attachment-input
@@ -116,9 +117,8 @@
             >
             <div class="source-qa-attachment-bar">
               <button class="button button-secondary source-qa-attachment-button" type="button" data-source-attachment-upload>Add photos &amp; files</button>
-              <div class="source-qa-attachment-list" data-source-attachments hidden></div>
+              <button class="button source-qa-send-button" type="button" data-source-query aria-label="Send question">Send</button>
             </div>
-            <button class="button source-qa-send-button" type="button" data-source-query aria-label="Send question">Send</button>
             <span class="microcopy" data-source-query-status hidden>Ready.</span>
           </div>
         </article>

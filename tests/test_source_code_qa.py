@@ -83,6 +83,10 @@ class SourceCodeQARouteTests(unittest.TestCase):
         html = response.get_data(as_text=True)
         self.assertIn("Source Code Q&amp;A", html)
         self.assertLess(html.index("Source Code Q&amp;A"), html.index("BPMIS Automation Tool"))
+        self.assertIn('data-source-question rows="8"', html)
+        self.assertLess(html.index("data-source-attachments"), html.index("data-source-question"))
+        self.assertLess(html.index("data-source-question"), html.index("data-source-attachment-upload"))
+        self.assertLess(html.index("data-source-attachment-upload"), html.index("data-source-query"))
 
     def test_whitelisted_gmail_user_also_sees_source_code_tab(self):
         with self.app.test_client() as client:

@@ -6492,15 +6492,13 @@ select:focus {
 }
 
 .source-qa-chat-composer {
-  position: relative;
-  margin-top: 6px;
+  margin-top: 10px;
 }
 
 .source-qa-chat-composer textarea {
-  min-height: 132px;
-  padding-right: 112px;
-  padding-bottom: 72px;
-  resize: none;
+  min-height: 240px;
+  padding: 16px 18px;
+  resize: vertical;
 }
 
 .source-qa-effort-requirement textarea {
@@ -6508,15 +6506,11 @@ select:focus {
 }
 
 .source-qa-attachment-bar {
-  position: absolute;
-  left: 14px;
-  right: 104px;
-  bottom: 14px;
   display: flex;
   align-items: center;
-  gap: 8px;
+  justify-content: space-between;
+  gap: 12px;
   min-width: 0;
-  pointer-events: none;
 }
 
 .source-qa-attachment-bar > * {
@@ -6532,13 +6526,15 @@ select:focus {
 
 .source-qa-attachment-list {
   max-width: 100%;
-  overflow: hidden;
+  overflow: visible;
+}
+
+.source-qa-attachment-list[hidden] {
+  display: none;
 }
 
 .source-qa-send-button {
-  position: absolute;
-  right: 14px;
-  bottom: 14px;
+  margin-left: auto;
   min-width: 76px;
   min-height: 42px;
   padding: 10px 16px;
