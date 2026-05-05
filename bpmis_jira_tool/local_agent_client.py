@@ -704,7 +704,7 @@ class LocalAgentClient:
             if str(value or "").strip():
                 headers[str(key)] = str(value)
         if signed:
-            request_path = urlsplit(url).path or "/"
+            request_path = path if str(path or "").startswith("/") else f"/{path}"
             headers.update(sign_headers(secret=self.hmac_secret, method=method, path=request_path, body=body))
         max_attempts = len(LOCAL_AGENT_TRANSIENT_UNREADABLE_RETRY_DELAYS_SECONDS) + 1
         for attempt in range(max_attempts):

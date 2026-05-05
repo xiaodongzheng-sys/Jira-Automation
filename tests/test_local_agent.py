@@ -725,6 +725,47 @@ class LocalAgentClientTests(unittest.TestCase):
         self.assertEqual(request.call_args.args[1], "https://portal.example/api/local-agent/healthz")
         self.assertEqual(request.call_args.kwargs["timeout"], (10, 300))
 
+    def test_prefixed_proxy_base_url_signs_canonical_local_agent_path(self):
+        class FakeResponse:
+            status_code = 200
+            text = '{"status":"ok","availability":{}}'
+
+            def json(self):
+                return {"status": "ok", "availability": {}}
+
+        client = LocalAgentClient(base_url="https://portal.example/uat-local-agent", hmac_secret="shared-secret")
+        with patch(
+            "bpmis_jira_tool.local_agent_client._LOCAL_AGENT_SESSION.request",
+            return_value=FakeResponse(),
+        ) as request:
+            client.source_code_qa_model_availability_get()
+
+        self.assertEqual(
+            request.call_args.args[1],
+            "https://portal.example/uat-local-agent/api/local-agent/source-code-qa/model-availability/get",
+        )
+        body = request.call_args.kwargs["data"]
+        headers = request.call_args.kwargs["headers"]
+        verify_signature(
+            secret="shared-secret",
+            method="POST",
+            path="/api/local-agent/source-code-qa/model-availability/get",
+            body=body,
+            timestamp=headers["X-Local-Agent-Timestamp"],
+            nonce=headers["X-Local-Agent-Nonce"],
+            signature=headers["X-Local-Agent-Signature"],
+        )
+        with self.assertRaises(ToolError):
+            verify_signature(
+                secret="shared-secret",
+                method="POST",
+                path="/uat-local-agent/api/local-agent/source-code-qa/model-availability/get",
+                body=body,
+                timestamp=headers["X-Local-Agent-Timestamp"],
+                nonce=headers["X-Local-Agent-Nonce"],
+                signature=headers["X-Local-Agent-Signature"],
+            )
+
     def test_client_uses_configured_connect_timeout(self):
         class FakeResponse:
             status_code = 200
