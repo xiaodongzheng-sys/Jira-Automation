@@ -12,6 +12,8 @@ import zipfile
 from unittest.mock import patch
 from types import SimpleNamespace
 
+from openpyxl import Workbook
+
 from bpmis_jira_tool.errors import ToolError
 from bpmis_jira_tool.source_code_qa import (
     CodexCliBridgeSourceCodeQALLMProvider,
@@ -1129,6 +1131,58 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertTrue(any("bcf_global_lock" in item.get("text", "") for item in grc_runtime))
         self.assertEqual({(item["pm_team"], item["country"], item["source_type"]) for item in af_runtime}, {("AF", "All", "data_dictionary")})
         self.assertTrue(any("af_rule" in item.get("text", "") for item in af_runtime))
+
+    def test_data_dictionary_xlsx_extracts_many_table_sheets(self):
+        workbook = Workbook()
+        overview = workbook.active
+        overview.title = "Full Dictionary"
+        overview.append(["table catalog"])
+        for index in range(1, 8):
+            sheet = workbook.create_sheet(f"table_{index}_info")
+            sheet.append(["字段名", "数据类型", "是否必填", "业务含义"])
+            sheet.append([f"`field_{index}`", "varchar(64)", "是", f"Meaning for table {index}"])
+        buffer = io.BytesIO()
+        workbook.save(buffer)
+
+        store = self.app.config["SOURCE_CODE_QA_RUNTIME_EVIDENCE_STORE"]
+        saved = store.save_bytes(
+            pm_team="GRC",
+            country="All",
+            source_type="data_dictionary",
+            uploaded_by="xiaodong.zheng@npt.sg",
+            filename="dictionary.xlsx",
+            mime_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            content=buffer.getvalue(),
+        )
+        resolved = store.resolve_scope(pm_team="GRC", country="SG")
+        dictionary_text = next(item["text"] for item in resolved if item["id"] == saved["id"])
+
+        self.assertIn("[Data dictionary sheet: table_7_info]", dictionary_text)
+        self.assertIn("field_7", dictionary_text)
+        self.assertGreater(saved["text_char_count"], 700)
+
+    def test_data_dictionary_prompt_allows_larger_context(self):
+        section = SourceCodeQAService._runtime_evidence_prompt_section(
+            [
+                {
+                    "id": "dict-1",
+                    "filename": "dictionary.xlsx",
+                    "mime_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    "kind": "document",
+                    "source_type": "data_dictionary",
+                    "pm_team": "GRC",
+                    "country": "All",
+                    "size": 100,
+                    "sha256": "a" * 64,
+                    "created_at": "2026-05-05T00:00:00Z",
+                    "uploaded_by": "owner@npt.sg",
+                    "text": "start\n" + ("x" * 7000) + "\nlate_table_name",
+                }
+            ]
+        )
+
+        self.assertIn("late_table_name", section)
+        self.assertIn("Data dictionary handling", section)
 
     def test_crms_cannot_use_all_country_runtime_evidence(self):
         with self.app.test_client() as client:

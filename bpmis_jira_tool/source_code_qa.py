@@ -16281,8 +16281,9 @@ class SourceCodeQAService:
             )
             text = str(item.get("text") or item.get("summary") or "").strip()
             if text:
-                if len(text) > 6000:
-                    text = f"{text[:6000]}\n...[runtime evidence text truncated]"
+                text_limit = 60000 if meta["source_type"].lower() == "data_dictionary" else 6000
+                if len(text) > text_limit:
+                    text = f"{text[:text_limit]}\n...[runtime evidence text truncated]"
                 lines.append(f"  Extracted text/summary:\n{text}")
                 if meta["source_type"].lower() == "apollo":
                     lines.append(

@@ -1831,6 +1831,10 @@ class SourceCodeQARuntimeEvidenceStore(SourceCodeQAAttachmentStore):
     MAX_ZIP_MEMBERS = 500
     MAX_ZIP_UNCOMPRESSED_BYTES = 8 * 1024 * 1024
     MAX_ZIP_TEXT_CHARS = 120000
+    MAX_DATA_DICTIONARY_XLSX_SHEETS = 120
+    MAX_DATA_DICTIONARY_XLSX_ROWS_PER_SHEET = 300
+    MAX_DATA_DICTIONARY_XLSX_COLS = 16
+    MAX_DATA_DICTIONARY_XLSX_TEXT_CHARS = 120000
     ZIP_TEXT_EXTENSIONS = SourceCodeQAAttachmentStore.TEXT_EXTENSIONS | {
         ".conf",
         ".cfg",
@@ -1915,7 +1919,7 @@ class SourceCodeQARuntimeEvidenceStore(SourceCodeQAAttachmentStore):
         kind = "archive" if suffix == ".zip" else self._attachment_kind(safe_name, guessed_mime, content)
         if kind == "image":
             raise ToolError("Runtime evidence must be a parseable text, spreadsheet, PDF, or document file, not an image.")
-        extracted = self._extract_attachment_text(safe_name, guessed_mime, content)
+        extracted = self._extract_runtime_evidence_text(safe_name, guessed_mime, content, source_type=safe_source_type)
         digest = hashlib.sha256(content).hexdigest()
         evidence_id = uuid.uuid4().hex
         stored_name = f"{evidence_id}{suffix or '.txt'}"
@@ -1959,6 +1963,49 @@ class SourceCodeQARuntimeEvidenceStore(SourceCodeQAAttachmentStore):
         if Path(filename).suffix.lower() == ".zip":
             return self._extract_zip_text(content)
         return super()._extract_attachment_text(filename, mime_type, content)
+
+    def _extract_runtime_evidence_text(self, filename: str, mime_type: str, content: bytes, *, source_type: str) -> str:
+        if str(source_type or "").strip().lower() == "data_dictionary" and Path(filename).suffix.lower() == ".xlsx":
+            return self._extract_data_dictionary_xlsx_text(content)
+        return self._extract_attachment_text(filename, mime_type, content)
+
+    def _extract_data_dictionary_xlsx_text(self, content: bytes) -> str:
+        try:
+            from openpyxl import load_workbook
+        except ImportError as error:
+            raise ToolError("XLSX data dictionaries are supported only when openpyxl is installed on the server.") from error
+        workbook = load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+        lines: list[str] = []
+        sheet_count = 0
+        for worksheet in workbook.worksheets[: self.MAX_DATA_DICTIONARY_XLSX_SHEETS]:
+            sheet_count += 1
+            lines.append(f"[Data dictionary sheet: {worksheet.title}]")
+            non_empty_rows = 0
+            for row in worksheet.iter_rows(
+                max_row=self.MAX_DATA_DICTIONARY_XLSX_ROWS_PER_SHEET,
+                max_col=self.MAX_DATA_DICTIONARY_XLSX_COLS,
+                values_only=True,
+            ):
+                values = ["" if value is None else str(value).strip() for value in row]
+                values = [value.replace("\r\n", "\n").replace("\r", "\n") for value in values]
+                if not any(values):
+                    continue
+                non_empty_rows += 1
+                lines.append("\t".join(values).rstrip())
+                if sum(len(line) for line in lines) >= self.MAX_DATA_DICTIONARY_XLSX_TEXT_CHARS:
+                    lines.append("...[data dictionary text truncated]")
+                    text = "\n".join(lines).strip()
+                    if not text:
+                        raise ToolError("Unable to extract readable text from this XLSX data dictionary.")
+                    return text[: self.MAX_DATA_DICTIONARY_XLSX_TEXT_CHARS]
+            if non_empty_rows == 0:
+                lines.append("(empty sheet)")
+        if len(workbook.worksheets) > sheet_count:
+            lines.append(f"[Data dictionary skipped sheets: {len(workbook.worksheets) - sheet_count}]")
+        text = "\n".join(lines).strip()
+        if not text:
+            raise ToolError("Unable to extract readable text from this XLSX data dictionary.")
+        return text[: self.MAX_DATA_DICTIONARY_XLSX_TEXT_CHARS]
 
     def _extract_zip_text(self, content: bytes) -> str:
         try:
@@ -2068,7 +2115,12 @@ class SourceCodeQARuntimeEvidenceStore(SourceCodeQAAttachmentStore):
                     content = path.read_bytes()
                 except OSError:
                     continue
-                enriched["text"] = self._extract_attachment_text(str(item.get("filename") or ""), str(item.get("mime_type") or ""), content)
+                enriched["text"] = self._extract_runtime_evidence_text(
+                    str(item.get("filename") or ""),
+                    str(item.get("mime_type") or ""),
+                    content,
+                    source_type=str(item.get("source_type") or ""),
+                )
                 resolved.append(enriched)
         return resolved[: self.MAX_QUERY_FILES_PER_SCOPE * max(1, len(countries))]
 
