@@ -1095,6 +1095,31 @@ class TeamPortalAccessTests(unittest.TestCase):
         _method, target_url = proxy_request.call_args.args[:2]
         self.assertEqual(target_url, "http://127.0.0.1:8124/healthz")
 
+    def test_uat_local_agent_proxy_bypasses_google_login_gate(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_BASE_URL": "https://jira-tool.example.com",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg",
+                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
+                "LOCAL_AGENT_PORT": "7007",
+                "UAT_LOCAL_AGENT_PORT": "8124",
+            },
+            clear=False,
+        ), patch("bpmis_jira_tool.web._LOCAL_AGENT_SESSION.request", return_value=_FakeProxyResponse()) as proxy_request:
+            app = create_app()
+            app.testing = True
+
+            with app.test_client() as client:
+                response = client.get("/uat-local-agent/healthz", follow_redirects=False)
+
+        self.assertEqual(response.status_code, 200)
+        proxy_request.assert_called_once()
+        _method, target_url = proxy_request.call_args.args[:2]
+        self.assertEqual(target_url, "http://127.0.0.1:8124/healthz")
+
     def test_default_sheet_template_download_returns_csv(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,

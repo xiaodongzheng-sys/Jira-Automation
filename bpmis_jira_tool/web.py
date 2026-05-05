@@ -2589,6 +2589,8 @@ def create_app() -> Flask:
             return jsonify({"status": "ok", "revision": _current_release_revision()}), HTTPStatus.OK
         if request.path.startswith("/api/local-agent/"):
             return None
+        if request.path.startswith("/uat-local-agent/"):
+            return None
         if request.endpoint in {
             None,
             "static",
