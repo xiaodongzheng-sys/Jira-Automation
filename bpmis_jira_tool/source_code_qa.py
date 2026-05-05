@@ -104,6 +104,8 @@ DEFAULT_CODEX_TOP_PATH_LIMIT = 30
 DEFAULT_CODEX_REPAIR_TOP_PATH_LIMIT = 16
 DEFAULT_CODEX_REPAIR_PROMPT_TOKEN_LIMIT = 11_000
 CODEX_INVESTIGATION_PROMPT_MODE = "codex_investigation_brief_v5"
+CODEX_SQL_GENERATION_PROMPT_MODE = "codex_sql_generation_brief_v1"
+CODEX_SQL_RUNTIME_EVIDENCE_CHAR_LIMIT = 18_000
 CODEX_SESSION_MODE_EPHEMERAL = "ephemeral"
 CODEX_SESSION_MODE_RESUME = "resume"
 DEFAULT_INDEX_LOCK_STALE_SECONDS = 15 * 60
@@ -12985,8 +12987,10 @@ class SourceCodeQAService:
             or table_relation_intent
             or (any(term in lowered for term in DATA_SOURCE_HINTS) and not api_intent)
         )
+        sql_generation_intent = self._question_sql_generation_intent(question)
         return {
-            "data_source": data_source_intent,
+            "data_source": data_source_intent or sql_generation_intent,
+            "sql_generation": sql_generation_intent,
             "api": api_intent,
             "config": any(term in lowered for term in CONFIG_HINTS),
             "module_dependency": any(term in lowered for term in MODULE_DEPENDENCY_HINTS),
@@ -12998,6 +13002,45 @@ class SourceCodeQAService:
             "test_coverage": any(term in lowered for term in TEST_COVERAGE_HINTS),
             "operational_boundary": self._question_operational_boundary_intent(question),
         }
+
+    @staticmethod
+    def _question_sql_generation_intent(question: str) -> bool:
+        lowered = f" {str(question or '').lower()} "
+        if not lowered.strip():
+            return False
+        negative_hints = (
+            "sql injection",
+            "injection",
+            "static qa",
+            "static analysis",
+            "vulnerability",
+            "漏洞",
+            "注入",
+            "代码质量",
+        )
+        if any(term in lowered for term in negative_hints):
+            return False
+        explicit_hints = (
+            "write sql",
+            "generate sql",
+            "create sql",
+            "sql query",
+            "sql code",
+            "query.sql",
+            "download sql",
+            "downloadable sql",
+            "export sql",
+            "sql file",
+            "帮我写sql",
+            "写sql",
+            "生成sql",
+            "sql代码",
+            "sql查询",
+            "下载sql",
+        )
+        if any(term in lowered for term in explicit_hints):
+            return True
+        return bool(re.search(r"\b(?:write|generate|create|build|draft)\b.{0,40}\bsql\b", lowered))
 
     @staticmethod
     def _question_static_qa_intent(question: str) -> bool:
@@ -15263,10 +15306,12 @@ class SourceCodeQAService:
         candidate_paths = self._merge_codex_followup_candidate_paths(candidate_paths, followup_context)
         candidate_path_layers = self._codex_candidate_path_layers(candidate_paths, followup_context)
         scope_roots = self._codex_scope_roots(entries=entries, key=key)
+        question_intent = self._question_intent(question)
+        prompt_mode = CODEX_SQL_GENERATION_PROMPT_MODE if question_intent.get("sql_generation") else CODEX_INVESTIGATION_PROMPT_MODE
         llm_route = {
             **llm_route,
             "answer_model": selected_model,
-            "prompt_mode": CODEX_INVESTIGATION_PROMPT_MODE,
+            "prompt_mode": prompt_mode,
             "candidate_paths": candidate_paths,
             "candidate_path_layers": candidate_path_layers,
             "candidate_repo_count": len({item.get("repo") for item in candidate_paths}),
@@ -15284,18 +15329,32 @@ class SourceCodeQAService:
             "codex_session_max_turns": self.codex_session_max_turns,
             "codex_cache_followups": self.codex_cache_followups,
         }
-        prompt_context = self._codex_investigation_brief(
-            pm_team=pm_team,
-            country=country,
-            question=question,
-            candidate_paths=candidate_paths,
-            evidence_pack=evidence_pack,
-            quality_gate=quality_gate,
-            followup_context=followup_context,
-            attachments=attachments or [],
-            runtime_evidence=runtime_evidence or [],
-            scope_roots=scope_roots,
-        )
+        if prompt_mode == CODEX_SQL_GENERATION_PROMPT_MODE:
+            prompt_context = self._codex_sql_generation_brief(
+                pm_team=pm_team,
+                country=country,
+                question=question,
+                candidate_paths=candidate_paths,
+                evidence_pack=evidence_pack,
+                quality_gate=quality_gate,
+                followup_context=followup_context,
+                attachments=attachments or [],
+                runtime_evidence=runtime_evidence or [],
+                scope_roots=scope_roots,
+            )
+        else:
+            prompt_context = self._codex_investigation_brief(
+                pm_team=pm_team,
+                country=country,
+                question=question,
+                candidate_paths=candidate_paths,
+                evidence_pack=evidence_pack,
+                quality_gate=quality_gate,
+                followup_context=followup_context,
+                attachments=attachments or [],
+                runtime_evidence=runtime_evidence or [],
+                scope_roots=scope_roots,
+            )
         initial_prompt_stats = self._codex_prompt_stats(prompt_context)
         candidate_repo_count = len({item.get("repo") for item in candidate_paths})
         _log_source_code_qa_timing(
@@ -15306,7 +15365,7 @@ class SourceCodeQAService:
             model=selected_model,
             query_mode=query_mode,
             phase="initial",
-            prompt_mode=CODEX_INVESTIGATION_PROMPT_MODE,
+            prompt_mode=prompt_mode,
             prompt_sha256=hashlib.sha256(prompt_context.encode("utf-8")).hexdigest()[:16],
             role_prompt_present="Source Code & Runtime Evidence Assistant" in prompt_context,
             pm_team=pm_team,
@@ -15433,6 +15492,7 @@ class SourceCodeQAService:
             codex_cli_session_id = str(session_meta.get("session_id") or "").strip()
         payload = self._codex_payload(
             prompt_context,
+            prompt_mode=prompt_mode,
             progress_callback=progress_callback,
             codex_cli_session_id=codex_cli_session_id,
             image_paths=self._attachment_image_paths(attachments or []),
@@ -16143,10 +16203,132 @@ class SourceCodeQAService:
         )
         return "\n".join(lines)
 
+    def _codex_sql_generation_brief(
+        self,
+        *,
+        pm_team: str,
+        country: str,
+        question: str,
+        candidate_paths: list[dict[str, Any]],
+        evidence_pack: dict[str, Any],
+        quality_gate: dict[str, Any],
+        followup_context: dict[str, Any] | None,
+        attachments: list[dict[str, Any]] | None = None,
+        runtime_evidence: list[dict[str, Any]] | None = None,
+        scope_roots: list[dict[str, str]] | None = None,
+    ) -> str:
+        normalized_scope_roots = [
+            item for item in (scope_roots or [])
+            if isinstance(item, dict) and str(item.get("repo_root") or "").strip()
+        ]
+        pm_team_label = str(pm_team or "selected").strip() or "selected"
+        lines = [
+            f"Prompt mode: {CODEX_SQL_GENERATION_PROMPT_MODE}",
+            f"PM Team: {pm_team}",
+            f"Country: {country}",
+            f"Question: {question}",
+            "",
+            "Role:",
+            f"- You are the {pm_team_label} PM Team's Source Code & Runtime Evidence Assistant.",
+            "- Produce a code-backed SQL answer using repository evidence plus uploaded data dictionary/runtime evidence.",
+            "",
+            "SQL task rules:",
+            "- Still inspect source code before answering. Candidate paths and data dictionary rows are hints, not proof.",
+            "- Use read-only `rg` and file reads inside the allowed scope roots to verify mapper/XML/DAO/repository/source SQL, table joins, filters, enums, and timestamp assumptions.",
+            "- Start direct_answer with the table/row selection logic and business meaning. Do not start with country DB routing, no-country-filter, or execution caveats.",
+            "- For AF and GRC, data_dictionary uploads apply to SG, ID, PH, and All; table and field definitions are shared across countries.",
+            "- For AF and GRC, the selected country runs against that country's separate DB instance. Mention this as an execution caveat only after the SQL/table logic if relevant.",
+            "- For GRC reviewer SQL questions, RC and Compliance are business aliases for the same review stage.",
+            "- Put generated SQL in a fenced ```sql block or a `sql` field so the portal can build query.sql.",
+            "- If a requested column is not explicitly defined, state the best code-backed approximation and list the missing evidence.",
+            "",
+            "Allowed scope roots:",
+        ]
+        if normalized_scope_roots:
+            for item in normalized_scope_roots:
+                lines.append(
+                    f"- repo={item.get('repo')} root={item.get('repo_root')} "
+                    f"relative_root={item.get('repo_relative_root')}"
+                )
+        else:
+            lines.append("- No explicit allowlist was provided; stay within the selected synced repository workspace.")
+        if candidate_paths:
+            lines.extend(["", "Starting code path hints from retrieval:"])
+            for item in candidate_paths[:12]:
+                original_path = str(item.get("original_path") or "").strip()
+                path_note = f" original_path={original_path}" if original_path else ""
+                lines.append(
+                    f"- {item.get('id')} repo={item.get('repo')} root={item.get('repo_root')} "
+                    f"relative_root={item.get('repo_relative_root')} path={item.get('path')}{path_note} "
+                    f"file_exists={item.get('file_exists')} path_status={item.get('path_status')} "
+                    f"lines={item.get('line_start')}-{item.get('line_end')} reason={item.get('reason')}"
+                )
+        lines.extend(
+            [
+                "",
+                "Compact evidence pack:",
+                f"- Quality gate: {quality_gate.get('status')} / confidence={quality_gate.get('confidence')} / missing={', '.join(quality_gate.get('missing') or []) or 'none'}",
+            ]
+        )
+        for label, key in (
+            ("Tables", "tables"),
+            ("Read/write points", "read_write_points"),
+            ("Entry points", "entry_points"),
+            ("Concrete data sources", "data_sources"),
+            ("Source tiers", "source_tiers"),
+            ("Missing hops", "missing_hops"),
+        ):
+            values = evidence_pack.get(key) or []
+            if values:
+                lines.append(f"- {label}:")
+                for value in values[:8]:
+                    lines.append(f"  - {value}")
+        typed_items = evidence_pack.get("items") or []
+        if typed_items:
+            lines.append("- Typed evidence items:")
+            for item in typed_items[:10]:
+                if not isinstance(item, dict):
+                    continue
+                location = f" [{item.get('source_id')}]" if item.get("source_id") else ""
+                lines.append(
+                    f"  - {item.get('type')} / confidence={item.get('confidence')} / hop={item.get('hop')}{location}: {item.get('claim')}"
+                )
+        attachment_section = self._attachment_prompt_section(attachments or [])
+        if attachment_section:
+            lines.extend(["", attachment_section])
+        runtime_section = self._runtime_evidence_sql_prompt_section(
+            runtime_evidence or [],
+            question=question,
+            evidence_pack=evidence_pack,
+        )
+        if runtime_section:
+            lines.extend(["", runtime_section])
+        if followup_context:
+            previous_question = str(followup_context.get("question") or "").strip()
+            previous_answer = str(followup_context.get("rendered_answer") or followup_context.get("answer") or "").strip()
+            if previous_question or previous_answer:
+                lines.extend(["", "Follow-up context:"])
+                if previous_question:
+                    lines.append(f"- Previous question: {previous_question[:500]}")
+                if previous_answer:
+                    lines.append(f"- Previous answer summary: {previous_answer[:900]}")
+        lines.extend(
+            [
+                "",
+                "Final answer contract:",
+                '- Return JSON: {"direct_answer":"...","sql":"...","sql_logic":["..."],"tables_used":["..."],"source_code_evidence":["file/function/field/table evidence..."],"runtime_evidence":["data dictionary/runtime evidence..."],"confirmed_from_code":["..."],"inferred_from_code":["..."],"missing_evidence":["..."],"claims":[{"text":"...","citations":["S1 or scoped/file/path.java:10-20"]}],"confidence":"high|medium|low"}.',
+                "- direct_answer should be concise but include the same useful table strategy as a normal Source Code Q&A answer.",
+                "- source_code_evidence must name concrete files, mappers, SQL fragments, functions, classes, fields, tables, or APIs.",
+                "- If the SQL depends on a runtime parameter, use a named placeholder such as :incident_id and explain it.",
+            ]
+        )
+        return "\n".join(lines)
+
     def _codex_payload(
         self,
         prompt: str,
         *,
+        prompt_mode: str = CODEX_INVESTIGATION_PROMPT_MODE,
         progress_callback: Any | None = None,
         codex_cli_session_id: str = "",
         image_paths: list[str] | None = None,
@@ -16158,7 +16340,7 @@ class SourceCodeQAService:
         repair_issue_count: int = 0,
     ) -> dict[str, Any]:
         payload = {
-            "codex_prompt_mode": CODEX_INVESTIGATION_PROMPT_MODE,
+            "codex_prompt_mode": prompt_mode,
             "contents": [{"parts": [{"text": prompt}]}],
             "systemInstruction": {"parts": [{"text": self._codex_system_instruction()}]},
             "generationConfig": {"temperature": 0.1, "responseMimeType": "application/json"},
@@ -16191,6 +16373,114 @@ class SourceCodeQAService:
             "prompt_bytes": len(full_prompt.encode("utf-8")),
             "estimated_prompt_tokens": self._estimate_llm_tokens(full_prompt),
         }
+
+    @staticmethod
+    def _codex_sql_relevance_terms(question: str, evidence_pack: dict[str, Any] | None) -> list[str]:
+        terms: list[str] = []
+        seen: set[str] = set()
+
+        def add(value: Any) -> None:
+            text = str(value or "").strip()
+            if not text:
+                return
+            for token in re.findall(r"[A-Za-z][A-Za-z0-9_]{2,}|[\u4e00-\u9fff]{2,}", text):
+                lowered = token.lower()
+                if lowered in seen or len(lowered) < 3:
+                    continue
+                if lowered in {
+                    "the",
+                    "and",
+                    "for",
+                    "with",
+                    "from",
+                    "where",
+                    "select",
+                    "sql",
+                    "query",
+                    "code",
+                    "data",
+                    "dictionary",
+                    "based",
+                    "help",
+                    "please",
+                }:
+                    continue
+                seen.add(lowered)
+                terms.append(token)
+
+        add(question)
+        pack = evidence_pack if isinstance(evidence_pack, dict) else {}
+        for key in ("tables", "read_write_points", "data_sources", "entry_points", "typed_items"):
+            for item in pack.get(key) or []:
+                if isinstance(item, dict):
+                    add(item.get("claim"))
+                    add(item.get("source_id"))
+                else:
+                    add(item)
+        return terms[:40]
+
+    @classmethod
+    def _compact_sql_runtime_evidence_text(cls, text: str, *, question: str, evidence_pack: dict[str, Any] | None, limit: int) -> str:
+        source = str(text or "").strip()
+        if not source or len(source) <= limit:
+            return source
+        terms = [term.lower() for term in cls._codex_sql_relevance_terms(question, evidence_pack)]
+        lines = source.splitlines()
+        selected: list[str] = []
+        for index, line in enumerate(lines):
+            lowered = line.lower()
+            if terms and any(term in lowered for term in terms):
+                start = max(0, index - 1)
+                end = min(len(lines), index + 3)
+                selected.extend(lines[start:end])
+        compact = "\n".join(dict.fromkeys([line for line in selected if str(line).strip()]))
+        if compact:
+            compact = f"{compact[: max(0, limit - 1200)]}\n...[data dictionary relevance-filtered for SQL prompt]"
+            prefix = source[: min(1200, max(0, limit - len(compact) - 80))]
+            return f"{prefix}\n...\n{compact}"[:limit]
+        return f"{source[:limit]}\n...[runtime evidence text truncated for SQL prompt]"
+
+    @classmethod
+    def _runtime_evidence_sql_prompt_section(
+        cls,
+        runtime_evidence: list[dict[str, Any]],
+        *,
+        question: str,
+        evidence_pack: dict[str, Any] | None,
+        text_limit: int = CODEX_SQL_RUNTIME_EVIDENCE_CHAR_LIMIT,
+    ) -> str:
+        normalized = [item for item in runtime_evidence or [] if isinstance(item, dict)]
+        if not normalized:
+            return ""
+        lines = [
+            "Uploaded runtime evidence for SQL generation:",
+            "- Treat these files as runtime/reference evidence, not repository source code.",
+            "- Data dictionary uploads are shared schema/reference evidence for their pm_team scope.",
+            "- For AF and GRC, data_dictionary uploads apply to SG, ID, PH, and All for that PM team; table and field definitions do not vary by country unless explicit DB evidence proves an override.",
+            "- For AF and GRC, each selected country runs against that country's separate runtime DB instance. Do not invent a country filter or cross-country union unless code/runtime evidence proves one.",
+            "- For GRC reviewer SQL questions, RC and Compliance are business aliases for the same review stage.",
+            "- Cross-check table names, joins, filters, and timestamp assumptions against mapper/XML/DAO/repository/source SQL before finalizing SQL.",
+        ]
+        remaining = max(2000, int(text_limit or CODEX_SQL_RUNTIME_EVIDENCE_CHAR_LIMIT))
+        for index, item in enumerate(normalized[:12], start=1):
+            meta = cls._public_runtime_evidence_metadata(item)
+            lines.append(
+                f"- R{index}: pm_team={meta['pm_team']} country={meta['country']} "
+                f"source_type={meta['source_type']} filename={meta['filename']} "
+                f"kind={meta['kind']} sha256={meta['sha256'][:16]}"
+            )
+            text = str(item.get("text") or item.get("summary") or "").strip()
+            if text and remaining > 0:
+                per_item_limit = min(remaining, 9000 if meta["source_type"].lower() == "data_dictionary" else 2500)
+                compact_text = cls._compact_sql_runtime_evidence_text(
+                    text,
+                    question=question,
+                    evidence_pack=evidence_pack,
+                    limit=per_item_limit,
+                )
+                remaining -= len(compact_text)
+                lines.append(f"  SQL-relevant extracted text/summary:\n{compact_text}")
+        return "\n".join(lines)
 
     @staticmethod
     def _public_attachment_metadata(attachment: dict[str, Any]) -> dict[str, Any]:

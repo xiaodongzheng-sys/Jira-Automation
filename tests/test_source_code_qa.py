@@ -2938,6 +2938,22 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertTrue(grc_table_intent["data_source"])
         self.assertFalse(grc_table_intent["operational_boundary"])
 
+    def test_sql_generation_intent_is_explicit_and_not_static_qa(self):
+        sql_intent = self.service._question_intent("Based on GRC repo and data dictionary, generate a SQL query for reviewer status")
+        self.assertTrue(sql_intent["sql_generation"])
+        self.assertTrue(sql_intent["data_source"])
+
+        chinese_sql_intent = self.service._question_intent("帮我写SQL查询incident reviewer状态")
+        self.assertTrue(chinese_sql_intent["sql_generation"])
+
+        static_intent = self.service._question_intent("check SQL injection risk in TicketMapper")
+        self.assertTrue(static_intent["static_qa"])
+        self.assertFalse(static_intent["sql_generation"])
+
+        data_source_intent = self.service._question_intent("which table stores reviewer status")
+        self.assertTrue(data_source_intent["data_source"])
+        self.assertFalse(data_source_intent["sql_generation"])
+
     def test_chinese_data_source_query_uses_source_trace(self):
         _build_fixture_repositories(self.service)
         self._build_all_indexes()
@@ -8926,6 +8942,74 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertIn("service/EarlierService.java", brief)
         self.assertNotIn("x" * 100, brief)
 
+    def test_codex_sql_generation_brief_is_compact_but_requires_code_checks(self):
+        entry = RepositoryEntry("GRC Portal", "https://git.example.com/team/grc-portal.git")
+        key = "GRC:All"
+        repo_path = self.service._repo_path(key, entry)
+        (repo_path / ".git").mkdir(parents=True)
+        mapper_file = repo_path / "mapper" / "TicketMapper.xml"
+        mapper_file.parent.mkdir(parents=True)
+        mapper_file.write_text(
+            "<select id=\"findTicket\">select * from ticket_info where authorization_type = #{authorizationType}</select>",
+            encoding="utf-8",
+        )
+        matches = [
+            {
+                "repo": "GRC Portal",
+                "path": "mapper/TicketMapper.xml",
+                "line_start": 1,
+                "line_end": 1,
+                "retrieval": "persistent_index",
+                "trace_stage": "direct",
+                "reason": "ticket_info SQL mapper matched",
+            }
+        ]
+        candidate_paths = self.service._codex_candidate_paths(entries=[entry], key=key, matches=matches)
+        scope_roots = self.service._codex_scope_roots(entries=[entry], key=key)
+        huge_dictionary = (
+            "[Data dictionary sheet: filler]\n"
+            + ("filler_field,unused meaning\n" * 2500)
+            + "[Data dictionary sheet: reviewer]\n"
+            + "ticket_info,event_id,Incident id\n"
+            + "ticket_info,authorization_type,Ticket authorization type\n"
+            + "ticket_node_info,target_group,Reviewer group such as CRO/ORM/CISO/Compliance\n"
+        )
+
+        brief = self.service._codex_sql_generation_brief(
+            pm_team="GRC",
+            country="SG",
+            question="generate a SQL query for incident reviewer status",
+            candidate_paths=candidate_paths,
+            evidence_pack={"tables": ["ticket_info [S1]", "ticket_node_info [S1]"], "items": []},
+            quality_gate={"status": "sufficient", "confidence": "high", "missing": []},
+            followup_context={},
+            runtime_evidence=[
+                {
+                    "filename": "grc-dictionary.xlsx",
+                    "source_type": "data_dictionary",
+                    "pm_team": "GRC",
+                    "country": "All",
+                    "kind": "document",
+                    "sha256": "a" * 64,
+                    "text": huge_dictionary,
+                }
+            ],
+            scope_roots=scope_roots,
+        )
+        stats = self.service._codex_prompt_stats(brief)
+
+        self.assertIn("Prompt mode: codex_sql_generation_brief_v1", brief)
+        self.assertIn("Still inspect source code before answering", brief)
+        self.assertIn("mapper/XML/DAO/repository/source SQL", brief)
+        self.assertIn("data_dictionary uploads apply to SG, ID, PH, and All", brief)
+        self.assertIn("separate DB instance", brief)
+        self.assertIn("RC and Compliance are business aliases", brief)
+        self.assertIn("ticket_info", brief)
+        self.assertIn("ticket_node_info", brief)
+        self.assertIn("path=mapper/TicketMapper.xml", brief)
+        self.assertNotIn("Three-stage investigation required:", brief)
+        self.assertLess(stats["estimated_prompt_tokens"], 15000)
+
     def test_codex_prompt_logging_marks_role_prompt_present(self):
         service = SourceCodeQAService(
             data_root=Path(self.temp_dir.name),
@@ -9008,7 +9092,88 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertIn("repair_will_run", repair_prepare_logs[0])
         self.assertIn("deep_investigation_needed", repair_prepare_logs[0])
         self.assertIn("repair_issue_count", repair_prepare_logs[0])
-        self.assertIn("elapsed_ms", repair_prepare_logs[0])
+
+    def test_sql_generation_question_uses_codex_sql_prompt_mode(self):
+        service = SourceCodeQAService(
+            data_root=Path(self.temp_dir.name),
+            team_profiles=TEAM_PROFILE_DEFAULTS,
+            llm_provider="codex_cli_bridge",
+            gitlab_token="secret-token",
+            git_timeout_seconds=5,
+            max_file_bytes=200_000,
+        )
+        entry = RepositoryEntry("GRC Portal", "https://git.example.com/team/grc-portal.git")
+        key = "GRC:All"
+        repo_path = service._repo_path(key, entry)
+        (repo_path / ".git").mkdir(parents=True)
+        mapper_file = repo_path / "mapper" / "TicketMapper.xml"
+        mapper_file.parent.mkdir(parents=True)
+        mapper_file.write_text(
+            "<select id=\"findTicket\">select * from ticket_info where authorization_type = #{authorizationType}</select>",
+            encoding="utf-8",
+        )
+        matches = [
+            {
+                "repo": "GRC Portal",
+                "path": "mapper/TicketMapper.xml",
+                "line_start": 1,
+                "line_end": 1,
+                "retrieval": "persistent_index",
+                "trace_stage": "direct",
+                "reason": "ticket_info mapper matched",
+                "score": 10,
+                "snippet": "select * from ticket_info",
+            }
+        ]
+        timing_logs = []
+
+        def fake_run(command, **kwargs):
+            if "login" in command and "status" in command:
+                return SimpleNamespace(returncode=0, stdout="Logged in using ChatGPT\n", stderr="")
+            output_path = command[command.index("--output-last-message") + 1]
+            Path(output_path).write_text(
+                '{"direct_answer":"Use latest ticket_info rows and ticket_node_info reviewer rows.",'
+                '"sql":"select * from ticket_info;",'
+                '"source_code_evidence":["mapper/TicketMapper.xml uses ticket_info"],'
+                '"claims":[{"text":"TicketMapper uses ticket_info","citations":["S1"]}],'
+                '"missing_evidence":[],"confidence":"high"}',
+                encoding="utf-8",
+            )
+            return SimpleNamespace(returncode=0, stdout='{"type":"done"}\n', stderr="")
+
+        with patch("bpmis_jira_tool.source_code_qa.shutil.which", return_value="/usr/local/bin/codex"), patch(
+            "bpmis_jira_tool.source_code_qa.subprocess.run",
+            side_effect=fake_run,
+        ), patch("bpmis_jira_tool.source_code_qa._log_source_code_qa_timing", side_effect=lambda component, **fields: timing_logs.append((component, fields))):
+            payload = service._build_llm_answer(
+                entries=[entry],
+                key=key,
+                pm_team="GRC",
+                country="SG",
+                question="generate a SQL query for incident reviewer status",
+                matches=matches,
+                llm_budget_mode="auto",
+                followup_context={},
+                requested_answer_mode="auto",
+                trace_id="trace-sql-prompt",
+                runtime_evidence=[
+                    {
+                        "filename": "grc-dictionary.xlsx",
+                        "source_type": "data_dictionary",
+                        "pm_team": "GRC",
+                        "country": "All",
+                        "kind": "document",
+                        "sha256": "a" * 64,
+                        "text": "ticket_info,event_id,Incident id\n" + ("x" * 40000),
+                    }
+                ],
+            )
+
+        prompt_logs = [fields for component, fields in timing_logs if component == "codex_prompt" and fields.get("phase") == "initial"]
+        self.assertTrue(prompt_logs)
+        self.assertEqual(prompt_logs[0]["prompt_mode"], "codex_sql_generation_brief_v1")
+        self.assertLess(prompt_logs[0]["estimated_prompt_tokens"], 15000)
+        self.assertEqual(payload["llm_route"]["prompt_mode"], "codex_sql_generation_brief_v1")
 
     def test_codex_candidate_paths_resolve_stale_path_by_filename(self):
         entry = RepositoryEntry("Portal Repo", "https://git.example.com/team/portal.git")

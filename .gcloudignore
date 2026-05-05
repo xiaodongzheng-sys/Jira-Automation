@@ -8,6 +8,7 @@
 .team-portal/
 __pycache__/
 *.pyc
+*.traineddata
 .DS_Store
 tmp/
 node_modules/
