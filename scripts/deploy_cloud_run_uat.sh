@@ -307,6 +307,7 @@ fi
 DEPLOY_SECRET_ARGS=(--update-secrets "LOCAL_AGENT_HMAC_SECRET=$UAT_LOCAL_AGENT_SECRET_NAME:latest")
 ENV_DEPLOY_MODE="set"
 ENV_REMOVE_ARGS=()
+ENV_SECRET_PRECLEAR_REQUIRED=0
 if [[ "${CLOUD_RUN_UAT_LOCAL_AGENT_SECRET_SOURCE:-secret_manager}" == "env" ]]; then
   uat_hmac_secret="${CLOUD_RUN_UAT_LOCAL_AGENT_HMAC_SECRET:-}"
   if [[ -z "$uat_hmac_secret" ]]; then
@@ -323,6 +324,7 @@ if [[ "${CLOUD_RUN_UAT_LOCAL_AGENT_SECRET_SOURCE:-secret_manager}" == "env" ]]; 
   ENV_VARS+=("LOCAL_AGENT_HMAC_SECRET=$uat_hmac_secret")
   DEPLOY_SECRET_ARGS=(--remove-secrets LOCAL_AGENT_HMAC_SECRET)
   ENV_REMOVE_ARGS=(--remove-env-vars LOCAL_AGENT_HMAC_SECRET)
+  ENV_SECRET_PRECLEAR_REQUIRED=1
   ENV_DEPLOY_MODE="update"
   echo "Using UAT local-agent HMAC from env fallback because CLOUD_RUN_UAT_LOCAL_AGENT_SECRET_SOURCE=env."
 fi
@@ -378,6 +380,27 @@ if [[ "${CLOUD_RUN_UAT_DRY_RUN:-0}" == "1" ]]; then
 fi
 
 cd "$ROOT_DIR"
+if [[ "$ENV_SECRET_PRECLEAR_REQUIRED" == "1" ]]; then
+  CURRENT_IMAGE="$(printf '%s' "$SERVICE_DESCRIBE_JSON" | json_field "p.get('spec', {}).get('template', {}).get('spec', {}).get('containers', [{}])[0].get('image', '')")"
+  if [[ -z "$CURRENT_IMAGE" ]]; then
+    echo "Could not resolve current Cloud Run image for env fallback preclear."
+    exit 1
+  fi
+  echo "Pre-clearing LOCAL_AGENT_HMAC_SECRET secret binding for UAT env fallback with a no-traffic revision."
+  "$GCLOUD_BIN" run deploy "$SERVICE" \
+    ${PROJECT_ARGS[@]+"${PROJECT_ARGS[@]}"} \
+    ${ACCOUNT_ARGS[@]+"${ACCOUNT_ARGS[@]}"} \
+    --region "$REGION" \
+    --image "$CURRENT_IMAGE" \
+    ${AUTH_ARGS[@]+"${AUTH_ARGS[@]}"} \
+    --max-instances="${CLOUD_RUN_MAX_INSTANCES:-1}" \
+    ${RUNTIME_ARGS[@]+"${RUNTIME_ARGS[@]}"} \
+    --no-traffic \
+    --tag "${UAT_TAG}-secret-clear" \
+    --remove-secrets LOCAL_AGENT_HMAC_SECRET \
+    --remove-env-vars LOCAL_AGENT_HMAC_SECRET
+fi
+
 "$GCLOUD_BIN" run deploy "$SERVICE" \
   ${PROJECT_ARGS[@]+"${PROJECT_ARGS[@]}"} \
   ${ACCOUNT_ARGS[@]+"${ACCOUNT_ARGS[@]}"} \
