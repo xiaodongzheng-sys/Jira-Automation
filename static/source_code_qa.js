@@ -920,6 +920,67 @@
   };
 
   const answerEvidenceHeadingPattern = /^(?:\*\*)?\s*(?:source[-\s]?code evidence|source evidence|evidence|references|citations|confirmed from code|not found|missing evidence|代码证据|证据|引用|来源)(?:\s*[:：])?\s*(?:\*\*)?$/i;
+  const answerSqlInlinePattern = /\bSQL\s*:\s*((?:WITH|SELECT|INSERT|UPDATE|DELETE|CREATE|ALTER|DROP|MERGE)\b[\s\S]*)$/i;
+  const structuredAnswerLabels = {
+    source_code_evidence: 'Source-Code Evidence',
+    confirmed_from_code: 'Confirmed From Code',
+    evidence: 'Evidence',
+    references: 'References',
+    citations: 'Citations',
+    not_found: 'Not Found',
+    missing_evidence: 'Missing Evidence',
+  };
+  const stringifyStructuredAnswerValue = (value) => {
+    if (typeof value === 'string') return value.trim();
+    if (Array.isArray(value)) {
+      return value
+        .map((item) => stringifyStructuredAnswerValue(item))
+        .filter(Boolean)
+        .map((item) => `- ${item}`)
+        .join('\n');
+    }
+    if (value && typeof value === 'object') {
+      return JSON.stringify(value);
+    }
+    return '';
+  };
+  const trimInlineSqlFromAnswer = (text) => {
+    const value = String(text || '').trim();
+    const match = value.match(answerSqlInlinePattern);
+    if (!match) return value;
+    const beforeSql = value.slice(0, match.index).trim().replace(/\bSQL\s*[:：]?\s*$/i, '').trim();
+    const replacement = 'SQL has been generated as a downloadable `query.sql` file below.';
+    return [beforeSql, replacement].filter(Boolean).join('\n\n');
+  };
+  const structuredCodexAnswer = (text) => {
+    const raw = String(text || '').trim();
+    if (!raw.startsWith('{')) return null;
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (_error) {
+      return null;
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+
+    const primaryParts = [];
+    ['direct_answer', 'answer', 'summary'].forEach((key) => {
+      const value = stringifyStructuredAnswerValue(parsed[key]);
+      if (value) primaryParts.push(trimInlineSqlFromAnswer(value));
+    });
+
+    const evidenceParts = [];
+    Object.entries(structuredAnswerLabels).forEach(([key, label]) => {
+      const value = stringifyStructuredAnswerValue(parsed[key]);
+      if (value) evidenceParts.push(`**${label}**\n${value}`);
+    });
+
+    if (!primaryParts.length && !evidenceParts.length) return null;
+    return {
+      primary: primaryParts.join('\n\n'),
+      evidence: evidenceParts.join('\n\n'),
+    };
+  };
   const splitAnswerEvidence = (text) => {
     const raw = String(text || '');
     const lines = raw.split('\n');
@@ -938,7 +999,7 @@
     if (options.live) {
       return `<pre class="source-qa-raw-codex-answer">${escapeHtml(raw)}</pre>`;
     }
-    const { primary, evidence } = splitAnswerEvidence(raw);
+    const { primary, evidence } = structuredCodexAnswer(raw) || splitAnswerEvidence(raw);
     return `
       <div class="source-qa-answer-rendered">
         ${primary ? `<div class="source-qa-answer-primary">${renderAnswerText(primary)}</div>` : ''}
