@@ -639,6 +639,8 @@ class TeamPortalAccessTests(unittest.TestCase):
                 "team_dashboard_tasks",
                 "link_team_dashboard_biz_project",
                 "save_team_dashboard_key_project",
+                "uat_local_agent_health_proxy",
+                "uat_local_agent_public_proxy",
             }
             self.assertEqual(related_rules - expected_endpoints, set())
 
@@ -1031,6 +1033,67 @@ class TeamPortalAccessTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         _method, target_url = proxy_request.call_args.args[:2]
         self.assertEqual(target_url, "https://agent.example.test/api/local-agent/healthz")
+
+    def test_uat_local_agent_proxy_forwards_to_isolated_loopback_agent(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
+                "LOCAL_AGENT_BASE_URL": "https://live-agent.example.test",
+                "LOCAL_AGENT_HOST": "127.0.0.1",
+                "LOCAL_AGENT_PORT": "7007",
+                "UAT_LOCAL_AGENT_PORT": "8124",
+            },
+            clear=False,
+        ), patch("bpmis_jira_tool.web._LOCAL_AGENT_SESSION.request", return_value=_FakeProxyResponse()) as proxy_request:
+            app = create_app()
+            app.testing = True
+
+            with app.test_client() as client:
+                response = client.post(
+                    "/uat-local-agent/api/local-agent/source-code-qa/query",
+                    data=b'{"question":"ping"}',
+                    headers={
+                        "Content-Type": "application/json",
+                        "X-Local-Agent-Timestamp": "123",
+                        "X-Local-Agent-Nonce": "abc",
+                        "X-Local-Agent-Signature": "uat-sig",
+                    },
+                )
+
+        self.assertEqual(response.status_code, 200)
+        _method, target_url = proxy_request.call_args.args[:2]
+        self.assertEqual(target_url, "http://127.0.0.1:8124/api/local-agent/source-code-qa/query")
+        self.assertEqual(proxy_request.call_args.kwargs["headers"]["X-Local-Agent-Signature"], "uat-sig")
+
+    def test_uat_local_agent_health_proxy_forwards_to_isolated_loopback_healthz(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
+                "LOCAL_AGENT_BASE_URL": "https://live-agent.example.test",
+                "LOCAL_AGENT_PORT": "7007",
+                "UAT_LOCAL_AGENT_PORT": "8124",
+            },
+            clear=False,
+        ), patch("bpmis_jira_tool.web._LOCAL_AGENT_SESSION.request", return_value=_FakeProxyResponse()) as proxy_request:
+            app = create_app()
+            app.testing = True
+
+            with app.test_client() as client:
+                response = client.get("/uat-local-agent/healthz")
+
+        self.assertEqual(response.status_code, 200)
+        _method, target_url = proxy_request.call_args.args[:2]
+        self.assertEqual(target_url, "http://127.0.0.1:8124/healthz")
 
     def test_default_sheet_template_download_returns_csv(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(

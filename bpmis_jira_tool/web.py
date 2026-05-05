@@ -5980,6 +5980,14 @@ def create_app() -> Flask:
     def local_agent_public_proxy(agent_path: str):
         return _proxy_local_agent_request(agent_path)
 
+    @app.route("/uat-local-agent/healthz", methods=["GET"])
+    def uat_local_agent_health_proxy():
+        return _proxy_local_agent_request("healthz", base_url=_uat_local_agent_loopback_base_url(), use_api_prefix=False)
+
+    @app.route("/uat-local-agent/api/local-agent/<path:agent_path>", methods=["GET", "POST", "PATCH", "DELETE"])
+    def uat_local_agent_public_proxy(agent_path: str):
+        return _proxy_local_agent_request(agent_path, base_url=_uat_local_agent_loopback_base_url(), use_api_prefix=True)
+
     @app.get("/api/bpmis-projects")
     def bpmis_projects():
         login_gate = _require_google_login(settings, api=True)
@@ -7863,12 +7871,14 @@ def _build_local_agent_client(settings: Settings) -> LocalAgentClient:
     )
 
 
-def _proxy_local_agent_request(agent_path: str):
+def _proxy_local_agent_request(agent_path: str, *, base_url: str | None = None, use_api_prefix: bool | None = None):
     settings: Settings = current_app.config["SETTINGS"]
-    configured_base_url = (settings.local_agent_base_url or "").strip().rstrip("/")
+    configured_base_url = (base_url if base_url is not None else settings.local_agent_base_url or "").strip().rstrip("/")
     local_base_url = configured_base_url or _local_agent_loopback_base_url()
     normalized_agent_path = agent_path.lstrip("/")
-    if configured_base_url:
+    if use_api_prefix is None:
+        use_api_prefix = bool(configured_base_url)
+    if use_api_prefix:
         target_path = f"/api/local-agent/{normalized_agent_path}"
     else:
         target_path = "/healthz" if normalized_agent_path == "healthz" else f"/api/local-agent/{normalized_agent_path}"
@@ -7911,6 +7921,15 @@ def _proxy_local_agent_request(agent_path: str):
 def _local_agent_loopback_base_url() -> str:
     host = str(os.environ.get("LOCAL_AGENT_HOST") or "127.0.0.1").strip() or "127.0.0.1"
     port = str(os.environ.get("LOCAL_AGENT_PORT") or "7007").strip() or "7007"
+    return f"http://{host}:{port}".rstrip("/")
+
+
+def _uat_local_agent_loopback_base_url() -> str:
+    value = str(os.environ.get("UAT_LOCAL_AGENT_LOOPBACK_BASE_URL") or "").strip().rstrip("/")
+    if value:
+        return value
+    host = str(os.environ.get("UAT_LOCAL_AGENT_HOST") or "127.0.0.1").strip() or "127.0.0.1"
+    port = str(os.environ.get("UAT_LOCAL_AGENT_PORT") or "7008").strip() or "7008"
     return f"http://{host}:{port}".rstrip("/")
 
 

@@ -72,6 +72,7 @@ esac
             "scripts/deploy_cloud_run.sh",
             "scripts/deploy_cloud_run_full.sh",
             "scripts/deploy_cloud_run_uat.sh",
+            "scripts/setup_uat_local_agent.sh",
             "scripts/promote_uat_to_live.sh",
             "scripts/build_cloud_run_image.sh",
         ]
@@ -183,7 +184,7 @@ exit 0
                     "FAKE_GCLOUD_CALLS": str(calls_path),
                     "CLOUD_RUN_UAT_SKIP_GIT_CHECK": "1",
                     "CLOUD_RUN_UAT_SYNC_LOCAL_AGENT_AFTER_DEPLOY": "0",
-                    "CLOUD_RUN_LOCAL_AGENT_BASE_URL": "https://agent.example.ngrok.app",
+                    "TEAM_PORTAL_BASE_URL": "https://live.example.ngrok.app",
                     "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg",
                     "BPMIS_BASE_URL": "https://bpmis.example.test",
                     "TRELLO_API_KEY": "trello-key",
@@ -202,7 +203,9 @@ exit 0
             self.assertIn("--tag uat", deploy_calls[0])
             self.assertIn("TEAM_PORTAL_STAGE=uat", deploy_calls[0])
             self.assertIn("TEAM_PORTAL_BASE_URL=https://uat---team-portal-ekaykywtvq-as.a.run.app", deploy_calls[0])
+            self.assertIn("LOCAL_AGENT_BASE_URL=https://live.example.ngrok.app/uat-local-agent", deploy_calls[0])
             self.assertIn("TEAM_PORTAL_RELEASE_REVISION=", deploy_calls[0])
+            self.assertIn("--update-secrets LOCAL_AGENT_HMAC_SECRET=local-agent-uat-hmac-secret:latest", deploy_calls[0])
             self.assertIn("TRELLO_API_KEY=trello-key", deploy_calls[0])
             self.assertIn("TRELLO_API_TOKEN=trello-token", deploy_calls[0])
             self.assertIn("TRELLO_BOARD_ID=trello-board", deploy_calls[0])
@@ -210,17 +213,38 @@ exit 0
             self.assertIn("Cloud Run UAT revision: team-portal-00091-uat", completed.stdout)
             self.assertIn("keeps live traffic unchanged", completed.stdout)
 
-    def test_cloud_run_uat_deploy_syncs_mac_local_agent_by_default(self):
+    def test_cloud_run_uat_deploy_syncs_isolated_mac_local_agent_by_default(self):
         deploy_script = PROJECT_ROOT / "scripts/deploy_cloud_run_uat.sh"
         contents = deploy_script.read_text(encoding="utf-8")
 
         self.assertIn("CLOUD_RUN_UAT_SYNC_LOCAL_AGENT_AFTER_DEPLOY:-1", contents)
         self.assertIn("CLOUD_RUN_UAT_HOST_WORKSPACE", contents)
+        self.assertIn("recommended_uat_team_stack_root", contents)
         self.assertIn("git -C \"$host_workspace\" merge --ff-only \"$GIT_SHA\"", contents)
         self.assertIn("pip\" install -r \"$host_workspace/requirements.txt\"", contents)
         self.assertIn("BriefingStore(data_path / \"prd_briefing\")", contents)
+        self.assertIn("LOCAL_AGENT_PORT=\"$UAT_LOCAL_AGENT_PORT\"", contents)
+        self.assertIn("LOCAL_AGENT_TEAM_PORTAL_DATA_DIR=\"$UAT_LOCAL_AGENT_DATA_DIR\"", contents)
+        self.assertIn("LOCAL_AGENT_SCREEN_SESSION=\"$UAT_LOCAL_AGENT_SCREEN_SESSION\"", contents)
         self.assertIn("./scripts/run_local_agent.sh restart", contents)
-        self.assertIn("/api/local-agent/healthz", contents)
+        self.assertIn("/uat-local-agent", contents)
+
+    def test_uat_local_agent_setup_uses_separate_workspace_port_and_data_root(self):
+        setup_script = (PROJECT_ROOT / "scripts/setup_uat_local_agent.sh").read_text(encoding="utf-8")
+
+        self.assertIn("recommended_uat_team_stack_root", setup_script)
+        self.assertIn(".team-portal-uat", setup_script)
+        self.assertIn("7008", setup_script)
+        self.assertIn("bpmis-local-agent-uat", setup_script)
+        self.assertIn("LOCAL_AGENT_HMAC_SECRET", setup_script)
+        self.assertIn("--exclude '/logs/'", setup_script)
+        self.assertIn("--exclude '/run/'", setup_script)
+
+    def test_local_agent_launcher_uses_agent_data_root_for_pid_and_logs(self):
+        script = (PROJECT_ROOT / "scripts/run_local_agent.sh").read_text(encoding="utf-8")
+
+        self.assertIn("LOCAL_AGENT_TEAM_PORTAL_DATA_DIR", script)
+        self.assertIn('DATA_DIR="$(resolve_team_data_dir "$AGENT_DATA_DIR")"', script)
 
     def test_promote_uat_to_live_fails_when_origin_main_differs_from_uat_commit(self):
         promote_script = PROJECT_ROOT / "scripts/promote_uat_to_live.sh"
@@ -745,6 +769,34 @@ read_env_values TEAM_PORTAL_DATA_DIR TEAM_PORTAL_PORT TEAM_PORTAL_BASE_URL
                 completed.stdout.splitlines(),
                 ["custom-data", "5123", "https://example.ngrok.dev"],
             )
+
+    def test_team_env_export_preserves_explicit_environment_overrides(self):
+        helper_path = PROJECT_ROOT / "scripts/lib/team_env.sh"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            env_file = Path(temp_dir) / ".env"
+            env_file.write_text("LOCAL_AGENT_PORT=7007\nTEAM_PORTAL_DATA_DIR=.team-portal\n", encoding="utf-8")
+            command = f'''
+source "{helper_path}"
+export_env_file
+printf '%s\\n' "$LOCAL_AGENT_PORT"
+'''
+            completed = subprocess.run(
+                ["bash", "-lc", command],
+                capture_output=True,
+                text=True,
+                check=False,
+                env={
+                    **os.environ,
+                    "ROOT_DIR": str(PROJECT_ROOT),
+                    "ENV_FILE": str(env_file),
+                    "PYTHON_BIN": sys.executable,
+                    "LOCAL_AGENT_PORT": "7008",
+                },
+            )
+
+            self.assertEqual(completed.returncode, 0, msg=completed.stderr)
+            self.assertEqual(completed.stdout.strip(), "7008")
 
     def test_team_env_helper_normalizes_relative_data_dir(self):
         helper_path = PROJECT_ROOT / "scripts/lib/team_env.sh"

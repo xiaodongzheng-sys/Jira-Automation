@@ -9,6 +9,10 @@ SCRIPT_STARTED_AT="$(date +%s)"
 SERVICE="${CLOUD_RUN_SERVICE:-team-portal}"
 REGION="${CLOUD_RUN_REGION:-asia-southeast1}"
 UAT_TAG="${CLOUD_RUN_UAT_TAG:-uat}"
+UAT_LOCAL_AGENT_PORT="${CLOUD_RUN_UAT_LOCAL_AGENT_PORT:-7008}"
+UAT_LOCAL_AGENT_DATA_DIR="${CLOUD_RUN_UAT_LOCAL_AGENT_DATA_DIR:-.team-portal-uat}"
+UAT_LOCAL_AGENT_SCREEN_SESSION="${CLOUD_RUN_UAT_LOCAL_AGENT_SCREEN_SESSION:-bpmis-local-agent-uat}"
+UAT_LOCAL_AGENT_SECRET_NAME="${CLOUD_RUN_UAT_LOCAL_AGENT_SECRET_NAME:-local-agent-uat-hmac-secret}"
 CLOUD_RUN_IMAGE="${CLOUD_RUN_IMAGE:-}"
 GCLOUD_BIN="${GCLOUD_BIN:-$(command -v gcloud || true)}"
 if [[ -z "$GCLOUD_BIN" && -x "$HOME/google-cloud-sdk/bin/gcloud" ]]; then
@@ -86,15 +90,44 @@ describe_service() {
 resolve_uat_host_workspace() {
   local configured="${CLOUD_RUN_UAT_HOST_WORKSPACE:-}"
   if [[ -z "$configured" ]]; then
-    configured="${TEAM_STACK_HOST_WORKSPACE:-}"
-  fi
-  if [[ -z "$configured" ]]; then
-    configured="$(read_env_value TEAM_STACK_HOST_WORKSPACE)"
-  fi
-  if [[ -z "$configured" ]]; then
-    configured="$HOME/Workspace/jira-creation-stack-host"
+    configured="$(recommended_uat_team_stack_root)"
   fi
   printf '%s\n' "$configured"
+}
+
+resolve_uat_local_agent_data_path() {
+  local host_workspace="$1"
+  local data_dir="${CLOUD_RUN_UAT_LOCAL_AGENT_DATA_DIR:-$UAT_LOCAL_AGENT_DATA_DIR}"
+  local data_path
+  data_path="$(HOST_WORKSPACE="$host_workspace" DATA_DIR_VALUE="$data_dir" "$PYTHON_BIN" - <<'PY'
+import os
+from pathlib import Path
+
+host = Path(os.environ["HOST_WORKSPACE"]).expanduser().resolve()
+data_dir = os.environ.get("DATA_DIR_VALUE", ".team-portal-uat").strip() or ".team-portal-uat"
+data_path = Path(data_dir).expanduser()
+if not data_path.is_absolute():
+    data_path = host / data_path
+print(data_path)
+PY
+)"
+  printf '%s\n' "$data_path"
+}
+
+resolve_uat_local_agent_url() {
+  local explicit_url="${CLOUD_RUN_UAT_LOCAL_AGENT_BASE_URL:-}"
+  if [[ -n "$explicit_url" ]]; then
+    printf '%s\n' "$explicit_url"
+    return 0
+  fi
+
+  local portal_url="${TEAM_PORTAL_BASE_URL:-$(read_env_value TEAM_PORTAL_BASE_URL)}"
+  if [[ -n "$portal_url" ]] && ! is_loopback_http_url "$portal_url"; then
+    printf '%s/uat-local-agent\n' "${portal_url%/}"
+    return 0
+  fi
+
+  printf '%s\n' "$portal_url"
 }
 
 ensure_host_prd_store_schema() {
@@ -106,42 +139,14 @@ ensure_host_prd_store_schema() {
     exit 1
   fi
 
-  HOST_WORKSPACE="$host_workspace" "$host_python" - <<'PY'
+  local data_path
+  data_path="$(resolve_uat_local_agent_data_path "$host_workspace")"
+  HOST_WORKSPACE="$host_workspace" UAT_DATA_PATH="$data_path" "$host_python" - <<'PY'
 import os
 from pathlib import Path
-
-
-def _read_env_file(path: Path) -> dict[str, str]:
-    values: dict[str, str] = {}
-    if not path.exists():
-        return values
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        key = key.strip()
-        value = value.strip().strip("'").strip('"')
-        if key:
-            values[key] = value
-    return values
-
-
-host = Path(os.environ["HOST_WORKSPACE"]).expanduser().resolve()
-env_values = _read_env_file(host / ".env")
-data_dir = (
-    os.environ.get("LOCAL_AGENT_TEAM_PORTAL_DATA_DIR")
-    or env_values.get("LOCAL_AGENT_TEAM_PORTAL_DATA_DIR")
-    or os.environ.get("TEAM_PORTAL_DATA_DIR")
-    or env_values.get("TEAM_PORTAL_DATA_DIR")
-    or ".team-portal"
-)
-data_path = Path(data_dir).expanduser()
-if not data_path.is_absolute():
-    data_path = host / data_path
-
 from prd_briefing.storage import BriefingStore
 
+data_path = Path(os.environ["UAT_DATA_PATH"]).expanduser().resolve()
 BriefingStore(data_path / "prd_briefing")
 print(data_path / "prd_briefing")
 PY
@@ -208,8 +213,15 @@ sync_mac_local_agent_for_uat() {
       echo "Mac local-agent restart script is missing: $host_workspace/scripts/run_local_agent.sh"
       exit 1
     fi
-    echo "Restarting Mac local-agent for UAT-backed local storage"
-    (cd "$host_workspace" && ./scripts/run_local_agent.sh restart >/dev/null)
+    echo "Restarting isolated UAT Mac local-agent on port $UAT_LOCAL_AGENT_PORT"
+    (
+      cd "$host_workspace"
+      LOCAL_AGENT_PORT="$UAT_LOCAL_AGENT_PORT" \
+      LOCAL_AGENT_TEAM_PORTAL_DATA_DIR="$UAT_LOCAL_AGENT_DATA_DIR" \
+      TEAM_PORTAL_DATA_DIR="$UAT_LOCAL_AGENT_DATA_DIR" \
+      LOCAL_AGENT_SCREEN_SESSION="$UAT_LOCAL_AGENT_SCREEN_SESSION" \
+      ./scripts/run_local_agent.sh restart >/dev/null
+    )
   fi
 
   if [[ "${CLOUD_RUN_UAT_VERIFY_PUBLIC_LOCAL_AGENT:-1}" != "0" && -n "$LOCAL_AGENT_URL" ]]; then
@@ -246,10 +258,15 @@ fi
 UAT_URL="$(tag_url_from_service_url "$SERVICE_URL")"
 INVOKER_IAM_DISABLED="$(printf '%s' "$SERVICE_DESCRIBE_JSON" | json_field "p.get('metadata', {}).get('annotations', {}).get('run.googleapis.com/invoker-iam-disabled', '')")"
 
-LOCAL_AGENT_URL="$(resolve_cloud_run_local_agent_url)"
+LOCAL_AGENT_URL="$(resolve_uat_local_agent_url)"
 if is_loopback_http_url "$LOCAL_AGENT_URL"; then
-  echo "Cloud Run UAT cannot reach a localhost LOCAL_AGENT_BASE_URL."
-  echo "Set CLOUD_RUN_LOCAL_AGENT_BASE_URL or LOCAL_AGENT_PUBLIC_URL to the Mac local-agent public URL."
+  echo "Cloud Run UAT cannot reach a localhost UAT local-agent URL."
+  echo "Set TEAM_PORTAL_BASE_URL to the fixed live portal URL or set CLOUD_RUN_UAT_LOCAL_AGENT_BASE_URL."
+  exit 1
+fi
+if [[ -z "$LOCAL_AGENT_URL" ]]; then
+  echo "Could not resolve the UAT local-agent public URL."
+  echo "Set TEAM_PORTAL_BASE_URL to the fixed live portal URL or set CLOUD_RUN_UAT_LOCAL_AGENT_BASE_URL."
   exit 1
 fi
 
@@ -344,6 +361,7 @@ cd "$ROOT_DIR"
   ${RUNTIME_ARGS[@]+"${RUNTIME_ARGS[@]}"} \
   --no-traffic \
   --tag "$UAT_TAG" \
+  --update-secrets "LOCAL_AGENT_HMAC_SECRET=$UAT_LOCAL_AGENT_SECRET_NAME:latest" \
   --set-env-vars "^|^$ENV_VARS_JOINED"
 
 SERVICE_DESCRIBE_JSON="$(describe_service)"

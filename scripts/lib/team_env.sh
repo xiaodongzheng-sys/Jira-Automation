@@ -183,6 +183,8 @@ name_pattern = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 for key, value in values.items():
     if not key or value is None or not name_pattern.match(str(key)):
         continue
+    if key in os.environ:
+        continue
     os.write(1, f"{key}={value}".encode("utf-8") + b"\0")
 PY
 )
@@ -222,4 +224,8 @@ is_protected_mac_path() {
 
 recommended_team_stack_root() {
   printf '%s\n' "$HOME/Workspace/jira-creation-stack-host"
+}
+
+recommended_uat_team_stack_root() {
+  printf '%s\n' "$HOME/Workspace/jira-creation-stack-uat-host"
 }
