@@ -177,6 +177,7 @@ TEAM_DASHBOARD_UNDER_PRD_BIZ_PROJECT_STATUSES = {"pending review", "confirmed"}
 TEAM_DASHBOARD_PENDING_LIVE_BIZ_PROJECT_STATUSES = {"developing", "testing", "uat"}
 TEAM_DASHBOARD_TASK_CACHE_VERSION = 2
 MEETING_RECORDER_PROCESS_ACTION = "meeting-recorder-process"
+MEETING_RECORDER_UPCOMING_DISPLAY_LIMIT = 3
 WORK_MEMORY_GMAIL_BACKFILL_ACTION = "work-memory-gmail-backfill"
 GOOGLE_DRIVE_READONLY_SCOPE = "https://www.googleapis.com/auth/drive.readonly"
 GMAIL_WORK_MEMORY_MAX_ATTACHMENT_BYTES = 12 * 1024 * 1024
@@ -4491,7 +4492,7 @@ def create_app() -> Flask:
             )
         try:
             meetings = _build_calendar_meeting_service().upcoming_meetings()
-            return jsonify({"status": "ok", "meetings": meetings})
+            return jsonify({"status": "ok", "meetings": meetings[:MEETING_RECORDER_UPCOMING_DISPLAY_LIMIT]})
         except Exception as error:  # noqa: BLE001
             _log_portal_event(
                 "meeting_recorder_calendar_unexpected_error",

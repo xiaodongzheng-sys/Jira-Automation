@@ -1979,6 +1979,29 @@ class MeetingRecorderRouteTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 403)
 
+    def test_upcoming_calendar_api_returns_next_three_meetings(self):
+        fake_calendar = Mock()
+        fake_calendar.upcoming_meetings.return_value = [
+            {
+                "calendar_event_id": f"event-{index}",
+                "title": f"Meeting {index}",
+                "platform": "google_meet",
+                "start": f"2026-05-0{index}T09:00:00+08:00",
+                "end": f"2026-05-0{index}T09:30:00+08:00",
+                "meeting_link": f"https://meet.google.com/event-{index}",
+            }
+            for index in range(1, 6)
+        ]
+
+        with patch("bpmis_jira_tool.web._build_calendar_meeting_service", return_value=fake_calendar):
+            with self.app.test_client() as client:
+                self._login(client, email="xiaodong.zheng@npt.sg", scopes=[CALENDAR_READONLY_SCOPE])
+                response = client.get("/api/meeting-recorder/calendar/upcoming")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual([item["calendar_event_id"] for item in payload["meetings"]], ["event-1", "event-2", "event-3"])
+
     def test_reminders_api_returns_eligible_meetings_and_active_recording(self):
         store = self.app.config["MEETING_RECORD_STORE"]
         active = store.create_record(

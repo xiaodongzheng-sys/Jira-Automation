@@ -1,6 +1,7 @@
 (() => {
   const root = document.querySelector('[data-meeting-recorder-root]');
   if (!root) return;
+  const UPCOMING_MEETING_DISPLAY_LIMIT = 3;
 
   const state = {
     activeRecordId: '',
@@ -1095,7 +1096,7 @@
     nodes.calendarStatus.textContent = 'Loading upcoming calendar meetings…';
     try {
       const payload = await api('/api/meeting-recorder/calendar/upcoming');
-      const meetings = Array.isArray(payload.meetings) ? payload.meetings : [];
+      const meetings = (Array.isArray(payload.meetings) ? payload.meetings : []).slice(0, UPCOMING_MEETING_DISPLAY_LIMIT);
       nodes.calendarStatus.textContent = meetings.length ? `${meetings.length} upcoming meeting(s).` : 'No upcoming calendar meetings found.';
       const defaultTranscriptLanguage = selectedTranscriptLanguage();
       nodes.upcoming.innerHTML = meetings.map((meeting, index) => `
