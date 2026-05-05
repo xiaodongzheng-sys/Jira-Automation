@@ -417,6 +417,44 @@ class WorkMemoryStore:
                 return None
             return self._public_item(connection, row)
 
+    def existing_source_ids(
+        self,
+        *,
+        source_type: str,
+        owner_email: str,
+        source_ids: list[str],
+        item_type: str = "",
+    ) -> set[str]:
+        normalized_source_type = str(source_type or "").strip()
+        normalized_owner = _normalize_email(owner_email)
+        normalized_ids = []
+        seen_ids: set[str] = set()
+        for source_id in source_ids:
+            normalized_id = str(source_id or "").strip()
+            if normalized_id and normalized_id not in seen_ids:
+                seen_ids.add(normalized_id)
+                normalized_ids.append(normalized_id)
+        if not normalized_source_type or not normalized_owner or not normalized_ids:
+            return set()
+
+        found: set[str] = set()
+        with self._connect() as connection:
+            for start in range(0, len(normalized_ids), 500):
+                chunk = normalized_ids[start:start + 500]
+                placeholders = ",".join("?" for _ in chunk)
+                params: list[Any] = [normalized_source_type, normalized_owner, *chunk]
+                sql = (
+                    "SELECT DISTINCT source_id FROM work_memory_items "
+                    f"WHERE source_type = ? AND owner_email = ? AND source_id IN ({placeholders})"
+                )
+                normalized_item_type = str(item_type or "").strip()
+                if normalized_item_type:
+                    sql += " AND item_type = ?"
+                    params.append(normalized_item_type)
+                rows = connection.execute(sql, params).fetchall()
+                found.update(str(row["source_id"]) for row in rows)
+        return found
+
     def record_memory_feedback(
         self,
         *,

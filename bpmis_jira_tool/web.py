@@ -6720,21 +6720,22 @@ def _get_work_memory_store() -> WorkMemoryStore:
     return current_app.config["WORK_MEMORY_STORE"]
 
 
-def _record_work_memory_items(items: list[dict[str, Any]], *, event: str, owner_email: str = "") -> dict[str, int]:
+def _record_work_memory_items(items: list[dict[str, Any]], *, event: str, owner_email: str = "", write_ledger: bool = True) -> dict[str, int]:
     recorded = 0
     failed = 0
     duplicate = 0
     if not items:
-        try:
-            _get_work_memory_store().record_ingestion_run(
-                source_type=event,
-                owner_email=owner_email or _current_google_email(),
-                status="ok",
-                recorded_count=0,
-                failed_count=0,
-            )
-        except Exception:
-            current_app.logger.debug("Work Memory empty ingestion ledger write failed for %s.", event, exc_info=True)
+        if write_ledger:
+            try:
+                _get_work_memory_store().record_ingestion_run(
+                    source_type=event,
+                    owner_email=owner_email or _current_google_email(),
+                    status="ok",
+                    recorded_count=0,
+                    failed_count=0,
+                )
+            except Exception:
+                current_app.logger.debug("Work Memory empty ingestion ledger write failed for %s.", event, exc_info=True)
         return {"recorded": 0, "failed": 0, "duplicate": 0}
     store = _get_work_memory_store()
     for item in items:
@@ -6753,19 +6754,20 @@ def _record_work_memory_items(items: list[dict[str, Any]], *, event: str, owner_
         except Exception:  # noqa: BLE001 - memory ingestion must not break the primary tool flow.
             failed += 1
             current_app.logger.exception("Work Memory ingestion failed for %s.", event)
-    try:
-        store.record_ingestion_run(
-            source_type=event,
-            owner_email=owner_email or _current_google_email(),
-            status="ok" if failed == 0 else "partial_error",
-            scanned_count=len(items),
-            matched_count=len(items),
-            recorded_count=recorded,
-            duplicate_count=duplicate,
-            failed_count=failed,
-        )
-    except Exception:
-        current_app.logger.debug("Work Memory ingestion ledger write failed for %s.", event, exc_info=True)
+    if write_ledger:
+        try:
+            store.record_ingestion_run(
+                source_type=event,
+                owner_email=owner_email or _current_google_email(),
+                status="ok" if failed == 0 else "partial_error",
+                scanned_count=len(items),
+                matched_count=len(items),
+                recorded_count=recorded,
+                duplicate_count=duplicate,
+                failed_count=failed,
+            )
+        except Exception:
+            current_app.logger.debug("Work Memory ingestion ledger write failed for %s.", event, exc_info=True)
     return {"recorded": recorded, "failed": failed, "duplicate": duplicate}
 
 
@@ -7020,22 +7022,33 @@ def _backfill_gmail_work_memory(
         if message_id and message_id not in seen_message_ids:
             seen_message_ids.add(message_id)
             unique_message_ids.append(message_id)
-    total = len(unique_message_ids)
-    job_store.update(job_id, stage="scanning", message=f"Scanning {total} Gmail message(s).", current=0, total=total)
+    original_total = len(unique_message_ids)
+    existing_message_ids = _get_work_memory_store().existing_source_ids(
+        source_type="gmail",
+        owner_email=owner_email,
+        source_ids=unique_message_ids,
+    )
+    pending_message_ids = [message_id for message_id in unique_message_ids if message_id not in existing_message_ids]
+    skipped_existing = original_total - len(pending_message_ids)
+    total = len(pending_message_ids)
+    skip_suffix = f" Skipping {skipped_existing} already recorded." if skipped_existing else ""
+    job_store.update(job_id, stage="scanning", message=f"Scanning {total}/{original_total} Gmail message(s).{skip_suffix}", current=0, total=total)
     vip_people = _gmail_work_memory_vip_people(report_intelligence_config)
     key_projects = _gmail_work_memory_key_projects()
-    items: list[dict[str, Any]] = []
     scanned = 0
     matched = 0
+    recorded = 0
+    duplicate = 0
     failed = 0
     attachment_processed = 0
     drive_links_processed = 0
     last_error = ""
     for batch_start in range(0, total, GMAIL_WORK_MEMORY_FETCH_BATCH_SIZE):
-        batch_ids = unique_message_ids[batch_start:batch_start + GMAIL_WORK_MEMORY_FETCH_BATCH_SIZE]
+        batch_ids = pending_message_ids[batch_start:batch_start + GMAIL_WORK_MEMORY_FETCH_BATCH_SIZE]
+        batch_items: list[dict[str, Any]] = []
         scanned += len(batch_ids)
         if scanned == len(batch_ids) or scanned % 100 == 0 or scanned == total:
-            job_store.update(job_id, stage="fetching", message=f"Fetching {scanned}/{total} Gmail message(s).", current=scanned, total=total)
+            job_store.update(job_id, stage="fetching", message=f"Fetching {scanned}/{total} Gmail message(s); skipped {skipped_existing}.", current=scanned, total=total)
         records, fetch_failures, fetch_error = _fetch_gmail_work_memory_records(
             credentials_payload=credentials_payload,
             owner_email=owner_email,
@@ -7065,7 +7078,7 @@ def _backfill_gmail_work_memory(
                     ]
                 )
                 report_matches = _gmail_work_memory_report_matches(match_text, report_intelligence_config, key_projects)
-                items.append(
+                batch_items.append(
                     gmail_message_memory_item(
                         owner_email=owner_email,
                         record=record,
@@ -7082,7 +7095,7 @@ def _backfill_gmail_work_memory(
                         record=record,
                         matched_vips=matched_vips,
                     )
-                    items.extend(attachment_items)
+                    batch_items.extend(attachment_items)
                     attachment_processed += len(attachment_items)
                     failed += attachment_failures
                     drive_items = _gmail_work_memory_vip_drive_items(
@@ -7092,29 +7105,33 @@ def _backfill_gmail_work_memory(
                         matched_vips=matched_vips,
                         drive_read_enabled=drive_read_enabled,
                     )
-                    items.extend(drive_items)
+                    batch_items.extend(drive_items)
                     drive_links_processed += len(drive_items)
             except Exception as error:  # noqa: BLE001 - one bad message must not stop the backfill.
                 failed += 1
                 last_error = str(error)
                 current_app.logger.warning("Gmail Work Memory message backfill skipped message_id=%s: %s", message_id, error)
-    result = _record_work_memory_items(items, event="gmail_backfill", owner_email=owner_email)
-    failed += int(result.get("failed") or 0)
+        result = _record_work_memory_items(batch_items, event="gmail_backfill", owner_email=owner_email, write_ledger=False)
+        recorded += int(result.get("recorded") or 0)
+        duplicate += int(result.get("duplicate") or 0)
+        failed += int(result.get("failed") or 0)
     status = "ok" if failed == 0 else "partial_error"
     _get_work_memory_store().record_ingestion_run(
         source_type="gmail_backfill",
         owner_email=owner_email,
-        cursor=f"days={days};messages={scanned}",
+        cursor=f"days={days};messages={scanned};skipped={skipped_existing}",
         status=status,
         scanned_count=scanned,
         matched_count=matched,
-        recorded_count=int(result.get("recorded") or 0),
-        duplicate_count=int(result.get("duplicate") or 0),
+        recorded_count=recorded,
+        duplicate_count=duplicate,
         failed_count=failed,
         error=last_error,
         metadata={
             "days": days,
             "max_messages": max_messages,
+            "original_message_count": original_total,
+            "skipped_existing_message_count": skipped_existing,
             "vip_people_count": len(vip_people),
             "attachment_processed": attachment_processed,
             "drive_links_processed": drive_links_processed,
@@ -7128,9 +7145,11 @@ def _backfill_gmail_work_memory(
         "status": status,
         "days": days,
         "scanned": scanned,
+        "skipped_existing": skipped_existing,
+        "original_message_count": original_total,
         "matched": matched,
-        "recorded": int(result.get("recorded") or 0),
-        "duplicate": int(result.get("duplicate") or 0),
+        "recorded": recorded,
+        "duplicate": duplicate,
         "failed": failed,
         "attachment_processed": attachment_processed,
         "drive_links_processed": drive_links_processed,

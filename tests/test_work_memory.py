@@ -88,6 +88,34 @@ class WorkMemoryStoreTests(unittest.TestCase):
             self.assertEqual(health["ingestion_runs"][0]["cursor"], "newer_than:90d")
             self.assertEqual(health["ingestion_runs"][0]["recorded_count"], 1)
 
+    def test_existing_source_ids_returns_owner_scoped_matches(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = WorkMemoryStore(Path(temp_dir) / "memory.db")
+            store.record_memory_item(
+                source_type="gmail",
+                source_id="msg-1",
+                item_type="decision",
+                owner_email="owner@npt.sg",
+                summary="Recorded message",
+                content="Recorded message",
+            )
+            store.record_memory_item(
+                source_type="gmail",
+                source_id="msg-2",
+                item_type="decision",
+                owner_email="other@npt.sg",
+                summary="Other owner",
+                content="Other owner",
+            )
+
+            existing = store.existing_source_ids(
+                source_type="gmail",
+                owner_email="owner@npt.sg",
+                source_ids=["msg-1", "msg-2", "msg-3"],
+            )
+
+        self.assertEqual(existing, {"msg-1"})
+
     def test_about_me_gate_controls_personal_work_profile(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             store = WorkMemoryStore(Path(temp_dir) / "memory.db")
@@ -628,6 +656,71 @@ class WorkMemoryRouteTests(unittest.TestCase):
         self.assertTrue(any(item["source_type"] == "gmail" for item in items))
         self.assertTrue(any(item["source_type"] == "gmail_attachment" for item in items))
         self.assertTrue(any(item["source_type"] == "gmail_drive_link" for item in items))
+
+    def test_gmail_backfill_skips_already_recorded_message_ids(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            env = {
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                app = create_app()
+
+            fetched: list[str] = []
+
+            class FakeGmailService:
+                def __init__(self, **_kwargs):
+                    pass
+
+                def list_work_memory_message_refs(self, *, days, max_messages, now=None):
+                    return [{"id": "msg-1"}, {"id": "msg-2"}]
+
+                def fetch_work_memory_message(self, message_id):
+                    fetched.append(message_id)
+                    return SimpleNamespace(
+                        headers={
+                            "from": "PM <pm@npt.sg>",
+                            "to": "owner@npt.sg",
+                            "subject": f"Project update {message_id}",
+                        },
+                        body_text=f"{message_id} is on track.",
+                        message_id=message_id,
+                        thread_id=f"thread-{message_id}",
+                        label_ids={"INBOX"},
+                        attachments=[],
+                        drive_links=[],
+                        internal_date=SimpleNamespace(isoformat=lambda: "2026-05-04T10:00:00+08:00"),
+                    )
+
+                def is_export_noise(self, headers):
+                    return False
+
+            with app.app_context(), patch("bpmis_jira_tool.web.GmailDashboardService", FakeGmailService):
+                app.config["WORK_MEMORY_STORE"].record_memory_item(
+                    source_type="gmail",
+                    source_id="msg-1",
+                    item_type="evidence",
+                    owner_email="owner@npt.sg",
+                    summary="Existing Gmail message",
+                    content="Existing Gmail message",
+                )
+                job = app.config["JOB_STORE"].create("work-memory-gmail-backfill", "Gmail Backfill", owner_email="owner@npt.sg")
+                result = _backfill_gmail_work_memory(
+                    owner_email="owner@npt.sg",
+                    credentials_payload={"token": "x"},
+                    report_intelligence_config={},
+                    days=90,
+                    max_messages=None,
+                    drive_read_enabled=False,
+                    job_id=job.job_id,
+                )
+
+        self.assertEqual(fetched, ["msg-2"])
+        self.assertEqual(result["original_message_count"], 2)
+        self.assertEqual(result["skipped_existing"], 1)
+        self.assertEqual(result["scanned"], 1)
+        self.assertEqual(result["matched"], 1)
 
     def test_gmail_backfill_isolates_single_message_fetch_failure(self):
         with tempfile.TemporaryDirectory() as temp_dir:
