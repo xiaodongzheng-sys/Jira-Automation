@@ -8477,18 +8477,21 @@ def _extract_source_code_qa_sql_blocks(answer: str) -> list[str]:
 
 def _source_code_qa_answer_text_candidates(answer: str) -> list[str]:
     raw = str(answer or "").strip()
-    candidates = [raw] if raw else []
+    candidates: list[str] = []
     if not raw or not raw.startswith("{"):
-        return candidates
+        return [raw] if raw else []
     try:
         parsed = json.loads(raw)
     except json.JSONDecodeError:
-        return candidates
+        return [raw] if raw else []
     if isinstance(parsed, dict):
         for key in ("sql", "query_sql", "generated_sql", "direct_answer", "answer", "summary"):
             value = parsed.get(key)
             if isinstance(value, str) and value.strip():
                 candidates.append(value.strip())
+    if candidates:
+        return candidates
+    candidates.append(raw)
     return candidates
 
 

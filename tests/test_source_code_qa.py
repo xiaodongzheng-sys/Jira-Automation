@@ -1276,7 +1276,8 @@ class SourceCodeQARouteTests(unittest.TestCase):
                             "Use reviewer tables. SQL: WITH latest_ticket AS "
                             "(SELECT * FROM ticket_info WHERE authorization_type = 'Incident - Authorize New Incident') "
                             "SELECT event_id FROM latest_ticket;"
-                        )
+                        ),
+                        "source_code_evidence": ["Mapper evidence with other SQL: SELECT should_not_leak FROM evidence;"],
                     }
                 ),
                 "llm_provider": "codex_cli_bridge",
@@ -1313,6 +1314,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
             sql = archive.read("query.sql").decode("utf-8")
         self.assertIn("WITH latest_ticket", sql)
         self.assertIn("SELECT event_id", sql)
+        self.assertNotIn("should_not_leak", sql)
 
     def test_source_code_qa_config_includes_runtime_capabilities(self):
         with self.app.test_client() as client:
