@@ -7033,7 +7033,12 @@ def _backfill_gmail_work_memory(
         scanned += len(batch_ids)
         if scanned == len(batch_ids) or scanned % 100 == 0 or scanned == total:
             job_store.update(job_id, stage="fetching", message=f"Fetching {scanned}/{total} Gmail message(s).", current=scanned, total=total)
-        records, fetch_failures, fetch_error = _fetch_gmail_work_memory_records(service=service, message_ids=batch_ids)
+        records, fetch_failures, fetch_error = _fetch_gmail_work_memory_records(
+            credentials_payload=credentials_payload,
+            owner_email=owner_email,
+            report_intelligence_config=report_intelligence_config,
+            message_ids=batch_ids,
+        )
         failed += fetch_failures
         if fetch_error:
             last_error = fetch_error
@@ -7140,15 +7145,30 @@ def _gmail_work_memory_fetch_workers() -> int:
         return GMAIL_WORK_MEMORY_FETCH_WORKERS
 
 
-def _fetch_gmail_work_memory_records(*, service: GmailDashboardService, message_ids: list[str]) -> tuple[list[Any], int, str]:
+def _fetch_gmail_work_memory_records(
+    *,
+    credentials_payload: dict[str, Any],
+    owner_email: str,
+    report_intelligence_config: dict[str, Any],
+    message_ids: list[str],
+) -> tuple[list[Any], int, str]:
     if not message_ids:
         return [], 0, ""
     workers = min(_gmail_work_memory_fetch_workers(), len(message_ids))
     records: list[Any] = []
     failed = 0
     last_error = ""
+
+    def fetch_one(message_id: str) -> Any:
+        local_service = GmailDashboardService(
+            credentials=Credentials(**credentials_payload),
+            cache_key=owner_email,
+            report_intelligence_config=report_intelligence_config,
+        )
+        return local_service.fetch_work_memory_message(message_id)
+
     with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = {executor.submit(service.fetch_work_memory_message, message_id): message_id for message_id in message_ids}
+        futures = {executor.submit(fetch_one, message_id): message_id for message_id in message_ids}
         for future in as_completed(futures):
             message_id = futures[future]
             try:
