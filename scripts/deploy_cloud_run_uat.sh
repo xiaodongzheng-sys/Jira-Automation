@@ -418,6 +418,7 @@ if [[ "$ENV_SECRET_PRECLEAR_REQUIRED" == "1" ]]; then
     --no-traffic \
     --tag "${UAT_TAG}-secret-clear" \
     --set-secrets "FLASK_SECRET_KEY=team-portal-flask-secret:latest,TEAM_PORTAL_CONFIG_ENCRYPTION_KEY=team-portal-config-encryption-key:latest,/secrets/google/client_secret.json=google-oauth-client-secret-json:latest" \
+    --remove-secrets LOCAL_AGENT_HMAC_SECRET \
     --remove-env-vars LOCAL_AGENT_HMAC_SECRET
 fi
 
