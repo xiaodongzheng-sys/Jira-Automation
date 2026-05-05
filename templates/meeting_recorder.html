@@ -64,9 +64,13 @@
         <h2>Recorded Meetings</h2>
       </div>
       <div class="meeting-record-toolbar">
-        <label>
+        <label class="meeting-record-date-field">
           <span>Date</span>
-          <input name="record_date" type="date" data-meeting-record-date>
+          <div class="meeting-record-date-control">
+            <input name="record_date" type="date" data-meeting-record-date>
+            <button class="meeting-record-date-trigger" type="button" data-meeting-record-date-toggle aria-label="Open larger date picker">Pick</button>
+          </div>
+          <div class="meeting-record-calendar" data-meeting-record-calendar hidden></div>
         </label>
         <button class="button button-secondary" type="button" data-meeting-records-refresh>Refresh</button>
       </div>

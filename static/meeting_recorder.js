@@ -23,6 +23,8 @@
     records: root.querySelector('[data-meeting-records]'),
     recordsRefresh: root.querySelector('[data-meeting-records-refresh]'),
     recordDate: root.querySelector('[data-meeting-record-date]'),
+    recordDateToggle: root.querySelector('[data-meeting-record-date-toggle]'),
+    recordCalendar: root.querySelector('[data-meeting-record-calendar]'),
     detail: root.querySelector('[data-meeting-record-detail]'),
   };
 
@@ -397,6 +399,66 @@
     const month = String(date.getMonth() + 1).padStart(2, '0');
     const day = String(date.getDate()).padStart(2, '0');
     return `${year}-${month}-${day}`;
+  };
+
+  const parseLocalDateValue = (value) => {
+    const match = String(value || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!match) return new Date();
+    return new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+  };
+
+  const calendarTitle = (date) => new Intl.DateTimeFormat(undefined, {
+    month: 'long',
+    year: 'numeric',
+  }).format(date);
+
+  const renderRecordCalendar = (viewDate = parseLocalDateValue(nodes.recordDate?.value)) => {
+    if (!nodes.recordCalendar) return;
+    const selectedValue = nodes.recordDate?.value || localDateValue();
+    const selected = parseLocalDateValue(selectedValue);
+    const firstDay = new Date(viewDate.getFullYear(), viewDate.getMonth(), 1);
+    const gridStart = new Date(firstDay);
+    gridStart.setDate(firstDay.getDate() - firstDay.getDay());
+    const days = [];
+    for (let index = 0; index < 42; index += 1) {
+      const date = new Date(gridStart);
+      date.setDate(gridStart.getDate() + index);
+      const value = localDateValue(date);
+      const classes = [
+        'meeting-record-calendar-day',
+        date.getMonth() === viewDate.getMonth() ? '' : 'is-muted',
+        value === selectedValue ? 'is-selected' : '',
+      ].filter(Boolean).join(' ');
+      days.push(`<button class="${classes}" type="button" data-meeting-calendar-day="${value}">${date.getDate()}</button>`);
+    }
+    nodes.recordCalendar.dataset.viewMonth = localDateValue(firstDay);
+    nodes.recordCalendar.innerHTML = `
+      <div class="meeting-record-calendar-head">
+        <button class="meeting-record-calendar-nav" type="button" data-meeting-calendar-prev aria-label="Previous month">&lsaquo;</button>
+        <strong>${escapeHtml(calendarTitle(viewDate))}</strong>
+        <button class="meeting-record-calendar-nav" type="button" data-meeting-calendar-next aria-label="Next month">&rsaquo;</button>
+      </div>
+      <div class="meeting-record-calendar-grid">
+        ${['S', 'M', 'T', 'W', 'T', 'F', 'S'].map((day) => `<span class="meeting-record-calendar-weekday">${day}</span>`).join('')}
+        ${days.join('')}
+      </div>
+    `;
+    const selectedButton = nodes.recordCalendar.querySelector(`[data-meeting-calendar-day="${localDateValue(selected)}"]`);
+    selectedButton?.setAttribute('aria-current', 'date');
+  };
+
+  const hideRecordCalendar = () => {
+    if (nodes.recordCalendar) nodes.recordCalendar.hidden = true;
+  };
+
+  const toggleRecordCalendar = () => {
+    if (!nodes.recordCalendar) return;
+    if (nodes.recordCalendar.hidden) {
+      renderRecordCalendar(parseLocalDateValue(nodes.recordDate?.value));
+      nodes.recordCalendar.hidden = false;
+    } else {
+      hideRecordCalendar();
+    }
   };
 
   const recordDateValue = (record) => localDateValue(record?.recording_started_at || record?.created_at || '');
@@ -1378,12 +1440,48 @@
     nodes.recordDate.addEventListener('change', () => {
       state.initialSelectionPending = false;
       state.selectedRecordId = '';
+      renderRecordCalendar(parseLocalDateValue(nodes.recordDate.value));
       if (nodes.detail) {
         nodes.detail.innerHTML = '<p class="empty-state">Select a recorded meeting to view audio, transcript, and minutes.</p>';
       }
       loadRecords();
     });
   }
+  nodes.recordDateToggle?.addEventListener('click', (event) => {
+    event.preventDefault();
+    toggleRecordCalendar();
+  });
+  nodes.recordCalendar?.addEventListener('click', (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) return;
+    const viewDate = parseLocalDateValue(nodes.recordCalendar.dataset.viewMonth || nodes.recordDate?.value);
+    if (target.matches('[data-meeting-calendar-prev]')) {
+      renderRecordCalendar(new Date(viewDate.getFullYear(), viewDate.getMonth() - 1, 1));
+      return;
+    }
+    if (target.matches('[data-meeting-calendar-next]')) {
+      renderRecordCalendar(new Date(viewDate.getFullYear(), viewDate.getMonth() + 1, 1));
+      return;
+    }
+    const value = target.dataset.meetingCalendarDay;
+    if (value && nodes.recordDate) {
+      nodes.recordDate.value = value;
+      hideRecordCalendar();
+      nodes.recordDate.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+  });
+  document.addEventListener('click', (event) => {
+    if (!nodes.recordCalendar || nodes.recordCalendar.hidden) return;
+    const target = event.target;
+    if (target instanceof Node && (
+      nodes.recordCalendar.contains(target)
+      || nodes.recordDateToggle?.contains(target)
+      || nodes.recordDate?.contains(target)
+    )) {
+      return;
+    }
+    hideRecordCalendar();
+  });
   nodes.startForm?.addEventListener('submit', async (event) => {
     event.preventDefault();
     const submitButton = nodes.startForm.querySelector('button[type="submit"]');

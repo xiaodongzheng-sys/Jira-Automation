@@ -8464,6 +8464,142 @@ select:focus {
   gap: 12px;
 }
 
+.meeting-record-toolbar {
+  position: relative;
+  display: flex;
+  align-items: end;
+  gap: 10px;
+  width: fit-content;
+  max-width: 100%;
+}
+
+.meeting-record-date-field {
+  position: relative;
+  display: grid;
+  gap: 6px;
+  width: 300px;
+  max-width: 100%;
+}
+
+.meeting-record-date-field > span {
+  font-size: 0.95rem;
+  font-weight: 800;
+}
+
+.meeting-record-date-control {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.meeting-record-date-control input {
+  min-height: 56px;
+  padding: 12px 14px;
+  font-size: 1.12rem;
+  font-weight: 800;
+}
+
+.meeting-record-date-trigger {
+  min-height: 56px;
+  padding: 0 16px;
+  border: 1px solid #b7d7ff;
+  border-radius: 12px;
+  background: #eff6ff;
+  color: #0958d9;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 800;
+}
+
+.meeting-record-date-trigger:hover,
+.meeting-record-date-trigger:focus-visible {
+  background: #d9ecff;
+  outline: none;
+}
+
+.meeting-record-calendar {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 10px);
+  left: 0;
+  width: 360px;
+  padding: 16px;
+  border: 1px solid #cbd5e1;
+  border-radius: 18px;
+  background: #ffffff;
+  box-shadow: 0 20px 50px rgba(15, 23, 42, 0.18);
+}
+
+.meeting-record-calendar-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.meeting-record-calendar-head strong {
+  color: #101828;
+  font-size: 1.05rem;
+}
+
+.meeting-record-calendar-nav {
+  width: 40px;
+  height: 40px;
+  border: 1px solid #d0d5dd;
+  border-radius: 12px;
+  background: #f8fafc;
+  color: #101828;
+  cursor: pointer;
+  font-size: 1.2rem;
+  font-weight: 900;
+}
+
+.meeting-record-calendar-grid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.meeting-record-calendar-weekday,
+.meeting-record-calendar-day {
+  display: grid;
+  place-items: center;
+}
+
+.meeting-record-calendar-weekday {
+  min-height: 28px;
+  color: #667085;
+  font-size: 0.78rem;
+  font-weight: 900;
+}
+
+.meeting-record-calendar-day {
+  min-height: 42px;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  background: transparent;
+  color: #101828;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 800;
+}
+
+.meeting-record-calendar-day:hover {
+  background: #eff6ff;
+}
+
+.meeting-record-calendar-day.is-muted {
+  color: #98a2b3;
+}
+
+.meeting-record-calendar-day.is-selected {
+  border-color: #1677ff;
+  background: #1677ff;
+  color: #ffffff;
+}
+
 .meeting-list-item,
 .meeting-record-row {
   display: flex;
@@ -8906,6 +9042,21 @@ select:focus {
   .meeting-recorder-status,
   .meeting-diagnostic-card {
     max-width: none;
+  }
+
+  .meeting-record-toolbar,
+  .meeting-record-date-field,
+  .meeting-record-calendar {
+    width: 100%;
+  }
+
+  .meeting-record-toolbar {
+    align-items: stretch;
+  }
+
+  .meeting-record-calendar {
+    left: 0;
+    right: 0;
   }
 
   .meeting-diagnostic-grid {
