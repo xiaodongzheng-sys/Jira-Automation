@@ -304,6 +304,25 @@ if [[ -n "$LOCAL_AGENT_URL" ]]; then
   ENV_VARS+=("LOCAL_AGENT_BASE_URL=$LOCAL_AGENT_URL")
 fi
 
+DEPLOY_SECRET_ARGS=(--update-secrets "LOCAL_AGENT_HMAC_SECRET=$UAT_LOCAL_AGENT_SECRET_NAME:latest")
+if [[ "${CLOUD_RUN_UAT_LOCAL_AGENT_SECRET_SOURCE:-secret_manager}" == "env" ]]; then
+  uat_hmac_secret="${CLOUD_RUN_UAT_LOCAL_AGENT_HMAC_SECRET:-}"
+  if [[ -z "$uat_hmac_secret" ]]; then
+    uat_host_workspace="$(resolve_uat_host_workspace)"
+    uat_env_file="$uat_host_workspace/.env"
+    if [[ -f "$uat_env_file" ]]; then
+      uat_hmac_secret="$(ENV_FILE="$uat_env_file" read_env_value LOCAL_AGENT_HMAC_SECRET)"
+    fi
+  fi
+  if [[ -z "$uat_hmac_secret" ]]; then
+    echo "CLOUD_RUN_UAT_LOCAL_AGENT_SECRET_SOURCE=env requires CLOUD_RUN_UAT_LOCAL_AGENT_HMAC_SECRET or LOCAL_AGENT_HMAC_SECRET in the UAT host .env."
+    exit 1
+  fi
+  ENV_VARS+=("LOCAL_AGENT_HMAC_SECRET=$uat_hmac_secret")
+  DEPLOY_SECRET_ARGS=()
+  echo "Using UAT local-agent HMAC from env fallback because CLOUD_RUN_UAT_LOCAL_AGENT_SECRET_SOURCE=env."
+fi
+
 IFS='|'
 ENV_VARS_JOINED="${ENV_VARS[*]}"
 unset IFS
@@ -361,7 +380,7 @@ cd "$ROOT_DIR"
   ${RUNTIME_ARGS[@]+"${RUNTIME_ARGS[@]}"} \
   --no-traffic \
   --tag "$UAT_TAG" \
-  --update-secrets "LOCAL_AGENT_HMAC_SECRET=$UAT_LOCAL_AGENT_SECRET_NAME:latest" \
+  ${DEPLOY_SECRET_ARGS[@]+"${DEPLOY_SECRET_ARGS[@]}"} \
   --set-env-vars "^|^$ENV_VARS_JOINED"
 
 SERVICE_DESCRIBE_JSON="$(describe_service)"
