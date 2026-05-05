@@ -262,6 +262,11 @@
           "term": "Approval Visibility",
           "aliases": ["approval list visibility", "审批可见性", "为什么看不到审批单"],
           "code_terms": ["ApprovalController", "ApprovalMapper", "ExtTicketMapper", "functionUnit"]
+        },
+        {
+          "term": "RC",
+          "aliases": ["Compliance", "RC review", "Compliance review"],
+          "code_terms": ["Compliance", "RC"]
         }
       ],
       "key_artifacts": {
@@ -294,7 +299,8 @@
       "evidence_rules": [
         "For approval visibility, prefer controller/service/mapper filters and function-unit config evidence over page labels.",
         "For globallock, cite config key, DO/entity, mapper/table, and calling service when available.",
-        "For authorization questions, separate role/permission data, user/group mapping, and approval-list filtering."
+        "For authorization questions, separate role/permission data, user/group mapping, and approval-list filtering.",
+        "For reviewer SQL questions, treat RC and Compliance as business aliases for the same review stage, but do not claim this alias is source-code evidence unless the repository proves it."
       ],
       "question_seeds": [
         {"question": "GRC globallock 配置在哪里？", "expected_terms": ["mysql-isolate.globallock", "BcfGlobalLockDO", "bcf_global_lock"]},

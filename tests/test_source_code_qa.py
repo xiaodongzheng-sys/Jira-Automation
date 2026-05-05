@@ -1190,10 +1190,11 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertIn("Data dictionary handling", section)
         self.assertIn("AF and GRC, data_dictionary uploads apply to all country selections", section)
         self.assertIn("SG, ID, and PH share the same table and data-field definitions", section)
+        self.assertIn("RC and Compliance are business aliases", section)
         self.assertIn("first explain the actual SQL/table logic", section)
         self.assertIn("chosen table names, key filters, joins, reviewer/status rows, and timestamp assumptions", section)
         self.assertIn("selected country points to that country's separate runtime DB instance", section)
-        self.assertIn("This DB-routing rule is not a complete answer by itself", section)
+        self.assertIn("not the first sentence or main conclusion", section)
 
     def test_crms_cannot_use_all_country_runtime_evidence(self):
         with self.app.test_client() as client:
@@ -3971,6 +3972,8 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertIn("BlackWhiteList", af_profile["data_carriers"])
         self.assertIn("CaseReviewController", af_profile["api_terms"])
         self.assertIn("mysql-isolate.globallock", grc_profile["config_terms"])
+        self.assertIn("RC", grc_profile["knowledge_terms"])
+        self.assertIn("Compliance", grc_profile["knowledge_terms"])
         self.assertIn("ApprovalController", grc_profile["api_terms"])
         self.assertEqual(knowledge["domains"]["CRMS"]["label"], "Credit Risk")
         self.assertGreaterEqual(knowledge["domains"]["AF"]["module_count"], 5)
@@ -4003,6 +4006,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertIn("co-occurrence in the same flow", af_context)
         self.assertIn("Domain guidance: Ops Risk", grc_context)
         self.assertIn("mysql-isolate.globallock", grc_context)
+        self.assertIn("RC and Compliance as business aliases", grc_context)
         self.assertIn("Evidence priority", grc_context)
 
     def test_index_health_payload_summarizes_ready_indexes(self):
@@ -8888,6 +8892,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertIn("Code & log analysis", brief)
         self.assertIn("AF domain mapping", brief)
         self.assertIn("Always begin with a direct answer", brief)
+        self.assertIn("do not begin the direct answer with country database routing", brief)
         self.assertIn("This information is not present in the provided Source Code or Runtime Evidence", brief)
         self.assertIn("Do not rewrite code, suggest architectural refactoring", brief)
         self.assertIn("Three-stage investigation required:", brief)
@@ -8898,6 +8903,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertIn("screenshot-driven incident questions", brief)
         self.assertIn("missing_production_evidence", brief)
         self.assertIn("source_code_evidence must name concrete files/functions/classes/fields/tables or APIs", brief)
+        self.assertIn("lead with the data model and SQL strategy", brief)
         self.assertIn("full rule/config definitions from status-only migration updates", brief)
         self.assertIn("Strict scope boundary: search only the allowed scope roots", brief)
         self.assertIn("Scoped Codex search allowlist:", brief)
