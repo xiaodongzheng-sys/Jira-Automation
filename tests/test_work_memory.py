@@ -412,6 +412,95 @@ class WorkMemoryStoreTests(unittest.TestCase):
             self.assertEqual(result["results"][0]["missing_answer_points"], ["not in evidence"])
             self.assertEqual(result["results"][0]["expected_links"], ["https://jira.shopee.io/browse/SPDBK-129093"])
 
+    def test_superagent_quality_gate_v1_contract_and_pm_brief(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = WorkMemoryStore(Path(temp_dir) / "memory.db")
+            store.record_memory_item(
+                source_type="team_dashboard",
+                source_id="project-1",
+                item_type="project",
+                owner_email="owner@npt.sg",
+                visibility=VISIBILITY_TEAM,
+                observed_at="2026-05-05T09:00:00Z",
+                summary="CRC Revamp is under PRD",
+                content="CRC Revamp is under PRD and planned for May review.",
+                weight=1.4,
+            )
+            store.record_memory_item(
+                source_type="meeting_recorder",
+                source_id="meeting-1:todo:1",
+                item_type="todo",
+                owner_email="owner@npt.sg",
+                visibility=VISIBILITY_PRIVATE,
+                observed_at="2026-05-05T10:00:00Z",
+                summary="Follow up with RC on CRC Revamp",
+                content="Follow up with RC on CRC Revamp before sign-off.",
+            )
+            store.record_memory_item(
+                source_type="gmail",
+                source_id="msg-1",
+                item_type="risk",
+                owner_email="owner@npt.sg",
+                visibility=VISIBILITY_PRIVATE,
+                observed_at="2026-05-05T11:00:00Z",
+                summary="CRC Revamp has sign-off risk",
+                content="CRC Revamp has sign-off risk if RC feedback is late.",
+            )
+
+            context = store.query_superagent_context(query="", owner_email="owner@npt.sg", task_type="pm_brief")
+            answer = store.generate_llm_superagent_answer(task_type="pm_brief", query="", context=context)
+            store.upsert_superagent_eval_cases(
+                owner_email="owner@npt.sg",
+                cases=[
+                    {
+                        "question": "CRC Revamp status?",
+                        "task_type": "project_status",
+                        "expected_sources": ["Team Dashboard"],
+                        "expected_answer_points": ["under PRD"],
+                        "suite_id": "gold_v1",
+                    }
+                ],
+            )
+            gate = store.run_superagent_quality_gate(owner_email="owner@npt.sg", suite_id="gold_v1", min_cases=1)
+
+            self.assertEqual(answer["answer_contract_version"], "superagent_quality_gate_v1")
+            self.assertIn("PM brief", [section["title"] for section in answer["sections"]])
+            self.assertIn("Follow-ups", [section["title"] for section in answer["sections"]])
+            self.assertIn("Risks and blockers", [section["title"] for section in answer["sections"]])
+            self.assertEqual(gate["quality_gate"]["gate_status"], "pass")
+            self.assertFalse(gate["quality_gate"]["release_blocking"])
+
+    def test_superagent_quality_gate_reports_failure_diagnostics(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = WorkMemoryStore(Path(temp_dir) / "memory.db")
+            store.record_memory_item(
+                source_type="team_dashboard",
+                source_id="project-1",
+                item_type="project",
+                owner_email="owner@npt.sg",
+                visibility=VISIBILITY_TEAM,
+                summary="CRC Revamp is under PRD",
+                content="CRC Revamp is under PRD.",
+            )
+            result = store.run_superagent_eval_cases(
+                owner_email="owner@npt.sg",
+                cases=[
+                    {
+                        "question": "CRC Revamp status?",
+                        "task_type": "project_status",
+                        "expected_sources": ["Gmail Sent Report"],
+                        "expected_answer_points": ["ready for live"],
+                        "suite_id": "gold_v1",
+                    }
+                ],
+                suite_id="gold_v1",
+            )
+
+            self.assertEqual(result["quality_gate"]["gate_status"], "fail")
+            self.assertIn("wrong_source", result["results"][0]["failure_reasons"])
+            self.assertIn("missing_answer_points", result["results"][0]["failure_reasons"])
+            self.assertEqual(result["results"][0]["diagnostics"]["answer_contract_version"], "superagent_quality_gate_v1")
+
     def test_team_visible_superagent_does_not_show_private_excerpt(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             store = WorkMemoryStore(Path(temp_dir) / "memory.db")
@@ -1047,7 +1136,8 @@ class WorkMemoryRouteTests(unittest.TestCase):
                             {
                                 "question": "CRC Revamp gold status?",
                                 "task_type": "project_status",
-                                "expected_source_type": "team_dashboard",
+                                "expected_sources": ["Team Dashboard"],
+                                "expected_answer_points": ["under PRD"],
                                 "suite_id": "gold_v1",
                             }
                         ],
@@ -1057,6 +1147,11 @@ class WorkMemoryRouteTests(unittest.TestCase):
                 self.assertEqual(gold_eval_response.status_code, 200)
                 self.assertEqual(gold_eval_response.get_json()["suite_id"], "gold_v1")
                 self.assertEqual(gold_eval_response.get_json()["case_count"], 1)
+                self.assertEqual(gold_eval_response.get_json()["quality_gate"]["gate_status"], "pass")
+
+                quality_gate = client.post("/api/superagent/quality-gate", json={"suite_id": "gold_v1", "min_cases": 1})
+                self.assertEqual(quality_gate.status_code, 200)
+                self.assertEqual(quality_gate.get_json()["quality_gate"]["gate_status"], "pass")
 
                 incremental = client.post("/api/work-memory/ingest-incremental", json={"window": "7d"})
                 self.assertEqual(incremental.status_code, 200)

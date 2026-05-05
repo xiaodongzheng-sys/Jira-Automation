@@ -31,6 +31,9 @@ SOURCE_PRECEDENCE = {
     "source_code_qa": 20,
 }
 
+SUPERAGENT_ANSWER_CONTRACT_VERSION = "superagent_quality_gate_v1"
+SUPERAGENT_DEFAULT_GATE_SUITE = "gold_v1"
+
 REVIEW_ITEM_TYPE_PRIORITY = {
     "key_project": 100,
     "risk": 95,
@@ -1002,6 +1005,9 @@ class WorkMemoryStore:
                 "unknowns": ["No matching Work Memory evidence was found."],
                 "follow_up_candidates": [],
                 "readonly": True,
+                "answer_contract_version": SUPERAGENT_ANSWER_CONTRACT_VERSION,
+                "sections": [],
+                "quality_warnings": ["missing_evidence"],
             }
         label = {
             "project_status": "Project status",
@@ -1009,16 +1015,17 @@ class WorkMemoryStore:
             "meeting_prep": "Meeting prep",
             "stakeholder_brief": "Stakeholder brief",
             "monthly_focus": "Monthly focus",
+            "pm_brief": "PM brief",
             "open_loop_check": "Open loops",
+            "what_changed": "What changed",
         }.get(str(task_type or "").strip(), "Work Memory summary")
-        direct_points = []
-        for item in evidence_items[:5]:
-            excerpt = self._evidence_excerpt(item, query=query, allow_private=owner_view)
-            if excerpt:
-                direct_points.append(excerpt)
-            else:
-                direct_points.append(str(item.get("summary") or item.get("content") or item.get("item_id") or "").strip())
-        direct_answer = "\n".join(f"- {point}" for point in direct_points if point).strip()
+        sections = self._superagent_answer_sections(
+            task_type=task_type,
+            query=query,
+            evidence_items=evidence_items,
+            owner_view=owner_view,
+        )
+        direct_answer = self._format_superagent_sections(sections)
         if not direct_answer:
             direct_answer = "I found related Work Memory evidence, but it does not contain enough detail for a direct answer."
         lines = [f"{label} based on Work Memory evidence:", direct_answer]
@@ -1037,6 +1044,11 @@ class WorkMemoryStore:
         unknowns = []
         if any(item.get("source_type") == "meeting_recorder" and (item.get("metadata") or {}).get("attribution_scope") == "meeting" for item in evidence_items):
             unknowns.append("Some meeting facts have unknown speaker attribution and are not treated as owner-authored decisions.")
+        quality_warnings = []
+        if len(evidence_items) < 2 and task_type in {"project_status", "follow_up", "meeting_prep", "monthly_focus", "pm_brief"}:
+            quality_warnings.append("limited_evidence")
+        if unknowns:
+            quality_warnings.append("attribution_unknown")
         return {
             "status": "ok",
             "answer": "\n".join(lines),
@@ -1047,6 +1059,9 @@ class WorkMemoryStore:
             "unknowns": unknowns,
             "follow_up_candidates": follow_ups,
             "readonly": True,
+            "answer_contract_version": SUPERAGENT_ANSWER_CONTRACT_VERSION,
+            "sections": sections,
+            "quality_warnings": quality_warnings,
         }
 
     def record_superagent_audit_log(
@@ -1299,6 +1314,17 @@ class WorkMemoryStore:
                 for item in items
             )
             privacy_risk = any(item.get("visibility") == VISIBILITY_PRIVATE for item in items) and row["visibility_scope"] == "team"
+            failure_reasons = []
+            if missing_evidence:
+                failure_reasons.append("missing_evidence")
+            if wrong_source:
+                failure_reasons.append("wrong_source")
+            if wrong_text:
+                failure_reasons.append("missing_answer_points")
+            if wrong_attribution:
+                failure_reasons.append("wrong_attribution")
+            if privacy_risk:
+                failure_reasons.append("privacy_risk")
             passed = not any([missing_evidence, wrong_source, wrong_text, wrong_attribution, privacy_risk])
             results.append(
                 {
@@ -1318,16 +1344,44 @@ class WorkMemoryStore:
                     "expected_links": _normalize_string_list(metadata.get("expected_links") or []),
                     "domain": str(metadata.get("domain") or ""),
                     "suite_id": str(metadata.get("suite_id") or ""),
+                    "failure_reasons": failure_reasons,
+                    "diagnostics": {
+                        "answer_contract_version": answer.get("answer_contract_version") or "",
+                        "evidence_sources": sorted(source for source in evidence_sources if source),
+                        "expected_sources_normalized": sorted(normalized_expected_sources),
+                        "quality_warnings": answer.get("quality_warnings") or [],
+                    },
                 }
             )
         passed_count = sum(1 for item in results if item["passed"])
-        return {
+        eval_result = {
             "status": "ok",
             "case_count": len(results),
             "passed_count": passed_count,
             "failed_count": len(results) - passed_count,
             "suite_id": normalized_suite_id,
             "results": results,
+        }
+        if normalized_suite_id == SUPERAGENT_DEFAULT_GATE_SUITE:
+            eval_result["quality_gate"] = self._superagent_quality_gate_from_eval(eval_result, min_cases=1)
+        return eval_result
+
+    def run_superagent_quality_gate(self, *, owner_email: str, suite_id: str = SUPERAGENT_DEFAULT_GATE_SUITE, limit: int = 30, min_cases: int = 1) -> dict[str, Any]:
+        normalized_suite_id = str(suite_id or SUPERAGENT_DEFAULT_GATE_SUITE).strip() or SUPERAGENT_DEFAULT_GATE_SUITE
+        eval_result = self.run_superagent_eval_cases(
+            owner_email=owner_email,
+            cases=None,
+            limit=limit,
+            suite_id=normalized_suite_id,
+        )
+        gate = self._superagent_quality_gate_from_eval(eval_result, min_cases=max(1, int(min_cases or 1)))
+        return {
+            "status": "ok",
+            "suite_id": normalized_suite_id,
+            "readonly": True,
+            "answer_contract_version": SUPERAGENT_ANSWER_CONTRACT_VERSION,
+            "quality_gate": gate,
+            "eval": eval_result,
         }
 
     def health(self) -> dict[str, Any]:
@@ -1394,8 +1448,158 @@ class WorkMemoryStore:
                 "external_writes_enabled": False,
                 "requires_evidence": True,
                 "meeting_facts_are_owner_profile_eligible": False,
+                "answer_contract_version": SUPERAGENT_ANSWER_CONTRACT_VERSION,
+                "quality_gate_suite": SUPERAGENT_DEFAULT_GATE_SUITE,
             },
         }
+
+    def _superagent_quality_gate_from_eval(self, eval_result: dict[str, Any], *, min_cases: int) -> dict[str, Any]:
+        results = eval_result.get("results") if isinstance(eval_result.get("results"), list) else []
+        failed_cases = [item for item in results if not item.get("passed")]
+        failure_summary: dict[str, int] = {}
+        for item in failed_cases:
+            for reason in item.get("failure_reasons") or ["failed"]:
+                failure_summary[str(reason)] = failure_summary.get(str(reason), 0) + 1
+        case_count = int(eval_result.get("case_count") or len(results))
+        passed = case_count >= max(1, int(min_cases or 1)) and not failed_cases
+        if case_count < max(1, int(min_cases or 1)):
+            failure_summary["insufficient_gold_cases"] = max(1, int(min_cases or 1)) - case_count
+        return {
+            "gate_status": "pass" if passed else "fail",
+            "release_blocking": not passed,
+            "suite_id": str(eval_result.get("suite_id") or SUPERAGENT_DEFAULT_GATE_SUITE),
+            "min_cases": max(1, int(min_cases or 1)),
+            "case_count": case_count,
+            "passed_count": int(eval_result.get("passed_count") or 0),
+            "failed_count": int(eval_result.get("failed_count") or len(failed_cases)),
+            "failure_summary": failure_summary,
+            "failed_cases": [
+                {
+                    "case_id": item.get("case_id"),
+                    "question": item.get("question"),
+                    "task_type": item.get("task_type"),
+                    "failure_reasons": item.get("failure_reasons") or [],
+                    "missing_answer_points": item.get("missing_answer_points") or [],
+                    "diagnostics": item.get("diagnostics") or {},
+                }
+                for item in failed_cases[:10]
+            ],
+        }
+
+    def _superagent_answer_sections(
+        self,
+        *,
+        task_type: str,
+        query: str,
+        evidence_items: list[dict[str, Any]],
+        owner_view: bool,
+    ) -> list[dict[str, Any]]:
+        task_key = str(task_type or "general").strip() or "general"
+
+        def matching(types: set[str], *, limit: int = 4) -> list[str]:
+            lines = []
+            for item in evidence_items:
+                if item.get("item_type") not in types:
+                    continue
+                line = self._superagent_item_line(item, query=query, owner_view=owner_view)
+                if line and line not in lines:
+                    lines.append(line)
+                if len(lines) >= limit:
+                    break
+            return lines
+
+        def first_available(*groups: list[str], limit: int = 4) -> list[str]:
+            lines: list[str] = []
+            for group in groups:
+                for line in group:
+                    if line and line not in lines:
+                        lines.append(line)
+                    if len(lines) >= limit:
+                        return lines
+            return lines
+
+        status = matching({"curated_report", "key_project", "project", "decision"}, limit=4)
+        followups = matching({"todo", "open_loop"}, limit=5)
+        risks = matching({"risk", "blocker"}, limit=4)
+        meetings = matching({"meeting", "owner_speech_candidate"}, limit=3)
+        stakeholders = matching({"stakeholder"}, limit=4)
+        fallback = [self._superagent_item_line(item, query=query, owner_view=owner_view) for item in evidence_items[:5]]
+        fallback = [line for line in fallback if line]
+
+        if task_key == "project_status":
+            sections = [
+                ("Current status", first_available(status, fallback, limit=4)),
+                ("Risks and blockers", risks),
+                ("Next actions", followups),
+                ("Evidence gaps", ["No owner-confirmed action, risk, or decision was found." if not (status or risks or followups) else "Use the evidence cards below before treating this as complete."]),
+            ]
+        elif task_key in {"follow_up", "open_loop_check"}:
+            sections = [
+                ("Follow-ups", first_available(followups, risks, fallback, limit=5)),
+                ("Why it matters", first_available(risks, status, limit=3)),
+                ("Evidence gaps", ["No explicit owner or due date was found for some items."] if followups else ["No explicit follow-up evidence was found."]),
+            ]
+        elif task_key == "meeting_prep":
+            sections = [
+                ("Recent context", first_available(meetings, status, fallback, limit=4)),
+                ("Questions to cover", first_available(followups, risks, limit=4)),
+                ("Evidence gaps", ["Speaker attribution is unknown for meeting-level facts."]),
+            ]
+        elif task_key == "monthly_focus":
+            sections = [
+                ("Focus projects", first_available(status, fallback, limit=5)),
+                ("Risks and blockers", risks),
+                ("Follow-ups", followups),
+            ]
+        elif task_key == "pm_brief":
+            sections = [
+                ("PM brief", first_available(status, fallback, limit=5)),
+                ("Follow-ups", followups),
+                ("Risks and blockers", risks),
+                ("Meeting prep", meetings),
+                ("Evidence gaps", ["Review source cards for freshness before external sharing."]),
+            ]
+        elif task_key == "stakeholder_brief":
+            sections = [
+                ("Stakeholders", first_available(stakeholders, fallback, limit=5)),
+                ("Related projects", status),
+                ("Follow-ups", followups),
+            ]
+        else:
+            sections = [
+                ("Relevant evidence", fallback),
+                ("Follow-ups", followups),
+                ("Risks and blockers", risks),
+            ]
+        return [
+            {"title": title, "items": items}
+            for title, items in sections
+            if items
+        ]
+
+    def _superagent_item_line(self, item: dict[str, Any], *, query: str, owner_view: bool) -> str:
+        excerpt = self._evidence_excerpt(item, query=query, allow_private=owner_view)
+        text = excerpt or str(item.get("summary") or item.get("content") or item.get("item_id") or "").strip()
+        if not text:
+            return ""
+        prefix = self._answer_prefix(item)
+        observed_at = str(item.get("observed_at") or "").strip()
+        source = str(item.get("source_type") or "evidence").strip()
+        label = f"{source}"
+        if observed_at:
+            label = f"{label}, {observed_at}"
+        return self._truncate_text(f"{prefix}{text} ({label})", limit=520)
+
+    def _format_superagent_sections(self, sections: list[dict[str, Any]]) -> str:
+        lines: list[str] = []
+        for section in sections:
+            title = str(section.get("title") or "").strip()
+            items = [str(item or "").strip() for item in section.get("items") or [] if str(item or "").strip()]
+            if not title or not items:
+                continue
+            lines.append(f"{title}:")
+            lines.extend(f"- {item}" for item in items)
+        return "\n".join(lines).strip()
 
     def _public_item(self, connection: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
         feedback_rows = connection.execute(
@@ -1558,7 +1762,7 @@ class WorkMemoryStore:
             if token not in terms:
                 terms.append(token)
         if not terms:
-            if task_type in {"what_changed", "monthly_focus"}:
+            if task_type in {"what_changed", "monthly_focus", "pm_brief", "meeting_prep", "follow_up", "open_loop_check"}:
                 return self._sort_by_precedence(
                     [
                         item
@@ -1665,7 +1869,10 @@ class WorkMemoryStore:
         preferred_types_by_task = {
             "stakeholder_brief": {"stakeholder", "project", "key_project", "curated_report"},
             "follow_up": {"todo", "open_loop", "risk", "blocker", "curated_report"},
+            "open_loop_check": {"todo", "open_loop", "risk", "blocker", "curated_report"},
+            "meeting_prep": {"meeting", "todo", "risk", "decision", "curated_report"},
             "monthly_focus": {"curated_report", "key_project", "project"},
+            "pm_brief": {"curated_report", "key_project", "project", "todo", "open_loop", "risk", "blocker", "meeting"},
             "project_status": {"curated_report", "key_project", "project", "decision", "risk", "todo"},
         }
         preferred_types = preferred_types_by_task.get(task_type_key, set())
@@ -1698,6 +1905,9 @@ class WorkMemoryStore:
         normalized: set[str] = set()
         for source in sources:
             lowered = source.casefold()
+            canonical = lowered.replace(" ", "_").replace("-", "_")
+            if canonical in SOURCE_PRECEDENCE:
+                normalized.add(canonical)
             if "gmail" in lowered or "email" in lowered or "sent report" in lowered:
                 normalized.update({"gmail_sent_monthly_report", "gmail", "gmail_attachment", "gmail_drive_link"})
             if "meeting" in lowered:

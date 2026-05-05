@@ -58,6 +58,7 @@
           <option value="meeting_prep">Meeting prep</option>
           <option value="stakeholder_brief">Stakeholder brief</option>
           <option value="monthly_focus">Monthly focus</option>
+          <option value="pm_brief">PM brief</option>
           <option value="open_loop_check">Open loops</option>
         </select>
         <input name="query" type="search" placeholder="Ask about a project, stakeholder, report, or follow-up">
@@ -70,6 +71,8 @@
         <button class="button button-secondary" type="button" data-superagent-task="meeting_prep" data-superagent-query="">Prepare meeting</button>
         <button class="button button-secondary" type="button" data-superagent-task="project_status" data-superagent-query="">Project brief</button>
         <button class="button button-secondary" type="button" data-superagent-task="monthly_focus" data-superagent-query="">Monthly focus</button>
+        <button class="button button-secondary" type="button" data-superagent-task="pm_brief" data-superagent-query="">PM Brief</button>
+        <button class="button button-secondary" type="button" data-superagent-quality-gate>Quality gate</button>
       </div>
       <div class="work-memory-list" data-superagent-answer></div>
     </section>
@@ -328,6 +331,16 @@
           return;
         }
         const evidence = payload.evidence || [];
+        const sections = payload.sections || [];
+        const sectionHtml = sections.length ? sections.map((section) => `
+          <article class="work-memory-item compact">
+            <div>
+              <p class="eyebrow">answer contract · ${escapeHtml(payload.answer_contract_version || 'v1')}</p>
+              <h3>${escapeHtml(section.title || 'Section')}</h3>
+              <p>${escapeHtml((section.items || []).map((item) => `- ${item}`).join('\n')).replaceAll('\n', '<br>')}</p>
+            </div>
+          </article>
+        `).join('') : '';
         if (superagentAnswer) {
           superagentAnswer.innerHTML = `
             <article class="work-memory-item">
@@ -337,6 +350,7 @@
                 <p>${escapeHtml(payload.direct_answer || payload.answer || '').replaceAll('\n', '<br>')}</p>
               </div>
             </article>
+            ${sectionHtml}
             ${evidence.length ? evidence.map((item) => `
               <article class="work-memory-item compact">
                 <div>
@@ -359,6 +373,41 @@
         }
       };
 
+      const runSuperagentQualityGate = async () => {
+        const response = await fetch('/api/superagent/quality-gate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ suite_id: 'gold_v1', min_cases: 1, limit: 30 }),
+        });
+        const payload = await response.json();
+        if (!response.ok) {
+          if (superagentAnswer) superagentAnswer.innerHTML = `<p class="empty-state">${escapeHtml(payload.message || 'Quality gate failed.')}</p>`;
+          return;
+        }
+        const gate = payload.quality_gate || {};
+        const failedCases = gate.failed_cases || [];
+        if (superagentAnswer) {
+          superagentAnswer.innerHTML = `
+            <article class="work-memory-item">
+              <div>
+                <p class="eyebrow">gold_v1 · ${escapeHtml(payload.answer_contract_version || 'v1')}</p>
+                <h3>Quality gate: ${escapeHtml(gate.gate_status || 'unknown')}</h3>
+                <p>${escapeHtml(gate.passed_count || 0)} passed · ${escapeHtml(gate.failed_count || 0)} failed · ${escapeHtml(gate.case_count || 0)} cases</p>
+              </div>
+            </article>
+            ${failedCases.length ? failedCases.map((item) => `
+              <article class="work-memory-item compact">
+                <div>
+                  <p class="eyebrow">${escapeHtml(item.task_type || 'case')} · ${escapeHtml((item.failure_reasons || []).join(', ') || 'failed')}</p>
+                  <h3>${escapeHtml(item.question || item.case_id || 'Failed case')}</h3>
+                  <p>${escapeHtml((item.missing_answer_points || []).join(' · ') || 'Check diagnostics and evidence source coverage.')}</p>
+                </div>
+              </article>
+            `).join('') : '<p class="empty-state">No failed gold_v1 cases.</p>'}
+          `;
+        }
+      };
+
       document.querySelector('[data-superagent-form]')?.addEventListener('submit', async (event) => {
         event.preventDefault();
         const form = event.currentTarget;
@@ -374,6 +423,10 @@
           if (select) select.value = task;
           await askSuperagent(task, query);
         });
+      });
+
+      document.querySelector('[data-superagent-quality-gate]')?.addEventListener('click', async () => {
+        await runSuperagentQualityGate();
       });
 
       document.querySelector('[data-superagent-explain]')?.addEventListener('click', async () => {

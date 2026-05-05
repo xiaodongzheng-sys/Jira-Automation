@@ -3824,6 +3824,33 @@ def create_app() -> Flask:
         )
         return jsonify(result)
 
+    @app.post("/api/superagent/quality-gate")
+    def superagent_quality_gate_api():
+        access_gate = _require_work_memory_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        payload = request.get_json(silent=True) or {}
+        suite_id = str(request.args.get("suite_id") or payload.get("suite_id") or "gold_v1").strip() or "gold_v1"
+        limit = int(payload.get("limit") or 30)
+        min_cases = int(payload.get("min_cases") or 1)
+        if _local_agent_work_memory_enabled(settings):
+            return jsonify(
+                _build_local_agent_client(settings).superagent_quality_gate(
+                    owner_email=_current_google_email(),
+                    suite_id=suite_id,
+                    limit=limit,
+                    min_cases=min_cases,
+                )
+            )
+        return jsonify(
+            _get_work_memory_store().run_superagent_quality_gate(
+                owner_email=_current_google_email(),
+                suite_id=suite_id,
+                limit=limit,
+                min_cases=min_cases,
+            )
+        )
+
     @app.get("/api/superagent/audit")
     def superagent_audit_api():
         access_gate = _require_work_memory_access(settings, api=True)

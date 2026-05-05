@@ -808,6 +808,18 @@ def create_local_agent_app() -> Flask:
             )
         )
 
+    @app.post("/api/local-agent/superagent/quality-gate")
+    def superagent_quality_gate():
+        payload = request.get_json(silent=True) or {}
+        return jsonify(
+            _get_work_memory_store().run_superagent_quality_gate(
+                owner_email=str(payload.get("owner_email") or "").strip().lower(),
+                suite_id=str(payload.get("suite_id") or "gold_v1").strip() or "gold_v1",
+                limit=int(payload.get("limit") or 30),
+                min_cases=int(payload.get("min_cases") or 1),
+            )
+        )
+
     @app.post("/api/local-agent/superagent/audit")
     def superagent_audit():
         payload = request.get_json(silent=True) or {}

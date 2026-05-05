@@ -481,6 +481,13 @@ class LocalAgentClient:
             {"owner_email": owner_email, "cases": cases or [], "limit": limit, "suite_id": suite_id},
         )
 
+    def superagent_quality_gate(self, *, owner_email: str, suite_id: str = "gold_v1", limit: int = 30, min_cases: int = 1) -> dict[str, Any]:
+        return self._request(
+            "POST",
+            "/api/local-agent/superagent/quality-gate",
+            {"owner_email": owner_email, "suite_id": suite_id, "limit": limit, "min_cases": min_cases},
+        )
+
     def superagent_audit(self, *, owner_email: str, limit: int = 50) -> list[dict[str, Any]]:
         payload = self._request("POST", "/api/local-agent/superagent/audit", {"owner_email": owner_email, "limit": limit})
         items = payload.get("items")
