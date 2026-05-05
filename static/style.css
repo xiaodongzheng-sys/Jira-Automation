@@ -8498,11 +8498,18 @@ select:focus {
   padding: 12px 14px;
   font-size: 1.12rem;
   font-weight: 800;
+  cursor: default;
+}
+
+.meeting-record-date-control input::-webkit-calendar-picker-indicator {
+  display: none;
+  -webkit-appearance: none;
 }
 
 .meeting-record-date-trigger {
   min-height: 56px;
-  padding: 0 16px;
+  min-width: 82px;
+  padding: 0 18px;
   border: 1px solid #b7d7ff;
   border-radius: 12px;
   background: #eff6ff;
