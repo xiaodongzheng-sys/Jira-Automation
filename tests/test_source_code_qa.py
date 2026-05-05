@@ -36,6 +36,7 @@ from bpmis_jira_tool.web import (
     _build_source_code_qa_effort_technical_candidates,
     _build_source_code_qa_session_context,
     _load_source_code_qa_effort_dictionaries,
+    _prepare_source_code_qa_auto_sync,
     create_app,
 )
 from scripts.promote_source_code_qa_eval_candidates import promote_candidates
@@ -1690,6 +1691,48 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         ensure_synced.assert_called_once_with(pm_team="AF", country="All")
         self.assertTrue(response.get_json()["auto_sync"]["attempted"])
+
+    def test_background_query_sync_blocks_when_scope_has_no_queryable_index(self):
+        calls = []
+        progress_events = []
+
+        class ColdIndexService:
+            def mapping_key(self, pm_team, country):
+                return f"{pm_team}:{country}"
+
+            def index_health_payload(self):
+                calls.append("health")
+                return {
+                    "keys": {
+                        "GRC:All": {
+                            "repos": [
+                                {"index": {"state": "missing", "queryable": False}},
+                                {"index": {"state": "missing", "queryable": False}},
+                            ]
+                        }
+                    }
+                }
+
+            def ensure_synced_today(self, *, pm_team, country):
+                calls.append(("sync", pm_team, country))
+                return {"attempted": True, "status": "ok", "key": f"{pm_team}:{country}"}
+
+            def ensure_synced_today_background(self, *, pm_team, country):  # pragma: no cover - must not be called.
+                calls.append(("background", pm_team, country))
+                return {"attempted": False, "status": "background_queued"}
+
+        with patch.dict(os.environ, {"SOURCE_CODE_QA_QUERY_SYNC_MODE": "background"}, clear=False):
+            with self.app.app_context():
+                result = _prepare_source_code_qa_auto_sync(
+                    ColdIndexService(),
+                    pm_team="GRC",
+                    country="All",
+                    progress_callback=lambda event, message, current, total: progress_events.append(event),
+                )
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(calls, ["health", ("sync", "GRC", "All")])
+        self.assertEqual(progress_events, ["auto_sync_check", "auto_sync_completed"])
 
     def test_cloud_run_local_agent_query_queues_auto_sync_in_background(self):
         calls = []

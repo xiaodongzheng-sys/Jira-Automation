@@ -8132,6 +8132,24 @@ def _source_code_qa_query_sync_mode(settings: Settings) -> str:
     return "background" if _local_agent_source_code_qa_enabled(settings) else "blocking"
 
 
+def _source_code_qa_scope_has_queryable_index(service: Any, key: str) -> bool:
+    try:
+        health = service.index_health_payload()
+    except Exception:  # noqa: BLE001
+        current_app.logger.warning("Source Code Q&A index health check failed before query auto-sync.", exc_info=True)
+        return True
+    scope = (health.get("keys") or {}).get(key) if isinstance(health, dict) else None
+    repos = scope.get("repos") if isinstance(scope, dict) else []
+    if not isinstance(repos, list):
+        return True
+    return any(
+        (repo.get("index") or {}).get("queryable")
+        and str((repo.get("index") or {}).get("state") or "").lower() in {"ready", "stale"}
+        for repo in repos
+        if isinstance(repo, dict)
+    )
+
+
 def _prepare_source_code_qa_auto_sync(
     service: Any,
     *,
@@ -8150,6 +8168,13 @@ def _prepare_source_code_qa_auto_sync(
             "key": key,
         }
     if mode == "background":
+        if not _source_code_qa_scope_has_queryable_index(service, key):
+            if progress_callback:
+                progress_callback("auto_sync_check", "Preparing the first repository index for this scope.", 0, 1)
+            result = service.ensure_synced_today(pm_team=pm_team, country=country)
+            if progress_callback:
+                progress_callback("auto_sync_completed", "Repository index is ready; starting code search.", 1, 1)
+            return result
         if progress_callback:
             progress_callback("auto_sync_queued", "Repository freshness check is running in the background.", 0, 1)
         if hasattr(service, "ensure_synced_today_background"):

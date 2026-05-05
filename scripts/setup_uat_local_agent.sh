@@ -159,6 +159,11 @@ if [[ -d "$LIVE_DATA_PATH" ]]; then
   rsync -a \
     --exclude '/logs/' \
     --exclude '/run/' \
+    --exclude '/source_code_qa/answer_cache/' \
+    --exclude '/source_code_qa/eval_runs/' \
+    --exclude '/source_code_qa/indexes/' \
+    --exclude '/source_code_qa/locks/' \
+    --exclude '/source_code_qa/sync_jobs.json' \
     --exclude '*.pid' \
     --exclude '*.sock' \
     "$LIVE_DATA_PATH/" "$UAT_DATA_PATH/"
