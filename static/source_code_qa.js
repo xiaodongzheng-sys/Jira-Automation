@@ -999,10 +999,12 @@
     if (options.live) {
       return `<pre class="source-qa-raw-codex-answer">${escapeHtml(raw)}</pre>`;
     }
+    const artifactsHtml = String(options.artifactsHtml || '').trim();
     const { primary, evidence } = structuredCodexAnswer(raw) || splitAnswerEvidence(raw);
     return `
       <div class="source-qa-answer-rendered">
         ${primary ? `<div class="source-qa-answer-primary">${renderAnswerText(primary)}</div>` : ''}
+        ${artifactsHtml}
         ${evidence ? `<div class="source-qa-answer-evidence">${renderAnswerText(evidence)}</div>` : ''}
       </div>
     `;
@@ -1080,6 +1082,9 @@
         : message.text;
       const attachmentItems = Array.isArray(message.attachments) ? message.attachments : (Array.isArray(payload.attachments) ? payload.attachments : []);
       const artifactItems = Array.isArray(payload.generated_artifacts) ? payload.generated_artifacts : [];
+      const generatedArtifactsHtml = message.role === 'assistant'
+        ? renderGeneratedArtifacts(artifactItems, activeSession?.id || activeSessionId)
+        : '';
       const citations = [];
       const liveActions = message.live && message.job_id ? `
         <div class="source-qa-live-actions">
@@ -1096,8 +1101,7 @@
             <span>${escapeHtml(meta)}</span>
           </div>
           <div class="source-qa-message-body">
-            ${message.role === 'assistant' ? renderCodexAnswerHtml(text, { live: Boolean(message.live) }) : `<p>${escapeHtml(text)}</p>`}
-            ${message.role === 'assistant' ? renderGeneratedArtifacts(artifactItems, activeSession?.id || activeSessionId) : ''}
+            ${message.role === 'assistant' ? renderCodexAnswerHtml(text, { live: Boolean(message.live), artifactsHtml: generatedArtifactsHtml }) : `<p>${escapeHtml(text)}</p>`}
             ${renderAttachmentChips(attachmentItems)}
             ${liveActions}
           </div>
@@ -1948,8 +1952,9 @@
           <span>${escapeHtml(meta)}</span>
         </div>
         <div class="source-qa-answer-body">
-          ${renderCodexAnswerHtml(answer)}
-          ${renderGeneratedArtifacts(payload?.generated_artifacts || [], payload?.session_id || activeSessionId)}
+          ${renderCodexAnswerHtml(answer, {
+            artifactsHtml: renderGeneratedArtifacts(payload?.generated_artifacts || [], payload?.session_id || activeSessionId),
+          })}
         </div>
       </div>
     `;
