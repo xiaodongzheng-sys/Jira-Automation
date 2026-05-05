@@ -16264,6 +16264,8 @@ class SourceCodeQAService:
             "- Separate source-code evidence, runtime evidence, attachment evidence, and missing evidence in the answer.",
             "- Runtime evidence can be stale or partial; use its pm_team/country/source_type labels and do not generalize it across countries unless the file proves that.",
             "- Data dictionary uploads are shared schema/reference evidence for their pm_team scope; use them to interpret table names, columns, and business meanings, but do not cite them as source code.",
+            "- For AF and GRC, data_dictionary uploads apply to all country selections for that PM team. SG, ID, and PH share the same table and data-field definitions; do not treat table or column names as country-specific unless uploaded DB evidence explicitly proves an override.",
+            "- For AF and GRC country-scoped SQL questions, assume the selected country points to that country's separate runtime DB instance. Do not invent a country filter, cross-country union, or shared physical database unless repository/runtime evidence proves it.",
             "- For SQL-generation questions, prefer table/column names supported by data_dictionary runtime evidence or mapper/XML/SQL source-code evidence, and include the SQL in a fenced ```sql block.",
             "- If runtime evidence conflicts with source code, describe the conflict instead of silently choosing one.",
             "- For Apollo/config archives, first identify the app/env/namespace path that matches the user's component or business flow, for example authentication-center/UAT1/... before anti-fraud-admin/UAT1/... for authentication or AMR/FV flows.",
@@ -16293,7 +16295,8 @@ class SourceCodeQAService:
                 if meta["source_type"].lower() == "data_dictionary":
                     lines.append(
                         "  Data dictionary handling: use this as table/column/business meaning reference evidence; "
-                        "cross-check generated SQL against code mappers or repository SQL when available."
+                        "for AF/GRC, apply table and field definitions across SG/ID/PH/All while keeping each country's "
+                        "runtime DB instance separate; cross-check generated SQL against code mappers or repository SQL when available."
                     )
         return "\n".join(lines)
 
