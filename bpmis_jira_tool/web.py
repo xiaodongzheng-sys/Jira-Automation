@@ -7023,11 +7023,18 @@ def _backfill_gmail_work_memory(
             seen_message_ids.add(message_id)
             unique_message_ids.append(message_id)
     original_total = len(unique_message_ids)
-    existing_message_ids = _get_work_memory_store().existing_source_ids(
+    work_memory_store = _get_work_memory_store()
+    existing_message_ids = work_memory_store.existing_source_ids(
         source_type="gmail",
         owner_email=owner_email,
         source_ids=unique_message_ids,
     )
+    processed_message_ids = work_memory_store.processed_source_ids(
+        source_type="gmail",
+        owner_email=owner_email,
+        source_ids=unique_message_ids,
+    )
+    existing_message_ids.update(processed_message_ids)
     pending_message_ids = [message_id for message_id in unique_message_ids if message_id not in existing_message_ids]
     skipped_existing = original_total - len(pending_message_ids)
     total = len(pending_message_ids)
@@ -7046,6 +7053,7 @@ def _backfill_gmail_work_memory(
     for batch_start in range(0, total, GMAIL_WORK_MEMORY_FETCH_BATCH_SIZE):
         batch_ids = pending_message_ids[batch_start:batch_start + GMAIL_WORK_MEMORY_FETCH_BATCH_SIZE]
         batch_items: list[dict[str, Any]] = []
+        processed_batch_ids: list[str] = []
         scanned += len(batch_ids)
         if scanned == len(batch_ids) or scanned % 100 == 0 or scanned == total:
             job_store.update(job_id, stage="fetching", message=f"Fetching {scanned}/{total} Gmail message(s); skipped {skipped_existing}.", current=scanned, total=total)
@@ -7065,6 +7073,7 @@ def _backfill_gmail_work_memory(
                     continue
                 headers = getattr(record, "headers", {}) or {}
                 if service.is_export_noise(headers):
+                    processed_batch_ids.append(message_id)
                     continue
                 matched_vips, vip_roles = _gmail_work_memory_matched_vips(headers, vip_people)
                 body_text = str(getattr(record, "body_text", "") or "")
@@ -7107,11 +7116,18 @@ def _backfill_gmail_work_memory(
                     )
                     batch_items.extend(drive_items)
                     drive_links_processed += len(drive_items)
+                processed_batch_ids.append(message_id)
             except Exception as error:  # noqa: BLE001 - one bad message must not stop the backfill.
                 failed += 1
                 last_error = str(error)
                 current_app.logger.warning("Gmail Work Memory message backfill skipped message_id=%s: %s", message_id, error)
         result = _record_work_memory_items(batch_items, event="gmail_backfill", owner_email=owner_email, write_ledger=False)
+        work_memory_store.record_processed_source_ids(
+            source_type="gmail",
+            owner_email=owner_email,
+            source_ids=processed_batch_ids,
+            metadata={"event": "gmail_backfill", "days": days},
+        )
         recorded += int(result.get("recorded") or 0)
         duplicate += int(result.get("duplicate") or 0)
         failed += int(result.get("failed") or 0)

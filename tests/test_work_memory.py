@@ -116,6 +116,29 @@ class WorkMemoryStoreTests(unittest.TestCase):
 
         self.assertEqual(existing, {"msg-1"})
 
+    def test_processed_source_ids_are_owner_scoped(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = WorkMemoryStore(Path(temp_dir) / "memory.db")
+            store.record_processed_source_ids(
+                source_type="gmail",
+                owner_email="owner@npt.sg",
+                source_ids=["msg-1", "msg-1"],
+                metadata={"event": "gmail_backfill"},
+            )
+            store.record_processed_source_ids(
+                source_type="gmail",
+                owner_email="other@npt.sg",
+                source_ids=["msg-2"],
+            )
+
+            existing = store.processed_source_ids(
+                source_type="gmail",
+                owner_email="owner@npt.sg",
+                source_ids=["msg-1", "msg-2", "msg-3"],
+            )
+
+        self.assertEqual(existing, {"msg-1"})
+
     def test_about_me_gate_controls_personal_work_profile(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             store = WorkMemoryStore(Path(temp_dir) / "memory.db")
@@ -697,13 +720,10 @@ class WorkMemoryRouteTests(unittest.TestCase):
                     return False
 
             with app.app_context(), patch("bpmis_jira_tool.web.GmailDashboardService", FakeGmailService):
-                app.config["WORK_MEMORY_STORE"].record_memory_item(
+                app.config["WORK_MEMORY_STORE"].record_processed_source_ids(
                     source_type="gmail",
-                    source_id="msg-1",
-                    item_type="evidence",
                     owner_email="owner@npt.sg",
-                    summary="Existing Gmail message",
-                    content="Existing Gmail message",
+                    source_ids=["msg-1"],
                 )
                 job = app.config["JOB_STORE"].create("work-memory-gmail-backfill", "Gmail Backfill", owner_email="owner@npt.sg")
                 result = _backfill_gmail_work_memory(
@@ -715,12 +735,18 @@ class WorkMemoryRouteTests(unittest.TestCase):
                     drive_read_enabled=False,
                     job_id=job.job_id,
                 )
+                processed = app.config["WORK_MEMORY_STORE"].processed_source_ids(
+                    source_type="gmail",
+                    owner_email="owner@npt.sg",
+                    source_ids=["msg-1", "msg-2"],
+                )
 
         self.assertEqual(fetched, ["msg-2"])
         self.assertEqual(result["original_message_count"], 2)
         self.assertEqual(result["skipped_existing"], 1)
         self.assertEqual(result["scanned"], 1)
         self.assertEqual(result["matched"], 1)
+        self.assertEqual(processed, {"msg-1", "msg-2"})
 
     def test_gmail_backfill_isolates_single_message_fetch_failure(self):
         with tempfile.TemporaryDirectory() as temp_dir:

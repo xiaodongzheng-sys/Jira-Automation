@@ -230,6 +230,20 @@ class WorkMemoryStore:
             )
             connection.execute(
                 """
+                CREATE TABLE IF NOT EXISTS work_memory_processed_sources (
+                    source_type TEXT NOT NULL,
+                    source_id TEXT NOT NULL,
+                    owner_email TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(source_type, source_id, owner_email)
+                )
+                """
+            )
+            connection.execute(
+                """
                 CREATE TABLE IF NOT EXISTS work_memory_materialized (
                     materialized_id TEXT PRIMARY KEY,
                     owner_email TEXT NOT NULL,
@@ -293,6 +307,7 @@ class WorkMemoryStore:
             connection.execute("CREATE INDEX IF NOT EXISTS idx_work_memory_items_visibility ON work_memory_items(visibility)")
             connection.execute("CREATE INDEX IF NOT EXISTS idx_work_memory_items_type ON work_memory_items(item_type)")
             connection.execute("CREATE INDEX IF NOT EXISTS idx_work_memory_ingestion_source ON work_memory_ingestion_runs(source_type, owner_email)")
+            connection.execute("CREATE INDEX IF NOT EXISTS idx_work_memory_processed_owner ON work_memory_processed_sources(owner_email, source_type)")
             connection.execute("CREATE INDEX IF NOT EXISTS idx_work_memory_materialized_owner ON work_memory_materialized(owner_email, graph_type)")
             connection.execute("CREATE INDEX IF NOT EXISTS idx_work_memory_audit_owner ON work_memory_superagent_audit(owner_email, created_at)")
             connection.execute("CREATE INDEX IF NOT EXISTS idx_work_memory_eval_owner ON work_memory_superagent_eval_cases(owner_email, task_type)")
@@ -454,6 +469,79 @@ class WorkMemoryStore:
                 rows = connection.execute(sql, params).fetchall()
                 found.update(str(row["source_id"]) for row in rows)
         return found
+
+    def processed_source_ids(self, *, source_type: str, owner_email: str, source_ids: list[str]) -> set[str]:
+        normalized_source_type = str(source_type or "").strip()
+        normalized_owner = _normalize_email(owner_email)
+        normalized_ids = []
+        seen_ids: set[str] = set()
+        for source_id in source_ids:
+            normalized_id = str(source_id or "").strip()
+            if normalized_id and normalized_id not in seen_ids:
+                seen_ids.add(normalized_id)
+                normalized_ids.append(normalized_id)
+        if not normalized_source_type or not normalized_owner or not normalized_ids:
+            return set()
+
+        found: set[str] = set()
+        with self._connect() as connection:
+            for start in range(0, len(normalized_ids), 500):
+                chunk = normalized_ids[start:start + 500]
+                placeholders = ",".join("?" for _ in chunk)
+                rows = connection.execute(
+                    (
+                        "SELECT source_id FROM work_memory_processed_sources "
+                        f"WHERE source_type = ? AND owner_email = ? AND source_id IN ({placeholders})"
+                    ),
+                    [normalized_source_type, normalized_owner, *chunk],
+                ).fetchall()
+                found.update(str(row["source_id"]) for row in rows)
+        return found
+
+    def record_processed_source_ids(
+        self,
+        *,
+        source_type: str,
+        owner_email: str,
+        source_ids: list[str],
+        status: str = "processed",
+        metadata: dict[str, Any] | None = None,
+    ) -> int:
+        normalized_source_type = str(source_type or "").strip()
+        normalized_owner = _normalize_email(owner_email)
+        normalized_status = str(status or "processed").strip() or "processed"
+        if not normalized_source_type or not normalized_owner:
+            return 0
+
+        normalized_ids = []
+        seen_ids: set[str] = set()
+        for source_id in source_ids:
+            normalized_id = str(source_id or "").strip()
+            if normalized_id and normalized_id not in seen_ids:
+                seen_ids.add(normalized_id)
+                normalized_ids.append(normalized_id)
+        if not normalized_ids:
+            return 0
+
+        timestamp = _now_iso()
+        metadata_json = _stable_json(metadata or {})
+        with self._connect() as connection:
+            for source_id in normalized_ids:
+                connection.execute(
+                    """
+                    INSERT INTO work_memory_processed_sources (
+                        source_type, source_id, owner_email, status, metadata_json, created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(source_type, source_id, owner_email) DO UPDATE SET
+                        status = excluded.status,
+                        metadata_json = excluded.metadata_json,
+                        updated_at = excluded.updated_at
+                    """,
+                    (normalized_source_type, source_id, normalized_owner, normalized_status, metadata_json, timestamp, timestamp),
+                )
+            connection.commit()
+        return len(normalized_ids)
 
     def record_memory_feedback(
         self,
