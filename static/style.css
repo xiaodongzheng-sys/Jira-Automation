@@ -7006,6 +7006,13 @@ select:focus {
   margin: 0;
 }
 
+.source-qa-generated-artifacts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 4px;
+}
+
 .source-qa-answer-quality {
   display: grid;
   gap: 6px;

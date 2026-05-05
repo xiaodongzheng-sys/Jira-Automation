@@ -50,6 +50,7 @@ from bpmis_jira_tool.web import (
     SeaTalkNameMappingStore,
     SeaTalkTodoStore,
     SourceCodeQAAttachmentStore,
+    SourceCodeQAGeneratedArtifactStore,
     SourceCodeQAModelAvailabilityStore,
     SourceCodeQARuntimeEvidenceStore,
     SourceCodeQASessionStore,
@@ -978,6 +979,42 @@ def create_local_agent_app() -> Flask:
                 {
                     "status": "ok",
                     "attachment": metadata,
+                    "content_base64": base64.b64encode(content).decode("ascii"),
+                }
+            )
+        except ToolError as error:
+            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.NOT_FOUND
+
+    @app.post("/api/local-agent/source-code-qa/generated-artifacts/save")
+    def source_code_qa_generated_artifact_save():
+        payload = request.get_json(silent=True) or {}
+        try:
+            artifact = _build_source_code_qa_generated_artifact_store(settings).save_sql_package(
+                owner_email=str(payload.get("owner_email") or ""),
+                session_id=str(payload.get("session_id") or ""),
+                pm_team=str(payload.get("pm_team") or ""),
+                country=str(payload.get("country") or ""),
+                question=str(payload.get("question") or ""),
+                sql=str(payload.get("sql") or ""),
+                readme=str(payload.get("readme") or ""),
+            )
+            return jsonify({"status": "ok", "artifact": artifact})
+        except ToolError as error:
+            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
+
+    @app.post("/api/local-agent/source-code-qa/generated-artifacts/get")
+    def source_code_qa_generated_artifact_get():
+        payload = request.get_json(silent=True) or {}
+        try:
+            metadata, content = _build_source_code_qa_generated_artifact_store(settings).get_bytes(
+                owner_email=str(payload.get("owner_email") or ""),
+                session_id=str(payload.get("session_id") or ""),
+                artifact_id=str(payload.get("artifact_id") or ""),
+            )
+            return jsonify(
+                {
+                    "status": "ok",
+                    "artifact": metadata,
                     "content_base64": base64.b64encode(content).decode("ascii"),
                 }
             )
@@ -2186,6 +2223,10 @@ def _build_source_code_qa_session_store(settings: Settings) -> SourceCodeQASessi
 
 def _build_source_code_qa_attachment_store(settings: Settings) -> SourceCodeQAAttachmentStore:
     return SourceCodeQAAttachmentStore(_data_root(settings) / "source_code_qa" / "attachments")
+
+
+def _build_source_code_qa_generated_artifact_store(settings: Settings) -> SourceCodeQAGeneratedArtifactStore:
+    return SourceCodeQAGeneratedArtifactStore(_data_root(settings) / "source_code_qa" / "generated_artifacts")
 
 
 def _build_source_code_qa_runtime_evidence_store(settings: Settings) -> SourceCodeQARuntimeEvidenceStore:

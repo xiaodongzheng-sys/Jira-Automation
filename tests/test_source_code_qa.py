@@ -1033,7 +1033,6 @@ class SourceCodeQARouteTests(unittest.TestCase):
                 content_type="multipart/form-data",
             )
             listed = client.get("/api/source-code-qa/runtime-evidence?pm_team=AF&country=SG")
-            self._login(client, "teammate@npt.sg")
             with patch("bpmis_jira_tool.source_code_qa.SourceCodeQAService.ensure_synced_today", return_value={"attempted": False, "status": "fresh"}), patch(
                 "bpmis_jira_tool.source_code_qa.SourceCodeQAService.query",
                 side_effect=fake_query,
@@ -1057,6 +1056,158 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertEqual(countries, {"SG", "PH"})
         self.assertTrue(any("apollo.sg.rule.enabled" in item.get("text", "") for item in captured["runtime_evidence"]))
         self.assertEqual(response.get_json()["runtime_evidence"][0]["pm_team"], "AF")
+
+    def test_grc_and_af_country_query_uses_all_country_data_dictionary(self):
+        captured = {}
+
+        def fake_query(**kwargs):
+            captured.update(kwargs)
+            return {
+                "status": "ok",
+                "answer_mode": "auto",
+                "summary": "answer summary",
+                "llm_answer": "direct answer",
+                "llm_provider": "codex_cli_bridge",
+                "llm_model": "codex-cli",
+                "trace_id": "trace-dictionary",
+                "matches": [],
+            }
+
+        with self.app.test_client() as client:
+            self._login(client, "xiaodong.zheng@npt.sg")
+            grc_dictionary = client.post(
+                "/api/source-code-qa/runtime-evidence",
+                data={
+                    "pm_team": "GRC",
+                    "country": "All",
+                    "source_type": "data_dictionary",
+                    "file": (io.BytesIO(b"table,column,meaning\nbcf_global_lock,lock_key,Global lock key"), "grc-dictionary.csv"),
+                },
+                content_type="multipart/form-data",
+            )
+            grc_db = client.post(
+                "/api/source-code-qa/runtime-evidence",
+                data={
+                    "pm_team": "GRC",
+                    "country": "SG",
+                    "source_type": "db",
+                    "file": (io.BytesIO(b"bcf_global_lock rows from SG"), "grc-sg-db.txt"),
+                },
+                content_type="multipart/form-data",
+            )
+            af_dictionary = client.post(
+                "/api/source-code-qa/runtime-evidence",
+                data={
+                    "pm_team": "AF",
+                    "country": "All",
+                    "source_type": "data_dictionary",
+                    "file": (io.BytesIO(b"table,column,meaning\naf_rule,rule_id,Risk rule id"), "af-dictionary.csv"),
+                },
+                content_type="multipart/form-data",
+            )
+            with patch("bpmis_jira_tool.source_code_qa.SourceCodeQAService.ensure_synced_today", return_value={"attempted": False, "status": "fresh"}), patch(
+                "bpmis_jira_tool.source_code_qa.SourceCodeQAService.query",
+                side_effect=fake_query,
+            ):
+                grc_response = client.post(
+                    "/api/source-code-qa/query",
+                    json={"pm_team": "GRC", "country": "SG", "question": "write SQL for global lock", "llm_provider": "codex_cli_bridge"},
+                )
+                grc_runtime = list(captured["runtime_evidence"])
+                af_response = client.post(
+                    "/api/source-code-qa/query",
+                    json={"pm_team": "AF", "country": "PH", "question": "write SQL for rule", "llm_provider": "codex_cli_bridge"},
+                )
+                af_runtime = list(captured["runtime_evidence"])
+
+        self.assertEqual(grc_dictionary.status_code, 200)
+        self.assertEqual(grc_db.status_code, 200)
+        self.assertEqual(af_dictionary.status_code, 200)
+        self.assertEqual(grc_response.status_code, 200)
+        self.assertEqual(af_response.status_code, 200)
+        self.assertEqual({(item["pm_team"], item["country"], item["source_type"]) for item in grc_runtime}, {("GRC", "All", "data_dictionary"), ("GRC", "SG", "db")})
+        self.assertTrue(any("bcf_global_lock" in item.get("text", "") for item in grc_runtime))
+        self.assertEqual({(item["pm_team"], item["country"], item["source_type"]) for item in af_runtime}, {("AF", "All", "data_dictionary")})
+        self.assertTrue(any("af_rule" in item.get("text", "") for item in af_runtime))
+
+    def test_crms_cannot_use_all_country_runtime_evidence(self):
+        with self.app.test_client() as client:
+            self._login(client, "xiaodong.zheng@npt.sg")
+            response = client.post(
+                "/api/source-code-qa/runtime-evidence",
+                data={
+                    "pm_team": "CRMS",
+                    "country": "All",
+                    "source_type": "data_dictionary",
+                    "file": (io.BytesIO(b"table,column,meaning\ncr_customer,id,Customer id"), "crms-dictionary.csv"),
+                },
+                content_type="multipart/form-data",
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("supported only for AF and GRC", response.get_json()["message"])
+
+    def test_source_code_qa_sql_answer_creates_downloadable_package(self):
+        def fake_query(**kwargs):
+            return {
+                "status": "ok",
+                "answer_mode": "auto",
+                "summary": "SQL generated",
+                "llm_answer": "Use this SQL:\n```sql\nselect lock_key from bcf_global_lock where status = 'ACTIVE';\n```\n",
+                "llm_provider": "codex_cli_bridge",
+                "llm_model": "codex-cli",
+                "trace_id": "trace-sql-package",
+                "matches": [{"repo": "GRC Portal", "path": "mapper/GlobalLockMapper.xml", "line_start": 12}],
+            }
+
+        with self.app.test_client() as client:
+            self._login(client, "xiaodong.zheng@npt.sg")
+            created = client.post("/api/source-code-qa/sessions", json={"pm_team": "GRC", "country": "SG", "llm_provider": "codex_cli_bridge"})
+            session_id = created.get_json()["session"]["id"]
+            upload = client.post(
+                "/api/source-code-qa/runtime-evidence",
+                data={
+                    "pm_team": "GRC",
+                    "country": "All",
+                    "source_type": "data_dictionary",
+                    "file": (io.BytesIO(b"table,column,meaning\nbcf_global_lock,lock_key,Global lock key"), "grc-dictionary.csv"),
+                },
+                content_type="multipart/form-data",
+            )
+            with patch("bpmis_jira_tool.source_code_qa.SourceCodeQAService.ensure_synced_today", return_value={"attempted": False, "status": "fresh"}), patch(
+                "bpmis_jira_tool.source_code_qa.SourceCodeQAService.query",
+                side_effect=fake_query,
+            ):
+                response = client.post(
+                    "/api/source-code-qa/query",
+                    json={
+                        "session_id": session_id,
+                        "pm_team": "GRC",
+                        "country": "SG",
+                        "question": "write SQL for global lock",
+                        "llm_provider": "codex_cli_bridge",
+                    },
+                )
+
+            payload = response.get_json()
+            artifact = payload["generated_artifacts"][0]
+            download = client.get(f"/api/source-code-qa/generated-artifacts/{artifact['id']}?session_id={session_id}")
+            self._login(client, "other@npt.sg")
+            blocked = client.get(f"/api/source-code-qa/generated-artifacts/{artifact['id']}?session_id={session_id}")
+
+        self.assertEqual(upload.status_code, 200)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(download.status_code, 200)
+        self.assertEqual(download.headers["Content-Type"], "application/zip")
+        with zipfile.ZipFile(io.BytesIO(download.data)) as archive:
+            self.assertIn("query.sql", archive.namelist())
+            self.assertIn("README.md", archive.namelist())
+            self.assertIn("select lock_key", archive.read("query.sql").decode("utf-8"))
+            readme = archive.read("README.md").decode("utf-8")
+            self.assertIn("GRC:SG", readme)
+            self.assertIn("grc-dictionary.csv", readme)
+            self.assertIn("mapper/GlobalLockMapper.xml", readme)
+        self.assertEqual(blocked.status_code, 404)
 
     def test_source_code_qa_config_includes_runtime_capabilities(self):
         with self.app.test_client() as client:

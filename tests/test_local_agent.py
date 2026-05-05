@@ -1,9 +1,12 @@
+import base64
 import json
 import os
 import tempfile
 import threading
 import time
 import unittest
+import zipfile
+import io
 from unittest.mock import Mock, patch
 
 from bpmis_jira_tool.errors import ToolError
@@ -176,6 +179,35 @@ class LocalAgentServerTests(unittest.TestCase):
         resolved = resolve_response.get_json()["attachments"][0]
         self.assertEqual(resolved["filename"], "notes.txt")
         self.assertIn("hello attachment", resolved["text"])
+
+    def test_signed_source_code_generated_artifact_save_and_get(self):
+        save_response = self._post_signed(
+            "/api/local-agent/source-code-qa/generated-artifacts/save",
+            {
+                "owner_email": "teammate@npt.sg",
+                "session_id": "session1234",
+                "pm_team": "GRC",
+                "country": "SG",
+                "question": "write SQL",
+                "sql": "select lock_key from bcf_global_lock;",
+                "readme": "# SQL package\n",
+            },
+        )
+        artifact_id = save_response.get_json()["artifact"]["id"]
+        get_response = self._post_signed(
+            "/api/local-agent/source-code-qa/generated-artifacts/get",
+            {
+                "owner_email": "teammate@npt.sg",
+                "session_id": "session1234",
+                "artifact_id": artifact_id,
+            },
+        )
+
+        self.assertEqual(save_response.status_code, 200)
+        self.assertEqual(get_response.status_code, 200)
+        encoded = get_response.get_json()["content_base64"]
+        with zipfile.ZipFile(io.BytesIO(base64.b64decode(encoded))) as archive:
+            self.assertIn("select lock_key", archive.read("query.sql").decode("utf-8"))
 
     def test_signed_source_code_async_query_streams_progress(self):
         class ImmediateThread:

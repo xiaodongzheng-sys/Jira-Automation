@@ -11,6 +11,7 @@
     data-effort-assessment-url="{{ url_for('source_code_qa_effort_assessment_api') }}"
     data-effort-latest-url="{{ url_for('source_code_qa_effort_assessment_latest_api') }}"
     data-attachment-url="{{ url_for('source_code_qa_attachments_api') }}"
+    data-generated-artifact-url="{{ url_for('source_code_qa_generated_artifact_api', artifact_id='__ARTIFACT_ID__') }}"
     data-runtime-evidence-url="{{ url_for('source_code_qa_runtime_evidence_api') }}"
     data-jobs-url="{{ url_for('source_code_qa_query_job_api', job_id='__JOB_ID__') }}"
     data-effort-jobs-url="{{ url_for('source_code_qa_effort_assessment_job_api', job_id='__JOB_ID__') }}"
@@ -283,6 +284,7 @@
             <label class="field-group">
               <span>Country</span>
               <select data-source-runtime-country>
+                <option value="{{ all_country }}">All</option>
                 <option value="ID">ID</option>
                 <option value="SG">SG</option>
                 <option value="PH">PH</option>
@@ -291,6 +293,7 @@
             <label class="field-group">
               <span>Source Type</span>
               <select data-source-runtime-source-type>
+                <option value="data_dictionary">Data dictionary</option>
                 <option value="apollo">Apollo config (UAT reference)</option>
                 <option value="db">DB data</option>
                 <option value="other">Other runtime evidence</option>

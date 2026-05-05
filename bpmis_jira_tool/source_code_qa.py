@@ -16263,6 +16263,8 @@ class SourceCodeQAService:
             "- Apollo uploads are UAT/non-Live configuration references unless the user explicitly proves otherwise; never use them as confirmed Live/production configuration facts.",
             "- Separate source-code evidence, runtime evidence, attachment evidence, and missing evidence in the answer.",
             "- Runtime evidence can be stale or partial; use its pm_team/country/source_type labels and do not generalize it across countries unless the file proves that.",
+            "- Data dictionary uploads are shared schema/reference evidence for their pm_team scope; use them to interpret table names, columns, and business meanings, but do not cite them as source code.",
+            "- For SQL-generation questions, prefer table/column names supported by data_dictionary runtime evidence or mapper/XML/SQL source-code evidence, and include the SQL in a fenced ```sql block.",
             "- If runtime evidence conflicts with source code, describe the conflict instead of silently choosing one.",
             "- For Apollo/config archives, first identify the app/env/namespace path that matches the user's component or business flow, for example authentication-center/UAT1/... before anti-fraud-admin/UAT1/... for authentication or AMR/FV flows.",
             "- Treat uploaded config key/value rows as runtime_evidence facts; use repository code only to prove which classes consume those keys and what behavior follows.",
@@ -16286,6 +16288,11 @@ class SourceCodeQAService:
                     lines.append(
                         "  Apollo handling: preserve path context such as app/env/namespace from each ZIP member; "
                         "choose the matching app namespace before using similarly named keys from another app."
+                    )
+                if meta["source_type"].lower() == "data_dictionary":
+                    lines.append(
+                        "  Data dictionary handling: use this as table/column/business meaning reference evidence; "
+                        "cross-check generated SQL against code mappers or repository SQL when available."
                     )
         return "\n".join(lines)
 

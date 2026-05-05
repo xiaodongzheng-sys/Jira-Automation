@@ -56,6 +56,7 @@ from bpmis_jira_tool.local_agent_client import (
     RemoteSeaTalkTodoStore,
     RemoteTeamDashboardConfigStore,
     RemoteSourceCodeQAAttachmentStore,
+    RemoteSourceCodeQAGeneratedArtifactStore,
     RemoteSourceCodeQAModelAvailabilityStore,
     RemoteSourceCodeQARuntimeEvidenceStore,
     RemoteSourceCodeQASessionStore,
@@ -1823,7 +1824,8 @@ class SourceCodeQAAttachmentStore:
 class SourceCodeQARuntimeEvidenceStore(SourceCodeQAAttachmentStore):
     ALLOWED_PM_TEAMS = {"AF", "CRMS", "GRC"}
     ALLOWED_COUNTRIES = {"ID", "SG", "PH"}
-    ALLOWED_SOURCE_TYPES = {"apollo", "db", "other"}
+    SHARED_EVIDENCE_PM_TEAMS = {"AF", "GRC"}
+    ALLOWED_SOURCE_TYPES = {"apollo", "db", "data_dictionary", "other"}
     MAX_FILES_PER_SCOPE = 20
     MAX_QUERY_FILES_PER_SCOPE = 8
     MAX_ZIP_MEMBERS = 500
@@ -1843,15 +1845,19 @@ class SourceCodeQARuntimeEvidenceStore(SourceCodeQAAttachmentStore):
         normalized_country = str(country or "").strip().upper()
         if normalized_team not in cls.ALLOWED_PM_TEAMS:
             raise ToolError("Runtime evidence PM Team must be one of AF, CRMS, or GRC.")
+        if normalized_country == ALL_COUNTRY.upper():
+            if normalized_team not in cls.SHARED_EVIDENCE_PM_TEAMS:
+                raise ToolError("Shared All-country runtime evidence is supported only for AF and GRC.")
+            return normalized_team, ALL_COUNTRY
         if normalized_country not in cls.ALLOWED_COUNTRIES:
-            raise ToolError("Runtime evidence country must be one of ID, SG, or PH.")
+            raise ToolError("Runtime evidence country must be one of All, ID, SG, or PH.")
         return normalized_team, normalized_country
 
     @classmethod
     def _safe_source_type(cls, source_type: str) -> str:
         normalized = str(source_type or "").strip().lower() or "other"
         if normalized not in cls.ALLOWED_SOURCE_TYPES:
-            raise ToolError("Runtime evidence source type must be apollo, db, or other.")
+            raise ToolError("Runtime evidence source type must be apollo, db, data_dictionary, or other.")
         return normalized
 
     def _scope_dir(self, *, pm_team: str, country: str) -> Path:
@@ -2034,15 +2040,25 @@ class SourceCodeQARuntimeEvidenceStore(SourceCodeQAAttachmentStore):
         ]
 
     def resolve_scope(self, *, pm_team: str, country: str) -> list[dict[str, Any]]:
+        safe_team = str(pm_team or "").strip().upper()
         normalized_country = str(country or "").strip().upper()
-        countries = sorted(self.ALLOWED_COUNTRIES) if normalized_country in {"", ALL_COUNTRY.upper()} else [normalized_country]
+        if normalized_country in {"", ALL_COUNTRY.upper()}:
+            countries = [ALL_COUNTRY, *sorted(self.ALLOWED_COUNTRIES)] if safe_team in self.SHARED_EVIDENCE_PM_TEAMS else sorted(self.ALLOWED_COUNTRIES)
+        else:
+            countries = [ALL_COUNTRY, normalized_country] if safe_team in self.SHARED_EVIDENCE_PM_TEAMS else [normalized_country]
         resolved: list[dict[str, Any]] = []
+        seen: set[str] = set()
         for scoped_country in countries:
             safe_team, safe_country = self._safe_scope(pm_team=pm_team, country=scoped_country)
             with self._lock:
                 metadata = self._load_metadata_locked(pm_team=safe_team, country=safe_country)
             scope_dir = self._scope_dir(pm_team=safe_team, country=safe_country)
             for item in sorted(metadata.values(), key=lambda value: str(value.get("created_at") or ""), reverse=True)[: self.MAX_QUERY_FILES_PER_SCOPE]:
+                item_id = str(item.get("id") or "")
+                if item_id and item_id in seen:
+                    continue
+                if item_id:
+                    seen.add(item_id)
                 path = scope_dir / str(item.get("stored_name") or "")
                 if not path.exists() or not path.is_file():
                     continue
@@ -2075,6 +2091,134 @@ class SourceCodeQARuntimeEvidenceStore(SourceCodeQAAttachmentStore):
                     pass
             self._persist_metadata_locked(pm_team=safe_team, country=safe_country, metadata=metadata)
         return True
+
+
+class SourceCodeQAGeneratedArtifactStore:
+    MAX_SQL_BYTES = 2 * 1024 * 1024
+
+    def __init__(self, root_dir: Path | None = None) -> None:
+        self.root_dir = root_dir
+        self._lock = threading.Lock()
+
+    @staticmethod
+    def _now() -> str:
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+    @staticmethod
+    def _owner_key(owner_email: str) -> str:
+        return SourceCodeQAAttachmentStore._owner_key(owner_email)
+
+    @staticmethod
+    def _safe_session_id(session_id: str) -> str:
+        return SourceCodeQAAttachmentStore._safe_session_id(session_id)
+
+    def _session_dir(self, *, owner_email: str, session_id: str) -> Path:
+        if self.root_dir is None:
+            raise ToolError("Source Code Q&A generated artifacts are not configured.")
+        return self.root_dir / self._owner_key(owner_email) / self._safe_session_id(session_id)
+
+    def _metadata_path(self, *, owner_email: str, session_id: str) -> Path:
+        return self._session_dir(owner_email=owner_email, session_id=session_id) / "metadata.json"
+
+    def _load_metadata_locked(self, *, owner_email: str, session_id: str) -> dict[str, dict[str, Any]]:
+        path = self._metadata_path(owner_email=owner_email, session_id=session_id)
+        if not path.exists():
+            return {}
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        artifacts = payload.get("artifacts") if isinstance(payload, dict) else {}
+        return {str(key): value for key, value in artifacts.items() if isinstance(value, dict)} if isinstance(artifacts, dict) else {}
+
+    def _persist_metadata_locked(self, *, owner_email: str, session_id: str, metadata: dict[str, dict[str, Any]]) -> None:
+        path = self._metadata_path(owner_email=owner_email, session_id=session_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        temp_path.write_text(
+            json.dumps({"updated_at": self._now(), "artifacts": metadata}, ensure_ascii=False, sort_keys=True),
+            encoding="utf-8",
+        )
+        os.replace(temp_path, path)
+
+    @classmethod
+    def public_metadata(cls, metadata: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "id": str(metadata.get("id") or ""),
+            "filename": str(metadata.get("filename") or "source-code-qa-sql-package.zip"),
+            "mime_type": str(metadata.get("mime_type") or "application/zip"),
+            "kind": str(metadata.get("kind") or "sql_package"),
+            "size": int(metadata.get("size") or 0),
+            "sha256": str(metadata.get("sha256") or ""),
+            "created_at": str(metadata.get("created_at") or ""),
+            "question": str(metadata.get("question") or "")[:240],
+            "pm_team": str(metadata.get("pm_team") or ""),
+            "country": str(metadata.get("country") or ""),
+        }
+
+    def save_sql_package(
+        self,
+        *,
+        owner_email: str,
+        session_id: str,
+        pm_team: str,
+        country: str,
+        question: str,
+        sql: str,
+        readme: str,
+    ) -> dict[str, Any]:
+        normalized_sql = str(sql or "").strip()
+        if not normalized_sql:
+            raise ToolError("Generated SQL content is empty.")
+        sql_bytes = normalized_sql.encode("utf-8")
+        if len(sql_bytes) > self.MAX_SQL_BYTES:
+            raise ToolError("Generated SQL content is too large to package.")
+        artifact_id = uuid.uuid4().hex
+        filename = "source-code-qa-sql-package.zip"
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("query.sql", normalized_sql + "\n")
+            archive.writestr("README.md", str(readme or "").strip() + "\n")
+        content = buffer.getvalue()
+        digest = hashlib.sha256(content).hexdigest()
+        stored_name = f"{artifact_id}.zip"
+        metadata = {
+            "id": artifact_id,
+            "filename": filename,
+            "stored_name": stored_name,
+            "mime_type": "application/zip",
+            "kind": "sql_package",
+            "size": len(content),
+            "sha256": digest,
+            "created_at": self._now(),
+            "question": str(question or "").strip(),
+            "pm_team": str(pm_team or "").strip().upper(),
+            "country": str(country or "").strip().upper() or ALL_COUNTRY,
+        }
+        with self._lock:
+            session_dir = self._session_dir(owner_email=owner_email, session_id=session_id)
+            existing = self._load_metadata_locked(owner_email=owner_email, session_id=session_id)
+            session_dir.mkdir(parents=True, exist_ok=True)
+            (session_dir / stored_name).write_bytes(content)
+            existing[artifact_id] = metadata
+            self._persist_metadata_locked(owner_email=owner_email, session_id=session_id, metadata=existing)
+        return self.public_metadata(metadata)
+
+    def get_bytes(self, *, owner_email: str, session_id: str, artifact_id: str) -> tuple[dict[str, Any], bytes]:
+        normalized_id = str(artifact_id or "").strip()
+        if not re.fullmatch(r"[a-fA-F0-9]{32}", normalized_id):
+            raise ToolError("Generated artifact id is invalid.")
+        with self._lock:
+            metadata = self._load_metadata_locked(owner_email=owner_email, session_id=session_id)
+            item = metadata.get(normalized_id)
+            if item is None:
+                raise ToolError("Generated artifact was not found.")
+            path = self._session_dir(owner_email=owner_email, session_id=session_id) / str(item.get("stored_name") or "")
+            try:
+                content = path.read_bytes()
+            except OSError as error:
+                raise ToolError("Generated artifact file is unreadable.") from error
+        return self.public_metadata(item), content
 
 
 class SourceCodeQAModelAvailabilityStore:
@@ -2427,6 +2571,9 @@ def create_app() -> Flask:
     )
     app.config["SOURCE_CODE_QA_SESSION_STORE"] = SourceCodeQASessionStore(data_root / "source_code_qa" / "sessions.json")
     app.config["SOURCE_CODE_QA_ATTACHMENT_STORE"] = SourceCodeQAAttachmentStore(data_root / "source_code_qa" / "attachments")
+    app.config["SOURCE_CODE_QA_GENERATED_ARTIFACT_STORE"] = SourceCodeQAGeneratedArtifactStore(
+        data_root / "source_code_qa" / "generated_artifacts"
+    )
     app.config["SOURCE_CODE_QA_RUNTIME_EVIDENCE_STORE"] = SourceCodeQARuntimeEvidenceStore(
         data_root / "source_code_qa" / "runtime_evidence"
     )
@@ -3026,6 +3173,32 @@ def create_app() -> Flask:
             as_attachment=False,
         )
 
+    @app.get("/api/source-code-qa/generated-artifacts/<artifact_id>")
+    def source_code_qa_generated_artifact_api(artifact_id: str):
+        access_gate = _require_source_code_qa_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        owner_email = _current_google_email() or "local"
+        session_id = str(request.args.get("session_id") or "").strip()
+        if not session_id:
+            return jsonify({"status": "error", "message": "session_id is required."}), HTTPStatus.BAD_REQUEST
+        if _get_source_code_qa_session_store().get(session_id, owner_email=owner_email) is None:
+            return jsonify({"status": "error", "message": "Source Code Q&A session was not found."}), HTTPStatus.NOT_FOUND
+        try:
+            metadata, content = _get_source_code_qa_generated_artifact_store().get_bytes(
+                owner_email=owner_email,
+                session_id=session_id,
+                artifact_id=artifact_id,
+            )
+        except ToolError as error:
+            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.NOT_FOUND
+        return send_file(
+            io.BytesIO(content),
+            mimetype=metadata.get("mime_type") or "application/zip",
+            download_name=metadata.get("filename") or "source-code-qa-sql-package.zip",
+            as_attachment=True,
+        )
+
     @app.route("/api/source-code-qa/runtime-evidence", methods=["GET", "POST"])
     def source_code_qa_runtime_evidence_api():
         access_gate = _require_source_code_qa_manage_access(settings, api=True)
@@ -3161,6 +3334,15 @@ def create_app() -> Flask:
             result["attachments"] = _source_code_qa_public_attachments(attachments)
             result["runtime_evidence"] = _source_code_qa_public_runtime_evidence(runtime_evidence)
             if session_id:
+                result["generated_artifacts"] = _build_source_code_qa_generated_artifacts(
+                    owner_email=owner_email,
+                    session_id=session_id,
+                    pm_team=pm_team,
+                    country=country,
+                    question=str(payload.get("question") or ""),
+                    result=result,
+                    runtime_evidence=runtime_evidence,
+                )
                 session_payload = session_store.append_exchange(
                     session_id,
                     owner_email=owner_email,
@@ -7688,6 +7870,13 @@ def _get_source_code_qa_attachment_store():
     return current_app.config["SOURCE_CODE_QA_ATTACHMENT_STORE"]
 
 
+def _get_source_code_qa_generated_artifact_store():
+    settings: Settings = current_app.config["SETTINGS"]
+    if _local_agent_source_code_qa_enabled(settings):
+        return RemoteSourceCodeQAGeneratedArtifactStore(_build_local_agent_client(settings))
+    return current_app.config["SOURCE_CODE_QA_GENERATED_ARTIFACT_STORE"]
+
+
 def _get_source_code_qa_runtime_evidence_store():
     settings: Settings = current_app.config["SETTINGS"]
     if _local_agent_source_code_qa_enabled(settings):
@@ -8075,10 +8264,10 @@ def _source_code_qa_options_payload(service: SourceCodeQAService) -> dict[str, A
 
 def _source_code_qa_runtime_capabilities_payload() -> dict[str, dict[str, dict[str, bool]]]:
     teams = ("AF", "GRC", "CRMS")
-    countries = tuple(CRMS_COUNTRIES)
+    countries = (ALL_COUNTRY, *tuple(CRMS_COUNTRIES))
     capabilities = {
         team: {
-            country: {"hasConfig": False, "hasDB": False}
+            country: {"hasConfig": False, "hasDB": False, "hasDictionary": False}
             for country in countries
         }
         for team in teams
@@ -8097,6 +8286,8 @@ def _source_code_qa_runtime_capabilities_payload() -> dict[str, dict[str, dict[s
                         capabilities[team][country]["hasConfig"] = True
                     elif source_type == "db":
                         capabilities[team][country]["hasDB"] = True
+                    elif source_type == "data_dictionary":
+                        capabilities[team][country]["hasDictionary"] = True
     except Exception:  # noqa: BLE001 - capability badges are advisory only.
         return capabilities
     return capabilities
@@ -8173,6 +8364,110 @@ def _source_code_qa_public_runtime_evidence(evidence: list[dict[str, Any]]) -> l
         for item in evidence
         if isinstance(item, dict)
     ]
+
+
+def _source_code_qa_public_generated_artifacts(artifacts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        SourceCodeQAGeneratedArtifactStore.public_metadata(item)
+        for item in artifacts
+        if isinstance(item, dict)
+    ]
+
+
+SQL_CODE_BLOCK_PATTERN = re.compile(r"```(?:sql|mysql|postgresql|postgres|sqlite|plsql|tsql)\s*\n(.*?)```", re.IGNORECASE | re.DOTALL)
+
+
+def _extract_source_code_qa_sql_blocks(answer: str) -> list[str]:
+    blocks: list[str] = []
+    for match in SQL_CODE_BLOCK_PATTERN.finditer(str(answer or "")):
+        sql = str(match.group(1) or "").strip()
+        if sql:
+            blocks.append(sql)
+    return blocks
+
+
+def _build_source_code_qa_sql_readme(
+    *,
+    pm_team: str,
+    country: str,
+    question: str,
+    result: dict[str, Any],
+    runtime_evidence: list[dict[str, Any]],
+) -> str:
+    evidence_lines = []
+    for item in runtime_evidence[:12]:
+        source_type = str(item.get("source_type") or "runtime")
+        filename = str(item.get("filename") or item.get("id") or "")
+        scope = f"{item.get('pm_team') or ''}:{item.get('country') or ''}"
+        evidence_lines.append(f"- {scope} {source_type}: {filename}")
+    code_lines = []
+    for index, match in enumerate(result.get("matches") or [], start=1):
+        if not isinstance(match, dict) or index > 12:
+            continue
+        location = str(match.get("path") or "")
+        if match.get("line_start"):
+            location = f"{location}:{match.get('line_start')}"
+        repo = str(match.get("repo") or "")
+        code_lines.append(f"- S{index}: {repo} {location}".strip())
+    return "\n".join(
+        [
+            "# Source Code Q&A SQL Package",
+            "",
+            f"- Scope: {str(pm_team or '').strip().upper()}:{str(country or '').strip().upper() or ALL_COUNTRY}",
+            f"- Question: {str(question or '').strip()}",
+            f"- Generated at: {SourceCodeQAGeneratedArtifactStore._now()}",
+            "",
+            "## Files",
+            "- `query.sql`: AI-generated SQL text.",
+            "- `README.md`: this context and evidence summary.",
+            "",
+            "## Runtime Evidence",
+            *(evidence_lines or ["- No runtime evidence was attached to this package."]),
+            "",
+            "## Source Code Evidence",
+            *(code_lines or ["- No source-code matches were included in the response payload."]),
+            "",
+            "## Review Notes",
+            "- This portal only generates SQL text. It does not connect to any database or execute the SQL.",
+            "- Review table names, column names, filters, limits, and environment-specific schema before running it.",
+            "- Treat data dictionary files as reference evidence and source-code paths as implementation evidence.",
+        ]
+    )
+
+
+def _build_source_code_qa_generated_artifacts(
+    *,
+    owner_email: str,
+    session_id: str,
+    pm_team: str,
+    country: str,
+    question: str,
+    result: dict[str, Any],
+    runtime_evidence: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    sql_blocks = _extract_source_code_qa_sql_blocks(str(result.get("llm_answer") or ""))
+    if not sql_blocks:
+        return []
+    try:
+        artifact = _get_source_code_qa_generated_artifact_store().save_sql_package(
+            owner_email=owner_email,
+            session_id=session_id,
+            pm_team=pm_team,
+            country=country,
+            question=question,
+            sql=sql_blocks[0],
+            readme=_build_source_code_qa_sql_readme(
+                pm_team=pm_team,
+                country=country,
+                question=question,
+                result=result,
+                runtime_evidence=runtime_evidence,
+            ),
+        )
+    except Exception as error:  # noqa: BLE001 - artifact packaging must not fail the answer.
+        current_app.logger.warning("Source Code Q&A generated SQL artifact could not be saved: %s", error)
+        return []
+    return [artifact]
 
 
 def _source_code_qa_effort_assessment_language(value: Any) -> str:
@@ -8920,6 +9215,9 @@ def _compact_source_code_qa_session_payload(result: dict[str, Any]) -> dict[str,
         "attachments": _source_code_qa_public_attachments(result.get("attachments") if isinstance(result.get("attachments"), list) else []),
         "runtime_evidence": _source_code_qa_public_runtime_evidence(
             result.get("runtime_evidence") if isinstance(result.get("runtime_evidence"), list) else []
+        ),
+        "generated_artifacts": _source_code_qa_public_generated_artifacts(
+            result.get("generated_artifacts") if isinstance(result.get("generated_artifacts"), list) else []
         ),
         "matches": [
             {
@@ -9911,6 +10209,15 @@ def _run_source_code_qa_query_job(app: Flask, job_id: str, payload: dict[str, An
             result["attachments"] = _source_code_qa_public_attachments(attachments)
             result["runtime_evidence"] = _source_code_qa_public_runtime_evidence(runtime_evidence)
             if session_id:
+                result["generated_artifacts"] = _build_source_code_qa_generated_artifacts(
+                    owner_email=owner_email,
+                    session_id=session_id,
+                    pm_team=pm_team,
+                    country=country,
+                    question=str(payload.get("question") or ""),
+                    result=result,
+                    runtime_evidence=runtime_evidence,
+                )
                 session_write_started = time.perf_counter()
                 session_payload = session_store.append_exchange(
                     session_id,

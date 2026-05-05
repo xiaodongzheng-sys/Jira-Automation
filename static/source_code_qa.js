@@ -6,6 +6,7 @@
   const saveUrl = root.dataset.saveUrl;
   const syncUrl = root.dataset.syncUrl;
   const queryUrl = root.dataset.queryUrl;
+  const generatedArtifactUrl = root.dataset.generatedArtifactUrl;
   const effortAssessmentUrl = root.dataset.effortAssessmentUrl;
   const effortLatestUrl = root.dataset.effortLatestUrl;
   const attachmentUrl = root.dataset.attachmentUrl;
@@ -260,11 +261,15 @@
   const runtimeCapabilities = () => options.runtime_capabilities || {};
   const countryCapability = (team, countryCode) => {
     const teamCapabilities = runtimeCapabilities()?.[team] || {};
-    return teamCapabilities?.[countryCode] || { hasConfig: false, hasDB: false };
+    return teamCapabilities?.[countryCode] || { hasConfig: false, hasDB: false, hasDictionary: false };
   };
   const capabilityLabel = (team, countryCode) => {
-    if (countryCode === allCountryValue()) return 'Common code only';
     const capability = countryCapability(team, countryCode);
+    if (countryCode === allCountryValue()) return capability.hasDictionary ? 'Common code + dictionary' : 'Common code only';
+    if (capability.hasDictionary && capability.hasConfig && capability.hasDB) return 'Dictionary + Apollo + DB';
+    if (capability.hasDictionary && capability.hasConfig) return 'Dictionary + Apollo';
+    if (capability.hasDictionary && capability.hasDB) return 'Dictionary + DB';
+    if (capability.hasDictionary) return 'Dictionary only';
     if (capability.hasConfig && capability.hasDB) return 'Apollo + DB';
     if (capability.hasConfig) return 'Apollo only';
     if (capability.hasDB) return 'DB only';
@@ -892,6 +897,31 @@
     `;
   };
 
+  const generatedArtifactHref = (artifact, sessionId = '') => {
+    const artifactId = String(artifact?.id || '').trim();
+    if (!generatedArtifactUrl || !artifactId) return '';
+    const path = generatedArtifactUrl.replace('__ARTIFACT_ID__', encodeURIComponent(artifactId));
+    const url = new URL(path, window.location.origin);
+    const effectiveSessionId = String(sessionId || activeSessionId || activeSession?.id || '').trim();
+    if (effectiveSessionId) url.searchParams.set('session_id', effectiveSessionId);
+    return url.toString();
+  };
+
+  const renderGeneratedArtifacts = (artifacts = [], sessionId = '') => {
+    const items = Array.isArray(artifacts) ? artifacts.filter((item) => item && item.id) : [];
+    if (!items.length) return '';
+    return `
+      <div class="source-qa-generated-artifacts">
+        ${items.map((item) => {
+          const href = generatedArtifactHref(item, sessionId);
+          return href
+            ? `<a class="button button-secondary" href="${escapeHtml(href)}" download>${escapeHtml(item.filename || 'Download SQL Package')}</a>`
+            : '';
+        }).join('')}
+      </div>
+    `;
+  };
+
   const renderSessionMessages = (session) => {
     if (!sessionMessages) return;
     const messages = [...(session?.messages || [])];
@@ -938,6 +968,7 @@
         ? (message.text || payload.llm_answer || payload.summary || 'Answer completed.')
         : message.text;
       const attachmentItems = Array.isArray(message.attachments) ? message.attachments : (Array.isArray(payload.attachments) ? payload.attachments : []);
+      const artifactItems = Array.isArray(payload.generated_artifacts) ? payload.generated_artifacts : [];
       const citations = [];
       const liveActions = message.live && message.job_id ? `
         <div class="source-qa-live-actions">
@@ -955,6 +986,7 @@
           </div>
           <div class="source-qa-message-body">
             ${message.role === 'assistant' ? renderCodexAnswerHtml(text, { live: Boolean(message.live) }) : `<p>${escapeHtml(text)}</p>`}
+            ${message.role === 'assistant' ? renderGeneratedArtifacts(artifactItems, activeSession?.id || activeSessionId) : ''}
             ${renderAttachmentChips(attachmentItems)}
             ${liveActions}
           </div>
@@ -1376,8 +1408,25 @@
   const runtimeEvidenceTypeLabel = (sourceType) => ({
     apollo: 'Apollo UAT reference',
     db: 'DB',
+    data_dictionary: 'Data dictionary',
     other: 'Other',
   }[sourceType] || sourceType || 'Runtime');
+
+  const updateRuntimeEvidenceCountryOptions = () => {
+    if (!runtimeEvidenceCountry) return;
+    const team = runtimeEvidencePmTeam?.value || 'AF';
+    const allValue = allCountryValue();
+    const previous = runtimeEvidenceCountry.value || '';
+    const countries = team === 'CRMS' ? runtimeCountries() : [allValue, ...runtimeCountries()];
+    runtimeEvidenceCountry.innerHTML = '';
+    countries.forEach((countryCode) => {
+      const option = document.createElement('option');
+      option.value = countryCode;
+      option.textContent = countryCode;
+      runtimeEvidenceCountry.appendChild(option);
+    });
+    runtimeEvidenceCountry.value = countries.includes(previous) ? previous : (team === 'CRMS' ? countries[0] || 'SG' : allValue);
+  };
 
   const renderRuntimeEvidence = (items = []) => {
     if (!runtimeEvidenceList) return;
@@ -1789,6 +1838,7 @@
         </div>
         <div class="source-qa-answer-body">
           ${renderCodexAnswerHtml(answer)}
+          ${renderGeneratedArtifacts(payload?.generated_artifacts || [], payload?.session_id || activeSessionId)}
         </div>
       </div>
     `;
@@ -2709,7 +2759,10 @@
   });
   saveButton?.addEventListener('click', saveConfig);
   saveModelAvailabilityButton?.addEventListener('click', saveModelAvailability);
-  runtimeEvidencePmTeam?.addEventListener('change', loadRuntimeEvidence);
+  runtimeEvidencePmTeam?.addEventListener('change', () => {
+    updateRuntimeEvidenceCountryOptions();
+    loadRuntimeEvidence();
+  });
   runtimeEvidenceCountry?.addEventListener('change', loadRuntimeEvidence);
   runtimeEvidenceUploadButton?.addEventListener('click', () => runtimeEvidenceInput?.click());
   runtimeEvidenceInput?.addEventListener('change', async () => {
@@ -2791,6 +2844,7 @@
   copyAnswerButton?.addEventListener('click', copyAnswerWithCitations);
 
   setSourceView('chat');
+  updateRuntimeEvidenceCountryOptions();
   restoreLastQueryConfig();
   restoreEffortAssessmentCache();
   loadLatestEffortAssessment();

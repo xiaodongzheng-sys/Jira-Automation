@@ -728,6 +728,43 @@ class LocalAgentClient:
         encoded = str(payload.get("content_base64") or "")
         return metadata, base64.b64decode(encoded.encode("ascii")) if encoded else b""
 
+    def source_code_qa_generated_artifact_save(
+        self,
+        *,
+        owner_email: str,
+        session_id: str,
+        pm_team: str,
+        country: str,
+        question: str,
+        sql: str,
+        readme: str,
+    ) -> dict[str, Any]:
+        payload = self._request(
+            "POST",
+            "/api/local-agent/source-code-qa/generated-artifacts/save",
+            {
+                "owner_email": owner_email,
+                "session_id": session_id,
+                "pm_team": pm_team,
+                "country": country,
+                "question": question,
+                "sql": sql,
+                "readme": readme,
+            },
+        )
+        artifact = payload.get("artifact")
+        return artifact if isinstance(artifact, dict) else {}
+
+    def source_code_qa_generated_artifact_get(self, *, owner_email: str, session_id: str, artifact_id: str) -> tuple[dict[str, Any], bytes]:
+        payload = self._request(
+            "POST",
+            "/api/local-agent/source-code-qa/generated-artifacts/get",
+            {"owner_email": owner_email, "session_id": session_id, "artifact_id": artifact_id},
+        )
+        metadata = payload.get("artifact") if isinstance(payload.get("artifact"), dict) else {}
+        encoded = str(payload.get("content_base64") or "")
+        return metadata, base64.b64decode(encoded.encode("ascii")) if encoded else b""
+
     def source_code_qa_model_availability_get(self) -> dict[str, bool]:
         payload = self._request("POST", "/api/local-agent/source-code-qa/model-availability/get", {})
         availability = payload.get("availability")
@@ -1295,6 +1332,39 @@ class RemoteSourceCodeQAAttachmentStore:
             owner_email=owner_email,
             session_id=session_id,
             attachment_id=attachment_id,
+        )
+
+
+class RemoteSourceCodeQAGeneratedArtifactStore:
+    def __init__(self, client: LocalAgentClient) -> None:
+        self.client = client
+
+    def save_sql_package(
+        self,
+        *,
+        owner_email: str,
+        session_id: str,
+        pm_team: str,
+        country: str,
+        question: str,
+        sql: str,
+        readme: str,
+    ) -> dict[str, Any]:
+        return self.client.source_code_qa_generated_artifact_save(
+            owner_email=owner_email,
+            session_id=session_id,
+            pm_team=pm_team,
+            country=country,
+            question=question,
+            sql=sql,
+            readme=readme,
+        )
+
+    def get_bytes(self, *, owner_email: str, session_id: str, artifact_id: str) -> tuple[dict[str, Any], bytes]:
+        return self.client.source_code_qa_generated_artifact_get(
+            owner_email=owner_email,
+            session_id=session_id,
+            artifact_id=artifact_id,
         )
 
 
