@@ -306,6 +306,7 @@ fi
 
 DEPLOY_SECRET_ARGS=(--update-secrets "LOCAL_AGENT_HMAC_SECRET=$UAT_LOCAL_AGENT_SECRET_NAME:latest")
 ENV_DEPLOY_MODE="set"
+ENV_REMOVE_ARGS=()
 if [[ "${CLOUD_RUN_UAT_LOCAL_AGENT_SECRET_SOURCE:-secret_manager}" == "env" ]]; then
   uat_hmac_secret="${CLOUD_RUN_UAT_LOCAL_AGENT_HMAC_SECRET:-}"
   if [[ -z "$uat_hmac_secret" ]]; then
@@ -321,6 +322,7 @@ if [[ "${CLOUD_RUN_UAT_LOCAL_AGENT_SECRET_SOURCE:-secret_manager}" == "env" ]]; 
   fi
   ENV_VARS+=("LOCAL_AGENT_HMAC_SECRET=$uat_hmac_secret")
   DEPLOY_SECRET_ARGS=(--remove-secrets LOCAL_AGENT_HMAC_SECRET)
+  ENV_REMOVE_ARGS=(--remove-env-vars LOCAL_AGENT_HMAC_SECRET)
   ENV_DEPLOY_MODE="update"
   echo "Using UAT local-agent HMAC from env fallback because CLOUD_RUN_UAT_LOCAL_AGENT_SECRET_SOURCE=env."
 fi
@@ -387,6 +389,7 @@ cd "$ROOT_DIR"
   --no-traffic \
   --tag "$UAT_TAG" \
   ${DEPLOY_SECRET_ARGS[@]+"${DEPLOY_SECRET_ARGS[@]}"} \
+  ${ENV_REMOVE_ARGS[@]+"${ENV_REMOVE_ARGS[@]}"} \
   "${ENV_DEPLOY_ARGS[@]}"
 
 SERVICE_DESCRIBE_JSON="$(describe_service)"
