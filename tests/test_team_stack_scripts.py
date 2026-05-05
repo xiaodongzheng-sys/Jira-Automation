@@ -236,6 +236,8 @@ exit 0
         self.assertIn(".team-portal-uat", setup_script)
         self.assertIn("7008", setup_script)
         self.assertIn("bpmis-local-agent-uat", setup_script)
+        self.assertIn("/opt/homebrew/bin/python3.12", setup_script)
+        self.assertIn('rm -rf "$UAT_WORKSPACE/.venv"', setup_script)
         self.assertIn("LOCAL_AGENT_HMAC_SECRET", setup_script)
         self.assertIn("--exclude '/logs/'", setup_script)
         self.assertIn("--exclude '/run/'", setup_script)

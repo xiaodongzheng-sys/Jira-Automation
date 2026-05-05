@@ -10,6 +10,7 @@ UAT_WORKSPACE="${CLOUD_RUN_UAT_HOST_WORKSPACE:-$(recommended_uat_team_stack_root
 UAT_DATA_DIR="${CLOUD_RUN_UAT_LOCAL_AGENT_DATA_DIR:-.team-portal-uat}"
 UAT_PORT="${CLOUD_RUN_UAT_LOCAL_AGENT_PORT:-7008}"
 UAT_SCREEN_SESSION="${CLOUD_RUN_UAT_LOCAL_AGENT_SCREEN_SESSION:-bpmis-local-agent-uat}"
+UAT_PYTHON_BIN="${CLOUD_RUN_UAT_PYTHON_BIN:-}"
 FORCE=0
 
 usage() {
@@ -54,6 +55,20 @@ live_env_value() {
   ENV_FILE="$LIVE_WORKSPACE/.env" read_env_value "$key"
 }
 
+resolve_uat_python_bin() {
+  if [[ -n "$UAT_PYTHON_BIN" ]]; then
+    printf '%s\n' "$UAT_PYTHON_BIN"
+    return 0
+  fi
+  for candidate in /opt/homebrew/bin/python3.12 /opt/homebrew/bin/python3.13 "$PYTHON_BIN" "$(command -v python3 || true)"; do
+    if [[ -n "$candidate" && -x "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  printf '%s\n' "python3"
+}
+
 if [[ ! -d "$LIVE_WORKSPACE/.git" ]]; then
   echo "Live host workspace is missing: $LIVE_WORKSPACE"
   exit 1
@@ -70,9 +85,11 @@ git -C "$UAT_WORKSPACE" checkout main >/dev/null
 git -C "$UAT_WORKSPACE" fetch origin main >/dev/null
 git -C "$UAT_WORKSPACE" merge --ff-only origin/main >/dev/null
 
+UAT_PYTHON_BIN="$(resolve_uat_python_bin)"
 if [[ ! -x "$UAT_WORKSPACE/.venv/bin/pip" ]]; then
+  rm -rf "$UAT_WORKSPACE/.venv"
   echo "Creating UAT host virtual environment"
-  python3 -m venv "$UAT_WORKSPACE/.venv"
+  "$UAT_PYTHON_BIN" -m venv "$UAT_WORKSPACE/.venv"
 fi
 "$UAT_WORKSPACE/.venv/bin/pip" install -r "$UAT_WORKSPACE/requirements.txt"
 
