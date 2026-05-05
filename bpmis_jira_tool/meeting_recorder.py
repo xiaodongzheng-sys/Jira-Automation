@@ -456,6 +456,19 @@ class MeetingRecorderRuntime:
         attendees: list[dict[str, Any]] | None = None,
         transcript_language: str = "",
     ) -> dict[str, Any]:
+        active_record = next(
+            (
+                record
+                for record in self.store.list_records(owner_email=owner_email)
+                if str(record.get("status") or "").strip().lower() == "recording"
+            ),
+            None,
+        )
+        if active_record:
+            raise ToolError(
+                f"A meeting recording is already active: {active_record.get('title') or 'Untitled meeting'}. "
+                "Stop it before starting another recording."
+            )
         ffmpeg_path = _resolve_ffmpeg_bin(self.config.ffmpeg_bin)
         if not ffmpeg_path:
             raise ConfigError("ffmpeg is required for local meeting recording. Install ffmpeg or set MEETING_RECORDER_FFMPEG_BIN.")

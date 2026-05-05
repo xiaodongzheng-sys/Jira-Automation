@@ -941,6 +941,27 @@ class MeetingRecorderRuntimeTests(unittest.TestCase):
         self.assertIn("--status-every-buffers", command)
         self.assertNotIn(":BlackHole 2ch", command)
 
+    def test_start_recording_rejects_duplicate_active_recording(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = MeetingRecordStore(root)
+            active = store.create_record(owner_email="owner@npt.sg", title="Active review", platform="zoom", meeting_link="")
+            active["status"] = "recording"
+            store.save_record(active)
+            runtime = MeetingRecorderRuntime(
+                store=store,
+                config=MeetingRecorderConfig(ffmpeg_bin="/opt/homebrew/bin/ffmpeg"),
+            )
+
+            with self.assertRaisesRegex(ToolError, "already active"):
+                runtime.start_recording(
+                    owner_email="owner@npt.sg",
+                    title="New review",
+                    platform="zoom",
+                    meeting_link="https://zoom.us/j/123",
+                    recording_mode="audio_only",
+                )
+
     def test_linked_meeting_audio_only_never_calls_legacy_screen_preflight(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -2240,6 +2261,9 @@ class MeetingRecorderRouteTests(unittest.TestCase):
         self.assertIn('data-meeting-record-date', template)
         self.assertNotIn("data-meeting-stop-current", template)
         self.assertIn("recordDateValue(record) === selectedDate", source)
+        self.assertIn("selectRecordDate(payload.record)", source)
+        self.assertIn("loadRecords({ restoreActive: true })", source)
+        self.assertIn("status || '').trim().toLowerCase() === 'recording'", source)
         self.assertIn("No meeting recordings on", source)
 
     def test_screencapturekit_helper_has_no_fixed_recording_duration(self):

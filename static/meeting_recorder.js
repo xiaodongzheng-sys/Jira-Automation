@@ -463,6 +463,13 @@
 
   const recordDateValue = (record) => localDateValue(record?.recording_started_at || record?.created_at || '');
 
+  const selectRecordDate = (record) => {
+    const value = recordDateValue(record);
+    if (!value || !nodes.recordDate) return;
+    nodes.recordDate.value = value;
+    renderRecordCalendar(parseLocalDateValue(value));
+  };
+
   const durationLabel = (start, end) => {
     const startDate = new Date(start || '');
     const endDate = new Date(end || '');
@@ -764,6 +771,7 @@
       throw error;
     }
     setRecordingState(payload.record);
+    selectRecordDate(payload.record);
     await loadRecords();
     await loadRecord(payload.record.record_id);
     startSignalChecks(payload.record);
@@ -1134,10 +1142,20 @@
     }
   };
 
-  const loadRecords = async () => {
+  const loadRecords = async ({ restoreActive = false } = {}) => {
     if (!nodes.records) return;
     const payload = await api('/api/meeting-recorder/records');
     const serverRecords = Array.isArray(payload.records) ? payload.records : [];
+    if (restoreActive) {
+      const activeRecord = serverRecords.find((record) => String(record?.status || '').trim().toLowerCase() === 'recording');
+      if (activeRecord) {
+        setRecordingState(activeRecord);
+        state.selectedRecordId = activeRecord.record_id || '';
+        state.initialSelectionPending = Boolean(state.selectedRecordId);
+        selectRecordDate(activeRecord);
+        startSignalChecks(activeRecord);
+      }
+    }
     const selectedDate = nodes.recordDate?.value || localDateValue();
     const activeBrowserRecord = state.browserRecording ? {
       record_id: 'browser-audio',
@@ -1514,5 +1532,5 @@
 
   loadDiagnostics();
   loadUpcoming();
-  loadRecords();
+  loadRecords({ restoreActive: true });
 })();
