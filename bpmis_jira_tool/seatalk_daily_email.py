@@ -251,13 +251,13 @@ def resolve_daily_email_window(*, now: datetime, slot: str = "auto") -> DailyEma
     local_now = now.astimezone(SEATALK_INSIGHTS_TIMEZONE)
     normalized_slot = str(slot or "auto").strip().lower()
     if normalized_slot == "auto":
-        normalized_slot = MIDDAY_SLOT if local_now >= _local_datetime(local_now.date(), 13) else MORNING_SLOT
+        normalized_slot = MIDDAY_SLOT if local_now >= _local_datetime(local_now.date(), 19) else MORNING_SLOT
     if normalized_slot == MIDDAY_SLOT:
-        start = _local_datetime(local_now.date(), 8)
-        end = _local_datetime(local_now.date(), 13)
+        start = _local_datetime(local_now.date(), 13)
+        end = _local_datetime(local_now.date(), 19)
     elif normalized_slot == MORNING_SLOT:
         previous_report_day_offset = 3 if local_now.weekday() == 0 else 1
-        start = _local_datetime(local_now.date() - timedelta(days=previous_report_day_offset), 13)
+        start = _local_datetime(local_now.date() - timedelta(days=previous_report_day_offset), 19)
         end = _local_datetime(local_now.date(), 8)
     else:
         raise ConfigError(f"Unsupported daily email slot: {slot}. Use auto, morning, or midday.")
@@ -1856,7 +1856,7 @@ def _renderer_for_kind(kind: str):
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Send the daily SeaTalk + Gmail briefing email.")
     parser.add_argument("--recipient", default=DEFAULT_RECIPIENT)
-    parser.add_argument("--hours", type=int, default=None, help="Legacy rolling window override. Omit to use the 8am/1pm fixed schedule.")
+    parser.add_argument("--hours", type=int, default=None, help="Legacy rolling window override. Omit to use the 8am/7pm fixed schedule.")
     parser.add_argument("--slot", choices=["auto", MORNING_SLOT, MIDDAY_SLOT], default="auto")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--dry-run", action="store_true")

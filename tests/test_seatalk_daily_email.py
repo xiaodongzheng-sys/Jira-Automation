@@ -1186,7 +1186,7 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
                 briefing=briefing,
                 run_date="2026-04-30",
                 run_slot="morning",
-                window_label="2026-04-29 13:00 - 2026-04-30 08:00",
+                window_label="2026-04-29 19:00 - 2026-04-30 08:00",
                 data_root=Path(temp_dir),
                 now=now,
                 trello_client=client,
@@ -1196,7 +1196,7 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
                 briefing=briefing,
                 run_date="2026-04-30",
                 run_slot="midday",
-                window_label="2026-04-30 08:00 - 2026-04-30 13:00",
+                window_label="2026-04-30 13:00 - 2026-04-30 19:00",
                 data_root=Path(temp_dir),
                 now=now,
                 trello_client=client,
@@ -1206,7 +1206,7 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
                 briefing=briefing,
                 run_date="2026-04-30",
                 run_slot="midday",
-                window_label="2026-04-30 08:00 - 2026-04-30 13:00",
+                window_label="2026-04-30 13:00 - 2026-04-30 19:00",
                 data_root=Path(temp_dir),
                 now=now,
                 trello_client=client,
@@ -1217,7 +1217,7 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         self.assertEqual(midday.created_count, 1)
         self.assertEqual(midday_again.created_count, 0)
         self.assertEqual(midday_again.skipped_count, 1)
-        self.assertIn("Report window: 2026-04-30 08:00 - 2026-04-30 13:00", client.created[1]["description"])
+        self.assertIn("Report window: 2026-04-30 13:00 - 2026-04-30 19:00", client.created[1]["description"])
 
     def test_gmail_raw_message_contains_expected_headers_and_body(self):
         raw = build_gmail_raw_message(
@@ -1289,15 +1289,15 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
             )
             self.assertTrue(store.already_sent(run_date="2026-04-27", recipient="xiaodong.zheng@npt.sg"))
 
-    def test_fixed_daily_email_windows_cover_8_to_13_and_13_to_next_8(self):
+    def test_fixed_daily_email_windows_cover_13_to_19_and_previous_13_to_8(self):
         midday = resolve_daily_email_window(
-            now=datetime(2026, 4, 30, 13, 5, tzinfo=SEATALK_INSIGHTS_TIMEZONE),
+            now=datetime(2026, 4, 30, 19, 5, tzinfo=SEATALK_INSIGHTS_TIMEZONE),
             slot="auto",
         )
         self.assertEqual(midday.run_slot, "midday")
         self.assertEqual(midday.run_date, "2026-04-30")
-        self.assertEqual(midday.start.isoformat(), "2026-04-30T08:00:00+08:00")
-        self.assertEqual(midday.end.isoformat(), "2026-04-30T13:00:00+08:00")
+        self.assertEqual(midday.start.isoformat(), "2026-04-30T13:00:00+08:00")
+        self.assertEqual(midday.end.isoformat(), "2026-04-30T19:00:00+08:00")
 
         morning = resolve_daily_email_window(
             now=datetime(2026, 4, 30, 8, 5, tzinfo=SEATALK_INSIGHTS_TIMEZONE),
@@ -1305,10 +1305,10 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         )
         self.assertEqual(morning.run_slot, "morning")
         self.assertEqual(morning.run_date, "2026-04-30")
-        self.assertEqual(morning.start.isoformat(), "2026-04-29T13:00:00+08:00")
+        self.assertEqual(morning.start.isoformat(), "2026-04-29T19:00:00+08:00")
         self.assertEqual(morning.end.isoformat(), "2026-04-30T08:00:00+08:00")
 
-    def test_monday_morning_window_covers_friday_13_to_monday_8(self):
+    def test_monday_morning_window_covers_friday_19_to_monday_8(self):
         morning = resolve_daily_email_window(
             now=datetime(2026, 5, 4, 8, 5, tzinfo=SEATALK_INSIGHTS_TIMEZONE),
             slot="auto",
@@ -1316,7 +1316,7 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
 
         self.assertEqual(morning.run_slot, "morning")
         self.assertEqual(morning.run_date, "2026-05-04")
-        self.assertEqual(morning.start.isoformat(), "2026-05-01T13:00:00+08:00")
+        self.assertEqual(morning.start.isoformat(), "2026-05-01T19:00:00+08:00")
         self.assertEqual(morning.end.isoformat(), "2026-05-04T08:00:00+08:00")
 
     def test_fixed_daily_email_windows_skip_saturday_and_sunday(self):
@@ -1378,8 +1378,8 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
             self.assertEqual(result.status, "skipped")
             self.assertEqual(result.run_date, "2026-05-03")
             self.assertEqual(result.run_slot, "midday")
-            self.assertEqual(result.window_start, "2026-05-03T08:00:00+08:00")
-            self.assertEqual(result.window_end, "2026-05-03T13:00:00+08:00")
+            self.assertEqual(result.window_start, "2026-05-03T13:00:00+08:00")
+            self.assertEqual(result.window_end, "2026-05-03T19:00:00+08:00")
 
     def test_send_daily_email_syncs_trello_cards_before_marking_sent(self):
         class FakeTrelloClient:
