@@ -2002,34 +2002,12 @@ class MeetingRecorderRouteTests(unittest.TestCase):
         payload = response.get_json()
         self.assertEqual([item["calendar_event_id"] for item in payload["meetings"]], ["event-1", "event-2", "event-3"])
 
-    def test_reminders_api_returns_eligible_meetings_and_active_recording(self):
-        store = self.app.config["MEETING_RECORD_STORE"]
-        active = store.create_record(
-            owner_email="xiaodong.zheng@npt.sg",
-            title="Current",
-            platform="google_meet",
-            meeting_link="https://meet.google.com/current",
-        )
-        active["status"] = "recording"
-        store.save_record(active)
-        fixed_now = datetime(2026, 5, 2, 12, 38, 30, tzinfo=ZoneInfo("Asia/Singapore"))
-        start = fixed_now + timedelta(seconds=90)
-
+    def test_reminders_api_returns_empty_when_auto_reminders_disabled(self):
         fake_calendar = Mock()
-        fake_calendar.upcoming_meetings.return_value = [
-            {
-                "calendar_event_id": "event-1",
-                "title": "Upcoming",
-                "platform": "google_meet",
-                "start": start.isoformat(),
-                "end": (start + timedelta(minutes=30)).isoformat(),
-                "meeting_link": "https://meet.google.com/abc-defg-hij",
-            }
-        ]
 
         with patch("bpmis_jira_tool.web._build_calendar_meeting_service", return_value=fake_calendar), patch(
             "bpmis_jira_tool.web.reminder_eligible_meetings",
-            side_effect=lambda meetings, **kwargs: reminder_eligible_meetings(meetings, now=fixed_now, **kwargs),
+            wraps=reminder_eligible_meetings,
         ), patch(
             "bpmis_jira_tool.web._meeting_recorder_diagnostics_payload",
             return_value={"audio_capture_label": "Aggregate device configured", "system_audio_configured": True},
@@ -2041,21 +2019,22 @@ class MeetingRecorderRouteTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         payload = response.get_json()
         self.assertTrue(payload["calendar_connected"])
-        self.assertEqual(payload["debug"]["reason"], "active_recording")
-        self.assertEqual(payload["meetings"][0]["calendar_event_id"], "event-1")
-        self.assertEqual(payload["meetings"][0]["suppression_key"].split(":", 1)[1], "event-1")
-        self.assertEqual(payload["active_recording"]["record_id"], active["record_id"])
-        self.assertEqual(payload["diagnostics"]["audio_capture_label"], "Aggregate device configured")
+        self.assertFalse(payload["reminders_enabled"])
+        self.assertEqual(payload["debug"]["reason"], "disabled")
+        self.assertEqual(payload["meetings"], [])
+        self.assertIsNone(payload["active_recording"])
+        fake_calendar.upcoming_meetings.assert_not_called()
 
-    def test_reminders_api_returns_debug_when_calendar_not_connected(self):
+    def test_reminders_api_stays_disabled_when_calendar_not_connected(self):
         with self.app.test_client() as client:
             self._login(client, email="xiaodong.zheng@npt.sg", scopes=[])
             response = client.get("/api/meeting-recorder/reminders")
 
         self.assertEqual(response.status_code, 200)
         payload = response.get_json()
-        self.assertFalse(payload["calendar_connected"])
-        self.assertEqual(payload["debug"]["reason"], "calendar_not_connected")
+        self.assertTrue(payload["calendar_connected"])
+        self.assertFalse(payload["reminders_enabled"])
+        self.assertEqual(payload["debug"]["reason"], "disabled")
 
     def test_reminder_telemetry_endpoint_logs_compact_event(self):
         with patch("bpmis_jira_tool.web._log_portal_event") as log_event:
@@ -2219,14 +2198,14 @@ class MeetingRecorderRouteTests(unittest.TestCase):
         self.assertNotIn("attachment", response.headers.get("Content-Disposition", ""))
         self.assertTrue(fake_response.closed)
 
-    def test_base_template_renders_meeting_indicator_and_reminder_script(self):
+    def test_base_template_does_not_render_meeting_indicator_or_reminder_script(self):
         with self.app.test_client() as client:
             self._login(client, email="xiaodong.zheng@npt.sg", scopes=[CALENDAR_READONLY_SCOPE])
             response = client.get("/meeting-recorder")
 
         self.assertEqual(response.status_code, 200)
-        self.assertIn(b"data-meeting-recorder-indicator", response.data)
-        self.assertIn(b"meeting_recorder_reminder.js", response.data)
+        self.assertNotIn(b"data-meeting-recorder-indicator", response.data)
+        self.assertNotIn(b"meeting_recorder_reminder.js", response.data)
 
     def test_reminder_script_polls_on_visibility_focus_and_reports_telemetry(self):
         source = Path("static/meeting_recorder_reminder.js").read_text(encoding="utf-8")

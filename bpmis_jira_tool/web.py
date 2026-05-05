@@ -2777,7 +2777,7 @@ def create_app() -> Flask:
             "can_access_prd_self_assessment": _can_access_prd_self_assessment(settings),
             "can_access_gmail_seatalk_demo": _can_access_gmail_seatalk_demo(settings),
             "can_access_meeting_recorder": _can_access_meeting_recorder(settings),
-            "meeting_recorder_reminder_enabled": _can_access_meeting_recorder(settings),
+            "meeting_recorder_reminder_enabled": _meeting_recorder_reminder_enabled(settings),
             "can_access_source_code_qa": _can_access_source_code_qa(settings),
             "can_manage_source_code_qa": _can_manage_source_code_qa(settings),
             "asset_revision": _current_release_revision(),
@@ -4509,6 +4509,20 @@ def create_app() -> Flask:
         access_gate = _require_meeting_recorder_access(settings, api=True)
         if access_gate is not None:
             return access_gate
+        if not settings.meeting_recorder_reminder_enabled:
+            debug = _meeting_recorder_reminder_debug(reason="disabled", calendar_connected=True)
+            return jsonify(
+                {
+                    "status": "ok",
+                    "calendar_connected": True,
+                    "reminders_enabled": False,
+                    "meetings": [],
+                    "active_recording": None,
+                    "poll_seconds": 3600,
+                    "timezone": "Asia/Singapore",
+                    "debug": debug,
+                }
+            )
         if not _google_credentials_have_scopes(CALENDAR_READONLY_SCOPE):
             debug = _meeting_recorder_reminder_debug(reason="calendar_not_connected", calendar_connected=False)
             return jsonify(
@@ -8082,6 +8096,10 @@ def _can_access_gmail_seatalk_demo(settings: Settings) -> bool:
 
 def _can_access_meeting_recorder(settings: Settings) -> bool:
     return _is_portal_admin()
+
+
+def _meeting_recorder_reminder_enabled(settings: Settings) -> bool:
+    return bool(settings.meeting_recorder_reminder_enabled and _can_access_meeting_recorder(settings))
 
 
 def _can_access_source_code_qa(settings: Settings) -> bool:
