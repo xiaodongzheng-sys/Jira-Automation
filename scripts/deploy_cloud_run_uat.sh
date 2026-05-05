@@ -328,6 +328,26 @@ if [[ "${CLOUD_RUN_UAT_LOCAL_AGENT_SECRET_SOURCE:-secret_manager}" == "env" ]]; 
   ENV_DEPLOY_MODE="update"
   echo "Using UAT local-agent HMAC from env fallback because CLOUD_RUN_UAT_LOCAL_AGENT_SECRET_SOURCE=env."
 fi
+if [[ "$ENV_SECRET_PRECLEAR_REQUIRED" == "1" ]]; then
+  if ! SERVICE_JSON_VALUE="$SERVICE_DESCRIBE_JSON" "$PYTHON_BIN" - <<'PY'
+import json
+import os
+import sys
+
+payload = json.loads(os.environ.get("SERVICE_JSON_VALUE", "{}"))
+containers = payload.get("spec", {}).get("template", {}).get("spec", {}).get("containers", [])
+for container in containers:
+    for env in container.get("env") or []:
+        if env.get("name") != "LOCAL_AGENT_HMAC_SECRET":
+            continue
+        if isinstance(env.get("valueFrom"), dict):
+            raise SystemExit(0)
+raise SystemExit(1)
+PY
+  then
+    ENV_SECRET_PRECLEAR_REQUIRED=0
+  fi
+fi
 
 IFS='|'
 ENV_VARS_JOINED="${ENV_VARS[*]}"
