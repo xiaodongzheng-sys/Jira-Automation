@@ -7,7 +7,7 @@ from pathlib import Path
 from dotenv import find_dotenv, load_dotenv
 
 
-DEFAULT_SPREADSHEET_ID = "1KKlqDosv2QjCZrY8If-JreuVa_ALHZUIrxhMbAa_y_Q"
+DEFAULT_SPREADSHEET_ID = ""
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -324,8 +324,8 @@ class Settings:
             elevenlabs_mandarin_voice_id=_env_str("ELEVENLABS_MANDARIN_VOICE_ID", "JBFqnCBsd6RMkjVDRZzb"),
             local_agent_base_url=_env_str("LOCAL_AGENT_BASE_URL"),
             local_agent_hmac_secret=_env_str("LOCAL_AGENT_HMAC_SECRET"),
-            local_agent_timeout_seconds=int(_env_str("LOCAL_AGENT_TIMEOUT_SECONDS", "300")),
-            local_agent_connect_timeout_seconds=int(_env_str("LOCAL_AGENT_CONNECT_TIMEOUT_SECONDS", "10")),
+            local_agent_timeout_seconds=_env_int("LOCAL_AGENT_TIMEOUT_SECONDS", 300),
+            local_agent_connect_timeout_seconds=_env_int("LOCAL_AGENT_CONNECT_TIMEOUT_SECONDS", 10),
             local_agent_mode=_env_str("LOCAL_AGENT_MODE", "disabled"),
             local_agent_source_code_qa_enabled=_env_bool("LOCAL_AGENT_SOURCE_CODE_QA_ENABLED", False),
             local_agent_seatalk_enabled=_env_bool("LOCAL_AGENT_SEATALK_ENABLED", False),

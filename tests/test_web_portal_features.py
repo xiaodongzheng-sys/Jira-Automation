@@ -1,4 +1,3 @@
-import io
 import os
 import tempfile
 import time
@@ -8,8 +7,6 @@ from pathlib import Path
 from unittest.mock import patch
 
 from cryptography.fernet import Fernet
-from openpyxl import load_workbook
-
 import bpmis_jira_tool.web as web_module
 from bpmis_jira_tool.config import Settings
 from bpmis_jira_tool.daily_brief_archive import DailyBriefArchiveStore, daily_brief_archive_path, daily_brief_pdf_bytes
@@ -568,7 +565,7 @@ class WebPortalFeatureTests(unittest.TestCase):
 
         self.assertEqual("env-token", resolved)
 
-    def test_default_sheet_template_download_returns_xlsx(self):
+    def test_default_sheet_template_download_endpoint_is_removed(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
@@ -589,34 +586,7 @@ class WebPortalFeatureTests(unittest.TestCase):
             with app.test_client() as client:
                 response = client.get("/download/default-sheet-template.xlsx")
 
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(
-            response.mimetype,
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
-        workbook = load_workbook(io.BytesIO(response.data))
-        worksheet = workbook.active
-        self.assertEqual("Sheet1", worksheet.title)
-        self.assertEqual(
-            [cell.value for cell in worksheet[1]],
-            [
-                "BPMIS ID",
-                "Project Name",
-                "BRD Link",
-                "Market",
-                "System",
-                "Jira Title",
-                "PRD Link",
-                "Description",
-                "Jira Ticket Link",
-            ],
-        )
-        self.assertEqual("225159", worksheet["A2"].value)
-        self.assertEqual("https://docs.google.com/document/d/example", worksheet["C2"].value)
-        self.assertEqual("SG", worksheet["D2"].value)
-        self.assertEqual("https://confluence/example-prd", worksheet["G2"].value)
-        self.assertEqual("Detailed Jira description goes here.", worksheet["H2"].value)
-        self.assertIsNone(worksheet["A1"].fill.fill_type)
+        self.assertEqual(response.status_code, 404)
 
     def test_index_hides_sheet_template_setup(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
@@ -646,7 +616,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertNotIn(b"data-create-template-sheet-button", response.data)
         self.assertNotIn(b"Download the default sheet template", response.data)
 
-    def test_create_template_spreadsheet_endpoint_returns_new_sheet_link(self):
+    def test_create_template_spreadsheet_endpoint_is_removed(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
@@ -661,38 +631,14 @@ class WebPortalFeatureTests(unittest.TestCase):
         ):
             app = create_app()
             app.testing = True
-            app.config["CONFIG_STORE"].save(
-                app.config["CONFIG_STORE"]._normalize(
-                    {
-                        "spreadsheet_link": "",
-                        "input_tab_name": "Sheet1",
-                    }
-                ),
-                "google:teammate@npt.sg",
-            )
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
+                    session["google_credentials"] = {"token": "x"}
 
-            with patch(
-                "bpmis_jira_tool.web.GoogleSheetsService.create_template_spreadsheet",
-                return_value={
-                    "spreadsheet_id": "sheet-123",
-                    "spreadsheet_url": "https://docs.google.com/spreadsheets/d/sheet-123/edit",
-                    "input_tab_name": "Sheet1",
-                    "spreadsheet_title": "BPMIS Automation Tool",
-                },
-            ) as mocked_create:
-                with app.test_client() as client:
-                    with client.session_transaction() as session:
-                        session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
-                        session["google_credentials"] = {"token": "x"}
+                response = client.post("/api/spreadsheets/create-template")
 
-                    response = client.post("/api/spreadsheets/create-template")
-
-        self.assertEqual(response.status_code, 200)
-        payload = response.get_json()
-        self.assertEqual(payload["status"], "ok")
-        self.assertEqual(payload["spreadsheet_id"], "sheet-123")
-        self.assertEqual(payload["input_tab_name"], "Sheet1")
-        mocked_create.assert_called_once()
+        self.assertEqual(response.status_code, 404)
 
     def test_healthz_sets_request_id_header(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
@@ -769,7 +715,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"TEAM_PORTAL_CONFIG_ENCRYPTION_KEY", response.data)
 
-    def test_shared_mode_index_skips_google_sheet_read_when_spreadsheet_link_is_blank(self):
+    def test_shared_mode_index_no_longer_reads_or_renders_spreadsheet_link(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
@@ -780,7 +726,7 @@ class WebPortalFeatureTests(unittest.TestCase):
                 "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": Fernet.generate_key().decode("utf-8"),
             },
             clear=False,
-        ), patch("bpmis_jira_tool.web.GoogleSheetsService.read_snapshot") as read_snapshot:
+        ):
             app = create_app()
             app.testing = True
 
@@ -793,12 +739,11 @@ class WebPortalFeatureTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertNotIn(b"Google Sheets request failed", response.data)
-        self.assertIn(b'id="spreadsheet_link" name="spreadsheet_link" value=""', response.data)
+        self.assertNotIn(b'id="spreadsheet_link"', response.data)
         self.assertIn(b'id="input_tab_name" name="input_tab_name" value="Sheet1"', response.data)
         self.assertIn(b'name="summary_header" value="Jira Title"', response.data)
-        read_snapshot.assert_not_called()
 
-    def test_shared_mode_index_skips_google_sheet_read_with_partial_google_credentials(self):
+    def test_shared_mode_index_ignores_legacy_spreadsheet_link_with_partial_google_credentials(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
@@ -809,7 +754,7 @@ class WebPortalFeatureTests(unittest.TestCase):
                 "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": Fernet.generate_key().decode("utf-8"),
             },
             clear=False,
-        ), patch("bpmis_jira_tool.web.GoogleSheetsService.read_snapshot") as read_snapshot:
+        ):
             app = create_app()
             app.testing = True
 
@@ -828,7 +773,7 @@ class WebPortalFeatureTests(unittest.TestCase):
                 response = client.get("/?workspace=run")
 
         self.assertEqual(response.status_code, 200)
-        read_snapshot.assert_not_called()
+        self.assertNotIn(b'id="spreadsheet_link"', response.data)
 
     def test_shared_mode_saves_encrypted_portal_token_for_google_user(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(

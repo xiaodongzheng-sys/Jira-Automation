@@ -36,8 +36,6 @@ from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build as build_google_api
 from googleapiclient.errors import HttpError
 import httplib2
-from openpyxl import Workbook
-from openpyxl.styles import Font
 import requests
 import sqlparse
 from werkzeug.middleware.proxy_fix import ProxyFix
@@ -97,16 +95,13 @@ from bpmis_jira_tool.report_intelligence import (
     normalize_report_intelligence_config,
 )
 from bpmis_jira_tool.seatalk_dashboard import SeaTalkDashboardService
-from bpmis_jira_tool.google_sheets import GoogleSheetsService
+from bpmis_jira_tool.bpmis_client import build_bpmis_client
 from bpmis_jira_tool.bpmis_projects import BPMISProjectStore, PortalJiraCreationService, PortalProjectSyncService
-from bpmis_jira_tool.project_sync import BPMISProjectSyncService
-from bpmis_jira_tool.service import JiraCreationService, build_bpmis_client
 from bpmis_jira_tool.source_code_qa import CRMS_COUNTRIES, ALL_COUNTRY, IDENTIFIER_PATTERN, CodexCliBridgeSourceCodeQALLMProvider, SourceCodeQAService
 from bpmis_jira_tool.user_config import (
     CONFIGURED_FIELDS,
     DEFAULT_DIRECT_VALUES,
     DEFAULT_NEED_UAT_BY_MARKET,
-    DEFAULT_SHEET_HEADERS,
     TEAM_DEFAULT_EMAIL_PLACEHOLDER,
     TEAM_PROFILE_DEFAULTS,
     WebConfigStore,
@@ -2469,7 +2464,6 @@ def _build_mapping_log_summary(config_data: dict[str, Any], *, save_mode: str = 
         "system_header": str(config_data.get("system_header", "") or "").strip(),
         "market_header": str(config_data.get("market_header", "") or "").strip(),
         "input_tab_name": str(config_data.get("input_tab_name", "") or "").strip(),
-        "has_spreadsheet_link": bool(str(config_data.get("spreadsheet_link", "") or "").strip()),
         "has_bpmis_token": bool(str(config_data.get("bpmis_api_access_token", "") or "").strip()),
         "route_rule_count": _count_configured_lines(config_data.get("component_route_rules_text", "")),
         "route_component_count": _count_routed_components(config_data.get("component_route_rules_text", "")),
@@ -2912,7 +2906,6 @@ def create_app() -> Flask:
         config_data = raw_config_data or config_store._normalize({})
         config_data = _hydrate_setup_defaults(config_data, user_identity, team_profiles=effective_team_profiles)
         _apply_sync_email_policy(config_data, user_identity)
-        input_headers: list[str] = []
         has_saved_config = bool(config_key and raw_config_data)
         default_workspace_tab = session.pop("default_workspace_tab", "run" if has_saved_config else "setup")
         allowed_workspace_tabs = {"setup", "run", "productization-upgrade-summary"}
@@ -2920,34 +2913,6 @@ def create_app() -> Flask:
             allowed_workspace_tabs.add("team-default-admin")
         if requested_workspace_tab in allowed_workspace_tabs:
             default_workspace_tab = requested_workspace_tab
-
-        if (
-            "google_credentials" in session
-            and _has_explicit_spreadsheet_link(raw_config_data)
-            and _google_session_can_call_live_google_apis()
-        ):
-            try:
-                sheets = _build_sheets_service(settings, config_data)
-                snapshot = sheets.read_snapshot()
-                input_headers = snapshot.headers
-            except ToolError as error:
-                error_details = _classify_portal_error(error)
-                _log_portal_event(
-                    "index_sheet_snapshot_tool_error",
-                    level=logging.WARNING,
-                    **_build_request_log_context(
-                        settings,
-                        user_identity=user_identity,
-                        extra=error_details,
-                    ),
-                )
-            except Exception:
-                _log_portal_event(
-                    "index_sheet_snapshot_unexpected_error",
-                    level=logging.WARNING,
-                    **_build_request_log_context(settings, user_identity=user_identity),
-                )
-                current_app.logger.warning("Google Sheets snapshot read failed on index.", exc_info=True)
 
         return render_template(
             "index.html",
@@ -2968,7 +2933,7 @@ def create_app() -> Flask:
             team_profile_admin_configs=effective_team_profiles,
             team_profile_admin_enabled=_is_team_profile_admin(user_identity),
             default_workspace_tab=default_workspace_tab,
-            input_headers=input_headers,
+            input_headers=[],
             google_authorized=True,
         )
 
@@ -5099,7 +5064,7 @@ def create_app() -> Flask:
             existing_config = _load_user_config_for_identity(settings, user_identity) or config_store._normalize({})
             save_mode = str(request.form.get("save_mode", "") or "").strip()
             config = {
-                "spreadsheet_link": request.form.get("spreadsheet_link", ""),
+                "spreadsheet_link": "",
                 "input_tab_name": request.form.get("input_tab_name", ""),
                 "bpmis_api_access_token": request.form.get("bpmis_api_access_token", ""),
                 "pm_team": request.form.get("pm_team", ""),
@@ -5168,7 +5133,7 @@ def create_app() -> Flask:
                     extra=_build_mapping_log_summary(config, save_mode=save_mode),
                 ),
             )
-            flash("Your web Jira config was saved for this user and will be used for preview/run.", "success")
+            flash("Your web Jira config was saved for this user and will be used for BPMIS Projects.", "success")
         except ToolError as error:
             error_details = _classify_portal_error(error)
             _log_portal_event(
@@ -6310,139 +6275,9 @@ def create_app() -> Flask:
             current_app.logger.exception("PRD Self-Assessment latest load failed.")
             return jsonify({"status": "error", "message": str(error) or "Could not load latest PRD Self-Assessment result."}), HTTPStatus.BAD_REQUEST
 
-    @app.get("/download/default-sheet-template.csv")
-    def download_default_sheet_template():
-        sample_row = [
-            "225159",
-            "Standalone Cash Loan",
-            "https://docs.google.com/document/d/example",
-            "SG",
-            "AF",
-            "Fraud rule improvement",
-            "https://confluence/example-prd",
-            "Detailed Jira description goes here.",
-            "",
-        ]
-        csv_lines = [
-            ",".join(_csv_escape(header) for header in DEFAULT_SHEET_HEADERS),
-            ",".join(_csv_escape(value) for value in sample_row),
-        ]
-        payload = io.BytesIO("\n".join(csv_lines).encode("utf-8"))
-        return send_file(
-            payload,
-            mimetype="text/csv",
-            as_attachment=True,
-            download_name="bpmis_jira_default_sheet_template.csv",
-        )
-
-    @app.get("/download/default-sheet-template.xlsx")
-    def download_default_sheet_template_xlsx():
-        workbook = Workbook()
-        worksheet = workbook.active
-        worksheet.title = "Sheet1"
-
-        sample_row = [
-            "225159",
-            "Standalone Cash Loan",
-            "https://docs.google.com/document/d/example",
-            "SG",
-            "AF",
-            "Fraud rule improvement",
-            "https://confluence/example-prd",
-            "Detailed Jira description goes here.",
-            "",
-        ]
-        worksheet.append(DEFAULT_SHEET_HEADERS)
-        worksheet.append(sample_row)
-
-        header_font = Font(bold=True, color="1F2937")
-        for cell in worksheet[1]:
-            cell.font = header_font
-
-        worksheet.freeze_panes = "A2"
-        for column_letter, width in {
-            "A": 16,
-            "B": 28,
-            "C": 12,
-            "D": 30,
-            "E": 14,
-            "F": 28,
-            "G": 34,
-            "H": 42,
-            "I": 28,
-        }.items():
-            worksheet.column_dimensions[column_letter].width = width
-
-        payload = io.BytesIO()
-        workbook.save(payload)
-        payload.seek(0)
-        return send_file(
-            payload,
-            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            as_attachment=True,
-            download_name="bpmis_jira_default_sheet_template.xlsx",
-        )
-
-    @app.post("/preview")
-    def preview():
-        login_gate = _require_google_login(settings)
-        if login_gate is not None:
-            return login_gate
-        try:
-            service = _build_service(settings)
-            results, _headers = service.preview()
-            session["last_results"] = _serialize_results(results, include_skipped=False)
-            _log_portal_event("preview_success", **_build_request_log_context(settings))
-        except ToolError as error:
-            error_details = _classify_portal_error(error)
-            _log_portal_event(
-                "preview_tool_error",
-                level=logging.WARNING,
-                **_build_request_log_context(settings, extra=error_details),
-            )
-            flash(str(error), "error")
-        return redirect(url_for("index"))
-
-    @app.post("/run")
-    def run():
-        login_gate = _require_google_login(settings)
-        if login_gate is not None:
-            return login_gate
-        dry_run = request.form.get("dry_run") == "on"
-        try:
-            service = _build_service(settings)
-            results = service.run(dry_run=dry_run)
-            session["last_results"] = _serialize_results(results, include_skipped=False)
-            session["run_notice"] = _build_run_notice(results, dry_run=dry_run)
-            if dry_run:
-                flash("Dry run completed without updating the sheet.", "success")
-            else:
-                flash("Run completed. Check the results table below.", "success")
-            _log_portal_event(
-                "run_success",
-                **_build_request_log_context(settings, extra={"dry_run": dry_run}),
-            )
-        except ToolError as error:
-            error_details = _classify_portal_error(error)
-            _log_portal_event(
-                "run_tool_error",
-                level=logging.WARNING,
-                **_build_request_log_context(settings, extra={**error_details, "dry_run": dry_run}),
-            )
-            flash(str(error), "error")
-        return redirect(url_for("index"))
-
-    @app.post("/api/jobs/preview")
-    def create_preview_job():
-        return _start_job("preview", dry_run=True)
-
-    @app.post("/api/jobs/run")
-    def create_run_job():
-        return _start_job("run", dry_run=False)
-
     @app.post("/api/jobs/sync-bpmis-projects")
     def create_sync_bpmis_projects_job():
-        return _start_job("sync-bpmis-projects", dry_run=False)
+        return _start_job("sync-bpmis-projects")
 
     @app.route("/api/local-agent/<path:agent_path>", methods=["GET", "POST", "PATCH", "DELETE"])
     def local_agent_public_proxy(agent_path: str):
@@ -6801,6 +6636,11 @@ def create_app() -> Flask:
                 HTTPStatus.INTERNAL_SERVER_ERROR,
             )
 
+    @app.post("/api/jobs/preview")
+    @app.post("/api/jobs/run")
+    def removed_sheet_automation_job_api():
+        return jsonify({"status": "error", "message": "Job not found."}), HTTPStatus.NOT_FOUND
+
     @app.get("/api/jobs/<job_id>")
     def get_job(job_id: str):
         snapshot = current_app.config["JOB_STORE"].snapshot(job_id)
@@ -6971,72 +6811,10 @@ def create_app() -> Flask:
             },
         )
 
-    @app.post("/api/spreadsheets/create-template")
-    def create_template_spreadsheet():
+    def _start_job(action: str):
         login_gate = _require_google_login(settings, api=True)
         if login_gate is not None:
             return login_gate
-        if "google_credentials" not in session:
-            return jsonify({"status": "error", "message": "Please connect Google Sheets first."}), HTTPStatus.BAD_REQUEST
-
-        config_data = _load_current_user_config(settings)
-        input_tab_name = str(config_data.get("input_tab_name", "") or "").strip() or settings.input_tab_name or "Sheet1"
-        spreadsheet_title = "BPMIS Automation Tool"
-        try:
-            created = GoogleSheetsService.create_template_spreadsheet(
-                get_google_credentials(),
-                spreadsheet_title=spreadsheet_title,
-                input_tab=input_tab_name,
-                headers=DEFAULT_SHEET_HEADERS,
-            )
-            _log_portal_event(
-                "spreadsheet_template_create_success",
-                **_build_request_log_context(
-                    settings,
-                    extra={"spreadsheet_id": created["spreadsheet_id"], "input_tab_name": input_tab_name},
-                ),
-            )
-            return jsonify(
-                {
-                    "status": "ok",
-                    "message": "A new Google Sheet was created and prefilled with the template header row.",
-                    **created,
-                }
-            )
-        except ToolError as error:
-            error_details = _classify_portal_error(error)
-            _log_portal_event(
-                "spreadsheet_template_create_tool_error",
-                level=logging.WARNING,
-                **_build_request_log_context(
-                    settings,
-                    extra={**error_details, "input_tab_name": input_tab_name},
-                ),
-            )
-            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
-        except Exception:
-            _log_portal_event(
-                "spreadsheet_template_create_unexpected_error",
-                level=logging.ERROR,
-                **_build_request_log_context(settings, extra={"input_tab_name": input_tab_name}),
-            )
-            current_app.logger.exception("Google Sheet template creation failed.")
-            return (
-                jsonify(
-                    {
-                        "status": "error",
-                        "message": "Unable to create a new Google Sheet right now. Please try again shortly.",
-                    }
-                ),
-                HTTPStatus.INTERNAL_SERVER_ERROR,
-            )
-
-    def _start_job(action: str, *, dry_run: bool):
-        login_gate = _require_google_login(settings, api=True)
-        if login_gate is not None:
-            return login_gate
-        if action != "sync-bpmis-projects" and "google_credentials" not in session:
-            return jsonify({"status": "error", "message": "Please connect Google Sheets first."}), 400
 
         user_identity = _get_user_identity(settings)
         config_data = _load_user_config_for_identity(settings, user_identity) or config_store._normalize({})
@@ -7045,16 +6823,13 @@ def create_app() -> Flask:
         config_data["_user_key"] = user_identity["config_key"]
         job_store: JobStore = current_app.config["JOB_STORE"]
         title = {
-            "preview": "Preview Eligible Rows",
-            "run": "Run Ticket Creation",
             "sync-bpmis-projects": "Sync BPMIS Projects",
         }.get(action, "Background Job")
         job = job_store.create(action, title=title)
-        credentials_payload = dict(session.get("google_credentials") or {})
 
         thread = threading.Thread(
             target=_run_background_job,
-            args=(app, job.job_id, action, settings, config_data, credentials_payload, dry_run),
+            args=(app, job.job_id, action, settings, config_data),
             daemon=True,
         )
         thread.start()
@@ -7063,27 +6838,12 @@ def create_app() -> Flask:
             **_build_request_log_context(
                 settings,
                 user_identity=user_identity,
-                extra={"job_id": job.job_id, "action": action, "dry_run": dry_run},
+                extra={"job_id": job.job_id, "action": action},
             ),
         )
         return jsonify({"status": "queued", "job_id": job.job_id})
 
     return app
-
-
-def _build_service(settings: Settings) -> JiraCreationService:
-    user_identity = _get_user_identity(settings)
-    config_store = _get_config_store()
-    config_data = _load_user_config_for_identity(settings, user_identity) or config_store._normalize({})
-    sheets = _build_sheets_service(settings, config_data)
-    field_mappings_override = config_store.build_field_mappings(config_data)
-    access_token = _resolve_bpmis_access_token(config_data, settings)
-    return JiraCreationService(
-        settings,
-        sheets,
-        access_token=access_token,
-        field_mappings_override=field_mappings_override,
-    )
 
 
 def _build_bpmis_client_for_current_user(settings: Settings):
@@ -7101,34 +6861,6 @@ def _load_current_user_config(settings: Settings) -> dict[str, Any]:
     return hydrated
 
 
-def _build_service_from_config(
-    settings: Settings,
-    config_data: dict[str, Any],
-    credentials_payload: dict[str, Any],
-) -> JiraCreationService:
-    credentials = Credentials(**credentials_payload)
-    sheets = _build_sheets_service_with_credentials(settings, config_data, credentials)
-    field_mappings_override = _get_config_store().build_field_mappings(config_data)
-    access_token = _resolve_bpmis_access_token(config_data, settings)
-    return JiraCreationService(
-        settings,
-        sheets,
-        access_token=access_token,
-        field_mappings_override=field_mappings_override,
-    )
-
-
-def _build_project_sync_service_from_config(
-    settings: Settings,
-    config_data: dict[str, Any],
-    credentials_payload: dict[str, Any],
-) -> BPMISProjectSyncService:
-    credentials = Credentials(**credentials_payload)
-    sheets = _build_sheets_service_with_credentials(settings, config_data, credentials)
-    bpmis_client = build_bpmis_client(settings, access_token=_resolve_bpmis_access_token(config_data, settings))
-    return BPMISProjectSyncService(sheets, bpmis_client)
-
-
 def _build_portal_project_sync_service(settings: Settings, config_data: dict[str, Any]) -> PortalProjectSyncService:
     bpmis_client = build_bpmis_client(settings, access_token=_resolve_bpmis_access_token(config_data, settings))
     return PortalProjectSyncService(_get_bpmis_project_store(), bpmis_client)
@@ -7142,11 +6874,6 @@ def _build_portal_jira_creation_service(settings: Settings) -> PortalJiraCreatio
         config_store=_get_config_store(),
         config_data=config_data,
     )
-
-
-def _build_sheets_service(settings: Settings, config_data: dict[str, object] | None = None) -> GoogleSheetsService:
-    credentials = get_google_credentials()
-    return _build_sheets_service_with_credentials(settings, config_data or {}, credentials)
 
 
 def _build_gmail_dashboard_service() -> GmailDashboardService:
@@ -7983,32 +7710,6 @@ def _seatalk_dashboard_is_configured(settings: Settings) -> bool:
     app_path = Path(str(settings.seatalk_local_app_path or "")).expanduser()
     data_dir = Path(str(settings.seatalk_local_data_dir or "")).expanduser()
     return bool(app_path.exists() and data_dir.exists() and (data_dir / "config.json").exists())
-
-
-def _has_explicit_spreadsheet_link(config_data: dict[str, object] | None) -> bool:
-    if not config_data:
-        return False
-    return bool(str(config_data.get("spreadsheet_link", "")).strip())
-
-
-def _build_sheets_service_with_credentials(
-    settings: Settings,
-    config_data: dict[str, object] | None,
-    credentials,
-) -> GoogleSheetsService:
-    config_data = config_data or {}
-    spreadsheet_id = _resolve_spreadsheet_id(str(config_data.get("spreadsheet_link", "")).strip()) or settings.spreadsheet_id
-    input_tab_name = str(config_data.get("input_tab_name", "")).strip() or settings.input_tab_name
-    issue_id_header = str(config_data.get("issue_id_header", "")).strip() or "Issue ID"
-    jira_ticket_link_header = str(config_data.get("jira_ticket_link_header", "")).strip() or "Jira Ticket Link"
-    return GoogleSheetsService(
-        credentials=credentials,
-        spreadsheet_id=spreadsheet_id,
-        common_tab=settings.common_tab_name,
-        input_tab=input_tab_name,
-        issue_id_header=issue_id_header,
-        jira_ticket_link_header=jira_ticket_link_header,
-    )
 
 
 def _get_config_store() -> WebConfigStore:
@@ -11021,49 +10722,6 @@ def _validate_team_profile_setup(
         )
 
 
-def _resolve_spreadsheet_id(value: str) -> str | None:
-    if not value:
-        return None
-    match = re.search(r"/spreadsheets/d/([a-zA-Z0-9-_]+)", value)
-    if match:
-        return match.group(1)
-    if re.fullmatch(r"[a-zA-Z0-9-_]{20,}", value):
-        return value
-    return None
-
-
-def _build_run_notice(results: list[object], dry_run: bool) -> dict[str, object]:
-    created = [result for result in results if getattr(result, "status", "") == "created"]
-    errors = [result for result in results if getattr(result, "status", "") == "error"]
-    skipped = [result for result in results if getattr(result, "status", "") == "skipped"]
-    previews = [result for result in results if getattr(result, "status", "") == "preview"]
-
-    title = "Dry Run Ready" if dry_run else ("Run Completed" if not errors else "Run Completed With Issues")
-    tone = "success" if not errors else "warning"
-    summary = (
-        f"{len(previews)} ready, {len(errors)} error, {len(skipped)} skipped."
-        if dry_run
-        else f"{len(created)} created, {len(errors)} error, {len(skipped)} skipped."
-    )
-
-    details: list[str] = []
-    for result in created[:3]:
-        ticket = getattr(result, "ticket_key", None) or getattr(result, "ticket_link", None) or "-"
-        details.append(f"Created row {result.row_number}: {ticket}")
-    for result in errors[:3]:
-        details.append(f"Row {result.row_number}: {result.message}")
-    if not details:
-        for result in skipped[:3]:
-            details.append(f"Row {result.row_number}: {result.message}")
-
-    return {
-        "title": title,
-        "tone": tone,
-        "summary": summary,
-        "details": details,
-    }
-
-
 def _build_sync_notice(results: list[object]) -> dict[str, object]:
     created = [result for result in results if getattr(result, "status", "") == "created"]
     updated = [result for result in results if getattr(result, "status", "") == "updated"]
@@ -11973,8 +11631,6 @@ def _run_background_job(
     action: str,
     settings: Settings,
     config_data: dict[str, Any],
-    credentials_payload: dict[str, Any],
-    dry_run: bool,
 ) -> None:
     with app.app_context():
         job_store: JobStore = app.config["JOB_STORE"]
@@ -11992,7 +11648,6 @@ def _run_background_job(
             logger=logger,
             job_id=job_id,
             action=action,
-            dry_run=dry_run,
             pm_team=str(config_data.get("pm_team", "") or "").strip().upper(),
             user=str(config_data.get("sync_pm_email", "") or "").strip().lower(),
         )
@@ -12008,25 +11663,18 @@ def _run_background_job(
             )
 
         try:
-            if action == "sync-bpmis-projects":
-                service = _build_portal_project_sync_service(settings, config_data)
-                results = service.sync_projects(
-                    user_key=str(config_data.get("_user_key", "")).strip(),
-                    pm_email=str(config_data.get("sync_pm_email", "")).strip(),
-                    progress_callback=progress_callback,
-                )
-                notice = _build_sync_notice(results)
-            else:
-                service = _build_service_from_config(settings, config_data, credentials_payload)
-                if dry_run:
-                    results, _headers = service.preview(progress_callback=progress_callback)
-                else:
-                    results = service.run(dry_run=False, progress_callback=progress_callback)
-                notice = _build_run_notice(results, dry_run=dry_run)
-            include_skipped = action == "sync-bpmis-projects"
+            if action != "sync-bpmis-projects":
+                raise ToolError(f"Unsupported background job action: {action}")
+            service = _build_portal_project_sync_service(settings, config_data)
+            results = service.sync_projects(
+                user_key=str(config_data.get("_user_key", "")).strip(),
+                pm_email=str(config_data.get("sync_pm_email", "")).strip(),
+                progress_callback=progress_callback,
+            )
+            notice = _build_sync_notice(results)
             job_store.complete(
                 job_id,
-                results=_serialize_results(results, include_skipped=include_skipped),
+                results=_serialize_results(results, include_skipped=True),
                 notice=notice,
             )
             _log_portal_event(
@@ -12034,7 +11682,6 @@ def _run_background_job(
                 logger=logger,
                 job_id=job_id,
                 action=action,
-                dry_run=dry_run,
                 result_count=len(results),
             )
         except ToolError as error:
@@ -12046,7 +11693,6 @@ def _run_background_job(
                 logger=logger,
                 job_id=job_id,
                 action=action,
-                dry_run=dry_run,
                 **error_details,
             )
         except Exception as error:  # noqa: BLE001
@@ -12058,17 +11704,9 @@ def _run_background_job(
                 logger=logger,
                 job_id=job_id,
                 action=action,
-                dry_run=dry_run,
                 **error_details,
             )
             logger.exception("Background job failed unexpectedly.")
-
-
-def _csv_escape(value: str) -> str:
-    text = str(value)
-    if any(character in text for character in [",", "\"", "\n"]):
-        return "\"" + text.replace("\"", "\"\"") + "\""
-    return text
 
 
 def _resolve_bpmis_access_token(config_data: dict[str, Any], settings: Settings) -> str | None:

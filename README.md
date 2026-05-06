@@ -7,11 +7,10 @@ This repository now supports both:
 
 The current local-first edition is a Flask web app that:
 
-- connects to Google Sheets with Google OAuth
-- reads one configurable Spreadsheet and Input tab
-- previews eligible rows whose `Jira Ticket Link` is blank
+- lets a user sync BPMIS projects into portal-owned storage
+- manages project-level Jira creation from the My Projects view
 - creates Jira tickets through BPMIS
-- writes the full Jira URL back to the configured Jira link column
+- stores project rows and created Jira links in the portal data store
 
 Current local assumptions:
 
@@ -24,7 +23,7 @@ Current shared-team assumptions:
 
 - one host Mac runs the portal
 - teammates open the fixed ngrok URL as the primary shared portal and sign in with `@npt.sg` Google accounts
-- each teammate stores their own spreadsheet config and BPMIS token in the portal
+- each teammate stores their own BPMIS token and team routing config in the portal
 - BPMIS tokens saved through the shared portal are encrypted at rest with `TEAM_PORTAL_CONFIG_ENCRYPTION_KEY`
 - Default release requests deploy UAT only. If a request says to publish Live without mentioning Cloud Run, publish only the Mac-hosted fixed-ngrok portal. Deploy Cloud Run live traffic only when the request explicitly says "live Cloud Run" or equivalent.
 - New Cloud Run services default to Mac local-agent-backed cache, DB, and durable state. Do not use Cloud Run's container-local team portal data directory as the system of record unless explicitly requested.

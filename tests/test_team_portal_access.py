@@ -62,19 +62,6 @@ class _NoStartThread:
         return None
 
 
-class _FailingPortalJobService:
-    def __init__(self, message):
-        self.message = message
-
-    def preview(self, *, progress_callback):
-        progress_callback("bpmis_preview", "Calling BPMIS preview fake.", 1, 1)
-        raise ToolError(self.message)
-
-    def run(self, *, dry_run, progress_callback):
-        progress_callback("bpmis_run", "Calling BPMIS run fake.", 1, 1)
-        raise ToolError(self.message)
-
-
 class _FailingProjectSyncService:
     def __init__(self, message):
         self.message = message
@@ -88,17 +75,11 @@ class _SlowPortalJobService:
     def __init__(self):
         self.calls = 0
 
-    def preview(self, *, progress_callback):
+    def sync_projects(self, *, user_key, pm_email, progress_callback):
         self.calls += 1
-        progress_callback("bpmis_preview", "Slow fake BPMIS preview.", 1, 2)
+        progress_callback("bpmis_project_sync", "Slow fake BPMIS sync.", 1, 2)
         time.sleep(0.02)
-        return ([{"status": "ready", "jira_title": "Preview row", "timing_step": "bpmis_preview"}], [])
-
-    def run(self, *, dry_run, progress_callback):
-        self.calls += 1
-        progress_callback("bpmis_run", "Slow fake BPMIS run.", 1, 2)
-        time.sleep(0.02)
-        return [{"status": "created", "jira_title": "Run row", "timing_step": "bpmis_run"}]
+        return [{"status": "created", "jira_title": "Synced project", "timing_step": "bpmis_project_sync"}]
 
 
 class TeamPortalAccessTests(unittest.TestCase):
@@ -163,8 +144,7 @@ class TeamPortalAccessTests(unittest.TestCase):
 
             with app.test_client() as client:
                 response = client.get("/download/default-sheet-template.xlsx", follow_redirects=False)
-                self.assertEqual(response.status_code, 302)
-                self.assertEqual(response.headers["Location"], "/")
+                self.assertEqual(response.status_code, 404)
 
     def test_forwarded_https_scheme_is_used_for_slash_redirects(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
@@ -560,8 +540,6 @@ class TeamPortalAccessTests(unittest.TestCase):
                 )
             }
             expected_endpoints = {
-                "create_preview_job",
-                "create_run_job",
                 "create_sync_bpmis_projects_job",
                 "get_job",
                 "gmail_seatalk_demo",
@@ -603,6 +581,7 @@ class TeamPortalAccessTests(unittest.TestCase):
                 "productization_upgrade_summary_issues",
                 "productization_upgrade_summary_llm_descriptions",
                 "productization_upgrade_summary_versions",
+                "removed_sheet_automation_job_api",
                 "save_team_dashboard_members",
                 "save_team_dashboard_monthly_report_template",
                 "save_team_dashboard_report_intelligence",
@@ -664,8 +643,8 @@ class TeamPortalAccessTests(unittest.TestCase):
                     ("get", "/api/productization-upgrade-summary/versions?q=26Q2", {200}),
                     ("get", "/api/productization-upgrade-summary/issues?version_id=88", {200}),
                     ("get", "/api/productization-upgrade-summary/llm-descriptions?version_id=88", {200}),
-                    ("post", "/api/jobs/preview", {200}),
-                    ("post", "/api/jobs/run", {200}),
+                    ("post", "/api/jobs/preview", {404}),
+                    ("post", "/api/jobs/run", {404}),
                     ("post", "/api/jobs/sync-bpmis-projects", {200}),
                     ("get", "/api/jobs/missing", {404}),
                     ("get", "/team-dashboard", {302}),
@@ -833,7 +812,7 @@ class TeamPortalAccessTests(unittest.TestCase):
                     {"status": "ok", "revision": _current_release_revision()},
                 )
 
-    def test_preview_job_requires_google_connection(self):
+    def test_removed_sheet_preview_job_endpoint_rejects_post(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
@@ -850,9 +829,7 @@ class TeamPortalAccessTests(unittest.TestCase):
 
             with app.test_client() as client:
                 response = client.post("/api/jobs/preview")
-                self.assertEqual(response.status_code, 400)
-                payload = response.get_json()
-                self.assertIn("connect Google", payload["message"])
+                self.assertEqual(response.status_code, 404)
 
     def test_sync_job_does_not_require_google_connection(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
@@ -887,11 +864,9 @@ class TeamPortalAccessTests(unittest.TestCase):
 
     def test_bpmis_background_job_failure_matrix_returns_pollable_stable_errors(self):
         scenarios = [
-            ("preview", True, "BPMIS preview timed out.", "_build_service_from_config", _FailingPortalJobService),
-            ("run", False, "BPMIS create returned 403.", "_build_service_from_config", _FailingPortalJobService),
-            ("sync-bpmis-projects", False, "BPMIS project sync returned invalid JSON.", "_build_portal_project_sync_service", _FailingProjectSyncService),
+            ("sync-bpmis-projects", "BPMIS project sync returned invalid JSON.", "_build_portal_project_sync_service", _FailingProjectSyncService),
         ]
-        for action, dry_run, message, patch_target, service_factory in scenarios:
+        for action, message, patch_target, service_factory in scenarios:
             with self.subTest(action=action), tempfile.TemporaryDirectory() as temp_dir, patch.dict(
                 os.environ,
                 {
@@ -907,7 +882,7 @@ class TeamPortalAccessTests(unittest.TestCase):
                 job = app.config["JOB_STORE"].create(action, title=f"{action} test")
                 config_data = {"_user_key": "google:teammate@npt.sg", "pm_team": "AF", "sync_pm_email": "teammate@npt.sg"}
                 with patch(f"bpmis_jira_tool.web.{patch_target}", return_value=service_factory(message)):
-                    _run_background_job(app, job.job_id, action, app.config["SETTINGS"], config_data, {"token": "x"}, dry_run)
+                    _run_background_job(app, job.job_id, action, app.config["SETTINGS"], config_data)
                 snapshot = app.config["JOB_STORE"].snapshot(job.job_id)
 
             self.assertEqual(snapshot["state"], "failed")
@@ -930,10 +905,10 @@ class TeamPortalAccessTests(unittest.TestCase):
             app = create_app()
             app.testing = True
             service = _SlowPortalJobService()
-            job = app.config["JOB_STORE"].create("preview", title="preview timing test")
+            job = app.config["JOB_STORE"].create("sync-bpmis-projects", title="sync timing test")
             config_data = {"_user_key": "google:teammate@npt.sg", "pm_team": "AF", "sync_pm_email": "teammate@npt.sg"}
-            with patch("bpmis_jira_tool.web._build_service_from_config", return_value=service):
-                _run_background_job(app, job.job_id, "preview", app.config["SETTINGS"], config_data, {"token": "x"}, True)
+            with patch("bpmis_jira_tool.web._build_portal_project_sync_service", return_value=service):
+                _run_background_job(app, job.job_id, "sync-bpmis-projects", app.config["SETTINGS"], config_data)
 
             with app.test_client() as client:
                 self._login_non_admin(client)
@@ -944,7 +919,7 @@ class TeamPortalAccessTests(unittest.TestCase):
         self.assertEqual(second_poll.status_code, 200)
         first_payload = first_poll.get_json()
         self.assertEqual(first_payload["state"], "completed")
-        self.assertEqual(first_payload["results"][0]["timing_step"], "bpmis_preview")
+        self.assertEqual(first_payload["results"][0]["timing_step"], "bpmis_project_sync")
         self.assertGreaterEqual(first_payload["completed_at"] - first_payload["started_at"], 0.02)
         self.assertEqual(service.calls, 1)
 
@@ -1142,9 +1117,7 @@ class TeamPortalAccessTests(unittest.TestCase):
 
             with app.test_client() as client:
                 response = client.get("/download/default-sheet-template.csv")
-                self.assertEqual(response.status_code, 200)
-                self.assertEqual(response.mimetype, "text/csv")
-                self.assertIn(b"BPMIS ID,Project Name,BRD Link,Market,System,Jira Title,PRD Link,Description,Jira Ticket Link", response.data)
+                self.assertEqual(response.status_code, 404)
 
     def test_allowlist_without_shared_portal_host_does_not_block_local_user_sessions(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(

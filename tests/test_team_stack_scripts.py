@@ -287,6 +287,32 @@ exit 0
         self.assertIn("./scripts/run_local_agent.sh restart", contents)
         self.assertIn("/uat-local-agent", contents)
 
+    def test_release_checklist_documents_full_gate_and_read_only_smoke(self):
+        checklist = (PROJECT_ROOT / "docs/release-checklist.md").read_text(encoding="utf-8")
+
+        self.assertIn("System Full Test Gate", checklist)
+        self.assertIn("./.venv/bin/python scripts/run_system_full_test_gate.py --skip-smoke", checklist)
+        self.assertIn("--coverage-fail-under 100", checklist)
+        self.assertIn("./.venv/bin/python -m coverage run -m unittest discover -s tests", checklist)
+        self.assertIn("node --check static/gmail_seatalk_demo.js", checklist)
+        self.assertIn("./.venv/bin/python scripts/run_source_code_qa_release_gate.py", checklist)
+        self.assertIn("read-only", checklist)
+        self.assertIn("--uat-url \"$UAT_URL\"", checklist)
+        self.assertIn("--live-url \"$LIVE_URL\"", checklist)
+        self.assertIn("--expected-revision \"$EXPECTED_REVISION\"", checklist)
+        self.assertIn("curl -fsS \"$UAT_URL/healthz/\"", checklist)
+        self.assertIn("curl -fsS \"$UAT_URL/api/local-agent/healthz\"", checklist)
+        self.assertIn("curl -fsS \"$LIVE_URL/healthz\"", checklist)
+        self.assertIn("curl -fsS \"$LIVE_URL/api/local-agent/healthz\"", checklist)
+        for unsafe_command in (
+            "curl -X POST",
+            "curl --request POST",
+            "/api/jobs/run",
+            "/api/team-dashboard/monthly-report/send",
+            "/api/meeting-recorder",
+        ):
+            self.assertNotIn(unsafe_command, checklist)
+
     def test_uat_local_agent_setup_uses_separate_workspace_port_and_data_root(self):
         setup_script = (PROJECT_ROOT / "scripts/setup_uat_local_agent.sh").read_text(encoding="utf-8")
 

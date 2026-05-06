@@ -18,10 +18,38 @@ Use this checklist for every portal release. The default target is UAT only. Do 
 git status --short
 ```
 
-- Run the focused tests for the changed area, then the broad suite when the release touches shared portal behavior:
+### System Full Test Gate
+
+Run this gate before every portal release. It is intentionally read-only except for local test temp/cache output: it must not create Jira tickets, send Gmail/SeaTalk messages, write BPMIS data, or mutate production portal state.
+
+- Run the one-command local gate first. This executes the governed-code 100% coverage suite, frontend JavaScript syntax checks for checked-in browser scripts, and the deterministic Source Code Q&A release gate:
 
 ```bash
-./.venv/bin/python -m unittest discover -s tests
+./.venv/bin/python scripts/run_system_full_test_gate.py --skip-smoke
+```
+
+Use an explicit threshold when validating release tooling changes:
+
+```bash
+./.venv/bin/python scripts/run_system_full_test_gate.py --coverage-fail-under 100 --skip-smoke
+```
+
+- The Python coverage gate is intentionally strict for the governed release surface configured in `.coveragerc` (`bpmis_jira_tool/config.py`, `bpmis_jira_tool/errors.py`, `bpmis_jira_tool/user_config.py`, `prd_briefing/models.py`, and `prd_briefing/text_generation.py`). Broader all-module coverage is tracked as an advisory baseline until each legacy integration module is made deterministic enough for a real 100% gate; do not exclude business logic, permission checks, release safety checks, or read-only smoke behavior just to raise the percentage.
+
+- If debugging a failed step, the equivalent local commands are:
+
+```bash
+./.venv/bin/python -m coverage erase \
+  && ./.venv/bin/python -m coverage run -m unittest discover -s tests \
+  && ./.venv/bin/python -m coverage report --fail-under 100 \
+  && node --check static/gmail_seatalk_demo.js \
+  && node --check static/productization_upgrade_summary.js \
+  && node --check static/team_dashboard.js \
+  && node --check static/meeting_recorder.js \
+  && node --check static/prd_self_assessment.js \
+  && node --check static/prd_briefing.js \
+  && node --check static/source_code_qa.js \
+  && ./.venv/bin/python scripts/run_source_code_qa_release_gate.py
 ```
 
 - For Source Code Q&A changes, run the release gate/evals that match the changed retrieval or provider behavior:
@@ -64,6 +92,24 @@ SOURCE_CODE_QA_QUERY_SYNC_MODE
 BPMIS_CALL_MODE
 TEAM_PORTAL_STAGE
 TEAM_PORTAL_RELEASE_REVISION
+```
+
+- After UAT deploy, run the same one-command gate with read-only UAT/Live smoke enabled. `EXPECTED_REVISION` must be the Git SHA deployed by `deploy_cloud_run_uat.sh`; `UAT_URL` is the Cloud Run tag URL printed by that script; `LIVE_URL` is the fixed-ngrok portal URL:
+
+```bash
+./.venv/bin/python scripts/run_system_full_test_gate.py \
+  --uat-url "$UAT_URL" \
+  --live-url "$LIVE_URL" \
+  --expected-revision "$EXPECTED_REVISION"
+```
+
+- The smoke step only sends GET requests to these read-only endpoints and fails if Live is already serving the UAT revision before promotion:
+
+```bash
+curl -fsS "$UAT_URL/healthz/"
+curl -fsS "$UAT_URL/api/local-agent/healthz"
+curl -fsS "$LIVE_URL/healthz"
+curl -fsS "$LIVE_URL/api/local-agent/healthz"
 ```
 
 ## 2. UAT Release

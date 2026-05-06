@@ -17,7 +17,7 @@ from bpmis_jira_tool.local_agent_client import LocalAgentClient
 from bpmis_jira_tool.local_agent_protocol import sign_headers, verify_signature
 from bpmis_jira_tool.local_agent_server import create_local_agent_app
 from bpmis_jira_tool.models import CreatedTicket
-from bpmis_jira_tool.service import build_bpmis_client
+from bpmis_jira_tool.bpmis_client import build_bpmis_client
 from bpmis_jira_tool.config import Settings
 
 

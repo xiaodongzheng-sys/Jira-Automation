@@ -324,7 +324,9 @@ if [[ "${CLOUD_RUN_UAT_LOCAL_AGENT_SECRET_SOURCE:-secret_manager}" == "env" ]]; 
     exit 1
   fi
   ENV_VARS+=("LOCAL_AGENT_HMAC_SECRET=$uat_hmac_secret")
-  DEPLOY_SECRET_ARGS=(--set-secrets "$BASE_SECRET_BINDINGS")
+  DEPLOY_SECRET_ARGS=(--update-secrets "$BASE_SECRET_BINDINGS")
+  ENV_REMOVE_ARGS=(--remove-secrets LOCAL_AGENT_HMAC_SECRET)
+  ENV_DEPLOY_MODE="update"
   ENV_SECRET_PRECLEAR_REQUIRED=1
   echo "Using UAT local-agent HMAC from env fallback because CLOUD_RUN_UAT_LOCAL_AGENT_SECRET_SOURCE=env."
 fi
@@ -418,7 +420,8 @@ if [[ "$ENV_SECRET_PRECLEAR_REQUIRED" == "1" ]]; then
     --no-traffic \
     --tag "${UAT_TAG}-secret-clear" \
     --remove-secrets LOCAL_AGENT_HMAC_SECRET \
-    --update-secrets "$BASE_SECRET_BINDINGS"
+    --update-secrets "$BASE_SECRET_BINDINGS" \
+    --update-env-vars "LOCAL_AGENT_HMAC_SECRET=$uat_hmac_secret"
 fi
 
 "$GCLOUD_BIN" run deploy "$SERVICE" \

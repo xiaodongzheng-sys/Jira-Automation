@@ -27,6 +27,12 @@ class ConfigTests(unittest.TestCase):
 
         self.assertEqual(settings.prd_briefing_edge_mandarin_voice, "zh-CN-XiaoxiaoNeural")
 
+    def test_spreadsheet_id_defaults_blank(self):
+        with patch.dict(os.environ, {}, clear=True), patch("bpmis_jira_tool.config.find_dotenv", return_value=""):
+            settings = Settings.from_env()
+
+        self.assertEqual(settings.spreadsheet_id, "")
+
     def test_from_env_loads_meeting_recorder_transcription_performance_settings(self):
         with patch.dict(
             os.environ,
@@ -122,6 +128,25 @@ class ConfigTests(unittest.TestCase):
             settings = Settings.from_env()
 
         self.assertEqual(settings.local_agent_connect_timeout_seconds, 4)
+
+    def test_invalid_integer_helper_env_value_falls_back_to_default(self):
+        with patch.dict(
+            os.environ,
+            {
+                "MEETING_RECORDER_TRANSCRIPT_SEGMENT_WORKERS": "not-a-number",
+                "LOCAL_AGENT_TIMEOUT_SECONDS": "not-a-number",
+                "LOCAL_AGENT_CONNECT_TIMEOUT_SECONDS": "not-a-number",
+            },
+            clear=True,
+        ), patch(
+            "bpmis_jira_tool.config.find_dotenv",
+            return_value="",
+        ):
+            settings = Settings.from_env()
+
+        self.assertEqual(settings.meeting_recorder_transcript_segment_workers, 2)
+        self.assertEqual(settings.local_agent_timeout_seconds, 300)
+        self.assertEqual(settings.local_agent_connect_timeout_seconds, 10)
 
     def test_meeting_recorder_screen_preflight_timeout_from_env(self):
         env = {

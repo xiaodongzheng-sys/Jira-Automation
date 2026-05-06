@@ -5,14 +5,11 @@ This document describes the current single-user local edition that should remain
 ## What It Does
 
 - Runs a local Flask web portal on `127.0.0.1:5000`
-- Uses Google OAuth to access Google Sheets
-- Reads one configurable spreadsheet and one configurable input tab
-- Treats rows as eligible when:
-  - the configured Issue ID header has a value
-  - the configured Jira Ticket Link header is blank
+- Uses Google OAuth for portal sign-in where required
+- Syncs BPMIS projects into portal-owned storage
 - Uses the saved web config as the only field-mapping source
 - Creates Jira tickets through BPMIS
-- Writes the full Jira browse URL back to the Jira Ticket Link column
+- Stores Jira ticket links in the portal data store
 
 ## Current Runtime Model
 

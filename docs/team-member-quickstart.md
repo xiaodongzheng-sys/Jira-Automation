@@ -10,10 +10,9 @@ You do **not** need to install Python, edit `.env`, or run any terminal commands
 2. Click `Connect Google`
 3. Sign in with your `@npt.sg` Google account
 4. In `Configuration Studio`, fill in:
-   - Spreadsheet Link or ID
-   - Input Tab Name
    - BPMIS API Access Token
-   - your sheet header names and Jira mapping fields
+   - PM Team
+   - routing and Jira owner defaults if your team defaults are not prefilled
 5. Click `Save Web Config`
 6. Run `Self-Check`
 
@@ -21,8 +20,9 @@ You do **not** need to install Python, edit `.env`, or run any terminal commands
 
 1. Open the shared portal URL
 2. Sign in with your `@npt.sg` Google account if needed
-3. Click `Preview Eligible Rows`
-4. If the preview looks correct, click `Run Ticket Creation`
+3. Open `My Projects`
+4. Click `Sync BPMIS Projects`
+5. Create Jira tickets from the synced project cards
 
 ## Notes
 

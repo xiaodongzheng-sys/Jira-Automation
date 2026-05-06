@@ -32,7 +32,7 @@ So the team edition needs:
 - a central web portal
 - one BPMIS API token per teammate
 
-The central portal handles spreadsheet access and orchestration.
+The central portal handles project storage and orchestration.
 The direct BPMIS API client handles Jira creation with the configured token.
 
 The current prototype on this branch now includes:
@@ -53,7 +53,7 @@ Phase 1 is a proof-of-path, not a full production release.
 
 It should validate:
 
-- different users can keep different Spreadsheet / Header / field config
+- different users can keep different PM team routing and owner config
 - the web portal can identify the current user and load that user's config
 - the web portal can detect whether BPMIS API access is ready
 - the portal can use the configured BPMIS token to create a Jira ticket
@@ -65,8 +65,8 @@ It should validate:
 Responsibilities:
 
 - Google OAuth
-- spreadsheet read/write
-- preview/run UI
+- portal-owned BPMIS project storage
+- My Projects UI
 - per-user config storage
 - BPMIS API readiness status
 - dispatch Jira create requests directly to BPMIS

@@ -91,7 +91,7 @@ def create_jira_from_request(
     resolved_task_type = _clean_string(request_data.get("task_type")) or "Feature"
 
     if client_factory is None:
-        from bpmis_jira_tool.service import build_bpmis_client
+        from bpmis_jira_tool.bpmis_client import build_bpmis_client
 
         client_factory = build_bpmis_client
 

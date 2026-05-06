@@ -13,8 +13,8 @@ This guide is for teammates who need to run the tool on their own Mac.
 - 你使用的是 Mac
 - you can open BPMIS in Chrome
 - 你可以在 Chrome 里打开 BPMIS
-- your Google account can open the Spreadsheet you need
-- 你的 Google 账号可以访问要使用的 Spreadsheet
+- your Google account can sign in to the portal if Google login is enabled
+- 如果启用了 Google 登录，你的 Google 账号可以登录门户
 - Git is installed
 - 电脑里已经装好 Git
 
@@ -77,55 +77,50 @@ Without a token, the tool cannot call BPMIS APIs directly to create Jira tickets
 
 ## Step 5: Connect Google
 
-在网页里点击 `Connect Google`。  
+在网页里点击 `Connect Google`。
 On the tool page, click `Connect Google`.
 
-请使用能够访问目标 Spreadsheet 的 Google 账号。  
-Use the Google account that can access your Spreadsheet.
+请使用你的 `@npt.sg` Google 账号。
+Use your `@npt.sg` Google account.
 
-你不需要自己去配置 Google Cloud 或 redirect URL。  
+你不需要自己去配置 Google Cloud 或 redirect URL。
 You do not need to set up Google Cloud or configure redirect URLs yourself.
 
 ## Step 6: Confirm The Status Box
 
 你应该看到：
 
-- `Google Sheets = Connected`
 - `BPMIS API` passes in Self-Check
 
-If both are connected, you can continue.  
-如果这两项都显示已连接，就可以继续。
+If BPMIS API passes, you can continue.
+如果 BPMIS API 通过，就可以继续。
 
 ## Step 7: Fill In Your Settings
 
 在网页上填写这些信息：
 
-- the Spreadsheet link
-- Spreadsheet 链接
-- the Input tab name
-- Input 页签名称
-- the Issue ID column name
-- Issue ID 列名
-- the Jira Ticket Link column name
-- Jira Ticket Link 列名
-- the remaining field mapping values your team uses
-- 你们团队约定的其他字段映射
+- the BPMIS API token
+- BPMIS API token
+- PM Team
+- PM 团队
+- routing and owner defaults if your team defaults are not prefilled
+- 如果团队默认值没有预填，请填写路由和负责人配置
 
-Then click `Save Web Config`.  
+Then click `Save Web Config`.
 然后点击 `Save Web Config`。
 
-## Step 8: Preview First
+## Step 8: Sync BPMIS Projects
 
-先点击 `Preview Eligible Rows`。  
-Click `Preview Eligible Rows` first.
+先进入 `My Projects`，点击 `Sync BPMIS Projects`。
+Open `My Projects`, then click `Sync BPMIS Projects`.
 
-这一步会先显示哪些行准备好要创建 Jira，不会先盲目执行。  
-This shows which rows are ready before any Jira ticket is created.
+这一步会把你的 BPMIS 项目同步到门户自己的项目列表里。
+This syncs your BPMIS projects into the portal-owned project list.
 
-## Step 9: Run Ticket Creation
+## Step 9: Create Jira
 
-如果预览结果没问题，再点击 `Run Ticket Creation`。  
-If the preview looks correct, click `Run Ticket Creation`.
+从项目卡片里选择组件并创建 Jira。
+Choose components from the project card and create Jira tickets.
 
 ## Daily Use
 
@@ -178,18 +173,14 @@ Then reopen:
 如果看到 BPMIS 相关报错，请确认 `.env` 里的 `BPMIS_API_ACCESS_TOKEN` 仍然有效。  
 If you see BPMIS errors, make sure `BPMIS_API_ACCESS_TOKEN` in `.env` is still valid.
 
-### Google or Spreadsheet error
+### Google sign-in error
 
 请检查：
 
-- your Google account can open the Spreadsheet
-- 你的 Google 账号能打开 Spreadsheet
-- the Spreadsheet link is correct
-- Spreadsheet 链接是否正确
-- the tab name is correct
-- tab 名称是否正确
-- the column header names are correct
-- 列名是否正确
+- you are using the correct Google account
+- 你使用的是正确的 Google 账号
+- the portal owner has allowed your domain or email
+- 门户管理员已经允许你的域名或邮箱
 
 ### Still stuck
 
