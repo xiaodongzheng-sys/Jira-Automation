@@ -171,6 +171,7 @@ class FakePRDReviewService:
 class FakePRDReviewLocalAgentClient:
     def __init__(self):
         self.payload = None
+        self.image_src = None
 
     def prd_briefing_review(self, payload):
         self.payload = payload
@@ -245,6 +246,16 @@ class FakePRDReviewLocalAgentClient:
                 }
             },
         }
+
+    def prd_briefing_image_proxy(self, src):
+        self.image_src = src
+
+        class Response:
+            content = b"local-agent-png"
+            status_code = 200
+            headers = {"content-type": "image/png"}
+
+        return Response()
 
 
 class FakeImageProxyConnector:
@@ -836,6 +847,24 @@ class PRDBriefingRouteTests(unittest.TestCase):
             mock_service.return_value.confluence.requested_url,
             "https://confluence.shopee.io/download/attachments/123/mock.png?api=v2",
         )
+
+    @patch("prd_briefing.blueprint._local_agent_prd_briefing_enabled", return_value=True)
+    @patch("prd_briefing.blueprint._is_loopback_url", return_value=False)
+    @patch("prd_briefing.blueprint._build_service", return_value=FakeImageProxyService())
+    def test_image_proxy_routes_to_signed_local_agent(self, _mock_service, _mock_loopback, _mock_enabled):
+        fake_client = FakePRDReviewLocalAgentClient()
+        source_url = "https://confluence.shopee.io/download/attachments/123/mock.png?api=v2"
+        with patch("prd_briefing.blueprint._build_local_agent_client", return_value=fake_client):
+            with self.app.test_client() as client:
+                response = client.get(
+                    "/prd-briefing/image-proxy",
+                    query_string={"src": source_url},
+                )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content_type, "image/png")
+        self.assertEqual(response.data, b"local-agent-png")
+        self.assertEqual(fake_client.image_src, source_url)
 
     @patch("prd_briefing.blueprint._build_service", return_value=FakeImageProxyService())
     def test_image_proxy_rejects_non_confluence_source(self, _mock_service):

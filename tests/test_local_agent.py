@@ -295,6 +295,47 @@ class LocalAgentServerTests(unittest.TestCase):
         self.assertEqual(response.get_json()["items"], generated)
         generate.assert_called_once()
 
+    def test_signed_prd_briefing_image_proxy_fetches_confluence_image(self):
+        class FakeConfluence:
+            def __init__(self):
+                self.requested_url = None
+                self.accept = None
+
+            def _request(self, url, accept):
+                self.requested_url = url
+                self.accept = accept
+
+                class Response:
+                    content = b"png-bytes"
+                    status_code = 200
+                    headers = {"content-type": "image/png"}
+
+                return Response()
+
+        class FakeService:
+            def __init__(self):
+                self.confluence = FakeConfluence()
+
+        fake_service = FakeService()
+        src = "https://confluence.shopee.io/download/attachments/123/mock.png?api=v2"
+        with patch("bpmis_jira_tool.local_agent_server._build_prd_briefing_service", return_value=fake_service):
+            response = self._post_signed("/api/local-agent/prd-briefing/image-proxy", {"src": src})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content_type, "image/png")
+        self.assertEqual(response.data, b"png-bytes")
+        self.assertEqual(fake_service.confluence.requested_url, src)
+        self.assertEqual(fake_service.confluence.accept, "image/*,*/*;q=0.8")
+
+    def test_signed_prd_briefing_image_proxy_rejects_non_confluence_image(self):
+        response = self._post_signed(
+            "/api/local-agent/prd-briefing/image-proxy",
+            {"src": "https://example.com/download/attachments/123/mock.png"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Unsupported image source", response.get_json()["message"])
+
     def test_seatalk_service_uses_agent_daily_cache_dir(self):
         from bpmis_jira_tool.local_agent_server import _build_seatalk_service
 

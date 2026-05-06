@@ -14,9 +14,10 @@ from dataclasses import asdict, is_dataclass
 from http import HTTPStatus
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 import uuid
 
-from flask import Flask, current_app, jsonify, request, send_file
+from flask import Flask, Response, current_app, jsonify, request, send_file
 
 from bpmis_jira_tool.bpmis import BPMISDirectApiClient
 from bpmis_jira_tool.bpmis_projects import BPMISProjectStore
@@ -379,6 +380,23 @@ def create_local_agent_app() -> Flask:
         )
         _inline_prd_briefing_audio_data_url(service.store, result)
         return jsonify(result)
+
+    @app.post("/api/local-agent/prd-briefing/image-proxy")
+    def prd_briefing_image_proxy():
+        payload = request.get_json(silent=True) or {}
+        src = str(payload.get("src") or "").strip()
+        if not src:
+            return jsonify({"status": "error", "message": "Missing image source."}), HTTPStatus.BAD_REQUEST
+        if not _is_allowed_confluence_image_source(src, settings.confluence_base_url or "https://confluence.shopee.io"):
+            return jsonify({"status": "error", "message": "Unsupported image source."}), HTTPStatus.BAD_REQUEST
+        service = _build_prd_briefing_service(settings)
+        response = service.confluence._request(src, accept="image/*,*/*;q=0.8")
+        return Response(
+            response.content,
+            status=response.status_code,
+            content_type=response.headers.get("content-type", "application/octet-stream"),
+            headers={"Cache-Control": "private, max-age=300"},
+        )
 
     @app.post("/api/local-agent/team-dashboard/monthly-report/draft")
     def team_dashboard_monthly_report_draft():
@@ -2392,6 +2410,18 @@ def _build_prd_briefing_service(settings: Settings) -> PRDBriefingService:
         answer_audio_enabled=settings.prd_briefing_answer_audio_enabled,
         walkthrough_prewarm_enabled=False,
     )
+
+
+def _is_allowed_confluence_image_source(src: str, confluence_base_url: str | None) -> bool:
+    parsed = urlparse(src)
+    base = urlparse(str(confluence_base_url or ""))
+    if parsed.scheme not in {"http", "https"}:
+        return False
+    if not base.scheme or not base.netloc:
+        return False
+    if parsed.scheme != base.scheme or parsed.netloc.lower() != base.netloc.lower():
+        return False
+    return (parsed.path or "").startswith(("/download/attachments/", "/download/thumbnails/"))
 
 
 def _save_prd_latest_result(settings: Settings, *, owner_key: str, tool_key: str, payload: dict[str, Any]) -> None:

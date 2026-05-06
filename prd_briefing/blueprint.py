@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
-from urllib.parse import quote, urlparse
+from urllib.parse import urlparse
 
-import requests
 from flask import Blueprint, Response, current_app, flash, jsonify, redirect, render_template, request, send_file, url_for
 
 from bpmis_jira_tool.config import Settings
@@ -216,11 +215,7 @@ def create_prd_briefing_blueprint() -> Blueprint:
         if not _is_allowed_confluence_image_source(src, confluence_base_url):
             return jsonify({"status": "error", "message": "Unsupported image source."}), 400
         if _local_agent_prd_briefing_enabled(settings) and not _is_loopback_url(settings.local_agent_base_url):
-            response = requests.get(
-                f"{str(settings.local_agent_base_url or '').rstrip('/')}/prd-briefing/image-proxy?src={quote(src, safe='')}",
-                headers={"Accept": "image/*,*/*;q=0.8"},
-                timeout=(settings.local_agent_connect_timeout_seconds, settings.local_agent_timeout_seconds),
-            )
+            response = _build_local_agent_client(settings).prd_briefing_image_proxy(src)
             return Response(
                 response.content,
                 status=response.status_code,

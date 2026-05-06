@@ -181,6 +181,16 @@ class LocalAgentClient:
         result = self._request("POST", "/api/local-agent/prd-briefing/generate-audio", payload)
         return result if isinstance(result, dict) else {}
 
+    def prd_briefing_image_proxy(self, src: str) -> requests.Response:
+        return self._request_raw(
+            "POST",
+            "/api/local-agent/prd-briefing/image-proxy",
+            {"src": str(src or "")},
+            expect_json=False,
+            extra_headers={"Accept": "image/*,*/*;q=0.8"},
+            stream=True,
+        )
+
     def team_dashboard_monthly_report_draft(self, payload: dict[str, Any], *, progress_callback: Callable[..., None] | None = None) -> dict[str, Any]:
         if progress_callback is None:
             result = self._request("POST", "/api/local-agent/team-dashboard/monthly-report/draft", payload)
