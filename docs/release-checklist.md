@@ -103,7 +103,7 @@ CLOUD_RUN_DEPLOY_ACCOUNT=vertex-ai-user@civil-partition-492805-v7.iam.gserviceac
 CLOUD_RUN_UAT_DRY_RUN=1 ./scripts/deploy_cloud_run_uat.sh
 ```
 
-- If Secret Manager `local-agent-uat-hmac-secret:latest` is missing and the active personal `gcloud` account cannot refresh tokens non-interactively, use the UAT host `.env` fallback instead of blocking the release. The fallback reads the isolated UAT `LOCAL_AGENT_HMAC_SECRET` from the UAT host workspace and deploys it as an environment variable:
+- If Secret Manager `local-agent-uat-hmac-secret:latest` is missing and the active personal `gcloud` account cannot refresh tokens non-interactively, use the UAT host `.env` fallback instead of blocking the release. The fallback reads the isolated UAT `LOCAL_AGENT_HMAC_SECRET` from the UAT host workspace, rewrites the Cloud Run secret bindings to the base Flask/config/OAuth secrets, and deploys the UAT local-agent HMAC as an environment variable:
 
 ```bash
 CLOUD_RUN_DEPLOY_ACCOUNT=vertex-ai-user@civil-partition-492805-v7.iam.gserviceaccount.com \

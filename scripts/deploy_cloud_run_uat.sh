@@ -304,6 +304,7 @@ if [[ -n "$LOCAL_AGENT_URL" ]]; then
   ENV_VARS+=("LOCAL_AGENT_BASE_URL=$LOCAL_AGENT_URL")
 fi
 
+BASE_SECRET_BINDINGS="FLASK_SECRET_KEY=team-portal-flask-secret:latest,TEAM_PORTAL_CONFIG_ENCRYPTION_KEY=team-portal-config-encryption-key:latest,/secrets/google/client_secret.json=google-oauth-client-secret-json:latest"
 DEPLOY_SECRET_ARGS=(--update-secrets "LOCAL_AGENT_HMAC_SECRET=$UAT_LOCAL_AGENT_SECRET_NAME:latest")
 ENV_DEPLOY_MODE="set"
 ENV_REMOVE_ARGS=()
@@ -322,10 +323,7 @@ if [[ "${CLOUD_RUN_UAT_LOCAL_AGENT_SECRET_SOURCE:-secret_manager}" == "env" ]]; 
     exit 1
   fi
   ENV_VARS+=("LOCAL_AGENT_HMAC_SECRET=$uat_hmac_secret")
-  DEPLOY_SECRET_ARGS=(--remove-secrets LOCAL_AGENT_HMAC_SECRET)
-  ENV_REMOVE_ARGS=(--remove-env-vars LOCAL_AGENT_HMAC_SECRET)
-  ENV_SECRET_PRECLEAR_REQUIRED=1
-  ENV_DEPLOY_MODE="update"
+  DEPLOY_SECRET_ARGS=(--set-secrets "$BASE_SECRET_BINDINGS")
   echo "Using UAT local-agent HMAC from env fallback because CLOUD_RUN_UAT_LOCAL_AGENT_SECRET_SOURCE=env."
 fi
 if [[ "$ENV_SECRET_PRECLEAR_REQUIRED" == "1" ]]; then
@@ -417,9 +415,7 @@ if [[ "$ENV_SECRET_PRECLEAR_REQUIRED" == "1" ]]; then
     ${RUNTIME_ARGS[@]+"${RUNTIME_ARGS[@]}"} \
     --no-traffic \
     --tag "${UAT_TAG}-secret-clear" \
-    --update-secrets "FLASK_SECRET_KEY=team-portal-flask-secret:latest,TEAM_PORTAL_CONFIG_ENCRYPTION_KEY=team-portal-config-encryption-key:latest,/secrets/google/client_secret.json=google-oauth-client-secret-json:latest" \
-    --remove-secrets LOCAL_AGENT_HMAC_SECRET \
-    --remove-env-vars LOCAL_AGENT_HMAC_SECRET
+    --set-secrets "$BASE_SECRET_BINDINGS"
 fi
 
 "$GCLOUD_BIN" run deploy "$SERVICE" \
