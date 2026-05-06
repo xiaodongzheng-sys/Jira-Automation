@@ -494,9 +494,17 @@ class ConfluenceConnector:
     def _build_source_text_with_media(sections: list[ParsedSection]) -> str:
         blocks: list[str] = []
         for index, section in enumerate(sections, start=1):
+            image_lines = "\n".join(f"[IMAGE] {ref}" for ref in section.image_refs[:6])
+            media_lines = "\n".join(
+                f"[{ref}]"
+                for ref in section.media_refs[:24]
+                if ref and f"[{ref}]" not in section.content
+            )
             blocks.append(
                 f"## Section {index}: {section.section_path}\n"
-                f"{section.content.strip()}".strip()
+                f"{section.content.strip()}\n"
+                f"{image_lines}\n"
+                f"{media_lines}".strip()
             )
         return "\n\n".join(blocks).strip()
 
@@ -680,8 +688,6 @@ class ConfluenceConnector:
     def _is_toc_block(self, node: Tag) -> bool:
         classes = node.get("class") or []
         if "toc-macro" in classes or any(str(item).startswith("rbtoc") for item in classes):
-            return True
-        if node.find(class_="toc-macro") is not None:
             return True
         text = self._clean_text(node.get_text(" ", strip=True))
         return bool(node.name == "h1" and "1. Project Management" in text and "1.1 Version Control" in text and "2. Introduction" in text)

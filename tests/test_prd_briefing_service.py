@@ -7,7 +7,7 @@ import json
 
 from bpmis_jira_tool.config import Settings
 
-from prd_briefing.confluence import IngestedConfluencePage, ParsedSection
+from prd_briefing.confluence import ConfluenceConnector, IngestedConfluencePage, ParsedSection
 from prd_briefing.reviewer import (
     PRD_BRIEFING_REVIEW_CACHE_KEY,
     PRD_REVIEW_PROMPT_VERSION,
@@ -152,6 +152,45 @@ class PRDBriefingServiceTests(unittest.TestCase):
     def test_parse_presentation_chunks_rejects_invalid_json(self):
         with self.assertRaises(ValueError):
             parse_presentation_chunks('{"id":"chunk-1"}')
+
+    def test_confluence_parser_keeps_media_inside_content_layout_with_toc(self):
+        connector = ConfluenceConnector(
+            base_url="https://confluence.example",
+            email=None,
+            api_token=None,
+            bearer_token=None,
+            store=self.store,
+        )
+        media_dict = {}
+
+        sections = connector._parse_sections(
+            html="""
+            <div class="contentLayout2">
+              <div class="toc-macro">Table of contents</div>
+              <h2>Feature Details</h2>
+              <p>Main implementation flow.</p>
+              <p><img class="confluence-embedded-image" src="/download/attachments/123/flow.png" width="720"></p>
+              <table>
+                <tr><th>Status</th><th>Meaning</th></tr>
+                <tr><td>NEW</td><td>Create a new outsourced case.</td></tr>
+              </table>
+            </div>
+            """,
+            base_url="https://confluence.example",
+            source_url="https://confluence.example/pages/viewpage.action?pageId=123",
+            session_id="session-1",
+            media_dict=media_dict,
+        )
+
+        self.assertEqual(len(sections), 1)
+        self.assertIn("Main implementation flow.", sections[0].content)
+        self.assertGreaterEqual(len(sections[0].image_refs), 1)
+        self.assertGreaterEqual(len(sections[0].media_refs), 2)
+        self.assertTrue(any(item["type"] == "image" for item in media_dict.values()))
+        self.assertTrue(any(item["type"] == "table" for item in media_dict.values()))
+        source_text = connector._build_source_text_with_media(sections)
+        self.assertIn("[MEDIA_ID_", source_text)
+        self.assertIn("[IMAGE] https://confluence.example/download/attachments/123/flow.png", source_text)
 
     def test_presentation_prompts_include_language_specific_script_rules(self):
         english_prompt = build_presentation_system_prompt("en")
