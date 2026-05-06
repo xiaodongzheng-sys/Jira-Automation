@@ -324,6 +324,7 @@ if [[ "${CLOUD_RUN_UAT_LOCAL_AGENT_SECRET_SOURCE:-secret_manager}" == "env" ]]; 
   fi
   ENV_VARS+=("LOCAL_AGENT_HMAC_SECRET=$uat_hmac_secret")
   DEPLOY_SECRET_ARGS=(--set-secrets "$BASE_SECRET_BINDINGS")
+  ENV_SECRET_PRECLEAR_REQUIRED=1
   echo "Using UAT local-agent HMAC from env fallback because CLOUD_RUN_UAT_LOCAL_AGENT_SECRET_SOURCE=env."
 fi
 if [[ "$ENV_SECRET_PRECLEAR_REQUIRED" == "1" ]]; then
