@@ -7,8 +7,11 @@ import time
 import unittest
 import zipfile
 import io
+from datetime import datetime
+from pathlib import Path
 from unittest.mock import Mock, patch
 
+from bpmis_jira_tool.daily_brief_archive import DailyBriefArchiveStore, daily_brief_archive_path
 from bpmis_jira_tool.errors import ToolError
 from bpmis_jira_tool.local_agent_client import LocalAgentClient
 from bpmis_jira_tool.local_agent_protocol import sign_headers, verify_signature
@@ -64,6 +67,7 @@ class LocalAgentServerTests(unittest.TestCase):
         env = {
             "LOCAL_AGENT_HMAC_SECRET": "shared-secret",
             "LOCAL_AGENT_BPMIS_ENABLED": "true",
+            "LOCAL_AGENT_SEATALK_ENABLED": "true",
             "TEAM_PORTAL_DATA_DIR": self.temp_dir.name,
             "SOURCE_CODE_QA_LLM_PROVIDER": "codex_cli_bridge",
         }
@@ -297,6 +301,34 @@ class LocalAgentServerTests(unittest.TestCase):
         service = _build_seatalk_service(Settings.from_env())
 
         self.assertEqual(str(service.daily_cache_dir), os.path.join(self.temp_dir.name, "seatalk", "cache"))
+
+    def test_signed_team_dashboard_daily_briefs_read_agent_archive(self):
+        store = DailyBriefArchiveStore(daily_brief_archive_path(Path(self.temp_dir.name)))
+        saved = store.save(
+            run_date="2026-05-05",
+            run_slot="midday",
+            recipient="xiaodong.zheng@npt.sg",
+            subject="Daily Brief - 2026-05-05 (2026-05-05 13:00 - 2026-05-05 19:00)",
+            text_body="Subject: Daily Brief\n\nArchive body",
+            html_body="<html><body>Archive body</body></html>",
+            message_id="msg-1",
+            status="sent",
+            sent_at=datetime(2026, 5, 5, 19, 0),
+            window_start=datetime(2026, 5, 5, 13, 0),
+            window_end=datetime(2026, 5, 5, 19, 0),
+        )
+
+        list_response = self._get_signed("/api/local-agent/team-dashboard/daily-briefs")
+        download_response = self._get_signed(f"/api/local-agent/team-dashboard/daily-briefs/{saved['brief_id']}/download")
+
+        self.assertEqual(list_response.status_code, 200)
+        payload = list_response.get_json()
+        self.assertEqual(payload["briefs"][0]["time_period"], "2026-05-05 13:00-19:00")
+        self.assertNotIn("text_body", payload["briefs"][0])
+        self.assertEqual(download_response.status_code, 200)
+        self.assertEqual(download_response.headers["Content-Type"], "application/pdf")
+        self.assertIn("daily-brief-2026-05-05-midday.pdf", download_response.headers["Content-Disposition"])
+        self.assertGreater(len(download_response.data), 100)
 
     def test_signed_seatalk_open_todos_returns_agent_store_items(self):
         seed = self._post_signed(

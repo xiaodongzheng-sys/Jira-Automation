@@ -48,6 +48,8 @@
   const monthlyReportTemplateForm = root.querySelector('[data-monthly-report-template-form]');
   const monthlyReportTemplate = root.querySelector('[data-monthly-report-template]');
   const monthlyReportTemplateStatus = root.querySelector('[data-monthly-report-template-status]');
+  const dailyBriefStatus = root.querySelector('[data-daily-brief-status]');
+  const dailyBriefRows = root.querySelector('[data-daily-brief-rows]');
   const reportIntelligenceForm = root.querySelector('[data-report-intelligence-form]');
   const reportIntelligenceStatus = root.querySelector('[data-report-intelligence-status]');
   const reportIntelligenceVips = root.querySelector('[data-report-intelligence-vips]');
@@ -85,6 +87,7 @@
   let keyProjectOnly = false;
   let monthlyReportSubject = 'Monthly Report';
   let monthlyReportLoaded = false;
+  let dailyBriefLoaded = false;
   let reportIntelligenceLoaded = false;
   let seatalkNameMappingsLoaded = false;
   let linkBizProjectRowsState = [];
@@ -245,6 +248,9 @@
       });
       if (name === 'monthly-report') {
         loadMonthlyReportTemplate();
+      }
+      if (name === 'daily-brief') {
+        loadDailyBriefs();
       }
       if (name === 'report-intelligence') {
         loadReportIntelligence();
@@ -1430,6 +1436,53 @@
     } finally {
       monthlyReportSendButton.textContent = 'Send Email';
       monthlyReportSendButton.disabled = !monthlyReportDraft.value.trim();
+    }
+  };
+
+  const renderDailyBriefRows = (briefs) => {
+    if (!dailyBriefRows) return;
+    const items = Array.isArray(briefs) ? briefs : [];
+    if (!items.length) {
+      dailyBriefRows.innerHTML = '<tr><td colspan="2" class="team-dashboard-empty-cell">No Daily Brief emails archived yet.</td></tr>';
+      return;
+    }
+    dailyBriefRows.innerHTML = items.map((item) => {
+      const downloadUrl = String(item.download_url || '').trim();
+      const disabled = downloadUrl ? '' : 'disabled';
+      return `
+        <tr>
+          <td>${escapeHtml(item.time_period || '-')}</td>
+          <td>
+            <a
+              class="button button-secondary"
+              href="${escapeHtml(downloadUrl || '#')}"
+              ${downloadUrl ? 'download' : 'aria-disabled="true"'}
+              ${disabled}
+            >Download</a>
+          </td>
+        </tr>
+      `;
+    }).join('');
+  };
+
+  const loadDailyBriefs = async ({ force = false } = {}) => {
+    if (!dailyBriefRows || (!force && dailyBriefLoaded)) return;
+    dailyBriefLoaded = true;
+    dailyBriefRows.innerHTML = '<tr><td colspan="2" class="team-dashboard-empty-cell">Loading Daily Brief emails...</td></tr>';
+    setStatus(dailyBriefStatus, 'Loading Daily Brief emails...', 'neutral');
+    try {
+      const response = await fetch(root.dataset.dailyBriefsUrl || '/api/team-dashboard/daily-briefs', {
+        headers: { Accept: 'application/json' },
+        credentials: 'same-origin',
+      });
+      const payload = await readJson(response, 'Could not load Daily Brief emails.');
+      renderDailyBriefRows(payload.briefs || []);
+      const count = Array.isArray(payload.briefs) ? payload.briefs.length : 0;
+      setStatus(dailyBriefStatus, count ? `Loaded ${count} Daily Brief email${count === 1 ? '' : 's'}.` : 'No Daily Brief emails archived yet.', count ? 'success' : 'neutral');
+    } catch (error) {
+      dailyBriefLoaded = false;
+      renderDailyBriefRows([]);
+      setStatus(dailyBriefStatus, error.message || 'Could not load Daily Brief emails.', 'error');
     }
   };
 

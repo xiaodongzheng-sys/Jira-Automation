@@ -120,6 +120,15 @@
   const effortAssessmentCacheKey = 'source-code-qa:effort-assessment:last:v1';
   const notificationPreferenceKey = 'source-code-qa:notification-permission-asked:v1';
 
+  const resizeQuestionInput = () => {
+    if (!questionInput) return;
+    const maxHeight = Math.max(160, Math.min(window.innerHeight * 0.42, 420));
+    questionInput.style.height = 'auto';
+    const nextHeight = Math.min(questionInput.scrollHeight, maxHeight);
+    questionInput.style.height = `${nextHeight}px`;
+    questionInput.style.overflowY = questionInput.scrollHeight > maxHeight ? 'auto' : 'hidden';
+  };
+
   const setSourceView = (view) => {
     const adminViews = new Set(['admin', 'effort']);
     const nextView = adminViews.has(view) && canManage ? view : 'chat';
@@ -2663,7 +2672,10 @@
     const queryControl = { stopped: false, jobId: '', question: submittedQuestion };
     activeQueryControl = queryControl;
     updateQueryButtonState(true);
-    if (questionInput) questionInput.value = '';
+    if (questionInput) {
+      questionInput.value = '';
+      resizeQuestionInput();
+    }
     renderPendingQuery(submittedQuestion, effectiveAnswerMode);
     try {
       const session = await ensureActiveSession({ preserveLive: true, preservePending: true });
@@ -2856,7 +2868,10 @@
     if (queryStatus) queryStatus.textContent = 'Starting a new chat...';
     try {
       await createSession();
-      if (questionInput) questionInput.value = '';
+      if (questionInput) {
+        questionInput.value = '';
+        resizeQuestionInput();
+      }
       clearPendingAttachments();
       if (summary) summary.textContent = 'No question asked yet.';
       if (results) results.innerHTML = '<div class="source-qa-empty">Ask a question to generate an answer. Retrieval details stay in the background unless Codex is unavailable.</div>';
@@ -2888,6 +2903,7 @@
   });
   syncButton?.addEventListener('click', syncRepos);
   queryButton?.addEventListener('click', queryCode);
+  questionInput?.addEventListener('input', resizeQuestionInput);
   effortRunButton?.addEventListener('click', runEffortAssessment);
   effortCopyButton?.addEventListener('click', copyEffortPmDevSummary);
   effortRequirement?.addEventListener('input', persistEffortAssessmentDraft);
@@ -2924,12 +2940,17 @@
     }
     const retryButton = event.target.closest('[data-source-retry-question]');
     if (retryButton) {
-      if (questionInput) questionInput.value = retryButton.dataset.sourceRetryQuestion || '';
+      if (questionInput) {
+        questionInput.value = retryButton.dataset.sourceRetryQuestion || '';
+        resizeQuestionInput();
+      }
       queryCode();
       return;
     }
     handleAttachmentPreviewEvent(event);
   });
+  window.addEventListener('resize', resizeQuestionInput);
+  resizeQuestionInput();
   sessionMessages?.addEventListener('keydown', handleAttachmentPreviewEvent);
   viewTabs.forEach((tab) => {
     tab.addEventListener('click', () => setSourceView(tab.dataset.sourceViewTab));

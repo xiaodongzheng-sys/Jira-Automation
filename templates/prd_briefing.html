@@ -3,7 +3,7 @@
 {% block page_shell_class %} page-shell-briefing{% endblock %}
 
 {% block body %}
-  <section class="briefing-shell">
+  <section class="briefing-shell" data-briefing-shell data-latest-url="{{ url_for('prd_briefing.latest_briefing') }}">
     <div class="portal-compact-hero briefing-compact-hero">
       <div class="portal-compact-title">
         <p class="showcase-kicker">AI PRD Briefing</p>

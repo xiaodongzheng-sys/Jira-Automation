@@ -122,6 +122,8 @@
       : (root.dataset.reviewUrl || '/api/prd-self-assessment/review')
   );
 
+  const latestEndpoint = () => root.dataset.latestUrl || '/api/prd-self-assessment/latest';
+
   const renderResult = (action, payload) => {
     if (!resultPanel) return;
     const isSummary = action === 'summary';
@@ -193,7 +195,33 @@
     }
   };
 
+  const restoreLatestResult = async () => {
+    try {
+      const response = await fetch(latestEndpoint(), {
+        method: 'GET',
+        headers: { Accept: 'application/json' },
+        credentials: 'same-origin',
+      });
+      const payload = await parseJsonResponse(response);
+      if (!response.ok || payload.status === 'error') return;
+      const latest = payload.latest || {};
+      const latestPayload = latest.payload || {};
+      const action = latestPayload.action === 'review' ? 'review' : (latestPayload.action === 'summary' ? 'summary' : '');
+      const resultPayload = latestPayload.payload || {};
+      if (!action || !resultPayload || resultPayload.status !== 'ok') return;
+      lastAction = action;
+      if (resultPayload.prd?.source_url && urlInput) urlInput.value = resultPayload.prd.source_url;
+      if (languageSelect) languageSelect.value = resultPayload.language === 'en' ? 'en' : 'zh';
+      saveForm();
+      setStatus(action === 'summary' ? 'Showing the latest PRD summary.' : 'Showing the latest AI PRD review.', 'success');
+      renderResult(action, resultPayload);
+    } catch {
+      // Latest output is a convenience only; leave the empty state if it cannot be loaded.
+    }
+  };
+
   restoreForm();
+  restoreLatestResult();
   urlInput?.addEventListener('input', saveForm);
   languageSelect?.addEventListener('change', saveForm);
   form?.addEventListener('submit', (event) => {

@@ -214,6 +214,38 @@ class FakePRDReviewLocalAgentClient:
             "prd": {"title": "Remote PRD"},
         }
 
+    def prd_self_assessment_latest(self, *, owner_key):
+        self.payload = {"owner_key": owner_key}
+        return {
+            "status": "ok",
+            "latest": {
+                "payload": {
+                    "action": "review",
+                    "payload": {
+                        "status": "ok",
+                        "language": "en",
+                        "review": {"status": "completed", "result_markdown": "### Latest Remote Review"},
+                        "prd": {"title": "Remote PRD"},
+                    },
+                }
+            },
+        }
+
+    def prd_briefing_latest(self, *, owner_key):
+        self.payload = {"owner_key": owner_key}
+        return {
+            "status": "ok",
+            "latest": {
+                "payload": {
+                    "payload": {
+                        "status": "ok",
+                        "session": {"session_id": "session-remote", "title": "Remote PRD"},
+                        "chunks": [{"id": "chunk-1", "title": "Remote", "content": "Body"}],
+                    }
+                }
+            },
+        }
+
 
 class FakeImageProxyConnector:
     base_url = "https://confluence.shopee.io"
@@ -286,6 +318,7 @@ class PRDBriefingRouteTests(unittest.TestCase):
             self.assertNotIn(b"data-prd-review-generate", response.data)
             self.assertIn(b"data-briefing-language", response.data)
             self.assertIn(b"data-briefing-page-ref", response.data)
+            self.assertIn(b"/prd-briefing/api/latest", response.data)
             self.assertIn(b"data-presenter-view", response.data)
             self.assertIn(b"data-theater-toggle", response.data)
             self.assertIn(b"Start Presentation Mode", response.data)
@@ -321,6 +354,8 @@ class PRDBriefingRouteTests(unittest.TestCase):
 
         self.assertIn("prd-briefing:last-form:v1", briefing_js)
         self.assertIn("prd-self-assessment:last-form:v1", self_assessment_js)
+        self.assertIn("/prd-briefing/api/latest", briefing_js)
+        self.assertIn("/api/prd-self-assessment/latest", self_assessment_js)
         self.assertNotIn("prd-self-assessment:last-form:v1", briefing_js)
         self.assertNotIn("prd-briefing:last-form:v1", self_assessment_js)
 
@@ -354,6 +389,24 @@ class PRDBriefingRouteTests(unittest.TestCase):
         self.assertEqual(payload["chunks"][0]["id"], "chunk-1")
         self.assertEqual(payload["chunks"][0]["imageUrls"], ["/prd-briefing/image-proxy?src=x"])
         self.assertEqual(payload["chunks"][0]["media"]["type"], "image")
+
+    @patch("prd_briefing.blueprint._build_service", return_value=FakeBriefingService())
+    def test_process_prd_endpoint_saves_latest_presentation(self, _mock_service):
+        with self.app.test_client() as client:
+            with client.session_transaction() as session:
+                session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong Zheng"}
+                session["google_credentials"] = {"token": "x"}
+            response = client.post(
+                "/prd-briefing/api/process-prd",
+                json={"page_ref": "https://example.atlassian.net/wiki/pages/123"},
+            )
+            self.assertEqual(response.status_code, 200)
+            latest_response = client.get("/prd-briefing/api/latest")
+
+        self.assertEqual(latest_response.status_code, 200)
+        latest = latest_response.get_json()["latest"]
+        self.assertEqual(latest["payload"]["payload"]["session"]["session_id"], "session-1")
+        self.assertEqual(latest["payload"]["payload"]["chunks"][0]["id"], "chunk-1")
 
     @patch("prd_briefing.blueprint._build_service", return_value=FakeBriefingService())
     def test_generate_audio_endpoint_returns_presentation_chunk(self, _mock_service):
@@ -524,6 +577,21 @@ class PRDBriefingRouteTests(unittest.TestCase):
         self.assertEqual(payload["review"]["result_markdown"], "### Cached Review")
         self.assertEqual(fake_client.payload["language"], "en")
 
+    @patch("prd_briefing.blueprint._local_agent_prd_briefing_enabled", return_value=True)
+    def test_prd_briefing_latest_endpoint_can_route_to_local_agent(self, _mock_enabled):
+        fake_client = FakePRDReviewLocalAgentClient()
+        with patch("prd_briefing.blueprint._build_local_agent_client", return_value=fake_client):
+            with self.app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong Zheng"}
+                    session["google_credentials"] = {"token": "x"}
+                response = client.get("/prd-briefing/api/latest")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["latest"]["payload"]["payload"]["session"]["session_id"], "session-remote")
+        self.assertEqual(fake_client.payload["owner_key"], "google:xiaodong.zheng@npt.sg")
+
     def test_portal_route_allows_non_admin_npt_google_user(self):
         with self.app.test_client() as client:
             with client.session_transaction() as session:
@@ -573,6 +641,7 @@ class PRDBriefingRouteTests(unittest.TestCase):
             self.assertIn(b"data-prd-self-assessment-language", response.data)
             self.assertIn(b"Generate PRD Summary", response.data)
             self.assertIn(b"Generate AI PRD Review", response.data)
+            self.assertIn(b"data-latest-url", response.data)
 
     def test_prd_self_assessment_route_allows_test_gmail_user(self):
         with self.app.test_client() as client:
@@ -630,6 +699,24 @@ class PRDBriefingRouteTests(unittest.TestCase):
         self.assertEqual(service.summary_requests[-1].language, "en")
 
     @patch("bpmis_jira_tool.web._build_prd_review_service", return_value=FakePRDReviewService())
+    def test_prd_self_assessment_endpoint_saves_latest_result(self, _mock_service):
+        with self.app.test_client() as client:
+            with client.session_transaction() as session:
+                session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
+                session["google_credentials"] = {"token": "x"}
+            response = client.post(
+                "/api/prd-self-assessment/summary",
+                json={"prd_url": "https://example.atlassian.net/wiki/pages/123", "language": "en"},
+            )
+            self.assertEqual(response.status_code, 200)
+            latest_response = client.get("/api/prd-self-assessment/latest")
+
+        self.assertEqual(latest_response.status_code, 200)
+        latest = latest_response.get_json()["latest"]
+        self.assertEqual(latest["payload"]["action"], "summary")
+        self.assertEqual(latest["payload"]["payload"]["summary"]["result_markdown"], "### Summary\n- Good")
+
+    @patch("bpmis_jira_tool.web._build_prd_review_service", return_value=FakePRDReviewService())
     def test_prd_self_assessment_endpoint_validates_http_prd_link(self, _mock_service):
         with self.app.test_client() as client:
             with client.session_transaction() as session:
@@ -658,6 +745,21 @@ class PRDBriefingRouteTests(unittest.TestCase):
         self.assertTrue(payload["cached"])
         self.assertEqual(payload["review"]["result_markdown"], "### Remote Review")
         self.assertEqual(fake_client.payload["language"], "en")
+
+    @patch("bpmis_jira_tool.web._local_agent_source_code_qa_enabled", return_value=True)
+    def test_prd_self_assessment_latest_endpoint_can_route_to_local_agent(self, _mock_enabled):
+        fake_client = FakePRDReviewLocalAgentClient()
+        with patch("bpmis_jira_tool.web._build_local_agent_client", return_value=fake_client):
+            with self.app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["google_profile"] = {"email": "teammate@npt.sg", "name": "Teammate"}
+                    session["google_credentials"] = {"token": "x"}
+                response = client.get("/api/prd-self-assessment/latest")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["latest"]["payload"]["payload"]["review"]["result_markdown"], "### Latest Remote Review")
+        self.assertEqual(fake_client.payload["owner_key"], "google:teammate@npt.sg")
 
     def test_prd_self_assessment_external_failure_matrix_returns_stable_json(self):
         class FailingService:

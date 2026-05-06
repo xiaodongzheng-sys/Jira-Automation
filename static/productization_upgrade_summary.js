@@ -21,6 +21,7 @@
   }
 
   const MAX_SELECTIONS = 2;
+  const STATE_STORAGE_KEY = 'productization-upgrade-summary:last-result:v1';
   const escapeHtml = (value) => String(value ?? '')
     .replaceAll('&', '&amp;')
     .replaceAll('<', '&lt;')
@@ -137,6 +138,66 @@
   let lastSuggestions = [];
   const selectedVersions = [];
   const isShowAllEnabled = () => Boolean(showAllToggle.checked);
+
+  const serializeSelection = (entry) => ({
+    version_id: String(entry?.version_id || ''),
+    label: String(entry?.label || ''),
+    items: Array.isArray(entry?.items) ? entry.items : [],
+    rawCount: Number(entry?.rawCount || 0),
+    filteredCount: Number(entry?.filteredCount || 0),
+    teamFilterApplied: Boolean(entry?.teamFilterApplied),
+    showAllBeforeTeamFiltering: Boolean(entry?.showAllBeforeTeamFiltering),
+    llmDescriptionGenerated: Boolean(entry?.llmDescriptionGenerated),
+    llmGeneratedCount: Number(entry?.llmGeneratedCount || 0),
+  });
+
+  const saveLatestState = () => {
+    try {
+      window.localStorage.setItem(STATE_STORAGE_KEY, JSON.stringify({
+        showAllBeforeTeamFiltering: isShowAllEnabled(),
+        selectedVersions: selectedVersions
+          .map(serializeSelection)
+          .filter((entry) => entry.version_id && entry.label),
+        savedAt: new Date().toISOString(),
+      }));
+    } catch {
+      // Last-result restore is best-effort; live lookup should keep working.
+    }
+  };
+
+  const readLatestState = () => {
+    try {
+      const parsed = JSON.parse(window.localStorage.getItem(STATE_STORAGE_KEY) || '{}');
+      return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch {
+      return {};
+    }
+  };
+
+  const restoreLatestState = () => {
+    const saved = readLatestState();
+    const savedSelections = Array.isArray(saved.selectedVersions) ? saved.selectedVersions.slice(0, MAX_SELECTIONS) : [];
+    const restored = savedSelections
+      .map(serializeSelection)
+      .filter((entry) => entry.version_id && entry.label && Array.isArray(entry.items));
+    if (!restored.length) return false;
+
+    showAllToggle.checked = Boolean(saved.showAllBeforeTeamFiltering);
+    selectedVersions.length = 0;
+    restored.forEach((entry) => selectedVersions.push(entry));
+    input.disabled = selectedVersions.length >= MAX_SELECTIONS;
+    input.placeholder = selectedVersions.length >= MAX_SELECTIONS ? 'Maximum 2 versions selected' : 'Type a version keyword';
+    renderSelectedVersions();
+    renderResults();
+    const totalRows = selectedVersions.reduce((sum, entry) => sum + (Array.isArray(entry.items) ? entry.items.length : 0), 0);
+    setStatus(
+      totalRows
+        ? `Showing the last loaded Productization Upgrade Summary (${totalRows} Jira ticket${totalRows === 1 ? '' : 's'}).`
+        : 'Showing the last selected Productization versions.',
+      'success',
+    );
+    return true;
+  };
 
   const buildCopyRows = () => {
     const header = ['Jira Link', 'Feature Summary', 'Detailed Feature'];
@@ -271,6 +332,7 @@
         const removed = selectedVersions.splice(index, 1)[0];
         renderSelectedVersions();
         renderResults();
+        saveLatestState();
         setStatus(
           selectedVersions.length
             ? `Removed ${removed?.label || 'version'}. You can select another version now.`
@@ -341,6 +403,7 @@
       selection.showAllBeforeTeamFiltering = Boolean(payload.show_all_before_team_filtering);
       renderSelectedVersions();
       renderResults();
+      saveLatestState();
       if (selectedVersions.length > 1) {
         setStatus(`Loaded ${selectedVersions.length} versions into one combined table.`, 'success');
       } else if (selection.teamFilterApplied && selection.rawCount > selection.filteredCount) {
@@ -359,6 +422,7 @@
       selectedVersions.splice(selectedVersions.findIndex((entry) => entry.version_id === selection.version_id), 1);
       renderSelectedVersions();
       renderResults();
+      saveLatestState();
       setStatus(error.message || 'Could not load Jira tickets for that version.', 'error');
     }
   };
@@ -405,6 +469,7 @@
         generatedTotal += selection.llmGeneratedCount;
       });
       renderResults();
+      saveLatestState();
 
       if (failed.length) {
         setStatus(
@@ -576,6 +641,7 @@
       renderResults();
       await loadIssuesForSelection(nextSelection);
     }
+    saveLatestState();
   });
 
   llmDescriptionButton.addEventListener('click', () => {
@@ -614,6 +680,8 @@
     }
   });
 
-  renderSelectedVersions();
-  resetResults();
+  if (!restoreLatestState()) {
+    renderSelectedVersions();
+    resetResults();
+  }
 })();

@@ -6496,9 +6496,11 @@ select:focus {
 }
 
 .source-qa-chat-composer textarea {
-  min-height: 240px;
+  min-height: 92px;
+  max-height: min(42vh, 420px);
   padding: 16px 18px;
-  resize: vertical;
+  overflow-y: hidden;
+  resize: none;
 }
 
 .source-qa-effort-requirement textarea {
@@ -7852,6 +7854,20 @@ select:focus {
 .team-dashboard-table th:nth-child(8),
 .team-dashboard-table td:nth-child(8) {
   width: 130px;
+}
+
+.team-dashboard-daily-brief-table {
+  min-width: 520px;
+}
+
+.team-dashboard-daily-brief-table th:nth-child(1),
+.team-dashboard-daily-brief-table td:nth-child(1) {
+  width: auto;
+}
+
+.team-dashboard-daily-brief-table th:nth-child(2),
+.team-dashboard-daily-brief-table td:nth-child(2) {
+  width: 160px;
 }
 
 .team-dashboard-prd-link {

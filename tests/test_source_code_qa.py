@@ -83,7 +83,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
         html = response.get_data(as_text=True)
         self.assertIn("Source Code Q&amp;A", html)
         self.assertLess(html.index("Source Code Q&amp;A"), html.index("BPMIS Automation Tool"))
-        self.assertIn('data-source-question rows="8"', html)
+        self.assertIn('data-source-question rows="2"', html)
         self.assertLess(html.index("data-source-attachments"), html.index("data-source-question"))
         self.assertLess(html.index("data-source-question"), html.index("data-source-attachment-upload"))
         self.assertLess(html.index("data-source-attachment-upload"), html.index("data-source-query"))
@@ -168,6 +168,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
 
     def test_frontend_caches_effort_assessment_draft_and_result(self):
         script = Path("static/source_code_qa.js").read_text(encoding="utf-8")
+        template = Path("templates/source_code_qa.html").read_text(encoding="utf-8")
 
         self.assertIn("source-code-qa:effort-assessment:last:v1", script)
         self.assertIn("persistEffortAssessmentDraft", script)
@@ -181,13 +182,18 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertIn("Assessment Summary", script)
         self.assertIn("assessment.business_plan", script)
         self.assertIn("assessment.technical_candidates", script)
-        self.assertIn("data-source-effort-copy", Path("templates/source_code_qa.html").read_text(encoding="utf-8"))
-        self.assertIn("data-effort-latest-url", Path("templates/source_code_qa.html").read_text(encoding="utf-8"))
+        self.assertIn("data-source-effort-copy", template)
+        self.assertIn("data-effort-latest-url", template)
+        self.assertIn("Business Requirement", template)
+        self.assertIn("Code Impact &amp; Man-day Assessment", template)
+        self.assertNotIn("Code Impact &amp; Person-days", template)
+        self.assertNotIn("业务需求", template)
         self.assertIn("loadLatestEffortAssessment", script)
+        self.assertIn("loadLatestEffortAssessment();", script)
         self.assertIn("copyEffortPmDevSummary", script)
         self.assertIn("effortDisplayedAssessmentText", script)
         self.assertIn("navigator.clipboard.writeText(text)", script)
-        self.assertNotIn("data-source-effort-summary", Path("templates/source_code_qa.html").read_text(encoding="utf-8"))
+        self.assertNotIn("data-source-effort-summary", template)
         self.assertNotIn("Effort Assessment PM/Dev Summary", script)
 
     def test_frontend_uses_deep_mode_and_raw_codex_answer(self):
@@ -518,18 +524,30 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertNotIn("2. 方案 1/2 技术改造点", prompt)
 
     def test_effort_assessment_builds_optimized_prompt_and_passes_runtime_evidence(self):
-        captured = {}
+        captured_calls = []
 
         def fake_query(**kwargs):
-            captured.update(kwargs)
+            captured_calls.append(kwargs)
             kwargs["progress_callback"]("direct_search", "Searching direct matches in Repo One.", 1, 1)
+            if kwargs.get("answer_mode") == "retrieval_only":
+                return {
+                    "status": "ok",
+                    "answer_mode": "retrieval_only",
+                    "summary": "evidence done",
+                    "trace_id": "trace-effort-evidence",
+                    "matches": [{"repo": "Repo One", "path": "src/api.py", "line_start": 10, "line_end": 12}],
+                    "citations": [{"id": "S1", "repo": "Repo One", "path": "src/api.py", "line_start": 10, "line_end": 12}],
+                    "index_freshness": {"status": "fresh", "git_revisions": [{"repo": "Repo One", "git_revision": "abc123"}]},
+                    "answer_quality": {"status": "sufficient", "confidence": "medium", "missing": []},
+                }
             return {
                 "status": "ok",
                 "answer_mode": "auto",
                 "summary": "effort done",
-                "llm_answer": "代码改动点\n- Update API [S1]\n\nBE 人天\n- 1-2 PD\n\nFE 人天\n- 0 PD",
+                "llm_answer": "业务理解\n- ok\n\n技术改造点\n- Update API [S1]\n\nBE 人天\n- 1-2 PD\n\nFE 人天\n- 0 PD\n\nConfirmed / Inferred / Missing Evidence\n- Confirmed S1",
                 "llm_provider": "codex_cli_bridge",
                 "llm_model": "codex-cli",
+                "llm_route": {"task": "effort_assessment", "codex_repair_attempted": False},
                 "trace_id": "trace-effort",
                 "matches": [{"repo": "Repo One", "path": "src/api.py", "line_start": 10, "line_end": 12}],
             }
@@ -584,24 +602,28 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertIn("technical_candidates", result["assessment"])
         self.assertIn("estimation_rubric", result["assessment"])
         self.assertEqual(result["runtime_evidence"][0]["filename"], "apollo.properties")
-        self.assertIn("Original business requirement, verbatim:", captured["question"])
-        self.assertIn("Need to add a new approval flow for high-risk orders", captured["question"])
-        self.assertIn("Business plan extracted from the requirement:", captured["question"])
-        self.assertIn("Technical candidates for repository evidence search:", captured["question"])
-        self.assertIn("Estimation rubric:", captured["question"])
-        self.assertIn("Required output sections:", captured["question"])
-        self.assertIn("业务理解", captured["question"])
-        self.assertIn("技术改造点", captured["question"])
-        self.assertIn("do not invent option labels", captured["question"])
-        self.assertNotIn("方案 1/2 技术改造点", captured["question"])
-        self.assertIn("BE 人天", captured["question"])
-        self.assertIn("FE 人天", captured["question"])
-        self.assertIn("Confirmed / Inferred / Missing Evidence", captured["question"])
-        self.assertEqual(captured["pm_team"], "AF")
-        self.assertEqual(captured["country"], "SG")
-        self.assertEqual(captured["llm_budget_mode"], "auto")
-        self.assertEqual(captured["query_mode"], "deep")
-        self.assertIn("new.feature.enabled=true", captured["runtime_evidence"][0]["text"])
+        self.assertGreaterEqual(len(captured_calls), 2)
+        evidence_call = captured_calls[0]
+        synthesis_call = captured_calls[1]
+        self.assertEqual(evidence_call["answer_mode"], "retrieval_only")
+        self.assertEqual(evidence_call["llm_budget_mode"], "cheap")
+        self.assertLess(len(evidence_call["question"]), 2500)
+        self.assertIn("Technical search terms:", evidence_call["question"])
+        self.assertIn("Need to add a new approval flow for high-risk orders", evidence_call["question"])
+        self.assertEqual(synthesis_call["answer_mode"], "auto")
+        self.assertEqual(synthesis_call["llm_budget_mode"], "auto")
+        self.assertTrue(synthesis_call["effort_assessment"])
+        self.assertIn("Compact source-code evidence pack", synthesis_call["question"])
+        self.assertIn("Required output sections:", synthesis_call["question"])
+        self.assertIn("BE 人天", synthesis_call["question"])
+        self.assertIn("FE 人天", synthesis_call["question"])
+        self.assertIn("Confirmed / Inferred / Missing Evidence", synthesis_call["question"])
+        self.assertEqual(synthesis_call["pm_team"], "AF")
+        self.assertEqual(synthesis_call["country"], "SG")
+        self.assertEqual(synthesis_call["query_mode"], "deep")
+        self.assertIn("new.feature.enabled=true", synthesis_call["runtime_evidence"][0]["text"])
+        self.assertIn("effort_evidence_query", result)
+        self.assertIn("effort_timing", result)
         ensure_synced.assert_not_called()
         self.assertIn(b"event: completed", events_response.data)
 
@@ -9472,6 +9494,101 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertEqual(payload["answer_contract"]["status"], "model_answer")
         self.assertIn("IssueRepository is in repository/IssueRepository.java", payload["llm_answer"])
 
+    def test_effort_assessment_missing_evidence_does_not_trigger_codex_repair(self):
+        service = SourceCodeQAService(
+            data_root=Path(self.temp_dir.name),
+            team_profiles=TEAM_PROFILE_DEFAULTS,
+            llm_provider="codex_cli_bridge",
+            gitlab_token="secret-token",
+            git_timeout_seconds=5,
+            max_file_bytes=200_000,
+        )
+        entry = RepositoryEntry("Portal Repo", "https://git.example.com/team/portal.git")
+        key = "AF:All"
+        repo_path = service._repo_path(key, entry)
+        source_file = repo_path / "repository" / "IssueRepository.java"
+        source_file.parent.mkdir(parents=True)
+        source_file.write_text("class IssueRepository {\n  void find(){ jdbc.query(\"select * from issue_table\"); }\n}\n", encoding="utf-8")
+        matches = [
+            {
+                "repo": "Portal Repo",
+                "path": "repository/IssueRepository.java",
+                "line_start": 1,
+                "line_end": 3,
+                "retrieval": "persistent_index",
+                "trace_stage": "direct",
+                "reason": "repository and table matched",
+                "score": 10,
+                "snippet": "class IssueRepository { void find(){ jdbc.query(\"select * from issue_table\"); } }",
+            }
+        ]
+        calls = []
+
+        def fake_run(command, **kwargs):
+            calls.append((command, kwargs))
+            if "login" in command and "status" in command:
+                return SimpleNamespace(returncode=0, stdout="Logged in using ChatGPT\n", stderr="")
+            output_path = command[command.index("--output-last-message") + 1]
+            answer = "\n".join(
+                [
+                    "业务理解 / Business Understanding",
+                    "- Need to estimate approval impact for issue_table changes.",
+                    "技术改造点 / Technical Changes",
+                    "- Confirmed repository evidence exists in IssueRepository [S1].",
+                    "BE 人天 / BE Person-days",
+                    "- 2-3 PD, inferred from repository impact.",
+                    "FE 人天 / FE Person-days",
+                    "- 0-1 PD, missing screen evidence.",
+                    "Confirmed / Inferred / Missing Evidence",
+                    "- Confirmed: repository/IssueRepository.java [S1].",
+                    "- Missing: Webform template screen evidence.",
+                    "Assumptions / Risks",
+                    "- Runtime configuration may change the final scope.",
+                    "Confirmation Questions",
+                    "- Confirm the affected suspended-user groups.",
+                    "Source / Runtime Evidence",
+                    "- S1 repository/IssueRepository.java.",
+                ]
+            )
+            Path(output_path).write_text(
+                json.dumps(
+                    {
+                        "direct_answer": answer,
+                        "claims": [{"text": "IssueRepository reads issue_table", "citations": ["S1"]}],
+                        "missing_evidence": ["Webform template screen evidence"],
+                        "confidence": "medium",
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            return SimpleNamespace(returncode=0, stdout='{"type":"done"}\n', stderr="")
+
+        with patch("bpmis_jira_tool.source_code_qa.shutil.which", return_value="/usr/local/bin/codex"), patch(
+            "bpmis_jira_tool.source_code_qa.subprocess.run",
+            side_effect=fake_run,
+        ):
+            payload = service._build_llm_answer(
+                entries=[entry],
+                key=key,
+                pm_team="AF",
+                country="All",
+                question="Effort assessment impact analysis: why approval changes affect issue_table",
+                matches=matches,
+                llm_budget_mode="auto",
+                followup_context={},
+                requested_answer_mode="auto",
+                effort_assessment=True,
+            )
+
+        exec_calls = [item for item in calls if "exec" in item[0]]
+        self.assertEqual(len(exec_calls), 1)
+        self.assertEqual(payload["llm_route"]["task"], "effort_assessment")
+        self.assertFalse(payload["llm_route"]["codex_repair_attempted"])
+        self.assertEqual(payload["llm_route"]["codex_repair_reason"], "")
+        self.assertEqual(payload["llm_route"]["codex_deep_investigation_rounds"], 0)
+        self.assertIn("Missing: Webform template screen evidence", payload["llm_answer"])
+
     def test_codex_out_of_scope_citation_triggers_severe_repair(self):
         service = SourceCodeQAService(
             data_root=Path(self.temp_dir.name),
@@ -9541,14 +9658,117 @@ class SourceCodeQAServiceTests(unittest.TestCase):
                 llm_budget_mode="auto",
                 followup_context={},
                 requested_answer_mode="auto",
+                effort_assessment=True,
             )
 
         exec_calls = [item for item in calls if "exec" in item[0]]
         self.assertEqual(len(exec_calls), 2)
+        self.assertEqual(payload["llm_route"]["task"], "effort_assessment")
         self.assertTrue(payload["llm_route"]["codex_repair_attempted"])
         self.assertIn("out_of_scope_citations", payload["llm_route"]["codex_repair_reason"])
         self.assertEqual(payload["codex_cli_summary"]["citation_validation_status"], "ok")
         self.assertEqual(payload["answer_contract"]["status"], "model_answer")
+
+    def test_effort_assessment_unsupported_claim_still_triggers_codex_repair(self):
+        service = SourceCodeQAService(
+            data_root=Path(self.temp_dir.name),
+            team_profiles=TEAM_PROFILE_DEFAULTS,
+            llm_provider="codex_cli_bridge",
+            gitlab_token="secret-token",
+            git_timeout_seconds=5,
+            max_file_bytes=200_000,
+        )
+        entry = RepositoryEntry("Portal Repo", "https://git.example.com/team/portal.git")
+        key = "AF:All"
+        repo_path = service._repo_path(key, entry)
+        source_file = repo_path / "repository" / "IssueRepository.java"
+        source_file.parent.mkdir(parents=True)
+        source_file.write_text("class IssueRepository {\n  void find(){ jdbc.query(\"select * from issue_table\"); }\n}\n", encoding="utf-8")
+        matches = [
+            {
+                "repo": "Portal Repo",
+                "path": "repository/IssueRepository.java",
+                "line_start": 1,
+                "line_end": 3,
+                "retrieval": "persistent_index",
+                "trace_stage": "direct",
+                "reason": "repository and table matched",
+                "score": 10,
+                "snippet": "class IssueRepository { void find(){ jdbc.query(\"select * from issue_table\"); } }",
+            }
+        ]
+        calls = []
+
+        def fake_run(command, **kwargs):
+            calls.append((command, kwargs))
+            if "login" in command and "status" in command:
+                return SimpleNamespace(returncode=0, stdout="Logged in using ChatGPT\n", stderr="")
+            output_path = command[command.index("--output-last-message") + 1]
+            exec_count = len([item for item in calls if "exec" in item[0]])
+            if exec_count == 1:
+                answer = "\n".join(
+                    [
+                        "业务理解 / Business Understanding",
+                        "- Need to estimate approval impact.",
+                        "技术改造点 / Technical Changes",
+                        "- IssueRepository owns all suspended-case routing.",
+                        "BE 人天 / BE Person-days",
+                        "- 3-5 PD.",
+                        "FE 人天 / FE Person-days",
+                        "- 1-2 PD.",
+                        "Confirmed / Inferred / Missing Evidence",
+                        "- Confirmed: source evidence exists.",
+                        "Assumptions / Risks",
+                        "- Scope depends on template rules.",
+                        "Confirmation Questions",
+                        "- Confirm the affected groups.",
+                        "Source / Runtime Evidence",
+                        "- Indexed repository evidence.",
+                    ]
+                )
+                Path(output_path).write_text(
+                    json.dumps(
+                        {
+                            "direct_answer": answer,
+                            "claims": [{"text": "IssueRepository owns all suspended-case routing", "citations": []}],
+                            "missing_evidence": [],
+                            "confidence": "high",
+                        },
+                        ensure_ascii=False,
+                    ),
+                    encoding="utf-8",
+                )
+            else:
+                Path(output_path).write_text(
+                    '{"direct_answer":"IssueRepository reads issue_table [S1].",'
+                    '"claims":[{"text":"IssueRepository reads issue_table","citations":["S1"]}],'
+                    '"missing_evidence":[],"confidence":"high"}',
+                    encoding="utf-8",
+                )
+            return SimpleNamespace(returncode=0, stdout='{"type":"done"}\n', stderr="")
+
+        with patch("bpmis_jira_tool.source_code_qa.shutil.which", return_value="/usr/local/bin/codex"), patch(
+            "bpmis_jira_tool.source_code_qa.subprocess.run",
+            side_effect=fake_run,
+        ):
+            payload = service._build_llm_answer(
+                entries=[entry],
+                key=key,
+                pm_team="AF",
+                country="All",
+                question="Effort assessment impact analysis: why approval changes affect suspended cases",
+                matches=matches,
+                llm_budget_mode="auto",
+                followup_context={},
+                requested_answer_mode="auto",
+                effort_assessment=True,
+            )
+
+        exec_calls = [item for item in calls if "exec" in item[0]]
+        self.assertEqual(len(exec_calls), 2)
+        self.assertEqual(payload["llm_route"]["task"], "effort_assessment")
+        self.assertTrue(payload["llm_route"]["codex_repair_attempted"])
+        self.assertIn("high_risk_claims_missing_scoped_file_evidence", payload["llm_route"]["codex_repair_reason"])
 
     def test_codex_repair_bad_request_keeps_initial_answer(self):
         service = SourceCodeQAService(

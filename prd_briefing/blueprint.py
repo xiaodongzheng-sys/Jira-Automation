@@ -77,6 +77,7 @@ def create_prd_briefing_blueprint() -> Blueprint:
                 data = _build_local_agent_client(settings).prd_briefing_review(review_payload)
             else:
                 data = _build_prd_review_service().review_url(PRDBriefingReviewRequest(**review_payload))
+            _save_latest_result(owner_key=owner_key, tool_key="prd_briefing_review", payload={"payload": data})
             return jsonify(data)
         except ToolError as error:
             return jsonify({"status": "error", "message": str(error)}), 400
@@ -100,6 +101,7 @@ def create_prd_briefing_blueprint() -> Blueprint:
             else:
                 service = _build_service()
                 data = service.process_prd_for_presentation(**request_payload)
+            _save_latest_result(owner_key=owner_key, tool_key="prd_briefing", payload={"payload": data})
             return jsonify(data)
         except ToolError as error:
             return jsonify({"status": "error", "message": str(error)}), 400
@@ -131,6 +133,20 @@ def create_prd_briefing_blueprint() -> Blueprint:
             return jsonify(data)
         except Exception as error:  # noqa: BLE001
             return jsonify({"status": "error", "message": str(error) or "Could not generate audio for this chunk."}), 400
+
+    @blueprint.get("/api/latest")
+    def latest_briefing():
+        owner_key = current_app.config["GET_USER_IDENTITY"]()["config_key"]
+        settings = current_app.config["SETTINGS"]
+        try:
+            if _local_agent_prd_briefing_enabled(settings):
+                return jsonify(_build_local_agent_client(settings).prd_briefing_latest(owner_key=owner_key))
+            latest = _get_latest_result(owner_key=owner_key, tool_key="prd_briefing")
+            return jsonify({"status": "ok", "latest": latest})
+        except ToolError as error:
+            return jsonify({"status": "error", "message": str(error)}), 400
+        except Exception as error:  # noqa: BLE001
+            return jsonify({"status": "error", "message": str(error) or "Could not load latest PRD briefing."}), 400
 
     @blueprint.get("/api/session/<session_id>")
     def get_session(session_id: str):
@@ -270,6 +286,20 @@ def _build_local_agent_client(settings: Settings) -> LocalAgentClient:
         timeout_seconds=settings.local_agent_timeout_seconds,
         connect_timeout_seconds=settings.local_agent_connect_timeout_seconds,
     )
+
+
+def _save_latest_result(*, owner_key: str, tool_key: str, payload: dict[str, object]) -> None:
+    if not owner_key:
+        return
+    store: BriefingStore = current_app.config["PRD_BRIEFING_STORE"]
+    store.save_latest_tool_result(owner_key=owner_key, tool_key=tool_key, payload=payload)
+
+
+def _get_latest_result(*, owner_key: str, tool_key: str) -> dict[str, object] | None:
+    if not owner_key:
+        return None
+    store: BriefingStore = current_app.config["PRD_BRIEFING_STORE"]
+    return store.get_latest_tool_result(owner_key=owner_key, tool_key=tool_key)
 
 
 def _build_prd_review_service() -> PRDReviewService:

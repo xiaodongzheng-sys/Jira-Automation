@@ -43,6 +43,11 @@ import sqlparse
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 from bpmis_jira_tool.config import Settings
+from bpmis_jira_tool.daily_brief_archive import (
+    DailyBriefArchiveStore,
+    daily_brief_archive_path,
+    daily_brief_pdf_bytes,
+)
 from bpmis_jira_tool.errors import BPMISError, ConfigError, ToolError
 from bpmis_jira_tool.google_auth import (
     create_google_authorization_url,
@@ -96,7 +101,7 @@ from bpmis_jira_tool.google_sheets import GoogleSheetsService
 from bpmis_jira_tool.bpmis_projects import BPMISProjectStore, PortalJiraCreationService, PortalProjectSyncService
 from bpmis_jira_tool.project_sync import BPMISProjectSyncService
 from bpmis_jira_tool.service import JiraCreationService, build_bpmis_client
-from bpmis_jira_tool.source_code_qa import CRMS_COUNTRIES, ALL_COUNTRY, CodexCliBridgeSourceCodeQALLMProvider, SourceCodeQAService
+from bpmis_jira_tool.source_code_qa import CRMS_COUNTRIES, ALL_COUNTRY, IDENTIFIER_PATTERN, CodexCliBridgeSourceCodeQALLMProvider, SourceCodeQAService
 from bpmis_jira_tool.user_config import (
     CONFIGURED_FIELDS,
     DEFAULT_DIRECT_VALUES,
@@ -2580,6 +2585,17 @@ def _log_portal_event(
     active_logger = logger or current_app.logger
     payload = {"event": event, **fields}
     active_logger.log(level, "portal_event %s", json.dumps(payload, ensure_ascii=False, sort_keys=True))
+
+
+def _team_portal_data_root(settings: Settings) -> Path:
+    data_root = settings.team_portal_data_dir
+    if data_root.is_absolute():
+        return data_root
+    return (PROJECT_ROOT / data_root).resolve()
+
+
+def _get_daily_brief_archive_store(settings: Settings) -> DailyBriefArchiveStore:
+    return DailyBriefArchiveStore(daily_brief_archive_path(_team_portal_data_root(settings)))
 
 
 def create_app() -> Flask:
@@ -5395,6 +5411,82 @@ def create_app() -> Flask:
             }
         )
 
+    @app.get("/api/team-dashboard/daily-briefs")
+    def team_dashboard_daily_briefs():
+        access_gate = _require_team_dashboard_monthly_report_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        if _local_agent_seatalk_enabled(settings):
+            briefs = _build_local_agent_client(settings).team_dashboard_daily_briefs()
+            return jsonify(
+                {
+                    "status": "ok",
+                    "briefs": [
+                        {
+                            "brief_id": item.get("brief_id") or "",
+                            "time_period": item.get("time_period") or "",
+                            "subject": item.get("subject") or "",
+                            "message_id": item.get("message_id") or "",
+                            "generated_at": item.get("generated_at") or item.get("sent_at") or "",
+                            "download_url": url_for("team_dashboard_daily_brief_download", brief_id=item.get("brief_id") or ""),
+                        }
+                        for item in briefs
+                        if item.get("brief_id")
+                    ],
+                }
+            )
+        briefs = _get_daily_brief_archive_store(settings).list_recent(limit=30)
+        return jsonify(
+            {
+                "status": "ok",
+                "briefs": [
+                    {
+                        "brief_id": item.get("brief_id") or "",
+                        "time_period": item.get("time_period") or "",
+                        "subject": item.get("subject") or "",
+                        "message_id": item.get("message_id") or "",
+                        "generated_at": item.get("sent_at") or "",
+                        "download_url": url_for("team_dashboard_daily_brief_download", brief_id=item.get("brief_id") or ""),
+                    }
+                    for item in briefs
+                    if item.get("brief_id")
+                ],
+            }
+        )
+
+    @app.get("/api/team-dashboard/daily-briefs/<brief_id>/download")
+    def team_dashboard_daily_brief_download(brief_id: str):
+        access_gate = _require_team_dashboard_monthly_report_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        if _local_agent_seatalk_enabled(settings):
+            response = _build_local_agent_client(settings).team_dashboard_daily_brief_download(brief_id)
+            headers = []
+            content_disposition = response.headers.get("Content-Disposition")
+            if content_disposition:
+                headers.append(("Content-Disposition", content_disposition))
+            return current_app.response_class(
+                response.content,
+                status=response.status_code,
+                headers=headers,
+                mimetype=response.headers.get("Content-Type") or "application/pdf",
+            )
+        item = _get_daily_brief_archive_store(settings).get(brief_id)
+        if item is None:
+            return jsonify({"status": "error", "message": "Daily Brief was not found."}), HTTPStatus.NOT_FOUND
+        pdf_bytes = daily_brief_pdf_bytes(
+            title=str(item.get("subject") or "Daily Brief"),
+            body=str(item.get("text_body") or ""),
+        )
+        run_date = re.sub(r"[^0-9-]", "", str(item.get("run_date") or "daily-brief")) or "daily-brief"
+        run_slot = re.sub(r"[^a-z0-9_-]", "-", str(item.get("run_slot") or "daily").lower()) or "daily"
+        return send_file(
+            io.BytesIO(pdf_bytes),
+            mimetype="application/pdf",
+            as_attachment=True,
+            download_name=f"daily-brief-{run_date}-{run_slot}.pdf",
+        )
+
     @app.post("/admin/team-dashboard/monthly-report-template")
     def save_team_dashboard_monthly_report_template():
         access_gate = _require_team_dashboard_monthly_report_access(settings, api=True)
@@ -6198,6 +6290,24 @@ def create_app() -> Flask:
     @app.post("/api/prd-self-assessment/summary")
     def prd_self_assessment_summary_api():
         return _run_prd_self_assessment_action(settings, action="summary")
+
+    @app.get("/api/prd-self-assessment/latest")
+    def prd_self_assessment_latest_api():
+        access_gate = _require_prd_self_assessment_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        user_identity = _get_user_identity(settings)
+        owner_key = str(user_identity.get("config_key") or "")
+        try:
+            if _local_agent_source_code_qa_enabled(settings):
+                return jsonify(_build_local_agent_client(settings).prd_self_assessment_latest(owner_key=owner_key))
+            latest = _get_prd_latest_result(owner_key=owner_key, tool_key="prd_self_assessment")
+            return jsonify({"status": "ok", "latest": latest})
+        except ToolError as error:
+            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
+        except Exception as error:  # noqa: BLE001
+            current_app.logger.exception("PRD Self-Assessment latest load failed.")
+            return jsonify({"status": "error", "message": str(error) or "Could not load latest PRD Self-Assessment result."}), HTTPStatus.BAD_REQUEST
 
     @app.get("/download/default-sheet-template.csv")
     def download_default_sheet_template():
@@ -9190,6 +9300,231 @@ def _build_source_code_qa_effort_assessment_prompt(
     )
 
 
+def _source_code_qa_effort_compact_terms(technical_candidates: dict[str, Any], requirement: str) -> list[str]:
+    terms: list[str] = []
+    for key in ("search_terms", "configs_or_tables", "product_terms", "limit_terms", "evidence_hints"):
+        terms.extend(str(item) for item in (technical_candidates.get(key) or []) if str(item or "").strip())
+    typed_candidates = technical_candidates.get("typed_candidates") if isinstance(technical_candidates.get("typed_candidates"), dict) else {}
+    for values in typed_candidates.values():
+        terms.extend(str(item) for item in (values or []) if str(item or "").strip())
+    terms.extend(IDENTIFIER_PATTERN.findall(str(requirement or "")))
+    return [str(item) for item in _source_code_qa_effort_unique(terms) if str(item or "").strip()][:36]
+
+
+def _build_source_code_qa_effort_evidence_query(
+    *,
+    requirement: str,
+    business_plan: dict[str, Any],
+    technical_candidates: dict[str, Any],
+) -> str:
+    goals = ", ".join(str(item) for item in (business_plan.get("business_goals") or [])[:4])
+    products = ", ".join(str(item) for item in (business_plan.get("products") or [])[:6])
+    limit_types = ", ".join(str(item) for item in (business_plan.get("limit_types") or [])[:6])
+    flow_changes = ", ".join(str(item) for item in (business_plan.get("flow_changes") or [])[:6])
+    terms = ", ".join(_source_code_qa_effort_compact_terms(technical_candidates, requirement)[:28])
+    dictionary_entries = ", ".join(str(item) for item in (technical_candidates.get("matched_dictionary_entries") or [])[:10])
+    return "\n".join(
+        [
+            "Effort assessment evidence lookup. Find current source-code evidence for implementation impact.",
+            f"Requirement summary: {str(requirement or '').strip()[:1200]}",
+            f"Business goals: {goals or 'planning-grade technical impact assessment'}",
+            f"Products: {products or 'n/a'}",
+            f"Limit/flow terms: {', '.join(item for item in (limit_types, flow_changes) if item) or 'n/a'}",
+            f"Technical search terms: {terms or 'n/a'}",
+            f"Dictionary hits: {dictionary_entries or 'none'}",
+            "Focus on impacted APIs, services, strategies, configs/tables, frontend screens, tests, and downstream/reporting paths.",
+        ]
+    )
+
+
+def _source_code_qa_effort_evidence_digest(evidence_result: dict[str, Any]) -> dict[str, Any]:
+    matches = evidence_result.get("matches") if isinstance(evidence_result.get("matches"), list) else []
+    return {
+        "index_freshness": evidence_result.get("index_freshness") or {},
+        "matches": [
+            {
+                "repo": match.get("repo"),
+                "path": match.get("path"),
+                "line_start": match.get("line_start"),
+                "line_end": match.get("line_end"),
+                "retrieval": match.get("retrieval"),
+                "trace_stage": match.get("trace_stage"),
+            }
+            for match in matches[:16]
+            if isinstance(match, dict)
+        ],
+    }
+
+
+def _source_code_qa_effort_runtime_digest(runtime_evidence: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    digest: list[dict[str, Any]] = []
+    for item in runtime_evidence:
+        if not isinstance(item, dict):
+            continue
+        digest.append(
+            {
+                "source_type": item.get("source_type") or "",
+                "filename": item.get("filename") or "",
+                "sha256": hashlib.sha256(str(item.get("text") or "").encode("utf-8")).hexdigest()[:16],
+            }
+        )
+    return digest
+
+
+def _source_code_qa_effort_cache_key(
+    *,
+    pm_team: str,
+    country: str,
+    language: str,
+    requirement: str,
+    llm_provider: str,
+    evidence_query: str,
+    evidence_result: dict[str, Any],
+    runtime_evidence: list[dict[str, Any]],
+) -> str:
+    dictionaries = _load_source_code_qa_effort_dictionaries()
+    payload = {
+        "version": 2,
+        "pm_team": pm_team,
+        "country": country,
+        "language": language,
+        "requirement_sha256": hashlib.sha256(str(requirement or "").encode("utf-8")).hexdigest(),
+        "llm_provider": llm_provider or "default",
+        "evidence_query_sha256": hashlib.sha256(str(evidence_query or "").encode("utf-8")).hexdigest(),
+        "effort_dictionary_version": dictionaries.get("version"),
+        "effort_dictionary_updated_at": dictionaries.get("updated_at"),
+        "runtime_evidence": _source_code_qa_effort_runtime_digest(runtime_evidence),
+        "evidence": _source_code_qa_effort_evidence_digest(evidence_result),
+    }
+    return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def _source_code_qa_effort_cache_root(settings: Settings) -> Path:
+    return _team_portal_data_root(settings) / "source_code_qa" / "effort_assessment_cache"
+
+
+def _load_source_code_qa_effort_cached_result(settings: Settings, cache_key: str) -> dict[str, Any] | None:
+    try:
+        path = _source_code_qa_effort_cache_root(settings) / f"{cache_key}.json"
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    result = payload.get("result") if isinstance(payload, dict) else None
+    if not isinstance(result, dict):
+        return None
+    result = dict(result)
+    result["effort_cache_hit"] = True
+    result["effort_cache_key"] = cache_key
+    if isinstance(result.get("llm_route"), dict):
+        result["llm_route"] = {**result["llm_route"], "task": "effort_assessment", "effort_cache_hit": True}
+    return result
+
+
+def _store_source_code_qa_effort_cached_result(settings: Settings, cache_key: str, result: dict[str, Any]) -> None:
+    try:
+        cache_root = _source_code_qa_effort_cache_root(settings)
+        cache_root.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "version": 2,
+            "cache_key": cache_key,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "result": result,
+        }
+        (cache_root / f"{cache_key}.json").write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True), encoding="utf-8")
+    except (OSError, TypeError):
+        current_app.logger.warning("Could not store Source Code Q&A effort assessment cache.", exc_info=True)
+
+
+def _source_code_qa_effort_compact_evidence(result: dict[str, Any]) -> dict[str, Any]:
+    matches = result.get("matches") if isinstance(result.get("matches"), list) else []
+    citations = result.get("citations") if isinstance(result.get("citations"), list) else []
+    evidence_outline = result.get("evidence_outline") if isinstance(result.get("evidence_outline"), dict) else {}
+    return {
+        "status": result.get("status") or "",
+        "summary": result.get("summary") or "",
+        "answer_quality": result.get("answer_quality") or {},
+        "evidence_outline": evidence_outline,
+        "citations": citations[:12],
+        "matches": [
+            {
+                "repo": match.get("repo"),
+                "path": match.get("path"),
+                "line_start": match.get("line_start"),
+                "line_end": match.get("line_end"),
+                "retrieval": match.get("retrieval"),
+                "trace_stage": match.get("trace_stage"),
+                "reason": match.get("reason"),
+                "snippet": str(match.get("snippet") or "")[:900],
+            }
+            for match in matches[:12]
+            if isinstance(match, dict)
+        ],
+    }
+
+
+def _build_source_code_qa_effort_compact_synthesis_prompt(
+    *,
+    pm_team: str,
+    country: str,
+    language: str,
+    requirement: str,
+    llm_provider: str,
+    runtime_evidence: list[dict[str, Any]],
+    business_plan: dict[str, Any],
+    technical_candidates: dict[str, Any],
+    estimation_rubric: dict[str, Any],
+    evidence_result: dict[str, Any],
+) -> str:
+    output_language = "Chinese" if language == "zh" else "English"
+    return "\n".join(
+        [
+            "You are performing a Source Code Q&A Effort Assessment. Use the compact evidence pack below; do not restart broad repository exploration unless required evidence is contradictory.",
+            "",
+            "Context:",
+            f"- PM Team: {pm_team}",
+            f"- Country: {country}",
+            f"- Answer language: {output_language}",
+            f"- Selected model provider: {llm_provider or 'default'}",
+            f"- Runtime evidence available: {len(runtime_evidence)} item(s)",
+            "",
+            "Original business requirement, verbatim:",
+            str(requirement or "").strip()[:4000],
+            "",
+            "Business plan:",
+            _source_code_qa_effort_json_block(business_plan),
+            "",
+            "Technical candidates:",
+            _source_code_qa_effort_json_block(technical_candidates),
+            "",
+            "Estimation rubric:",
+            _source_code_qa_effort_json_block(estimation_rubric),
+            "",
+            "Compact source-code evidence pack from the indexed repositories:",
+            _source_code_qa_effort_json_block(_source_code_qa_effort_compact_evidence(evidence_result)),
+            "",
+            "Instructions:",
+            "- Produce the final effort assessment from this evidence pack, business plan, runtime evidence, and rubric.",
+            "- Keep concrete source citations as file paths, classes, functions, APIs, tables, configs, or S-id citations when available.",
+            "- Separate Confirmed, Inferred, and Missing Evidence. Missing source-code evidence is acceptable; state it explicitly and continue with low confidence.",
+            "- Do not invent Option 1/Option 2 labels unless the original requirement had explicit alternatives.",
+            "- Estimate BE and FE as person-day ranges and explain the driver for each range.",
+            "- Include QA/test and integration impact inside the relevant BE/FE notes.",
+            "",
+            "Required output sections:",
+            "1. 业务理解 / Business Understanding",
+            "2. 技术改造点 / Technical Changes",
+            "3. BE 人天 / BE Person-days",
+            "4. FE 人天 / FE Person-days",
+            "5. Confirmed / Inferred / Missing Evidence",
+            "6. Assumptions / Risks",
+            "7. Confirmation Questions",
+            "8. Source / Runtime Evidence",
+            "",
+            f"Write the final answer in {output_language}.",
+        ]
+    )
+
+
 def _source_code_qa_effort_missing_evidence(
     *,
     result: dict[str, Any],
@@ -9782,6 +10117,11 @@ def _run_prd_self_assessment_action(settings: Settings, *, action: str):
                 },
             ),
         )
+        _save_prd_latest_result(
+            owner_key=request_payload["owner_key"],
+            tool_key="prd_self_assessment",
+            payload={"action": action, "payload": data},
+        )
         return jsonify(data)
     except ToolError as error:
         error_details = _classify_portal_error(error)
@@ -9812,6 +10152,20 @@ def _run_prd_self_assessment_action(settings: Settings, *, action: str):
             ),
             HTTPStatus.INTERNAL_SERVER_ERROR,
         )
+
+
+def _save_prd_latest_result(*, owner_key: str, tool_key: str, payload: dict[str, Any]) -> None:
+    if not owner_key:
+        return
+    store: BriefingStore = current_app.config["PRD_BRIEFING_STORE"]
+    store.save_latest_tool_result(owner_key=owner_key, tool_key=tool_key, payload=payload)
+
+
+def _get_prd_latest_result(*, owner_key: str, tool_key: str) -> dict[str, Any] | None:
+    if not owner_key:
+        return None
+    store: BriefingStore = current_app.config["PRD_BRIEFING_STORE"]
+    return store.get_latest_tool_result(owner_key=owner_key, tool_key=tool_key)
 
 
 def _require_team_dashboard_monthly_report_access(settings: Settings, *, api: bool = False):
@@ -10582,7 +10936,8 @@ def _run_source_code_qa_effort_assessment_job(app: Flask, job_id: str, payload: 
             requirement = str(payload.get("requirement") or "").strip()
             if not requirement:
                 raise ToolError("Business requirement is empty.")
-            progress_callback("assessment_prompt", "Building optimized effort assessment prompt.", 0, 1)
+            settings: Settings = app.config["SETTINGS"]
+            progress_callback("assessment_prompt", "Building optimized effort assessment evidence query.", 0, 1)
             runtime_evidence = _resolve_source_code_qa_runtime_evidence(pm_team=pm_team, country=country)
             business_plan = _build_source_code_qa_effort_business_plan(
                 pm_team=pm_team,
@@ -10600,29 +10955,101 @@ def _run_source_code_qa_effort_assessment_job(app: Flask, job_id: str, payload: 
                 business_plan=business_plan,
                 technical_candidates=technical_candidates,
             )
-            optimized_prompt = _build_source_code_qa_effort_assessment_prompt(
-                pm_team=pm_team,
-                country=country,
-                language=language,
+            llm_provider = str(payload.get("llm_provider") or "")
+            effort_started = time.perf_counter()
+            evidence_query = _build_source_code_qa_effort_evidence_query(
                 requirement=requirement,
-                llm_provider=str(payload.get("llm_provider") or ""),
-                runtime_evidence=runtime_evidence,
                 business_plan=business_plan,
                 technical_candidates=technical_candidates,
-                estimation_rubric=estimation_rubric,
             )
-            result = service.query(
+            progress_callback("effort_evidence", "Searching focused source-code evidence for effort assessment.", 0, 1)
+            evidence_started = time.perf_counter()
+            evidence_result = service.query(
                 pm_team=pm_team,
                 country=country,
-                question=optimized_prompt,
-                answer_mode="auto",
-                llm_budget_mode="auto",
+                question=evidence_query,
+                limit=16,
+                answer_mode="retrieval_only",
+                llm_budget_mode="cheap",
                 query_mode="deep",
                 conversation_context=None,
                 attachments=[],
                 runtime_evidence=runtime_evidence,
                 progress_callback=progress_callback,
             )
+            evidence_latency_ms = int((time.perf_counter() - evidence_started) * 1000)
+            cache_key = _source_code_qa_effort_cache_key(
+                pm_team=pm_team,
+                country=country,
+                language=language,
+                requirement=requirement,
+                llm_provider=llm_provider,
+                evidence_query=evidence_query,
+                evidence_result=evidence_result,
+                runtime_evidence=runtime_evidence,
+            )
+            result = _load_source_code_qa_effort_cached_result(settings, cache_key)
+            if result is None:
+                synthesis_prompt = _build_source_code_qa_effort_compact_synthesis_prompt(
+                    pm_team=pm_team,
+                    country=country,
+                    language=language,
+                    requirement=requirement,
+                    llm_provider=llm_provider,
+                    runtime_evidence=runtime_evidence,
+                    business_plan=business_plan,
+                    technical_candidates=technical_candidates,
+                    estimation_rubric=estimation_rubric,
+                    evidence_result=evidence_result,
+                )
+                progress_callback("effort_synthesis", "Generating compact code-grounded effort assessment.", 0, 1)
+                synthesis_started = time.perf_counter()
+                result = service.query(
+                    pm_team=pm_team,
+                    country=country,
+                    question=synthesis_prompt,
+                    limit=16,
+                    answer_mode="auto",
+                    llm_budget_mode="auto",
+                    query_mode="deep",
+                    conversation_context=None,
+                    attachments=[],
+                    runtime_evidence=runtime_evidence,
+                    progress_callback=progress_callback,
+                    effort_assessment=True,
+                )
+                synthesis_latency_ms = int((time.perf_counter() - synthesis_started) * 1000)
+                if isinstance(result.get("llm_route"), dict):
+                    result["llm_route"] = {
+                        **result["llm_route"],
+                        "task": "effort_assessment",
+                        "effort_cache_hit": False,
+                        "effort_evidence_query_sha256": hashlib.sha256(evidence_query.encode("utf-8")).hexdigest()[:16],
+                    }
+                result["effort_timing"] = {
+                    "evidence_retrieval_ms": evidence_latency_ms,
+                    "synthesis_ms": synthesis_latency_ms,
+                    "repair_decision_ms": int(
+                        ((result.get("llm_route") or {}).get("codex_repair_decision_ms") or 0)
+                        if isinstance(result.get("llm_route"), dict)
+                        else 0
+                    ),
+                    "total_ms": int((time.perf_counter() - effort_started) * 1000),
+                    "cache_hit": False,
+                }
+                result["effort_cache_key"] = cache_key
+                _store_source_code_qa_effort_cached_result(settings, cache_key, result)
+            else:
+                result["effort_timing"] = {
+                    **(result.get("effort_timing") if isinstance(result.get("effort_timing"), dict) else {}),
+                    "evidence_retrieval_ms": evidence_latency_ms,
+                    "cache_hit": True,
+                    "repair_decision_ms": int(
+                        ((result.get("llm_route") or {}).get("codex_repair_decision_ms") or 0)
+                        if isinstance(result.get("llm_route"), dict)
+                        else 0
+                    ),
+                }
             result = _normalize_source_code_qa_effort_assessment_result(
                 result=result,
                 language=language,
@@ -10630,6 +11057,8 @@ def _run_source_code_qa_effort_assessment_job(app: Flask, job_id: str, payload: 
                 technical_candidates=technical_candidates,
                 estimation_rubric=estimation_rubric,
             )
+            result["effort_evidence_query"] = evidence_query
+            result["effort_evidence_result"] = _source_code_qa_effort_compact_evidence(evidence_result)
             result["assessment"] = {
                 "type": "effort_assessment",
                 "pm_team": pm_team,

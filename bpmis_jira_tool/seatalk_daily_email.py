@@ -13,6 +13,7 @@ from typing import Any
 import re
 
 from bpmis_jira_tool.config import Settings
+from bpmis_jira_tool.daily_brief_archive import DailyBriefArchiveStore, daily_brief_archive_path
 from bpmis_jira_tool.errors import ConfigError
 from bpmis_jira_tool.gmail_dashboard import GMAIL_READONLY_SCOPE, GmailDashboardService
 from bpmis_jira_tool.gmail_sender import StoredGoogleCredentials, credentials_from_payload, send_gmail_message
@@ -778,6 +779,19 @@ def send_daily_email(
         message_id=message_id,
         sent_at=local_now,
         run_slot=run_slot,
+        window_start=window_start,
+        window_end=window_end,
+    )
+    DailyBriefArchiveStore(daily_brief_archive_path(data_root)).save(
+        run_date=run_date,
+        run_slot=run_slot,
+        recipient=recipient,
+        subject=subject,
+        text_body=text_body,
+        html_body=html_body,
+        message_id=message_id,
+        status="sent",
+        sent_at=local_now,
         window_start=window_start,
         window_end=window_end,
     )

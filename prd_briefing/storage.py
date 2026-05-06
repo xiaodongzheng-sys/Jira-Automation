@@ -169,6 +169,15 @@ class BriefingStore:
 
                 create unique index if not exists idx_presentation_outline_cache_lookup
                     on presentation_outline_cache(owner_key, page_id, version_number, prompt_version, model_id);
+
+                create table if not exists latest_tool_results (
+                    owner_key text not null,
+                    tool_key text not null,
+                    payload_json text not null,
+                    created_at text not null,
+                    updated_at text not null,
+                    primary key(owner_key, tool_key)
+                );
                 """
             )
             session_columns = {
@@ -573,6 +582,65 @@ class BriefingStore:
                 """,
                 (owner_key, audience, model_id, prompt_version, section_hash, script, utc_now()),
             )
+
+    def save_latest_tool_result(self, *, owner_key: str, tool_key: str, payload: dict[str, Any]) -> dict[str, Any]:
+        normalized_owner = str(owner_key or "").strip()
+        normalized_tool = str(tool_key or "").strip()
+        if not normalized_owner or not normalized_tool:
+            return {}
+        now = utc_now()
+        with self.connect() as conn:
+            existing = conn.execute(
+                "select created_at from latest_tool_results where owner_key = ? and tool_key = ?",
+                (normalized_owner, normalized_tool),
+            ).fetchone()
+            conn.execute(
+                """
+                insert into latest_tool_results (
+                    owner_key, tool_key, payload_json, created_at, updated_at
+                ) values (?, ?, ?, ?, ?)
+                on conflict(owner_key, tool_key)
+                do update set
+                    payload_json = excluded.payload_json,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    normalized_owner,
+                    normalized_tool,
+                    json.dumps(payload or {}, ensure_ascii=False, sort_keys=True),
+                    str(existing["created_at"]) if existing else now,
+                    now,
+                ),
+            )
+        return self.get_latest_tool_result(owner_key=normalized_owner, tool_key=normalized_tool) or {}
+
+    def get_latest_tool_result(self, *, owner_key: str, tool_key: str) -> dict[str, Any] | None:
+        normalized_owner = str(owner_key or "").strip()
+        normalized_tool = str(tool_key or "").strip()
+        if not normalized_owner or not normalized_tool:
+            return None
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                select * from latest_tool_results
+                where owner_key = ? and tool_key = ?
+                limit 1
+                """,
+                (normalized_owner, normalized_tool),
+            ).fetchone()
+        if not row:
+            return None
+        try:
+            payload = json.loads(row["payload_json"] or "{}")
+        except (TypeError, json.JSONDecodeError):
+            payload = {}
+        return {
+            "owner_key": str(row["owner_key"]),
+            "tool_key": str(row["tool_key"]),
+            "payload": payload if isinstance(payload, dict) else {},
+            "created_at": str(row["created_at"]),
+            "updated_at": str(row["updated_at"]),
+        }
 
     def get_prd_review_result(
         self,

@@ -733,6 +733,7 @@ class PRDBriefingService:
                 "prompt_version": prompt_version,
                 "page_id": page_id,
                 "version_number": version_number,
+                "language": language,
             },
             "chunks": chunks,
         }

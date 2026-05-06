@@ -1,4 +1,5 @@
 (() => {
+  const root = document.querySelector('[data-briefing-shell]');
   const sessionForm = document.querySelector('[data-briefing-session-form]');
   const statusNode = document.querySelector('[data-briefing-status]');
   const presenterView = document.querySelector('[data-presenter-view]');
@@ -733,14 +734,10 @@
       });
       const payload = await parseJsonResponse(response);
       if (!response.ok) throw new Error(payload.message || 'Could not process this PRD.');
-      state.sessionId = payload.session?.session_id || null;
-      state.sessionTitle = payload.session?.title || 'PRD';
-      state.chunks = (payload.chunks || []).map(sanitizeChunk).filter((chunk) => chunk.content);
-      state.isGenerating = false;
-      state.currentIndex = 0;
-      setStatus(`Generated the briefing outline for "${state.sessionTitle}". Generating the opening audio first.`, 'success');
-      renderPresenterView();
-      enqueueAudio(0).then(() => ensurePrefetchWindow(1));
+      applyPresentationPayload(payload, {
+        statusMessage: `Generated the briefing outline for "${payload.session?.title || 'PRD'}". Generating the opening audio first.`,
+        enqueueOpeningAudio: true,
+      });
     } catch (error) {
       state.isGenerating = false;
       const message = error.message || 'Could not process this PRD.';
@@ -750,6 +747,44 @@
       }
     } finally {
       setSessionSubmitLoading(false);
+    }
+  };
+
+  const applyPresentationPayload = (payload, { statusMessage = '', enqueueOpeningAudio = false } = {}) => {
+    state.sessionId = payload.session?.session_id || null;
+    state.sessionTitle = payload.session?.title || 'PRD';
+    state.chunks = (payload.chunks || []).map(sanitizeChunk).filter((chunk) => chunk.content);
+    state.isGenerating = false;
+    state.currentIndex = 0;
+    state.activeSentenceIndex = -1;
+    state.continueRequired = false;
+    setStatus(statusMessage || `Showing the latest briefing outline for "${state.sessionTitle}".`, 'success');
+    renderPresenterView();
+    if (enqueueOpeningAudio && state.chunks.length) {
+      enqueueAudio(0).then(() => ensurePrefetchWindow(1));
+    }
+  };
+
+  const restoreLatestPresentation = async () => {
+    try {
+      const response = await fetch(root?.dataset.latestUrl || '/prd-briefing/api/latest', {
+        method: 'GET',
+        headers: { Accept: 'application/json' },
+        credentials: 'same-origin',
+      });
+      const payload = await parseJsonResponse(response);
+      if (!response.ok || payload.status === 'error') return;
+      const latestPayload = payload.latest?.payload?.payload || {};
+      if (latestPayload.status !== 'ok' || !Array.isArray(latestPayload.chunks) || !latestPayload.chunks.length) return;
+      if (pageRefInput && latestPayload.session?.source_url) pageRefInput.value = latestPayload.session.source_url;
+      if (briefingLanguage) briefingLanguage.value = latestPayload.session?.language === 'en' ? 'en' : (latestPayload.language === 'en' ? 'en' : briefingLanguage.value);
+      saveFormDefaults();
+      applyPresentationPayload(latestPayload, {
+        statusMessage: `Showing the latest briefing outline for "${latestPayload.session?.title || 'PRD'}".`,
+        enqueueOpeningAudio: true,
+      });
+    } catch {
+      // Latest output is best-effort; keep the normal empty state when it cannot be loaded.
     }
   };
 
@@ -771,6 +806,7 @@
   };
 
   restoreFormDefaults();
+  restoreLatestPresentation();
   pageRefInput?.addEventListener('input', saveFormDefaults);
   briefingLanguage?.addEventListener('change', saveFormDefaults);
 

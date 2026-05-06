@@ -11,6 +11,7 @@ from unittest.mock import patch
 from cryptography.fernet import Fernet
 
 from bpmis_jira_tool.config import Settings
+from bpmis_jira_tool.daily_brief_archive import DailyBriefArchiveStore, daily_brief_archive_path
 from bpmis_jira_tool.errors import ConfigError
 from bpmis_jira_tool.gmail_dashboard import GMAIL_READONLY_SCOPE
 from bpmis_jira_tool.gmail_sender import (
@@ -1440,6 +1441,85 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
             "[Watch] Monitor closure",
             "[Follow-up] Rene Chong: Check the case",
         ])
+
+    def test_send_daily_email_archives_body_and_force_overwrites(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            encryption_key = Fernet.generate_key().decode("utf-8")
+            settings = _settings(temp_dir, encryption_key=encryption_key)
+            store = StoredGoogleCredentials(
+                Path(temp_dir) / "google" / "credentials.json",
+                encryption_key=encryption_key,
+            )
+            store.save(
+                owner_email="xiaodong.zheng@npt.sg",
+                credentials_payload={
+                    "token": "access-token",
+                    "scopes": [GMAIL_SEND_SCOPE, GMAIL_READONLY_SCOPE],
+                },
+            )
+            briefing = {
+                "direct_action_todos": [{"task": "Review rollout", "domain": "Anti-fraud", "priority": "high", "due": "today", "evidence": "Alice"}],
+                "watch_delegate_todos": [],
+                "team_member_reminders": [],
+                "my_todos": [],
+                "project_updates": [],
+            }
+
+            with patch("bpmis_jira_tool.seatalk_daily_email.build_seatalk_service", return_value=FakeSeaTalkService()):
+                with patch("bpmis_jira_tool.seatalk_daily_email.export_window_gmail_threads", return_value=""):
+                    with patch("bpmis_jira_tool.seatalk_daily_email.build_daily_briefing", return_value=briefing):
+                        with patch("bpmis_jira_tool.seatalk_daily_email.send_gmail_message", side_effect=[{"id": "msg-1"}, {"id": "msg-2"}]):
+                            first = send_daily_email(
+                                settings=settings,
+                                now=datetime(2026, 5, 5, 13, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE),
+                                slot="morning",
+                                gmail_service=object(),
+                            )
+                            second = send_daily_email(
+                                settings=settings,
+                                now=datetime(2026, 5, 5, 13, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE),
+                                slot="morning",
+                                force=True,
+                                gmail_service=object(),
+                            )
+
+            self.assertEqual(first.status, "sent")
+            self.assertEqual(second.status, "sent")
+            archive = DailyBriefArchiveStore(daily_brief_archive_path(Path(temp_dir))).list_recent()
+            self.assertEqual(len(archive), 1)
+            self.assertEqual(archive[0]["message_id"], "msg-2")
+            self.assertEqual(archive[0]["run_slot"], "morning")
+            self.assertEqual(archive[0]["time_period"], "2026-05-05 08:00-13:00")
+            self.assertIn("Review rollout", archive[0]["text_body"])
+
+    def test_send_daily_email_dry_run_does_not_archive(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            encryption_key = Fernet.generate_key().decode("utf-8")
+            settings = _settings(temp_dir, encryption_key=encryption_key)
+            store = StoredGoogleCredentials(
+                Path(temp_dir) / "google" / "credentials.json",
+                encryption_key=encryption_key,
+            )
+            store.save(
+                owner_email="xiaodong.zheng@npt.sg",
+                credentials_payload={
+                    "token": "access-token",
+                    "scopes": [GMAIL_SEND_SCOPE, GMAIL_READONLY_SCOPE],
+                },
+            )
+            with patch("bpmis_jira_tool.seatalk_daily_email.build_seatalk_service", return_value=FakeSeaTalkService()):
+                with patch("bpmis_jira_tool.seatalk_daily_email.export_window_gmail_threads", return_value=""):
+                    result = send_daily_email(
+                        settings=settings,
+                        now=datetime(2026, 5, 5, 13, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE),
+                        slot="morning",
+                        dry_run=True,
+                        gmail_service=object(),
+                    )
+
+            self.assertEqual(result.status, "dry_run")
+            archive = DailyBriefArchiveStore(daily_brief_archive_path(Path(temp_dir))).list_recent()
+            self.assertEqual(archive, [])
 
     def test_send_daily_email_reports_gmail_export_timeout(self):
         with tempfile.TemporaryDirectory() as temp_dir:

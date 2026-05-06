@@ -165,8 +165,16 @@ class LocalAgentClient:
         result = self._request("POST", "/api/local-agent/prd-self-assessment/summary", payload)
         return result if isinstance(result, dict) else {}
 
+    def prd_self_assessment_latest(self, *, owner_key: str) -> dict[str, Any]:
+        result = self._request("POST", "/api/local-agent/prd-self-assessment/latest", {"owner_key": owner_key})
+        return result if isinstance(result, dict) else {}
+
     def prd_briefing_process_prd(self, payload: dict[str, Any]) -> dict[str, Any]:
         result = self._request("POST", "/api/local-agent/prd-briefing/process-prd", payload)
+        return result if isinstance(result, dict) else {}
+
+    def prd_briefing_latest(self, *, owner_key: str) -> dict[str, Any]:
+        result = self._request("POST", "/api/local-agent/prd-briefing/latest", {"owner_key": owner_key})
         return result if isinstance(result, dict) else {}
 
     def prd_briefing_generate_audio(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -227,6 +235,21 @@ class LocalAgentClient:
     def team_dashboard_monthly_report_send(self, payload: dict[str, Any]) -> dict[str, Any]:
         result = self._request("POST", "/api/local-agent/team-dashboard/monthly-report/send", payload)
         return result if isinstance(result, dict) else {}
+
+    def team_dashboard_daily_briefs(self) -> list[dict[str, Any]]:
+        payload = self._request("GET", "/api/local-agent/team-dashboard/daily-briefs", signed=True)
+        briefs = payload.get("briefs")
+        return [item for item in briefs if isinstance(item, dict)] if isinstance(briefs, list) else []
+
+    def team_dashboard_daily_brief_download(self, brief_id: str) -> requests.Response:
+        safe_brief_id = quote(str(brief_id or "").strip(), safe="")
+        return self._request_raw(
+            "GET",
+            f"/api/local-agent/team-dashboard/daily-briefs/{safe_brief_id}/download",
+            signed=True,
+            expect_json=False,
+            stream=True,
+        )
 
     def meeting_recorder_diagnostics(self) -> dict[str, Any]:
         return self._request("POST", "/api/local-agent/meeting-recorder/diagnostics", {})

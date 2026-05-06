@@ -448,6 +448,7 @@ class TeamPortalAccessTests(unittest.TestCase):
                 source_page = client.get("/source-code-qa")
                 self.assertEqual(source_page.status_code, 200)
                 self.assertIn(b"data-source-question", source_page.data)
+                self.assertIn(b'<textarea data-source-question rows="2"></textarea>', source_page.data)
                 self.assertIn(b"data-source-query", source_page.data)
                 self.assertIn(b"data-source-session-list", source_page.data)
                 self.assertIn(b"Source Code Q&amp;A", source_page.data)
@@ -596,6 +597,7 @@ class TeamPortalAccessTests(unittest.TestCase):
                 "meeting_recorder_stop_api",
                 "meeting_recorder_upcoming_api",
                 "prd_self_assessment_page",
+                "prd_self_assessment_latest_api",
                 "prd_self_assessment_review_api",
                 "prd_self_assessment_summary_api",
                 "productization_upgrade_summary_issues",
@@ -613,6 +615,7 @@ class TeamPortalAccessTests(unittest.TestCase):
                 "source_code_qa_effort_assessment_job_events_api",
                 "source_code_qa_effort_assessment_latest_api",
                 "source_code_qa_feedback_api",
+                "source_code_qa_generated_artifact_api",
                 "source_code_qa_model_availability_api",
                 "source_code_qa_query_api",
                 "source_code_qa_query_job_api",
@@ -625,6 +628,8 @@ class TeamPortalAccessTests(unittest.TestCase):
                 "source_code_qa_sessions_api",
                 "source_code_qa_sync_api",
                 "team_dashboard_config",
+                "team_dashboard_daily_brief_download",
+                "team_dashboard_daily_briefs",
                 "team_dashboard_link_biz_project_jira",
                 "team_dashboard_link_biz_project_suggestions",
                 "team_dashboard_link_biz_projects",

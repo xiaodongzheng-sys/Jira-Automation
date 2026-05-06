@@ -3786,6 +3786,7 @@ class SourceCodeQAService:
         attachments: list[dict[str, Any]] | None = None,
         runtime_evidence: list[dict[str, Any]] | None = None,
         progress_callback: Any | None = None,
+        effort_assessment: bool = False,
     ) -> dict[str, Any]:
         key = self.mapping_key(pm_team, country)
         question = str(question or "").strip()
@@ -4423,6 +4424,7 @@ class SourceCodeQAService:
                 progress_callback=progress_callback,
                 attachments=attachments or [],
                 runtime_evidence=runtime_evidence or [],
+                effort_assessment=effort_assessment,
             )
             payload.update(llm_payload)
             payload["query_mode"] = query_mode
@@ -14591,6 +14593,7 @@ class SourceCodeQAService:
         progress_callback: Any | None = None,
         attachments: list[dict[str, Any]] | None = None,
         runtime_evidence: list[dict[str, Any]] | None = None,
+        effort_assessment: bool = False,
     ) -> dict[str, Any]:
         if not self.llm_ready():
             raise ToolError(self.llm_unavailable_message())
@@ -14601,6 +14604,8 @@ class SourceCodeQAService:
             "query_mode": query_mode,
             "deadline_seconds": 0,
         }
+        if effort_assessment:
+            llm_route["task"] = "effort_assessment"
         selected_model = self._model_for_role_or_budget("answer", budget)
         selected_matches = self._select_llm_matches(matches, int(budget["match_limit"]), question=question)
         evidence_summary = self._compress_evidence_cached(question, selected_matches, request_cache=request_cache)
@@ -14640,6 +14645,7 @@ class SourceCodeQAService:
                 progress_callback=progress_callback,
                 attachments=attachments or [],
                 runtime_evidence=runtime_evidence or [],
+                effort_assessment=effort_assessment,
             )
         attachment_section = self._context_attachment_section(attachments or [], runtime_evidence or [])
         domain_context = self._llm_domain_context(
@@ -14667,6 +14673,8 @@ class SourceCodeQAService:
             "thinking_budget": answer_thinking_budget,
             "thinking_config": answer_thinking_config,
         }
+        if effort_assessment:
+            llm_route["task"] = "effort_assessment"
         prompt_context = self._build_compressed_llm_context(
             evidence_summary,
             quality_gate,
@@ -14754,6 +14762,8 @@ class SourceCodeQAService:
                     "tight_threshold": LLM_PROMPT_TIGHT_THRESHOLD_TOKENS,
                 },
             }
+        if effort_assessment:
+            llm_route["task"] = "effort_assessment"
         answer_max_output_tokens = int(budget["max_output_tokens"])
         if routed_budget_mode == COMPACT_DEEP_BUDGET_MODE and token_pressure == "tight":
             answer_max_output_tokens = max(answer_max_output_tokens, 2_400)
@@ -15273,6 +15283,7 @@ class SourceCodeQAService:
         progress_callback: Any | None = None,
         attachments: list[dict[str, Any]] | None = None,
         runtime_evidence: list[dict[str, Any]] | None = None,
+        effort_assessment: bool = False,
     ) -> dict[str, Any]:
         query_mode = self.normalize_query_mode(query_mode)
         timing: dict[str, int] = {}
@@ -15329,6 +15340,8 @@ class SourceCodeQAService:
             "codex_session_max_turns": self.codex_session_max_turns,
             "codex_cache_followups": self.codex_cache_followups,
         }
+        if effort_assessment:
+            llm_route["task"] = "effort_assessment"
         if prompt_mode == CODEX_SQL_GENERATION_PROMPT_MODE:
             prompt_context = self._codex_sql_generation_brief(
                 pm_team=pm_team,
@@ -15557,14 +15570,45 @@ class SourceCodeQAService:
         )
         if deep_needed_raw and self._codex_high_risk_question(question):
             severe_repair_reasons.append("deep_investigation_needed_for_high_risk_question")
+        if effort_assessment:
+            required_section_groups = (
+                ("业务理解", "business understanding"),
+                ("技术改造", "technical changes"),
+                ("be", "后端", "人天"),
+                ("fe", "前端", "人天"),
+                ("confirmed", "inferred", "missing", "证据"),
+            )
+            lowered_answer = str(answer or "").lower()
+            if not all(any(section in lowered_answer for section in group) for group in required_section_groups):
+                severe_repair_reasons.append("effort_assessment_missing_required_sections")
+            allowed_effort_reasons = {
+                "empty_codex_answer",
+                "malformed_json_answer",
+                "bad_request_answer",
+                "out_of_scope_citations",
+                "high_risk_claims_missing_scoped_file_evidence",
+                "high_risk_answer_judge_requires_repair",
+                "not_found_answer_conflicts_with_retrieval_hints",
+                "effort_assessment_missing_required_sections",
+            }
+            if (
+                "not_found_answer_conflicts_with_retrieval_hints" in severe_repair_reasons
+                or "high_risk_claims_missing_scoped_file_evidence" in severe_repair_reasons
+            ):
+                allowed_effort_reasons.add("deep_investigation_needed_for_high_risk_question")
+            severe_repair_reasons = [
+                reason for reason in severe_repair_reasons
+                if reason in allowed_effort_reasons or reason.startswith("finish_reason_")
+            ]
         severe_repair_reasons = list(dict.fromkeys([reason for reason in severe_repair_reasons if reason]))
         repair_issues = severe_repair_reasons
         deep_needed = any(reason == "deep_investigation_needed_for_high_risk_question" for reason in severe_repair_reasons)
         repair_issue_count = len([issue for issue in repair_issues if issue]) + (1 if deep_needed else 0)
         repair_will_run = bool(self.codex_repair_enabled and severe_repair_reasons)
+        repair_decision_ms = int((time.perf_counter() - repair_prepare_started) * 1000)
         _log_source_code_qa_timing(
             "codex_repair_prepare",
-            elapsed_ms=int((time.perf_counter() - repair_prepare_started) * 1000),
+            elapsed_ms=repair_decision_ms,
             trace_id=trace_id,
             provider=self.llm_provider.name,
             model=selected_model,
@@ -15832,6 +15876,7 @@ class SourceCodeQAService:
             "codex_scoped_file_ref_count": len(codex_validation.get("scoped_file_refs") or []),
             "codex_out_of_scope_ref_count": len(codex_validation.get("out_of_scope_refs") or []),
             "codex_validation_warning_count": int(codex_validation.get("warning_count") or 0),
+            "codex_repair_decision_ms": repair_decision_ms,
             "codex_deep_investigation_rounds": deep_investigation_rounds,
             "codex_deep_investigation_terms": deep_investigation_terms[:12],
             "codex_deep_investigation_added": deep_investigation_added,

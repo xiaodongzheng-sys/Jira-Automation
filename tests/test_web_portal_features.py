@@ -12,6 +12,7 @@ from openpyxl import load_workbook
 
 import bpmis_jira_tool.web as web_module
 from bpmis_jira_tool.config import Settings
+from bpmis_jira_tool.daily_brief_archive import DailyBriefArchiveStore, daily_brief_archive_path
 from bpmis_jira_tool.errors import BPMISError, ToolError
 from bpmis_jira_tool.models import CreatedTicket
 from bpmis_jira_tool.monthly_report import DEFAULT_MONTHLY_REPORT_TEMPLATE, MonthlyReportSendResult, resolve_monthly_report_period
@@ -232,6 +233,7 @@ class _FakeMonthlyReportLocalAgentClient(_FakePRDReviewLocalAgentClient):
         self.draft_payload = None
         self.send_payload = None
         self.started_payload = None
+        self.daily_brief_download_id = None
 
     def team_dashboard_config_load(self):
         return {}
@@ -293,6 +295,37 @@ class _FakeMonthlyReportLocalAgentClient(_FakePRDReviewLocalAgentClient):
             "subject": payload.get("subject"),
             "message_id": "remote-message",
         }
+
+    def team_dashboard_daily_briefs(self):
+        return [
+            {
+                "brief_id": "2026-05-05-midday-3593312304",
+                "time_period": "2026-05-05 13:00-19:00",
+                "subject": "Daily Brief - 2026-05-05 (2026-05-05 13:00 - 2026-05-05 19:00)",
+                "message_id": "msg-midday",
+                "generated_at": "2026-05-05T19:00:00+08:00",
+            },
+            {
+                "brief_id": "2026-05-05-morning-3593312304",
+                "time_period": "2026-05-05 08:00-13:00",
+                "subject": "Daily Brief - 2026-05-05 (2026-05-05 08:00 - 2026-05-05 13:00)",
+                "message_id": "msg-morning",
+                "generated_at": "2026-05-05T13:00:00+08:00",
+            },
+        ]
+
+    def team_dashboard_daily_brief_download(self, brief_id):
+        self.daily_brief_download_id = brief_id
+
+        class Response:
+            status_code = 200
+            content = b"%PDF-1.4\nremote daily brief\n%%EOF"
+            headers = {
+                "Content-Type": "application/pdf",
+                "Content-Disposition": "attachment; filename=daily-brief-2026-05-05-midday.pdf",
+            }
+
+        return Response()
 
 
 class WebPortalFeatureTests(unittest.TestCase):
@@ -977,6 +1010,10 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertIn(b"Copy whole table", response.data)
         self.assertIn(b"Jira Link", response.data)
         self.assertIn(b"productization_upgrade_summary.js", response.data)
+        productization_js = (Path(__file__).resolve().parent.parent / "static" / "productization_upgrade_summary.js").read_text()
+        self.assertIn("productization-upgrade-summary:last-result:v1", productization_js)
+        self.assertIn("restoreLatestState()", productization_js)
+        self.assertIn("saveLatestState()", productization_js)
         self.assertIn(b"userInitiatedTeamChange", response.data)
         self.assertIn(b"resetConfirmModalState", response.data)
         self.assertIn(b"syncSelectedTeamBaseline", response.data)
@@ -2910,6 +2947,20 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertIn("seatalk-name-mapping", script)
         self.assertIn("loadSeaTalkNameMappings(false)", script)
 
+    def test_team_dashboard_daily_brief_frontend_and_template_hooks(self):
+        template = Path("templates/_team_dashboard_content.html").read_text(encoding="utf-8")
+        script = Path("static/team_dashboard.js").read_text(encoding="utf-8")
+
+        self.assertLess(template.index("Monthly Report</button>"), template.index("Daily Brief</button>"))
+        self.assertLess(template.index("Daily Brief</button>"), template.index("Report Intelligence</button>"))
+        self.assertIn("data-daily-briefs-url", template)
+        self.assertIn("<th>Time Period</th>", template)
+        self.assertIn("<th>Action</th>", template)
+        self.assertIn("data-team-dashboard-tab=\"daily-brief\"", template)
+        self.assertIn("loadDailyBriefs", script)
+        self.assertIn("root.dataset.dailyBriefsUrl", script)
+        self.assertIn("Download", script)
+
     def test_team_dashboard_name_mapping_page_size_options(self):
         script = Path("static/team_dashboard.js").read_text(encoding="utf-8")
         self.assertIn("seatalkNameMappingDefaultPageSize = 20", script)
@@ -4732,6 +4783,102 @@ class WebPortalFeatureTests(unittest.TestCase):
         payload = response.get_json()
         self.assertEqual(payload["message_id"], "msg-1")
         self.assertEqual(mock_send.call_args.kwargs["draft_markdown"], "edited draft")
+
+    def test_team_dashboard_daily_brief_list_and_download_pdf(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+            },
+            clear=False,
+        ):
+            store = DailyBriefArchiveStore(daily_brief_archive_path(Path(temp_dir)))
+            store.save(
+                run_date="2026-05-05",
+                run_slot="morning",
+                recipient="xiaodong.zheng@npt.sg",
+                subject="Daily Brief - 2026-05-05 (2026-05-05 08:00 - 2026-05-05 13:00)",
+                text_body="Subject: Daily Brief\n\nMorning brief body",
+                html_body="<html><body>Morning</body></html>",
+                message_id="msg-morning",
+                status="sent",
+                sent_at=datetime(2026, 5, 5, 13, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE),
+                window_start=datetime(2026, 5, 5, 8, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE),
+                window_end=datetime(2026, 5, 5, 13, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE),
+            )
+            evening = store.save(
+                run_date="2026-05-05",
+                run_slot="midday",
+                recipient="xiaodong.zheng@npt.sg",
+                subject="Daily Brief - 2026-05-05 (2026-05-05 13:00 - 2026-05-05 19:00)",
+                text_body="Subject: Daily Brief\n\nEvening brief body",
+                html_body="<html><body>Evening</body></html>",
+                message_id="msg-evening",
+                status="sent",
+                sent_at=datetime(2026, 5, 5, 19, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE),
+                window_start=datetime(2026, 5, 5, 13, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE),
+                window_end=datetime(2026, 5, 5, 19, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE),
+            )
+            app = create_app()
+            app.testing = True
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong Zheng"}
+                    session["google_credentials"] = {"token": "x"}
+                list_response = client.get("/api/team-dashboard/daily-briefs")
+                download_response = client.get(f"/api/team-dashboard/daily-briefs/{evening['brief_id']}/download")
+
+        self.assertEqual(list_response.status_code, 200)
+        payload = list_response.get_json()
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual([item["time_period"] for item in payload["briefs"]], [
+            "2026-05-05 13:00-19:00",
+            "2026-05-05 08:00-13:00",
+        ])
+        self.assertEqual(download_response.status_code, 200)
+        self.assertEqual(download_response.headers["Content-Type"], "application/pdf")
+        self.assertIn("daily-brief-2026-05-05-midday.pdf", download_response.headers["Content-Disposition"])
+        self.assertGreater(len(download_response.data), 100)
+
+    def test_team_dashboard_daily_brief_uses_local_agent_when_enabled(self):
+        fake_client = _FakeMonthlyReportLocalAgentClient()
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "TEAM_PORTAL_BASE_URL": "",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
+                "LOCAL_AGENT_MODE": "sync",
+                "LOCAL_AGENT_BASE_URL": "https://portal.example/uat-local-agent",
+                "LOCAL_AGENT_HMAC_SECRET": "shared-secret",
+                "LOCAL_AGENT_SEATALK_ENABLED": "true",
+            },
+            clear=False,
+        ), patch("bpmis_jira_tool.web._build_local_agent_client", return_value=fake_client):
+            app = create_app()
+            app.testing = True
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Xiaodong Zheng"}
+                    session["google_credentials"] = {"token": "x"}
+                list_response = client.get("/api/team-dashboard/daily-briefs")
+                download_response = client.get("/api/team-dashboard/daily-briefs/2026-05-05-midday-3593312304/download")
+
+        self.assertEqual(list_response.status_code, 200)
+        payload = list_response.get_json()
+        self.assertEqual([item["time_period"] for item in payload["briefs"]], [
+            "2026-05-05 13:00-19:00",
+            "2026-05-05 08:00-13:00",
+        ])
+        self.assertEqual(payload["briefs"][0]["download_url"], "/api/team-dashboard/daily-briefs/2026-05-05-midday-3593312304/download")
+        self.assertEqual(download_response.status_code, 200)
+        self.assertEqual(download_response.headers["Content-Type"], "application/pdf")
+        self.assertIn("daily-brief-2026-05-05-midday.pdf", download_response.headers["Content-Disposition"])
+        self.assertEqual(fake_client.daily_brief_download_id, "2026-05-05-midday-3593312304")
 
     @patch("bpmis_jira_tool.web._local_agent_seatalk_enabled", return_value=True)
     @patch("bpmis_jira_tool.web._load_all_team_dashboard_task_payloads", return_value=[{"team_key": "AF"}])

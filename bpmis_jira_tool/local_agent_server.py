@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import io
 import json
 import logging
 import mimetypes
@@ -20,6 +21,7 @@ from flask import Flask, current_app, jsonify, request, send_file
 from bpmis_jira_tool.bpmis import BPMISDirectApiClient
 from bpmis_jira_tool.bpmis_projects import BPMISProjectStore
 from bpmis_jira_tool.config import Settings
+from bpmis_jira_tool.daily_brief_archive import DailyBriefArchiveStore, daily_brief_archive_path, daily_brief_pdf_bytes
 from bpmis_jira_tool.errors import ToolError
 from bpmis_jira_tool.local_agent_protocol import NONCE_HEADER, SIGNATURE_HEADER, TIMESTAMP_HEADER, verify_signature
 from bpmis_jira_tool.meeting_recorder import (
@@ -207,12 +209,14 @@ def create_local_agent_app() -> Flask:
             pm_team=str(payload.get("pm_team") or ""),
             country=str(payload.get("country") or ""),
             question=str(payload.get("question") or ""),
+            limit=int(payload.get("limit") or 12),
             answer_mode=str(payload.get("answer_mode") or "auto"),
             llm_budget_mode=str(payload.get("llm_budget_mode") or "auto"),
             query_mode=str(payload.get("query_mode") or "deep"),
             conversation_context=payload.get("conversation_context") if isinstance(payload.get("conversation_context"), dict) else None,
             attachments=payload.get("attachments") if isinstance(payload.get("attachments"), list) else None,
             runtime_evidence=payload.get("runtime_evidence") if isinstance(payload.get("runtime_evidence"), list) else None,
+            effort_assessment=bool(payload.get("effort_assessment")),
         )
         return jsonify({"status": "ok", **result})
 
@@ -302,42 +306,66 @@ def create_local_agent_app() -> Flask:
     @app.post("/api/local-agent/prd-self-assessment/review")
     def prd_self_assessment_review():
         payload = request.get_json(silent=True) or {}
+        owner_key = str(payload.get("owner_key") or "")
         service = _build_prd_review_service(settings)
         result = service.review_url(
             PRDBriefingReviewRequest(
-                owner_key=str(payload.get("owner_key") or ""),
+                owner_key=owner_key,
                 prd_url=str(payload.get("prd_url") or ""),
                 language=str(payload.get("language") or "zh"),
                 force_refresh=bool(payload.get("force_refresh")),
             )
         )
+        _save_prd_latest_result(settings, owner_key=owner_key, tool_key="prd_self_assessment", payload={"action": "review", "payload": result})
         return jsonify(result)
 
     @app.post("/api/local-agent/prd-self-assessment/summary")
     def prd_self_assessment_summary():
         payload = request.get_json(silent=True) or {}
+        owner_key = str(payload.get("owner_key") or "")
         service = _build_prd_review_service(settings)
         result = service.summarize_url(
             PRDBriefingReviewRequest(
-                owner_key=str(payload.get("owner_key") or ""),
+                owner_key=owner_key,
                 prd_url=str(payload.get("prd_url") or ""),
                 language=str(payload.get("language") or "zh"),
                 force_refresh=bool(payload.get("force_refresh")),
             )
         )
+        _save_prd_latest_result(settings, owner_key=owner_key, tool_key="prd_self_assessment", payload={"action": "summary", "payload": result})
         return jsonify(result)
+
+    @app.post("/api/local-agent/prd-self-assessment/latest")
+    def prd_self_assessment_latest():
+        payload = request.get_json(silent=True) or {}
+        owner_key = str(payload.get("owner_key") or "")
+        latest = _get_prd_latest_result(settings, owner_key=owner_key, tool_key="prd_self_assessment")
+        if not latest:
+            return jsonify({"status": "ok", "latest": None})
+        return jsonify({"status": "ok", "latest": latest})
 
     @app.post("/api/local-agent/prd-briefing/process-prd")
     def prd_briefing_process_prd():
         payload = request.get_json(silent=True) or {}
+        owner_key = str(payload.get("owner_key") or "")
         service = _build_prd_briefing_service(settings)
         result = service.process_prd_for_presentation(
-            owner_key=str(payload.get("owner_key") or ""),
+            owner_key=owner_key,
             page_ref=str(payload.get("page_ref") or payload.get("prd_url") or ""),
             text=str(payload.get("text") or ""),
             language=str(payload.get("language") or "zh"),
         )
+        _save_prd_latest_result(settings, owner_key=owner_key, tool_key="prd_briefing", payload={"payload": result})
         return jsonify(result)
+
+    @app.post("/api/local-agent/prd-briefing/latest")
+    def prd_briefing_latest():
+        payload = request.get_json(silent=True) or {}
+        owner_key = str(payload.get("owner_key") or "")
+        latest = _get_prd_latest_result(settings, owner_key=owner_key, tool_key="prd_briefing")
+        if not latest:
+            return jsonify({"status": "ok", "latest": None})
+        return jsonify({"status": "ok", "latest": latest})
 
     @app.post("/api/local-agent/prd-briefing/generate-audio")
     def prd_briefing_generate_audio():
@@ -1365,6 +1393,48 @@ def create_local_agent_app() -> Flask:
         saved = _build_team_dashboard_config_store(settings).save(config)
         return jsonify({"status": "ok", "config": saved})
 
+    @app.get("/api/local-agent/team-dashboard/daily-briefs")
+    def team_dashboard_daily_briefs():
+        if not settings.local_agent_seatalk_enabled:
+            raise ToolError("SeaTalk local-agent proxy is disabled.")
+        briefs = _build_daily_brief_archive_store(settings).list_recent(limit=30)
+        return jsonify(
+            {
+                "status": "ok",
+                "briefs": [
+                    {
+                        "brief_id": item.get("brief_id") or "",
+                        "time_period": item.get("time_period") or "",
+                        "subject": item.get("subject") or "",
+                        "message_id": item.get("message_id") or "",
+                        "generated_at": item.get("sent_at") or "",
+                    }
+                    for item in briefs
+                    if item.get("brief_id")
+                ],
+            }
+        )
+
+    @app.get("/api/local-agent/team-dashboard/daily-briefs/<brief_id>/download")
+    def team_dashboard_daily_brief_download(brief_id: str):
+        if not settings.local_agent_seatalk_enabled:
+            raise ToolError("SeaTalk local-agent proxy is disabled.")
+        item = _build_daily_brief_archive_store(settings).get(brief_id)
+        if item is None:
+            return jsonify({"status": "error", "message": "Daily Brief was not found."}), HTTPStatus.NOT_FOUND
+        pdf_bytes = daily_brief_pdf_bytes(
+            title=str(item.get("subject") or "Daily Brief"),
+            body=str(item.get("text_body") or ""),
+        )
+        run_date = re.sub(r"[^0-9-]", "", str(item.get("run_date") or "daily-brief")) or "daily-brief"
+        run_slot = re.sub(r"[^a-z0-9_-]", "-", str(item.get("run_slot") or "daily").lower()) or "daily"
+        return send_file(
+            io.BytesIO(pdf_bytes),
+            mimetype="application/pdf",
+            as_attachment=True,
+            download_name=f"daily-brief-{run_date}-{run_slot}.pdf",
+        )
+
     @app.post("/api/local-agent/bpmis/projects/list")
     def bpmis_projects_list():
         if not settings.local_agent_bpmis_enabled:
@@ -1695,12 +1765,14 @@ def _run_source_code_qa_query_job(app: Flask, job_id: str, payload: dict[str, An
                 pm_team=str(payload.get("pm_team") or ""),
                 country=str(payload.get("country") or ""),
                 question=str(payload.get("question") or ""),
+                limit=int(payload.get("limit") or 12),
                 answer_mode=str(payload.get("answer_mode") or "auto"),
                 llm_budget_mode=str(payload.get("llm_budget_mode") or "auto"),
                 query_mode=str(payload.get("query_mode") or "deep"),
                 conversation_context=payload.get("conversation_context") if isinstance(payload.get("conversation_context"), dict) else None,
                 attachments=payload.get("attachments") if isinstance(payload.get("attachments"), list) else None,
                 runtime_evidence=payload.get("runtime_evidence") if isinstance(payload.get("runtime_evidence"), list) else None,
+                effort_assessment=bool(payload.get("effort_assessment")),
                 progress_callback=progress_callback,
             )
             _update_query_job(
@@ -2053,6 +2125,10 @@ def _build_team_dashboard_config_store(settings: Settings):
     return TeamDashboardConfigStore(_build_config_store(settings).db_path)
 
 
+def _build_daily_brief_archive_store(settings: Settings) -> DailyBriefArchiveStore:
+    return DailyBriefArchiveStore(daily_brief_archive_path(_data_root(settings)))
+
+
 def _build_bpmis_project_store(settings: Settings) -> BPMISProjectStore:
     return BPMISProjectStore(_build_config_store(settings).db_path)
 
@@ -2315,6 +2391,20 @@ def _build_prd_briefing_service(settings: Settings) -> PRDBriefingService:
         answer_audio_enabled=settings.prd_briefing_answer_audio_enabled,
         walkthrough_prewarm_enabled=False,
     )
+
+
+def _save_prd_latest_result(settings: Settings, *, owner_key: str, tool_key: str, payload: dict[str, Any]) -> None:
+    if not owner_key:
+        return
+    store = BriefingStore(_data_root(settings) / "prd_briefing")
+    store.save_latest_tool_result(owner_key=owner_key, tool_key=tool_key, payload=payload)
+
+
+def _get_prd_latest_result(settings: Settings, *, owner_key: str, tool_key: str) -> dict[str, Any] | None:
+    if not owner_key:
+        return None
+    store = BriefingStore(_data_root(settings) / "prd_briefing")
+    return store.get_latest_tool_result(owner_key=owner_key, tool_key=tool_key)
 
 
 def _inline_prd_briefing_audio_data_url(store: BriefingStore, result: dict[str, Any]) -> None:
