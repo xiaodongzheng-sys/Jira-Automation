@@ -38,6 +38,7 @@ from bpmis_jira_tool.web import (
     _build_source_code_qa_session_context,
     _load_source_code_qa_effort_dictionaries,
     _prepare_source_code_qa_auto_sync,
+    _source_code_qa_effort_scope_guard,
     create_app,
 )
 from scripts.promote_source_code_qa_eval_candidates import promote_candidates
@@ -524,6 +525,21 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertIn("evidence_status", structured["code_change_points"][0])
         self.assertIn("evidence_matrix_quality", structured)
 
+    def test_effort_assessment_scope_guard_blocks_wrong_repo_selection(self):
+        requirement = (
+            "CRMS SG BTI suspended case review: income review, Manual Review, APC approval, "
+            "CBS purchase, Suspension Appeal and Monthly Review need final decision workflow."
+        )
+
+        guard = _source_code_qa_effort_scope_guard(pm_team="GRC", country="SG", requirement=requirement)
+
+        self.assertEqual(guard["status"], "mismatch")
+        self.assertEqual(guard["selected_pm_team"], "GRC")
+        self.assertEqual(guard["suggested_pm_team"], "CRMS")
+        self.assertEqual(guard["suggested_country"], "SG")
+        self.assertGreater(guard["scores"]["CRMS"], guard["scores"]["GRC"])
+        self.assertIn("crms", [item.lower() for item in guard["matched_terms"]["CRMS"]])
+
     def test_effort_assessment_single_requirement_does_not_invent_options(self):
         requirement = (
             "Scope Retrieve and validate SME Keyman information from CIF using the SME CIF number from the DWH file. "
@@ -686,6 +702,50 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertNotIn("Evidence Used", result["llm_answer"])
         ensure_synced.assert_not_called()
         self.assertIn(b"event: completed", events_response.data)
+
+    def test_effort_assessment_wrong_repo_scope_returns_mismatch_without_query(self):
+        requirement = (
+            "CRMS SG BTI suspended case review: income review, Manual Review, APC approval, "
+            "CBS purchase, Suspension Appeal and Monthly Review need final decision workflow."
+        )
+
+        with patch("bpmis_jira_tool.web._source_code_qa_provider_available", return_value=True), patch(
+            "bpmis_jira_tool.source_code_qa.SourceCodeQAService.query"
+        ) as query:
+            with self.app.test_client() as client:
+                self._login(client, "xiaodong.zheng@npt.sg")
+                response = client.post(
+                    "/api/source-code-qa/effort-assessment",
+                    json={
+                        "pm_team": "GRC",
+                        "country": "SG",
+                        "language": "zh",
+                        "requirement": requirement,
+                        "llm_provider": "codex_cli_bridge",
+                    },
+                )
+                self.assertEqual(response.status_code, 200)
+                payload = response.get_json()
+                snapshot = {}
+                for _ in range(20):
+                    status_response = client.get(f"/api/source-code-qa/effort-assessment-jobs/{payload['job_id']}")
+                    snapshot = status_response.get_json()
+                    if snapshot.get("state") == "completed":
+                        break
+                    time.sleep(0.05)
+
+        query.assert_not_called()
+        result = snapshot["results"][0]
+        self.assertEqual(result["status"], "scope_mismatch")
+        self.assertEqual(result["effort_evidence_status"], "scope_mismatch")
+        self.assertEqual(result["assessment"]["confidence"], "scope_mismatch")
+        self.assertEqual(result["assessment"]["scope_guard"]["suggested_pm_team"], "CRMS")
+        self.assertEqual(result["assessment"]["scope_guard"]["suggested_country"], "SG")
+        self.assertIn("请切换 PM Team 到 CRMS、Country 到 SG", result["llm_answer"])
+        self.assertIn("不会基于当前 repo 生成 BE/FE 人天估算", result["llm_answer"])
+        self.assertEqual(result["structured_assessment"]["code_change_points"], [])
+        self.assertEqual(result["structured_assessment"]["be_estimate"], [])
+        self.assertEqual(result["structured_assessment"]["fe_estimate"], [])
 
     def test_effort_assessment_exact_miss_still_returns_low_confidence_assessment(self):
         def fake_query(**kwargs):

@@ -8915,6 +8915,288 @@ def _source_code_qa_effort_domain_entries(pm_team: str) -> list[dict[str, Any]]:
     return [entry for entry in entries if isinstance(entry, dict)]
 
 
+SOURCE_CODE_QA_EFFORT_SCOPE_ALIASES: dict[str, list[str]] = {
+    "CRMS": [
+        "crms",
+        "credit risk",
+        "credit risk admin",
+        "bti",
+        "cbs",
+        "apc",
+        "manual review",
+        "monthly review",
+        "suspension",
+        "appeal",
+        "income review",
+        "b score",
+        "underwriting",
+        "cashline",
+        "cash installment",
+        "myinfo",
+        "cpf",
+        "noa",
+        "dwh_creditrisk",
+    ],
+    "GRC": [
+        "grc",
+        "parameter management",
+        "authorization management",
+        "global lock",
+        "globallock",
+        "bcf_global_lock",
+        "function unit",
+        "functionunit",
+        "parameterEditFunctionUnit",
+        "approval visibility",
+    ],
+    "AF": [
+        "anti-fraud",
+        "anti fraud",
+        "fraud",
+        "risk decision",
+        "risk flow engine",
+        "blacklist",
+        "whitelist",
+        "black white list",
+        "flow report",
+        "crc",
+        "transactionid",
+    ],
+}
+
+SOURCE_CODE_QA_EFFORT_SCOPE_COMMON_TERMS = {
+    "api",
+    "service",
+    "strategy",
+    "workflow",
+    "config",
+    "configuration",
+    "table",
+    "mapper",
+    "sql",
+    "frontend",
+    "screen",
+    "page",
+    "approval",
+    "review",
+    "report",
+    "reporting",
+    "submission",
+    "downstream",
+    "integration",
+    "test",
+    "rule",
+    "risk",
+    "status",
+    "permission",
+    "role",
+    "parameter",
+    "limit",
+    "credit",
+    "income",
+}
+
+
+def _source_code_qa_effort_country_hint(requirement: str, fallback: str) -> str:
+    text = f" {str(requirement or '').lower()} "
+    if re.search(r"(?<![a-z0-9])sg(?![a-z0-9])", text) or "singapore" in text:
+        return "SG"
+    if re.search(r"(?<![a-z0-9])id(?![a-z0-9])", text) or "indonesia" in text:
+        return "ID"
+    if re.search(r"(?<![a-z0-9])ph(?![a-z0-9])", text) or "philippines" in text:
+        return "PH"
+    return str(fallback or "").strip() or "All"
+
+
+def _source_code_qa_effort_term_matches(text: str, term: str) -> bool:
+    normalized_text = str(text or "").lower()
+    normalized_term = str(term or "").strip().lower()
+    if not normalized_term:
+        return False
+    if len(normalized_term) <= 3 and re.fullmatch(r"[a-z0-9]+", normalized_term):
+        return bool(re.search(rf"(?<![a-z0-9]){re.escape(normalized_term)}(?![a-z0-9])", normalized_text))
+    return normalized_term in normalized_text
+
+
+def _source_code_qa_effort_scope_terms_by_team() -> dict[str, list[str]]:
+    teams = set(SOURCE_CODE_QA_EFFORT_SCOPE_ALIASES)
+    dictionaries = _load_source_code_qa_effort_dictionaries()
+    teams.update(str(team or "").upper() for team in ((dictionaries.get("domains") or {}).keys()))
+    knowledge = _load_source_code_qa_domain_knowledge_config()
+    teams.update(str(team or "").upper() for team in (((knowledge.get("domains") or {}) if isinstance(knowledge, dict) else {}).keys()))
+    terms_by_team: dict[str, list[str]] = {}
+    for team in sorted(team for team in teams if team):
+        terms: list[str] = list(SOURCE_CODE_QA_EFFORT_SCOPE_ALIASES.get(team, []))
+        for entry in _source_code_qa_effort_domain_entries(team):
+            terms.append(str(entry.get("id") or ""))
+            for key in ("business_aliases", "technical_terms", "product_terms", "limit_terms", "evidence_hints"):
+                terms.extend(str(item) for item in (entry.get(key) or []) if item)
+        domain = ((knowledge.get("domains") or {}).get(team) or {}) if isinstance(knowledge, dict) else {}
+        if isinstance(domain, dict):
+            for module in domain.get("module_map") or []:
+                if not isinstance(module, dict):
+                    continue
+                terms.append(str(module.get("name") or ""))
+                for key in ("aliases", "repo_hints", "code_hints", "business_flows"):
+                    terms.extend(str(item) for item in (module.get(key) or []) if item)
+            for item in domain.get("terminology") or []:
+                if not isinstance(item, dict):
+                    continue
+                terms.append(str(item.get("term") or ""))
+                terms.extend(str(value) for value in (item.get("aliases") or []) if value)
+                terms.extend(str(value) for value in (item.get("code_terms") or []) if value)
+            retrieval_terms = domain.get("retrieval_terms") if isinstance(domain.get("retrieval_terms"), dict) else {}
+            for values in retrieval_terms.values():
+                terms.extend(str(item) for item in (values or []) if item)
+        filtered = []
+        for term in _source_code_qa_effort_unique(terms):
+            normalized = str(term or "").strip()
+            lowered = normalized.lower()
+            if len(lowered) < 3 or lowered in SOURCE_CODE_QA_EFFORT_SCOPE_COMMON_TERMS:
+                continue
+            filtered.append(normalized)
+        terms_by_team[team] = filtered[:120]
+    return terms_by_team
+
+
+def _source_code_qa_effort_scope_guard(
+    *,
+    pm_team: str,
+    country: str,
+    requirement: str,
+) -> dict[str, Any]:
+    selected_team = str(pm_team or "").strip().upper()
+    terms_by_team = _source_code_qa_effort_scope_terms_by_team()
+    scores: dict[str, int] = {}
+    matched_terms: dict[str, list[str]] = {}
+    for team, terms in terms_by_team.items():
+        score = 0
+        hits: list[str] = []
+        for term in terms:
+            if not _source_code_qa_effort_term_matches(requirement, term):
+                continue
+            lowered = str(term).lower()
+            explicit = lowered in {item.lower() for item in SOURCE_CODE_QA_EFFORT_SCOPE_ALIASES.get(team, [])}
+            score += 6 if explicit else 2
+            hits.append(str(term))
+        if selected_team == team and selected_team and _source_code_qa_effort_term_matches(requirement, selected_team):
+            score += 8
+            hits.append(selected_team)
+        scores[team] = score
+        matched_terms[team] = _source_code_qa_effort_unique(hits)[:12]
+    best_team = max(scores, key=lambda key: scores.get(key, 0), default=selected_team)
+    selected_score = scores.get(selected_team, 0)
+    best_score = scores.get(best_team, 0)
+    mismatch = (
+        bool(selected_team)
+        and bool(best_team)
+        and best_team != selected_team
+        and best_score >= 10
+        and best_score >= selected_score + 6
+        and best_score >= selected_score * 2 + 4
+    )
+    return {
+        "status": "mismatch" if mismatch else "ok",
+        "selected_pm_team": selected_team,
+        "selected_country": str(country or "").strip() or "All",
+        "suggested_pm_team": best_team if mismatch else selected_team,
+        "suggested_country": _source_code_qa_effort_country_hint(requirement, country) if mismatch else str(country or "").strip() or "All",
+        "scores": scores,
+        "matched_terms": matched_terms,
+        "reason": (
+            f"Requirement terms match {best_team} more strongly than selected {selected_team}."
+            if mismatch
+            else "Selected scope is compatible with requirement terms."
+        ),
+    }
+
+
+def _source_code_qa_effort_scope_mismatch_result(
+    *,
+    pm_team: str,
+    country: str,
+    language: str,
+    requirement: str,
+    llm_provider: str,
+    business_plan: dict[str, Any],
+    technical_candidates: dict[str, Any],
+    estimation_rubric: dict[str, Any],
+    scope_guard: dict[str, Any],
+) -> dict[str, Any]:
+    suggested_team = str(scope_guard.get("suggested_pm_team") or "").strip() or "the correct PM team"
+    suggested_country = str(scope_guard.get("suggested_country") or "").strip() or "the correct country"
+    matched = ", ".join(str(item) for item in (scope_guard.get("matched_terms") or {}).get(suggested_team, [])[:8])
+    if language == "zh":
+        answer = "\n".join(
+            [
+                "Scope Mismatch / 选择范围不匹配",
+                f"当前选择的是 {pm_team}:{country}，但需求文本更像 {suggested_team}:{suggested_country} 的改动。",
+                f"命中的范围信号: {matched or '未记录'}。",
+                f"请切换 PM Team 到 {suggested_team}、Country 到 {suggested_country} 后重新运行 Effort Assessment。",
+                "这次不会基于当前 repo 生成 BE/FE 人天估算，避免把错误代码库里的能力硬套到需求上。",
+            ]
+        )
+    else:
+        answer = "\n".join(
+            [
+                "Scope Mismatch",
+                f"The selected scope is {pm_team}:{country}, but the requirement matches {suggested_team}:{suggested_country} more strongly.",
+                f"Matched scope signals: {matched or 'not recorded'}.",
+                f"Switch PM Team to {suggested_team} and Country to {suggested_country}, then run Effort Assessment again.",
+                "No BE/FE estimate was generated from the selected repository scope to avoid misleading output.",
+            ]
+        )
+    missing_evidence = [
+        f"Selected repository scope {pm_team}:{country} does not match requirement signals for {suggested_team}:{suggested_country}."
+    ]
+    return {
+        "status": "scope_mismatch",
+        "summary": "Selected repository scope does not match the requirement.",
+        "llm_answer": answer,
+        "llm_provider": llm_provider or "default",
+        "llm_model": "",
+        "trace_id": f"effort-scope-{hashlib.sha1(str(requirement or '').encode('utf-8')).hexdigest()[:12]}",
+        "matches": [],
+        "citations": [],
+        "missing_evidence": missing_evidence,
+        "assessment_confidence": "scope_mismatch",
+        "effort_evidence_status": "scope_mismatch",
+        "effort_scope_guard": scope_guard,
+        "effort_evidence_matrix": {"version": 1, "groups": [], "quality": {"confirmed_group_count": 0, "inferred_group_count": 0, "missing_group_count": 0, "status": "scope_mismatch"}},
+        "effort_evidence_matrix_quality": {"confirmed_group_count": 0, "inferred_group_count": 0, "missing_group_count": 0, "status": "scope_mismatch"},
+        "effort_generic_output_guard": {"status": "blocked", "issues": ["scope_mismatch"], "confirmed_or_inferred_group_count": 0},
+        "effort_timing": {"cache_hit": False, "scope_guard": scope_guard},
+        "structured_assessment": {
+            "version": 2,
+            "language": language,
+            "confidence": "scope_mismatch",
+            "business_understanding": business_plan,
+            "code_change_points": [],
+            "be_estimate": [],
+            "fe_estimate": [],
+            "confirmed_evidence": [],
+            "inferred_impact": [],
+            "missing_evidence": missing_evidence,
+            "questions": [f"Should this request be assessed under {suggested_team}:{suggested_country}?"],
+        },
+        "assessment": {
+            "type": "effort_assessment",
+            "pm_team": pm_team,
+            "country": country,
+            "language": language,
+            "requirement": requirement,
+            "business_plan": business_plan,
+            "technical_candidates": technical_candidates,
+            "estimation_rubric": estimation_rubric,
+            "structured_assessment": {},
+            "confidence": "scope_mismatch",
+            "missing_evidence": missing_evidence,
+            "evidence_status": "scope_mismatch",
+            "scope_guard": scope_guard,
+        },
+    }
+
+
 def _source_code_qa_effort_seed_terms(pm_team: str) -> list[str]:
     team = str(pm_team or "").upper()
     terms: list[str] = []
@@ -11381,6 +11663,48 @@ def _run_source_code_qa_effort_assessment_job(app: Flask, job_id: str, payload: 
                 technical_candidates=technical_candidates,
             )
             llm_provider = str(payload.get("llm_provider") or "")
+            scope_guard = _source_code_qa_effort_scope_guard(pm_team=pm_team, country=country, requirement=requirement)
+            if scope_guard.get("status") == "mismatch":
+                result = _source_code_qa_effort_scope_mismatch_result(
+                    pm_team=pm_team,
+                    country=country,
+                    language=language,
+                    requirement=requirement,
+                    llm_provider=llm_provider,
+                    business_plan=business_plan,
+                    technical_candidates=technical_candidates,
+                    estimation_rubric=estimation_rubric,
+                    scope_guard=scope_guard,
+                )
+                current_app.logger.warning(
+                    "source_code_qa_effort_assessment_scope_mismatch %s",
+                    json.dumps(
+                        {
+                            "event": "source_code_qa_effort_assessment_scope_mismatch",
+                            "job_id": job_id,
+                            "pm_team": pm_team,
+                            "country": country,
+                            "scope_guard": scope_guard,
+                        },
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ),
+                )
+                job_store.complete(
+                    job_id,
+                    results=[result],
+                    notice={
+                        "title": "Effort Assessment",
+                        "tone": "warning",
+                        "summary": result["summary"],
+                        "details": [
+                            f"Selected: {pm_team}:{country}",
+                            f"Suggested: {scope_guard.get('suggested_pm_team')}:{scope_guard.get('suggested_country')}",
+                            "Status: scope_mismatch",
+                        ],
+                    },
+                )
+                return
             effort_started = time.perf_counter()
             evidence_query = _build_source_code_qa_effort_evidence_query(
                 requirement=requirement,
@@ -11408,6 +11732,7 @@ def _run_source_code_qa_effort_assessment_job(app: Flask, job_id: str, payload: 
                 business_plan=business_plan,
                 technical_candidates=technical_candidates,
             )
+            evidence_matrix["scope_guard"] = scope_guard
             evidence_matrix_quality = _source_code_qa_effort_matrix_quality(evidence_matrix)
             cache_key = _source_code_qa_effort_cache_key(
                 pm_team=pm_team,
