@@ -178,10 +178,14 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertIn("renderEffortAssessment(cached.result, { persist: false })", script)
         self.assertIn("renderEffortHybridSummary", script)
         self.assertIn("renderEffortStructuredAnswer", script)
+        self.assertIn("effortRenderChangePoints", script)
         self.assertIn("effortParsedAnswer", script)
         self.assertIn("Assessment Summary", script)
+        self.assertIn("Code Change Points", script)
         self.assertIn("assessment.business_plan", script)
         self.assertIn("assessment.technical_candidates", script)
+        self.assertIn("structured_assessment", script)
+        self.assertNotIn("Hybrid Assessment Context", script)
         self.assertIn("data-source-effort-copy", template)
         self.assertIn("data-effort-latest-url", template)
         self.assertIn("Business Requirement", template)
@@ -481,6 +485,8 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertTrue(structured["be_estimate"])
         self.assertTrue(structured["fe_estimate"])
         self.assertTrue(structured["inferred_impact"])
+        self.assertTrue(structured["code_change_points"])
+        self.assertIn("change", structured["code_change_points"][0])
 
     def test_effort_assessment_single_requirement_does_not_invent_options(self):
         requirement = (
@@ -520,8 +526,10 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertEqual(business_plan["options"][0]["label"], "single proposed change")
         self.assertEqual(rubric["option_estimates"][0]["label"], "single proposed change")
         self.assertIn("do not invent option labels", prompt)
-        self.assertIn("2. 技术改造点", prompt)
-        self.assertNotIn("2. 方案 1/2 技术改造点", prompt)
+        self.assertIn("2. 代码改动点 / Code Change Points", prompt)
+        self.assertNotIn("2. 方案 1/2 代码改动点", prompt)
+        self.assertIn("Do not include visible sections named Evidence", prompt)
+        self.assertNotIn("5. Confirmed / Inferred / Missing Evidence", prompt)
 
     def test_effort_assessment_builds_optimized_prompt_and_passes_runtime_evidence(self):
         captured_calls = []
@@ -544,7 +552,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
                 "status": "ok",
                 "answer_mode": "auto",
                 "summary": "effort done",
-                "llm_answer": "业务理解\n- ok\n\n技术改造点\n- Update API [S1]\n\nBE 人天\n- 1-2 PD\n\nFE 人天\n- 0 PD\n\nConfirmed / Inferred / Missing Evidence\n- Confirmed S1",
+                "llm_answer": "业务理解\n- ok\n\n代码改动点\n- 调整审批接口和状态流转，让高风险订单走新的审批路径 [S1]。\n\nBE 人天\n- 1-2 PD\n\nFE 人天\n- 0 PD\n\nConfirmed / Inferred / Missing Evidence\n- Confirmed S1\n\nQA / Integration Impact\n- 覆盖审批通过、拒绝和回退场景。",
                 "llm_provider": "codex_cli_bridge",
                 "llm_model": "codex-cli",
                 "llm_route": {"task": "effort_assessment", "codex_repair_attempted": False},
@@ -615,15 +623,20 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertTrue(synthesis_call["effort_assessment"])
         self.assertIn("Compact source-code evidence pack", synthesis_call["question"])
         self.assertIn("Required output sections:", synthesis_call["question"])
+        self.assertIn("代码改动点 / Code Change Points", synthesis_call["question"])
         self.assertIn("BE 人天", synthesis_call["question"])
         self.assertIn("FE 人天", synthesis_call["question"])
-        self.assertIn("Confirmed / Inferred / Missing Evidence", synthesis_call["question"])
+        self.assertIn("Do not include visible sections named Evidence", synthesis_call["question"])
+        self.assertNotIn("8. Source / Runtime Evidence", synthesis_call["question"])
         self.assertEqual(synthesis_call["pm_team"], "AF")
         self.assertEqual(synthesis_call["country"], "SG")
         self.assertEqual(synthesis_call["query_mode"], "deep")
         self.assertIn("new.feature.enabled=true", synthesis_call["runtime_evidence"][0]["text"])
         self.assertIn("effort_evidence_query", result)
         self.assertIn("effort_timing", result)
+        self.assertIn("代码改动点", result["llm_answer"])
+        self.assertNotIn("[S1]", result["llm_answer"])
+        self.assertNotIn("Confirmed / Inferred / Missing Evidence", result["llm_answer"])
         ensure_synced.assert_not_called()
         self.assertIn(b"event: completed", events_response.data)
 
@@ -677,9 +690,15 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertIn("technical_candidates", result["assessment"])
         self.assertIn("estimation_rubric", result["assessment"])
         self.assertIn("missing_evidence", result["assessment"])
+        self.assertIn("code_change_points", result["structured_assessment"])
+        self.assertTrue(result["structured_assessment"]["code_change_points"])
         self.assertIn("BE", result["llm_answer"])
         self.assertIn("FE", result["llm_answer"])
+        self.assertIn("代码改动点", result["llm_answer"])
         self.assertIn("低置信度", result["llm_answer"])
+        self.assertNotIn("Confirmed / Inferred / Missing Evidence", result["llm_answer"])
+        self.assertNotIn("Source / Runtime Evidence", result["llm_answer"])
+        self.assertNotIn("证据", result["llm_answer"])
         self.assertIn("cashline", result["assessment"]["technical_candidates"]["search_terms"])
         self.assertIn("subProductLimitInfos", result["assessment"]["technical_candidates"]["search_terms"])
 
@@ -9530,26 +9549,23 @@ class SourceCodeQAServiceTests(unittest.TestCase):
                 return SimpleNamespace(returncode=0, stdout="Logged in using ChatGPT\n", stderr="")
             output_path = command[command.index("--output-last-message") + 1]
             answer = "\n".join(
-                [
-                    "业务理解 / Business Understanding",
-                    "- Need to estimate approval impact for issue_table changes.",
-                    "技术改造点 / Technical Changes",
-                    "- Confirmed repository evidence exists in IssueRepository [S1].",
-                    "BE 人天 / BE Person-days",
-                    "- 2-3 PD, inferred from repository impact.",
-                    "FE 人天 / FE Person-days",
-                    "- 0-1 PD, missing screen evidence.",
-                    "Confirmed / Inferred / Missing Evidence",
-                    "- Confirmed: repository/IssueRepository.java [S1].",
-                    "- Missing: Webform template screen evidence.",
-                    "Assumptions / Risks",
-                    "- Runtime configuration may change the final scope.",
-                    "Confirmation Questions",
-                    "- Confirm the affected suspended-user groups.",
-                    "Source / Runtime Evidence",
-                    "- S1 repository/IssueRepository.java.",
-                ]
-            )
+                    [
+                        "业务理解 / Business Understanding",
+                        "- Need to estimate approval impact for issue_table changes.",
+                        "代码改动点 / Code Change Points",
+                        "- Update the approval data flow so issue_table changes are handled by the right review process.",
+                        "BE 人天 / BE Person-days",
+                        "- 2-3 PD, driven by backend approval-flow changes.",
+                        "FE 人天 / FE Person-days",
+                        "- 0-1 PD, depending on whether the screen needs new copy.",
+                        "QA / Integration Impact",
+                        "- Cover approval, rejection, and rollback regression scenarios.",
+                        "Assumptions / Risks",
+                        "- Runtime configuration may change the final scope.",
+                        "Confirmation Questions",
+                        "- Confirm the affected suspended-user groups.",
+                    ]
+                )
             Path(output_path).write_text(
                 json.dumps(
                     {
@@ -9587,7 +9603,8 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertFalse(payload["llm_route"]["codex_repair_attempted"])
         self.assertEqual(payload["llm_route"]["codex_repair_reason"], "")
         self.assertEqual(payload["llm_route"]["codex_deep_investigation_rounds"], 0)
-        self.assertIn("Missing: Webform template screen evidence", payload["llm_answer"])
+        self.assertIn("right review process", payload["llm_answer"])
+        self.assertNotIn("Missing: Webform template screen evidence", payload["llm_answer"])
 
     def test_codex_out_of_scope_citation_triggers_severe_repair(self):
         service = SourceCodeQAService(
@@ -9710,20 +9727,18 @@ class SourceCodeQAServiceTests(unittest.TestCase):
                     [
                         "业务理解 / Business Understanding",
                         "- Need to estimate approval impact.",
-                        "技术改造点 / Technical Changes",
+                        "代码改动点 / Code Change Points",
                         "- IssueRepository owns all suspended-case routing.",
                         "BE 人天 / BE Person-days",
                         "- 3-5 PD.",
                         "FE 人天 / FE Person-days",
                         "- 1-2 PD.",
-                        "Confirmed / Inferred / Missing Evidence",
-                        "- Confirmed: source evidence exists.",
+                        "QA / Integration Impact",
+                        "- Cover suspended-case regression.",
                         "Assumptions / Risks",
                         "- Scope depends on template rules.",
                         "Confirmation Questions",
                         "- Confirm the affected groups.",
-                        "Source / Runtime Evidence",
-                        "- Indexed repository evidence.",
                     ]
                 )
                 Path(output_path).write_text(

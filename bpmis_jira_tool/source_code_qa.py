@@ -15573,10 +15573,10 @@ class SourceCodeQAService:
         if effort_assessment:
             required_section_groups = (
                 ("业务理解", "business understanding"),
-                ("技术改造", "technical changes"),
+                ("代码改动", "code change", "技术改造"),
                 ("be", "后端", "人天"),
                 ("fe", "前端", "人天"),
-                ("confirmed", "inferred", "missing", "证据"),
+                ("qa", "integration", "测试", "联调"),
             )
             lowered_answer = str(answer or "").lower()
             if not all(any(section in lowered_answer for section in group) for group in required_section_groups):

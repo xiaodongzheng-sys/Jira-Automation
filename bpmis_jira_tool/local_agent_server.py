@@ -1425,6 +1425,7 @@ def create_local_agent_app() -> Flask:
         pdf_bytes = daily_brief_pdf_bytes(
             title=str(item.get("subject") or "Daily Brief"),
             body=str(item.get("text_body") or ""),
+            html_body=str(item.get("html_body") or ""),
         )
         run_date = re.sub(r"[^0-9-]", "", str(item.get("run_date") or "daily-brief")) or "daily-brief"
         run_slot = re.sub(r"[^a-z0-9_-]", "-", str(item.get("run_slot") or "daily").lower()) or "daily"

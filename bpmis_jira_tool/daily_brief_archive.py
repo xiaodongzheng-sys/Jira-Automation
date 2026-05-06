@@ -4,9 +4,12 @@ import hashlib
 import json
 import os
 import re
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+from bs4 import BeautifulSoup, NavigableString, Tag
 
 
 class DailyBriefArchiveStore:
@@ -110,11 +113,23 @@ def format_daily_brief_period(item: dict[str, Any]) -> str:
     return f"{start:%Y-%m-%d %H:%M}-{end:%Y-%m-%d %H:%M}"
 
 
-def daily_brief_pdf_bytes(*, title: str, body: str) -> bytes:
-    lines = _wrap_pdf_lines(str(title or "Daily Brief"), max_chars=78)
-    lines.append("")
-    lines.extend(_wrap_pdf_lines(str(body or ""), max_chars=92))
-    pages = [lines[index : index + 48] for index in range(0, len(lines), 48)] or [["Daily Brief"]]
+@dataclass(frozen=True)
+class _PdfSegment:
+    text: str
+    bold: bool = False
+
+
+@dataclass(frozen=True)
+class _PdfLine:
+    segments: tuple[_PdfSegment, ...]
+    size: int = 10
+    indent: int = 0
+    bold: bool = False
+
+
+def daily_brief_pdf_bytes(*, title: str, body: str, html_body: str = "") -> bytes:
+    lines = _daily_brief_pdf_lines(title=title, body=body, html_body=html_body)
+    pages = [lines[index : index + 44] for index in range(0, len(lines), 44)] or [[_PdfLine((_PdfSegment("Daily Brief"),), bold=True)]]
     objects: list[bytes] = [b"<< /Type /Catalog /Pages 2 0 R >>"]
     page_refs: list[str] = []
     content_objects: list[bytes] = []
@@ -124,22 +139,177 @@ def daily_brief_pdf_bytes(*, title: str, body: str) -> bytes:
         page_refs.append(f"{page_obj_num} 0 R")
         stream = _pdf_page_stream(page_lines)
         objects.append(
-            f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents {content_obj_num} 0 R >>".encode("latin-1")
+            f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R /F2 6 0 R >> >> /Contents {content_obj_num} 0 R >>".encode("latin-1")
         )
         content_objects.append(f"<< /Length {len(stream)} >>\nstream\n".encode("latin-1") + stream + b"\nendstream")
     font_obj_num = 3 + len(pages) * 2
+    bold_font_obj_num = font_obj_num + 1
     objects.insert(1, f"<< /Type /Pages /Kids [{' '.join(page_refs)}] /Count {len(page_refs)} >>".encode("latin-1"))
     merged: list[bytes] = [objects[0], objects[1]]
     for index in range(len(pages)):
         merged.append(objects[2 + index])
         merged.append(content_objects[index])
     merged.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
+    merged.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>")
     # Rewrite font object references if the page count moved the font object number.
     merged = [
-        item.replace(b"/F1 5 0 R", f"/F1 {font_obj_num} 0 R".encode("latin-1"))
+        item.replace(b"/F1 5 0 R", f"/F1 {font_obj_num} 0 R".encode("latin-1")).replace(
+            b"/F2 6 0 R",
+            f"/F2 {bold_font_obj_num} 0 R".encode("latin-1"),
+        )
         for item in merged
     ]
     return _build_pdf(merged)
+
+
+def _daily_brief_pdf_lines(*, title: str, body: str, html_body: str) -> list[_PdfLine]:
+    lines = [_PdfLine((_PdfSegment(str(title or "Daily Brief")),), size=16, bold=True), _PdfLine(tuple(), size=6)]
+    html_text = str(html_body or "").strip()
+    if html_text:
+        parsed = _html_pdf_lines(html_text)
+        if parsed:
+            normalized_title = _collapse_spaces(str(title or "Daily Brief")).lower()
+            if parsed and _line_text(parsed[0]).lower() == normalized_title:
+                parsed = parsed[1:]
+            return lines + parsed
+    text_lines = []
+    for item in _wrap_pdf_lines(str(body or ""), max_chars=92):
+        text_lines.append(_PdfLine((_PdfSegment(item),) if item else tuple()))
+    return lines + text_lines
+
+
+def _html_pdf_lines(html_body: str) -> list[_PdfLine]:
+    soup = BeautifulSoup(html_body, "html.parser")
+    root = soup.body or soup
+    lines: list[_PdfLine] = []
+    for child in root.children:
+        lines.extend(_html_node_pdf_lines(child))
+    return lines
+
+
+def _html_node_pdf_lines(node: Any, *, indent: int = 0) -> list[_PdfLine]:
+    if isinstance(node, NavigableString):
+        text = _collapse_spaces(str(node))
+        return [_PdfLine((_PdfSegment(text),), indent=indent)] if text else []
+    if not isinstance(node, Tag):
+        return []
+    name = node.name.lower()
+    if name in {"style", "script"}:
+        return []
+    if name in {"h1", "h2"}:
+        return _wrapped_segment_lines(_inline_segments(node), size=15, indent=indent, bold=True) + [_PdfLine(tuple(), size=4)]
+    if name == "h3":
+        return _wrapped_segment_lines(_inline_segments(node), size=13, indent=indent, bold=True) + [_PdfLine(tuple(), size=3)]
+    if name == "h4":
+        return _wrapped_segment_lines(_inline_segments(node), size=11, indent=indent, bold=True)
+    if name == "p":
+        segments = _inline_segments(node)
+        return (_wrapped_segment_lines(segments, indent=indent) if segments else []) + [_PdfLine(tuple(), size=4)]
+    if name in {"ul", "ol"}:
+        output: list[_PdfLine] = []
+        for child in node.children:
+            if isinstance(child, Tag) and child.name and child.name.lower() == "li":
+                output.extend(_html_node_pdf_lines(child, indent=indent + 14))
+        output.append(_PdfLine(tuple(), size=3))
+        return output
+    if name == "li":
+        segments = [_PdfSegment("- ")] + _inline_segments(node, stop_at_block=True)
+        output = _wrapped_segment_lines(segments, indent=indent)
+        for child in node.children:
+            if isinstance(child, Tag) and child.name and child.name.lower() in {"ul", "ol"}:
+                output.extend(_html_node_pdf_lines(child, indent=indent + 12))
+        return output
+    if name in {"br"}:
+        return [_PdfLine(tuple())]
+    output: list[_PdfLine] = []
+    for child in node.children:
+        output.extend(_html_node_pdf_lines(child, indent=indent))
+    return output
+
+
+def _inline_segments(node: Tag, *, bold: bool = False, stop_at_block: bool = False) -> list[_PdfSegment]:
+    segments: list[_PdfSegment] = []
+    for child in node.children:
+        if isinstance(child, NavigableString):
+            text = _collapse_spaces(str(child))
+            if text:
+                segments.append(_PdfSegment(text, bold=bold))
+            continue
+        if not isinstance(child, Tag):
+            continue
+        name = child.name.lower()
+        if stop_at_block and name in {"ul", "ol", "p", "h1", "h2", "h3", "h4"}:
+            continue
+        if name == "br":
+            segments.append(_PdfSegment("\n", bold=bold))
+            continue
+        child_bold = bold or name in {"strong", "b"}
+        segments.extend(_inline_segments(child, bold=child_bold, stop_at_block=stop_at_block))
+    return _normalize_segments(segments)
+
+
+def _normalize_segments(segments: list[_PdfSegment]) -> list[_PdfSegment]:
+    normalized: list[_PdfSegment] = []
+    for segment in segments:
+        text = segment.text
+        if not text:
+            continue
+        if normalized and normalized[-1].bold == segment.bold and "\n" not in normalized[-1].text and "\n" not in text:
+            previous = normalized.pop()
+            normalized.append(_PdfSegment((previous.text + " " + text).strip(), bold=segment.bold))
+        else:
+            normalized.append(_PdfSegment(text, bold=segment.bold))
+    return normalized
+
+
+def _wrapped_segment_lines(
+    segments: list[_PdfSegment],
+    *,
+    size: int = 10,
+    indent: int = 0,
+    bold: bool = False,
+    max_width: float = 512,
+) -> list[_PdfLine]:
+    width_limit = max(180.0, max_width - indent)
+    lines: list[_PdfLine] = []
+    current: list[_PdfSegment] = []
+    current_width = 0.0
+    for segment in segments:
+        parts = segment.text.split("\n")
+        for part_index, part in enumerate(parts):
+            words = part.split()
+            for word in words:
+                prefix = " " if current else ""
+                token = f"{prefix}{word}"
+                token_width = _segment_width(token, size=size, bold=segment.bold or bold)
+                if current and current_width + token_width > width_limit:
+                    lines.append(_PdfLine(tuple(current), size=size, indent=indent, bold=bold))
+                    current = []
+                    current_width = 0.0
+                    token = word
+                    token_width = _segment_width(token, size=size, bold=segment.bold or bold)
+                current.append(_PdfSegment(token, bold=segment.bold))
+                current_width += token_width
+            if part_index < len(parts) - 1:
+                lines.append(_PdfLine(tuple(current), size=size, indent=indent, bold=bold))
+                current = []
+                current_width = 0.0
+    if current:
+        lines.append(_PdfLine(tuple(current), size=size, indent=indent, bold=bold))
+    return lines
+
+
+def _collapse_spaces(value: str) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
+def _line_text(line: _PdfLine) -> str:
+    return _collapse_spaces("".join(segment.text for segment in line.segments))
+
+
+def _segment_width(value: str, *, size: int, bold: bool) -> float:
+    multiplier = 0.57 if bold else 0.53
+    return len(value) * size * multiplier
 
 
 def _datetime_value(value: datetime | str | None) -> str:
@@ -184,14 +354,20 @@ def _pdf_escape(value: str) -> str:
     return str(value or "").encode("latin-1", errors="replace").decode("latin-1").replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
 
 
-def _pdf_page_stream(lines: list[str]) -> bytes:
-    commands = ["BT", "/F1 10 Tf", "14 TL", "50 750 Td"]
-    first = True
+def _pdf_page_stream(lines: list[_PdfLine]) -> bytes:
+    commands = ["BT"]
+    y = 750
     for line in lines:
-        if not first:
-            commands.append("T*")
-        commands.append(f"({_pdf_escape(line)}) Tj")
-        first = False
+        if not line.segments:
+            y -= max(8, line.size)
+            continue
+        x = 50 + line.indent
+        commands.append(f"1 0 0 1 {x} {y} Tm")
+        for segment in line.segments:
+            font = "/F2" if line.bold or segment.bold else "/F1"
+            commands.append(f"{font} {line.size} Tf")
+            commands.append(f"({_pdf_escape(segment.text)}) Tj")
+        y -= max(12, int(line.size * 1.45))
     commands.append("ET")
     return "\n".join(commands).encode("latin-1", errors="replace")
 

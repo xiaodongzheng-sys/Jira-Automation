@@ -12,7 +12,7 @@ from openpyxl import load_workbook
 
 import bpmis_jira_tool.web as web_module
 from bpmis_jira_tool.config import Settings
-from bpmis_jira_tool.daily_brief_archive import DailyBriefArchiveStore, daily_brief_archive_path
+from bpmis_jira_tool.daily_brief_archive import DailyBriefArchiveStore, daily_brief_archive_path, daily_brief_pdf_bytes
 from bpmis_jira_tool.errors import BPMISError, ToolError
 from bpmis_jira_tool.models import CreatedTicket
 from bpmis_jira_tool.monthly_report import DEFAULT_MONTHLY_REPORT_TEMPLATE, MonthlyReportSendResult, resolve_monthly_report_period
@@ -329,6 +329,25 @@ class _FakeMonthlyReportLocalAgentClient(_FakePRDReviewLocalAgentClient):
 
 
 class WebPortalFeatureTests(unittest.TestCase):
+    def test_daily_brief_pdf_prefers_html_formatting(self):
+        pdf = daily_brief_pdf_bytes(
+            title="Daily Brief",
+            body="Plain fallback should not render",
+            html_body="<html><body><h2>Daily Brief</h2><h3>To-do</h3><ul><li><strong>Review</strong> rollout</li></ul></body></html>",
+        )
+
+        self.assertIn(b"/Helvetica-Bold", pdf)
+        self.assertIn(b"To-do", pdf)
+        self.assertIn(b"Review", pdf)
+        self.assertIn(b"rollout", pdf)
+        self.assertIn(b"(-)", pdf)
+        self.assertNotIn(b"Plain fallback", pdf)
+
+    def test_daily_brief_pdf_falls_back_to_plain_text(self):
+        pdf = daily_brief_pdf_bytes(title="Daily Brief", body="Plain fallback body", html_body="")
+
+        self.assertIn(b"Plain fallback body", pdf)
+
     def test_background_job_forms_disable_submit_button_while_running(self):
         template = Path("templates/base.html").read_text(encoding="utf-8")
 
@@ -4814,8 +4833,8 @@ class WebPortalFeatureTests(unittest.TestCase):
                 run_slot="midday",
                 recipient="xiaodong.zheng@npt.sg",
                 subject="Daily Brief - 2026-05-05 (2026-05-05 13:00 - 2026-05-05 19:00)",
-                text_body="Subject: Daily Brief\n\nEvening brief body",
-                html_body="<html><body>Evening</body></html>",
+                text_body="Subject: Daily Brief\n\nPlain evening body",
+                html_body="<html><body><h3>Evening HTML</h3><ul><li><strong>Formatted</strong> body</li></ul></body></html>",
                 message_id="msg-evening",
                 status="sent",
                 sent_at=datetime(2026, 5, 5, 19, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE),
@@ -4842,6 +4861,10 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertEqual(download_response.headers["Content-Type"], "application/pdf")
         self.assertIn("daily-brief-2026-05-05-midday.pdf", download_response.headers["Content-Disposition"])
         self.assertGreater(len(download_response.data), 100)
+        self.assertIn(b"/Helvetica-Bold", download_response.data)
+        self.assertIn(b"Evening", download_response.data)
+        self.assertIn(b"Formatted", download_response.data)
+        self.assertNotIn(b"Plain evening body", download_response.data)
 
     def test_team_dashboard_daily_brief_uses_local_agent_when_enabled(self):
         fake_client = _FakeMonthlyReportLocalAgentClient()

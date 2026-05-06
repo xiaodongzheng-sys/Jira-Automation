@@ -309,8 +309,8 @@ class LocalAgentServerTests(unittest.TestCase):
             run_slot="midday",
             recipient="xiaodong.zheng@npt.sg",
             subject="Daily Brief - 2026-05-05 (2026-05-05 13:00 - 2026-05-05 19:00)",
-            text_body="Subject: Daily Brief\n\nArchive body",
-            html_body="<html><body>Archive body</body></html>",
+            text_body="Subject: Daily Brief\n\nPlain archive body",
+            html_body="<html><body><h3>Archive HTML</h3><ul><li><strong>Formatted</strong> archive item</li></ul></body></html>",
             message_id="msg-1",
             status="sent",
             sent_at=datetime(2026, 5, 5, 19, 0),
@@ -329,6 +329,10 @@ class LocalAgentServerTests(unittest.TestCase):
         self.assertEqual(download_response.headers["Content-Type"], "application/pdf")
         self.assertIn("daily-brief-2026-05-05-midday.pdf", download_response.headers["Content-Disposition"])
         self.assertGreater(len(download_response.data), 100)
+        self.assertIn(b"/Helvetica-Bold", download_response.data)
+        self.assertIn(b"Archive", download_response.data)
+        self.assertIn(b"Formatted", download_response.data)
+        self.assertNotIn(b"Plain archive body", download_response.data)
 
     def test_signed_seatalk_open_todos_returns_agent_store_items(self):
         seed = self._post_signed(

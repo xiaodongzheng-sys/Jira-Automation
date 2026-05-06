@@ -5477,6 +5477,7 @@ def create_app() -> Flask:
         pdf_bytes = daily_brief_pdf_bytes(
             title=str(item.get("subject") or "Daily Brief"),
             body=str(item.get("text_body") or ""),
+            html_body=str(item.get("html_body") or ""),
         )
         run_date = re.sub(r"[^0-9-]", "", str(item.get("run_date") or "daily-brief")) or "daily-brief"
         run_slot = re.sub(r"[^a-z0-9_-]", "-", str(item.get("run_slot") or "daily").lower()) or "daily"
@@ -9240,7 +9241,7 @@ def _build_source_code_qa_effort_assessment_prompt(
     ) or "none"
     raw_requirement = str(requirement or "").strip()[:8000]
     has_explicit_options = bool(business_plan.get("has_explicit_options"))
-    technical_change_section = "方案 1/2 技术改造点" if has_explicit_options else "技术改造点"
+    technical_change_section = "方案 1/2 代码改动点" if has_explicit_options else "代码改动点"
     option_rule = (
         "- The requirement contains explicit alternatives; keep the original option labels and compare each option separately."
         if has_explicit_options
@@ -9272,30 +9273,31 @@ def _build_source_code_qa_effort_assessment_prompt(
             "Optimized assessment task:",
             "- Use the business plan and technical candidates as the focused search map. Do not rely only on the original business wording.",
             "- Map the requirement to likely impacted repositories, modules, files, APIs, tables, configs, scheduled jobs, front-end screens and components, and tests.",
-            "- Use current source-code evidence as the primary basis for implementation impact and person-day estimates.",
+            "- Use current source-code evidence internally as the basis for implementation impact and person-day estimates.",
             "- If exact table or path lookup misses, record it as a warning and continue with focused technical-candidate search.",
-            "- Use runtime evidence only as supporting context. Treat uploaded DB, Apollo, and log evidence separately from source-code proof and cite the evidence type distinctly.",
-            "- Separate confirmed code evidence from assumptions, inferred impact, and missing evidence. If a required evidence link is missing, say so explicitly instead of guessing.",
+            "- Use runtime evidence only as supporting context.",
+            "- Translate technical findings into business-readable change points. Do not expose evidence, citations, or file-path proof lists in the visible final answer.",
             "- Estimate BE and FE work as ranges in person-days. Use 0 person-days if no FE or BE change is found, but explain why.",
             "- Include QA/test and integration impact in the relevant BE/FE estimate notes instead of creating a third estimate bucket.",
             "",
             "Required output sections:",
-            "1. 业务理解",
-            f"2. {technical_change_section}",
-            "3. BE 人天",
-            "4. FE 人天",
-            "5. Confirmed / Inferred / Missing Evidence",
+            "1. 业务理解 / Business Understanding",
+            f"2. {technical_change_section} / Code Change Points",
+            "3. BE 人天 / BE Person-days",
+            "4. FE 人天 / FE Person-days",
+            "5. QA / Integration Impact",
             "6. Assumptions / Risks",
             "7. Confirmation Questions",
-            "8. Source / Runtime Evidence",
             "",
             "Output rules:",
             f"- Write the final answer in {output_language}.",
             option_rule,
             "- Keep the answer concise but specific enough for PM and engineering planning.",
-            "- Cite concrete file paths, classes, functions, APIs, tables, configs, tests, or runtime evidence filenames when available.",
+            "- Do not include visible sections named Evidence, Source / Runtime Evidence, Confirmed / Inferred / Missing Evidence, or Missing Evidence.",
+            "- Do not include source citations, S-id references such as [S1], file-path proof lists, or runtime-evidence filenames in the final answer.",
+            "- Code change points must be understandable to business users: describe behavior, process, rule, UI, API, data, integration, and testing changes before technical names.",
             "- Person-day estimates must be ranges such as 1-2 PD or 3-5 PD, with one sentence explaining the driver for each range.",
-            "- If source evidence is weak, still estimate with low confidence and explain missing evidence.",
+            "- If source evidence is weak, still estimate with low confidence and state the planning assumption without adding an evidence section.",
         ]
     )
 
@@ -9384,7 +9386,7 @@ def _source_code_qa_effort_cache_key(
 ) -> str:
     dictionaries = _load_source_code_qa_effort_dictionaries()
     payload = {
-        "version": 2,
+        "version": 3,
         "pm_team": pm_team,
         "country": country,
         "language": language,
@@ -9425,7 +9427,7 @@ def _store_source_code_qa_effort_cached_result(settings: Settings, cache_key: st
         cache_root = _source_code_qa_effort_cache_root(settings)
         cache_root.mkdir(parents=True, exist_ok=True)
         payload = {
-            "version": 2,
+            "version": 3,
             "cache_key": cache_key,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "result": result,
@@ -9504,21 +9506,23 @@ def _build_source_code_qa_effort_compact_synthesis_prompt(
             "",
             "Instructions:",
             "- Produce the final effort assessment from this evidence pack, business plan, runtime evidence, and rubric.",
-            "- Keep concrete source citations as file paths, classes, functions, APIs, tables, configs, or S-id citations when available.",
-            "- Separate Confirmed, Inferred, and Missing Evidence. Missing source-code evidence is acceptable; state it explicitly and continue with low confidence.",
+            "- Use source-code evidence internally to decide impact, but do not expose evidence, citations, S-id references, file paths, or proof lists in the visible final answer.",
+            "- Explain detailed code change points in business-readable language: behavior/process/rule/UI/API/data/integration/testing impact first, technical names only when useful.",
+            "- Missing source-code evidence is acceptable; continue with low confidence and state planning assumptions without creating a visible evidence section.",
             "- Do not invent Option 1/Option 2 labels unless the original requirement had explicit alternatives.",
             "- Estimate BE and FE as person-day ranges and explain the driver for each range.",
             "- Include QA/test and integration impact inside the relevant BE/FE notes.",
             "",
             "Required output sections:",
             "1. 业务理解 / Business Understanding",
-            "2. 技术改造点 / Technical Changes",
+            "2. 代码改动点 / Code Change Points",
             "3. BE 人天 / BE Person-days",
             "4. FE 人天 / FE Person-days",
-            "5. Confirmed / Inferred / Missing Evidence",
+            "5. QA / Integration Impact",
             "6. Assumptions / Risks",
             "7. Confirmation Questions",
-            "8. Source / Runtime Evidence",
+            "",
+            "Do not include visible sections named Evidence, Source / Runtime Evidence, Confirmed / Inferred / Missing Evidence, Missing Evidence, or source/runtime proof.",
             "",
             f"Write the final answer in {output_language}.",
         ]
@@ -9553,6 +9557,117 @@ def _source_code_qa_effort_confidence(result: dict[str, Any], missing_evidence: 
     return "low"
 
 
+def _source_code_qa_effort_code_change_points(
+    *,
+    language: str,
+    business_plan: dict[str, Any],
+    technical_candidates: dict[str, Any],
+    estimation_rubric: dict[str, Any],
+) -> list[dict[str, str]]:
+    is_zh = language == "zh"
+    typed_candidates = technical_candidates.get("typed_candidates") if isinstance(technical_candidates.get("typed_candidates"), dict) else {}
+    backend_terms = [str(item) for item in (technical_candidates.get("backend_surfaces") or [])[:6] if str(item or "").strip()]
+    frontend_terms = [str(item) for item in (technical_candidates.get("frontend_surfaces") or [])[:6] if str(item or "").strip()]
+    config_terms = [str(item) for item in (technical_candidates.get("configs_or_tables") or [])[:6] if str(item or "").strip()]
+    reporting_terms = [str(item) for item in (typed_candidates.get("downstream_reporting") or [])[:6] if str(item or "").strip()]
+    products = [str(item) for item in (business_plan.get("products") or [])[:4] if str(item or "").strip()]
+    limit_types = [str(item) for item in (business_plan.get("limit_types") or [])[:4] if str(item or "").strip()]
+    flow_changes = [str(item) for item in (business_plan.get("flow_changes") or [])[:4] if str(item or "").strip()]
+    estimates = [item for item in (estimation_rubric.get("option_estimates") or []) if isinstance(item, dict)]
+
+    def join_terms(items: list[str], fallback: str) -> str:
+        return ", ".join(items) if items else fallback
+
+    points: list[dict[str, str]] = []
+
+    def add(area: str, change: str, technical_surface: str, impact: str) -> None:
+        if not change.strip():
+            return
+        points.append(
+            {
+                "area": area,
+                "change": change,
+                "likely_technical_surface": technical_surface,
+                "impact": impact,
+            }
+        )
+
+    if flow_changes or products or limit_types:
+        add(
+            "业务规则 / Business Rules" if is_zh else "Business Rules",
+            (
+                f"把需求中的流程、产品和额度规则落到系统判断中，覆盖 {join_terms(flow_changes + products + limit_types, '当前业务规则')}。"
+                if is_zh
+                else f"Map the requested flow, product, and limit-rule changes into system decision logic for {join_terms(flow_changes + products + limit_types, 'the affected business rules')}."
+            ),
+            join_terms(backend_terms + config_terms, "service/config rule layer" if not is_zh else "服务/配置规则层"),
+            "影响审批、授信、额度或流程判断口径。" if is_zh else "Affects approval, credit, limit, or workflow decisions.",
+        )
+    if backend_terms or typed_candidates.get("backend_service"):
+        add(
+            "后端服务 / Backend" if is_zh else "Backend",
+            (
+                f"调整后端接口、服务或策略逻辑，让新规则能在核心流程中被计算、校验和保存。"
+                if is_zh
+                else "Update backend APIs, services, or strategy logic so the new rule can be calculated, validated, and persisted in the core flow."
+            ),
+            join_terms(backend_terms or [str(item) for item in (typed_candidates.get("backend_service") or [])[:6]], "backend service/API layer"),
+            "主要决定 BE 人天范围。" if is_zh else "This is the main driver for BE person-days.",
+        )
+    if config_terms or typed_candidates.get("configuration"):
+        add(
+            "配置与数据 / Config & Data" if is_zh else "Config & Data",
+            (
+                f"新增或调整配置、字典、表字段映射或参数，确保规则可配置且不同环境口径一致。"
+                if is_zh
+                else "Add or adjust configuration, dictionary, table-field mapping, or parameters so the rule is configurable and consistent across environments."
+            ),
+            join_terms(config_terms or [str(item) for item in (typed_candidates.get("configuration") or [])[:6]], "config/table mapping"),
+            "需要迁移、参数发布或数据校验配合。" if is_zh else "May require migration, parameter rollout, or data validation.",
+        )
+    if frontend_terms or typed_candidates.get("frontend_surface"):
+        add(
+            "前端页面 / Frontend" if is_zh else "Frontend",
+            (
+                "调整页面入口、字段展示、提示文案或用户操作路径，让用户能理解并使用新的业务规则。"
+                if is_zh
+                else "Update screen entry points, field display, helper copy, or user flow so users can understand and use the new business rule."
+            ),
+            join_terms(frontend_terms or [str(item) for item in (typed_candidates.get("frontend_surface") or [])[:6]], "frontend screen/component"),
+            "决定是否需要 FE 人天；无页面变化时可为 0-1 PD。" if is_zh else "Determines FE effort; can be 0-1 PD if no user-facing screen changes.",
+        )
+    if reporting_terms or typed_candidates.get("integration") or typed_candidates.get("downstream"):
+        add(
+            "下游与报送 / Integration" if is_zh else "Integration",
+            (
+                "检查并调整下游接口、报送字段或同步任务，避免新规则只在主流程生效但下游口径不一致。"
+                if is_zh
+                else "Check and adjust downstream APIs, reporting fields, or sync jobs so the new rule does not diverge between the main flow and downstream consumers."
+            ),
+            join_terms(reporting_terms, "downstream/reporting path" if not is_zh else "下游/报送链路"),
+            "增加联调和回归测试成本。" if is_zh else "Adds integration and regression testing cost.",
+        )
+    add(
+        "测试与验收 / QA" if is_zh else "QA",
+        (
+            "补充单元测试、接口测试和关键业务场景回归，覆盖正常、边界和回退场景。"
+            if is_zh
+            else "Add unit, API, and key business regression tests covering normal, boundary, and rollback scenarios."
+        ),
+        "test/regression suite",
+        "测试工作包含在 BE/FE 估算说明中。" if is_zh else "Testing work is included in the BE/FE estimate notes.",
+    )
+
+    if estimates:
+        estimate_summary = "; ".join(
+            f"{item.get('label') or item.get('id') or 'option'}: BE {item.get('be_person_days') or 'n/a'}, FE {item.get('fe_person_days') or 'n/a'}"
+            for item in estimates[:3]
+        )
+        for point in points:
+            point.setdefault("estimate_hint", estimate_summary)
+    return points[:6]
+
+
 def _source_code_qa_effort_fallback_answer(
     *,
     language: str,
@@ -9568,11 +9683,19 @@ def _source_code_qa_effort_fallback_answer(
         for item in options
         if isinstance(item, dict)
     )
-    candidate_terms = ", ".join(str(item) for item in (technical_candidates.get("search_terms") or [])[:12])
-    missing_lines = "\n".join(f"- {item}" for item in missing_evidence) or "- More code evidence is required."
+    code_change_points = _source_code_qa_effort_code_change_points(
+        language=language,
+        business_plan=business_plan,
+        technical_candidates=technical_candidates,
+        estimation_rubric=estimation_rubric,
+    )
+    point_lines = "\n".join(
+        f"- {item['area']}: {item['change']} ({item['impact']})"
+        for item in code_change_points
+    )
     if language == "zh":
         goals = ", ".join(str(item) for item in business_plan.get("business_goals") or [])
-        technical_title = "方案 1/2 技术改造点" if has_explicit_options else "技术改造点"
+        technical_title = "方案 1/2 代码改动点" if has_explicit_options else "代码改动点"
         confirmation_questions = [
             "- 额度策略是否只改参数，还是需要新增产品/子产品额度模型?",
             "- 是否需要前端新增 cashline 申请入口或额度解释文案?",
@@ -9585,15 +9708,13 @@ def _source_code_qa_effort_fallback_answer(
                 f"- 目标: {goals or '评估业务需求对应的技术改造范围'}",
                 "",
                 technical_title,
-                "- Confirmed: 当前没有足够 source-code 引用能确认具体文件。",
-                f"- Inferred: 需要围绕这些技术候选词继续确认影响面: {candidate_terms}",
-                "- Missing: 需要开发确认额度策略、申请流程、前端展示、报送或下游接口是否在当前 repo 覆盖。",
+                point_lines or "- 按当前需求描述，需要调整业务规则、后端流程、可能的前端展示和测试回归范围。",
                 "",
                 "BE 人天 / FE 人天",
                 option_lines or "- 单方案: BE 3-6 PD, FE 1-3 PD，低置信度。",
                 "",
-                "Confirmed / Inferred / Missing Evidence",
-                missing_lines,
+                "QA / Integration Impact",
+                "- 需要覆盖核心业务路径、边界条件、配置发布和下游联调回归。",
                 "",
                 "Assumptions / Risks",
                 "- 这是 planning-grade 低置信度估算，不替代 Dev final sizing。",
@@ -9603,7 +9724,7 @@ def _source_code_qa_effort_fallback_answer(
                 *confirmation_questions,
             ]
         )
-    technical_title = "Option Technical Changes" if has_explicit_options else "Technical Changes"
+    technical_title = "Option Code Change Points" if has_explicit_options else "Code Change Points"
     confirmation_questions = [
         "- Is the requested limit change a config-only rule update or a new limit model?",
         "- Does the change require FE display, application entry, or customer education copy?",
@@ -9616,15 +9737,13 @@ def _source_code_qa_effort_fallback_answer(
             f"- Goals: {', '.join(str(item) for item in business_plan.get('business_goals') or [])}",
             "",
             technical_title,
-            "- Confirmed: No concrete source-code references were found.",
-            f"- Inferred: Continue validation around these technical candidates: {candidate_terms}",
-            "- Missing: Dev confirmation is required for limit strategy, application flow, FE display, and downstream reporting impact.",
+            point_lines or "- Adjust business rules, backend flow, possible frontend display, and regression testing scope based on the requirement.",
             "",
             "BE / FE Person-days",
             option_lines or "- Single option: BE 3-6 PD, FE 1-3 PD, low confidence.",
             "",
-            "Confirmed / Inferred / Missing Evidence",
-            missing_lines,
+            "QA / Integration Impact",
+            "- Cover core business paths, boundary conditions, configuration rollout, and downstream integration regression.",
             "",
             "Assumptions / Risks",
             "- This is a planning-grade low-confidence estimate and does not replace Dev final sizing.",
@@ -9665,6 +9784,12 @@ def _build_source_code_qa_effort_structured_assessment(
         for surface, terms in typed_candidates.items()
         if terms
     ]
+    code_change_points = _source_code_qa_effort_code_change_points(
+        language=language,
+        business_plan=business_plan,
+        technical_candidates=technical_candidates,
+        estimation_rubric=estimation_rubric,
+    )
     return {
         "version": 1,
         "language": language,
@@ -9686,6 +9811,7 @@ def _build_source_code_qa_effort_structured_assessment(
             for item in (business_plan.get("options") or [])
             if isinstance(item, dict)
         ],
+        "code_change_points": code_change_points,
         "be_estimate": [
             {
                 "option_id": item.get("id") or "",
@@ -9719,6 +9845,68 @@ def _build_source_code_qa_effort_structured_assessment(
     }
 
 
+def _source_code_qa_effort_sanitize_visible_answer(value: Any) -> str:
+    text = str(value or "")
+    if not text.strip():
+        return ""
+    allowed_heading_patterns = (
+        "business understanding",
+        "业务理解",
+        "code change",
+        "代码改动",
+        "technical change",
+        "技术改造",
+        "be person",
+        "be 人天",
+        "fe person",
+        "fe 人天",
+        "qa",
+        "integration",
+        "assumptions",
+        "risks",
+        "assumptions / risks",
+        "假设",
+        "风险",
+        "confirmation questions",
+        "确认问题",
+        "需要确认",
+    )
+    blocked_heading_patterns = (
+        "confirmed / inferred / missing evidence",
+        "source / runtime evidence",
+        "source/runtime evidence",
+        "missing evidence",
+        "runtime evidence",
+        "source evidence",
+        "evidence",
+        "证据",
+    )
+
+    def normalized_heading(line: str) -> str:
+        value = re.sub(r"^[#*\s>\-]*", "", line.strip())
+        value = re.sub(r"^\d+[\.)、]\s*", "", value)
+        value = value.strip("*:： ").lower()
+        return value
+
+    output: list[str] = []
+    skipping = False
+    for line in text.splitlines():
+        heading = normalized_heading(line)
+        is_blocked = any(pattern in heading for pattern in blocked_heading_patterns)
+        is_allowed = any(pattern in heading for pattern in allowed_heading_patterns)
+        if is_blocked and not is_allowed:
+            skipping = True
+            continue
+        if skipping and is_allowed:
+            skipping = False
+        if skipping:
+            continue
+        output.append(line)
+    cleaned = "\n".join(output).strip()
+    cleaned = re.sub(r"\s*\[S\d+\]", "", cleaned)
+    return cleaned
+
+
 def _normalize_source_code_qa_effort_assessment_result(
     *,
     result: dict[str, Any],
@@ -9748,6 +9936,7 @@ def _normalize_source_code_qa_effort_assessment_result(
         normalized["effort_evidence_status"] = "warning" if missing_evidence else "confirmed"
         if not normalized.get("summary"):
             normalized["summary"] = "Effort assessment completed."
+        normalized["llm_answer"] = _source_code_qa_effort_sanitize_visible_answer(normalized.get("llm_answer") or normalized.get("answer") or "")
     normalized["assessment_confidence"] = confidence
     normalized["missing_evidence"] = missing_evidence
     normalized["structured_assessment"] = _build_source_code_qa_effort_structured_assessment(

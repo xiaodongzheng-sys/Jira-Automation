@@ -2449,6 +2449,25 @@
     }).join('')}</div>`;
   };
 
+  const effortRenderChangePoints = (items) => {
+    const values = Array.isArray(items) ? items.filter(Boolean).slice(0, 8) : [];
+    if (!values.length) return '';
+    return `<ol class="source-qa-effort-list">${values.map((item) => {
+      const area = effortDisplayValue(item.area || item.title || 'Change point');
+      const change = effortDisplayValue(item.change || item.summary || item.description || '');
+      const impact = effortDisplayValue(item.impact || '');
+      const surface = effortDisplayValue(item.likely_technical_surface || item.surface || '');
+      return `
+        <li>
+          <strong>${escapeHtml(area)}</strong>
+          ${change ? `<p>${escapeHtml(change)}</p>` : ''}
+          ${impact ? `<p>${escapeHtml(impact)}</p>` : ''}
+          ${surface ? `<p class="muted">${escapeHtml(surface)}</p>` : ''}
+        </li>
+      `;
+    }).join('')}</ol>`;
+  };
+
   const renderEffortHybridSummary = (payload) => {
     const assessment = payload?.assessment || {};
     const businessPlan = assessment.business_plan || payload?.business_plan || {};
@@ -2456,8 +2475,6 @@
     const rubric = assessment.estimation_rubric || payload?.estimation_rubric || {};
     if (!businessPlan.raw_requirement && !candidates.search_terms && !rubric.option_estimates) return '';
     const confidence = assessment.confidence || payload?.assessment_confidence || 'unknown';
-    const evidenceStatus = assessment.evidence_status || payload?.effort_evidence_status || 'unknown';
-    const missingEvidence = assessment.missing_evidence || payload?.missing_evidence || [];
     const options = Array.isArray(businessPlan.options) ? businessPlan.options.slice(0, 3) : [];
     const estimates = Array.isArray(rubric.option_estimates) ? rubric.option_estimates : [];
     const estimateHtml = estimates.length
@@ -2466,8 +2483,8 @@
     return `
       <div class="source-qa-evidence-card source-qa-effort-hybrid-card">
         <div class="source-qa-evidence-head">
-          <strong>Hybrid Assessment Context</strong>
-          <span>confidence: ${escapeHtml(confidence)} · evidence: ${escapeHtml(evidenceStatus)}</span>
+          <strong>Planning Context</strong>
+          <span>confidence: ${escapeHtml(confidence)}</span>
         </div>
         <div class="source-qa-evidence-grid">
           <section>
@@ -2483,10 +2500,6 @@
             <strong>Rubric Estimate</strong>
             ${estimateHtml}
           </section>
-          <section>
-            <strong>Missing Evidence</strong>
-            ${effortListPreview(missingEvidence, 6)}
-          </section>
         </div>
       </div>
     `;
@@ -2494,12 +2507,15 @@
 
   const renderEffortStructuredAnswer = (payload) => {
     const parsed = effortParsedAnswer(payload?.llm_answer || payload?.answer);
+    const effortStructured = payload?.structured_assessment || {};
     const structured = payload?.structured_answer || {};
     const directAnswer = parsed?.direct_answer || structured.direct_answer || '';
+    const codeChangePoints = parsed?.code_change_points || effortStructured.code_change_points || [];
     if (!parsed && !directAnswer) return '';
     return `
       <div class="source-qa-effort-readable">
         ${directAnswer ? effortRenderSection('Assessment Summary', `<div class="source-qa-effort-paragraphs">${effortRenderParagraphs(directAnswer)}</div>`) : ''}
+        ${effortRenderSection('Code Change Points', effortRenderChangePoints(codeChangePoints))}
       </div>
     `;
   };
