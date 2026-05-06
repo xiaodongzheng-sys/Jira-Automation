@@ -168,14 +168,75 @@ def _daily_brief_pdf_lines(*, title: str, body: str, html_body: str) -> list[_Pd
     if html_text:
         parsed = _html_pdf_lines(html_text)
         if parsed:
-            normalized_title = _collapse_spaces(str(title or "Daily Brief")).lower()
-            if parsed and _line_text(parsed[0]).lower() == normalized_title:
-                parsed = parsed[1:]
-            return lines + parsed
+            return lines + _strip_daily_brief_body_header(parsed, title=title)
     text_lines = []
     for item in _wrap_pdf_lines(str(body or ""), max_chars=92):
         text_lines.append(_PdfLine((_PdfSegment(item),) if item else tuple()))
-    return lines + text_lines
+    return lines + _strip_daily_brief_body_header(text_lines, title=title)
+
+
+def _strip_daily_brief_body_header(lines: list[_PdfLine], *, title: str) -> list[_PdfLine]:
+    output = list(lines)
+    output = _drop_leading_blank_pdf_lines(output)
+    output = _strip_leading_subject_line(output)
+    output = _drop_leading_blank_pdf_lines(output)
+    output = _strip_leading_daily_brief_heading(output, title=title)
+    output = _drop_leading_blank_pdf_lines(output)
+    output = _strip_leading_window_line(output)
+    return _drop_leading_blank_pdf_lines(output)
+
+
+def _drop_leading_blank_pdf_lines(lines: list[_PdfLine]) -> list[_PdfLine]:
+    index = 0
+    while index < len(lines) and not _line_text(lines[index]):
+        index += 1
+    return lines[index:]
+
+
+def _strip_leading_subject_line(lines: list[_PdfLine]) -> list[_PdfLine]:
+    if lines and _line_text(lines[0]).lower().startswith("subject: daily brief"):
+        return lines[1:]
+    return lines
+
+
+def _strip_leading_daily_brief_heading(lines: list[_PdfLine], *, title: str) -> list[_PdfLine]:
+    if not lines:
+        return lines
+    first_text = _line_text(lines[0])
+    if not first_text.lower().startswith("daily brief"):
+        return lines
+
+    normalized_title = _collapse_spaces(str(title or "Daily Brief")).lower()
+    candidate = first_text
+    consume_until = 1
+    for next_index in range(1, min(len(lines), 5)):
+        next_text = _line_text(lines[next_index])
+        if not next_text:
+            consume_until = next_index + 1
+            break
+        combined = _collapse_spaces(f"{candidate} {next_text}")
+        combined_lower = combined.lower()
+        if normalized_title.startswith(combined_lower) or combined_lower.startswith(normalized_title):
+            candidate = combined
+            consume_until = next_index + 1
+            continue
+        if normalized_title.startswith(candidate.lower()) and _looks_like_wrapped_title_remainder(next_text):
+            candidate = combined
+            consume_until = next_index + 1
+            continue
+        break
+    return lines[consume_until:]
+
+
+def _looks_like_wrapped_title_remainder(value: str) -> bool:
+    return bool(re.fullmatch(r"[0-9:() \-]+", _collapse_spaces(value)))
+
+
+def _strip_leading_window_line(lines: list[_PdfLine]) -> list[_PdfLine]:
+    output = list(lines)
+    while output and _line_text(output[0]).lower().startswith("window:"):
+        output = _drop_leading_blank_pdf_lines(output[1:])
+    return output
 
 
 def _html_pdf_lines(html_body: str) -> list[_PdfLine]:

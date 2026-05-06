@@ -330,13 +330,20 @@ class _FakeMonthlyReportLocalAgentClient(_FakePRDReviewLocalAgentClient):
 
 class WebPortalFeatureTests(unittest.TestCase):
     def test_daily_brief_pdf_prefers_html_formatting(self):
+        title = "Daily Brief - 2026-05-05 (2026-05-05 13:00 - 2026-05-05 19:00)"
         pdf = daily_brief_pdf_bytes(
-            title="Daily Brief",
+            title=title,
             body="Plain fallback should not render",
-            html_body="<html><body><h2>Daily Brief</h2><h3>To-do</h3><ul><li><strong>Review</strong> rollout</li></ul></body></html>",
+            html_body=(
+                f"<html><body><h2>{title}</h2>"
+                "<p><strong>Window:</strong> 2026-05-05 13:00 - 2026-05-05 19:00</p>"
+                "<h3>To-do</h3><ul><li><strong>Review</strong> rollout</li></ul></body></html>"
+            ),
         )
 
         self.assertIn(b"/Helvetica-Bold", pdf)
+        self.assertEqual(pdf.count(b"Daily Brief - 2026-05-05"), 1)
+        self.assertNotIn(b"Window:", pdf)
         self.assertIn(b"To-do", pdf)
         self.assertIn(b"Review", pdf)
         self.assertIn(b"rollout", pdf)
@@ -344,8 +351,16 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertNotIn(b"Plain fallback", pdf)
 
     def test_daily_brief_pdf_falls_back_to_plain_text(self):
-        pdf = daily_brief_pdf_bytes(title="Daily Brief", body="Plain fallback body", html_body="")
+        title = "Daily Brief - 2026-05-05 (2026-05-05 13:00 - 2026-05-05 19:00)"
+        pdf = daily_brief_pdf_bytes(
+            title=title,
+            body=f"Subject: {title}\n\n{title}\nWindow: 2026-05-05 13:00 - 2026-05-05 19:00\n\nTo-do\nPlain fallback body",
+            html_body="",
+        )
 
+        self.assertEqual(pdf.count(b"Daily Brief - 2026-05-05"), 1)
+        self.assertNotIn(b"Window:", pdf)
+        self.assertIn(b"To-do", pdf)
         self.assertIn(b"Plain fallback body", pdf)
 
     def test_background_job_forms_disable_submit_button_while_running(self):
