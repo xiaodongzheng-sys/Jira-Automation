@@ -21,6 +21,12 @@ class ConfigTests(unittest.TestCase):
 
         self.assertEqual(settings.team_portal_stage, "uat")
 
+    def test_prd_briefing_mandarin_edge_voice_defaults_to_xiaoxiao(self):
+        with patch.dict(os.environ, {}, clear=True), patch("bpmis_jira_tool.config.find_dotenv", return_value=""):
+            settings = Settings.from_env()
+
+        self.assertEqual(settings.prd_briefing_edge_mandarin_voice, "zh-CN-XiaoxiaoNeural")
+
     def test_from_env_loads_meeting_recorder_transcription_performance_settings(self):
         with patch.dict(
             os.environ,

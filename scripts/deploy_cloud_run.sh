@@ -208,6 +208,7 @@ append_optional_env_var TRELLO_API_KEY
 append_optional_env_var TRELLO_API_TOKEN
 append_optional_env_var TRELLO_BOARD_ID
 append_optional_env_var TRELLO_DAILY_LIST_NAME
+append_optional_env_var PRD_BRIEFING_EDGE_MANDARIN_VOICE
 if [[ -n "$BASE_URL" ]]; then
   ENV_VARS+=("TEAM_PORTAL_BASE_URL=$BASE_URL")
 fi

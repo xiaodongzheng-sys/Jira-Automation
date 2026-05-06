@@ -339,7 +339,7 @@ class PRDBriefingServiceTests(unittest.TestCase):
             store=self.store,
             openai_client=self.openai_client,
             tts_provider="edge",
-            edge_mandarin_voice="zh-CN-XiaoruiNeural",
+            edge_mandarin_voice="zh-CN-XiaoxiaoNeural",
             edge_english_voice="en-SG-LunaNeural",
             edge_rate="-12%",
             edge_mandarin_rate="+0%",

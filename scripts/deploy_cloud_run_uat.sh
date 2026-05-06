@@ -300,6 +300,7 @@ append_optional_env_var TRELLO_API_KEY
 append_optional_env_var TRELLO_API_TOKEN
 append_optional_env_var TRELLO_BOARD_ID
 append_optional_env_var TRELLO_DAILY_LIST_NAME
+append_optional_env_var PRD_BRIEFING_EDGE_MANDARIN_VOICE
 if [[ -n "$LOCAL_AGENT_URL" ]]; then
   ENV_VARS+=("LOCAL_AGENT_BASE_URL=$LOCAL_AGENT_URL")
 fi

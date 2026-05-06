@@ -154,7 +154,7 @@ class Settings:
     prd_briefing_transcription_model: str = "gpt-4o-mini-transcribe"
     prd_briefing_tts_model: str = "gpt-4o-mini-tts"
     prd_briefing_tts_provider: str = "edge"
-    prd_briefing_edge_mandarin_voice: str = "zh-CN-XiaoruiNeural"
+    prd_briefing_edge_mandarin_voice: str = "zh-CN-XiaoxiaoNeural"
     prd_briefing_edge_english_voice: str = "en-SG-LunaNeural"
     prd_briefing_edge_rate: str = "-12%"
     prd_briefing_edge_mandarin_rate: str = "+0%"
@@ -303,7 +303,7 @@ class Settings:
             prd_briefing_transcription_model=_env_str("PRD_BRIEFING_TRANSCRIPTION_MODEL", "gpt-4o-mini-transcribe"),
             prd_briefing_tts_model=_env_str("PRD_BRIEFING_TTS_MODEL", "gpt-4o-mini-tts"),
             prd_briefing_tts_provider=_env_str("PRD_BRIEFING_TTS_PROVIDER", "edge"),
-            prd_briefing_edge_mandarin_voice=_env_str("PRD_BRIEFING_EDGE_MANDARIN_VOICE", "zh-CN-XiaoruiNeural"),
+            prd_briefing_edge_mandarin_voice=_env_str("PRD_BRIEFING_EDGE_MANDARIN_VOICE", "zh-CN-XiaoxiaoNeural"),
             prd_briefing_edge_english_voice=_env_str("PRD_BRIEFING_EDGE_ENGLISH_VOICE", "en-SG-LunaNeural"),
             prd_briefing_edge_rate=_env_str("PRD_BRIEFING_EDGE_RATE", "-12%"),
             prd_briefing_edge_mandarin_rate=_env_str(

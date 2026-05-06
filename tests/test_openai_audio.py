@@ -120,7 +120,7 @@ class OpenAIAudioTests(unittest.TestCase):
                 store=store,
                 openai_client=client,
                 tts_provider="edge",
-                edge_mandarin_voice="zh-CN-XiaoruiNeural",
+                edge_mandarin_voice="zh-CN-XiaoxiaoNeural",
                 edge_english_voice="en-SG-LunaNeural",
                 edge_rate="-12%",
                 edge_mandarin_rate="+0%",
@@ -144,7 +144,7 @@ class OpenAIAudioTests(unittest.TestCase):
 
             self.assertIsNotNone(audio_path)
             edge_tts.assert_called_once()
-            self.assertEqual(edge_tts.call_args.kwargs["voice_id"], "zh-CN-XiaoruiNeural")
+            self.assertEqual(edge_tts.call_args.kwargs["voice_id"], "zh-CN-XiaoxiaoNeural")
             self.assertEqual(edge_tts.call_args.kwargs["rate"], "+0%")
             client.synthesize_speech.assert_not_called()
             self.assertEqual(
@@ -165,7 +165,7 @@ class OpenAIAudioTests(unittest.TestCase):
                 store=store,
                 openai_client=client,
                 tts_provider="edge",
-                edge_mandarin_voice="zh-CN-XiaoruiNeural",
+                edge_mandarin_voice="zh-CN-XiaoxiaoNeural",
                 edge_english_voice="en-SG-LunaNeural",
                 edge_rate="-12%",
                 edge_mandarin_rate="+0%",

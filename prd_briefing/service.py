@@ -244,7 +244,7 @@ class VoiceService:
         self.store = store
         self.openai_client = openai_client
         self.tts_provider = str(tts_provider or "edge").strip().lower() or "edge"
-        self.edge_mandarin_voice = str(edge_mandarin_voice or "zh-CN-XiaoruiNeural").strip() or "zh-CN-XiaoruiNeural"
+        self.edge_mandarin_voice = str(edge_mandarin_voice or "zh-CN-XiaoxiaoNeural").strip() or "zh-CN-XiaoxiaoNeural"
         self.edge_english_voice = str(edge_english_voice or "en-SG-LunaNeural").strip() or "en-SG-LunaNeural"
         self.edge_rate = str(edge_rate or "-12%").strip() or "-12%"
         self.edge_mandarin_rate = str(edge_mandarin_rate or self.edge_rate or "+0%").strip() or "+0%"
