@@ -31,6 +31,7 @@ from bpmis_jira_tool.web import (
     SourceCodeQASessionStore,
     _build_source_code_qa_effort_assessment_prompt,
     _build_source_code_qa_effort_business_plan,
+    _build_source_code_qa_effort_evidence_matrix,
     _build_source_code_qa_effort_estimation_rubric,
     _build_source_code_qa_effort_structured_assessment,
     _build_source_code_qa_effort_technical_candidates,
@@ -185,6 +186,11 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertIn("assessment.business_plan", script)
         self.assertIn("assessment.technical_candidates", script)
         self.assertIn("structured_assessment", script)
+        self.assertNotIn("Evidence Used", script)
+        self.assertNotIn("renderEffortEvidence", script)
+        self.assertNotIn("data-source-effort-evidence", template)
+        self.assertNotIn("effort_evidence_query", script)
+        self.assertNotIn("effort_evidence_result", script)
         self.assertNotIn("Hybrid Assessment Context", script)
         self.assertIn("data-source-effort-copy", template)
         self.assertIn("data-effort-latest-url", template)
@@ -472,8 +478,36 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertIn("downstream_reporting", candidates["typed_candidates"])
         self.assertEqual(rubric["complexity_drivers"]["backend"], "high")
         self.assertEqual(len(rubric["option_estimates"]), 2)
+        matrix = _build_source_code_qa_effort_evidence_matrix(
+            evidence_result={
+                "matches": [
+                    {
+                        "repo": "CRMS",
+                        "path": "src/services/LimitStrategyService.java",
+                        "line_start": 12,
+                        "line_end": 18,
+                        "reason": "cash installment limit strategy service",
+                        "snippet": "class LimitStrategyService { void calculateAnnualIncomeLimit() {} }",
+                    },
+                    {
+                        "repo": "CRMS",
+                        "path": "src/config/limit_mapper.xml",
+                        "line_start": 21,
+                        "line_end": 28,
+                        "reason": "subProductCode=103 config table mapping",
+                        "snippet": "subProductCode=103 subProductCode=104",
+                    },
+                ],
+            },
+            business_plan=business_plan,
+            technical_candidates=candidates,
+        )
+        self.assertEqual(matrix["version"], 1)
+        self.assertIn("quality", matrix)
+        self.assertGreaterEqual(matrix["quality"]["confirmed_group_count"], 1)
+        self.assertTrue(any(group["key"] == "config_table" and group["status"] == "confirmed" for group in matrix["groups"]))
         structured = _build_source_code_qa_effort_structured_assessment(
-            result={"matches": []},
+            result={"matches": [], "effort_evidence_matrix": matrix},
             language="zh",
             business_plan=business_plan,
             technical_candidates=candidates,
@@ -487,6 +521,8 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertTrue(structured["inferred_impact"])
         self.assertTrue(structured["code_change_points"])
         self.assertIn("change", structured["code_change_points"][0])
+        self.assertIn("evidence_status", structured["code_change_points"][0])
+        self.assertIn("evidence_matrix_quality", structured)
 
     def test_effort_assessment_single_requirement_does_not_invent_options(self):
         requirement = (
@@ -552,7 +588,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
                 "status": "ok",
                 "answer_mode": "auto",
                 "summary": "effort done",
-                "llm_answer": "业务理解\n- ok\n\n代码改动点\n- 调整审批接口和状态流转，让高风险订单走新的审批路径 [S1]。\n\nBE 人天\n- 1-2 PD\n\nFE 人天\n- 0 PD\n\nConfirmed / Inferred / Missing Evidence\n- Confirmed S1\n\nQA / Integration Impact\n- 覆盖审批通过、拒绝和回退场景。",
+                "llm_answer": "业务理解\n- ok\n\n代码改动点\n- 调整审批接口和状态流转，让高风险订单走新的审批路径 [S1]，不要暴露 src/api.py:10。\n\nBE 人天\n- 1-2 PD\n\nFE 人天\n- 0 PD\n\nConfirmed / Inferred / Missing Evidence\n- Confirmed S1\n\nQA / Integration Impact\n- 覆盖审批通过、拒绝和回退场景。",
                 "llm_provider": "codex_cli_bridge",
                 "llm_model": "codex-cli",
                 "llm_route": {"task": "effort_assessment", "codex_repair_attempted": False},
@@ -622,6 +658,9 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertEqual(synthesis_call["llm_budget_mode"], "auto")
         self.assertTrue(synthesis_call["effort_assessment"])
         self.assertIn("Compact source-code evidence pack", synthesis_call["question"])
+        self.assertIn("Internal evidence matrix for planning quality", synthesis_call["question"])
+        self.assertIn("Every visible code change point must be grounded", synthesis_call["question"])
+        self.assertIn("rule/workflow, backend/API, config/data, frontend, and integration/QA", synthesis_call["question"])
         self.assertIn("Required output sections:", synthesis_call["question"])
         self.assertIn("代码改动点 / Code Change Points", synthesis_call["question"])
         self.assertIn("BE 人天", synthesis_call["question"])
@@ -633,10 +672,18 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertEqual(synthesis_call["query_mode"], "deep")
         self.assertIn("new.feature.enabled=true", synthesis_call["runtime_evidence"][0]["text"])
         self.assertIn("effort_evidence_query", result)
+        self.assertIn("effort_evidence_matrix", result)
+        self.assertIn("effort_evidence_matrix_quality", result)
+        self.assertIn("effort_generic_output_guard", result)
+        self.assertEqual(result["effort_evidence_matrix"]["version"], 1)
         self.assertIn("effort_timing", result)
+        self.assertIn("evidence_matrix_quality", result["effort_timing"])
+        self.assertIn("generic_output_guard", result["effort_timing"])
         self.assertIn("代码改动点", result["llm_answer"])
         self.assertNotIn("[S1]", result["llm_answer"])
+        self.assertNotIn("src/api.py", result["llm_answer"])
         self.assertNotIn("Confirmed / Inferred / Missing Evidence", result["llm_answer"])
+        self.assertNotIn("Evidence Used", result["llm_answer"])
         ensure_synced.assert_not_called()
         self.assertIn(b"event: completed", events_response.data)
 
@@ -690,6 +737,8 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertIn("technical_candidates", result["assessment"])
         self.assertIn("estimation_rubric", result["assessment"])
         self.assertIn("missing_evidence", result["assessment"])
+        self.assertIn("effort_evidence_matrix", result)
+        self.assertEqual(result["effort_evidence_matrix_quality"]["status"], "planning_assumption")
         self.assertIn("code_change_points", result["structured_assessment"])
         self.assertTrue(result["structured_assessment"]["code_change_points"])
         self.assertIn("BE", result["llm_answer"])

@@ -9382,11 +9382,12 @@ def _source_code_qa_effort_cache_key(
     llm_provider: str,
     evidence_query: str,
     evidence_result: dict[str, Any],
+    evidence_matrix: dict[str, Any],
     runtime_evidence: list[dict[str, Any]],
 ) -> str:
     dictionaries = _load_source_code_qa_effort_dictionaries()
     payload = {
-        "version": 3,
+        "version": 4,
         "pm_team": pm_team,
         "country": country,
         "language": language,
@@ -9397,6 +9398,19 @@ def _source_code_qa_effort_cache_key(
         "effort_dictionary_updated_at": dictionaries.get("updated_at"),
         "runtime_evidence": _source_code_qa_effort_runtime_digest(runtime_evidence),
         "evidence": _source_code_qa_effort_evidence_digest(evidence_result),
+        "evidence_matrix": {
+            "version": evidence_matrix.get("version") if isinstance(evidence_matrix, dict) else 0,
+            "groups": [
+                {
+                    "key": group.get("key"),
+                    "status": group.get("status"),
+                    "terms": group.get("terms") or [],
+                    "match_count": len(group.get("matches") or []),
+                }
+                for group in ((evidence_matrix or {}).get("groups") or [])
+                if isinstance(group, dict)
+            ],
+        },
     }
     return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
 
@@ -9427,7 +9441,7 @@ def _store_source_code_qa_effort_cached_result(settings: Settings, cache_key: st
         cache_root = _source_code_qa_effort_cache_root(settings)
         cache_root.mkdir(parents=True, exist_ok=True)
         payload = {
-            "version": 3,
+            "version": 4,
             "cache_key": cache_key,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "result": result,
@@ -9464,6 +9478,167 @@ def _source_code_qa_effort_compact_evidence(result: dict[str, Any]) -> dict[str,
     }
 
 
+def _source_code_qa_effort_matrix_terms(
+    *,
+    key: str,
+    business_plan: dict[str, Any],
+    technical_candidates: dict[str, Any],
+) -> list[str]:
+    typed_candidates = technical_candidates.get("typed_candidates") if isinstance(technical_candidates.get("typed_candidates"), dict) else {}
+    if key == "business_rule":
+        values = (
+            list(business_plan.get("business_goals") or [])
+            + list(business_plan.get("products") or [])
+            + list(business_plan.get("limit_types") or [])
+            + list(business_plan.get("decision_points") or [])
+            + list(technical_candidates.get("product_terms") or [])
+            + list(technical_candidates.get("limit_terms") or [])
+        )
+    elif key == "workflow_api":
+        values = (
+            list(business_plan.get("flow_changes") or [])
+            + list(technical_candidates.get("backend_surfaces") or [])
+            + list(typed_candidates.get("backend_service") or [])
+            + list(typed_candidates.get("api") or [])
+            + list(typed_candidates.get("workflow") or [])
+        )
+    elif key == "config_table":
+        values = (
+            list(technical_candidates.get("configs_or_tables") or [])
+            + list(typed_candidates.get("configuration") or [])
+            + list(typed_candidates.get("table") or [])
+        )
+    elif key == "frontend_surface":
+        values = list(technical_candidates.get("frontend_surfaces") or []) + list(typed_candidates.get("frontend_surface") or [])
+    elif key == "downstream_reporting":
+        values = (
+            list(typed_candidates.get("downstream_reporting") or [])
+            + list(typed_candidates.get("integration") or [])
+            + list(typed_candidates.get("downstream") or [])
+        )
+    else:
+        values = list(typed_candidates.get("test") or []) + ["test", "qa", "regression", "integration"]
+    return _source_code_qa_effort_unique(str(item) for item in values if str(item or "").strip())[:12]
+
+
+def _source_code_qa_effort_match_text(match: dict[str, Any]) -> str:
+    return " ".join(
+        str(match.get(field) or "")
+        for field in ("repo", "path", "reason", "snippet", "retrieval", "trace_stage")
+    ).lower()
+
+
+def _source_code_qa_effort_matrix_quality(matrix: dict[str, Any]) -> dict[str, Any]:
+    groups = matrix.get("groups") if isinstance(matrix, dict) else []
+    if not isinstance(groups, list):
+        groups = []
+    counts = {"confirmed": 0, "inferred": 0, "missing": 0}
+    for group in groups:
+        if not isinstance(group, dict):
+            continue
+        status = str(group.get("status") or "missing")
+        if status in counts:
+            counts[status] += 1
+    return {
+        "confirmed_group_count": counts["confirmed"],
+        "inferred_group_count": counts["inferred"],
+        "missing_group_count": counts["missing"],
+        "status": "confirmed" if counts["confirmed"] >= 3 and counts["missing"] == 0 else ("partial" if counts["confirmed"] else "planning_assumption"),
+    }
+
+
+def _build_source_code_qa_effort_evidence_matrix(
+    *,
+    evidence_result: dict[str, Any],
+    business_plan: dict[str, Any],
+    technical_candidates: dict[str, Any],
+) -> dict[str, Any]:
+    matches = evidence_result.get("matches") if isinstance(evidence_result.get("matches"), list) else []
+    group_defs = [
+        ("business_rule", "Business rule / decision logic", ("rule", "decision", "limit", "amount", "income", "product", "strategy")),
+        ("workflow_api", "Workflow / API / service path", ("api", "service", "controller", "workflow", "approval", "review", "appeal", "suspension")),
+        ("config_table", "Config / table / parameter", ("config", "table", "mapper", "sql", "apollo", "properties", "param", "dictionary")),
+        ("frontend_surface", "Frontend screen / operation path", ("frontend", "screen", "page", "component", "vue", "react", "template", "webform")),
+        ("downstream_reporting", "Downstream / reporting / integration", ("report", "submission", "downstream", "dwh", "cbs", "integration", "mq", "sync")),
+        ("tests", "Tests / QA regression", ("test", "spec", "qa", "regression", "integration")),
+    ]
+    groups: list[dict[str, Any]] = []
+    for key, title, fallback_markers in group_defs:
+        terms = _source_code_qa_effort_matrix_terms(
+            key=key,
+            business_plan=business_plan,
+            technical_candidates=technical_candidates,
+        )
+        markers = [marker.lower() for marker in list(fallback_markers) + [term for term in terms if len(str(term)) >= 3]]
+        group_matches: list[dict[str, Any]] = []
+        for match in matches:
+            if not isinstance(match, dict):
+                continue
+            match_text = _source_code_qa_effort_match_text(match)
+            if any(str(marker).lower() in match_text for marker in markers):
+                group_matches.append(
+                    {
+                        "repo": match.get("repo"),
+                        "path": match.get("path"),
+                        "line_start": match.get("line_start"),
+                        "line_end": match.get("line_end"),
+                        "reason": match.get("reason"),
+                        "retrieval": match.get("retrieval"),
+                    }
+                )
+        status = "confirmed" if group_matches else ("inferred" if terms else "missing")
+        groups.append(
+            {
+                "key": key,
+                "title": title,
+                "status": status,
+                "terms": terms,
+                "matches": group_matches[:6],
+                "planning_note": (
+                    "Grounded by retrieved source-code references."
+                    if status == "confirmed"
+                    else (
+                        "Candidate impact inferred from requirement and domain dictionary; visible answer must phrase this as a planning assumption."
+                        if status == "inferred"
+                        else "No source or candidate evidence found for this workstream."
+                    )
+                ),
+            }
+        )
+    matrix = {
+        "version": 1,
+        "groups": groups,
+    }
+    matrix["quality"] = _source_code_qa_effort_matrix_quality(matrix)
+    return matrix
+
+
+def _source_code_qa_effort_generic_output_guard(answer: str, evidence_matrix: dict[str, Any]) -> dict[str, Any]:
+    text = str(answer or "")
+    generic_patterns = (
+        "api validation, service strategy",
+        "service strategy, workflow decision rule",
+        "config lookup",
+        "frontend_guidance",
+        "test/regression suite",
+    )
+    issues = [pattern for pattern in generic_patterns if pattern.lower() in text.lower()]
+    confirmed_or_inferred = [
+        group for group in (evidence_matrix.get("groups") or [])
+        if isinstance(group, dict) and group.get("status") in {"confirmed", "inferred"}
+    ]
+    if "code change" in text.lower() or "代码改动" in text:
+        status = "ok" if not issues and confirmed_or_inferred else "warning"
+    else:
+        status = "warning"
+        issues.append("missing_code_change_section")
+    return {
+        "status": status,
+        "issues": _source_code_qa_effort_unique(issues),
+        "confirmed_or_inferred_group_count": len(confirmed_or_inferred),
+    }
+
+
 def _build_source_code_qa_effort_compact_synthesis_prompt(
     *,
     pm_team: str,
@@ -9476,6 +9651,7 @@ def _build_source_code_qa_effort_compact_synthesis_prompt(
     technical_candidates: dict[str, Any],
     estimation_rubric: dict[str, Any],
     evidence_result: dict[str, Any],
+    evidence_matrix: dict[str, Any],
 ) -> str:
     output_language = "Chinese" if language == "zh" else "English"
     return "\n".join(
@@ -9504,13 +9680,18 @@ def _build_source_code_qa_effort_compact_synthesis_prompt(
             "Compact source-code evidence pack from the indexed repositories:",
             _source_code_qa_effort_json_block(_source_code_qa_effort_compact_evidence(evidence_result)),
             "",
+            "Internal evidence matrix for planning quality. Use it for grounding only; do not expose it in the final answer:",
+            _source_code_qa_effort_json_block(evidence_matrix),
+            "",
             "Instructions:",
             "- Produce the final effort assessment from this evidence pack, business plan, runtime evidence, and rubric.",
             "- Use source-code evidence internally to decide impact, but do not expose evidence, citations, S-id references, file paths, or proof lists in the visible final answer.",
             "- Explain detailed code change points in business-readable language: behavior/process/rule/UI/API/data/integration/testing impact first, technical names only when useful.",
+            "- Every visible code change point must be grounded in a confirmed or inferred evidence-matrix workstream; if a workstream is only inferred, phrase it as a planning assumption.",
+            "- Do not output generic keyword strings such as API validation, service strategy, config lookup, frontend_guidance, or test/regression suite as change points.",
             "- Missing source-code evidence is acceptable; continue with low confidence and state planning assumptions without creating a visible evidence section.",
             "- Do not invent Option 1/Option 2 labels unless the original requirement had explicit alternatives.",
-            "- Estimate BE and FE as person-day ranges and explain the driver for each range.",
+            "- Estimate BE and FE as person-day ranges and break down the driver by rule/workflow, backend/API, config/data, frontend, and integration/QA where applicable.",
             "- Include QA/test and integration impact inside the relevant BE/FE notes.",
             "",
             "Required output sections:",
@@ -9765,6 +9946,8 @@ def _build_source_code_qa_effort_structured_assessment(
     confidence: str,
 ) -> dict[str, Any]:
     matches = result.get("matches") if isinstance(result.get("matches"), list) else []
+    evidence_matrix = result.get("effort_evidence_matrix") if isinstance(result.get("effort_evidence_matrix"), dict) else {}
+    evidence_groups = evidence_matrix.get("groups") if isinstance(evidence_matrix.get("groups"), list) else []
     confirmed_evidence = [
         {
             "repo": str(match.get("repo") or ""),
@@ -9790,8 +9973,38 @@ def _build_source_code_qa_effort_structured_assessment(
         technical_candidates=technical_candidates,
         estimation_rubric=estimation_rubric,
     )
+    matrix_status_by_key = {
+        str(group.get("key") or ""): str(group.get("status") or "missing")
+        for group in evidence_groups
+        if isinstance(group, dict)
+    }
+    workstream_by_area = (
+        ("business_rule", ("business", "业务规则")),
+        ("workflow_api", ("backend", "后端", "api", "服务")),
+        ("config_table", ("config", "data", "配置", "数据")),
+        ("frontend_surface", ("frontend", "前端", "页面")),
+        ("downstream_reporting", ("integration", "下游", "报送", "联调")),
+        ("tests", ("qa", "测试", "验收")),
+    )
+    for point in code_change_points:
+        area_text = str(point.get("area") or "").lower()
+        workstream_key = next(
+            (
+                key
+                for key, markers in workstream_by_area
+                if any(marker in area_text for marker in markers)
+            ),
+            "",
+        )
+        status = matrix_status_by_key.get(workstream_key, "inferred" if workstream_key else "missing")
+        point["evidence_status"] = status
+        point["workstream"] = workstream_key or "planning"
+        if status == "inferred":
+            point["planning_assumption"] = "Candidate impact inferred from requirement/domain dictionary; Dev confirmation required."
+        elif status == "missing":
+            point["planning_assumption"] = "No direct source evidence found; treat as planning assumption."
     return {
-        "version": 1,
+        "version": 2,
         "language": language,
         "confidence": confidence,
         "business_understanding": {
@@ -9833,6 +10046,7 @@ def _build_source_code_qa_effort_structured_assessment(
         "confirmed_evidence": confirmed_evidence,
         "inferred_impact": inferred_impact,
         "missing_evidence": missing_evidence,
+        "evidence_matrix_quality": evidence_matrix.get("quality") or _source_code_qa_effort_matrix_quality(evidence_matrix),
         "questions": (
             ["Are the listed options alternatives, or should more than one be implemented?"]
             if business_plan.get("has_explicit_options")
@@ -9904,6 +10118,12 @@ def _source_code_qa_effort_sanitize_visible_answer(value: Any) -> str:
         output.append(line)
     cleaned = "\n".join(output).strip()
     cleaned = re.sub(r"\s*\[S\d+\]", "", cleaned)
+    cleaned = re.sub(
+        r"(?:[\w.-]+/)+[\w.-]+\.(?:py|java|js|ts|tsx|vue|sql|xml|yaml|yml|properties|kt|go|rb|php|html|css|sh)(?::\d+(?:-\d+)?)?",
+        "source module",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
     return cleaned
 
 
@@ -9914,8 +10134,17 @@ def _normalize_source_code_qa_effort_assessment_result(
     business_plan: dict[str, Any],
     technical_candidates: dict[str, Any],
     estimation_rubric: dict[str, Any],
+    evidence_matrix: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     normalized = dict(result or {})
+    if evidence_matrix is not None:
+        normalized["effort_evidence_matrix"] = evidence_matrix
+    elif not isinstance(normalized.get("effort_evidence_matrix"), dict):
+        normalized["effort_evidence_matrix"] = _build_source_code_qa_effort_evidence_matrix(
+            evidence_result=normalized,
+            business_plan=business_plan,
+            technical_candidates=technical_candidates,
+        )
     missing_evidence = _source_code_qa_effort_missing_evidence(
         result=normalized,
         technical_candidates=technical_candidates,
@@ -9939,6 +10168,13 @@ def _normalize_source_code_qa_effort_assessment_result(
         normalized["llm_answer"] = _source_code_qa_effort_sanitize_visible_answer(normalized.get("llm_answer") or normalized.get("answer") or "")
     normalized["assessment_confidence"] = confidence
     normalized["missing_evidence"] = missing_evidence
+    normalized["effort_evidence_matrix_quality"] = _source_code_qa_effort_matrix_quality(
+        normalized.get("effort_evidence_matrix") if isinstance(normalized.get("effort_evidence_matrix"), dict) else {}
+    )
+    normalized["effort_generic_output_guard"] = _source_code_qa_effort_generic_output_guard(
+        normalized.get("llm_answer") or "",
+        normalized.get("effort_evidence_matrix") if isinstance(normalized.get("effort_evidence_matrix"), dict) else {},
+    )
     normalized["structured_assessment"] = _build_source_code_qa_effort_structured_assessment(
         result=normalized,
         language=language,
@@ -11167,6 +11403,12 @@ def _run_source_code_qa_effort_assessment_job(app: Flask, job_id: str, payload: 
                 progress_callback=progress_callback,
             )
             evidence_latency_ms = int((time.perf_counter() - evidence_started) * 1000)
+            evidence_matrix = _build_source_code_qa_effort_evidence_matrix(
+                evidence_result=evidence_result,
+                business_plan=business_plan,
+                technical_candidates=technical_candidates,
+            )
+            evidence_matrix_quality = _source_code_qa_effort_matrix_quality(evidence_matrix)
             cache_key = _source_code_qa_effort_cache_key(
                 pm_team=pm_team,
                 country=country,
@@ -11175,6 +11417,7 @@ def _run_source_code_qa_effort_assessment_job(app: Flask, job_id: str, payload: 
                 llm_provider=llm_provider,
                 evidence_query=evidence_query,
                 evidence_result=evidence_result,
+                evidence_matrix=evidence_matrix,
                 runtime_evidence=runtime_evidence,
             )
             result = _load_source_code_qa_effort_cached_result(settings, cache_key)
@@ -11190,6 +11433,7 @@ def _run_source_code_qa_effort_assessment_job(app: Flask, job_id: str, payload: 
                     technical_candidates=technical_candidates,
                     estimation_rubric=estimation_rubric,
                     evidence_result=evidence_result,
+                    evidence_matrix=evidence_matrix,
                 )
                 progress_callback("effort_synthesis", "Generating compact code-grounded effort assessment.", 0, 1)
                 synthesis_started = time.perf_counter()
@@ -11214,7 +11458,9 @@ def _run_source_code_qa_effort_assessment_job(app: Flask, job_id: str, payload: 
                         "task": "effort_assessment",
                         "effort_cache_hit": False,
                         "effort_evidence_query_sha256": hashlib.sha256(evidence_query.encode("utf-8")).hexdigest()[:16],
+                        "effort_evidence_matrix_quality": evidence_matrix_quality,
                     }
+                result["effort_evidence_matrix"] = evidence_matrix
                 result["effort_timing"] = {
                     "evidence_retrieval_ms": evidence_latency_ms,
                     "synthesis_ms": synthesis_latency_ms,
@@ -11225,14 +11471,17 @@ def _run_source_code_qa_effort_assessment_job(app: Flask, job_id: str, payload: 
                     ),
                     "total_ms": int((time.perf_counter() - effort_started) * 1000),
                     "cache_hit": False,
+                    "evidence_matrix_quality": evidence_matrix_quality,
                 }
                 result["effort_cache_key"] = cache_key
                 _store_source_code_qa_effort_cached_result(settings, cache_key, result)
             else:
+                result["effort_evidence_matrix"] = evidence_matrix
                 result["effort_timing"] = {
                     **(result.get("effort_timing") if isinstance(result.get("effort_timing"), dict) else {}),
                     "evidence_retrieval_ms": evidence_latency_ms,
                     "cache_hit": True,
+                    "evidence_matrix_quality": evidence_matrix_quality,
                     "repair_decision_ms": int(
                         ((result.get("llm_route") or {}).get("codex_repair_decision_ms") or 0)
                         if isinstance(result.get("llm_route"), dict)
@@ -11245,7 +11494,13 @@ def _run_source_code_qa_effort_assessment_job(app: Flask, job_id: str, payload: 
                 business_plan=business_plan,
                 technical_candidates=technical_candidates,
                 estimation_rubric=estimation_rubric,
+                evidence_matrix=evidence_matrix,
             )
+            if isinstance(result.get("effort_timing"), dict):
+                result["effort_timing"] = {
+                    **result["effort_timing"],
+                    "generic_output_guard": result.get("effort_generic_output_guard") or {},
+                }
             result["effort_evidence_query"] = evidence_query
             result["effort_evidence_result"] = _source_code_qa_effort_compact_evidence(evidence_result)
             result["assessment"] = {
@@ -11262,6 +11517,21 @@ def _run_source_code_qa_effort_assessment_job(app: Flask, job_id: str, payload: 
                 "missing_evidence": result.get("missing_evidence") or [],
                 "evidence_status": result.get("effort_evidence_status") or "warning",
             }
+            current_app.logger.warning(
+                "source_code_qa_effort_assessment_quality %s",
+                json.dumps(
+                    {
+                        "event": "source_code_qa_effort_assessment_quality",
+                        "job_id": job_id,
+                        "trace_id": str(result.get("trace_id") or ""),
+                        "evidence_matrix_quality": result.get("effort_evidence_matrix_quality") or {},
+                        "generic_output_guard": result.get("effort_generic_output_guard") or {},
+                        "cache_hit": bool((result.get("effort_timing") or {}).get("cache_hit")) if isinstance(result.get("effort_timing"), dict) else False,
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+            )
             result["runtime_evidence"] = _source_code_qa_public_runtime_evidence(runtime_evidence)
             status = str(result.get("status") or "ok")
             notice_tone = "warning" if result.get("effort_evidence_status") == "warning" else ("success" if status == "ok" else "warning")

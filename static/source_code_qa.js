@@ -74,7 +74,6 @@
   const effortScope = document.querySelector('[data-source-effort-scope]');
   const effortMeta = document.querySelector('[data-source-effort-meta]');
   const effortAnswer = document.querySelector('[data-source-effort-answer]');
-  const effortEvidence = document.querySelector('[data-source-effort-evidence]');
   const effortCopyButton = document.querySelector('[data-source-effort-copy]');
   const viewTabs = Array.from(document.querySelectorAll('[data-source-view-tab]'));
   const viewPanels = Array.from(document.querySelectorAll('[data-source-view-panel]'));
@@ -772,11 +771,22 @@
     });
   };
 
-  const cachedEffortPayload = (payload) => ({
-    ...payload,
-    cache_scope: effortAssessmentScope(),
-    cached_requirement: String(effortRequirement?.value || ''),
-  });
+  const cachedEffortPayload = (payload) => {
+    const publicPayload = { ...(payload || {}) };
+    [
+      `effort_${'evidence'}_query`,
+      `effort_${'evidence'}_result`,
+      `effort_${'evidence'}_matrix`,
+      'matches',
+      'citations',
+      `runtime_${'evidence'}`,
+    ].forEach((key) => delete publicPayload[key]);
+    return {
+      ...publicPayload,
+      cache_scope: effortAssessmentScope(),
+      cached_requirement: String(effortRequirement?.value || ''),
+    };
+  };
 
   const restoreEffortAssessmentCache = () => {
     if (!canManage || !effortRequirement) return;
@@ -2306,42 +2316,6 @@
     if (effortStatus) effortStatus.textContent = 'Stopped.';
   };
 
-  const renderEffortEvidence = (payload) => {
-    if (!effortEvidence) return;
-    const matches = (payload?.matches || []).slice(0, 8);
-    const runtimeEvidence = (payload?.runtime_evidence || []).slice(0, 6);
-    if (!matches.length && !runtimeEvidence.length) {
-      effortEvidence.hidden = true;
-      effortEvidence.innerHTML = '';
-      return;
-    }
-    const codeItems = matches.map((match, index) => `
-      <li>[S${index + 1}] ${escapeHtml(match.repo || '')} · ${escapeHtml(match.path || '')}${match.line_start ? `:${escapeHtml(match.line_start)}` : ''}</li>
-    `).join('');
-    const runtimeItems = runtimeEvidence.map((item) => `
-      <li>${escapeHtml(item.pm_team || '')}:${escapeHtml(item.country || '')} · ${escapeHtml(item.source_type || 'runtime')} · ${escapeHtml(item.filename || item.id || '')}</li>
-    `).join('');
-    effortEvidence.hidden = false;
-    effortEvidence.innerHTML = `
-      <div class="source-qa-evidence-card">
-        <div class="source-qa-evidence-head">
-          <strong>Evidence Used</strong>
-          <span>${matches.length} code reference(s) · ${runtimeEvidence.length} runtime evidence file(s)</span>
-        </div>
-        <div class="source-qa-evidence-grid">
-          <section>
-            <strong>Source Code</strong>
-            <ul>${codeItems || '<li>No source-code citation returned.</li>'}</ul>
-          </section>
-          <section>
-            <strong>Runtime Evidence</strong>
-            <ul>${runtimeItems || '<li>No runtime evidence was available for this scope.</li>'}</ul>
-          </section>
-        </div>
-      </div>
-    `;
-  };
-
   const effortReadableText = (value) => String(value || '')
     .replace(/\\n/g, '\n')
     .replace(/\r\n/g, '\n')
@@ -2546,10 +2520,6 @@
       ? renderCodexAnswerHtml(answer)
       : '<div class="source-qa-empty">Assessment completed without a generated answer.</div>');
     effortAnswer.innerHTML = answerHtml;
-    if (effortEvidence) {
-      effortEvidence.hidden = true;
-      effortEvidence.innerHTML = '';
-    }
     if (options.persist !== false) {
       persistEffortAssessmentCache({ result: cachedEffortPayload(payload), status: 'completed' });
     }
@@ -2611,10 +2581,6 @@
     if (effortSummary) effortSummary.textContent = `Running assessment for ${pmTeam?.value || ''}:${currentCountry()}.`;
     if (effortProvider) effortProvider.textContent = providerLabel(selectedProvider);
     if (effortScope) effortScope.textContent = [pmTeam?.value, currentCountry()].filter(Boolean).join(' · ');
-    if (effortEvidence) {
-      effortEvidence.hidden = true;
-      effortEvidence.innerHTML = '';
-    }
     const progress = startQueryProgress('Submitting effort assessment to server...', effortStatus);
     try {
       const initialPayload = await apiFetchJson(effortAssessmentUrl, {
