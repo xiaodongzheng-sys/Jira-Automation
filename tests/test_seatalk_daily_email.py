@@ -1053,6 +1053,44 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         self.assertEqual(card.url, "https://trello.test/card-1")
         self.assertEqual(session.posts[0]["params"]["idList"], "list-1")
 
+    def test_trello_client_lists_existing_cards(self):
+        class FakeResponse:
+            def __init__(self, payload):
+                self.payload = payload
+                self.text = ""
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return self.payload
+
+        class FakeSession:
+            def get(self, url, params, timeout):
+                return FakeResponse(
+                    [
+                        {
+                            "id": "card-1",
+                            "name": "[Direct] Review rollout",
+                            "desc": "Report date: 2026-04-30\nDomain: Anti-fraud",
+                            "closed": False,
+                        },
+                        {
+                            "id": "card-2",
+                            "name": "[Direct] Closed",
+                            "desc": "Report date: 2026-04-30\nDomain: Anti-fraud",
+                            "closed": True,
+                        },
+                    ]
+                )
+
+        client = TrelloDailySummaryClient(api_key="key", api_token="token", board_id="board-1", session=FakeSession())
+
+        cards = client.list_cards(list_id="list-1")
+
+        self.assertEqual(len(cards), 1)
+        self.assertEqual(cards[0]["id"], "card-1")
+
     def test_trello_client_creates_missing_daily_list(self):
         class FakeResponse:
             def __init__(self, payload):
@@ -1159,7 +1197,7 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
                 )
         self.assertEqual(result.status, "disabled")
 
-    def test_daily_trello_sync_tracks_morning_and_midday_separately(self):
+    def test_daily_trello_sync_dedupes_same_item_across_morning_and_midday(self):
         class FakeTrelloClient:
             def __init__(self):
                 self.created = []
@@ -1215,10 +1253,59 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
             )
 
         self.assertEqual(morning.created_count, 1)
-        self.assertEqual(midday.created_count, 1)
+        self.assertEqual(midday.created_count, 0)
+        self.assertEqual(midday.skipped_count, 1)
         self.assertEqual(midday_again.created_count, 0)
         self.assertEqual(midday_again.skipped_count, 1)
-        self.assertIn("Report window: 2026-04-30 13:00 - 2026-04-30 19:00", client.created[1]["description"])
+        self.assertEqual(len(client.created), 1)
+        self.assertIn("Report window: 2026-04-30 08:00 - 2026-04-30 13:00", client.created[0]["description"])
+
+    def test_daily_trello_sync_skips_existing_board_card_when_local_state_is_missing(self):
+        class FakeTrelloClient:
+            def __init__(self):
+                self.created = []
+
+            def get_or_create_list_id(self):
+                return "list-1"
+
+            def list_cards(self, *, list_id):
+                self.list_id = list_id
+                return [
+                    {
+                        "id": "card-existing",
+                        "name": "[Direct] Review rollout",
+                        "desc": "Report date: 2026-04-30\nDomain: Anti-fraud\nTask: Review rollout",
+                        "closed": False,
+                    }
+                ]
+
+            def create_card(self, *, list_id, name, description):
+                self.created.append({"list_id": list_id, "name": name, "description": description})
+                from bpmis_jira_tool.trello_daily_summary import TrelloCardResult
+
+                return TrelloCardResult(status="created", name=name, url="https://trello.test/new", trello_id="card-new")
+
+        briefing = {
+            "direct_action_todos": [{"task": "Review rollout", "domain": "Anti-fraud", "priority": "high", "due": "today", "evidence": "Alice"}],
+            "watch_delegate_todos": [],
+            "team_member_reminders": [],
+        }
+        now = datetime(2026, 4, 30, 13, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = sync_daily_summary_to_trello(
+                briefing=briefing,
+                run_date="2026-04-30",
+                run_slot="morning",
+                window_label="2026-04-30 08:00 - 2026-04-30 13:00",
+                data_root=Path(temp_dir),
+                now=now,
+                trello_client=FakeTrelloClient(),
+                trello_store=TrelloDailySummaryStore(Path(temp_dir) / "daily_trello_cards.json"),
+            )
+
+        self.assertEqual(result.created_count, 0)
+        self.assertEqual(result.skipped_count, 1)
 
     def test_gmail_raw_message_contains_expected_headers_and_body(self):
         raw = build_gmail_raw_message(

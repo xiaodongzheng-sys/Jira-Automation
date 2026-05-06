@@ -113,6 +113,17 @@ class TrelloDailySummaryClient:
             raise ToolError("Trello did not return an id or URL for the created card.")
         return TrelloCardResult(status="created", name=str(payload.get("name") or name), url=url, trello_id=trello_id)
 
+    def list_cards(self, *, list_id: str) -> list[dict[str, Any]]:
+        response = self.session.get(
+            f"{self.base_url}/lists/{list_id}/cards",
+            params={**self._auth_params(), "fields": "name,desc,url,shortUrl,id,closed"},
+            timeout=20,
+        )
+        payload = self._json_response(response, action="load Trello daily summary cards")
+        if not isinstance(payload, list):
+            raise ToolError("Trello returned an invalid card list payload.")
+        return [item for item in payload if isinstance(item, dict) and not item.get("closed")]
+
     def _auth_params(self) -> dict[str, str]:
         return {"key": self.api_key, "token": self.api_token}
 
@@ -165,3 +176,32 @@ def fingerprint_daily_card(*, run_date: str, section: str, item_text: str, domai
     normalized = " ".join(re.findall(r"[a-z0-9]+", f"{run_date} {section} {domain} {item_text}".lower()))
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
+
+def normalize_daily_card_identity_text(value: str) -> str:
+    return " ".join(re.findall(r"[a-z0-9]+", str(value or "").lower()))
+
+
+def daily_card_board_identity(*, run_date: str, name: str, domain: str) -> str:
+    return "|".join(
+        [
+            normalize_daily_card_identity_text(run_date),
+            normalize_daily_card_identity_text(domain),
+            normalize_daily_card_identity_text(name),
+        ]
+    )
+
+
+def daily_card_identity_from_trello_card(card: dict[str, Any]) -> str:
+    name = str(card.get("name") or "")
+    description = str(card.get("desc") or "")
+    report_date = ""
+    domain = ""
+    for raw_line in description.splitlines():
+        line = raw_line.strip()
+        if line.lower().startswith("report date:"):
+            report_date = line.split(":", 1)[1].strip()
+        elif line.lower().startswith("domain:"):
+            domain = line.split(":", 1)[1].strip()
+    if not report_date:
+        return ""
+    return daily_card_board_identity(run_date=report_date, name=name, domain=domain)

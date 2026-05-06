@@ -36,6 +36,8 @@ from bpmis_jira_tool.trello_daily_summary import (
     TrelloDailySummaryClient,
     TrelloDailySummaryStore,
     TrelloSyncResult,
+    daily_card_board_identity,
+    daily_card_identity_from_trello_card,
     fingerprint_daily_card,
 )
 
@@ -832,22 +834,43 @@ def sync_daily_summary_to_trello(
         return TrelloSyncResult(status="no_cards")
 
     list_id = client.get_or_create_list_id()
+    existing_board_identities: set[str] = set()
+    list_cards = getattr(client, "list_cards", None)
+    if callable(list_cards):
+        for card in list_cards(list_id=list_id):
+            identity = daily_card_identity_from_trello_card(card)
+            if identity:
+                existing_board_identities.add(identity)
     created = 0
     skipped = 0
     cards: list[dict[str, str]] = []
     created_at = now.astimezone(SEATALK_INSIGHTS_TIMEZONE).isoformat()
-    run_key = f"{run_date}:{run_slot}"
     for spec in specs:
         fingerprint = fingerprint_daily_card(
-            run_date=run_key,
+            run_date=run_date,
             section=spec.section,
             item_text=spec.fingerprint_text,
             domain=spec.domain,
         )
-        if store.has_card(fingerprint):
+        legacy_fingerprints = {
+            fingerprint_daily_card(
+                run_date=f"{run_date}:{legacy_slot}",
+                section=spec.section,
+                item_text=spec.fingerprint_text,
+                domain=spec.domain,
+            )
+            for legacy_slot in {run_slot, LEGACY_SLOT}
+        }
+        board_identity = daily_card_board_identity(run_date=run_date, name=spec.name, domain=spec.domain)
+        if (
+            store.has_card(fingerprint)
+            or any(store.has_card(item) for item in legacy_fingerprints)
+            or board_identity in existing_board_identities
+        ):
             skipped += 1
             continue
         card = client.create_card(list_id=list_id, name=spec.name, description=spec.description)
+        existing_board_identities.add(board_identity)
         store.mark_card(
             fingerprint=fingerprint,
             name=card.name,
