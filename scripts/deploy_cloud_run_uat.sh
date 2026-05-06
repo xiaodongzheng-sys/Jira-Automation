@@ -416,7 +416,8 @@ if [[ "$ENV_SECRET_PRECLEAR_REQUIRED" == "1" ]]; then
     ${RUNTIME_ARGS[@]+"${RUNTIME_ARGS[@]}"} \
     --no-traffic \
     --tag "${UAT_TAG}-secret-clear" \
-    --set-secrets "$BASE_SECRET_BINDINGS"
+    --remove-secrets LOCAL_AGENT_HMAC_SECRET \
+    --update-secrets "$BASE_SECRET_BINDINGS"
 fi
 
 "$GCLOUD_BIN" run deploy "$SERVICE" \
