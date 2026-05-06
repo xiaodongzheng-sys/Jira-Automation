@@ -9,14 +9,16 @@ For every release, start from [docs/release-checklist.md](/Users/NPTSG0388/Docum
 ```text
 Cloud Run team portal
   -> Google OAuth
-  -> BPMIS API through Mac local-agent when VPN-only
-  -> Mac local-agent through fixed ngrok URL
+  -> Mac local-agent through fixed ngrok URL by default
+       -> Mac-local cache and SQLite DB
        -> Codex CLI
        -> SeaTalk desktop data
        -> BPMIS API through the Mac VPN
 ```
 
 Use `BPMIS_CALL_MODE=local_agent` when Cloud Run cannot reach BPMIS directly but the Mac can reach it through VPN.
+
+New Cloud Run services must default to local-agent-backed state. For cache, SQLite DBs, Source Code Q&A repos/indexes, sessions, attachments, runtime evidence, BPMIS project/config rows, PRD briefing stores, Team Dashboard job state, and similar durable data, use the Mac-local data root through local-agent APIs. Do not create a separate Cloud Run-owned team portal cache/DB as the system of record unless the user explicitly asks for Cloud Run-owned storage.
 
 ## Mac Host
 
@@ -47,6 +49,7 @@ The local-agent reads the same Mac-local state as the current portal:
 
 - Codex CLI login and synced repos under `LOCAL_AGENT_TEAM_PORTAL_DATA_DIR/source_code_qa`
 - Set `LOCAL_AGENT_TEAM_PORTAL_DATA_DIR` to the stable Mac data directory that already contains `team_portal.db`, `source_code_qa/repos`, `source_code_qa/indexes`, Source Code Q&A sessions/attachments/runtime evidence, and BPMIS project/config rows. Do not let new code or deploy scripts use Cloud Run `/tmp/team-portal` as a state store.
+- New local-agent-backed features should add their durable cache/DB/files under this Mac data directory and expose them through local-agent endpoints when Cloud Run needs access.
 - SeaTalk app and data from `SEATALK_LOCAL_APP_PATH` / `SEATALK_LOCAL_DATA_DIR`
 - Source Code Q&A GitLab token from `SOURCE_CODE_QA_GITLAB_TOKEN`
 

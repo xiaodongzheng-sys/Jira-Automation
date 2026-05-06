@@ -1,11 +1,14 @@
 # Release Checklist
 
-Use this checklist for every routine portal release. The default release flow is UAT first, then fixed-ngrok Live only after explicit approval:
+Use this checklist for every portal release. The default target is UAT only. Do not publish any Live surface unless the user explicitly asks for Live:
 
 - The Mac-hosted portal exposed through the fixed ngrok URL is the primary teammate entrypoint.
 - The Mac host owns Mac-only capabilities and durable portal state, including Source Code Q&A repos/indexes, Codex CLI access, Source Code Q&A sessions/attachments/runtime evidence, BPMIS setup/project rows, SeaTalk desktop data, and VPN-only BPMIS calls.
 - Cloud Run tagged revisions provide the UAT environment. UAT uses `--no-traffic --tag uat`, so it does not change Cloud Run live traffic or the fixed-ngrok Live portal.
-- Fixed-ngrok Live must not be updated until the user explicitly confirms UAT has passed and asks to publish Live.
+- New services running on Cloud Run must default to local-agent-backed cache/DB/state. Use the Mac-local data root through local-agent APIs for durable cache, SQLite DBs, Source Code Q&A repos/indexes, PRD stores, Team Dashboard job state, and similar records; do not use the Cloud Run team portal filesystem or container-local DB as the system of record unless explicitly requested.
+- If the user says only "deploy", "publish", "release", or "发/发布", deploy UAT only.
+- If the user says "发 live", "publish live", "deploy live", or "发布 live" without saying Cloud Run, publish only the fixed-ngrok Live portal.
+- Deploy Cloud Run live traffic only when the user explicitly says "live Cloud Run", "Cloud Run live", "publish the cloud version", or equivalent.
 
 ## 1. Pre-Release
 
