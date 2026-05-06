@@ -49,6 +49,8 @@ https://jira-tool.example.com/auth/google/callback
 
 Replace the hostname with your real ngrok hostname.
 
+The portal requests Google Drive and Google Docs read scopes so it can read shared Google Doc links during Work Memory / Gmail evidence ingestion. After scope changes, existing browser sessions and stored owner credentials are not upgraded automatically; sign out and reconnect Google to grant the new `drive.readonly` and `documents.readonly` permissions.
+
 ## Recommended Host Layout
 
 For the final macOS host setup, do not run the long-lived stack from a repo under protected folders such as:

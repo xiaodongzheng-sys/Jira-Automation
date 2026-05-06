@@ -13,6 +13,9 @@ from bpmis_jira_tool.config import Settings
 from bpmis_jira_tool.errors import AuthenticationError, ConfigError
 
 
+GOOGLE_DRIVE_READONLY_SCOPE = "https://www.googleapis.com/auth/drive.readonly"
+GOOGLE_DOCS_READONLY_SCOPE = "https://www.googleapis.com/auth/documents.readonly"
+
 GOOGLE_SCOPES = [
     "openid",
     "https://www.googleapis.com/auth/userinfo.email",
@@ -21,7 +24,8 @@ GOOGLE_SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/gmail.send",
     "https://www.googleapis.com/auth/calendar.readonly",
-    "https://www.googleapis.com/auth/drive.readonly",
+    GOOGLE_DRIVE_READONLY_SCOPE,
+    GOOGLE_DOCS_READONLY_SCOPE,
 ]
 
 
