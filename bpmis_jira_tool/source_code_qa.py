@@ -13582,35 +13582,10 @@ class SourceCodeQAService:
         if deep_needed_raw and self._codex_high_risk_question(question):
             severe_repair_reasons.append("deep_investigation_needed_for_high_risk_question")
         if effort_assessment:
-            required_section_groups = (
-                ("业务理解", "business understanding"),
-                ("代码改动", "code change", "技术改造"),
-                ("be", "后端", "人天"),
-                ("fe", "前端", "人天"),
-                ("qa", "integration", "测试", "联调"),
+            severe_repair_reasons = self._codex_effort_assessment_repair_reasons(
+                answer=answer,
+                repair_reasons=severe_repair_reasons,
             )
-            lowered_answer = str(answer or "").lower()
-            if not all(any(section in lowered_answer for section in group) for group in required_section_groups):
-                severe_repair_reasons.append("effort_assessment_missing_required_sections")
-            allowed_effort_reasons = {
-                "empty_codex_answer",
-                "malformed_json_answer",
-                "bad_request_answer",
-                "out_of_scope_citations",
-                "high_risk_claims_missing_scoped_file_evidence",
-                "high_risk_answer_judge_requires_repair",
-                "not_found_answer_conflicts_with_retrieval_hints",
-                "effort_assessment_missing_required_sections",
-            }
-            if (
-                "not_found_answer_conflicts_with_retrieval_hints" in severe_repair_reasons
-                or "high_risk_claims_missing_scoped_file_evidence" in severe_repair_reasons
-            ):
-                allowed_effort_reasons.add("deep_investigation_needed_for_high_risk_question")
-            severe_repair_reasons = [
-                reason for reason in severe_repair_reasons
-                if reason in allowed_effort_reasons or reason.startswith("finish_reason_")
-            ]
         severe_repair_reasons = list(dict.fromkeys([reason for reason in severe_repair_reasons if reason]))
         repair_issues = severe_repair_reasons
         deep_needed = any(reason == "deep_investigation_needed_for_high_risk_question" for reason in severe_repair_reasons)
@@ -13993,6 +13968,43 @@ class SourceCodeQAService:
             "question_intent": question_intent,
             "prompt_mode": prompt_mode,
         }
+
+    @staticmethod
+    def _codex_effort_assessment_repair_reasons(
+        *,
+        answer: str,
+        repair_reasons: list[str],
+    ) -> list[str]:
+        required_section_groups = (
+            ("业务理解", "business understanding"),
+            ("代码改动", "code change", "技术改造"),
+            ("be", "后端", "人天"),
+            ("fe", "前端", "人天"),
+            ("qa", "integration", "测试", "联调"),
+        )
+        adjusted_reasons = list(repair_reasons)
+        lowered_answer = str(answer or "").lower()
+        if not all(any(section in lowered_answer for section in group) for group in required_section_groups):
+            adjusted_reasons.append("effort_assessment_missing_required_sections")
+        allowed_effort_reasons = {
+            "empty_codex_answer",
+            "malformed_json_answer",
+            "bad_request_answer",
+            "out_of_scope_citations",
+            "high_risk_claims_missing_scoped_file_evidence",
+            "high_risk_answer_judge_requires_repair",
+            "not_found_answer_conflicts_with_retrieval_hints",
+            "effort_assessment_missing_required_sections",
+        }
+        if (
+            "not_found_answer_conflicts_with_retrieval_hints" in adjusted_reasons
+            or "high_risk_claims_missing_scoped_file_evidence" in adjusted_reasons
+        ):
+            allowed_effort_reasons.add("deep_investigation_needed_for_high_risk_question")
+        return [
+            reason for reason in adjusted_reasons
+            if reason in allowed_effort_reasons or reason.startswith("finish_reason_")
+        ]
 
     def _codex_deep_investigation_needed(
         self,
