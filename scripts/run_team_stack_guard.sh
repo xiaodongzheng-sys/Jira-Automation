@@ -7,11 +7,20 @@ source "$ROOT_DIR/scripts/lib/team_env.sh"
 export_env_file
 PORTAL_FOREGROUND_SCRIPT="$ROOT_DIR/scripts/run_team_portal_foreground.sh"
 NGROK_FOREGROUND_SCRIPT="$ROOT_DIR/scripts/run_ngrok_tunnel_foreground.sh"
+CLOUDFLARE_FOREGROUND_SCRIPT="$ROOT_DIR/scripts/run_cloudflare_tunnel_foreground.sh"
+CLOUDFLARED_BIN="${CLOUDFLARED_BIN:-$(command -v cloudflared || true)}"
+if [[ -z "$CLOUDFLARED_BIN" && -x "/opt/homebrew/bin/cloudflared" ]]; then
+  CLOUDFLARED_BIN="/opt/homebrew/bin/cloudflared"
+fi
 DATA_DIR="$(resolve_team_data_dir "${TEAM_PORTAL_DATA_DIR:-$(read_env_value TEAM_PORTAL_DATA_DIR)}")"
 PORT="${TEAM_PORTAL_PORT:-$(read_env_value TEAM_PORTAL_PORT)}"
 PORT="${PORT:-5000}"
 PROBE_HOST="${TEAM_PORTAL_PROBE_HOST:-127.0.0.1}"
 PUBLIC_URL="${TEAM_PORTAL_BASE_URL:-$(read_env_value TEAM_PORTAL_BASE_URL)}"
+TUNNEL_PROVIDER="${TEAM_PORTAL_TUNNEL_PROVIDER:-$(read_env_value TEAM_PORTAL_TUNNEL_PROVIDER)}"
+TUNNEL_PROVIDER="${TUNNEL_PROVIDER:-ngrok}"
+CLOUDFLARE_TUNNEL_NAME="${TEAM_PORTAL_CLOUDFLARE_TUNNEL_NAME:-$(read_env_value TEAM_PORTAL_CLOUDFLARE_TUNNEL_NAME)}"
+CLOUDFLARE_TUNNEL_NAME="${CLOUDFLARE_TUNNEL_NAME:-bankpmtool-live}"
 EXPECTED_REVISION="$(current_release_revision)"
 
 mkdir -p "$DATA_DIR/logs" "$DATA_DIR/run"
@@ -21,10 +30,12 @@ PID_FILE="$DATA_DIR/run/team_stack_guard.pid"
 CAFFEINATE_PID_FILE="$DATA_DIR/run/team_stack_caffeinate.pid"
 PORTAL_CHILD_PID_FILE="$DATA_DIR/run/team_portal.child.pid"
 NGROK_CHILD_PID_FILE="$DATA_DIR/run/ngrok_tunnel.child.pid"
+CLOUDFLARE_CHILD_PID_FILE="$DATA_DIR/run/cloudflare_tunnel.child.pid"
 STATUS_FILE="$DATA_DIR/run/team_stack_status.json"
 ALERT_FILE="$DATA_DIR/run/team_stack_alert.json"
 PORTAL_LOG_FILE="$DATA_DIR/logs/team_portal.log"
 NGROK_LOG_FILE="$DATA_DIR/logs/ngrok_tunnel.log"
+CLOUDFLARE_LOG_FILE="$DATA_DIR/logs/cloudflare_tunnel.log"
 SOURCE_QA_EVAL_STATUS_FILE="$DATA_DIR/run/source_code_qa_eval_status.json"
 SOURCE_QA_EVAL_LAST_RUN_FILE="$DATA_DIR/run/source_code_qa_eval_last_run"
 SOURCE_QA_EVAL_LOG_FILE="$DATA_DIR/logs/source_code_qa_nightly_eval.log"
@@ -47,6 +58,26 @@ portal_last_start_at=0
 ngrok_last_start_at=0
 portal_unhealthy_count=0
 ngrok_unhealthy_count=0
+
+case "$TUNNEL_PROVIDER" in
+  cloudflare)
+    TUNNEL_FOREGROUND_SCRIPT="$CLOUDFLARE_FOREGROUND_SCRIPT"
+    TUNNEL_CHILD_PID_FILE="$CLOUDFLARE_CHILD_PID_FILE"
+    TUNNEL_LOG_FILE="$CLOUDFLARE_LOG_FILE"
+    TUNNEL_LABEL="Cloudflare Tunnel"
+    ;;
+  ngrok|"")
+    TUNNEL_FOREGROUND_SCRIPT="$NGROK_FOREGROUND_SCRIPT"
+    TUNNEL_CHILD_PID_FILE="$NGROK_CHILD_PID_FILE"
+    TUNNEL_LOG_FILE="$NGROK_LOG_FILE"
+    TUNNEL_LABEL="ngrok tunnel"
+    TUNNEL_PROVIDER="ngrok"
+    ;;
+  *)
+    echo "Unsupported TEAM_PORTAL_TUNNEL_PROVIDER: $TUNNEL_PROVIDER" >&2
+    exit 1
+    ;;
+esac
 
 json_escape() {
   local value="$1"
@@ -95,7 +126,7 @@ stop_child() {
 }
 
 cleanup() {
-  stop_child "$NGROK_CHILD_PID_FILE" "ngrok tunnel"
+  stop_child "$TUNNEL_CHILD_PID_FILE" "$TUNNEL_LABEL"
   stop_child "$PORTAL_CHILD_PID_FILE" "portal"
   if [[ -f "$CAFFEINATE_PID_FILE" ]]; then
     local caffeinate_pid
@@ -106,7 +137,7 @@ cleanup() {
     rm -f "$CAFFEINATE_PID_FILE"
   fi
   cat >"$STATUS_FILE" <<EOF
-{"state":"stopped","updated_at":"$(date '+%Y-%m-%d %H:%M:%S')","updated_unix":$(date +%s),"guard_pid":null,"portal_child_pid":null,"ngrok_child_pid":null,"caffeinate_pid":null,"portal_health":"unknown","ngrok_health":"unknown","alert_state":"none","public_url":"$(json_escape "$PUBLIC_URL")","probe_url":"$(json_escape "http://$PROBE_HOST:$PORT/healthz")"}
+{"state":"stopped","updated_at":"$(date '+%Y-%m-%d %H:%M:%S')","updated_unix":$(date +%s),"guard_pid":null,"portal_child_pid":null,"tunnel_child_pid":null,"ngrok_child_pid":null,"caffeinate_pid":null,"portal_health":"unknown","tunnel_health":"unknown","ngrok_health":"unknown","tunnel_provider":"$(json_escape "$TUNNEL_PROVIDER")","alert_state":"none","public_url":"$(json_escape "$PUBLIC_URL")","probe_url":"$(json_escape "http://$PROBE_HOST:$PORT/healthz")"}
 EOF
   rm -f "$PID_FILE"
 }
@@ -171,7 +202,7 @@ compute_backoff() {
     backoff="$MAX_RESTART_BACKOFF_SECONDS"
   fi
   if (( ngrok_restart_count >= RESTART_ALERT_THRESHOLD )); then
-    write_alert_marker "ngrok" "$ngrok_restart_count"
+    write_alert_marker "tunnel" "$ngrok_restart_count"
   fi
   printf '%s\n' "$backoff"
 }
@@ -208,7 +239,22 @@ portal_is_healthy() {
   portal_revision_matches "$PROBE_HOST" "$PORT" "$EXPECTED_REVISION"
 }
 
-ngrok_is_healthy() {
+tunnel_is_healthy() {
+  if [[ "$TUNNEL_PROVIDER" == "cloudflare" ]]; then
+    if [[ -n "$PUBLIC_URL" ]]; then
+      curl -fsS --max-time 10 "${PUBLIC_URL%/}/healthz" >/dev/null 2>&1
+      return
+    fi
+    if [[ -n "$CLOUDFLARED_BIN" ]]; then
+      local tunnel_info
+      tunnel_info="$("$CLOUDFLARED_BIN" tunnel info "$CLOUDFLARE_TUNNEL_NAME" 2>/dev/null || true)"
+      if [[ "$tunnel_info" == *"CONNECTOR ID"* ]]; then
+        return 0
+      fi
+    fi
+    return 1
+  fi
+
   local payload
   payload="$(curl -fsS --max-time 5 "http://127.0.0.1:4040/api/tunnels" 2>/dev/null)" || return 1
   if [[ ! -x "$PYTHON_BIN" ]]; then
@@ -264,26 +310,26 @@ start_portal() {
   log "Portal did not become healthy within ${START_READY_TIMEOUT_SECONDS}s."
 }
 
-start_ngrok() {
+start_tunnel() {
   local backoff
-  backoff="$(compute_backoff ngrok)"
+  backoff="$(compute_backoff tunnel)"
   if (( backoff > 0 )); then
-    log "ngrok restart backoff ${backoff}s before next launch."
+    log "$TUNNEL_LABEL restart backoff ${backoff}s before next launch."
     sleep "$backoff"
   fi
-  touch "$NGROK_LOG_FILE"
-  "$NGROK_FOREGROUND_SCRIPT" >>"$NGROK_LOG_FILE" 2>&1 &
-  echo $! >"$NGROK_CHILD_PID_FILE"
-  log "ngrok launched (pid $(cat "$NGROK_CHILD_PID_FILE"))."
+  touch "$TUNNEL_LOG_FILE"
+  "$TUNNEL_FOREGROUND_SCRIPT" >>"$TUNNEL_LOG_FILE" 2>&1 &
+  echo $! >"$TUNNEL_CHILD_PID_FILE"
+  log "$TUNNEL_LABEL launched (pid $(cat "$TUNNEL_CHILD_PID_FILE"))."
   local _attempt
   for ((_attempt=0; _attempt<START_READY_TIMEOUT_SECONDS; _attempt++)); do
-    if ngrok_is_healthy; then
-      log "ngrok became healthy."
+    if tunnel_is_healthy; then
+      log "$TUNNEL_LABEL became healthy."
       return
     fi
     sleep 1
   done
-  log "ngrok did not become healthy within ${START_READY_TIMEOUT_SECONDS}s."
+  log "$TUNNEL_LABEL did not become healthy within ${START_READY_TIMEOUT_SECONDS}s."
 }
 
 ensure_portal_running() {
@@ -315,21 +361,21 @@ ensure_portal_running() {
   fi
 }
 
-ensure_ngrok_running() {
+ensure_tunnel_running() {
   local pid
-  pid="$(read_pid_file "$NGROK_CHILD_PID_FILE" || true)"
+  pid="$(read_pid_file "$TUNNEL_CHILD_PID_FILE" || true)"
   if [[ -n "${pid:-}" ]] && ! pid_is_running "$pid"; then
-    log "ngrok process exited unexpectedly (pid $pid)."
-    rm -f "$NGROK_CHILD_PID_FILE"
+    log "$TUNNEL_LABEL process exited unexpectedly (pid $pid)."
+    rm -f "$TUNNEL_CHILD_PID_FILE"
   fi
 
-  if [[ ! -f "$NGROK_CHILD_PID_FILE" ]]; then
-    start_ngrok
+  if [[ ! -f "$TUNNEL_CHILD_PID_FILE" ]]; then
+    start_tunnel
     ngrok_unhealthy_count=0
     return
   fi
 
-  if ngrok_is_healthy; then
+  if tunnel_is_healthy; then
     ngrok_unhealthy_count=0
     clear_alert_marker_if_stable
     return
@@ -337,28 +383,34 @@ ensure_ngrok_running() {
 
   ngrok_unhealthy_count=$((ngrok_unhealthy_count + 1))
   if (( ngrok_unhealthy_count >= 2 )); then
-    log "ngrok health check failed twice; restarting it."
-    stop_child "$NGROK_CHILD_PID_FILE" "ngrok tunnel"
-    start_ngrok
+    log "$TUNNEL_LABEL health check failed twice; restarting it."
+    stop_child "$TUNNEL_CHILD_PID_FILE" "$TUNNEL_LABEL"
+    start_tunnel
     ngrok_unhealthy_count=0
   fi
 }
 
 write_status_summary() {
-  local portal_child_pid ngrok_child_pid caffeinate_pid portal_health ngrok_health alert_state
+  local portal_child_pid tunnel_child_pid caffeinate_pid portal_health tunnel_health alert_state ngrok_child_pid ngrok_health
   portal_child_pid="$(read_pid_file "$PORTAL_CHILD_PID_FILE" || true)"
-  ngrok_child_pid="$(read_pid_file "$NGROK_CHILD_PID_FILE" || true)"
+  tunnel_child_pid="$(read_pid_file "$TUNNEL_CHILD_PID_FILE" || true)"
+  if [[ "$TUNNEL_PROVIDER" == "ngrok" ]]; then
+    ngrok_child_pid="$tunnel_child_pid"
+  else
+    ngrok_child_pid="null"
+  fi
   caffeinate_pid="$(read_pid_file "$CAFFEINATE_PID_FILE" || true)"
   if portal_is_healthy; then
     portal_health="healthy"
   else
     portal_health="unhealthy"
   fi
-  if ngrok_is_healthy; then
-    ngrok_health="healthy"
+  if tunnel_is_healthy; then
+    tunnel_health="healthy"
   else
-    ngrok_health="unhealthy"
+    tunnel_health="unhealthy"
   fi
+  ngrok_health="$tunnel_health"
   if [[ -f "$ALERT_FILE" ]]; then
     alert_state="present"
   else
@@ -366,7 +418,7 @@ write_status_summary() {
   fi
 
   cat >"$STATUS_FILE" <<EOF
-{"state":"running","updated_at":"$(date '+%Y-%m-%d %H:%M:%S')","updated_unix":$(date +%s),"guard_pid":$$,"portal_child_pid":${portal_child_pid:-null},"ngrok_child_pid":${ngrok_child_pid:-null},"caffeinate_pid":${caffeinate_pid:-null},"portal_health":"$(json_escape "$portal_health")","ngrok_health":"$(json_escape "$ngrok_health")","alert_state":"$(json_escape "$alert_state")","public_url":"$(json_escape "$PUBLIC_URL")","probe_url":"$(json_escape "http://$PROBE_HOST:$PORT/healthz")"}
+{"state":"running","updated_at":"$(date '+%Y-%m-%d %H:%M:%S')","updated_unix":$(date +%s),"guard_pid":$$,"portal_child_pid":${portal_child_pid:-null},"tunnel_child_pid":${tunnel_child_pid:-null},"ngrok_child_pid":${ngrok_child_pid:-null},"caffeinate_pid":${caffeinate_pid:-null},"portal_health":"$(json_escape "$portal_health")","tunnel_health":"$(json_escape "$tunnel_health")","ngrok_health":"$(json_escape "$ngrok_health")","tunnel_provider":"$(json_escape "$TUNNEL_PROVIDER")","alert_state":"$(json_escape "$alert_state")","public_url":"$(json_escape "$PUBLIC_URL")","probe_url":"$(json_escape "http://$PROBE_HOST:$PORT/healthz")"}
 EOF
 }
 
@@ -433,7 +485,7 @@ start_caffeinate
 while true; do
   ensure_portal_running
   if portal_is_healthy; then
-    ensure_ngrok_running
+    ensure_tunnel_running
     run_source_qa_eval_if_due
   fi
   write_status_summary

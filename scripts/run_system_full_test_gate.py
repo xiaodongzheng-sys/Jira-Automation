@@ -135,7 +135,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--skip-smoke", action="store_true", help="Skip UAT/Live HTTP smoke checks.")
     parser.add_argument("--uat-url", default=None, help="Cloud Run UAT tag URL.")
-    parser.add_argument("--live-url", default=None, help="Fixed-ngrok Live portal URL.")
+    parser.add_argument("--live-url", default=None, help="Mac-hosted Live portal URL.")
     parser.add_argument("--expected-revision", default=None, help="Git SHA expected on UAT and not yet on Live.")
     parser.add_argument("--coverage-fail-under", type=int, default=100, help="Coverage percentage required for governed code.")
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")

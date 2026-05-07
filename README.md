@@ -3,7 +3,7 @@
 This repository now supports both:
 
 - a local-first edition for individual use
-- a shared portal edition hosted on one Mac and exposed through ngrok
+- a shared portal edition hosted on one Mac and exposed through Cloudflare Tunnel
 
 The current local-first edition is a Flask web app that:
 
@@ -22,10 +22,10 @@ Current local assumptions:
 Current shared-team assumptions:
 
 - one host Mac runs the portal
-- teammates open the fixed ngrok URL as the primary shared portal and sign in with `@npt.sg` Google accounts
+- teammates open the Cloudflare Tunnel URL as the primary shared portal and sign in with `@npt.sg` Google accounts
 - each teammate stores their own BPMIS token and team routing config in the portal
 - BPMIS tokens saved through the shared portal are encrypted at rest with `TEAM_PORTAL_CONFIG_ENCRYPTION_KEY`
-- Default release requests deploy UAT only. If a request says to publish Live without mentioning Cloud Run, publish only the Mac-hosted fixed-ngrok portal. Deploy Cloud Run live traffic only when the request explicitly says "live Cloud Run" or equivalent.
+- Default release requests deploy UAT only. If a request says to publish Live without mentioning Cloud Run, publish only the Mac-hosted Cloudflare Tunnel portal. Deploy Cloud Run live traffic only when the request explicitly says "live Cloud Run" or equivalent.
 - New Cloud Run services default to Mac local-agent-backed cache, DB, and durable state. Do not use Cloud Run's container-local team portal data directory as the system of record unless explicitly requested.
 
 ## Upload-Style Python Script

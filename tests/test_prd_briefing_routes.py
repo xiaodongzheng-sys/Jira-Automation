@@ -303,6 +303,7 @@ class PRDBriefingRouteTests(unittest.TestCase):
         with patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": self.temp_dir.name,
             },

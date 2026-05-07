@@ -180,7 +180,11 @@ class Settings:
 
     @classmethod
     def from_env(cls) -> "Settings":
-        dotenv_path = find_dotenv(usecwd=True)
+        configured_env_file = os.getenv("ENV_FILE")
+        if configured_env_file is not None:
+            dotenv_path = configured_env_file.strip()
+        else:
+            dotenv_path = find_dotenv(usecwd=True)
         if dotenv_path:
             load_dotenv(dotenv_path, override=False)
         client_secret = _env_str("GOOGLE_OAUTH_CLIENT_SECRET_FILE", "")

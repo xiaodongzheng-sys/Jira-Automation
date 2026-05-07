@@ -1300,7 +1300,7 @@ class CodexCliBridgeSourceCodeQALLMProvider(SourceCodeQALLMProvider):
     def _codex_env(self) -> dict[str, str]:
         env = dict(os.environ)
         path_parts = [part for part in str(env.get("PATH") or "").split(os.pathsep) if part]
-        for tool_dir in self._codex_tool_path_dirs():
+        for tool_dir in reversed(self._codex_tool_path_dirs()):
             if tool_dir not in path_parts:
                 path_parts.insert(0, tool_dir)
         if path_parts:
@@ -2381,6 +2381,7 @@ class SourceCodeQAService:
         self.codex_session_mode = normalized_codex_session_mode if normalized_codex_session_mode in {CODEX_SESSION_MODE_EPHEMERAL, CODEX_SESSION_MODE_RESUME} else CODEX_SESSION_MODE_EPHEMERAL
         self.codex_session_max_turns = max(1, min(int(codex_session_max_turns or 8), 30))
         self.codex_cache_followups = bool(codex_cache_followups)
+        self.codex_model = self._codex_cli_model()
         self.llm_max_retries = max(0, int(llm_max_retries or 0))
         self.llm_backoff_seconds = max(0.0, float(llm_backoff_seconds or 0.0))
         self.llm_max_backoff_seconds = max(
@@ -2647,11 +2648,10 @@ class SourceCodeQAService:
             budgets["deep"]["model"] = self.openai_deep_model
             budgets[COMPACT_DEEP_BUDGET_MODE]["model"] = self.openai_deep_model
         elif self.llm_provider_name == LLM_PROVIDER_CODEX_CLI_BRIDGE:
-            codex_model = self._codex_cli_model()
-            budgets["cheap"]["model"] = codex_model
-            budgets["balanced"]["model"] = codex_model
-            budgets["deep"]["model"] = codex_model
-            budgets[COMPACT_DEEP_BUDGET_MODE]["model"] = codex_model
+            budgets["cheap"]["model"] = self.codex_model
+            budgets["balanced"]["model"] = self.codex_model
+            budgets["deep"]["model"] = self.codex_model
+            budgets[COMPACT_DEEP_BUDGET_MODE]["model"] = self.codex_model
         elif self.llm_provider_name == LLM_PROVIDER_VERTEX_AI:
             for budget_name, overrides in VERTEX_QUALITY_LLM_BUDGETS.items():
                 budgets[budget_name].update(overrides)
@@ -2801,7 +2801,7 @@ class SourceCodeQAService:
         if self.llm_provider_name == LLM_PROVIDER_OPENAI_COMPATIBLE:
             return self.openai_fallback_model
         if self.llm_provider_name == LLM_PROVIDER_CODEX_CLI_BRIDGE:
-            return self._codex_cli_model()
+            return self.codex_model
         if self.llm_provider_name == LLM_PROVIDER_VERTEX_AI:
             return self.vertex_fallback_model
         return self.gemini_fallback_model
@@ -2810,7 +2810,7 @@ class SourceCodeQAService:
         if self.llm_provider_name == LLM_PROVIDER_OPENAI_COMPATIBLE:
             return self.openai_model
         if self.llm_provider_name == LLM_PROVIDER_CODEX_CLI_BRIDGE:
-            return self._codex_cli_model()
+            return self.codex_model
         if self.llm_provider_name == LLM_PROVIDER_VERTEX_AI:
             return self.vertex_model
         return self.gemini_model

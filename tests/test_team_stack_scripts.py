@@ -10,6 +10,24 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
 class TeamStackScriptTests(unittest.TestCase):
+    SCRIPT_TEST_ENV_KEYS = (
+        "ALLOW_LEGACY_NGROK_LOCAL_AGENT",
+        "CLOUDFLARE_TUNNEL_TOKEN",
+        "CLOUD_RUN_DEPLOY_ACCOUNT",
+        "GOOGLE_CLOUD_PROJECT",
+        "TEAM_PORTAL_BASE_URL",
+        "TEAM_PORTAL_CLOUDFLARE_PROTOCOL",
+        "TEAM_PORTAL_CLOUDFLARE_TUNNEL_NAME",
+        "TEAM_PORTAL_DATA_DIR",
+    )
+
+    def _script_env(self, **overrides: str) -> dict:
+        env = os.environ.copy()
+        for key in self.SCRIPT_TEST_ENV_KEYS:
+            env.pop(key, None)
+        env.update(overrides)
+        return env
+
     def _current_release_revision(self) -> str:
         helper_path = PROJECT_ROOT / "scripts/lib/team_env.sh"
         command = f'''
@@ -46,6 +64,13 @@ case "$url" in
     ;;
   https://example.ngrok.dev)
     ;;
+  https://example.ngrok.dev/healthz)
+    ;;
+  https://app.bankpmtool.uk/healthz)
+    if [[ "${FAKE_PUBLIC_HEALTH_FAIL:-0}" == "1" ]]; then
+      exit 22
+    fi
+    ;;
   *)
     exit 1
     ;;
@@ -56,6 +81,49 @@ esac
         curl_path.chmod(0o755)
         return curl_path
 
+    def _write_fake_pgrep(self, bin_dir: Path, *, cloudflared_pid: str = "", ngrok_pid: str = "") -> Path:
+        pgrep_path = bin_dir / "pgrep"
+        pgrep_path.write_text(
+            """#!/usr/bin/env bash
+set -euo pipefail
+
+pattern="${*: -1}"
+if [[ "$pattern" == *"cloudflared"* && -n "${FAKE_CLOUDFLARED_PID:-}" ]]; then
+  printf '%s\\n' "$FAKE_CLOUDFLARED_PID"
+  exit 0
+fi
+if [[ "$pattern" == *"ngrok"* && -n "${FAKE_NGROK_PID:-}" ]]; then
+  printf '%s\\n' "$FAKE_NGROK_PID"
+  exit 0
+fi
+exit 1
+""",
+            encoding="utf-8",
+        )
+        pgrep_path.chmod(0o755)
+        return pgrep_path
+
+    def _write_fake_cloudflared(self, bin_dir: Path) -> Path:
+        cloudflared_path = bin_dir / "cloudflared"
+        cloudflared_path.write_text(
+            """#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "$*" == "tunnel info bankpmtool-live" || "$*" == "tunnel info custom-live" ]]; then
+  printf 'NAME:     %s\\n' "${*: -1}"
+  printf 'CONNECTOR ID                         CREATED\\n'
+  printf 'fake-connector                       2026-05-06T13:40:52Z\\n'
+  exit 0
+fi
+
+printf '%s\\n' "$*" > "${FAKE_CLOUDFLARED_ARGS_FILE:?}"
+exit 0
+""",
+            encoding="utf-8",
+        )
+        cloudflared_path.chmod(0o755)
+        return cloudflared_path
+
     def test_stack_scripts_have_valid_bash_syntax(self):
         script_paths = [
             "scripts/lib/team_env.sh",
@@ -63,6 +131,8 @@ esac
             "scripts/run_team_portal_foreground.sh",
             "scripts/run_ngrok_tunnel.sh",
             "scripts/run_ngrok_tunnel_foreground.sh",
+            "scripts/run_cloudflare_tunnel.sh",
+            "scripts/run_cloudflare_tunnel_foreground.sh",
             "scripts/run_team_stack_guard.sh",
             "scripts/run_team_stack_guard_daemon.sh",
             "scripts/run_team_stack.sh",
@@ -127,7 +197,7 @@ exit 0
                     "PATH": f"{fake_bin}:{os.environ['PATH']}",
                     "PYTHON_BIN": sys.executable,
                     "CLOUD_RUN_DEPLOY_DRY_RUN": "1",
-                    "CLOUD_RUN_LOCAL_AGENT_BASE_URL": "https://agent.example.ngrok.app",
+                    "CLOUD_RUN_LOCAL_AGENT_BASE_URL": "https://app.bankpmtool.uk",
                     "CLOUD_RUN_RESTART_LOCAL_AGENT_AFTER_DEPLOY": "0",
                     "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg",
                     "BPMIS_BASE_URL": "https://bpmis.example.test",
@@ -184,7 +254,7 @@ exit 0
                     "FAKE_GCLOUD_CALLS": str(calls_path),
                     "CLOUD_RUN_UAT_SKIP_GIT_CHECK": "1",
                     "CLOUD_RUN_UAT_SYNC_LOCAL_AGENT_AFTER_DEPLOY": "0",
-                    "TEAM_PORTAL_BASE_URL": "https://live.example.ngrok.app",
+                    "TEAM_PORTAL_BASE_URL": "https://app.bankpmtool.uk",
                     "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg",
                     "BPMIS_BASE_URL": "https://bpmis.example.test",
                     "TRELLO_API_KEY": "trello-key",
@@ -203,7 +273,7 @@ exit 0
             self.assertIn("--tag uat", deploy_calls[0])
             self.assertIn("TEAM_PORTAL_STAGE=uat", deploy_calls[0])
             self.assertIn("TEAM_PORTAL_BASE_URL=https://uat---team-portal-ekaykywtvq-as.a.run.app", deploy_calls[0])
-            self.assertIn("LOCAL_AGENT_BASE_URL=https://live.example.ngrok.app/uat-local-agent", deploy_calls[0])
+            self.assertIn("LOCAL_AGENT_BASE_URL=https://app.bankpmtool.uk/uat-local-agent", deploy_calls[0])
             self.assertIn("TEAM_PORTAL_RELEASE_REVISION=", deploy_calls[0])
             self.assertIn("--update-secrets LOCAL_AGENT_HMAC_SECRET=local-agent-uat-hmac-secret:latest", deploy_calls[0])
             self.assertIn("TRELLO_API_KEY=trello-key", deploy_calls[0])
@@ -212,6 +282,74 @@ exit 0
             self.assertIn("TRELLO_DAILY_LIST_NAME=Daily Summary Email", deploy_calls[0])
             self.assertIn("Cloud Run UAT revision: team-portal-00091-uat", completed.stdout)
             self.assertIn("keeps live traffic unchanged", completed.stdout)
+
+    def test_cloud_run_uat_deploy_reads_project_and_account_from_env_file(self):
+        deploy_script = PROJECT_ROOT / "scripts/deploy_cloud_run_uat.sh"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            fake_bin = temp_path / "bin"
+            fake_bin.mkdir()
+            calls_path = temp_path / "gcloud-calls.log"
+            env_file = temp_path / ".env"
+            env_file.write_text(
+                "\n".join(
+                    [
+                        "GOOGLE_CLOUD_PROJECT=demo-project",
+                        "CLOUD_RUN_DEPLOY_ACCOUNT=deploy@example.iam.gserviceaccount.com",
+                        "TEAM_PORTAL_BASE_URL=https://app.bankpmtool.uk",
+                        "TEAM_ALLOWED_EMAIL_DOMAINS=npt.sg",
+                        "BPMIS_BASE_URL=https://bpmis.example.test",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            gcloud_path = fake_bin / "gcloud"
+            gcloud_path.write_text(
+                """#!/usr/bin/env bash
+set -euo pipefail
+
+printf '%s\\n' "$*" >> "$FAKE_GCLOUD_CALLS"
+if [[ "$*" == "run services describe"* ]]; then
+  printf '{"metadata":{"annotations":{"run.googleapis.com/invoker-iam-disabled":"true"}},"status":{"url":"https://team-portal-ekaykywtvq-as.a.run.app","traffic":[]}}\\n'
+  exit 0
+fi
+if [[ "$*" == "run deploy"* ]]; then
+  echo "unexpected deploy" >&2
+  exit 44
+fi
+exit 0
+""",
+                encoding="utf-8",
+            )
+            gcloud_path.chmod(0o755)
+
+            completed = subprocess.run(
+                ["bash", str(deploy_script)],
+                capture_output=True,
+                text=True,
+                check=False,
+                env=self._script_env(
+                    PATH=f"{fake_bin}:{os.environ['PATH']}",
+                    PYTHON_BIN=sys.executable,
+                    ENV_FILE=str(env_file),
+                    FAKE_GCLOUD_CALLS=str(calls_path),
+                    CLOUD_RUN_UAT_SKIP_GIT_CHECK="1",
+                    CLOUD_RUN_UAT_DRY_RUN="1",
+                    CLOUD_RUN_UAT_SYNC_LOCAL_AGENT_AFTER_DEPLOY="0",
+                ),
+                cwd=PROJECT_ROOT,
+            )
+
+            self.assertEqual(completed.returncode, 0, msg=completed.stderr)
+            calls = calls_path.read_text(encoding="utf-8")
+            self.assertIn(
+                "run services describe team-portal --project demo-project --account deploy@example.iam.gserviceaccount.com",
+                calls,
+            )
+            self.assertIn("Dry run only", completed.stdout)
+            self.assertNotIn("unexpected deploy", completed.stderr)
 
     def test_cloud_run_uat_deploy_can_use_explicit_env_hmac_fallback(self):
         deploy_script = PROJECT_ROOT / "scripts/deploy_cloud_run_uat.sh"
@@ -254,7 +392,7 @@ exit 0
                     "CLOUD_RUN_UAT_SYNC_LOCAL_AGENT_AFTER_DEPLOY": "0",
                     "CLOUD_RUN_UAT_LOCAL_AGENT_SECRET_SOURCE": "env",
                     "CLOUD_RUN_UAT_LOCAL_AGENT_HMAC_SECRET": "uat-only-secret",
-                    "TEAM_PORTAL_BASE_URL": "https://live.example.ngrok.app",
+                    "TEAM_PORTAL_BASE_URL": "https://app.bankpmtool.uk",
                     "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg",
                     "BPMIS_BASE_URL": "https://bpmis.example.test",
                 },
@@ -266,8 +404,9 @@ exit 0
             deploy_calls = [line for line in calls.splitlines() if line.startswith("run deploy")]
             self.assertEqual(len(deploy_calls), 1, msg=calls)
             self.assertNotIn("--update-secrets LOCAL_AGENT_HMAC_SECRET=", deploy_calls[0])
-            self.assertIn("--remove-secrets LOCAL_AGENT_HMAC_SECRET", deploy_calls[0])
-            self.assertIn("--update-env-vars", deploy_calls[0])
+            self.assertIn("--set-secrets", deploy_calls[0])
+            self.assertNotIn("local-agent-uat-hmac-secret", deploy_calls[0])
+            self.assertIn("--set-env-vars", deploy_calls[0])
             self.assertIn("LOCAL_AGENT_HMAC_SECRET=uat-only-secret", deploy_calls[0])
             self.assertIn("CLOUD_RUN_UAT_LOCAL_AGENT_SECRET_SOURCE=env", completed.stdout)
 
@@ -431,7 +570,7 @@ exit 0
                     "PATH": f"{fake_bin}:{os.environ['PATH']}",
                     "PYTHON_BIN": sys.executable,
                     "FAKE_GCLOUD_CALLS": str(calls_path),
-                    "CLOUD_RUN_LOCAL_AGENT_BASE_URL": "https://agent.example.ngrok.app",
+                    "CLOUD_RUN_LOCAL_AGENT_BASE_URL": "https://app.bankpmtool.uk",
                     "CLOUD_RUN_RESTART_LOCAL_AGENT_AFTER_DEPLOY": "0",
                     "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg",
                     "BPMIS_BASE_URL": "https://bpmis.example.test",
@@ -442,11 +581,18 @@ exit 0
             self.assertEqual(completed.returncode, 0, msg=completed.stderr)
             calls = calls_path.read_text(encoding="utf-8")
             deploy_calls = [line for line in calls.splitlines() if line.startswith("run deploy")]
+            traffic_calls = [line for line in calls.splitlines() if line.startswith("run services update-traffic")]
             self.assertEqual(len(deploy_calls), 1, msg=calls)
+            self.assertEqual(len(traffic_calls), 1, msg=calls)
             self.assertIn("--source .", deploy_calls[0])
             self.assertIn("TEAM_PORTAL_DATA_DIR=/workspace/team-portal-runtime", deploy_calls[0])
+            self.assertIn("TEAM_PORTAL_STAGE=live", deploy_calls[0])
+            self.assertIn("TEAM_PORTAL_RELEASE_REVISION=", deploy_calls[0])
+            self.assertIn("LOCAL_AGENT_BASE_URL=https://app.bankpmtool.uk", deploy_calls[0])
             self.assertNotIn("/tmp/team-portal", deploy_calls[0])
             self.assertNotIn("--image", deploy_calls[0])
+            self.assertIn("--to-latest", traffic_calls[0])
+            self.assertIn("Cloud Run traffic moved to latest revision", completed.stdout)
 
     def test_cloud_run_deploy_skips_iam_binding_when_invoker_iam_is_disabled(self):
         deploy_script = PROJECT_ROOT / "scripts/deploy_cloud_run.sh"
@@ -485,7 +631,7 @@ exit 0
                     "PATH": f"{fake_bin}:{os.environ['PATH']}",
                     "PYTHON_BIN": sys.executable,
                     "FAKE_GCLOUD_CALLS": str(calls_path),
-                    "CLOUD_RUN_LOCAL_AGENT_BASE_URL": "https://agent.example.ngrok.app",
+                    "CLOUD_RUN_LOCAL_AGENT_BASE_URL": "https://app.bankpmtool.uk",
                     "CLOUD_RUN_RESTART_LOCAL_AGENT_AFTER_DEPLOY": "0",
                     "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg",
                     "BPMIS_BASE_URL": "https://bpmis.example.test",
@@ -539,7 +685,7 @@ exit 0
                     "PYTHON_BIN": sys.executable,
                     "FAKE_GCLOUD_CALLS": str(calls_path),
                     "CLOUD_RUN_IMAGE": image,
-                    "CLOUD_RUN_LOCAL_AGENT_BASE_URL": "https://agent.example.ngrok.app",
+                    "CLOUD_RUN_LOCAL_AGENT_BASE_URL": "https://app.bankpmtool.uk",
                     "CLOUD_RUN_RESTART_LOCAL_AGENT_AFTER_DEPLOY": "0",
                     "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg",
                     "BPMIS_BASE_URL": "https://bpmis.example.test",
@@ -591,7 +737,7 @@ exit 0
                     "PATH": f"{fake_bin}:{os.environ['PATH']}",
                     "PYTHON_BIN": sys.executable,
                     "FAKE_GCLOUD_CALLS": str(calls_path),
-                    "CLOUD_RUN_LOCAL_AGENT_BASE_URL": "https://agent.example.ngrok.app",
+                    "CLOUD_RUN_LOCAL_AGENT_BASE_URL": "https://app.bankpmtool.uk",
                     "CLOUD_RUN_RESTART_LOCAL_AGENT_AFTER_DEPLOY": "0",
                     "CLOUD_RUN_MIN_INSTANCES": "1",
                     "CLOUD_RUN_CPU_BOOST": "true",
@@ -653,15 +799,15 @@ if [[ "$*" == "auth list"* ]]; then
   printf 'teammate@example.com\\n'
   exit 0
 fi
-if [[ "$*" == "run services describe"* ]]; then
+if [[ "$*" == *"run services describe"* ]]; then
   printf 'https://team-portal-example.run.app\\n'
   exit 0
 fi
-if [[ "$*" == "projects describe"* ]]; then
+if [[ "$*" == *"projects describe"* ]]; then
   printf '123456789\\n'
   exit 0
 fi
-if [[ "$*" == "secrets describe"* ]]; then
+if [[ "$*" == *"secrets describe"* ]]; then
   exit 0
 fi
 if [[ "$*" == *"secrets versions access latest"* && "$*" == *"team-portal-config-encryption-key"* ]]; then
@@ -676,10 +822,10 @@ if [[ "$*" == *"secrets versions access latest"* && "$*" == *"google-oauth-clien
   printf '{"web":{}}'
   exit 0
 fi
-if [[ "$*" == "run deploy"* ]]; then
+if [[ "$*" == *"run deploy"* ]]; then
   exit 0
 fi
-if [[ "$*" == "run services update"* ]]; then
+if [[ "$*" == *"run services update"* ]]; then
   echo "unexpected update" >&2
   exit 46
 fi
@@ -702,7 +848,7 @@ exit 0
                     "GOOGLE_CLOUD_PROJECT": "demo-project",
                     "CLOUD_RUN_SKIP_SERVICE_ENABLE": "1",
                     "CLOUD_RUN_SKIP_IAM_BINDINGS": "1",
-                    "CLOUD_RUN_LOCAL_AGENT_BASE_URL": "https://agent.example.ngrok.app",
+                    "CLOUD_RUN_LOCAL_AGENT_BASE_URL": "https://app.bankpmtool.uk",
                     "LOCAL_AGENT_HMAC_SECRET": "shared-secret",
                     "GOOGLE_OAUTH_CLIENT_SECRET_FILE": str(google_secret),
                     "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "config-key",
@@ -714,8 +860,8 @@ exit 0
 
             self.assertEqual(completed.returncode, 0, msg=f"STDOUT:\n{completed.stdout}\nSTDERR:\n{completed.stderr}")
             calls = calls_path.read_text(encoding="utf-8")
-            deploy_calls = [line for line in calls.splitlines() if line.startswith("run deploy")]
-            update_calls = [line for line in calls.splitlines() if line.startswith("run services update")]
+            deploy_calls = [line for line in calls.splitlines() if "run deploy" in line]
+            update_calls = [line for line in calls.splitlines() if "run services update" in line]
             self.assertEqual(len(deploy_calls), 1, msg=calls)
             self.assertEqual(update_calls, [], msg=calls)
             self.assertIn("TEAM_PORTAL_DATA_DIR=/workspace/team-portal-runtime", deploy_calls[0])
@@ -761,13 +907,12 @@ exit 0
                 capture_output=True,
                 text=True,
                 check=False,
-                env={
-                    **os.environ,
-                    "PATH": f"{fake_bin}:{os.environ['PATH']}",
-                    "PYTHON_BIN": sys.executable,
-                    "CLOUD_RUN_BUILD_IMAGE_DRY_RUN": "1",
-                    "CLOUD_RUN_IMAGE_TAG": "test-tag",
-                },
+                env=self._script_env(
+                    PATH=f"{fake_bin}:{os.environ['PATH']}",
+                    PYTHON_BIN=sys.executable,
+                    CLOUD_RUN_BUILD_IMAGE_DRY_RUN="1",
+                    CLOUD_RUN_IMAGE_TAG="test-tag",
+                ),
                 cwd=PROJECT_ROOT,
             )
 
@@ -808,6 +953,140 @@ exit 0
         self.assertIn('--workers "${LOCAL_AGENT_WORKERS:-1}"', script)
         self.assertIn('--threads "${LOCAL_AGENT_THREADS:-8}"', script)
         self.assertIn("-m flask --app local_agent run", script)
+
+    def test_local_agent_ngrok_tunnel_is_disabled_by_default(self):
+        tunnel_script = PROJECT_ROOT / "scripts/run_local_agent_tunnel_foreground.sh"
+
+        completed = subprocess.run(
+            ["bash", str(tunnel_script)],
+            capture_output=True,
+            text=True,
+            check=False,
+            env=self._script_env(
+                PYTHON_BIN=sys.executable,
+                ENV_FILE=str(PROJECT_ROOT / ".env.example"),
+            ),
+            cwd=PROJECT_ROOT,
+        )
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("ngrok tunnel is sunset", completed.stdout)
+        self.assertIn("ALLOW_LEGACY_NGROK_LOCAL_AGENT=1", completed.stdout)
+
+    def test_local_agent_ngrok_tunnel_requires_explicit_rollback_flag(self):
+        script = (PROJECT_ROOT / "scripts/run_local_agent_tunnel_foreground.sh").read_text(encoding="utf-8")
+
+        self.assertIn("ALLOW_LEGACY_NGROK_LOCAL_AGENT", script)
+        self.assertIn("Use the Cloudflare-backed team portal proxy instead", script)
+
+    def test_runtime_docs_do_not_tell_operators_to_start_local_agent_ngrok(self):
+        for relative_path in ("docs/gcp-cloud-run-local-agent.md", "docs/release-checklist.md", "docs/team-deployment.md"):
+            contents = (PROJECT_ROOT / relative_path).read_text(encoding="utf-8")
+
+            self.assertNotIn("./scripts/run_local_agent_tunnel.sh start", contents)
+            self.assertNotIn("your-fixed-agent-domain.ngrok.app", contents)
+            self.assertNotIn("breeze-lung-clunky.ngrok-free.dev", contents)
+
+    def test_cloudflare_tunnel_foreground_defaults_to_named_http2_tunnel(self):
+        foreground_script = PROJECT_ROOT / "scripts/run_cloudflare_tunnel_foreground.sh"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            fake_bin = temp_path / "bin"
+            fake_bin.mkdir()
+            args_file = temp_path / "cloudflared.args"
+            self._write_fake_cloudflared(fake_bin)
+
+            completed = subprocess.run(
+                ["bash", str(foreground_script)],
+                capture_output=True,
+                text=True,
+                check=False,
+                env=self._script_env(
+                    PATH=f"{fake_bin}:{os.environ['PATH']}",
+                    PYTHON_BIN=sys.executable,
+                    ENV_FILE=str(temp_path / ".env"),
+                    FAKE_CLOUDFLARED_ARGS_FILE=str(args_file),
+                ),
+                cwd=PROJECT_ROOT,
+            )
+
+            self.assertEqual(completed.returncode, 0, msg=completed.stderr)
+            self.assertEqual(args_file.read_text(encoding="utf-8").strip(), "tunnel --protocol http2 run bankpmtool-live")
+
+    def test_cloudflare_tunnel_foreground_honors_protocol_name_and_token(self):
+        foreground_script = PROJECT_ROOT / "scripts/run_cloudflare_tunnel_foreground.sh"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            fake_bin = temp_path / "bin"
+            fake_bin.mkdir()
+            args_file = temp_path / "cloudflared.args"
+            self._write_fake_cloudflared(fake_bin)
+
+            env_file = temp_path / ".env"
+            env_file.write_text(
+                "TEAM_PORTAL_CLOUDFLARE_TUNNEL_NAME=custom-live\nTEAM_PORTAL_CLOUDFLARE_PROTOCOL=quic\n",
+                encoding="utf-8",
+            )
+
+            completed = subprocess.run(
+                ["bash", str(foreground_script)],
+                capture_output=True,
+                text=True,
+                check=False,
+                env=self._script_env(
+                    PATH=f"{fake_bin}:{os.environ['PATH']}",
+                    PYTHON_BIN=sys.executable,
+                    ENV_FILE=str(env_file),
+                    CLOUDFLARE_TUNNEL_TOKEN="secret-token",
+                    FAKE_CLOUDFLARED_ARGS_FILE=str(args_file),
+                ),
+                cwd=PROJECT_ROOT,
+            )
+
+            self.assertEqual(completed.returncode, 0, msg=completed.stderr)
+            self.assertEqual(
+                args_file.read_text(encoding="utf-8").strip(),
+                "tunnel --protocol quic run --token secret-token",
+            )
+
+    def test_cloudflare_tunnel_status_uses_tunnel_info_and_pid_file(self):
+        tunnel_script = PROJECT_ROOT / "scripts/run_cloudflare_tunnel.sh"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            fake_bin = temp_path / "bin"
+            fake_bin.mkdir()
+            self._write_fake_cloudflared(fake_bin)
+            self._write_fake_pgrep(fake_bin)
+
+            data_dir = temp_path / "team-data"
+            args_file = temp_path / "cloudflared.args"
+            env_file = temp_path / ".env"
+            env_file.write_text(
+                f"TEAM_PORTAL_DATA_DIR={data_dir}\nTEAM_PORTAL_BASE_URL=https://app.bankpmtool.uk\n",
+                encoding="utf-8",
+            )
+
+            completed = subprocess.run(
+                ["bash", str(tunnel_script), "status"],
+                capture_output=True,
+                text=True,
+                check=False,
+                env=self._script_env(
+                    PATH=f"{fake_bin}:{os.environ['PATH']}",
+                    PYTHON_BIN=sys.executable,
+                    ENV_FILE=str(env_file),
+                    FAKE_CLOUDFLARED_PID="4242",
+                    FAKE_CLOUDFLARED_ARGS_FILE=str(args_file),
+                ),
+                cwd=PROJECT_ROOT,
+            )
+
+            self.assertEqual(completed.returncode, 0, msg=completed.stderr)
+            self.assertIn("Cloudflare Tunnel running (pid 4242).", completed.stdout)
+            self.assertEqual((data_dir / "run/cloudflare_tunnel.pid").read_text(encoding="utf-8").strip(), "4242")
 
     def test_cloud_build_uses_latest_image_as_layer_cache(self):
         config = (PROJECT_ROOT / "cloudbuild.yaml").read_text(encoding="utf-8")
@@ -972,6 +1251,102 @@ fi
         self.assertEqual(completed.returncode, 0, msg=completed.stderr)
         self.assertEqual(completed.stdout.strip(), "yes")
 
+    def test_team_stack_guard_supports_cloudflare_tunnel_provider(self):
+        guard_script = (PROJECT_ROOT / "scripts/run_team_stack_guard.sh").read_text(encoding="utf-8")
+
+        self.assertIn('TUNNEL_PROVIDER="${TEAM_PORTAL_TUNNEL_PROVIDER:-$(read_env_value TEAM_PORTAL_TUNNEL_PROVIDER)}"', guard_script)
+        self.assertIn('TUNNEL_LABEL="Cloudflare Tunnel"', guard_script)
+        self.assertIn('TUNNEL_FOREGROUND_SCRIPT="$CLOUDFLARE_FOREGROUND_SCRIPT"', guard_script)
+        self.assertIn('"tunnel_provider":"$(json_escape "$TUNNEL_PROVIDER")"', guard_script)
+        self.assertIn('"tunnel_health":"$(json_escape "$tunnel_health")"', guard_script)
+
+    def test_stack_doctor_reports_cloudflare_tunnel_provider(self):
+        stack_script = PROJECT_ROOT / "scripts/run_team_stack.sh"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            fake_bin = temp_path / "bin"
+            fake_bin.mkdir()
+            self._write_fake_curl(fake_bin)
+            self._write_fake_pgrep(fake_bin)
+
+            data_dir = temp_path / "team-data"
+            run_dir = data_dir / "run"
+            run_dir.mkdir(parents=True)
+            status_file = run_dir / "team_stack_status.json"
+            status_file.write_text(
+                """
+{"state":"running","updated_at":"2026-05-06 21:00:00","updated_unix":4102444800,"guard_pid":123,"portal_child_pid":456,"tunnel_child_pid":789,"ngrok_child_pid":null,"caffeinate_pid":321,"portal_health":"healthy","tunnel_health":"unhealthy","ngrok_health":"unhealthy","tunnel_provider":"cloudflare","alert_state":"none","public_url":"https://app.bankpmtool.uk","probe_url":"http://127.0.0.1:5000/healthz"}
+""".strip()
+                + "\n",
+                encoding="utf-8",
+            )
+
+            completed = subprocess.run(
+                ["bash", str(stack_script), "doctor"],
+                capture_output=True,
+                text=True,
+                check=False,
+                env={
+                    **os.environ,
+                    "PATH": f"{fake_bin}:{os.environ['PATH']}",
+                    "PYTHON_BIN": sys.executable,
+                    "FAKE_HEALTHZ_REVISION": self._current_release_revision(),
+                    "FAKE_CLOUDFLARED_PID": "789",
+                    "TEAM_PORTAL_DATA_DIR": str(data_dir),
+                    "TEAM_PORTAL_PORT": "5000",
+                    "TEAM_PORTAL_BASE_URL": "https://app.bankpmtool.uk",
+                    "TEAM_PORTAL_TUNNEL_PROVIDER": "cloudflare",
+                },
+                cwd=PROJECT_ROOT,
+            )
+
+            self.assertNotEqual(completed.returncode, 0, msg=completed.stdout)
+            self.assertIn("Tunnel provider: cloudflare", completed.stdout)
+            self.assertIn("Cloudflare Tunnel process running", completed.stdout)
+            self.assertIn("public URL reachable", completed.stdout)
+            self.assertIn(
+                "status summary is stale: tunnel probe is healthy but file says unhealthy",
+                completed.stdout,
+            )
+
+    def test_stack_doctor_fails_cloudflare_public_error_status(self):
+        stack_script = PROJECT_ROOT / "scripts/run_team_stack.sh"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            fake_bin = temp_path / "bin"
+            fake_bin.mkdir()
+            self._write_fake_curl(fake_bin)
+            self._write_fake_pgrep(fake_bin)
+
+            data_dir = temp_path / "team-data"
+            (data_dir / "run").mkdir(parents=True)
+
+            completed = subprocess.run(
+                ["bash", str(stack_script), "doctor"],
+                capture_output=True,
+                text=True,
+                check=False,
+                env={
+                    **os.environ,
+                    "PATH": f"{fake_bin}:{os.environ['PATH']}",
+                    "PYTHON_BIN": sys.executable,
+                    "FAKE_HEALTHZ_REVISION": self._current_release_revision(),
+                    "FAKE_CLOUDFLARED_PID": "789",
+                    "FAKE_PUBLIC_HEALTH_FAIL": "1",
+                    "TEAM_PORTAL_DATA_DIR": str(data_dir),
+                    "TEAM_PORTAL_PORT": "5000",
+                    "TEAM_PORTAL_BASE_URL": "https://app.bankpmtool.uk",
+                    "TEAM_PORTAL_TUNNEL_PROVIDER": "cloudflare",
+                },
+                cwd=PROJECT_ROOT,
+            )
+
+            self.assertNotEqual(completed.returncode, 0, msg=completed.stdout)
+            self.assertIn("Cloudflare Tunnel process running", completed.stdout)
+            self.assertIn("public URL check failed", completed.stdout)
+
     def test_doctor_reports_stale_status_summary_when_live_probes_disagree(self):
         stack_script = PROJECT_ROOT / "scripts/run_team_stack.sh"
 
@@ -1006,6 +1381,7 @@ fi
                     "TEAM_PORTAL_DATA_DIR": str(data_dir),
                     "TEAM_PORTAL_PORT": "5000",
                     "TEAM_PORTAL_BASE_URL": "https://example.ngrok.dev",
+                    "TEAM_PORTAL_TUNNEL_PROVIDER": "ngrok",
                 },
                 cwd=PROJECT_ROOT,
             )
@@ -1020,7 +1396,7 @@ fi
                 completed.stdout,
             )
             self.assertIn(
-                "status summary is stale: ngrok probe is healthy but file says unhealthy",
+                "status summary is stale: tunnel probe is healthy but file says unhealthy",
                 completed.stdout,
             )
             self.assertIn(
@@ -1062,6 +1438,7 @@ fi
                     "TEAM_PORTAL_DATA_DIR": str(data_dir),
                     "TEAM_PORTAL_PORT": "5000",
                     "TEAM_PORTAL_BASE_URL": "https://example.ngrok.dev",
+                    "TEAM_PORTAL_TUNNEL_PROVIDER": "ngrok",
                 },
                 cwd=PROJECT_ROOT,
             )

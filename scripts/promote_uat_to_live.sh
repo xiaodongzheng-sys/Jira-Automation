@@ -82,13 +82,13 @@ if ! git -C "$HOST_ROOT" diff --quiet --no-ext-diff --exit-code || ! git -C "$HO
   exit 1
 fi
 
-echo "Promoting Cloud Run UAT tag '$UAT_TAG' to fixed-ngrok Live."
+echo "Promoting Cloud Run UAT tag '$UAT_TAG' to Mac-hosted Live."
 echo "UAT revision: $UAT_REVISION"
 echo "UAT URL: ${UAT_URL:-<not reported>}"
 echo "Git commit: $UAT_COMMIT"
 echo "Host workspace: $HOST_ROOT"
 if [[ "${PROMOTE_UAT_DRY_RUN:-0}" == "1" ]]; then
-  echo "Dry run only; set PROMOTE_UAT_DRY_RUN=0 or unset it to update fixed-ngrok Live."
+  echo "Dry run only; set PROMOTE_UAT_DRY_RUN=0 or unset it to update Mac-hosted Live."
   exit 0
 fi
 
@@ -125,4 +125,4 @@ if [[ -n "$PUBLIC_URL" ]]; then
   fi
 fi
 
-echo "Fixed-ngrok Live now serves UAT commit $UAT_COMMIT."
+echo "Mac-hosted Live now serves UAT commit $UAT_COMMIT."

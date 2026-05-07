@@ -24,6 +24,7 @@ from bpmis_jira_tool.bpmis_projects import BPMISProjectStore
 from bpmis_jira_tool.config import Settings
 from bpmis_jira_tool.daily_brief_archive import DailyBriefArchiveStore, daily_brief_archive_path, daily_brief_pdf_bytes
 from bpmis_jira_tool.errors import ToolError
+from bpmis_jira_tool.job_store import JobStore
 from bpmis_jira_tool.local_agent_protocol import NONCE_HEADER, SIGNATURE_HEADER, TIMESTAMP_HEADER, verify_signature
 from bpmis_jira_tool.meeting_recorder import (
     MeetingProcessingService,
@@ -49,7 +50,6 @@ from bpmis_jira_tool.source_code_qa import SourceCodeQAService
 from bpmis_jira_tool.user_config import TEAM_PROFILE_DEFAULTS, WebConfigStore
 from bpmis_jira_tool.work_memory import WorkMemoryStore, meeting_record_memory_items, team_dashboard_memory_items
 from bpmis_jira_tool.web import (
-    JobStore,
     SeaTalkNameMappingStore,
     SeaTalkTodoStore,
     SourceCodeQAAttachmentStore,

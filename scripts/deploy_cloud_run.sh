@@ -6,9 +6,11 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT_DIR/scripts/lib/team_env.sh"
 
 SCRIPT_STARTED_AT="$(date +%s)"
-SERVICE="${CLOUD_RUN_SERVICE:-team-portal}"
-REGION="${CLOUD_RUN_REGION:-asia-southeast1}"
-CLOUD_RUN_IMAGE="${CLOUD_RUN_IMAGE:-}"
+SERVICE="${CLOUD_RUN_SERVICE:-$(read_env_value CLOUD_RUN_SERVICE)}"
+SERVICE="${SERVICE:-team-portal}"
+REGION="${CLOUD_RUN_REGION:-$(read_env_value CLOUD_RUN_REGION)}"
+REGION="${REGION:-asia-southeast1}"
+CLOUD_RUN_IMAGE="${CLOUD_RUN_IMAGE:-$(read_env_value CLOUD_RUN_IMAGE)}"
 GCLOUD_BIN="${GCLOUD_BIN:-$(command -v gcloud || true)}"
 if [[ -z "$GCLOUD_BIN" && -x "$HOME/google-cloud-sdk/bin/gcloud" ]]; then
   GCLOUD_BIN="$HOME/google-cloud-sdk/bin/gcloud"
@@ -21,12 +23,14 @@ if [[ -x "/opt/homebrew/bin/python3.12" && -z "${CLOUDSDK_PYTHON:-}" ]]; then
   export CLOUDSDK_PYTHON="/opt/homebrew/bin/python3.12"
 fi
 PROJECT_ARGS=()
-if [[ -n "${GOOGLE_CLOUD_PROJECT:-}" ]]; then
-  PROJECT_ARGS=(--project "$GOOGLE_CLOUD_PROJECT")
+GOOGLE_CLOUD_PROJECT_RESOLVED="${GOOGLE_CLOUD_PROJECT:-$(read_env_value GOOGLE_CLOUD_PROJECT)}"
+if [[ -n "$GOOGLE_CLOUD_PROJECT_RESOLVED" ]]; then
+  PROJECT_ARGS=(--project "$GOOGLE_CLOUD_PROJECT_RESOLVED")
 fi
 ACCOUNT_ARGS=()
-if [[ -n "${CLOUD_RUN_DEPLOY_ACCOUNT:-}" ]]; then
-  ACCOUNT_ARGS=(--account "$CLOUD_RUN_DEPLOY_ACCOUNT")
+CLOUD_RUN_DEPLOY_ACCOUNT_RESOLVED="${CLOUD_RUN_DEPLOY_ACCOUNT:-$(read_env_value CLOUD_RUN_DEPLOY_ACCOUNT)}"
+if [[ -n "$CLOUD_RUN_DEPLOY_ACCOUNT_RESOLVED" ]]; then
+  ACCOUNT_ARGS=(--account "$CLOUD_RUN_DEPLOY_ACCOUNT_RESOLVED")
 fi
 
 cloud_run_hash() {
@@ -177,7 +181,7 @@ LOCAL_AGENT_URL="$(resolve_cloud_run_local_agent_url)"
 if is_loopback_http_url "$LOCAL_AGENT_URL"; then
   echo "Cloud Run cannot reach a localhost LOCAL_AGENT_BASE_URL."
   echo "Set CLOUD_RUN_LOCAL_AGENT_BASE_URL or LOCAL_AGENT_PUBLIC_URL to the Mac local-agent public URL."
-  echo "If the Mac portal ngrok proxies /api/local-agent/*, TEAM_PORTAL_BASE_URL can be used as the fallback."
+  echo "If the Mac portal proxies /api/local-agent/* through the public tunnel, TEAM_PORTAL_BASE_URL can be used as the fallback."
   exit 1
 fi
 
@@ -196,6 +200,8 @@ ENV_VARS=(
   "LOCAL_AGENT_SEATALK_ENABLED=${LOCAL_AGENT_SEATALK_ENABLED:-true}"
   "LOCAL_AGENT_BPMIS_ENABLED=${LOCAL_AGENT_BPMIS_ENABLED:-true}"
   "GUNICORN_WORKERS=${GUNICORN_WORKERS:-1}"
+  "TEAM_PORTAL_STAGE=${CLOUD_RUN_TEAM_PORTAL_STAGE:-live}"
+  "TEAM_PORTAL_RELEASE_REVISION=$(current_release_revision)"
 )
 append_optional_env_var() {
   local key="$1"
@@ -298,6 +304,17 @@ DEPLOY_STARTED_AT="$(date +%s)"
   --set-env-vars "^|^$ENV_VARS_JOINED"
 DEPLOY_FINISHED_AT="$(date +%s)"
 echo "Cloud Run deploy completed in $((DEPLOY_FINISHED_AT - DEPLOY_STARTED_AT))s"
+
+if [[ "${CLOUD_RUN_UPDATE_TRAFFIC_TO_LATEST:-1}" == "1" ]]; then
+  TRAFFIC_STARTED_AT="$(date +%s)"
+  "$GCLOUD_BIN" run services update-traffic "$SERVICE" \
+    ${PROJECT_ARGS[@]+"${PROJECT_ARGS[@]}"} \
+    ${ACCOUNT_ARGS[@]+"${ACCOUNT_ARGS[@]}"} \
+    --region "$REGION" \
+    --to-latest
+  TRAFFIC_FINISHED_AT="$(date +%s)"
+  echo "Cloud Run traffic moved to latest revision in $((TRAFFIC_FINISHED_AT - TRAFFIC_STARTED_AT))s"
+fi
 
 if [[ "${CLOUD_RUN_RESTART_LOCAL_AGENT_AFTER_DEPLOY:-1}" == "1" ]]; then
   LOCAL_AGENT_RESTART_STARTED_AT="$(date +%s)"

@@ -1,6 +1,6 @@
 # GCP Cloud Run + Mac Local Agent
 
-This deployment keeps the Flask team portal on Google Cloud Run while Mac-only capabilities stay on the host Mac behind a fixed ngrok URL.
+This deployment keeps the Flask team portal on Google Cloud Run while Mac-only capabilities stay on the host Mac behind the public Mac portal tunnel.
 
 For every release, start from [docs/release-checklist.md](/Users/NPTSG0388/Documents/New%20project/docs/release-checklist.md) so Cloud Run, the Mac local-agent, and any Mac-hosted stack updates are not missed.
 
@@ -9,7 +9,7 @@ For every release, start from [docs/release-checklist.md](/Users/NPTSG0388/Docum
 ```text
 Cloud Run team portal
   -> Google OAuth
-  -> Mac local-agent through fixed ngrok URL by default
+  -> Mac local-agent through the public Mac portal tunnel by default
        -> Mac-local cache and SQLite DB
        -> Codex CLI
        -> SeaTalk desktop data
@@ -27,7 +27,7 @@ Configure `.env` on the Mac:
 ```bash
 LOCAL_AGENT_HOST=127.0.0.1
 LOCAL_AGENT_PORT=7007
-LOCAL_AGENT_PUBLIC_URL=https://your-fixed-agent-domain.ngrok.app
+LOCAL_AGENT_PUBLIC_URL=https://app.bankpmtool.uk
 LOCAL_AGENT_HMAC_SECRET=<shared-random-secret>
 LOCAL_AGENT_SOURCE_CODE_QA_ENABLED=true
 LOCAL_AGENT_SEATALK_ENABLED=true
@@ -37,12 +37,12 @@ SOURCE_CODE_QA_QUERY_SYNC_MODE=background
 BPMIS_CALL_MODE=local_agent
 ```
 
-Start the local capability server and tunnel:
+Start the local capability server. Public access to it should go through the Mac-hosted team portal Cloudflare Tunnel proxy, not a standalone local-agent ngrok tunnel:
 
 ```bash
 ./scripts/run_local_agent.sh start
-./scripts/run_local_agent_tunnel.sh start
 curl http://127.0.0.1:7007/healthz
+curl https://app.bankpmtool.uk/api/local-agent/healthz
 ```
 
 The local-agent reads the same Mac-local state as the current portal:
@@ -70,7 +70,7 @@ Deploy the portal:
 CLOUD_RUN_SERVICE=team-portal \
 CLOUD_RUN_REGION=asia-southeast1 \
 TEAM_PORTAL_BASE_URL=https://your-cloud-run-or-custom-domain \
-LOCAL_AGENT_BASE_URL=https://your-fixed-agent-domain.ngrok.app \
+LOCAL_AGENT_BASE_URL=https://app.bankpmtool.uk \
 ./scripts/deploy_cloud_run.sh
 ```
 
@@ -145,7 +145,7 @@ Recommended speed/stability profiles:
 - Fast redeploy after a prebuilt image: `CLOUD_RUN_IMAGE=asia-southeast1-docker.pkg.dev/... ./scripts/deploy_cloud_run.sh`.
 - Faster prebuilt image builds when dependencies or Docker cache are cold: `CLOUD_RUN_BUILD_MACHINE_TYPE=e2-highcpu-8 ./scripts/build_cloud_run_image.sh`, then deploy the printed `CLOUD_RUN_IMAGE=...` command.
 - Lower cold-start latency for the shared portal: set `CLOUD_RUN_MIN_INSTANCES=1` and `CLOUD_RUN_CPU_BOOST=true`. This improves first-hit responsiveness, but it can increase Cloud Run cost.
-- Faster failure on a broken ngrok/local-agent tunnel: set `LOCAL_AGENT_CONNECT_TIMEOUT_SECONDS=3` or `5` while keeping `LOCAL_AGENT_TIMEOUT_SECONDS=300` for long-running Source Code Q&A responses.
+- Faster failure on a broken public local-agent tunnel: set `LOCAL_AGENT_CONNECT_TIMEOUT_SECONDS=3` or `5` while keeping `LOCAL_AGENT_TIMEOUT_SECONDS=300` for long-running Source Code Q&A responses.
 
 For Source Code Q&A, Cloud Run deploys set `SOURCE_CODE_QA_QUERY_SYNC_MODE=background` by default. User questions start against the last usable Mac-local index while the Mac local-agent queues the daily freshness check in the background, so repo clone/pull/index work no longer blocks the answer path.
 
@@ -161,9 +161,8 @@ https://your-cloud-run-or-custom-domain/auth/google/callback
 
 ```bash
 curl https://your-cloud-run-or-custom-domain/healthz
-curl https://your-fixed-agent-domain.ngrok.app/healthz
+curl https://app.bankpmtool.uk/api/local-agent/healthz
 ./scripts/run_local_agent.sh status
-./scripts/run_local_agent_tunnel.sh status
 ```
 
 Then verify in the portal:

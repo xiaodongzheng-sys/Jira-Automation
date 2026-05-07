@@ -17,25 +17,35 @@ fi
 if [[ -x "/opt/homebrew/bin/python3.12" && -z "${CLOUDSDK_PYTHON:-}" ]]; then
   export CLOUDSDK_PYTHON="/opt/homebrew/bin/python3.12"
 fi
-PROJECT_ID="${GOOGLE_CLOUD_PROJECT:-$("$GCLOUD_BIN" config get-value project 2>/dev/null || true)}"
+PROJECT_ID="${GOOGLE_CLOUD_PROJECT:-$(read_env_value GOOGLE_CLOUD_PROJECT)}"
+PROJECT_ID="${PROJECT_ID:-$("$GCLOUD_BIN" config get-value project 2>/dev/null || true)}"
 PROJECT_ID="${PROJECT_ID:-}"
 if [[ -z "$PROJECT_ID" || "$PROJECT_ID" == "(unset)" ]]; then
   echo "Google Cloud project is not configured. Run: $GCLOUD_BIN config set project PROJECT_ID"
   exit 1
 fi
 
-ACCOUNT="$("$GCLOUD_BIN" auth list --filter='status:ACTIVE' --format='value(account)' 2>/dev/null || true)"
+ACCOUNT_ARGS=()
+DEPLOY_ACCOUNT="${CLOUD_RUN_DEPLOY_ACCOUNT:-$(read_env_value CLOUD_RUN_DEPLOY_ACCOUNT)}"
+if [[ -n "$DEPLOY_ACCOUNT" ]]; then
+  ACCOUNT="$DEPLOY_ACCOUNT"
+  ACCOUNT_ARGS=(--account "$DEPLOY_ACCOUNT")
+else
+  ACCOUNT="$("$GCLOUD_BIN" auth list --filter='status:ACTIVE' --format='value(account)' 2>/dev/null || true)"
+fi
 if [[ -z "$ACCOUNT" ]]; then
   echo "No active Google Cloud account. Run: $GCLOUD_BIN auth login"
   exit 1
 fi
 
-SERVICE="${CLOUD_RUN_SERVICE:-team-portal}"
-REGION="${CLOUD_RUN_REGION:-asia-southeast1}"
-CLOUD_RUN_IMAGE="${CLOUD_RUN_IMAGE:-}"
-EXISTING_SERVICE_URL="$("$GCLOUD_BIN" run services describe "$SERVICE" --project "$PROJECT_ID" --region "$REGION" --format='value(status.url)' 2>/dev/null || true)"
+SERVICE="${CLOUD_RUN_SERVICE:-$(read_env_value CLOUD_RUN_SERVICE)}"
+SERVICE="${SERVICE:-team-portal}"
+REGION="${CLOUD_RUN_REGION:-$(read_env_value CLOUD_RUN_REGION)}"
+REGION="${REGION:-asia-southeast1}"
+CLOUD_RUN_IMAGE="${CLOUD_RUN_IMAGE:-$(read_env_value CLOUD_RUN_IMAGE)}"
+EXISTING_SERVICE_URL="$("$GCLOUD_BIN" ${ACCOUNT_ARGS[@]+"${ACCOUNT_ARGS[@]}"} run services describe "$SERVICE" --project "$PROJECT_ID" --region "$REGION" --format='value(status.url)' 2>/dev/null || true)"
 BASE_URL="${CLOUD_RUN_TEAM_PORTAL_BASE_URL:-${EXISTING_SERVICE_URL:-}}"
-PROJECT_NUMBER="$("$GCLOUD_BIN" projects describe "$PROJECT_ID" --format='value(projectNumber)')"
+PROJECT_NUMBER="$("$GCLOUD_BIN" ${ACCOUNT_ARGS[@]+"${ACCOUNT_ARGS[@]}"} projects describe "$PROJECT_ID" --format='value(projectNumber)')"
 RUNTIME_SERVICE_ACCOUNT="${CLOUD_RUN_SERVICE_ACCOUNT:-$PROJECT_NUMBER-compute@developer.gserviceaccount.com}"
 LOCAL_AGENT_URL="$(resolve_cloud_run_local_agent_url)"
 LOCAL_AGENT_SECRET="${LOCAL_AGENT_HMAC_SECRET:-$(read_env_value LOCAL_AGENT_HMAC_SECRET)}"
@@ -52,7 +62,7 @@ fi
 if is_loopback_http_url "$LOCAL_AGENT_URL"; then
   echo "Cloud Run cannot reach a localhost LOCAL_AGENT_BASE_URL."
   echo "Set CLOUD_RUN_LOCAL_AGENT_BASE_URL or LOCAL_AGENT_PUBLIC_URL to the Mac local-agent public URL."
-  echo "If the Mac portal ngrok proxies /api/local-agent/*, TEAM_PORTAL_BASE_URL can be used as the fallback."
+  echo "If the Mac portal proxies /api/local-agent/* through the public tunnel, TEAM_PORTAL_BASE_URL can be used as the fallback."
   exit 1
 fi
 if [[ -z "$GOOGLE_SECRET_FILE" || ! -f "$GOOGLE_SECRET_FILE" ]]; then
@@ -66,7 +76,7 @@ fi
 
 secret_exists() {
   local name="$1"
-  "$GCLOUD_BIN" secrets describe "$name" --project "$PROJECT_ID" >/dev/null 2>&1
+  "$GCLOUD_BIN" ${ACCOUNT_ARGS[@]+"${ACCOUNT_ARGS[@]}"} secrets describe "$name" --project "$PROJECT_ID" >/dev/null 2>&1
 }
 
 create_or_update_secret() {
@@ -75,15 +85,15 @@ create_or_update_secret() {
   if secret_exists "$name"; then
     if [[ "${CLOUD_RUN_FORCE_SECRET_VERSION:-0}" != "1" ]]; then
       local current
-      current="$("$GCLOUD_BIN" secrets versions access latest --secret "$name" --project "$PROJECT_ID" 2>/dev/null || true)"
+      current="$("$GCLOUD_BIN" ${ACCOUNT_ARGS[@]+"${ACCOUNT_ARGS[@]}"} secrets versions access latest --secret "$name" --project "$PROJECT_ID" 2>/dev/null || true)"
       if [[ "$current" == "$value" ]]; then
         echo "Secret unchanged: $name"
         return 0
       fi
     fi
-    printf '%s' "$value" | "$GCLOUD_BIN" secrets versions add "$name" --project "$PROJECT_ID" --data-file=-
+    printf '%s' "$value" | "$GCLOUD_BIN" ${ACCOUNT_ARGS[@]+"${ACCOUNT_ARGS[@]}"} secrets versions add "$name" --project "$PROJECT_ID" --data-file=-
   else
-    printf '%s' "$value" | "$GCLOUD_BIN" secrets create "$name" --project "$PROJECT_ID" --replication-policy=automatic --data-file=-
+    printf '%s' "$value" | "$GCLOUD_BIN" ${ACCOUNT_ARGS[@]+"${ACCOUNT_ARGS[@]}"} secrets create "$name" --project "$PROJECT_ID" --replication-policy=automatic --data-file=-
   fi
 }
 
@@ -93,15 +103,15 @@ create_or_update_secret_file() {
   if secret_exists "$name"; then
     if [[ "${CLOUD_RUN_FORCE_SECRET_VERSION:-0}" != "1" ]]; then
       local current
-      current="$("$GCLOUD_BIN" secrets versions access latest --secret "$name" --project "$PROJECT_ID" 2>/dev/null || true)"
+      current="$("$GCLOUD_BIN" ${ACCOUNT_ARGS[@]+"${ACCOUNT_ARGS[@]}"} secrets versions access latest --secret "$name" --project "$PROJECT_ID" 2>/dev/null || true)"
       if [[ "$current" == "$(<"$path")" ]]; then
         echo "Secret unchanged: $name"
         return 0
       fi
     fi
-    "$GCLOUD_BIN" secrets versions add "$name" --project "$PROJECT_ID" --data-file="$path"
+    "$GCLOUD_BIN" ${ACCOUNT_ARGS[@]+"${ACCOUNT_ARGS[@]}"} secrets versions add "$name" --project "$PROJECT_ID" --data-file="$path"
   else
-    "$GCLOUD_BIN" secrets create "$name" --project "$PROJECT_ID" --replication-policy=automatic --data-file="$path"
+    "$GCLOUD_BIN" ${ACCOUNT_ARGS[@]+"${ACCOUNT_ARGS[@]}"} secrets create "$name" --project "$PROJECT_ID" --replication-policy=automatic --data-file="$path"
   fi
 }
 
@@ -120,7 +130,7 @@ if [[ "${CLOUD_RUN_SKIP_SERVICE_ENABLE:-0}" == "1" ]]; then
   echo "Skipping service enable preflight because CLOUD_RUN_SKIP_SERVICE_ENABLE=1."
 else
   SERVICES_STARTED_AT="$(date +%s)"
-  "$GCLOUD_BIN" services enable \
+  "$GCLOUD_BIN" ${ACCOUNT_ARGS[@]+"${ACCOUNT_ARGS[@]}"} services enable \
     run.googleapis.com \
     cloudbuild.googleapis.com \
     artifactregistry.googleapis.com \
@@ -140,7 +150,7 @@ else
     roles/artifactregistry.writer \
     roles/secretmanager.secretAccessor
   do
-    "$GCLOUD_BIN" projects add-iam-policy-binding "$PROJECT_ID" \
+    "$GCLOUD_BIN" ${ACCOUNT_ARGS[@]+"${ACCOUNT_ARGS[@]}"} projects add-iam-policy-binding "$PROJECT_ID" \
       --member="serviceAccount:$RUNTIME_SERVICE_ACCOUNT" \
       --role="$role" \
       --condition=None >/dev/null
@@ -212,7 +222,7 @@ fi
 PREFLIGHT_FINISHED_AT="$(date +%s)"
 echo "Cloud Run full preflight completed in $((PREFLIGHT_FINISHED_AT - SCRIPT_STARTED_AT))s"
 DEPLOY_STARTED_AT="$(date +%s)"
-"$GCLOUD_BIN" run deploy "$SERVICE" \
+"$GCLOUD_BIN" ${ACCOUNT_ARGS[@]+"${ACCOUNT_ARGS[@]}"} run deploy "$SERVICE" \
   --project "$PROJECT_ID" \
   --region "$REGION" \
   "${DEPLOY_SOURCE_ARGS[@]}" \
@@ -226,9 +236,9 @@ echo "Cloud Run deploy completed in $((DEPLOY_FINISHED_AT - DEPLOY_STARTED_AT))s
 
 SERVICE_URL="${BASE_URL:-}"
 if [[ -z "$SERVICE_URL" ]]; then
-  SERVICE_URL="$("$GCLOUD_BIN" run services describe "$SERVICE" --project "$PROJECT_ID" --region "$REGION" --format='value(status.url)')"
+  SERVICE_URL="$("$GCLOUD_BIN" ${ACCOUNT_ARGS[@]+"${ACCOUNT_ARGS[@]}"} run services describe "$SERVICE" --project "$PROJECT_ID" --region "$REGION" --format='value(status.url)')"
   UPDATE_STARTED_AT="$(date +%s)"
-  "$GCLOUD_BIN" run services update "$SERVICE" \
+  "$GCLOUD_BIN" ${ACCOUNT_ARGS[@]+"${ACCOUNT_ARGS[@]}"} run services update "$SERVICE" \
     --project "$PROJECT_ID" \
     --region "$REGION" \
     --update-env-vars "TEAM_PORTAL_BASE_URL=$SERVICE_URL"

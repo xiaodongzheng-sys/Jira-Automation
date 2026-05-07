@@ -2,12 +2,12 @@
 
 Use this checklist for every portal release. The default target is UAT only. Do not publish any Live surface unless the user explicitly asks for Live:
 
-- The Mac-hosted portal exposed through the fixed ngrok URL is the primary teammate entrypoint.
+- The Mac-hosted portal exposed through Cloudflare Tunnel is the primary teammate entrypoint.
 - The Mac host owns Mac-only capabilities and durable portal state, including Source Code Q&A repos/indexes, Codex CLI access, Source Code Q&A sessions/attachments/runtime evidence, BPMIS setup/project rows, SeaTalk desktop data, and VPN-only BPMIS calls.
-- Cloud Run tagged revisions provide the UAT environment. UAT uses `--no-traffic --tag uat`, so it does not change Cloud Run live traffic or the fixed-ngrok Live portal.
+- Cloud Run tagged revisions provide the UAT environment. UAT uses `--no-traffic --tag uat`, so it does not change Cloud Run live traffic or the Cloudflare Tunnel Live portal.
 - New services running on Cloud Run must default to local-agent-backed cache/DB/state. Use the Mac-local data root through local-agent APIs for durable cache, SQLite DBs, Source Code Q&A repos/indexes, PRD stores, Team Dashboard job state, and similar records; do not use the Cloud Run team portal filesystem or container-local DB as the system of record unless explicitly requested.
 - If the user says only "deploy", "publish", "release", or "发/发布", deploy UAT only.
-- If the user says "发 live", "publish live", "deploy live", or "发布 live" without saying Cloud Run, publish only the fixed-ngrok Live portal.
+- If the user says "发 live", "publish live", "deploy live", or "发布 live" without saying Cloud Run, publish only the Cloudflare Tunnel Live portal.
 - Deploy Cloud Run live traffic only when the user explicitly says "live Cloud Run", "Cloud Run live", "publish the cloud version", or equivalent.
 
 ## 1. Pre-Release
@@ -80,6 +80,8 @@ Use an explicit threshold when validating release tooling changes:
 
 ```text
 TEAM_PORTAL_BASE_URL
+TEAM_PORTAL_TUNNEL_PROVIDER
+TEAM_PORTAL_CLOUDFLARE_TUNNEL_NAME
 TEAM_PORTAL_DATA_DIR
 LOCAL_AGENT_TEAM_PORTAL_DATA_DIR
 LOCAL_AGENT_BASE_URL
@@ -94,7 +96,7 @@ TEAM_PORTAL_STAGE
 TEAM_PORTAL_RELEASE_REVISION
 ```
 
-- After UAT deploy, run the same one-command gate with read-only UAT/Live smoke enabled. `EXPECTED_REVISION` must be the Git SHA deployed by `deploy_cloud_run_uat.sh`; `UAT_URL` is the Cloud Run tag URL printed by that script; `LIVE_URL` is the fixed-ngrok portal URL:
+- After UAT deploy, run the same one-command gate with read-only UAT/Live smoke enabled. `EXPECTED_REVISION` must be the Git SHA deployed by `deploy_cloud_run_uat.sh`; `UAT_URL` is the Cloud Run tag URL printed by that script; `LIVE_URL` is the Cloudflare Tunnel portal URL:
 
 ```bash
 ./.venv/bin/python scripts/run_system_full_test_gate.py \
@@ -112,6 +114,8 @@ curl -fsS "$LIVE_URL/healthz"
 curl -fsS "$LIVE_URL/api/local-agent/healthz"
 ```
 
+- Treat Cloudflare `502`, `530`, and `1033` pages as a release-blocking tunnel failure even if a `cloudflared` process exists. The only acceptable Live public check is a successful `curl -fsS "$LIVE_URL/healthz"` response from the portal. UAT local-agent health depends on the Live domain's `/uat-local-agent` proxy, so a broken Live Cloudflare Tunnel can also make UAT local-agent-backed pages fail.
+
 ## 2. UAT Release
 
 Run this for routine releases after changes are committed and pushed to `origin/main`.
@@ -119,9 +123,10 @@ Run this for routine releases after changes are committed and pushed to `origin/
 - Deploy the pushed commit to a Cloud Run tagged UAT revision. The script requires a clean checkout with `HEAD == origin/main`, sets `TEAM_PORTAL_STAGE=uat`, pins `TEAM_PORTAL_RELEASE_REVISION` to the Git SHA, and deploys with `--no-traffic --tag uat`.
 
 ```bash
-CLOUD_RUN_DEPLOY_ACCOUNT=vertex-ai-user@civil-partition-492805-v7.iam.gserviceaccount.com \
 ./scripts/deploy_cloud_run_uat.sh
 ```
+
+The deploy scripts read `GOOGLE_CLOUD_PROJECT` and `CLOUD_RUN_DEPLOY_ACCOUNT` from `.env`, so routine UAT deploys do not depend on a personal interactive `gcloud auth login` session.
 
 - After Cloud Run UAT deploy succeeds, the script syncs the isolated UAT Mac host workspace to the same Git commit, installs host dependencies, initializes the PRD Briefing SQLite schema under the UAT data root, restarts the UAT Mac local-agent on port `7008`, and verifies public UAT local-agent health through the fixed live portal `/uat-local-agent` proxy. This keeps UAT's Cloud Run frontend and UAT local-agent-backed backend/cache code aligned without restarting the live local-agent.
 
@@ -172,7 +177,7 @@ curl https://<uat-tag-url>/api/local-agent/healthz
   - UAT `/healthz/` revision equals the intended Git commit.
   - The Mac host workspace `git rev-parse HEAD` equals the intended Git commit.
   - UAT `/api/local-agent/healthz` succeeds through the public `/uat-local-agent` path to the isolated UAT local-agent.
-  - The fixed-ngrok Live `/healthz` still serves the old Live revision until promotion.
+  - The Cloudflare Tunnel Live `/healthz` still serves the old Live revision until promotion.
   - Live Source Code Q&A still answers through the live data root; UAT Source Code Q&A writes only under `.team-portal-uat`.
   - Any changed workflow passes the expected manual smoke checks.
 
@@ -230,7 +235,7 @@ LOCAL_AGENT_BPMIS_ENABLED=true
 
 ## 4. Mac Local-Agent Release
 
-UAT deploys run this automatically by default. Run it manually only when fixing the Mac host outside the UAT script, when the UAT guard was intentionally skipped, or when preparing the fixed-ngrok Live portal.
+UAT deploys run this automatically by default. Run it manually only when fixing the Mac host outside the UAT script, when the UAT guard was intentionally skipped, or when preparing the Cloudflare Tunnel Live portal.
 
 - Update the host workspace that actually runs the Mac-local services, usually:
 
@@ -239,37 +244,35 @@ cd ~/Workspace/jira-creation-stack-host
 git pull --ff-only
 ```
 
-- Restart the local-agent and its tunnel when any local-agent code, settings, Source Code Q&A behavior, SeaTalk behavior, or BPMIS proxy behavior changed:
+- Restart the local-agent when any local-agent code, settings, Source Code Q&A behavior, SeaTalk behavior, or BPMIS proxy behavior changed:
 
 ```bash
 ./scripts/run_local_agent.sh restart
-./scripts/run_local_agent_tunnel.sh restart
 ```
 
-- Confirm the local-agent is healthy on loopback and through the public tunnel:
+- Confirm the local-agent is healthy on loopback and through the portal proxy:
 
 ```bash
 curl http://127.0.0.1:7007/healthz
-curl https://your-fixed-agent-domain.ngrok.app/healthz
+curl https://app.bankpmtool.uk/api/local-agent/healthz
 ./scripts/run_local_agent.sh status
-./scripts/run_local_agent_tunnel.sh status
 ```
 
 - If the teammate-facing portal path uses `BPMIS_CALL_MODE=local_agent`, restart the local-agent even when the visible change is in a portal page that consumes BPMIS proxy data. A stale local-agent process can keep serving old BPMIS serialization, such as Team Dashboard Biz Projects without `status`, which makes zero-Jira BPMIS projects disappear from Under PRD/Pending Live.
-- For Team Dashboard or BPMIS proxy releases, smoke-check a PM who has Biz Projects but no Jira tickets, and confirm the local-agent-backed response preserves each project's `status` before calling the fixed ngrok portal live.
+- For Team Dashboard or BPMIS proxy releases, smoke-check a PM who has Biz Projects but no Jira tickets, and confirm the local-agent-backed response preserves each project's `status` before calling the Cloudflare Tunnel portal live.
 
 - Confirm `LOCAL_AGENT_TEAM_PORTAL_DATA_DIR` points at the durable Mac data directory that contains `team_portal.db`, Source Code Q&A repos/indexes, sessions, attachments, runtime evidence, and BPMIS project/config rows. Do not rely on Cloud Run container storage for these records.
 
 ## 5. Live Promotion
 
-Run this only after the user explicitly confirms UAT passed and asks to publish Live. The promotion script reads the Cloud Run `uat` tag, verifies the tagged revision's `TEAM_PORTAL_RELEASE_REVISION`, refuses to publish if `origin/main` has moved past that UAT commit, fast-forwards the host workspace, restarts fixed-ngrok Live, and verifies `/healthz`.
+Run this only after the user explicitly confirms UAT passed and asks to publish Live. The promotion script reads the Cloud Run `uat` tag, verifies the tagged revision's `TEAM_PORTAL_RELEASE_REVISION`, refuses to publish if `origin/main` has moved past that UAT commit, fast-forwards the host workspace, restarts Cloudflare Tunnel Live, and verifies `/healthz`.
 
 ```bash
 CLOUD_RUN_DEPLOY_ACCOUNT=vertex-ai-user@civil-partition-492805-v7.iam.gserviceaccount.com \
 ./scripts/promote_uat_to_live.sh
 ```
 
-The script does not change Cloud Run live traffic. The fixed-ngrok URL remains the primary Live portal.
+The script does not change Cloud Run live traffic. The Cloudflare Tunnel URL remains the primary Live portal.
 
 After promotion, run doctor for the full stack view:
 
@@ -278,12 +281,16 @@ cd ~/Workspace/jira-creation-stack-host
 ./scripts/run_team_stack.sh doctor
 ```
 
-When `BPMIS_CALL_MODE=local_agent`, `run_team_stack.sh restart` also restarts the Mac local-agent first so portal BPMIS proxy changes do not run against a stale local-agent process. The doctor check verifies portal health, public URL health, ngrok inspector health, revision alignment, data directory readiness, and launchd friendliness.
+When `BPMIS_CALL_MODE=local_agent`, `run_team_stack.sh restart` also restarts the Mac local-agent first so portal BPMIS proxy changes do not run against a stale local-agent process. The doctor check verifies portal health, public URL health, tunnel health, revision alignment, data directory readiness, and launchd friendliness.
 
-For the fixed-ngrok primary-entry setup, confirm these values in the host `.env`:
+For the Cloudflare Tunnel primary-entry setup, confirm these values in the host `.env`:
 
 ```text
-TEAM_PORTAL_BASE_URL=https://<fixed-portal-ngrok-host>
+TEAM_PORTAL_BASE_URL=https://app.bankpmtool.uk
+TEAM_PORTAL_TUNNEL_PROVIDER=cloudflare
+TEAM_PORTAL_CLOUDFLARE_TUNNEL_NAME=bankpmtool-live
+GOOGLE_CLOUD_PROJECT=civil-partition-492805-v7
+CLOUD_RUN_DEPLOY_ACCOUNT=vertex-ai-user@civil-partition-492805-v7.iam.gserviceaccount.com
 TEAM_PORTAL_HOST=127.0.0.1
 TEAM_PORTAL_PORT=5000
 TEAM_PORTAL_STAGE=
@@ -292,7 +299,7 @@ TEAM_PORTAL_STAGE=
 Google OAuth callback URLs must match `TEAM_PORTAL_BASE_URL` exactly:
 
 ```text
-https://<fixed-portal-ngrok-host>/auth/google/callback
+https://app.bankpmtool.uk/auth/google/callback
 ```
 
 ## 6. Post-Release Acceptance
@@ -300,12 +307,12 @@ https://<fixed-portal-ngrok-host>/auth/google/callback
 Run these after the Mac-hosted portal is updated:
 
 - Mac portal loopback `/healthz` returns the expected revision.
-- The fixed ngrok URL opens the same Mac-hosted portal and returns HTTP 200.
-- Google OAuth login returns to the fixed ngrok URL.
-- BPMIS Setup can save/load config from the fixed ngrok portal.
+- The Cloudflare Tunnel URL opens the same Mac-hosted portal and returns HTTP 200.
+- Google OAuth login returns to the Cloudflare Tunnel URL.
+- BPMIS Setup can save/load config from the Cloudflare Tunnel portal.
 - BPMIS Create Jira succeeds with Jira-resolvable NPT user emails in owner fields.
 - Source Code Q&A with Codex answers from the Mac-hosted portal and does not block on repo clone/pull/index work.
-- Source Code Q&A attachment smoke passes for one small text file; for image-capable releases, confirm Codex mode receives the image through the fixed ngrok portal path.
+- Source Code Q&A attachment smoke passes for one small text file; for image-capable releases, confirm Codex mode receives the image through the Cloudflare Tunnel portal path.
 - Source Code Q&A active repo config contains the expected GitLab repositories, not fixture/demo `git.example.com` URLs, and index health is `ready`.
 - SeaTalk Summary reads Mac desktop data from the Mac host.
 - `./scripts/run_team_stack.sh doctor` is clean.
@@ -322,7 +329,7 @@ Only when the user explicitly requested Cloud Run live deployment or validation,
 - UAT deploys must not be promoted if `origin/main` has advanced beyond the tagged UAT commit. Re-deploy UAT from the latest commit instead.
 - Source Code Q&A index/retrieval changes need the Mac-hosted portal restarted because the Mac owns both the primary web request path and durable repos/indexes.
 - Local-agent code changes still need the Mac local-agent restarted when Cloud Run backup mode or local-agent-only features are in use.
-- BPMIS proxy changes need the fixed ngrok portal path checked by default; check Cloud Run env only when the user explicitly requested Cloud Run.
+- BPMIS proxy changes need the Cloudflare Tunnel portal path checked by default; check Cloud Run env only when the user explicitly requested Cloud Run.
 - SeaTalk changes need the Mac-hosted portal or relevant Mac watcher restarted because Cloud Run cannot read the Mac desktop data directly.
 - `scripts/deploy_cloud_run.sh` and `scripts/deploy_cloud_run_full.sh` matter only for explicit Cloud Run releases.
 - OAuth/base URL changes need Google Cloud Console callback URLs to match the released hostname.
@@ -336,7 +343,7 @@ Only when the user explicitly requested Cloud Run live deployment or validation,
 
 ## 9. Keep This Checklist Current
 
-Whenever a new production, deployment, local-agent, BPMIS proxy, Source Code Q&A, SeaTalk, OAuth, ngrok, launchd, host-workspace, or explicit Cloud Run issue is found, update this checklist in the same fix cycle.
+Whenever a new production, deployment, local-agent, BPMIS proxy, Source Code Q&A, SeaTalk, OAuth, tunnel, launchd, host-workspace, or explicit Cloud Run issue is found, update this checklist in the same fix cycle.
 
 Each update should capture:
 

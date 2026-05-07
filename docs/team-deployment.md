@@ -3,11 +3,11 @@
 This guide describes the supported **shared-team** setup:
 
 - one Mac hosts the Flask portal
-- ngrok exposes the portal through one stable HTTPS URL
+- Cloudflare Tunnel exposes the portal through one stable HTTPS URL
 - teammates sign in with `@npt.sg` Google accounts
 - each teammate stores their own config and BPMIS token inside the portal
 
-This Mac-hosted ngrok URL is the primary teammate entrypoint and the default release target. Cloud Run can remain available as a backup surface, but routine deploy/release/live requests should update and verify only the fixed ngrok portal. Deploy or validate Cloud Run only when the request explicitly says Cloud Run.
+This Mac-hosted Cloudflare Tunnel URL is the primary teammate entrypoint and the default release target. Cloud Run can remain available as a UAT/backup surface, but routine deploy/release/live requests should update and verify only the Mac-hosted tunnel portal. Deploy or validate Cloud Run only when the request explicitly says Cloud Run.
 
 ## Host Configuration
 
@@ -18,7 +18,9 @@ FLASK_SECRET_KEY=change-me
 GOOGLE_OAUTH_CLIENT_SECRET_FILE=/absolute/path/to/google-client-secret.json
 TEAM_PORTAL_HOST=127.0.0.1
 TEAM_PORTAL_PORT=5000
-TEAM_PORTAL_BASE_URL=https://jira-tool.example.com
+TEAM_PORTAL_BASE_URL=https://app.bankpmtool.uk
+TEAM_PORTAL_TUNNEL_PROVIDER=cloudflare
+TEAM_PORTAL_CLOUDFLARE_TUNNEL_NAME=bankpmtool-live
 TEAM_ALLOWED_EMAIL_DOMAINS=npt.sg
 TEAM_PORTAL_DATA_DIR=/absolute/path/to/team-portal-data
 TEAM_PORTAL_CONFIG_ENCRYPTION_KEY=<fernet-key>
@@ -35,7 +37,7 @@ PY
 
 Notes:
 
-- `TEAM_PORTAL_BASE_URL` must match the exact ngrok hostname teammates will open
+- `TEAM_PORTAL_BASE_URL` must match the exact Cloudflare Tunnel hostname teammates will open
 - Google OAuth callback generation uses `TEAM_PORTAL_BASE_URL`
 - `TEAM_PORTAL_CONFIG_ENCRYPTION_KEY` is required if teammates will save BPMIS tokens in the shared portal
 
@@ -44,10 +46,10 @@ Notes:
 In Google Cloud Console, configure the OAuth client with this callback:
 
 ```text
-https://jira-tool.example.com/auth/google/callback
+https://app.bankpmtool.uk/auth/google/callback
 ```
 
-Replace the hostname with your real ngrok hostname.
+Replace the hostname with your real Cloudflare Tunnel hostname.
 
 The portal requests Google Drive and Google Docs read scopes so it can read shared Google Doc links during Work Memory / Gmail evidence ingestion. After scope changes, existing browser sessions and stored owner credentials are not upgraded automatically; sign out and reconnect Google to grant the new `drive.readonly` and `documents.readonly` permissions.
 
@@ -81,7 +83,7 @@ That script will:
 
 ## Start the Shared Portal
 
-Use the stack guard as the fixed entrypoint. It keeps the Flask portal and ngrok alive together and is now the recommended day-to-day start command:
+Use the stack guard as the fixed entrypoint. It keeps the Flask portal and selected public tunnel alive together and is the recommended day-to-day start command:
 
 ```bash
 ./scripts/run_team_stack.sh start
@@ -103,21 +105,21 @@ To stop or restart:
 ./scripts/run_team_stack.sh restart
 ```
 
-When the launchd job is installed, `restart` uses `launchctl kickstart -k` so launchd remains the single owner of the guard process and the fixed ngrok endpoint does not get claimed by competing restarts.
+When the launchd job is installed, `restart` uses `launchctl kickstart -k` so launchd remains the single owner of the guard process and the public tunnel does not get claimed by competing restarts.
 
 If you need to manage the pieces manually for debugging:
 
 ```bash
 ./scripts/run_team_portal_prod.sh start
-./scripts/run_ngrok_tunnel.sh start
+./scripts/run_cloudflare_tunnel.sh start
 ```
 
-The stack guard now runs as a lightweight supervisor. It keeps the Flask portal and ngrok as child processes, restarts them with backoff when they crash, probes `/healthz` for the portal, and validates the ngrok inspector API before it reports the stack as healthy.
+The stack guard now runs as a lightweight supervisor. It keeps the Flask portal and selected public tunnel as child processes, restarts them with backoff when they crash, probes `/healthz` for the portal, and validates the public tunnel health before it reports the stack as healthy.
 
-For the primary-entry setup, the host `.env` should point `TEAM_PORTAL_BASE_URL` at the same fixed ngrok hostname that teammates open. Google OAuth callback configuration must use that hostname too:
+For the primary-entry setup, the host `.env` should point `TEAM_PORTAL_BASE_URL` at the same Cloudflare Tunnel hostname that teammates open. Google OAuth callback configuration must use that hostname too:
 
 ```text
-https://<fixed-portal-ngrok-host>/auth/google/callback
+https://app.bankpmtool.uk/auth/google/callback
 ```
 
 Cloud Run-specific local-agent settings can stay in `.env` for explicit fallback deployments, but they are not part of the normal Mac portal request path or default release validation.
@@ -151,18 +153,18 @@ Note:
 TEAM_STACK_ALLOW_PROTECTED_ROOT=1 ./scripts/install_team_stack_launchd.sh
 ```
 
-## ngrok Setup
+## Cloudflare Tunnel Setup
 
-Create one tunnel on the host Mac that forwards the public hostname to the local Flask port:
+Create one named tunnel on the host Mac that forwards the public hostname to the local Flask port:
 
 ```text
-https://jira-tool.example.com  ->  http://127.0.0.1:5000
+https://app.bankpmtool.uk  ->  http://127.0.0.1:5000
 ```
 
 Owner-run checklist:
 
 1. Start the portal with `./scripts/run_team_portal_prod.sh start`
-2. Start the public ngrok tunnel
+2. Start the public Cloudflare Tunnel with `./scripts/run_cloudflare_tunnel.sh start`
 3. Open the public URL and confirm the homepage loads
 4. Confirm Google sign-in returns to the same public URL
 5. Confirm teammates can finish `Setup`, then use `Run`
@@ -188,17 +190,17 @@ Host-side checks:
 - `./scripts/run_team_portal_prod.sh status`
 - `./scripts/run_team_portal_prod.sh logs`
 - `curl http://127.0.0.1:5000/healthz`
-- open the public ngrok URL
+- open the public Cloudflare Tunnel URL
 - verify Google login callback works through the public hostname
-- inspect `.team-portal/run/team_stack_status.json` for the latest guard view of portal and ngrok health
+- inspect `.team-portal/run/team_stack_status.json` for the latest guard view of portal and tunnel health
 - run `./scripts/run_team_stack.sh doctor` for a one-shot end-to-end stack diagnosis
 - `doctor` now also checks whether the repo path is launchd-friendly and whether the `launchd` job is installed
 
 Primary-entry acceptance checks:
 
-- Source Code Q&A answers from the fixed ngrok portal URL.
-- BPMIS setup and run flows work from the fixed ngrok portal URL.
-- SeaTalk features read Mac desktop data from the fixed ngrok portal URL.
+- Source Code Q&A answers from the Cloudflare Tunnel portal URL.
+- BPMIS setup and run flows work from the Cloudflare Tunnel portal URL.
+- SeaTalk features read Mac desktop data from the Cloudflare Tunnel portal URL.
 - Cloud Run URL is checked only for explicit Cloud Run deployments or validation requests.
 
 Teammate acceptance check:
@@ -218,7 +220,7 @@ Check:
 
 - the host Mac is awake
 - the portal process is running
-- the ngrok tunnel is connected
+- the Cloudflare Tunnel is connected
 - `./scripts/run_team_stack.sh doctor`
 
 ### launchd install fails on macOS
@@ -259,7 +261,7 @@ Check:
 This shared deployment is intentionally lightweight:
 
 - one host Mac
-- one ngrok tunnel
+- one Cloudflare Tunnel
 - Google login restricted by domain
 - uptime depends on the host Mac staying online
 

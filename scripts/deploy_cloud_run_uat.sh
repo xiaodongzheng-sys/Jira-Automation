@@ -6,14 +6,17 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT_DIR/scripts/lib/team_env.sh"
 
 SCRIPT_STARTED_AT="$(date +%s)"
-SERVICE="${CLOUD_RUN_SERVICE:-team-portal}"
-REGION="${CLOUD_RUN_REGION:-asia-southeast1}"
-UAT_TAG="${CLOUD_RUN_UAT_TAG:-uat}"
+SERVICE="${CLOUD_RUN_SERVICE:-$(read_env_value CLOUD_RUN_SERVICE)}"
+SERVICE="${SERVICE:-team-portal}"
+REGION="${CLOUD_RUN_REGION:-$(read_env_value CLOUD_RUN_REGION)}"
+REGION="${REGION:-asia-southeast1}"
+UAT_TAG="${CLOUD_RUN_UAT_TAG:-$(read_env_value CLOUD_RUN_UAT_TAG)}"
+UAT_TAG="${UAT_TAG:-uat}"
 UAT_LOCAL_AGENT_PORT="${CLOUD_RUN_UAT_LOCAL_AGENT_PORT:-7008}"
 UAT_LOCAL_AGENT_DATA_DIR="${CLOUD_RUN_UAT_LOCAL_AGENT_DATA_DIR:-.team-portal-uat}"
 UAT_LOCAL_AGENT_SCREEN_SESSION="${CLOUD_RUN_UAT_LOCAL_AGENT_SCREEN_SESSION:-bpmis-local-agent-uat}"
 UAT_LOCAL_AGENT_SECRET_NAME="${CLOUD_RUN_UAT_LOCAL_AGENT_SECRET_NAME:-local-agent-uat-hmac-secret}"
-CLOUD_RUN_IMAGE="${CLOUD_RUN_IMAGE:-}"
+CLOUD_RUN_IMAGE="${CLOUD_RUN_IMAGE:-$(read_env_value CLOUD_RUN_IMAGE)}"
 GCLOUD_BIN="${GCLOUD_BIN:-$(command -v gcloud || true)}"
 if [[ -z "$GCLOUD_BIN" && -x "$HOME/google-cloud-sdk/bin/gcloud" ]]; then
   GCLOUD_BIN="$HOME/google-cloud-sdk/bin/gcloud"
@@ -27,12 +30,14 @@ if [[ -x "/opt/homebrew/bin/python3.12" && -z "${CLOUDSDK_PYTHON:-}" ]]; then
 fi
 
 PROJECT_ARGS=()
-if [[ -n "${GOOGLE_CLOUD_PROJECT:-}" ]]; then
-  PROJECT_ARGS=(--project "$GOOGLE_CLOUD_PROJECT")
+GOOGLE_CLOUD_PROJECT_RESOLVED="${GOOGLE_CLOUD_PROJECT:-$(read_env_value GOOGLE_CLOUD_PROJECT)}"
+if [[ -n "$GOOGLE_CLOUD_PROJECT_RESOLVED" ]]; then
+  PROJECT_ARGS=(--project "$GOOGLE_CLOUD_PROJECT_RESOLVED")
 fi
 ACCOUNT_ARGS=()
-if [[ -n "${CLOUD_RUN_DEPLOY_ACCOUNT:-}" ]]; then
-  ACCOUNT_ARGS=(--account "$CLOUD_RUN_DEPLOY_ACCOUNT")
+CLOUD_RUN_DEPLOY_ACCOUNT_RESOLVED="${CLOUD_RUN_DEPLOY_ACCOUNT:-$(read_env_value CLOUD_RUN_DEPLOY_ACCOUNT)}"
+if [[ -n "$CLOUD_RUN_DEPLOY_ACCOUNT_RESOLVED" ]]; then
+  ACCOUNT_ARGS=(--account "$CLOUD_RUN_DEPLOY_ACCOUNT_RESOLVED")
 fi
 
 require_clean_pushed_main() {
@@ -324,10 +329,9 @@ if [[ "${CLOUD_RUN_UAT_LOCAL_AGENT_SECRET_SOURCE:-secret_manager}" == "env" ]]; 
     exit 1
   fi
   ENV_VARS+=("LOCAL_AGENT_HMAC_SECRET=$uat_hmac_secret")
-  DEPLOY_SECRET_ARGS=(--update-secrets "$BASE_SECRET_BINDINGS")
-  ENV_REMOVE_ARGS=(--remove-secrets LOCAL_AGENT_HMAC_SECRET)
-  ENV_DEPLOY_MODE="update"
-  ENV_SECRET_PRECLEAR_REQUIRED=1
+  DEPLOY_SECRET_ARGS=(--set-secrets "$BASE_SECRET_BINDINGS")
+  ENV_DEPLOY_MODE="set"
+  ENV_SECRET_PRECLEAR_REQUIRED=0
   echo "Using UAT local-agent HMAC from env fallback because CLOUD_RUN_UAT_LOCAL_AGENT_SECRET_SOURCE=env."
 fi
 if [[ "$ENV_SECRET_PRECLEAR_REQUIRED" == "1" ]]; then

@@ -569,6 +569,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_PORTAL_BASE_URL": "",
@@ -592,6 +593,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_PORTAL_BASE_URL": "",
@@ -620,6 +622,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_PORTAL_BASE_URL": "",
@@ -644,6 +647,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_PORTAL_BASE_URL": "",
@@ -666,6 +670,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg",
@@ -686,6 +691,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg",
@@ -719,6 +725,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg",
@@ -747,6 +754,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg",
@@ -779,6 +787,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg",
@@ -834,6 +843,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_PORTAL_BASE_URL": "",
@@ -887,6 +897,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as cloud_dir_one, tempfile.TemporaryDirectory() as cloud_dir_two, tempfile.TemporaryDirectory() as remote_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": cloud_dir_one,
                 "TEAM_PORTAL_BASE_URL": "",
@@ -951,6 +962,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_PORTAL_BASE_URL": "",
@@ -1007,6 +1019,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_PORTAL_BASE_URL": "",
@@ -1040,6 +1053,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_PORTAL_BASE_URL": "",
@@ -1090,6 +1104,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_PORTAL_BASE_URL": "",
@@ -1141,6 +1156,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_PORTAL_BASE_URL": "",
@@ -1219,6 +1235,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_ALLOWED_EMAILS": "",
@@ -1282,6 +1299,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_PORTAL_BASE_URL": "",
@@ -1320,6 +1338,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_PORTAL_BASE_URL": "",
@@ -1361,6 +1380,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_PORTAL_BASE_URL": "",
@@ -1391,6 +1411,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_ALLOWED_EMAILS": "",
@@ -1491,6 +1512,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_ALLOWED_EMAILS": "",
@@ -1568,6 +1590,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_ALLOWED_EMAILS": "",
@@ -1631,6 +1654,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_PORTAL_BASE_URL": "",
@@ -1704,6 +1728,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_PORTAL_BASE_URL": "",
@@ -1941,6 +1966,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_ALLOWED_EMAILS": "",
@@ -2213,6 +2239,7 @@ class WebPortalFeatureTests(unittest.TestCase):
             patcher = patch.dict(
                 os.environ,
                 {
+                    "ENV_FILE": os.devnull,
                     "FLASK_SECRET_KEY": "test-secret",
                     "TEAM_PORTAL_DATA_DIR": temp_dir.name,
                     "TEAM_PORTAL_BASE_URL": "",
@@ -2284,6 +2311,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_ALLOWED_EMAILS": "",
@@ -2358,6 +2386,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_ALLOWED_EMAILS": "",
@@ -2473,6 +2502,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_ALLOWED_EMAILS": "",
@@ -2585,6 +2615,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_ALLOWED_EMAILS": "",
@@ -2664,6 +2695,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_ALLOWED_EMAILS": "",
@@ -2742,6 +2774,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_ALLOWED_EMAILS": "",
@@ -2812,6 +2845,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_ALLOWED_EMAILS": "",
@@ -2858,6 +2892,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_ALLOWED_EMAILS": "",
@@ -2959,6 +2994,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_ALLOWED_EMAILS": "",
@@ -3031,6 +3067,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_ALLOWED_EMAILS": "",
@@ -3150,6 +3187,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_ALLOWED_EMAILS": "",
@@ -3220,6 +3258,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_ALLOWED_EMAILS": "",
@@ -3242,6 +3281,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_PORTAL_BASE_URL": "",
@@ -3281,6 +3321,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_PORTAL_BASE_URL": "",
@@ -3329,6 +3370,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_PORTAL_BASE_URL": "",
@@ -3384,6 +3426,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_PORTAL_BASE_URL": "",
@@ -3456,6 +3499,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_PORTAL_BASE_URL": "",
@@ -3508,6 +3552,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_PORTAL_BASE_URL": "",
@@ -3563,6 +3608,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_PORTAL_BASE_URL": "",
@@ -3618,6 +3664,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_PORTAL_BASE_URL": "",
@@ -3672,6 +3719,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_PORTAL_BASE_URL": "",
@@ -3702,6 +3750,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_PORTAL_BASE_URL": "",
@@ -3756,6 +3805,7 @@ class WebPortalFeatureTests(unittest.TestCase):
             with self.subTest(name=name), tempfile.TemporaryDirectory() as temp_dir, patch.dict(
                 os.environ,
                 {
+                    "ENV_FILE": os.devnull,
                     "FLASK_SECRET_KEY": "test-secret",
                     "TEAM_PORTAL_DATA_DIR": temp_dir,
                     "TEAM_PORTAL_BASE_URL": "",
@@ -3800,6 +3850,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_PORTAL_BASE_URL": "",
@@ -3838,6 +3889,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_PORTAL_BASE_URL": "",
@@ -3916,6 +3968,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_PORTAL_BASE_URL": "",
@@ -3956,6 +4009,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_PORTAL_BASE_URL": "",
@@ -3994,6 +4048,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_PORTAL_BASE_URL": "",
@@ -4042,6 +4097,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_PORTAL_BASE_URL": "",
@@ -4080,6 +4136,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_PORTAL_BASE_URL": "",
@@ -4121,6 +4178,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_PORTAL_BASE_URL": "",
@@ -4157,6 +4215,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_PORTAL_BASE_URL": "",
@@ -4189,6 +4248,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_PORTAL_BASE_URL": "",
@@ -4315,6 +4375,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_PORTAL_BASE_URL": "",
@@ -4408,6 +4469,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_PORTAL_BASE_URL": "",
@@ -4441,6 +4503,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_PORTAL_BASE_URL": "",
@@ -4496,6 +4559,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_PORTAL_BASE_URL": "",
@@ -4545,6 +4609,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_PORTAL_BASE_URL": "",
@@ -4586,6 +4651,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_PORTAL_BASE_URL": "",
@@ -4630,6 +4696,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_PORTAL_BASE_URL": "",
@@ -4655,6 +4722,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_PORTAL_BASE_URL": "",
@@ -4689,6 +4757,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_PORTAL_BASE_URL": "",
@@ -4736,6 +4805,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_PORTAL_BASE_URL": "",
@@ -4767,6 +4837,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_PORTAL_BASE_URL": "",
@@ -4831,6 +4902,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_PORTAL_BASE_URL": "",
@@ -4871,6 +4943,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_PORTAL_BASE_URL": "",
@@ -4914,6 +4987,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_PORTAL_BASE_URL": "https://uat.example.test",
@@ -4959,6 +5033,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_PORTAL_BASE_URL": "",
@@ -4992,6 +5067,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_PORTAL_BASE_URL": "",
@@ -5016,6 +5092,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_PORTAL_BASE_URL": "",
@@ -5045,6 +5122,7 @@ class WebPortalFeatureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             os.environ,
             {
+                "ENV_FILE": os.devnull,
                 "FLASK_SECRET_KEY": "test-secret",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "TEAM_PORTAL_BASE_URL": "",

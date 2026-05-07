@@ -42,6 +42,9 @@ logs() {
   echo
   echo "== ngrok Tunnel =="
   "$ROOT_DIR/scripts/run_ngrok_tunnel.sh" logs || true
+  echo
+  echo "== Cloudflare Tunnel =="
+  "$ROOT_DIR/scripts/run_cloudflare_tunnel.sh" logs || true
 }
 
 launchd_domain_label() {
@@ -53,11 +56,32 @@ launchd_stack_installed() {
   command -v launchctl >/dev/null 2>&1 && launchctl print "$(launchd_domain_label)" >/dev/null 2>&1
 }
 
+public_url_reachable() {
+  local url="$1"
+  local probe_url="${url%/}/healthz"
+  if curl -fsS --max-time 10 "$probe_url" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  if [[ "$probe_url" =~ ^https://([^/:]+)(/.*)?$ ]] && command -v dig >/dev/null 2>&1; then
+    local host="${BASH_REMATCH[1]}"
+    local ip
+    ip="$(dig +short A "$host" @1.1.1.1 | head -n 1)"
+    if [[ -n "$ip" ]]; then
+      curl -fsS --resolve "$host:443:$ip" --max-time 10 "$probe_url" >/dev/null 2>&1
+      return
+    fi
+  fi
+
+  return 1
+}
+
 doctor() {
   local env_file="$ENV_FILE"
   local data_dir="${TEAM_PORTAL_DATA_DIR:-}"
   local port="${TEAM_PORTAL_PORT:-}"
   local public_url="${TEAM_PORTAL_BASE_URL:-}"
+  local tunnel_provider="${TEAM_PORTAL_TUNNEL_PROVIDER:-}"
   local launchd_label="${TEAM_STACK_LAUNCHD_LABEL:-io.npt.jira-creation-stack}"
   local status_file
   local alert_file
@@ -72,7 +96,7 @@ doctor() {
   local recommended_root
 
   local resolved
-  resolved="$(read_env_values TEAM_PORTAL_DATA_DIR TEAM_PORTAL_PORT TEAM_PORTAL_BASE_URL)"
+  resolved="$(read_env_values TEAM_PORTAL_DATA_DIR TEAM_PORTAL_PORT TEAM_PORTAL_BASE_URL TEAM_PORTAL_TUNNEL_PROVIDER)"
   if [[ -z "$data_dir" ]]; then
     data_dir="$(printf '%s' "$resolved" | sed -n '1p')"
   fi
@@ -82,9 +106,13 @@ doctor() {
   if [[ -z "$public_url" ]]; then
     public_url="$(printf '%s' "$resolved" | sed -n '3p')"
   fi
+  if [[ -z "$tunnel_provider" ]]; then
+    tunnel_provider="$(printf '%s' "$resolved" | sed -n '4p')"
+  fi
 
   data_dir="$(resolve_team_data_dir "$data_dir")"
   port="${port:-5000}"
+  tunnel_provider="${tunnel_provider:-ngrok}"
   expected_revision="$(current_release_revision)"
   recommended_root="$(recommended_team_stack_root)"
   status_file="$data_dir/run/team_stack_status.json"
@@ -104,6 +132,7 @@ doctor() {
   echo "Data dir: $data_dir"
   echo "Port: $port"
   echo "Public URL: ${public_url:-<missing>}"
+  echo "Tunnel provider: $tunnel_provider"
   echo "Expected revision: $expected_revision"
   echo
 
@@ -151,8 +180,16 @@ doctor() {
   fi
   echo
 
-  echo "== ngrok API =="
-  if curl -fsS --max-time 5 "http://127.0.0.1:4040/api/tunnels" >/dev/null; then
+  echo "== Tunnel =="
+  if [[ "$tunnel_provider" == "cloudflare" ]]; then
+    if pgrep -f "cloudflared .*tunnel .*run" >/dev/null 2>&1; then
+      echo "Cloudflare Tunnel process running"
+    else
+      echo "Cloudflare Tunnel process not found"
+      ngrok_ok=0
+      ok=1
+    fi
+  elif curl -fsS --max-time 5 "http://127.0.0.1:4040/api/tunnels" >/dev/null; then
     echo "ngrok inspector reachable"
   else
     echo "ngrok inspector unreachable"
@@ -163,7 +200,7 @@ doctor() {
 
   echo "== Public URL =="
   if [[ -n "$public_url" ]]; then
-    if curl -I --max-time 10 "$public_url" >/dev/null 2>&1; then
+    if public_url_reachable "$public_url"; then
       echo "public URL reachable"
     else
       echo "public URL check failed"
@@ -214,7 +251,7 @@ if isinstance(updated_unix, int):
 
 state = str(payload.get("state") or "")
 portal_health = str(payload.get("portal_health") or "")
-ngrok_health = str(payload.get("ngrok_health") or "")
+tunnel_health = str(payload.get("tunnel_health") or payload.get("ngrok_health") or "")
 
 if not guard_ok and state == "running":
     messages.append("status summary is stale: file says running but guard is not running")
@@ -224,8 +261,8 @@ if state == "stopped" and (portal_ok or ngrok_ok or public_ok):
     messages.append("status summary is stale: file says stopped but live probes still respond")
 if portal_ok and portal_health == "unhealthy":
     messages.append("status summary is stale: portal probe is healthy but file says unhealthy")
-if ngrok_ok and ngrok_health == "unhealthy":
-    messages.append("status summary is stale: ngrok probe is healthy but file says unhealthy")
+if ngrok_ok and tunnel_health == "unhealthy":
+    messages.append("status summary is stale: tunnel probe is healthy but file says unhealthy")
 if public_ok and not payload.get("public_url"):
     messages.append("status summary is incomplete: public_url missing while public probe passed")
 
@@ -316,6 +353,7 @@ start() {
 stop() {
   "$GUARD_DAEMON_SCRIPT" stop || true
   "$ROOT_DIR/scripts/run_ngrok_tunnel.sh" stop || true
+  "$ROOT_DIR/scripts/run_cloudflare_tunnel.sh" stop || true
   "$ROOT_DIR/scripts/run_team_portal_prod.sh" stop || true
 }
 
@@ -323,6 +361,7 @@ status() {
   "$GUARD_DAEMON_SCRIPT" status || true
   "$ROOT_DIR/scripts/run_team_portal_prod.sh" status || true
   "$ROOT_DIR/scripts/run_ngrok_tunnel.sh" status || true
+  "$ROOT_DIR/scripts/run_cloudflare_tunnel.sh" status || true
 }
 
 restart_local_agent_if_needed() {

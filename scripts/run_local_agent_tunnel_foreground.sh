@@ -5,6 +5,12 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT_DIR/scripts/lib/team_env.sh"
 
+if [[ "${ALLOW_LEGACY_NGROK_LOCAL_AGENT:-0}" != "1" ]]; then
+  echo "Mac local-agent ngrok tunnel is sunset. Use the Cloudflare-backed team portal proxy instead."
+  echo "Set ALLOW_LEGACY_NGROK_LOCAL_AGENT=1 only for an explicit emergency rollback."
+  exit 1
+fi
+
 PUBLIC_URL="${LOCAL_AGENT_PUBLIC_URL:-$(read_env_value LOCAL_AGENT_PUBLIC_URL)}"
 PORT="${LOCAL_AGENT_PORT:-$(read_env_value LOCAL_AGENT_PORT)}"
 PORT="${PORT:-7007}"
