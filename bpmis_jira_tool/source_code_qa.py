@@ -13131,6 +13131,77 @@ class SourceCodeQAService:
             cache_key=cache_key,
         )
 
+    def _final_llm_answer_result(
+        self,
+        *,
+        question: str,
+        answer: str,
+        structured_answer: dict[str, Any],
+        evidence_summary: dict[str, Any],
+        quality_gate: dict[str, Any],
+        claim_check: dict[str, Any],
+        answer_judge: dict[str, Any],
+        finish_reason: str,
+        selected_matches: list[dict[str, Any]],
+        cache_key: str,
+        usage: dict[str, Any],
+        effective_model: str,
+        query_mode: str,
+        routed_budget_mode: str,
+        llm_budget_mode: str,
+        llm_route: dict[str, Any],
+        answer_thinking_budget: int,
+        attempts: int,
+        llm_latency_ms: int,
+        llm_attempt_log: list[dict[str, Any]],
+        answer_check: dict[str, Any],
+        evidence_pack: dict[str, Any],
+    ) -> dict[str, Any]:
+        final = self._finalize_llm_answer(
+            question=question,
+            answer=answer,
+            structured_answer=structured_answer,
+            evidence_summary=evidence_summary,
+            quality_gate=quality_gate,
+            claim_check=claim_check,
+            answer_judge=answer_judge,
+            finish_reason=finish_reason,
+            selected_matches=selected_matches,
+        )
+        final_answer = final["answer"]
+        self._store_llm_answer_cache(
+            cache_key=cache_key,
+            answer=final_answer,
+            usage=usage,
+            quality_gate=quality_gate,
+            effective_model=effective_model,
+            thinking_budget=llm_route.get("repair_thinking_budget", answer_thinking_budget),
+            finish_reason=finish_reason,
+            query_mode=query_mode,
+            routed_budget_mode=routed_budget_mode,
+        )
+        return self._llm_answer_result_payload(
+            answer=final_answer,
+            routed_budget_mode=routed_budget_mode,
+            llm_budget_mode=llm_budget_mode,
+            llm_route=llm_route,
+            usage=usage,
+            effective_model=effective_model,
+            answer_thinking_budget=answer_thinking_budget,
+            attempts=attempts,
+            llm_latency_ms=llm_latency_ms,
+            llm_attempt_log=llm_attempt_log,
+            finish_reason=finish_reason,
+            quality_gate=quality_gate,
+            answer_check=answer_check,
+            claim_check=claim_check,
+            answer_judge=answer_judge,
+            structured_answer=final["structured_answer"],
+            answer_contract=final["answer_contract"],
+            evidence_pack=evidence_pack,
+            cache_key=cache_key,
+        )
+
     def _store_llm_answer_cache(
         self,
         *,
@@ -13702,7 +13773,7 @@ class SourceCodeQAService:
                     "repair_model": effective_model,
                     "repair_thinking_budget": retry_thinking_budget,
                 }
-        final = self._finalize_llm_answer(
+        return self._final_llm_answer_result(
             question=question,
             answer=answer,
             structured_answer=structured_answer,
@@ -13712,41 +13783,19 @@ class SourceCodeQAService:
             answer_judge=answer_judge,
             finish_reason=finish_reason,
             selected_matches=selected_matches,
-        )
-        answer = final["answer"]
-        structured_answer = final["structured_answer"]
-        answer_contract = final["answer_contract"]
-        self._store_llm_answer_cache(
             cache_key=cache_key,
-            answer=answer,
             usage=usage,
-            quality_gate=quality_gate,
             effective_model=effective_model,
-            thinking_budget=llm_route.get("repair_thinking_budget", answer_thinking_budget),
-            finish_reason=finish_reason,
             query_mode=query_mode,
-            routed_budget_mode=routed_budget_mode,
-        )
-        return self._llm_answer_result_payload(
-            answer=answer,
             routed_budget_mode=routed_budget_mode,
             llm_budget_mode=llm_budget_mode,
             llm_route=llm_route,
-            usage=usage,
-            effective_model=effective_model,
             answer_thinking_budget=answer_thinking_budget,
             attempts=attempts,
             llm_latency_ms=llm_latency_ms,
             llm_attempt_log=llm_attempt_log,
-            finish_reason=finish_reason,
-            quality_gate=quality_gate,
             answer_check=answer_check,
-            claim_check=claim_check,
-            answer_judge=answer_judge,
-            structured_answer=structured_answer,
-            answer_contract=answer_contract,
             evidence_pack=evidence_pack,
-            cache_key=cache_key,
         )
 
     def _build_codex_llm_answer(
