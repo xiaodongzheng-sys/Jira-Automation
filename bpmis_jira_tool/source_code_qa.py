@@ -13489,10 +13489,7 @@ class SourceCodeQAService:
                 "codex_cli_summary": cached_summary,
                 "cache_metadata": self._answer_cache_metadata(cache_key, cached),
             }
-        codex_cli_session_id = ""
-        if self.codex_session_mode == CODEX_SESSION_MODE_RESUME and isinstance(followup_context, dict):
-            session_meta = followup_context.get("codex_cli_session") if isinstance(followup_context.get("codex_cli_session"), dict) else {}
-            codex_cli_session_id = str(session_meta.get("session_id") or "").strip()
+        codex_cli_session_id = self._codex_cli_session_id(followup_context)
         payload = self._codex_payload(
             prompt_context,
             prompt_mode=prompt_mode,
@@ -14288,6 +14285,14 @@ class SourceCodeQAService:
             runtime_evidence=runtime_evidence,
             scope_roots=scope_roots,
         )
+
+    def _codex_cli_session_id(self, followup_context: dict[str, Any] | None) -> str:
+        if self.codex_session_mode != CODEX_SESSION_MODE_RESUME or not isinstance(followup_context, dict):
+            return ""
+        session_meta = followup_context.get("codex_cli_session")
+        if not isinstance(session_meta, dict):
+            return ""
+        return str(session_meta.get("session_id") or "").strip()
 
     def _log_codex_prompt_timing(
         self,
