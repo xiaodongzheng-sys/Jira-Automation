@@ -4938,6 +4938,72 @@ class SourceCodeQAService:
             return lines[line_no - 1].strip()
         return ""
 
+    @staticmethod
+    def _node_start_line(node: Any) -> int:
+        try:
+            return int(node.start_point[0]) + 1
+        except Exception:
+            return 1
+
+    @classmethod
+    def _first_named_child_text(cls, source: bytes, node: Any, types: set[str]) -> str:
+        for child in getattr(node, "named_children", []) or []:
+            if str(child.type) in types:
+                return cls._node_text(source, child).strip()
+        return ""
+
+    @classmethod
+    def _tree_sitter_name_for_node(cls, source: bytes, node: Any) -> str:
+        name_node = None
+        try:
+            name_node = node.child_by_field_name("name")
+        except Exception:
+            name_node = None
+        if name_node is not None:
+            value = cls._node_text(source, name_node).strip()
+            if value:
+                return value
+        return cls._first_named_child_text(source, node, {"identifier", "type_identifier", "property_identifier"})
+
+    @classmethod
+    def _tree_sitter_call_target(cls, source: bytes, node: Any) -> str:
+        target_node = None
+        for field in ("function", "name"):
+            try:
+                target_node = node.child_by_field_name(field)
+            except Exception:
+                target_node = None
+            if target_node is not None:
+                break
+        target = cls._node_text(source, target_node).strip() if target_node is not None else ""
+        if not target:
+            raw = cls._node_text(source, node)
+            target = raw.split("(", 1)[0].strip()
+        target = target.replace("this.", "").strip()
+        return target[-180:]
+
+    @classmethod
+    def _tree_sitter_type_text_for_node(cls, source: bytes, node: Any) -> str:
+        type_node = None
+        try:
+            type_node = node.child_by_field_name("type")
+        except Exception:
+            type_node = None
+        if type_node is not None:
+            value = cls._node_text(source, type_node).strip()
+            if value:
+                return value
+        return cls._first_named_child_text(source, node, {"type_identifier", "generic_type"})
+
+    @classmethod
+    def _tree_sitter_string_values(cls, source: bytes, node: Any) -> list[str]:
+        values: list[str] = []
+        raw = cls._node_text(source, node)
+        for value in re.findall(r"[\"']([^\"']+)[\"']", raw):
+            if value and value not in values:
+                values.append(value)
+        return values
+
     def _extract_tree_sitter_structure(
         self,
         *,
@@ -4962,71 +5028,11 @@ class SourceCodeQAService:
         if getattr(root, "has_error", False):
             return False, "parse error"
 
-        def line_no(node: Any) -> int:
-            try:
-                return int(node.start_point[0]) + 1
-            except Exception:
-                return 1
-
-        def first_named_child_text(node: Any, types: set[str]) -> str:
-            for child in getattr(node, "named_children", []) or []:
-                if str(child.type) in types:
-                    return self._node_text(source, child).strip()
-            return ""
-
-        def name_for_node(node: Any) -> str:
-            name_node = None
-            try:
-                name_node = node.child_by_field_name("name")
-            except Exception:
-                name_node = None
-            if name_node is not None:
-                value = self._node_text(source, name_node).strip()
-                if value:
-                    return value
-            return first_named_child_text(node, {"identifier", "type_identifier", "property_identifier"})
-
-        def call_target(node: Any) -> str:
-            target_node = None
-            for field in ("function", "name"):
-                try:
-                    target_node = node.child_by_field_name(field)
-                except Exception:
-                    target_node = None
-                if target_node is not None:
-                    break
-            target = self._node_text(source, target_node).strip() if target_node is not None else ""
-            if not target:
-                raw = self._node_text(source, node)
-                target = raw.split("(", 1)[0].strip()
-            target = target.replace("this.", "").strip()
-            return target[-180:]
-
-        def type_text_for_node(node: Any) -> str:
-            type_node = None
-            try:
-                type_node = node.child_by_field_name("type")
-            except Exception:
-                type_node = None
-            if type_node is not None:
-                value = self._node_text(source, type_node).strip()
-                if value:
-                    return value
-            return first_named_child_text(node, {"type_identifier", "generic_type"})
-
-        def string_values(node: Any) -> list[str]:
-            values: list[str] = []
-            raw = self._node_text(source, node)
-            for value in re.findall(r"[\"']([^\"']+)[\"']", raw):
-                if value and value not in values:
-                    values.append(value)
-            return values
-
         def add_route_edges(owner_id: str, node: Any, evidence: str) -> None:
             for route in re.findall(r"[\"']([^\"']+)[\"']", evidence):
                 if route.startswith("/") or route.startswith("http"):
-                    add_reference(route, "route", line_no(node), evidence)
-                    add_entity_edge(owner_id, "route", route, line_no(node), evidence)
+                    add_reference(route, "route", self._node_start_line(node), evidence)
+                    add_entity_edge(owner_id, "route", route, self._node_start_line(node), evidence)
 
         def visit(node: Any, class_id: str, method_id: str, class_name: str = "") -> None:
             node_type = str(getattr(node, "type", ""))
@@ -5034,10 +5040,10 @@ class SourceCodeQAService:
             current_method_id = method_id
             node_text_lines = self._node_text(source, node).splitlines()
             signature = self._node_line(lines, node) or (node_text_lines[0][:500] if node_text_lines else node_type)
-            node_line = line_no(node)
+            node_line = self._node_start_line(node)
 
             if node_type in {"class_declaration", "interface_declaration", "enum_declaration"}:
-                name = name_for_node(node)
+                name = self._tree_sitter_name_for_node(source, node)
                 if name:
                     kind = f"{language}_{node_type.replace('_declaration', '')}"
                     add_definition(name, kind, node_line, signature)
@@ -5050,7 +5056,7 @@ class SourceCodeQAService:
                             add_reference(inherited_name, "type_hierarchy", node_line, signature)
                             add_entity_edge(current_class_id, "implements" if "implements" in raw else "extends", inherited_name, node_line, signature)
             elif node_type in {"method_declaration", "method_definition", "function_declaration", "function_definition"}:
-                name = name_for_node(node)
+                name = self._tree_sitter_name_for_node(source, node)
                 if name:
                     kind = f"{language}_{'method' if 'method' in node_type else 'function'}"
                     add_definition(name, kind, node_line, signature)
@@ -5061,7 +5067,7 @@ class SourceCodeQAService:
                         add_entity(qualified_name, kind, node_line, signature, parent=class_name)
             elif node_type in {"field_declaration", "public_field_definition", "variable_declarator"}:
                 raw = self._node_text(source, node)
-                type_name = type_text_for_node(node) or first_named_child_text(node, {"type_identifier", "generic_type", "identifier"})
+                type_name = self._tree_sitter_type_text_for_node(source, node) or self._first_named_child_text(source, node, {"type_identifier", "generic_type", "identifier"})
                 variable_names = [
                     value
                     for value in IDENTIFIER_PATTERN.findall(raw)
@@ -5073,14 +5079,14 @@ class SourceCodeQAService:
                     add_reference(type_name, "field_type", node_line, signature)
                     add_entity_edge(current_class_id or file_entity_id, "injects", type_name, node_line, signature)
             elif node_type in {"import_statement", "import_from_statement", "import_declaration"}:
-                for value in string_values(node):
+                for value in self._tree_sitter_string_values(source, node):
                     add_reference(value, "import", node_line, signature)
                     add_entity_edge(current_method_id or current_class_id or file_entity_id, "import", value, node_line, signature)
                 for dotted in re.findall(r"(?:import|from)\s+([A-Za-z0-9_.*{} ,/.-]+)", signature):
                     add_reference(dotted.strip(), "import", node_line, signature)
                     add_entity_edge(current_method_id or current_class_id or file_entity_id, "import", dotted.strip(), node_line, signature)
             elif node_type in {"method_invocation", "call", "call_expression"}:
-                target = call_target(node)
+                target = self._tree_sitter_call_target(source, node)
                 if target and target.lower() not in LOW_VALUE_CALL_SYMBOLS:
                     add_reference(target, "call", node_line, signature)
                     add_entity_edge(current_method_id or current_class_id or file_entity_id, "call", target, node_line, signature)
