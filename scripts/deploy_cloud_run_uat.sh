@@ -423,8 +423,8 @@ if [[ "$ENV_SECRET_PRECLEAR_REQUIRED" == "1" ]]; then
     ${RUNTIME_ARGS[@]+"${RUNTIME_ARGS[@]}"} \
     --no-traffic \
     --tag "${UAT_TAG}-secret-clear" \
-    --remove-secrets LOCAL_AGENT_HMAC_SECRET \
-    --update-secrets "$BASE_SECRET_BINDINGS"
+    --clear-secrets \
+    --update-env-vars "LOCAL_AGENT_HMAC_SECRET=$uat_hmac_secret"
 fi
 
 "$GCLOUD_BIN" run deploy "$SERVICE" \
