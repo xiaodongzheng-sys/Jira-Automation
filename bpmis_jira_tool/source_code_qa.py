@@ -2104,23 +2104,21 @@ class SourceCodeQAService:
             matches.extend(exact_matches)
         elif exact_lookup_terms and self._exact_lookup_miss_should_stop(exact_lookup_terms):
             report("completed", "Exact references were not found in the current indexes.", 0, 0)
-            payload = self._empty_query_payload(
-                key,
+            return self._record_empty_query_payload(
+                key=key,
+                question=question,
+                answer_mode=answer_mode,
+                llm_budget_mode=llm_budget_mode,
+                started_at=started_at,
                 repo_status=repo_status,
                 index_freshness=index_freshness,
                 status="no_match",
                 summary="No exact table/path references were found in the indexed repositories.",
                 trace_id=trace_id,
-            )
-            payload["exact_lookup_terms"] = exact_lookup_terms
-            payload["repository_scope"] = repository_scope
-            return self._record_query_payload(
-                key=key,
-                question=question,
-                answer_mode=answer_mode,
-                llm_budget_mode=llm_budget_mode,
-                payload=payload,
-                started_at=started_at,
+                extra_fields={
+                    "exact_lookup_terms": exact_lookup_terms,
+                    "repository_scope": repository_scope,
+                },
             )
         elif exact_lookup_terms:
             self._increment_retrieval_stat(request_cache, "exact_lookup_soft_misses")
@@ -2422,23 +2420,19 @@ class SourceCodeQAService:
             repo_status = self.repo_status(key)
             index_freshness = self._index_freshness_payload(repo_status)
         if not top_matches:
-            payload = self._empty_query_payload(
-                key,
+            return self._record_empty_query_payload(
+                key=key,
+                question=question,
+                answer_mode=answer_mode,
+                llm_budget_mode=llm_budget_mode,
+                started_at=started_at,
                 repo_status=repo_status,
                 index_freshness=index_freshness,
                 status="no_match",
                 summary="No confident match. Try exact symbols, route paths, table names, or error codes.",
                 trace_id=trace_id,
-            )
-            payload["repository_scope"] = repository_scope
-            return self._record_query_payload(
-                key=key,
-                question=question,
-                answer_mode=answer_mode,
-                llm_budget_mode=llm_budget_mode,
                 query_mode=query_mode,
-                payload=payload,
-                started_at=started_at,
+                extra_fields={"repository_scope": repository_scope},
             )
         retrieval_latency_ms = int((time.time() - started_at) * 1000)
         normalized_answer_mode = self._normalize_answer_mode(answer_mode)
