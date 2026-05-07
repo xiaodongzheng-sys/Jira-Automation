@@ -12789,6 +12789,32 @@ class SourceCodeQAService:
             "cache_metadata": self._answer_cache_metadata(cache_key),
         }
 
+    def _store_llm_answer_cache(
+        self,
+        *,
+        cache_key: str,
+        answer: str,
+        usage: dict[str, Any],
+        quality_gate: dict[str, Any],
+        effective_model: str,
+        thinking_budget: int,
+        finish_reason: str,
+        query_mode: str,
+        routed_budget_mode: str,
+    ) -> None:
+        self._store_cached_answer(
+            cache_key,
+            answer=answer,
+            usage=usage,
+            answer_quality=quality_gate,
+            provider=self.llm_provider.name,
+            model=effective_model,
+            thinking_budget=thinking_budget,
+            finish_reason=finish_reason,
+            query_mode=query_mode,
+            llm_budget_mode=routed_budget_mode,
+        )
+
     def _build_llm_answer(
         self,
         *,
@@ -13169,17 +13195,16 @@ class SourceCodeQAService:
             answer = final["answer"]
             structured_answer = final["structured_answer"]
             answer_contract = final["answer_contract"]
-            self._store_cached_answer(
-                cache_key,
+            self._store_llm_answer_cache(
+                cache_key=cache_key,
                 answer=answer,
                 usage=usage,
-                answer_quality=quality_gate,
-                provider=self.llm_provider.name,
-                model=effective_model,
+                quality_gate=quality_gate,
+                effective_model=effective_model,
                 thinking_budget=llm_route.get("repair_thinking_budget", answer_thinking_budget),
                 finish_reason=finish_reason,
                 query_mode=query_mode,
-                llm_budget_mode=routed_budget_mode,
+                routed_budget_mode=routed_budget_mode,
             )
             return self._llm_answer_result_payload(
                 answer=answer,
@@ -13375,17 +13400,16 @@ class SourceCodeQAService:
         answer = final["answer"]
         structured_answer = final["structured_answer"]
         answer_contract = final["answer_contract"]
-        self._store_cached_answer(
-            cache_key,
+        self._store_llm_answer_cache(
+            cache_key=cache_key,
             answer=answer,
             usage=usage,
-            answer_quality=quality_gate,
-            provider=self.llm_provider.name,
-            model=effective_model,
+            quality_gate=quality_gate,
+            effective_model=effective_model,
             thinking_budget=llm_route.get("repair_thinking_budget", answer_thinking_budget),
             finish_reason=finish_reason,
             query_mode=query_mode,
-            llm_budget_mode=routed_budget_mode,
+            routed_budget_mode=routed_budget_mode,
         )
         return self._llm_answer_result_payload(
             answer=answer,
