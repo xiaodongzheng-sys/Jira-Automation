@@ -42,9 +42,6 @@ from bpmis_jira_tool.source_code_qa_evidence_policy import (
     TEST_COVERAGE_HINTS,
     TOOL_LOOP_TRACE_PREFIX,
 )
-from bpmis_jira_tool.source_code_qa_embeddings import (
-    SourceCodeQAEmbeddingProvider,
-)
 from bpmis_jira_tool.source_code_qa_cache_telemetry import attach_cache_telemetry_helpers
 from bpmis_jira_tool.source_code_qa_retrieval_cache import attach_retrieval_cache_helpers
 from bpmis_jira_tool.source_code_qa_codex_refs import (
@@ -229,9 +226,7 @@ class SourceCodeQAService:
         query_rewrite_model: str | None = None,
         planner_model: str | None = None,
         answer_model: str | None = None,
-        judge_model: str | None = None,
         repair_model: str | None = None,
-        llm_judge_enabled: bool = False,
         semantic_index_model: str = DEFAULT_SEMANTIC_INDEX_MODEL,
         semantic_index_enabled: bool = True,
         llm_cache_ttl_seconds: int = 1800,
@@ -265,10 +260,7 @@ class SourceCodeQAService:
         self.query_rewrite_model = str(query_rewrite_model or "").strip()
         self.planner_model = str(planner_model or "").strip()
         self.answer_model = str(answer_model or "").strip()
-        self.judge_model = str(judge_model or "").strip()
         self.repair_model = str(repair_model or "").strip()
-        self.llm_judge_enabled = bool(llm_judge_enabled)
-        self.embedding_provider_name = "local_token_hybrid"
         self.semantic_index_model = str(semantic_index_model or DEFAULT_SEMANTIC_INDEX_MODEL).strip() or DEFAULT_SEMANTIC_INDEX_MODEL
         self.semantic_index_enabled = bool(semantic_index_enabled)
         self.llm_timeout_seconds = max(5, int(llm_timeout_seconds or DEFAULT_LLM_TIMEOUT_SECONDS))
@@ -296,7 +288,6 @@ class SourceCodeQAService:
         self.codex_cache_followups = bool(codex_cache_followups)
         self.codex_model = self._codex_cli_model()
         self.llm_provider = self._build_llm_provider()
-        self.embedding_provider = self._build_embedding_provider()
         self.llm_budgets = self._build_llm_budgets()
         self.model_policy = self._build_model_policy_matrix()
         self._tree_sitter_parsers: dict[str, Any | None] = {}
@@ -318,9 +309,7 @@ class SourceCodeQAService:
             query_rewrite_model=self.query_rewrite_model,
             planner_model=self.planner_model,
             answer_model=self.answer_model,
-            judge_model=self.judge_model,
             repair_model=self.repair_model,
-            llm_judge_enabled=self.llm_judge_enabled,
             semantic_index_model=self.semantic_index_model,
             semantic_index_enabled=self.semantic_index_enabled,
             llm_cache_ttl_seconds=self.llm_cache_ttl_seconds,
@@ -401,7 +390,7 @@ class SourceCodeQAService:
                 "enabled": self.semantic_index_enabled,
                 "model": self.semantic_index_model,
                 "index_version": CODE_INDEX_VERSION,
-                "embedding_provider": self.embedding_provider.public_config(),
+                "embedding_provider": {"provider": "local_token_hybrid", "ready": True},
             },
             "judge": {
                 "enabled": True,
@@ -442,9 +431,6 @@ class SourceCodeQAService:
             session_mode=self.codex_session_mode,
         )
 
-    def _build_embedding_provider(self) -> SourceCodeQAEmbeddingProvider:
-        return SourceCodeQAEmbeddingProvider()
-
     def _build_llm_budgets(self) -> dict[str, dict[str, Any]]:
         budgets = json.loads(json.dumps(DEFAULT_LLM_BUDGETS))
         budgets["cheap"]["model"] = self.codex_model
@@ -458,7 +444,6 @@ class SourceCodeQAService:
             "query_rewrite": ("cheap", self.query_rewrite_model, "Normalize follow-up and fuzzy user wording before retrieval."),
             "planner": ("cheap", self.planner_model, "Choose deterministic retrieval tools and trace expansion steps."),
             "answer": ("balanced", self.answer_model, "Generate the user-facing evidence-grounded answer."),
-            "judge": ("cheap", self.judge_model, "Check whether answer claims are supported by the evidence pack."),
             "repair": ("deep", self.repair_model, "Rewrite after a failed claim check or missing-evidence judge finding."),
         }
         matrix: dict[str, dict[str, Any]] = {}
@@ -470,7 +455,6 @@ class SourceCodeQAService:
                 "budget": budget,
                 "override": bool(override),
                 "budget_routed": role in {"answer", "repair"} and not bool(override),
-                "enabled": role != "judge" or self.llm_judge_enabled,
                 "purpose": purpose,
             }
         return matrix
@@ -3751,19 +3735,7 @@ class SourceCodeQAService:
         self,
         chunks: list[tuple[str, str, int, int, str, str, str, str, str]],
     ) -> list[tuple[str, str, int, int, str, str, str, str, str]]:
-        if not self.embedding_provider.ready() or self.embedding_provider.name == "local_token_hybrid":
-            return chunks
-        texts = [chunk[4] for chunk in chunks]
-        try:
-            embeddings = self.embedding_provider.embed_texts(texts)
-        except ToolError:
-            return chunks
-        enriched = []
-        for chunk, embedding in zip(chunks, embeddings):
-            enriched.append((*chunk[:8], json.dumps(embedding[:2048], separators=(",", ":"))))
-        if len(enriched) < len(chunks):
-            enriched.extend(chunks[len(enriched):])
-        return enriched
+        return chunks
 
     @staticmethod
     def _semantic_tokens(text: str) -> list[str]:
@@ -6280,7 +6252,6 @@ class SourceCodeQAService:
                         "lower_text": str(row["lower_text"] or ""),
                         "tokens_set": set(json.loads(row["tokens"] or "[]")),
                         "symbols_set": set(json.loads(row["symbols"] or "[]")),
-                        "embedding_values": self._parse_embedding(row["embedding"] if "embedding" in row.keys() else ""),
                     }
                     for row in semantic_rows
                 ]
@@ -6611,7 +6582,6 @@ class SourceCodeQAService:
                 "lower_text": str(row["lower_text"] or ""),
                 "tokens_set": set(json.loads(row["tokens"] or "[]")),
                 "symbols_set": set(json.loads(row["symbols"] or "[]")),
-                "embedding_values": self._parse_embedding(row["embedding"] if "embedding" in row.keys() else ""),
             }
             for row in semantic_rows_by_id.values()
         ] if self.semantic_index_enabled else []
@@ -6992,7 +6962,6 @@ class SourceCodeQAService:
             return []
         matches: list[dict[str, Any]] = []
         query_set = set(query_terms)
-        query_embedding = self._query_embedding(question) if self.embedding_provider.ready() and self.embedding_provider.name != "local_token_hybrid" else []
         if rows is None:
             try:
                 rows = connection.execute("select * from semantic_chunks").fetchall()
@@ -7004,7 +6973,6 @@ class SourceCodeQAService:
                 chunk_symbols = set(row.get("symbols_set") or set())
                 lower_text = str(row.get("lower_text") or "")
                 file_path = str(row.get("file_path") or "")
-                chunk_embedding = list(row.get("embedding_values") or [])
                 start_line = int(row.get("start_line") or 1)
                 end_line = int(row.get("end_line") or start_line)
                 chunk_text = str(row.get("chunk_text") or "")
@@ -7013,19 +6981,16 @@ class SourceCodeQAService:
                 chunk_symbols = set(json.loads(row["symbols"] or "[]"))
                 lower_text = str(row["lower_text"] or "")
                 file_path = str(row["file_path"] or "")
-                chunk_embedding = self._parse_embedding(row["embedding"])
                 start_line = int(row["start_line"])
                 end_line = int(row["end_line"])
                 chunk_text = str(row["chunk_text"] or "")
             overlap = query_set & (chunk_tokens | chunk_symbols)
             phrase_hits = [term for term in query_terms if len(term) >= 5 and term in lower_text]
-            embedding_score = self._embedding_similarity(query_embedding, chunk_embedding) if query_embedding and chunk_embedding else 0.0
-            if not overlap and not phrase_hits and embedding_score < 0.2:
+            if not overlap and not phrase_hits:
                 continue
             score = 35 + repo_score + trace_stage_bonus
             score += min(len(overlap), 8) * 9
             score += min(len(phrase_hits), 6) * 12
-            score += int(max(0.0, embedding_score) * 80)
             if intent.get("data_source") and any(term in lower_text for term in CONCRETE_SOURCE_HINTS):
                 score += 26
             if intent.get("api") and any(term in lower_text for term in API_HINTS):
@@ -7037,7 +7002,7 @@ class SourceCodeQAService:
             if (intent.get("error") or intent.get("rule_logic")) and any(term in lower_text for term in ERROR_HINTS + RULE_HINTS):
                 score += 18
             matched_terms = list(dict.fromkeys([*sorted(overlap), *phrase_hits]))[:6]
-            reason = f"semantic chunk matched: {', '.join(matched_terms)}" if matched_terms else f"semantic embedding matched: {embedding_score:.2f}"
+            reason = f"semantic chunk matched: {', '.join(matched_terms)}" if matched_terms else "semantic chunk matched local tokens"
             if trace_stage == "dependency":
                 reason = f"dependency trace; {reason}"
             elif trace_stage == "two_hop":
@@ -7088,13 +7053,6 @@ class SourceCodeQAService:
             if lowered not in deduped:
                 deduped.append(lowered)
         return deduped[:64]
-
-    def _query_embedding(self, question: str) -> list[float]:
-        try:
-            rows = self.embedding_provider.embed_texts([question[:6000]])
-        except ToolError:
-            return []
-        return rows[0] if rows else []
 
     @staticmethod
     def _extract_exact_lookup_terms(question: str) -> list[str]:
@@ -7318,38 +7276,6 @@ class SourceCodeQAService:
             return []
         matches.sort(key=lambda item: int(item.get("score") or 0), reverse=True)
         return matches[:160]
-
-    @staticmethod
-    def _parse_embedding(raw_value: Any) -> list[float]:
-        if not raw_value:
-            return []
-        try:
-            values = json.loads(str(raw_value))
-        except json.JSONDecodeError:
-            return []
-        if not isinstance(values, list):
-            return []
-        parsed = []
-        for value in values[:2048]:
-            try:
-                parsed.append(float(value))
-            except (TypeError, ValueError):
-                continue
-        return parsed
-
-    @staticmethod
-    def _embedding_similarity(left: list[float], right: list[float]) -> float:
-        if not left or not right:
-            return 0.0
-        size = min(len(left), len(right))
-        if size <= 0:
-            return 0.0
-        dot = sum(left[index] * right[index] for index in range(size))
-        left_norm = sum(left[index] * left[index] for index in range(size)) ** 0.5
-        right_norm = sum(right[index] * right[index] for index in range(size)) ** 0.5
-        if not left_norm or not right_norm:
-            return 0.0
-        return dot / (left_norm * right_norm)
 
     def _index_fingerprint(self, index_path: Path) -> str:
         try:

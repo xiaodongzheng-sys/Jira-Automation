@@ -78,9 +78,7 @@ class ConfigTests(unittest.TestCase):
 
         self.assertEqual(settings.source_code_qa_llm_provider, "codex_cli_bridge")
         self.assertEqual(settings.source_code_qa_embedding_model, "local-token-hybrid-v1")
-        self.assertEqual(settings.source_code_qa_embedding_provider, "local_token_hybrid")
         self.assertTrue(settings.source_code_qa_semantic_index_enabled)
-        self.assertTrue(settings.source_code_qa_llm_judge_enabled)
         self.assertEqual(settings.source_code_qa_llm_timeout_seconds, 90)
         self.assertEqual(settings.source_code_qa_codex_timeout_seconds, 240)
         self.assertEqual(settings.source_code_qa_codex_concurrency, 2)
@@ -166,9 +164,7 @@ class ConfigTests(unittest.TestCase):
             "SOURCE_CODE_QA_QUERY_REWRITE_MODEL": "rewrite-lite",
             "SOURCE_CODE_QA_PLANNER_MODEL": "planner-lite",
             "SOURCE_CODE_QA_ANSWER_MODEL": "answer-balanced",
-            "SOURCE_CODE_QA_JUDGE_MODEL": "judge-lite",
             "SOURCE_CODE_QA_REPAIR_MODEL": "repair-deep",
-            "SOURCE_CODE_QA_LLM_JUDGE_ENABLED": "true",
             "SOURCE_CODE_QA_LLM_TIMEOUT_SECONDS": "45",
         }
         with patch.dict(os.environ, env, clear=True):
@@ -177,9 +173,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(settings.source_code_qa_query_rewrite_model, "rewrite-lite")
         self.assertEqual(settings.source_code_qa_planner_model, "planner-lite")
         self.assertEqual(settings.source_code_qa_answer_model, "answer-balanced")
-        self.assertEqual(settings.source_code_qa_judge_model, "judge-lite")
         self.assertEqual(settings.source_code_qa_repair_model, "repair-deep")
-        self.assertTrue(settings.source_code_qa_llm_judge_enabled)
         self.assertEqual(settings.source_code_qa_llm_timeout_seconds, 45)
 
 

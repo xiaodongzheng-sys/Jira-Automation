@@ -101,31 +101,6 @@ class MockSourceCodeQALLMProvider:
         return ""
 
 
-class MockSourceCodeQAEmbeddingProvider:
-    name = "mock_embedding"
-
-    def ready(self) -> bool:
-        return True
-
-    def public_config(self) -> dict[str, Any]:
-        return {"provider": self.name, "ready": True, "mode": "deterministic_eval"}
-
-    def embed_texts(self, texts: list[str], *, task_type: str | None = None) -> list[list[float]]:
-        del task_type
-        rows: list[list[float]] = []
-        for text in texts:
-            lowered = str(text or "").lower()
-            rows.append(
-                [
-                    float(lowered.count("issue") + lowered.count("jira")),
-                    float(lowered.count("repository") + lowered.count("mapper") + lowered.count("table")),
-                    float(lowered.count("api") + lowered.count("controller") + lowered.count("client")),
-                    float(len(set(re.findall(r"[a-zA-Z][a-zA-Z0-9_]{2,}", lowered))) % 17),
-                ]
-            )
-        return rows
-
-
 def _failure_bucket(message: str) -> str:
     lowered = message.lower()
     if "path" in lowered or "retrieval" in lowered or "trace stage" in lowered or "trace path" in lowered or "evidence pack" in lowered:
@@ -1120,9 +1095,7 @@ def _build_service_from_settings(
         query_rewrite_model=settings.source_code_qa_query_rewrite_model,
         planner_model=settings.source_code_qa_planner_model,
         answer_model=settings.source_code_qa_answer_model,
-        judge_model=settings.source_code_qa_judge_model,
         repair_model=settings.source_code_qa_repair_model,
-        llm_judge_enabled=settings.source_code_qa_llm_judge_enabled,
         semantic_index_model=embedding_model,
         semantic_index_enabled=settings.source_code_qa_semantic_index_enabled,
         llm_cache_ttl_seconds=settings.source_code_qa_llm_cache_ttl_seconds,
@@ -1202,8 +1175,6 @@ def main() -> int:
             if args.mock_llm:
                 service.llm_provider = MockSourceCodeQALLMProvider()
                 service.llm_provider_name = service.llm_provider.name
-                if service.embedding_provider.name != "local_token_hybrid":
-                    service.embedding_provider = MockSourceCodeQAEmbeddingProvider()
                 service.answer_cache_root = service.answer_cache_root / "mock_llm_eval"
             if args.fixture:
                 _build_fixture_repositories(service)
@@ -1219,8 +1190,6 @@ def main() -> int:
     if args.mock_llm:
         service.llm_provider = MockSourceCodeQALLMProvider()
         service.llm_provider_name = service.llm_provider.name
-        if service.embedding_provider.name != "local_token_hybrid":
-            service.embedding_provider = MockSourceCodeQAEmbeddingProvider()
         service.answer_cache_root = service.answer_cache_root / "mock_llm_eval"
     if args.fixture:
         _build_fixture_repositories(service)

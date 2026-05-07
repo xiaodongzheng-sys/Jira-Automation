@@ -86,11 +86,8 @@ class Settings:
     source_code_qa_query_rewrite_model: str | None = None
     source_code_qa_planner_model: str | None = None
     source_code_qa_answer_model: str | None = None
-    source_code_qa_judge_model: str | None = None
     source_code_qa_repair_model: str | None = None
-    source_code_qa_llm_judge_enabled: bool = True
     source_code_qa_embedding_model: str = "local-token-hybrid-v1"
-    source_code_qa_embedding_provider: str = "local_token_hybrid"
     source_code_qa_semantic_index_enabled: bool = True
     source_code_qa_llm_cache_ttl_seconds: int = 1800
     source_code_qa_llm_timeout_seconds: int = 90
@@ -186,11 +183,8 @@ class Settings:
             source_code_qa_query_rewrite_model=_env_str("SOURCE_CODE_QA_QUERY_REWRITE_MODEL"),
             source_code_qa_planner_model=_env_str("SOURCE_CODE_QA_PLANNER_MODEL"),
             source_code_qa_answer_model=_env_str("SOURCE_CODE_QA_ANSWER_MODEL"),
-            source_code_qa_judge_model=_env_str("SOURCE_CODE_QA_JUDGE_MODEL"),
             source_code_qa_repair_model=_env_str("SOURCE_CODE_QA_REPAIR_MODEL"),
-            source_code_qa_llm_judge_enabled=_env_bool("SOURCE_CODE_QA_LLM_JUDGE_ENABLED", True),
             source_code_qa_embedding_model=_env_str("SOURCE_CODE_QA_EMBEDDING_MODEL", "local-token-hybrid-v1"),
-            source_code_qa_embedding_provider="local_token_hybrid",
             source_code_qa_semantic_index_enabled=_env_bool("SOURCE_CODE_QA_SEMANTIC_INDEX_ENABLED", True),
             source_code_qa_llm_cache_ttl_seconds=int(_env_str("SOURCE_CODE_QA_LLM_CACHE_TTL_SECONDS", "1800")),
             source_code_qa_llm_timeout_seconds=int(_env_str("SOURCE_CODE_QA_LLM_TIMEOUT_SECONDS", "90")),

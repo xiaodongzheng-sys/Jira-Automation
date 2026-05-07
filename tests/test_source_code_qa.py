@@ -7302,8 +7302,6 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         service = SourceCodeQAService(
             data_root=Path(self.temp_dir.name),
             team_profiles=TEAM_PROFILE_DEFAULTS,
-            judge_model="judge-lite",
-            llm_judge_enabled=True,
             gitlab_token="secret-token",
             git_timeout_seconds=5,
             max_file_bytes=200_000,
@@ -7368,8 +7366,6 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         service = SourceCodeQAService(
             data_root=Path(self.temp_dir.name),
             team_profiles=TEAM_PROFILE_DEFAULTS,
-            judge_model="codex-judge",
-            llm_judge_enabled=True,
             gitlab_token="secret-token",
             git_timeout_seconds=5,
             max_file_bytes=200_000,
@@ -8031,9 +8027,8 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         )
         self.assertEqual(service.llm_provider_name, "codex_cli_bridge")
         self.assertEqual(service.llm_provider.name, "codex_cli_bridge")
-        self.assertEqual(service.embedding_provider_name, "local_token_hybrid")
-        self.assertEqual(service.embedding_provider.public_config()["provider"], "local_token_hybrid")
-        self.assertEqual(service.embedding_provider.embed_texts(["find createIssue"], task_type="CODE_RETRIEVAL_QUERY"), [])
+        self.assertEqual(service.llm_policy_payload()["semantic_retrieval"]["embedding_provider"]["provider"], "local_token_hybrid")
+        self.assertNotIn("judge", service.model_policy)
         self.assertEqual(service._llm_fallback_model(), os.getenv("SOURCE_CODE_QA_CODEX_MODEL", "codex-cli"))
         routed_mode, routed_budget, route = service._resolve_llm_budget("cheap", "where is createIssue", [])
         self.assertEqual(routed_mode, "cheap")
