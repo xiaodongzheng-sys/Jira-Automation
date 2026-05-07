@@ -12712,6 +12712,36 @@ class SourceCodeQAService:
             "cache_metadata": self._answer_cache_metadata(cache_key, cached),
         }
 
+    def _llm_answer_payload(
+        self,
+        *,
+        prompt: str,
+        attachments: list[dict[str, Any]],
+        max_output_tokens: int,
+        thinking_config: dict[str, Any],
+    ) -> dict[str, Any]:
+        return {
+            "contents": [
+                {
+                    "parts": self._llm_payload_parts(prompt, attachments)
+                }
+            ],
+            "systemInstruction": {
+                "parts": [
+                    {
+                        "text": self._llm_system_instruction()
+                    }
+                ]
+            },
+            "generationConfig": {
+                "temperature": 0.2,
+                "maxOutputTokens": max_output_tokens,
+                "responseMimeType": "application/json",
+                "responseSchema": self._llm_answer_response_schema(),
+                "thinkingConfig": thinking_config,
+            },
+        }
+
     def _build_llm_answer(
         self,
         *,
@@ -13053,27 +13083,12 @@ class SourceCodeQAService:
         )
         if vertex_two_pass:
             final_prompt = self._vertex_final_prompt(final_prompt=final_prompt, draft_answer=draft_answer)
-        payload = {
-            "contents": [
-                {
-                    "parts": self._llm_payload_parts(final_prompt, attachments or [])
-                }
-            ],
-            "systemInstruction": {
-                "parts": [
-                    {
-                        "text": self._llm_system_instruction()
-                    }
-                ]
-            },
-            "generationConfig": {
-                "temperature": 0.2,
-                "maxOutputTokens": answer_max_output_tokens,
-                "responseMimeType": "application/json",
-                "responseSchema": self._llm_answer_response_schema(),
-                "thinkingConfig": answer_thinking_config,
-            },
-        }
+        payload = self._llm_answer_payload(
+            prompt=final_prompt,
+            attachments=attachments or [],
+            max_output_tokens=answer_max_output_tokens,
+            thinking_config=answer_thinking_config,
+        )
         result = self.llm_provider.generate(
             payload=payload,
             primary_model=selected_model,
