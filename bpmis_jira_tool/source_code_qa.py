@@ -13337,32 +13337,19 @@ class SourceCodeQAService:
         }
         if effort_assessment:
             llm_route["task"] = "effort_assessment"
-        if prompt_mode == CODEX_SQL_GENERATION_PROMPT_MODE:
-            prompt_context = self._codex_sql_generation_brief(
-                pm_team=pm_team,
-                country=country,
-                question=question,
-                candidate_paths=candidate_paths,
-                evidence_pack=evidence_pack,
-                quality_gate=quality_gate,
-                followup_context=followup_context,
-                attachments=attachments or [],
-                runtime_evidence=runtime_evidence or [],
-                scope_roots=scope_roots,
-            )
-        else:
-            prompt_context = self._codex_investigation_brief(
-                pm_team=pm_team,
-                country=country,
-                question=question,
-                candidate_paths=candidate_paths,
-                evidence_pack=evidence_pack,
-                quality_gate=quality_gate,
-                followup_context=followup_context,
-                attachments=attachments or [],
-                runtime_evidence=runtime_evidence or [],
-                scope_roots=scope_roots,
-            )
+        prompt_context = self._codex_initial_prompt_context(
+            prompt_mode=prompt_mode,
+            pm_team=pm_team,
+            country=country,
+            question=question,
+            candidate_paths=candidate_paths,
+            evidence_pack=evidence_pack,
+            quality_gate=quality_gate,
+            followup_context=followup_context,
+            attachments=attachments or [],
+            runtime_evidence=runtime_evidence or [],
+            scope_roots=scope_roots,
+        )
         initial_prompt_stats = self._codex_prompt_stats(prompt_context)
         candidate_repo_count = len({item.get("repo") for item in candidate_paths})
         self._log_codex_prompt_timing(
@@ -14259,6 +14246,47 @@ class SourceCodeQAService:
             scope_roots=scope_roots,
             attachment_section=attachment_section,
             runtime_section=runtime_section,
+        )
+
+    def _codex_initial_prompt_context(
+        self,
+        *,
+        prompt_mode: str,
+        pm_team: str,
+        country: str,
+        question: str,
+        candidate_paths: list[dict[str, Any]],
+        evidence_pack: dict[str, Any],
+        quality_gate: dict[str, Any],
+        followup_context: dict[str, Any] | None,
+        attachments: list[dict[str, Any]],
+        runtime_evidence: list[dict[str, Any]],
+        scope_roots: list[dict[str, str]],
+    ) -> str:
+        if prompt_mode == CODEX_SQL_GENERATION_PROMPT_MODE:
+            return self._codex_sql_generation_brief(
+                pm_team=pm_team,
+                country=country,
+                question=question,
+                candidate_paths=candidate_paths,
+                evidence_pack=evidence_pack,
+                quality_gate=quality_gate,
+                followup_context=followup_context,
+                attachments=attachments,
+                runtime_evidence=runtime_evidence,
+                scope_roots=scope_roots,
+            )
+        return self._codex_investigation_brief(
+            pm_team=pm_team,
+            country=country,
+            question=question,
+            candidate_paths=candidate_paths,
+            evidence_pack=evidence_pack,
+            quality_gate=quality_gate,
+            followup_context=followup_context,
+            attachments=attachments,
+            runtime_evidence=runtime_evidence,
+            scope_roots=scope_roots,
         )
 
     def _log_codex_prompt_timing(
