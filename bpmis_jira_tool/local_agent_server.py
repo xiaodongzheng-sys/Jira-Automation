@@ -48,16 +48,18 @@ from bpmis_jira_tool.gmail_sender import StoredGoogleCredentials
 from bpmis_jira_tool.seatalk_dashboard import SeaTalkDashboardService
 from bpmis_jira_tool.source_code_qa import SourceCodeQAService
 from bpmis_jira_tool.source_code_qa_factory import build_source_code_qa_service_from_settings
-from bpmis_jira_tool.user_config import WebConfigStore
-from bpmis_jira_tool.work_memory import WorkMemoryStore, meeting_record_memory_items, team_dashboard_memory_items
-from bpmis_jira_tool.web import (
-    SeaTalkNameMappingStore,
-    SeaTalkTodoStore,
+from bpmis_jira_tool.source_code_qa_stores import (
     SourceCodeQAAttachmentStore,
     SourceCodeQAGeneratedArtifactStore,
     SourceCodeQAModelAvailabilityStore,
     SourceCodeQARuntimeEvidenceStore,
     SourceCodeQASessionStore,
+)
+from bpmis_jira_tool.user_config import WebConfigStore
+from bpmis_jira_tool.work_memory import WorkMemoryStore, meeting_record_memory_items, team_dashboard_memory_items
+from bpmis_jira_tool.web import (
+    SeaTalkNameMappingStore,
+    SeaTalkTodoStore,
     _generate_productization_detailed_features_with_local_codex,
 )
 from prd_briefing.confluence import ConfluenceConnector
