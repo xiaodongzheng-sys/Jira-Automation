@@ -2023,44 +2023,40 @@ class SourceCodeQAService:
                 len(entries),
             )
         if not synced_entries:
-            payload = self._empty_query_payload(
-                key,
+            return self._record_empty_query_payload(
+                key=key,
+                question=question,
+                answer_mode=answer_mode,
+                llm_budget_mode=llm_budget_mode,
+                started_at=started_at,
                 repo_status=repo_status,
                 index_freshness=index_freshness,
                 status="not_synced",
                 summary="No synced repositories are available in the selected scope. Run Sync / Refresh before asking code questions.",
                 trace_id=trace_id,
-            )
-            payload["repository_scope"] = repository_scope
-            payload["retrieval_runtime"] = self._retrieval_cache_stats(request_cache)
-            return self._record_query_payload(
-                key=key,
-                question=question,
-                answer_mode=answer_mode,
-                llm_budget_mode=llm_budget_mode,
-                payload=payload,
-                started_at=started_at,
+                extra_fields={
+                    "repository_scope": repository_scope,
+                    "retrieval_runtime": self._retrieval_cache_stats(request_cache),
+                },
             )
         queryable_entries = self._queryable_index_entries(key, synced_entries)
         if not queryable_entries:
             self._increment_retrieval_stat(request_cache, "index_not_ready_scopes")
-            payload = self._empty_query_payload(
-                key,
+            return self._record_empty_query_payload(
+                key=key,
+                question=question,
+                answer_mode=answer_mode,
+                llm_budget_mode=llm_budget_mode,
+                started_at=started_at,
                 repo_status=repo_status,
                 index_freshness=index_freshness,
                 status="index_not_ready",
                 summary="Synced repositories exist in the selected scope, but none has a ready queryable index. Run Sync / Refresh before trusting code answers.",
                 trace_id=trace_id,
-            )
-            payload["repository_scope"] = repository_scope
-            payload["retrieval_runtime"] = self._retrieval_cache_stats(request_cache)
-            return self._record_query_payload(
-                key=key,
-                question=question,
-                answer_mode=answer_mode,
-                llm_budget_mode=llm_budget_mode,
-                payload=payload,
-                started_at=started_at,
+                extra_fields={
+                    "repository_scope": repository_scope,
+                    "retrieval_runtime": self._retrieval_cache_stats(request_cache),
+                },
             )
         intent = query_plan.get("intent") if isinstance(query_plan.get("intent"), dict) else {}
         simple_quality_trace = (
