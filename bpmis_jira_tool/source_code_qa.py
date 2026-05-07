@@ -2150,121 +2150,21 @@ class SourceCodeQAService:
                 )
                 report("focused_search", f"Checked domain-specific symbols in {entry.display_name}.", index, len(synced_entries))
         if not exact_lookup_sufficient:
-            report("direct_search", f"Searching direct matches across {len(synced_entries)} repos.", 0, len(synced_entries))
-            skip_broad_query_decomposition = False
-            for index, (entry, repo_path) in enumerate(synced_entries, start=1):
-                matches.extend(self._search_repo(entry, repo_path, tokens, question=question, request_cache=request_cache))
-                report("direct_search", f"Searching direct matches in {entry.display_name}.", index, len(synced_entries))
-                if matches and simple_quality_trace and index >= 3 and (len(matches) >= 80 or time.time() - started_at >= 4.0):
-                    direct_ranked = self._rank_matches(question, matches, request_cache=request_cache)
-                    direct_top = self._select_result_matches(direct_ranked, self._query_result_limit(limit), question=question)
-                    direct_evidence_summary = self._compress_evidence_cached(question, direct_top, request_cache=request_cache)
-                    direct_quality_gate = self._quality_gate_cached(question, direct_evidence_summary, request_cache=request_cache)
-                    if (
-                        direct_quality_gate.get("status") == "sufficient"
-                        and direct_quality_gate.get("confidence") in {"medium", "high"}
-                        and (len(synced_entries) >= 5 or time.time() - started_at >= 6.0)
-                    ):
-                        skip_broad_query_decomposition = True
-                        self._increment_retrieval_stat(request_cache, "direct_scan_early_stops")
-                        report(
-                            "quality_gate",
-                            "Direct matches are sufficient; stopping repository scan early.",
-                            index,
-                            len(synced_entries),
-                        )
-                        break
-                    if time.time() - started_at >= 6.0 and len(matches) >= max(60, result_limit * 5):
-                        skip_broad_query_decomposition = True
-                        self._increment_retrieval_stat(request_cache, "simple_latency_guards")
-                        report(
-                            "quality_gate",
-                            "Direct scan has enough candidate evidence; stopping early to keep the response responsive.",
-                            index,
-                            len(synced_entries),
-                        )
-                        break
-            if matches and simple_quality_trace:
-                direct_ranked = self._rank_matches(question, matches, request_cache=request_cache)
-                direct_top = self._select_result_matches(direct_ranked, self._query_result_limit(limit), question=question)
-                direct_evidence_summary = self._compress_evidence_cached(question, direct_top, request_cache=request_cache)
-                direct_quality_gate = self._quality_gate_cached(question, direct_evidence_summary, request_cache=request_cache)
-                if (
-                    direct_quality_gate.get("status") == "sufficient"
-                    and direct_quality_gate.get("confidence") in {"medium", "high"}
-                    and (len(synced_entries) >= 5 or time.time() - started_at >= 6.0)
-                ):
-                    skip_broad_query_decomposition = True
-                    self._increment_retrieval_stat(request_cache, "direct_quality_short_circuits")
-                    report("quality_gate", "Direct matches are sufficient; skipping broader evidence expansion.", len(synced_entries), len(synced_entries))
-            if matches and not skip_broad_query_decomposition and time.time() - started_at >= 7.0 and len(matches) >= max(36, result_limit * 3):
-                skip_broad_query_decomposition = True
-                latency_guarded_query_expansion = True
-                self._increment_retrieval_stat(request_cache, "query_decomposition_latency_guards")
-                report(
-                    "quality_gate",
-                    "Direct scan has enough candidate evidence; skipping query expansion to keep the response responsive.",
-                    len(synced_entries),
-                    len(synced_entries),
-                )
-            if not skip_broad_query_decomposition:
-                report("query_decomposition", "Expanding query terms from domain and intent profile.", 0, len(synced_entries))
-            for index, (entry, repo_path) in enumerate(synced_entries, start=1):
-                if skip_broad_query_decomposition:
-                    continue
-                for component in query_plan.get("components") or []:
-                    component_terms = [str(term) for term in component.get("terms") or [] if str(term).strip()]
-                    expanded_tokens: list[str] = []
-                    for term in component_terms:
-                        expanded_tokens.extend(self._question_tokens(term))
-                    expanded_tokens = list(dict.fromkeys(expanded_tokens))[:24]
-                    if not expanded_tokens:
-                        continue
-                    matches.extend(
-                        self._search_repo(
-                            entry,
-                            repo_path,
-                            expanded_tokens,
-                            question=question,
-                            focus_terms=component_terms,
-                            trace_stage="query_decomposition",
-                            request_cache=request_cache,
-                        )
-                    )
-                report("query_decomposition", f"Expanded query terms in {entry.display_name}.", index, len(synced_entries))
-                if query_plan.get("intent", {}).get("static_qa"):
-                    matches.extend(
-                        self._tool_find_static_findings(
-                            entry,
-                            repo_path,
-                            tokens,
-                            question,
-                            0,
-                            request_cache=request_cache,
-                        )
-                    )
-                if query_plan.get("intent", {}).get("test_coverage"):
-                    matches.extend(
-                        self._tool_find_test_coverage(
-                            entry,
-                            repo_path,
-                            tokens,
-                            question,
-                            0,
-                            request_cache=request_cache,
-                        )
-                    )
-                if query_plan.get("intent", {}).get("operational_boundary"):
-                    matches.extend(
-                        self._tool_find_operational_boundaries(
-                            entry,
-                            repo_path,
-                            tokens,
-                            question,
-                            0,
-                            request_cache=request_cache,
-                        )
-                    )
+            direct_context = self._query_direct_and_decomposed_matches(
+                question=question,
+                matches=matches,
+                tokens=tokens,
+                synced_entries=synced_entries,
+                simple_quality_trace=simple_quality_trace,
+                started_at=started_at,
+                result_limit=result_limit,
+                limit=limit,
+                query_plan=query_plan,
+                request_cache=request_cache,
+                report=report,
+            )
+            matches = direct_context["matches"]
+            latency_guarded_query_expansion = direct_context["latency_guarded_query_expansion"]
         report("ranking", "Ranking matched files and snippets.", 0, 0)
         matches = self._rank_matches(question, matches, request_cache=request_cache)
         top_matches = (
@@ -2515,6 +2415,147 @@ class SourceCodeQAService:
             payload=payload,
             started_at=started_at,
         )
+
+    def _query_direct_and_decomposed_matches(
+        self,
+        *,
+        question: str,
+        matches: list[dict[str, Any]],
+        tokens: list[str],
+        synced_entries: list[tuple[RepositoryEntry, Path]],
+        simple_quality_trace: bool,
+        started_at: float,
+        result_limit: int,
+        limit: int,
+        query_plan: dict[str, Any],
+        request_cache: dict[str, Any],
+        report: Any,
+    ) -> dict[str, Any]:
+        latency_guarded_query_expansion = False
+        report("direct_search", f"Searching direct matches across {len(synced_entries)} repos.", 0, len(synced_entries))
+        skip_broad_query_decomposition = False
+        for index, (entry, repo_path) in enumerate(synced_entries, start=1):
+            matches.extend(self._search_repo(entry, repo_path, tokens, question=question, request_cache=request_cache))
+            report("direct_search", f"Searching direct matches in {entry.display_name}.", index, len(synced_entries))
+            if matches and simple_quality_trace and index >= 3 and (len(matches) >= 80 or time.time() - started_at >= 4.0):
+                direct_ranked = self._rank_matches(question, matches, request_cache=request_cache)
+                direct_top = self._select_result_matches(direct_ranked, self._query_result_limit(limit), question=question)
+                direct_evidence_summary = self._compress_evidence_cached(question, direct_top, request_cache=request_cache)
+                direct_quality_gate = self._quality_gate_cached(question, direct_evidence_summary, request_cache=request_cache)
+                if (
+                    direct_quality_gate.get("status") == "sufficient"
+                    and direct_quality_gate.get("confidence") in {"medium", "high"}
+                    and (len(synced_entries) >= 5 or time.time() - started_at >= 6.0)
+                ):
+                    skip_broad_query_decomposition = True
+                    self._increment_retrieval_stat(request_cache, "direct_scan_early_stops")
+                    report(
+                        "quality_gate",
+                        "Direct matches are sufficient; stopping repository scan early.",
+                        index,
+                        len(synced_entries),
+                    )
+                    break
+                if time.time() - started_at >= 6.0 and len(matches) >= max(60, result_limit * 5):
+                    skip_broad_query_decomposition = True
+                    self._increment_retrieval_stat(request_cache, "simple_latency_guards")
+                    report(
+                        "quality_gate",
+                        "Direct scan has enough candidate evidence; stopping early to keep the response responsive.",
+                        index,
+                        len(synced_entries),
+                    )
+                    break
+        if matches and simple_quality_trace:
+            direct_ranked = self._rank_matches(question, matches, request_cache=request_cache)
+            direct_top = self._select_result_matches(direct_ranked, self._query_result_limit(limit), question=question)
+            direct_evidence_summary = self._compress_evidence_cached(question, direct_top, request_cache=request_cache)
+            direct_quality_gate = self._quality_gate_cached(question, direct_evidence_summary, request_cache=request_cache)
+            if (
+                direct_quality_gate.get("status") == "sufficient"
+                and direct_quality_gate.get("confidence") in {"medium", "high"}
+                and (len(synced_entries) >= 5 or time.time() - started_at >= 6.0)
+            ):
+                skip_broad_query_decomposition = True
+                self._increment_retrieval_stat(request_cache, "direct_quality_short_circuits")
+                report(
+                    "quality_gate",
+                    "Direct matches are sufficient; skipping broader evidence expansion.",
+                    len(synced_entries),
+                    len(synced_entries),
+                )
+        if matches and not skip_broad_query_decomposition and time.time() - started_at >= 7.0 and len(matches) >= max(36, result_limit * 3):
+            skip_broad_query_decomposition = True
+            latency_guarded_query_expansion = True
+            self._increment_retrieval_stat(request_cache, "query_decomposition_latency_guards")
+            report(
+                "quality_gate",
+                "Direct scan has enough candidate evidence; skipping query expansion to keep the response responsive.",
+                len(synced_entries),
+                len(synced_entries),
+            )
+        if not skip_broad_query_decomposition:
+            report("query_decomposition", "Expanding query terms from domain and intent profile.", 0, len(synced_entries))
+        for index, (entry, repo_path) in enumerate(synced_entries, start=1):
+            if skip_broad_query_decomposition:
+                continue
+            for component in query_plan.get("components") or []:
+                component_terms = [str(term) for term in component.get("terms") or [] if str(term).strip()]
+                expanded_tokens: list[str] = []
+                for term in component_terms:
+                    expanded_tokens.extend(self._question_tokens(term))
+                expanded_tokens = list(dict.fromkeys(expanded_tokens))[:24]
+                if not expanded_tokens:
+                    continue
+                matches.extend(
+                    self._search_repo(
+                        entry,
+                        repo_path,
+                        expanded_tokens,
+                        question=question,
+                        focus_terms=component_terms,
+                        trace_stage="query_decomposition",
+                        request_cache=request_cache,
+                    )
+                )
+            report("query_decomposition", f"Expanded query terms in {entry.display_name}.", index, len(synced_entries))
+            if query_plan.get("intent", {}).get("static_qa"):
+                matches.extend(
+                    self._tool_find_static_findings(
+                        entry,
+                        repo_path,
+                        tokens,
+                        question,
+                        0,
+                        request_cache=request_cache,
+                    )
+                )
+            if query_plan.get("intent", {}).get("test_coverage"):
+                matches.extend(
+                    self._tool_find_test_coverage(
+                        entry,
+                        repo_path,
+                        tokens,
+                        question,
+                        0,
+                        request_cache=request_cache,
+                    )
+                )
+            if query_plan.get("intent", {}).get("operational_boundary"):
+                matches.extend(
+                    self._tool_find_operational_boundaries(
+                        entry,
+                        repo_path,
+                        tokens,
+                        question,
+                        0,
+                        request_cache=request_cache,
+                    )
+                )
+        return {
+            "matches": matches,
+            "latency_guarded_query_expansion": latency_guarded_query_expansion,
+        }
 
     def _build_query_answer_context(
         self,
