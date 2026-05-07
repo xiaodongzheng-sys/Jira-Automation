@@ -18934,12 +18934,9 @@ class SourceCodeQAService:
             "probable_inspected_file_count": len(trace.get("probable_inspected_files") or []),
         }
 
-    def _select_llm_matches(self, matches: list[dict[str, Any]], limit: int, *, question: str = "") -> list[dict[str, Any]]:
-        if not matches:
-            return []
-        limit = max(1, int(limit or 1))
-        intent = self._question_intent(question) if question else {}
-        buckets = {
+    @staticmethod
+    def _llm_match_buckets(matches: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+        return {
             "exact_lookup": [match for match in matches if match.get("trace_stage") == "exact_lookup"],
             "direct": [match for match in matches if match.get("trace_stage") == "direct"],
             "query_decomposition": [match for match in matches if match.get("trace_stage") == "query_decomposition"],
@@ -18953,6 +18950,23 @@ class SourceCodeQAService:
             "agent_plan": [match for match in matches if str(match.get("trace_stage") or "").startswith("agent_plan")],
             "quality_gate": [match for match in matches if match.get("trace_stage") == QUALITY_GATE_TRACE_STAGE],
         }
+
+    @staticmethod
+    def _llm_match_stage_order(intent: dict[str, Any]) -> tuple[str, ...]:
+        if intent.get("impact_analysis"):
+            return ("exact_lookup", "direct", "impact_analysis", "tool_loop", "query_decomposition", "dependency", "two_hop", "agent_trace", "agent_plan", "quality_gate")
+        if intent.get("test_coverage"):
+            return ("exact_lookup", "direct", "test_coverage", "query_decomposition", "tool_loop", "dependency", "two_hop", "agent_trace", "agent_plan", "quality_gate")
+        if intent.get("operational_boundary"):
+            return ("exact_lookup", "direct", "operational_boundary", "query_decomposition", "tool_loop", "dependency", "two_hop", "agent_trace", "agent_plan", "quality_gate")
+        return ("exact_lookup", "direct", "query_decomposition", "dependency", "two_hop", "tool_loop", "agent_trace", "agent_plan", "quality_gate")
+
+    def _select_llm_matches(self, matches: list[dict[str, Any]], limit: int, *, question: str = "") -> list[dict[str, Any]]:
+        if not matches:
+            return []
+        limit = max(1, int(limit or 1))
+        intent = self._question_intent(question) if question else {}
+        buckets = self._llm_match_buckets(matches)
         selected: list[dict[str, Any]] = []
         seen: set[tuple[Any, Any, Any, Any]] = set()
 
@@ -18968,13 +18982,7 @@ class SourceCodeQAService:
         # Keep a balanced evidence bundle: entry point, purpose-specific logic,
         # and downstream/common builders. This improves answer accuracy more than
         # sending only the highest raw scores.
-        stage_order = ("exact_lookup", "direct", "query_decomposition", "dependency", "two_hop", "tool_loop", "agent_trace", "agent_plan", "quality_gate")
-        if intent.get("impact_analysis"):
-            stage_order = ("exact_lookup", "direct", "impact_analysis", "tool_loop", "query_decomposition", "dependency", "two_hop", "agent_trace", "agent_plan", "quality_gate")
-        if intent.get("test_coverage"):
-            stage_order = ("exact_lookup", "direct", "test_coverage", "query_decomposition", "tool_loop", "dependency", "two_hop", "agent_trace", "agent_plan", "quality_gate")
-        if intent.get("operational_boundary"):
-            stage_order = ("exact_lookup", "direct", "operational_boundary", "query_decomposition", "tool_loop", "dependency", "two_hop", "agent_trace", "agent_plan", "quality_gate")
+        stage_order = self._llm_match_stage_order(intent)
         if intent.get("data_source"):
             for match in buckets["exact_lookup"]:
                 add(match)
