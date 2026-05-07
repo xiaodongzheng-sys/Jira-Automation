@@ -2494,13 +2494,8 @@ class SourceCodeQAService:
             retrieval_latency_ms=retrieval_latency_ms,
         )
         if self._answer_mode_requests_llm(normalized_answer_mode):
-            llm_service = self
-            payload["llm_provider"] = llm_service.llm_provider.name
-            if llm_service.llm_provider.name == LLM_PROVIDER_CODEX_CLI_BRIDGE:
-                report("llm_generation", f"Scoped Codex search · {pm_team}:{country}. Retrieval is navigation hints.", 0, 0)
-            else:
-                report("llm_generation", "Calling LLM with retrieved evidence.", 0, 0)
-            llm_payload = llm_service._build_llm_answer(
+            self._augment_query_payload_with_llm_answer(
+                payload=payload,
                 entries=query_entries,
                 key=key,
                 pm_team=pm_team,
@@ -2511,26 +2506,16 @@ class SourceCodeQAService:
                 query_mode=query_mode,
                 trace_id=trace_id,
                 followup_context=followup_context,
-                requested_answer_mode=normalized_answer_mode,
+                normalized_answer_mode=normalized_answer_mode,
                 request_cache=request_cache,
                 progress_callback=progress_callback,
-                attachments=attachments or [],
-                runtime_evidence=runtime_evidence or [],
+                attachments=attachments,
+                runtime_evidence=runtime_evidence,
                 effort_assessment=effort_assessment,
+                retrieval_latency_ms=retrieval_latency_ms,
+                evidence_pack=evidence_pack,
+                report=report,
             )
-            payload.update(llm_payload)
-            payload["query_mode"] = query_mode
-            payload["requested_query_mode"] = payload.get("requested_query_mode") or ""
-            payload["deadline_seconds"] = 0
-            payload["retrieval_latency_ms"] = retrieval_latency_ms
-            payload["codex_latency_ms"] = payload.get("llm_latency_ms") if llm_service.llm_provider.name == LLM_PROVIDER_CODEX_CLI_BRIDGE else 0
-            if isinstance(payload.get("llm_route"), dict):
-                payload["llm_route"]["retrieval_hints_ms"] = retrieval_latency_ms
-            if isinstance(payload.get("codex_cli_summary"), dict):
-                payload["codex_cli_summary"]["retrieval_hints_ms"] = retrieval_latency_ms
-            payload["background_deep_job_id"] = payload.get("background_deep_job_id") or ""
-            payload["evidence_outline"] = self._build_evidence_outline(payload.get("evidence_pack") or evidence_pack, top_matches)
-            payload["answer_mode"] = normalized_answer_mode
             report("completed", "LLM answer generated.", 0, 0)
         if not (self._answer_mode_requests_llm(normalized_answer_mode) and payload.get("llm_answer")):
             report("completed", "Code evidence retrieval completed.", 0, 0)
@@ -2543,6 +2528,68 @@ class SourceCodeQAService:
             payload=payload,
             started_at=started_at,
         )
+
+    def _augment_query_payload_with_llm_answer(
+        self,
+        *,
+        payload: dict[str, Any],
+        entries: list[RepositoryEntry],
+        key: str,
+        pm_team: str,
+        country: str,
+        question: str,
+        matches: list[dict[str, Any]],
+        llm_budget_mode: str,
+        query_mode: str,
+        trace_id: str,
+        followup_context: dict[str, Any] | None,
+        normalized_answer_mode: str,
+        request_cache: dict[str, Any],
+        progress_callback: Any | None,
+        attachments: list[dict[str, Any]] | None,
+        runtime_evidence: list[dict[str, Any]] | None,
+        effort_assessment: bool,
+        retrieval_latency_ms: int,
+        evidence_pack: dict[str, Any],
+        report: Any,
+    ) -> None:
+        llm_service = self
+        payload["llm_provider"] = llm_service.llm_provider.name
+        if llm_service.llm_provider.name == LLM_PROVIDER_CODEX_CLI_BRIDGE:
+            report("llm_generation", f"Scoped Codex search · {pm_team}:{country}. Retrieval is navigation hints.", 0, 0)
+        else:
+            report("llm_generation", "Calling LLM with retrieved evidence.", 0, 0)
+        llm_payload = llm_service._build_llm_answer(
+            entries=entries,
+            key=key,
+            pm_team=pm_team,
+            country=country,
+            question=question,
+            matches=matches,
+            llm_budget_mode=llm_budget_mode,
+            query_mode=query_mode,
+            trace_id=trace_id,
+            followup_context=followup_context,
+            requested_answer_mode=normalized_answer_mode,
+            request_cache=request_cache,
+            progress_callback=progress_callback,
+            attachments=attachments or [],
+            runtime_evidence=runtime_evidence or [],
+            effort_assessment=effort_assessment,
+        )
+        payload.update(llm_payload)
+        payload["query_mode"] = query_mode
+        payload["requested_query_mode"] = payload.get("requested_query_mode") or ""
+        payload["deadline_seconds"] = 0
+        payload["retrieval_latency_ms"] = retrieval_latency_ms
+        payload["codex_latency_ms"] = payload.get("llm_latency_ms") if llm_service.llm_provider.name == LLM_PROVIDER_CODEX_CLI_BRIDGE else 0
+        if isinstance(payload.get("llm_route"), dict):
+            payload["llm_route"]["retrieval_hints_ms"] = retrieval_latency_ms
+        if isinstance(payload.get("codex_cli_summary"), dict):
+            payload["codex_cli_summary"]["retrieval_hints_ms"] = retrieval_latency_ms
+        payload["background_deep_job_id"] = payload.get("background_deep_job_id") or ""
+        payload["evidence_outline"] = self._build_evidence_outline(payload.get("evidence_pack") or evidence_pack, matches)
+        payload["answer_mode"] = normalized_answer_mode
 
     def _merge_expanded_matches(
         self,
