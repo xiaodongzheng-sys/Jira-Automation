@@ -2178,16 +2178,13 @@ class SourceCodeQAService:
                 request_cache=request_cache,
             )
             if dependency_matches:
-                existing_keys = {(item["repo"], item["path"], item["line_start"], item["line_end"]) for item in top_matches}
-                for item in dependency_matches:
-                    item_key = (item["repo"], item["path"], item["line_start"], item["line_end"])
-                    if item_key not in existing_keys:
-                        top_matches.append(item)
-                        existing_keys.add(item_key)
-                    else:
-                        self._annotate_duplicate_tool_match(top_matches, item)
-                top_matches = self._rank_matches(question, top_matches, request_cache=request_cache)
-                top_matches = self._select_result_matches(top_matches, max(1, min(int(limit or 12), 30)), question=question)
+                top_matches = self._merge_expanded_matches(
+                    question=question,
+                    current_matches=top_matches,
+                    expanded_matches=dependency_matches,
+                    limit=limit,
+                    request_cache=request_cache,
+                )
         if top_matches and should_expand_matches:
             report("two_hop_expansion", "Expanding two-hop evidence from top matches.", 0, 0)
             trace_matches = self._expand_two_hop_matches(
@@ -2199,16 +2196,13 @@ class SourceCodeQAService:
                 request_cache=request_cache,
             )
             if trace_matches:
-                existing_keys = {(item["repo"], item["path"], item["line_start"], item["line_end"]) for item in top_matches}
-                for item in trace_matches:
-                    item_key = (item["repo"], item["path"], item["line_start"], item["line_end"])
-                    if item_key not in existing_keys:
-                        top_matches.append(item)
-                        existing_keys.add(item_key)
-                    else:
-                        self._annotate_duplicate_tool_match(top_matches, item)
-                top_matches = self._rank_matches(question, top_matches, request_cache=request_cache)
-                top_matches = self._select_result_matches(top_matches, max(1, min(int(limit or 12), 30)), question=question)
+                top_matches = self._merge_expanded_matches(
+                    question=question,
+                    current_matches=top_matches,
+                    expanded_matches=trace_matches,
+                    limit=limit,
+                    request_cache=request_cache,
+                )
         if top_matches and should_expand_matches:
             report("agent_trace", "Tracing related entities from top matches.", 0, 0)
             agent_matches = self._expand_agent_trace_matches(
@@ -2220,16 +2214,13 @@ class SourceCodeQAService:
                 request_cache=request_cache,
             )
             if agent_matches:
-                existing_keys = {(item["repo"], item["path"], item["line_start"], item["line_end"]) for item in top_matches}
-                for item in agent_matches:
-                    item_key = (item["repo"], item["path"], item["line_start"], item["line_end"])
-                    if item_key not in existing_keys:
-                        top_matches.append(item)
-                        existing_keys.add(item_key)
-                    else:
-                        self._annotate_duplicate_tool_match(top_matches, item)
-                top_matches = self._rank_matches(question, top_matches, request_cache=request_cache)
-                top_matches = self._select_result_matches(top_matches, max(1, min(int(limit or 12), 30)), question=question)
+                top_matches = self._merge_expanded_matches(
+                    question=question,
+                    current_matches=top_matches,
+                    expanded_matches=agent_matches,
+                    limit=limit,
+                    request_cache=request_cache,
+                )
         if top_matches and should_expand_matches:
             report("tool_loop", "Running targeted local investigation tools.", 0, 0)
             tool_loop_matches = self._run_planner_tool_loop(
@@ -2242,16 +2233,13 @@ class SourceCodeQAService:
                 request_cache=request_cache,
             )
             if tool_loop_matches:
-                existing_keys = {(item["repo"], item["path"], item["line_start"], item["line_end"]) for item in top_matches}
-                for item in tool_loop_matches:
-                    item_key = (item["repo"], item["path"], item["line_start"], item["line_end"])
-                    if item_key not in existing_keys:
-                        top_matches.append(item)
-                        existing_keys.add(item_key)
-                    else:
-                        self._annotate_duplicate_tool_match(top_matches, item)
-                top_matches = self._rank_matches(question, top_matches, request_cache=request_cache)
-                top_matches = self._select_result_matches(top_matches, max(1, min(int(limit or 12), 30)), question=question)
+                top_matches = self._merge_expanded_matches(
+                    question=question,
+                    current_matches=top_matches,
+                    expanded_matches=tool_loop_matches,
+                    limit=limit,
+                    request_cache=request_cache,
+                )
         if top_matches and should_expand_matches:
             report("quality_gate", "Checking evidence sufficiency before deeper expansion.", 0, 0)
             evidence_summary = self._compress_evidence_cached(question, top_matches, request_cache=request_cache)
@@ -2300,16 +2288,13 @@ class SourceCodeQAService:
                 request_cache=request_cache,
             )
             if impact_matches:
-                existing_keys = {(item["repo"], item["path"], item["line_start"], item["line_end"]) for item in top_matches}
-                for item in impact_matches:
-                    item_key = (item["repo"], item["path"], item["line_start"], item["line_end"])
-                    if item_key not in existing_keys:
-                        top_matches.append(item)
-                        existing_keys.add(item_key)
-                    else:
-                        self._annotate_duplicate_tool_match(top_matches, item)
-                top_matches = self._rank_matches(question, top_matches, request_cache=request_cache)
-                top_matches = self._select_result_matches(top_matches, max(1, min(int(limit or 12), 30)), question=question)
+                top_matches = self._merge_expanded_matches(
+                    question=question,
+                    current_matches=top_matches,
+                    expanded_matches=impact_matches,
+                    limit=limit,
+                    request_cache=request_cache,
+                )
         if index_freshness.get("status") != "fresh":
             repo_status = self.repo_status(key)
             index_freshness = self._index_freshness_payload(repo_status)
@@ -2451,6 +2436,26 @@ class SourceCodeQAService:
             started_at=started_at,
         )
         return payload
+
+    def _merge_expanded_matches(
+        self,
+        *,
+        question: str,
+        current_matches: list[dict[str, Any]],
+        expanded_matches: list[dict[str, Any]],
+        limit: int,
+        request_cache: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        existing_keys = {(item["repo"], item["path"], item["line_start"], item["line_end"]) for item in current_matches}
+        for item in expanded_matches:
+            item_key = (item["repo"], item["path"], item["line_start"], item["line_end"])
+            if item_key not in existing_keys:
+                current_matches.append(item)
+                existing_keys.add(item_key)
+            else:
+                self._annotate_duplicate_tool_match(current_matches, item)
+        ranked_matches = self._rank_matches(question, current_matches, request_cache=request_cache)
+        return self._select_result_matches(ranked_matches, max(1, min(int(limit or 12), 30)), question=question)
 
     def repo_status(self, key: str) -> list[dict[str, Any]]:
         entries = self._load_entries_for_key(key)

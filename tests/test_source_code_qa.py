@@ -2591,6 +2591,58 @@ class SourceCodeQAServiceTests(unittest.TestCase):
                 if (repo_path / ".git").exists():
                     target_service._build_repo_index(key, repo_entry, repo_path)
 
+    def test_merge_expanded_matches_dedupes_and_preserves_duplicate_signal(self):
+        current_matches = [
+            {
+                "repo": "Repo",
+                "path": "service/IssueService.java",
+                "line_start": 10,
+                "line_end": 12,
+                "retrieval": "file_scan",
+                "reason": "direct match",
+                "score": 4,
+            }
+        ]
+        expanded_matches = [
+            {
+                "repo": "Repo",
+                "path": "service/IssueService.java",
+                "line_start": 10,
+                "line_end": 12,
+                "retrieval": "flow_graph",
+                "reason": "flow edge",
+                "score": 9,
+            },
+            {
+                "repo": "Repo",
+                "path": "controller/IssueController.java",
+                "line_start": 3,
+                "line_end": 5,
+                "retrieval": "planner_caller",
+                "reason": "caller",
+                "score": 7,
+            },
+        ]
+
+        with patch.object(self.service, "_rank_matches", side_effect=lambda _question, matches, request_cache=None: matches), patch.object(
+            self.service,
+            "_select_result_matches",
+            side_effect=lambda matches, _limit, question="": matches,
+        ):
+            merged = self.service._merge_expanded_matches(
+                question="what is impacted",
+                current_matches=current_matches,
+                expanded_matches=expanded_matches,
+                limit=12,
+            )
+
+        self.assertEqual(len(merged), 2)
+        self.assertEqual(merged[0]["retrieval"], "flow_graph")
+        self.assertEqual(merged[0]["retrieval_chain"], ["file_scan", "flow_graph"])
+        self.assertIn("corroborated by flow edge", merged[0]["reason"])
+        self.assertEqual(merged[0]["score"], 9)
+        self.assertEqual(merged[1]["path"], "controller/IssueController.java")
+
     def test_attachment_prompt_and_gemini_parts_keep_attachment_evidence_separate(self):
         image_path = Path(self.temp_dir.name) / "screen.png"
         image_path.write_bytes(b"fake-image")
