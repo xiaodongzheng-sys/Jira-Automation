@@ -1850,7 +1850,7 @@ class SourceCodeQAService:
         tool_trace: list[dict[str, Any]] = []
         matches: list[dict[str, Any]] = []
         request_cache = self._new_retrieval_request_cache()
-        result_limit = max(1, min(int(limit or 12), 30))
+        result_limit = self._query_result_limit(limit)
         cross_repo_context = self._requires_cross_repo_context(question)
         if cross_repo_context and repository_scope.get("active"):
             repository_scope = {
@@ -2027,7 +2027,7 @@ class SourceCodeQAService:
                 report("direct_search", f"Searching direct matches in {entry.display_name}.", index, len(synced_entries))
                 if matches and simple_quality_trace and index >= 3 and (len(matches) >= 80 or time.time() - started_at >= 4.0):
                     direct_ranked = self._rank_matches(question, matches, request_cache=request_cache)
-                    direct_top = self._select_result_matches(direct_ranked, max(1, min(int(limit or 12), 30)), question=question)
+                    direct_top = self._select_result_matches(direct_ranked, self._query_result_limit(limit), question=question)
                     direct_evidence_summary = self._compress_evidence_cached(question, direct_top, request_cache=request_cache)
                     direct_quality_gate = self._quality_gate_cached(question, direct_evidence_summary, request_cache=request_cache)
                     if (
@@ -2056,7 +2056,7 @@ class SourceCodeQAService:
                         break
             if matches and simple_quality_trace:
                 direct_ranked = self._rank_matches(question, matches, request_cache=request_cache)
-                direct_top = self._select_result_matches(direct_ranked, max(1, min(int(limit or 12), 30)), question=question)
+                direct_top = self._select_result_matches(direct_ranked, self._query_result_limit(limit), question=question)
                 direct_evidence_summary = self._compress_evidence_cached(question, direct_top, request_cache=request_cache)
                 direct_quality_gate = self._quality_gate_cached(question, direct_evidence_summary, request_cache=request_cache)
                 if (
@@ -2448,7 +2448,7 @@ class SourceCodeQAService:
             else:
                 self._annotate_duplicate_tool_match(current_matches, item)
         ranked_matches = self._rank_matches(question, current_matches, request_cache=request_cache)
-        return self._select_result_matches(ranked_matches, max(1, min(int(limit or 12), 30)), question=question)
+        return self._select_result_matches(ranked_matches, self._query_result_limit(limit), question=question)
 
     def _record_query_payload(
         self,
@@ -2471,6 +2471,10 @@ class SourceCodeQAService:
             started_at=started_at,
         )
         return payload
+
+    @staticmethod
+    def _query_result_limit(limit: int) -> int:
+        return max(1, min(int(limit or 12), 30))
 
     def repo_status(self, key: str) -> list[dict[str, Any]]:
         entries = self._load_entries_for_key(key)
@@ -8080,7 +8084,7 @@ class SourceCodeQAService:
                 seen.add(item_key)
                 added += 1
             current_matches.sort(key=lambda item: item["score"], reverse=True)
-            current_matches = self._select_result_matches(current_matches, max(1, min(int(limit or 12), 30)), question=question)
+            current_matches = self._select_result_matches(current_matches, self._query_result_limit(limit), question=question)
             empty_rounds = empty_rounds + 1 if added == 0 else 0
             should_stop = self._should_stop_tool_loop(question, current_matches, step_index, empty_rounds, request_cache=request_cache)
             if tool_trace is not None:
@@ -10769,7 +10773,7 @@ class SourceCodeQAService:
                     }
                 )
             collected.sort(key=lambda item: item["score"], reverse=True)
-            collected = self._select_result_matches(collected, max(1, min(int(limit or 12), 30)), question=question)
+            collected = self._select_result_matches(collected, self._query_result_limit(limit), question=question)
             current_summary = self._compress_evidence_cached(question, collected, request_cache=request_cache)
             current_gate = self._quality_gate_cached(question, current_summary, request_cache=request_cache)
             if self._should_stop_agent_plan(current_summary, current_gate, step_index):
