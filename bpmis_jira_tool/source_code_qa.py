@@ -13890,19 +13890,16 @@ class SourceCodeQAService:
         answer_contract = final["answer_contract"]
         llm_route = {
             **llm_route,
-            "codex_citation_validation_status": codex_validation.get("status"),
-            "codex_repair_attempted": repair_attempted,
-            "codex_repair_policy": "severe_only",
-            "codex_repair_reason": repair_reason,
-            "codex_repair_skipped_reason": repair_skipped_reason,
-            "codex_cited_path_count": codex_validation.get("cited_path_count", 0),
-            "codex_scoped_file_ref_count": len(codex_validation.get("scoped_file_refs") or []),
-            "codex_out_of_scope_ref_count": len(codex_validation.get("out_of_scope_refs") or []),
-            "codex_validation_warning_count": int(codex_validation.get("warning_count") or 0),
-            "codex_repair_decision_ms": repair_decision_ms,
-            "codex_deep_investigation_rounds": deep_investigation_rounds,
-            "codex_deep_investigation_terms": deep_investigation_terms[:12],
-            "codex_deep_investigation_added": deep_investigation_added,
+            **self._codex_repair_route_fields(
+                codex_validation=codex_validation,
+                repair_attempted=repair_attempted,
+                repair_reason=repair_reason,
+                repair_skipped_reason=repair_skipped_reason,
+                repair_decision_ms=repair_decision_ms,
+                deep_investigation_rounds=deep_investigation_rounds,
+                deep_investigation_terms=deep_investigation_terms,
+                deep_investigation_added=deep_investigation_added,
+            ),
         }
         if not (is_followup and not self.codex_cache_followups):
             self._store_cached_answer(
@@ -14349,6 +14346,34 @@ class SourceCodeQAService:
             "session_id": codex_cli_trace.get("session_id") or "",
             "deep_investigation_rounds": deep_investigation_rounds,
             "deep_investigation_added": deep_investigation_added,
+        }
+
+    @staticmethod
+    def _codex_repair_route_fields(
+        *,
+        codex_validation: dict[str, Any],
+        repair_attempted: bool,
+        repair_reason: str,
+        repair_skipped_reason: str,
+        repair_decision_ms: int,
+        deep_investigation_rounds: int,
+        deep_investigation_terms: list[str],
+        deep_investigation_added: int,
+    ) -> dict[str, Any]:
+        return {
+            "codex_citation_validation_status": codex_validation.get("status"),
+            "codex_repair_attempted": repair_attempted,
+            "codex_repair_policy": "severe_only",
+            "codex_repair_reason": repair_reason,
+            "codex_repair_skipped_reason": repair_skipped_reason,
+            "codex_cited_path_count": codex_validation.get("cited_path_count", 0),
+            "codex_scoped_file_ref_count": len(codex_validation.get("scoped_file_refs") or []),
+            "codex_out_of_scope_ref_count": len(codex_validation.get("out_of_scope_refs") or []),
+            "codex_validation_warning_count": int(codex_validation.get("warning_count") or 0),
+            "codex_repair_decision_ms": repair_decision_ms,
+            "codex_deep_investigation_rounds": deep_investigation_rounds,
+            "codex_deep_investigation_terms": deep_investigation_terms[:12],
+            "codex_deep_investigation_added": deep_investigation_added,
         }
 
     def _codex_payload(
