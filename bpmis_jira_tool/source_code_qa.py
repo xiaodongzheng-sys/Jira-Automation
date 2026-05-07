@@ -12758,6 +12758,42 @@ class SourceCodeQAService:
             "domain_context": domain_context,
         }
 
+    def _llm_answer_generation_settings(
+        self,
+        *,
+        llm_route: dict[str, Any],
+        selected_model: str,
+        routed_budget_mode: str,
+        budget: dict[str, Any],
+        quality_gate: dict[str, Any],
+        force_zero_thinking: bool = False,
+    ) -> dict[str, Any]:
+        answer_thinking_budget = self._thinking_budget_for_call(
+            role="answer",
+            budget_mode=routed_budget_mode,
+            budget=budget,
+            quality_gate=quality_gate,
+        )
+        if force_zero_thinking:
+            answer_thinking_budget = 0
+        answer_thinking_budget = self._normalize_thinking_budget_for_provider(answer_thinking_budget)
+        answer_thinking_config = self._thinking_config_for_provider(
+            answer_thinking_budget,
+            model=selected_model,
+            role="answer",
+            budget_mode=routed_budget_mode,
+        )
+        return {
+            "answer_thinking_budget": answer_thinking_budget,
+            "answer_thinking_config": answer_thinking_config,
+            "llm_route": {
+                **llm_route,
+                "answer_model": selected_model,
+                "thinking_budget": answer_thinking_budget,
+                "thinking_config": answer_thinking_config,
+            },
+        }
+
     def _cached_llm_answer_payload(
         self,
         *,
@@ -13087,25 +13123,16 @@ class SourceCodeQAService:
                 effort_assessment=effort_assessment,
             )
         attachment_section = self._context_attachment_section(attachments or [], runtime_evidence or [])
-        answer_thinking_budget = self._thinking_budget_for_call(
-            role="answer",
-            budget_mode=routed_budget_mode,
+        generation_settings = self._llm_answer_generation_settings(
+            llm_route=llm_route,
+            selected_model=selected_model,
+            routed_budget_mode=routed_budget_mode,
             budget=budget,
             quality_gate=quality_gate,
         )
-        answer_thinking_budget = self._normalize_thinking_budget_for_provider(answer_thinking_budget)
-        answer_thinking_config = self._thinking_config_for_provider(
-            answer_thinking_budget,
-            model=selected_model,
-            role="answer",
-            budget_mode=routed_budget_mode,
-        )
-        llm_route = {
-            **llm_route,
-            "answer_model": selected_model,
-            "thinking_budget": answer_thinking_budget,
-            "thinking_config": answer_thinking_config,
-        }
+        answer_thinking_budget = generation_settings["answer_thinking_budget"]
+        answer_thinking_config = generation_settings["answer_thinking_config"]
+        llm_route = generation_settings["llm_route"]
         if effort_assessment:
             llm_route["task"] = "effort_assessment"
         prompt_context = self._build_compressed_llm_context(
@@ -13142,29 +13169,21 @@ class SourceCodeQAService:
             quality_gate = answer_context["quality_gate"]
             evidence_pack = answer_context["evidence_pack"]
             domain_context = answer_context["domain_context"]
-            answer_thinking_budget = self._thinking_budget_for_call(
-                role="answer",
-                budget_mode=routed_budget_mode,
+            generation_settings = self._llm_answer_generation_settings(
+                llm_route=llm_route,
+                selected_model=selected_model,
+                routed_budget_mode=routed_budget_mode,
                 budget=budget,
                 quality_gate=quality_gate,
+                force_zero_thinking=token_pressure == "tight",
             )
-            if token_pressure == "tight":
-                answer_thinking_budget = 0
-            answer_thinking_budget = self._normalize_thinking_budget_for_provider(answer_thinking_budget)
-            answer_thinking_config = self._thinking_config_for_provider(
-                answer_thinking_budget,
-                model=selected_model,
-                role="answer",
-                budget_mode=routed_budget_mode,
-            )
+            answer_thinking_budget = generation_settings["answer_thinking_budget"]
+            answer_thinking_config = generation_settings["answer_thinking_config"]
             llm_route = {
-                **llm_route,
+                **generation_settings["llm_route"],
                 "selected": routed_budget_mode,
                 "reason": f"{llm_route.get('reason') or ''},token_pressure_{token_pressure}".strip(","),
                 "original_budget": original_budget_mode,
-                "answer_model": selected_model,
-                "thinking_budget": answer_thinking_budget,
-                "thinking_config": answer_thinking_config,
             }
             prompt_context = self._build_compressed_llm_context(
                 evidence_summary,
