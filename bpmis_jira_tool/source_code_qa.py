@@ -2165,6 +2165,140 @@ class SourceCodeQAService:
             )
             matches = direct_context["matches"]
             latency_guarded_query_expansion = direct_context["latency_guarded_query_expansion"]
+        top_matches, should_expand_matches = self._rank_and_expand_query_matches(
+            question=question,
+            matches=matches,
+            exact_matches=exact_matches,
+            result_limit=result_limit,
+            exact_lookup_sufficient=exact_lookup_sufficient,
+            simple_quality_trace=simple_quality_trace,
+            synced_entries=synced_entries,
+            started_at=started_at,
+            latency_guarded_query_expansion=latency_guarded_query_expansion,
+            query_entries=query_entries,
+            key=key,
+            limit=limit,
+            query_plan=query_plan,
+            tool_trace=tool_trace,
+            request_cache=request_cache,
+            report=report,
+        )
+        if index_freshness.get("status") != "fresh":
+            repo_status = self.repo_status(key)
+            index_freshness = self._index_freshness_payload(repo_status)
+        if not top_matches:
+            return self._record_empty_query_payload(
+                key=key,
+                question=question,
+                answer_mode=answer_mode,
+                llm_budget_mode=llm_budget_mode,
+                started_at=started_at,
+                repo_status=repo_status,
+                index_freshness=index_freshness,
+                status="no_match",
+                summary="No confident match. Try exact symbols, route paths, table names, or error codes.",
+                trace_id=trace_id,
+                query_mode=query_mode,
+                extra_fields={"repository_scope": repository_scope},
+            )
+        retrieval_latency_ms = int((time.time() - started_at) * 1000)
+        normalized_answer_mode = self._normalize_answer_mode(answer_mode)
+        report(
+            "evidence_pack",
+            "Building evidence pack and answer context.",
+            0,
+            0,
+        )
+        evidence_summary, quality_gate, trace_paths, repo_graph, evidence_pack = self._build_query_answer_context(
+            question=question,
+            matches=top_matches,
+            entries=query_entries,
+            key=key,
+            exact_lookup_sufficient=exact_lookup_sufficient,
+            should_expand_matches=should_expand_matches,
+            request_cache=request_cache,
+        )
+        payload = self._query_success_payload(
+            question=question,
+            answer_mode=normalized_answer_mode,
+            matches=top_matches,
+            trace_paths=trace_paths,
+            repo_graph=repo_graph,
+            evidence_summary=evidence_summary,
+            evidence_pack=evidence_pack,
+            repo_status=repo_status,
+            index_freshness=index_freshness,
+            answer_quality=quality_gate,
+            query_plan=query_plan,
+            exact_lookup_terms=exact_lookup_terms,
+            exact_lookup_matched_terms=exact_lookup_matched_terms,
+            exact_match_count=len(exact_matches),
+            exact_lookup_sufficient=exact_lookup_sufficient,
+            tool_trace=tool_trace,
+            request_cache=request_cache,
+            followup_context=followup_context,
+            repository_scope=repository_scope,
+            original_question=original_question,
+            trace_id=trace_id,
+            query_mode=query_mode,
+            retrieval_latency_ms=retrieval_latency_ms,
+        )
+        if self._answer_mode_requests_llm(normalized_answer_mode):
+            self._augment_query_payload_with_llm_answer(
+                payload=payload,
+                entries=query_entries,
+                key=key,
+                pm_team=pm_team,
+                country=country,
+                question=question,
+                matches=top_matches,
+                llm_budget_mode=llm_budget_mode,
+                query_mode=query_mode,
+                trace_id=trace_id,
+                followup_context=followup_context,
+                normalized_answer_mode=normalized_answer_mode,
+                request_cache=request_cache,
+                progress_callback=progress_callback,
+                attachments=attachments,
+                runtime_evidence=runtime_evidence,
+                effort_assessment=effort_assessment,
+                retrieval_latency_ms=retrieval_latency_ms,
+                evidence_pack=evidence_pack,
+                report=report,
+            )
+            report("completed", "LLM answer generated.", 0, 0)
+        if not (self._answer_mode_requests_llm(normalized_answer_mode) and payload.get("llm_answer")):
+            report("completed", "Code evidence retrieval completed.", 0, 0)
+        return self._record_query_payload(
+            key=key,
+            question=question,
+            answer_mode=answer_mode,
+            llm_budget_mode=llm_budget_mode,
+            query_mode=query_mode,
+            payload=payload,
+            started_at=started_at,
+        )
+
+    def _rank_and_expand_query_matches(
+        self,
+        *,
+        question: str,
+        matches: list[dict[str, Any]],
+        exact_matches: list[dict[str, Any]],
+        result_limit: int,
+        exact_lookup_sufficient: bool,
+        simple_quality_trace: bool,
+        synced_entries: list[tuple[RepositoryEntry, Path]],
+        started_at: float,
+        latency_guarded_query_expansion: bool,
+        query_entries: list[RepositoryEntry],
+        key: str,
+        limit: int,
+        query_plan: dict[str, Any],
+        tool_trace: list[dict[str, Any]],
+        request_cache: dict[str, Any],
+        report: Any,
+    ) -> tuple[list[dict[str, Any]], bool]:
         report("ranking", "Ranking matched files and snippets.", 0, 0)
         matches = self._rank_matches(question, matches, request_cache=request_cache)
         top_matches = (
@@ -2320,101 +2454,7 @@ class SourceCodeQAService:
                     limit=limit,
                     request_cache=request_cache,
                 )
-        if index_freshness.get("status") != "fresh":
-            repo_status = self.repo_status(key)
-            index_freshness = self._index_freshness_payload(repo_status)
-        if not top_matches:
-            return self._record_empty_query_payload(
-                key=key,
-                question=question,
-                answer_mode=answer_mode,
-                llm_budget_mode=llm_budget_mode,
-                started_at=started_at,
-                repo_status=repo_status,
-                index_freshness=index_freshness,
-                status="no_match",
-                summary="No confident match. Try exact symbols, route paths, table names, or error codes.",
-                trace_id=trace_id,
-                query_mode=query_mode,
-                extra_fields={"repository_scope": repository_scope},
-            )
-        retrieval_latency_ms = int((time.time() - started_at) * 1000)
-        normalized_answer_mode = self._normalize_answer_mode(answer_mode)
-        report(
-            "evidence_pack",
-            "Building evidence pack and answer context.",
-            0,
-            0,
-        )
-        evidence_summary, quality_gate, trace_paths, repo_graph, evidence_pack = self._build_query_answer_context(
-            question=question,
-            matches=top_matches,
-            entries=query_entries,
-            key=key,
-            exact_lookup_sufficient=exact_lookup_sufficient,
-            should_expand_matches=should_expand_matches,
-            request_cache=request_cache,
-        )
-        payload = self._query_success_payload(
-            question=question,
-            answer_mode=normalized_answer_mode,
-            matches=top_matches,
-            trace_paths=trace_paths,
-            repo_graph=repo_graph,
-            evidence_summary=evidence_summary,
-            evidence_pack=evidence_pack,
-            repo_status=repo_status,
-            index_freshness=index_freshness,
-            answer_quality=quality_gate,
-            query_plan=query_plan,
-            exact_lookup_terms=exact_lookup_terms,
-            exact_lookup_matched_terms=exact_lookup_matched_terms,
-            exact_match_count=len(exact_matches),
-            exact_lookup_sufficient=exact_lookup_sufficient,
-            tool_trace=tool_trace,
-            request_cache=request_cache,
-            followup_context=followup_context,
-            repository_scope=repository_scope,
-            original_question=original_question,
-            trace_id=trace_id,
-            query_mode=query_mode,
-            retrieval_latency_ms=retrieval_latency_ms,
-        )
-        if self._answer_mode_requests_llm(normalized_answer_mode):
-            self._augment_query_payload_with_llm_answer(
-                payload=payload,
-                entries=query_entries,
-                key=key,
-                pm_team=pm_team,
-                country=country,
-                question=question,
-                matches=top_matches,
-                llm_budget_mode=llm_budget_mode,
-                query_mode=query_mode,
-                trace_id=trace_id,
-                followup_context=followup_context,
-                normalized_answer_mode=normalized_answer_mode,
-                request_cache=request_cache,
-                progress_callback=progress_callback,
-                attachments=attachments,
-                runtime_evidence=runtime_evidence,
-                effort_assessment=effort_assessment,
-                retrieval_latency_ms=retrieval_latency_ms,
-                evidence_pack=evidence_pack,
-                report=report,
-            )
-            report("completed", "LLM answer generated.", 0, 0)
-        if not (self._answer_mode_requests_llm(normalized_answer_mode) and payload.get("llm_answer")):
-            report("completed", "Code evidence retrieval completed.", 0, 0)
-        return self._record_query_payload(
-            key=key,
-            question=question,
-            answer_mode=answer_mode,
-            llm_budget_mode=llm_budget_mode,
-            query_mode=query_mode,
-            payload=payload,
-            started_at=started_at,
-        )
+        return top_matches, should_expand_matches
 
     def _query_direct_and_decomposed_matches(
         self,
