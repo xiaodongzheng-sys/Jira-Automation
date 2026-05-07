@@ -1808,6 +1808,13 @@ class SourceCodeQAService:
                 queryable_entries.append((entry, repo_path))
         return queryable_entries
 
+    @staticmethod
+    def _normalize_answer_mode(answer_mode: str) -> str:
+        normalized_answer_mode = str(answer_mode or ANSWER_MODE).strip() or ANSWER_MODE
+        if normalized_answer_mode not in {ANSWER_MODE, ANSWER_MODE_GEMINI, ANSWER_MODE_AUTO}:
+            return ANSWER_MODE_AUTO
+        return normalized_answer_mode
+
     def query(
         self,
         *,
@@ -2335,9 +2342,7 @@ class SourceCodeQAService:
                 started_at=started_at,
             )
         retrieval_latency_ms = int((time.time() - started_at) * 1000)
-        normalized_answer_mode = str(answer_mode or ANSWER_MODE).strip() or ANSWER_MODE
-        if normalized_answer_mode not in {ANSWER_MODE, ANSWER_MODE_GEMINI, ANSWER_MODE_AUTO}:
-            normalized_answer_mode = ANSWER_MODE_AUTO
+        normalized_answer_mode = self._normalize_answer_mode(answer_mode)
         report(
             "evidence_pack",
             "Building evidence pack and answer context.",
