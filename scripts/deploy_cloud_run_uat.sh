@@ -452,7 +452,7 @@ if [[ "$ENV_SECRET_PRECLEAR_REQUIRED" == "1" ]]; then
     ${RUNTIME_ARGS[@]+"${RUNTIME_ARGS[@]}"} \
     --no-traffic \
     --tag "${UAT_TAG}-secret-clear" \
-    --clear-secrets \
+    --remove-secrets "LOCAL_AGENT_HMAC_SECRET" \
     --remove-env-vars "LOCAL_AGENT_HMAC_SECRET"
 fi
 
