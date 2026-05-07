@@ -13993,54 +13993,36 @@ class SourceCodeQAService:
                 "cache_metadata": self._answer_cache_metadata(cache_key, cached),
             }
         codex_cli_session_id = self._codex_cli_session_id(followup_context)
-        payload = self._codex_payload(
-            prompt_context,
+        initial_result = self._codex_initial_answer_result(
+            prompt_context=prompt_context,
             prompt_mode=prompt_mode,
             progress_callback=progress_callback,
             codex_cli_session_id=codex_cli_session_id,
-            image_paths=self._attachment_image_paths(attachments or []),
+            attachments=attachments or [],
             trace_id=trace_id,
-            phase="initial",
-            prompt_stats=initial_prompt_stats,
-            candidate_path_count=len(candidate_paths),
+            initial_prompt_stats=initial_prompt_stats,
+            candidate_paths=candidate_paths,
             candidate_repo_count=candidate_repo_count,
-        )
-        try:
-            result = self.llm_provider.generate(
-                payload=payload,
-                primary_model=selected_model,
-                fallback_model=self._llm_fallback_model(),
-            )
-        except ToolError as error:
-            raise
-        answer = self.llm_provider.extract_text(result.payload)
-        structured_answer = self._parse_structured_answer(answer)
-        usage = self._normalize_llm_usage(result.usage or result.payload.get("usageMetadata") or {})
-        effective_model = result.model
-        attempts = result.attempts
-        llm_latency_ms = int(result.latency_ms or 0)
-        llm_attempt_log = [dict(item) for item in result.attempt_log]
-        finish_reason = self._llm_finish_reason(result.payload)
-        codex_cli_trace = result.payload.get("codex_cli_trace") if isinstance(result.payload.get("codex_cli_trace"), dict) else {}
-        codex_validation = self._timed_codex_call(
-            timing,
-            "citation_validation",
-            lambda: self._validate_codex_citations(answer, candidate_paths, candidate_paths, scope_roots=scope_roots),
-            trace_id=trace_id,
             selected_model=selected_model,
             query_mode=query_mode,
-            phase="initial",
+            question=question,
+            evidence_pack=evidence_pack,
+            timing=timing,
+            scope_roots=scope_roots,
         )
-        claim_check = self._merge_codex_validation(self._trusted_provider_check(), codex_validation)
-        answer_judge = self._timed_codex_call(
-            timing,
-            "answer_judge",
-            lambda: self._run_answer_judge(question, answer, evidence_pack, claim_check),
-            trace_id=trace_id,
-            selected_model=selected_model,
-            query_mode=query_mode,
-            phase="initial",
-        )
+        answer = initial_result["answer"]
+        structured_answer = initial_result["structured_answer"]
+        usage = initial_result["usage"]
+        effective_model = initial_result["effective_model"]
+        attempts = initial_result["attempts"]
+        llm_latency_ms = initial_result["llm_latency_ms"]
+        llm_attempt_log = initial_result["llm_attempt_log"]
+        finish_reason = initial_result["finish_reason"]
+        codex_cli_trace = initial_result["codex_cli_trace"]
+        codex_initial_ms = initial_result["codex_initial_ms"]
+        codex_validation = initial_result["codex_validation"]
+        claim_check = initial_result["claim_check"]
+        answer_judge = initial_result["answer_judge"]
         repair_attempted = False
         repair_skipped_reason = ""
         repair_reason = ""
@@ -14337,7 +14319,7 @@ class SourceCodeQAService:
             repair_skipped_reason=repair_skipped_reason,
             scope_roots=scope_roots,
             llm_latency_ms=llm_latency_ms,
-            codex_initial_ms=int(result.latency_ms or 0),
+            codex_initial_ms=codex_initial_ms,
             timing=timing,
             llm_attempt_log=llm_attempt_log,
             codex_cli_trace=codex_cli_trace,
@@ -14558,6 +14540,89 @@ class SourceCodeQAService:
             llm_budget_mode=routed_budget_mode,
             trace_id=trace_id,
         )
+
+    def _codex_initial_answer_result(
+        self,
+        *,
+        prompt_context: str,
+        prompt_mode: str,
+        progress_callback: Any | None,
+        codex_cli_session_id: str,
+        attachments: list[dict[str, Any]],
+        trace_id: str,
+        initial_prompt_stats: dict[str, int],
+        candidate_paths: list[dict[str, Any]],
+        candidate_repo_count: int,
+        selected_model: str,
+        query_mode: str,
+        question: str,
+        evidence_pack: dict[str, Any],
+        timing: dict[str, int],
+        scope_roots: list[dict[str, str]],
+    ) -> dict[str, Any]:
+        payload = self._codex_payload(
+            prompt_context,
+            prompt_mode=prompt_mode,
+            progress_callback=progress_callback,
+            codex_cli_session_id=codex_cli_session_id,
+            image_paths=self._attachment_image_paths(attachments),
+            trace_id=trace_id,
+            phase="initial",
+            prompt_stats=initial_prompt_stats,
+            candidate_path_count=len(candidate_paths),
+            candidate_repo_count=candidate_repo_count,
+        )
+        try:
+            result = self.llm_provider.generate(
+                payload=payload,
+                primary_model=selected_model,
+                fallback_model=self._llm_fallback_model(),
+            )
+        except ToolError as error:
+            raise
+        answer = self.llm_provider.extract_text(result.payload)
+        structured_answer = self._parse_structured_answer(answer)
+        usage = self._normalize_llm_usage(result.usage or result.payload.get("usageMetadata") or {})
+        effective_model = result.model
+        attempts = result.attempts
+        llm_latency_ms = int(result.latency_ms or 0)
+        llm_attempt_log = [dict(item) for item in result.attempt_log]
+        finish_reason = self._llm_finish_reason(result.payload)
+        codex_cli_trace = result.payload.get("codex_cli_trace") if isinstance(result.payload.get("codex_cli_trace"), dict) else {}
+        codex_validation = self._timed_codex_call(
+            timing,
+            "citation_validation",
+            lambda: self._validate_codex_citations(answer, candidate_paths, candidate_paths, scope_roots=scope_roots),
+            trace_id=trace_id,
+            selected_model=selected_model,
+            query_mode=query_mode,
+            phase="initial",
+        )
+        claim_check = self._merge_codex_validation(self._trusted_provider_check(), codex_validation)
+        answer_judge = self._timed_codex_call(
+            timing,
+            "answer_judge",
+            lambda: self._run_answer_judge(question, answer, evidence_pack, claim_check),
+            trace_id=trace_id,
+            selected_model=selected_model,
+            query_mode=query_mode,
+            phase="initial",
+        )
+        return {
+            "answer": answer,
+            "structured_answer": structured_answer,
+            "usage": usage,
+            "effective_model": effective_model,
+            "attempts": attempts,
+            "llm_latency_ms": llm_latency_ms,
+            "llm_attempt_log": llm_attempt_log,
+            "finish_reason": finish_reason,
+            "codex_cli_trace": codex_cli_trace,
+            "codex_initial_ms": llm_latency_ms,
+            "codex_validation": codex_validation,
+            "claim_check": claim_check,
+            "answer_judge": answer_judge,
+        }
 
     def _codex_repair_decision(
         self,
