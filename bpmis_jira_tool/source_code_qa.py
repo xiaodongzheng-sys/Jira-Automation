@@ -13292,23 +13292,6 @@ class SourceCodeQAService:
         query_mode = self.normalize_query_mode(query_mode)
         timing: dict[str, int] = {}
 
-        def timed_call(component: str, callback: Any, **fields: Any) -> Any:
-            started = time.perf_counter()
-            try:
-                return callback()
-            finally:
-                elapsed_ms = int((time.perf_counter() - started) * 1000)
-                timing[component] = timing.get(component, 0) + elapsed_ms
-                _log_source_code_qa_timing(
-                    component,
-                    elapsed_ms=elapsed_ms,
-                    trace_id=trace_id,
-                    provider=self.llm_provider.name,
-                    model=selected_model,
-                    query_mode=query_mode,
-                    **fields,
-                )
-
         candidate_limit = self.codex_top_path_limit
         candidate_matches = self._select_llm_matches(
             matches,
@@ -13401,15 +13384,23 @@ class SourceCodeQAService:
         if cached is not None:
             cached_answer = str(cached["answer"])
             cached_structured = self._parse_structured_answer(cached_answer)
-            cached_validation = timed_call(
+            cached_validation = self._timed_codex_call(
+                timing,
                 "citation_validation",
                 lambda: self._validate_codex_citations(cached_answer, candidate_paths, candidate_paths, scope_roots=scope_roots),
+                trace_id=trace_id,
+                selected_model=selected_model,
+                query_mode=query_mode,
                 phase="cache_refresh_check",
             )
             cached_claim_check = self._merge_codex_validation(self._trusted_provider_check(), cached_validation)
-            cached_judge = timed_call(
+            cached_judge = self._timed_codex_call(
+                timing,
                 "answer_judge",
                 lambda: self._run_answer_judge(question, cached_answer, evidence_pack, cached_claim_check),
+                trace_id=trace_id,
+                selected_model=selected_model,
+                query_mode=query_mode,
                 phase="cache_refresh_check",
             )
             cached_repair_reasons = self._codex_severe_repair_reasons(
@@ -13428,15 +13419,23 @@ class SourceCodeQAService:
         if cached is not None:
             cached_answer = str(cached["answer"])
             cached_structured = self._parse_structured_answer(cached_answer)
-            cached_validation = timed_call(
+            cached_validation = self._timed_codex_call(
+                timing,
                 "citation_validation",
                 lambda: self._validate_codex_citations(cached_answer, candidate_paths, candidate_paths, scope_roots=scope_roots),
+                trace_id=trace_id,
+                selected_model=selected_model,
+                query_mode=query_mode,
                 phase="cache_hit",
             )
             cached_claim_check = self._merge_codex_validation(self._trusted_provider_check(), cached_validation)
-            cached_judge = timed_call(
+            cached_judge = self._timed_codex_call(
+                timing,
                 "answer_judge",
                 lambda: self._run_answer_judge(question, cached_answer, evidence_pack, cached_claim_check),
+                trace_id=trace_id,
+                selected_model=selected_model,
+                query_mode=query_mode,
                 phase="cache_hit",
             )
             cached_final = self._finalize_trusted_model_answer(
@@ -13528,15 +13527,23 @@ class SourceCodeQAService:
         llm_attempt_log = [dict(item) for item in result.attempt_log]
         finish_reason = self._llm_finish_reason(result.payload)
         codex_cli_trace = result.payload.get("codex_cli_trace") if isinstance(result.payload.get("codex_cli_trace"), dict) else {}
-        codex_validation = timed_call(
+        codex_validation = self._timed_codex_call(
+            timing,
             "citation_validation",
             lambda: self._validate_codex_citations(answer, candidate_paths, candidate_paths, scope_roots=scope_roots),
+            trace_id=trace_id,
+            selected_model=selected_model,
+            query_mode=query_mode,
             phase="initial",
         )
         claim_check = self._merge_codex_validation(self._trusted_provider_check(), codex_validation)
-        answer_judge = timed_call(
+        answer_judge = self._timed_codex_call(
+            timing,
             "answer_judge",
             lambda: self._run_answer_judge(question, answer, evidence_pack, claim_check),
+            trace_id=trace_id,
+            selected_model=selected_model,
+            query_mode=query_mode,
             phase="initial",
         )
         repair_attempted = False
@@ -13816,15 +13823,23 @@ class SourceCodeQAService:
                 else:
                     repair_answer = self.llm_provider.extract_text(repair_result.payload)
                     repair_structured = self._parse_structured_answer(repair_answer)
-                    repair_validation = timed_call(
+                    repair_validation = self._timed_codex_call(
+                        timing,
                         "citation_validation",
                         lambda: self._validate_codex_citations(repair_answer, candidate_paths, candidate_paths, scope_roots=scope_roots),
+                        trace_id=trace_id,
+                        selected_model=selected_model,
+                        query_mode=query_mode,
                         phase="repair",
                     )
                     repair_claim_check = self._merge_codex_validation(self._trusted_provider_check(), repair_validation)
-                    repair_judge = timed_call(
+                    repair_judge = self._timed_codex_call(
+                        timing,
                         "answer_judge",
                         lambda: self._run_answer_judge(question, repair_answer, evidence_pack, repair_claim_check),
+                        trace_id=trace_id,
+                        selected_model=selected_model,
+                        query_mode=query_mode,
                         phase="repair",
                     )
                     answer = repair_answer
@@ -14256,6 +14271,33 @@ class SourceCodeQAService:
             query_mode=query_mode,
             **fields,
         )
+
+    def _timed_codex_call(
+        self,
+        timing: dict[str, int],
+        component: str,
+        callback: Any,
+        *,
+        trace_id: str,
+        selected_model: str,
+        query_mode: str,
+        **fields: Any,
+    ) -> Any:
+        started = time.perf_counter()
+        try:
+            return callback()
+        finally:
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            timing[component] = timing.get(component, 0) + elapsed_ms
+            _log_source_code_qa_timing(
+                component,
+                elapsed_ms=elapsed_ms,
+                trace_id=trace_id,
+                provider=self.llm_provider.name,
+                model=selected_model,
+                query_mode=query_mode,
+                **fields,
+            )
 
     def _codex_payload(
         self,
