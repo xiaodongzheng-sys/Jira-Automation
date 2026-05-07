@@ -462,7 +462,7 @@ exit 0
             deploy_calls = [line for line in calls.splitlines() if line.startswith("run deploy")]
             self.assertEqual(len(deploy_calls), 2, msg=calls)
             self.assertIn("--remove-secrets LOCAL_AGENT_HMAC_SECRET", deploy_calls[0])
-            self.assertIn("--update-env-vars LOCAL_AGENT_HMAC_SECRET=uat-only-secret", deploy_calls[0])
+            self.assertNotIn("--update-env-vars LOCAL_AGENT_HMAC_SECRET=uat-only-secret", deploy_calls[0])
             self.assertIn("--set-secrets", deploy_calls[1])
             self.assertIn("--set-env-vars", deploy_calls[1])
             self.assertIn("LOCAL_AGENT_HMAC_SECRET=uat-only-secret", deploy_calls[1])
