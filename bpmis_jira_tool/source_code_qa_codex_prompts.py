@@ -23,6 +23,45 @@ def codex_system_instruction() -> str:
     )
 
 
+def build_codex_payload(
+    prompt: str,
+    *,
+    prompt_mode: str,
+    system_instruction: str,
+    prompt_stats: dict[str, Any],
+    progress_callback: Any | None = None,
+    codex_cli_session_id: str = "",
+    image_paths: list[str] | None = None,
+    trace_id: str = "",
+    phase: str = "",
+    candidate_path_count: int = 0,
+    candidate_repo_count: int = 0,
+    repair_issue_count: int = 0,
+) -> dict[str, Any]:
+    payload = {
+        "codex_prompt_mode": prompt_mode,
+        "contents": [{"parts": [{"text": prompt}]}],
+        "systemInstruction": {"parts": [{"text": system_instruction}]},
+        "generationConfig": {"temperature": 0.1, "responseMimeType": "application/json"},
+    }
+    stats = prompt_stats if isinstance(prompt_stats, dict) else {}
+    payload["_codex_trace_id"] = str(trace_id or "")
+    payload["_codex_phase"] = str(phase or "")
+    payload["_codex_prompt_chars"] = int(stats.get("prompt_chars") or 0)
+    payload["_codex_prompt_bytes"] = int(stats.get("prompt_bytes") or 0)
+    payload["_codex_estimated_prompt_tokens"] = int(stats.get("estimated_prompt_tokens") or 0)
+    payload["_codex_candidate_path_count"] = int(candidate_path_count or 0)
+    payload["_codex_candidate_repo_count"] = int(candidate_repo_count or 0)
+    payload["_codex_repair_issue_count"] = int(repair_issue_count or 0)
+    if codex_cli_session_id:
+        payload["codex_cli_session_id"] = codex_cli_session_id
+    if image_paths:
+        payload["_codex_image_paths"] = list(image_paths)
+    if progress_callback:
+        payload["_progress_callback"] = progress_callback
+    return payload
+
+
 def build_codex_repair_brief(
     *,
     pm_team: str,

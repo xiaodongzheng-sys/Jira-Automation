@@ -65,6 +65,7 @@ from bpmis_jira_tool.source_code_qa_codex_refs import (
     resolve_codex_file_ref,
 )
 from bpmis_jira_tool.source_code_qa_codex_prompts import (
+    build_codex_payload,
     build_codex_repair_brief,
     build_codex_sql_generation_brief,
     codex_system_instruction,
@@ -14231,28 +14232,21 @@ class SourceCodeQAService:
         candidate_repo_count: int = 0,
         repair_issue_count: int = 0,
     ) -> dict[str, Any]:
-        payload = {
-            "codex_prompt_mode": prompt_mode,
-            "contents": [{"parts": [{"text": prompt}]}],
-            "systemInstruction": {"parts": [{"text": self._codex_system_instruction()}]},
-            "generationConfig": {"temperature": 0.1, "responseMimeType": "application/json"},
-        }
         stats = prompt_stats if isinstance(prompt_stats, dict) else self._codex_prompt_stats(prompt)
-        payload["_codex_trace_id"] = str(trace_id or "")
-        payload["_codex_phase"] = str(phase or "")
-        payload["_codex_prompt_chars"] = int(stats.get("prompt_chars") or 0)
-        payload["_codex_prompt_bytes"] = int(stats.get("prompt_bytes") or 0)
-        payload["_codex_estimated_prompt_tokens"] = int(stats.get("estimated_prompt_tokens") or 0)
-        payload["_codex_candidate_path_count"] = int(candidate_path_count or 0)
-        payload["_codex_candidate_repo_count"] = int(candidate_repo_count or 0)
-        payload["_codex_repair_issue_count"] = int(repair_issue_count or 0)
-        if codex_cli_session_id:
-            payload["codex_cli_session_id"] = codex_cli_session_id
-        if image_paths:
-            payload["_codex_image_paths"] = list(image_paths)
-        if progress_callback:
-            payload["_progress_callback"] = progress_callback
-        return payload
+        return build_codex_payload(
+            prompt,
+            prompt_mode=prompt_mode,
+            system_instruction=self._codex_system_instruction(),
+            prompt_stats=stats,
+            progress_callback=progress_callback,
+            codex_cli_session_id=codex_cli_session_id,
+            image_paths=image_paths,
+            trace_id=trace_id,
+            phase=phase,
+            candidate_path_count=candidate_path_count,
+            candidate_repo_count=candidate_repo_count,
+            repair_issue_count=repair_issue_count,
+        )
 
     def _codex_prompt_stats(self, prompt: str) -> dict[str, int]:
         payload = {
