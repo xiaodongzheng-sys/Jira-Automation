@@ -15238,36 +15238,6 @@ class SourceCodeQAService:
             if reason in allowed_effort_reasons or reason.startswith("finish_reason_")
         ]
 
-    @staticmethod
-    def _cached_codex_cli_summary(
-        *,
-        llm_route: dict[str, Any],
-        cached_validation: dict[str, Any],
-        scope_roots: list[dict[str, Any]],
-        timing: dict[str, int],
-    ) -> dict[str, Any]:
-        return {
-            "prompt_mode": llm_route.get("prompt_mode"),
-            "candidate_repo_count": llm_route.get("candidate_repo_count"),
-            "candidate_path_count": llm_route.get("candidate_path_count"),
-            "cited_path_count": 0,
-            "citation_validation_status": cached_validation.get("status"),
-            "scoped_file_refs": cached_validation.get("scoped_file_refs") or [],
-            "out_of_scope_refs": cached_validation.get("out_of_scope_refs") or [],
-            "warning_count": cached_validation.get("warning_count", 0),
-            "repair_attempted": False,
-            "repair_policy": "severe_only",
-            "repair_reason": "",
-            "retrieval_role": "hints",
-            "scope_repo_count": len(scope_roots),
-            "cli_latency_ms": 0,
-            "codex_initial_ms": 0,
-            "soft_validation_ms": int(timing.get("citation_validation", 0) + timing.get("answer_judge", 0)),
-            "repair_ms": 0,
-            "exit_codes": [],
-            "timeout": False,
-        }
-
     def _codex_llm_answer_result_payload(
         self,
         *,
