@@ -1815,6 +1815,10 @@ class SourceCodeQAService:
             return ANSWER_MODE_AUTO
         return normalized_answer_mode
 
+    @staticmethod
+    def _answer_mode_requests_llm(normalized_answer_mode: str) -> bool:
+        return normalized_answer_mode in {ANSWER_MODE_GEMINI, ANSWER_MODE_AUTO}
+
     def query(
         self,
         *,
@@ -2406,7 +2410,7 @@ class SourceCodeQAService:
             "fallback_used": False,
             "background_deep_job_id": "",
         }
-        if normalized_answer_mode in {ANSWER_MODE_GEMINI, ANSWER_MODE_AUTO}:
+        if self._answer_mode_requests_llm(normalized_answer_mode):
             llm_service = self
             payload["llm_provider"] = llm_service.llm_provider.name
             if llm_service.llm_provider.name == LLM_PROVIDER_CODEX_CLI_BRIDGE:
@@ -2445,7 +2449,7 @@ class SourceCodeQAService:
             payload["evidence_outline"] = self._build_evidence_outline(payload.get("evidence_pack") or evidence_pack, top_matches)
             payload["answer_mode"] = normalized_answer_mode
             report("completed", "LLM answer generated.", 0, 0)
-        if not (normalized_answer_mode in {ANSWER_MODE_GEMINI, ANSWER_MODE_AUTO} and payload.get("llm_answer")):
+        if not (self._answer_mode_requests_llm(normalized_answer_mode) and payload.get("llm_answer")):
             report("completed", "Code evidence retrieval completed.", 0, 0)
         return self._record_query_payload(
             key=key,
