@@ -1820,6 +1820,23 @@ class SourceCodeQAService:
         return normalized_answer_mode in {ANSWER_MODE_GEMINI, ANSWER_MODE_AUTO}
 
     @staticmethod
+    def _query_uses_simple_quality_trace(intent: dict[str, Any]) -> bool:
+        return (
+            any(intent.get(intent_key) for intent_key in ("rule_logic", "api", "config"))
+            and not any(
+                intent.get(intent_key)
+                for intent_key in (
+                    "data_source",
+                    "module_dependency",
+                    "static_qa",
+                    "impact_analysis",
+                    "test_coverage",
+                    "operational_boundary",
+                )
+            )
+        )
+
+    @staticmethod
     def _report_query_progress(
         progress_callback: Any | None,
         stage: str,
@@ -2059,20 +2076,7 @@ class SourceCodeQAService:
                 },
             )
         intent = query_plan.get("intent") if isinstance(query_plan.get("intent"), dict) else {}
-        simple_quality_trace = (
-            any(intent.get(intent_key) for intent_key in ("rule_logic", "api", "config"))
-            and not any(
-                intent.get(intent_key)
-                for intent_key in (
-                    "data_source",
-                    "module_dependency",
-                    "static_qa",
-                    "impact_analysis",
-                    "test_coverage",
-                    "operational_boundary",
-                )
-            )
-        )
+        simple_quality_trace = self._query_uses_simple_quality_trace(intent)
         if exact_lookup_terms:
             report(
                 "exact_lookup",
