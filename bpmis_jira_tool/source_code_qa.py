@@ -12815,6 +12815,27 @@ class SourceCodeQAService:
             llm_budget_mode=routed_budget_mode,
         )
 
+    @staticmethod
+    def _merge_answer_retry_issues(
+        answer_check: dict[str, Any],
+        claim_check: dict[str, Any],
+        answer_judge: dict[str, Any],
+        *,
+        claim_requires_existing_retry: bool,
+    ) -> dict[str, Any]:
+        merged_check = answer_check
+        if claim_check.get("status") != "ok" and (
+            not claim_requires_existing_retry or merged_check.get("status") == "retry"
+        ):
+            issues = list(merged_check.get("issues") or [])
+            issues.extend(claim_check.get("issues") or [])
+            merged_check = {"status": "retry", "issues": list(dict.fromkeys(issues))}
+        if answer_judge.get("status") == "repair":
+            issues = list(merged_check.get("issues") or [])
+            issues.extend(answer_judge.get("issues") or [])
+            merged_check = {"status": "retry", "issues": list(dict.fromkeys(issues))}
+        return merged_check
+
     def _build_llm_answer(
         self,
         *,
@@ -13233,14 +13254,12 @@ class SourceCodeQAService:
             answer_check = {"status": "retry", "issues": list(dict.fromkeys(issues))}
         claim_check = self._verify_answer_claims(answer, evidence_summary, selected_matches)
         answer_judge = self._run_answer_judge(question, answer, evidence_pack, claim_check)
-        if claim_check.get("status") != "ok" and answer_check.get("status") == "retry":
-            issues = list(answer_check.get("issues") or [])
-            issues.extend(claim_check.get("issues") or [])
-            answer_check = {"status": "retry", "issues": list(dict.fromkeys(issues))}
-        if answer_judge.get("status") == "repair":
-            issues = list(answer_check.get("issues") or [])
-            issues.extend(answer_judge.get("issues") or [])
-            answer_check = {"status": "retry", "issues": list(dict.fromkeys(issues))}
+        answer_check = self._merge_answer_retry_issues(
+            answer_check,
+            claim_check,
+            answer_judge,
+            claim_requires_existing_retry=True,
+        )
         if answer_check.get("status") == "retry":
             if token_limited_generation:
                 retry_matches = selected_matches[: max(4, min(int(budget["match_limit"]), 8))]
@@ -13356,14 +13375,12 @@ class SourceCodeQAService:
                     retry_check = {"status": "retry", "issues": list(dict.fromkeys(issues))}
                 retry_claim_check = self._verify_answer_claims(retry_answer, retry_evidence_summary, retry_selected_matches)
                 retry_judge = self._run_answer_judge(question, retry_answer, retry_evidence_pack, retry_claim_check)
-                if retry_claim_check.get("status") != "ok":
-                    issues = list(retry_check.get("issues") or [])
-                    issues.extend(retry_claim_check.get("issues") or [])
-                    retry_check = {"status": "retry", "issues": list(dict.fromkeys(issues))}
-                if retry_judge.get("status") == "repair":
-                    issues = list(retry_check.get("issues") or [])
-                    issues.extend(retry_judge.get("issues") or [])
-                    retry_check = {"status": "retry", "issues": list(dict.fromkeys(issues))}
+                retry_check = self._merge_answer_retry_issues(
+                    retry_check,
+                    retry_claim_check,
+                    retry_judge,
+                    claim_requires_existing_retry=False,
+                )
                 answer = retry_answer
                 structured_answer = retry_structured_answer
                 retry_usage = self._normalize_llm_usage(retry_result.usage or retry_result.payload.get("usageMetadata") or {})
