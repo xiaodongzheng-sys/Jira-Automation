@@ -5357,23 +5357,16 @@ class SourceCodeQAService:
                 for property_name in self._spring_annotation_arg_values(conditional_match.group(1), "prefix"):
                     add_reference(property_name, "config_key", line_no, stripped)
                     add_entity_edge(current_class_id or file_entity_id, "config", property_name, line_no, stripped)
-            listener_match = MESSAGE_LISTENER_PATTERN.search(line)
-            if listener_match:
-                for topic in self._extract_message_names(listener_match.group(2)):
-                    add_reference(topic, "message_consume", line_no, stripped)
-                    add_entity_edge(current_method_id or current_class_id or file_entity_id, "message_consume", topic, line_no, stripped)
-            for send_match in MESSAGE_SEND_PATTERN.finditer(line):
-                for topic in self._extract_message_names(send_match.group(1)):
-                    add_reference(topic, "message_publish", line_no, stripped)
-                    add_entity_edge(current_method_id or current_class_id or file_entity_id, "message_publish", topic, line_no, stripped)
-            for event_match in EVENT_PUBLISH_PATTERN.finditer(line):
-                for event_name in self._extract_event_names(event_match.group(1)):
-                    add_reference(event_name, "event_publish", line_no, stripped)
-                    add_entity_edge(current_method_id or current_class_id or file_entity_id, "event_publish", event_name, line_no, stripped)
-            if "@EventListener" in stripped or "@TransactionalEventListener" in stripped:
-                for event_name in re.findall(r"\b([A-Z][A-Za-z0-9_]*(?:Event|Message|Command))\b", stripped):
-                    add_reference(event_name, "event_consume", line_no, stripped)
-                    add_entity_edge(current_method_id or current_class_id or file_entity_id, "event_consume", event_name, line_no, stripped)
+            self._extract_message_event_structure(
+                line=line,
+                stripped=stripped,
+                line_no=line_no,
+                current_method_id=current_method_id,
+                current_class_id=current_class_id,
+                file_entity_id=file_entity_id,
+                add_reference=add_reference,
+                add_entity_edge=add_entity_edge,
+            )
             self._extract_sql_http_config_structure(
                 line=line,
                 stripped=stripped,
@@ -5548,6 +5541,37 @@ class SourceCodeQAService:
             elif key_match:
                 add_definition(key_match.group(1), "config_key", line_no, stripped)
                 add_entity_edge(file_entity_id, "config", key_match.group(1), line_no, stripped)
+
+    def _extract_message_event_structure(
+        self,
+        *,
+        line: str,
+        stripped: str,
+        line_no: int,
+        current_method_id: str,
+        current_class_id: str,
+        file_entity_id: str,
+        add_reference: Any,
+        add_entity_edge: Any,
+    ) -> None:
+        current_entity_id = current_method_id or current_class_id or file_entity_id
+        listener_match = MESSAGE_LISTENER_PATTERN.search(line)
+        if listener_match:
+            for topic in self._extract_message_names(listener_match.group(2)):
+                add_reference(topic, "message_consume", line_no, stripped)
+                add_entity_edge(current_entity_id, "message_consume", topic, line_no, stripped)
+        for send_match in MESSAGE_SEND_PATTERN.finditer(line):
+            for topic in self._extract_message_names(send_match.group(1)):
+                add_reference(topic, "message_publish", line_no, stripped)
+                add_entity_edge(current_entity_id, "message_publish", topic, line_no, stripped)
+        for event_match in EVENT_PUBLISH_PATTERN.finditer(line):
+            for event_name in self._extract_event_names(event_match.group(1)):
+                add_reference(event_name, "event_publish", line_no, stripped)
+                add_entity_edge(current_entity_id, "event_publish", event_name, line_no, stripped)
+        if "@EventListener" in stripped or "@TransactionalEventListener" in stripped:
+            for event_name in re.findall(r"\b([A-Z][A-Za-z0-9_]*(?:Event|Message|Command))\b", stripped):
+                add_reference(event_name, "event_consume", line_no, stripped)
+                add_entity_edge(current_entity_id, "event_consume", event_name, line_no, stripped)
 
     def _extract_test_structure_references(
         self,
