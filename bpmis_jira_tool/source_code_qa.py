@@ -13311,20 +13311,19 @@ class SourceCodeQAService:
         query_mode = self.normalize_query_mode(query_mode)
         timing: dict[str, int] = {}
 
-        candidate_limit = self.codex_top_path_limit
-        candidate_matches = self._select_llm_matches(
-            matches,
-            candidate_limit,
+        candidate_context = self._codex_initial_candidate_context(
+            entries=entries,
+            key=key,
             question=question,
+            matches=matches,
+            selected_matches=selected_matches,
+            followup_context=followup_context,
         )
-        if not candidate_matches:
-            candidate_matches = selected_matches
-        candidate_paths = self._codex_candidate_paths(entries=entries, key=key, matches=candidate_matches)
-        candidate_paths = self._merge_codex_followup_candidate_paths(candidate_paths, followup_context)
-        candidate_path_layers = self._codex_candidate_path_layers(candidate_paths, followup_context)
-        scope_roots = self._codex_scope_roots(entries=entries, key=key)
-        question_intent = self._question_intent(question)
-        prompt_mode = CODEX_SQL_GENERATION_PROMPT_MODE if question_intent.get("sql_generation") else CODEX_INVESTIGATION_PROMPT_MODE
+        candidate_matches = candidate_context["candidate_matches"]
+        candidate_paths = candidate_context["candidate_paths"]
+        candidate_path_layers = candidate_context["candidate_path_layers"]
+        scope_roots = candidate_context["scope_roots"]
+        prompt_mode = candidate_context["prompt_mode"]
         llm_route = {
             **llm_route,
             **self._codex_initial_route_fields(
@@ -13958,6 +13957,42 @@ class SourceCodeQAService:
     @classmethod
     def _match_answer_grade(cls, match: dict[str, Any], *, intent_label: str = "general") -> bool:
         return match_answer_grade(match, intent_label=intent_label)
+
+    def _codex_initial_candidate_context(
+        self,
+        *,
+        entries: list[RepositoryEntry],
+        key: str,
+        question: str,
+        matches: list[dict[str, Any]],
+        selected_matches: list[dict[str, Any]],
+        followup_context: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        candidate_matches = self._select_llm_matches(
+            matches,
+            self.codex_top_path_limit,
+            question=question,
+        )
+        if not candidate_matches:
+            candidate_matches = selected_matches
+        candidate_paths = self._codex_candidate_paths(entries=entries, key=key, matches=candidate_matches)
+        candidate_paths = self._merge_codex_followup_candidate_paths(candidate_paths, followup_context)
+        candidate_path_layers = self._codex_candidate_path_layers(candidate_paths, followup_context)
+        scope_roots = self._codex_scope_roots(entries=entries, key=key)
+        question_intent = self._question_intent(question)
+        prompt_mode = (
+            CODEX_SQL_GENERATION_PROMPT_MODE
+            if question_intent.get("sql_generation")
+            else CODEX_INVESTIGATION_PROMPT_MODE
+        )
+        return {
+            "candidate_matches": candidate_matches,
+            "candidate_paths": candidate_paths,
+            "candidate_path_layers": candidate_path_layers,
+            "scope_roots": scope_roots,
+            "question_intent": question_intent,
+            "prompt_mode": prompt_mode,
+        }
 
     def _codex_deep_investigation_needed(
         self,
