@@ -12933,6 +12933,54 @@ class SourceCodeQAService:
             },
         }
 
+    def _vertex_draft_answer_result(
+        self,
+        *,
+        pm_team: str,
+        country: str,
+        question: str,
+        prompt_context: str,
+        attachment_section: str,
+        attachments: list[dict[str, Any]],
+        answer_max_output_tokens: int,
+        answer_thinking_config: dict[str, Any],
+        selected_model: str,
+        evidence_summary: dict[str, Any],
+        quality_gate: dict[str, Any],
+        selected_matches: list[dict[str, Any]],
+        evidence_pack: dict[str, Any],
+    ) -> dict[str, Any]:
+        draft_payload = self._vertex_draft_payload(
+            pm_team=pm_team,
+            country=country,
+            question=question,
+            context=prompt_context,
+            attachment_section=attachment_section,
+            attachments=attachments,
+            max_output_tokens=answer_max_output_tokens,
+            thinking_config=answer_thinking_config,
+        )
+        draft_result = self.llm_provider.generate(
+            payload=draft_payload,
+            primary_model=selected_model,
+            fallback_model=self._llm_fallback_model(),
+        )
+        draft_answer = self.llm_provider.extract_text(draft_result.payload)
+        draft_check = self._answer_self_check(question, draft_answer, evidence_summary, quality_gate)
+        draft_claim_check = self._verify_answer_claims(draft_answer, evidence_summary, selected_matches)
+        draft_judge = self._run_answer_judge(question, draft_answer, evidence_pack, draft_claim_check)
+        return {
+            "draft_answer": draft_answer,
+            "draft_usage": self._normalize_llm_usage(draft_result.usage or draft_result.payload.get("usageMetadata") or {}),
+            "draft_attempts": draft_result.attempts,
+            "draft_latency_ms": int(draft_result.latency_ms or 0),
+            "draft_attempt_log": [dict(item) for item in draft_result.attempt_log],
+            "vertex_draft_check": draft_check,
+            "vertex_draft_claim_check": draft_claim_check,
+            "vertex_draft_judge": draft_judge,
+            "vertex_draft_model": draft_result.model,
+        }
+
     def _llm_answer_result_payload(
         self,
         *,
@@ -13249,30 +13297,32 @@ class SourceCodeQAService:
         vertex_draft_check: dict[str, Any] | None = None
         vertex_draft_claim_check: dict[str, Any] | None = None
         vertex_draft_judge: dict[str, Any] | None = None
+        vertex_draft_model = selected_model
         if vertex_two_pass:
-            draft_payload = self._vertex_draft_payload(
+            draft_result = self._vertex_draft_answer_result(
                 pm_team=pm_team,
                 country=country,
                 question=question,
-                context=prompt_context,
+                prompt_context=prompt_context,
                 attachment_section=attachment_section,
                 attachments=attachments or [],
-                max_output_tokens=answer_max_output_tokens,
-                thinking_config=answer_thinking_config,
+                answer_max_output_tokens=answer_max_output_tokens,
+                answer_thinking_config=answer_thinking_config,
+                selected_model=selected_model,
+                evidence_summary=evidence_summary,
+                quality_gate=quality_gate,
+                selected_matches=selected_matches,
+                evidence_pack=evidence_pack,
             )
-            draft_result = self.llm_provider.generate(
-                payload=draft_payload,
-                primary_model=selected_model,
-                fallback_model=self._llm_fallback_model(),
-            )
-            draft_answer = self.llm_provider.extract_text(draft_result.payload)
-            draft_usage = self._normalize_llm_usage(draft_result.usage or draft_result.payload.get("usageMetadata") or {})
-            draft_attempts = draft_result.attempts
-            draft_latency_ms = int(draft_result.latency_ms or 0)
-            draft_attempt_log = [dict(item) for item in draft_result.attempt_log]
-            vertex_draft_check = self._answer_self_check(question, draft_answer, evidence_summary, quality_gate)
-            vertex_draft_claim_check = self._verify_answer_claims(draft_answer, evidence_summary, selected_matches)
-            vertex_draft_judge = self._run_answer_judge(question, draft_answer, evidence_pack, vertex_draft_claim_check)
+            draft_answer = draft_result["draft_answer"]
+            draft_usage = draft_result["draft_usage"]
+            draft_attempts = draft_result["draft_attempts"]
+            draft_latency_ms = draft_result["draft_latency_ms"]
+            draft_attempt_log = draft_result["draft_attempt_log"]
+            vertex_draft_check = draft_result["vertex_draft_check"]
+            vertex_draft_claim_check = draft_result["vertex_draft_claim_check"]
+            vertex_draft_judge = draft_result["vertex_draft_judge"]
+            vertex_draft_model = draft_result["vertex_draft_model"]
             vertex_retry_matches = self._expand_answer_retry_matches(
                 entries=entries,
                 key=key,
@@ -13331,7 +13381,7 @@ class SourceCodeQAService:
             llm_route = {
                 **llm_route,
                 "vertex_two_pass": True,
-                "vertex_draft_model": draft_result.model,
+                "vertex_draft_model": vertex_draft_model,
                 "vertex_final_schema": True,
             }
             cache_key = self._llm_answer_cache_key(
