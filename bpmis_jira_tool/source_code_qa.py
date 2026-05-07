@@ -1813,7 +1813,7 @@ class SourceCodeQAService:
                 summary="No repositories are configured for this PM Team and country yet.",
                 trace_id=trace_id,
             )
-            self._record_query_telemetry(
+            return self._record_query_payload(
                 key=key,
                 question=question,
                 answer_mode=answer_mode,
@@ -1821,7 +1821,6 @@ class SourceCodeQAService:
                 payload=payload,
                 started_at=started_at,
             )
-            return payload
         query_entries, repository_scope = self._filter_entries_for_question_repository_scope(original_question, entries)
         question, followup_context = self._apply_conversation_context(
             question,
@@ -1837,7 +1836,7 @@ class SourceCodeQAService:
                 summary="No confident match. Try adding exact class, API, table, field, or function names.",
                 trace_id=trace_id,
             )
-            self._record_query_telemetry(
+            return self._record_query_payload(
                 key=key,
                 question=question,
                 answer_mode=answer_mode,
@@ -1845,7 +1844,6 @@ class SourceCodeQAService:
                 payload=payload,
                 started_at=started_at,
             )
-            return payload
         domain_profile = self._domain_profile(pm_team, country)
         tokens = self._expand_tokens_with_domain_profile(tokens, question, domain_profile)
         query_plan = self._build_query_decomposition(question, domain_profile)
@@ -1896,7 +1894,7 @@ class SourceCodeQAService:
             )
             payload["repository_scope"] = repository_scope
             payload["retrieval_runtime"] = self._retrieval_cache_stats(request_cache)
-            self._record_query_telemetry(
+            return self._record_query_payload(
                 key=key,
                 question=question,
                 answer_mode=answer_mode,
@@ -1904,7 +1902,6 @@ class SourceCodeQAService:
                 payload=payload,
                 started_at=started_at,
             )
-            return payload
         queryable_entries = [
             (entry, repo_path)
             for entry, repo_path in synced_entries
@@ -1925,7 +1922,7 @@ class SourceCodeQAService:
             )
             payload["repository_scope"] = repository_scope
             payload["retrieval_runtime"] = self._retrieval_cache_stats(request_cache)
-            self._record_query_telemetry(
+            return self._record_query_payload(
                 key=key,
                 question=question,
                 answer_mode=answer_mode,
@@ -1933,7 +1930,6 @@ class SourceCodeQAService:
                 payload=payload,
                 started_at=started_at,
             )
-            return payload
         intent = query_plan.get("intent") if isinstance(query_plan.get("intent"), dict) else {}
         simple_quality_trace = (
             any(intent.get(intent_key) for intent_key in ("rule_logic", "api", "config"))
@@ -1990,7 +1986,7 @@ class SourceCodeQAService:
             )
             payload["exact_lookup_terms"] = exact_lookup_terms
             payload["repository_scope"] = repository_scope
-            self._record_query_telemetry(
+            return self._record_query_payload(
                 key=key,
                 question=question,
                 answer_mode=answer_mode,
@@ -1998,7 +1994,6 @@ class SourceCodeQAService:
                 payload=payload,
                 started_at=started_at,
             )
-            return payload
         elif exact_lookup_terms:
             self._increment_retrieval_stat(request_cache, "exact_lookup_soft_misses")
             report("exact_lookup", "Exact dotted references were not found; falling back to broader token retrieval.", 0, 0)
@@ -2308,7 +2303,7 @@ class SourceCodeQAService:
                 trace_id=trace_id,
             )
             payload["repository_scope"] = repository_scope
-            self._record_query_telemetry(
+            return self._record_query_payload(
                 key=key,
                 question=question,
                 answer_mode=answer_mode,
@@ -2317,7 +2312,6 @@ class SourceCodeQAService:
                 payload=payload,
                 started_at=started_at,
             )
-            return payload
         retrieval_latency_ms = int((time.time() - started_at) * 1000)
         normalized_answer_mode = str(answer_mode or ANSWER_MODE).strip() or ANSWER_MODE
         if normalized_answer_mode not in {ANSWER_MODE, ANSWER_MODE_GEMINI, ANSWER_MODE_AUTO}:
@@ -2426,7 +2420,7 @@ class SourceCodeQAService:
             report("completed", "LLM answer generated.", 0, 0)
         if not (normalized_answer_mode in {ANSWER_MODE_GEMINI, ANSWER_MODE_AUTO} and payload.get("llm_answer")):
             report("completed", "Code evidence retrieval completed.", 0, 0)
-        self._record_query_telemetry(
+        return self._record_query_payload(
             key=key,
             question=question,
             answer_mode=answer_mode,
@@ -2435,7 +2429,6 @@ class SourceCodeQAService:
             payload=payload,
             started_at=started_at,
         )
-        return payload
 
     def _merge_expanded_matches(
         self,
@@ -2456,6 +2449,28 @@ class SourceCodeQAService:
                 self._annotate_duplicate_tool_match(current_matches, item)
         ranked_matches = self._rank_matches(question, current_matches, request_cache=request_cache)
         return self._select_result_matches(ranked_matches, max(1, min(int(limit or 12), 30)), question=question)
+
+    def _record_query_payload(
+        self,
+        *,
+        key: str,
+        question: str,
+        answer_mode: str,
+        llm_budget_mode: str,
+        payload: dict[str, Any],
+        started_at: float,
+        query_mode: str = QUERY_MODE_DEEP,
+    ) -> dict[str, Any]:
+        self._record_query_telemetry(
+            key=key,
+            question=question,
+            answer_mode=answer_mode,
+            llm_budget_mode=llm_budget_mode,
+            query_mode=query_mode,
+            payload=payload,
+            started_at=started_at,
+        )
+        return payload
 
     def repo_status(self, key: str) -> list[dict[str, Any]]:
         entries = self._load_entries_for_key(key)
