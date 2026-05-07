@@ -1784,6 +1784,30 @@ class SourceCodeQAService:
             exact_lookup_terms = list(dict.fromkeys([*exact_lookup_terms, *specific_exact_terms]))[:12]
         return exact_lookup_terms, question_specific_terms
 
+    def _synced_query_entries(
+        self,
+        key: str,
+        entries: list[RepositoryEntry],
+    ) -> list[tuple[RepositoryEntry, Path]]:
+        synced_entries: list[tuple[RepositoryEntry, Path]] = []
+        for entry in entries:
+            repo_path = self._repo_path(key, entry)
+            if (repo_path / ".git").exists():
+                synced_entries.append((entry, repo_path))
+        return synced_entries
+
+    def _queryable_index_entries(
+        self,
+        key: str,
+        synced_entries: list[tuple[RepositoryEntry, Path]],
+    ) -> list[tuple[RepositoryEntry, Path]]:
+        queryable_entries: list[tuple[RepositoryEntry, Path]] = []
+        for entry, repo_path in synced_entries:
+            index_info = self._repo_index_info(key, entry, repo_path)
+            if index_info.get("state") == "ready" or (index_info.get("state") == "stale" and index_info.get("queryable")):
+                queryable_entries.append((entry, repo_path))
+        return queryable_entries
+
     def query(
         self,
         *,
@@ -1879,7 +1903,7 @@ class SourceCodeQAService:
         exact_lookup_terms, question_specific_terms = self._query_exact_lookup_terms(question)
         exact_matches: list[dict[str, Any]] = []
         latency_guarded_query_expansion = False
-        synced_entries = [(entry, self._repo_path(key, entry)) for entry in query_entries if (self._repo_path(key, entry) / ".git").exists()]
+        synced_entries = self._synced_query_entries(key, query_entries)
         if repository_scope.get("active"):
             self._increment_retrieval_stat(request_cache, "repository_scope_filters")
             report(
@@ -1907,14 +1931,7 @@ class SourceCodeQAService:
                 payload=payload,
                 started_at=started_at,
             )
-        queryable_entries = [
-            (entry, repo_path)
-            for entry, repo_path in synced_entries
-            if (
-                (index_info := self._repo_index_info(key, entry, repo_path)).get("state") == "ready"
-                or (index_info.get("state") == "stale" and index_info.get("queryable"))
-            )
-        ]
+        queryable_entries = self._queryable_index_entries(key, synced_entries)
         if not queryable_entries:
             self._increment_retrieval_stat(request_cache, "index_not_ready_scopes")
             payload = self._empty_query_payload(
