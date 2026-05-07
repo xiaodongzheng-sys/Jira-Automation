@@ -410,6 +410,63 @@ exit 0
             self.assertIn("LOCAL_AGENT_HMAC_SECRET=uat-only-secret", deploy_calls[0])
             self.assertIn("CLOUD_RUN_UAT_LOCAL_AGENT_SECRET_SOURCE=env", completed.stdout)
 
+    def test_cloud_run_uat_env_hmac_fallback_preclears_existing_secret_binding(self):
+        deploy_script = PROJECT_ROOT / "scripts/deploy_cloud_run_uat.sh"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            fake_bin = temp_path / "bin"
+            fake_bin.mkdir()
+            calls_path = temp_path / "gcloud-calls.log"
+            gcloud_path = fake_bin / "gcloud"
+            gcloud_path.write_text(
+                """#!/usr/bin/env bash
+set -euo pipefail
+
+printf '%s\\n' "$*" >> "$FAKE_GCLOUD_CALLS"
+if [[ "$*" == "run services describe"* ]]; then
+  printf '{"metadata":{"annotations":{"run.googleapis.com/invoker-iam-disabled":"true"}},"spec":{"template":{"spec":{"containers":[{"image":"existing-image","env":[{"name":"LOCAL_AGENT_HMAC_SECRET","valueFrom":{"secretKeyRef":{"name":"local-agent-uat-hmac-secret","key":"latest"}}}]}]}}},"status":{"url":"https://team-portal-ekaykywtvq-as.a.run.app","traffic":[{"tag":"uat","url":"https://uat---team-portal-ekaykywtvq-as.a.run.app","revisionName":"team-portal-00091-uat","percent":0}]}}\\n'
+  exit 0
+fi
+if [[ "$*" == "run deploy"* ]]; then
+  exit 0
+fi
+exit 0
+""",
+                encoding="utf-8",
+            )
+            gcloud_path.chmod(0o755)
+
+            completed = subprocess.run(
+                ["bash", str(deploy_script)],
+                capture_output=True,
+                text=True,
+                check=False,
+                env=self._script_env(
+                    PATH=f"{fake_bin}:{os.environ['PATH']}",
+                    PYTHON_BIN=sys.executable,
+                    FAKE_GCLOUD_CALLS=str(calls_path),
+                    CLOUD_RUN_UAT_SKIP_GIT_CHECK="1",
+                    CLOUD_RUN_UAT_SYNC_LOCAL_AGENT_AFTER_DEPLOY="0",
+                    CLOUD_RUN_UAT_LOCAL_AGENT_SECRET_SOURCE="env",
+                    CLOUD_RUN_UAT_LOCAL_AGENT_HMAC_SECRET="uat-only-secret",
+                    TEAM_PORTAL_BASE_URL="https://app.bankpmtool.uk",
+                    TEAM_ALLOWED_EMAIL_DOMAINS="npt.sg",
+                    BPMIS_BASE_URL="https://bpmis.example.test",
+                ),
+                cwd=PROJECT_ROOT,
+            )
+
+            self.assertEqual(completed.returncode, 0, msg=completed.stderr)
+            calls = calls_path.read_text(encoding="utf-8")
+            deploy_calls = [line for line in calls.splitlines() if line.startswith("run deploy")]
+            self.assertEqual(len(deploy_calls), 2, msg=calls)
+            self.assertIn("--remove-secrets LOCAL_AGENT_HMAC_SECRET", deploy_calls[0])
+            self.assertIn("--update-env-vars LOCAL_AGENT_HMAC_SECRET=uat-only-secret", deploy_calls[0])
+            self.assertIn("--set-secrets", deploy_calls[1])
+            self.assertIn("--set-env-vars", deploy_calls[1])
+            self.assertIn("LOCAL_AGENT_HMAC_SECRET=uat-only-secret", deploy_calls[1])
+
     def test_cloud_run_uat_deploy_syncs_isolated_mac_local_agent_by_default(self):
         deploy_script = PROJECT_ROOT / "scripts/deploy_cloud_run_uat.sh"
         contents = deploy_script.read_text(encoding="utf-8")

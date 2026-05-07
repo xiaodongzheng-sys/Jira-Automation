@@ -130,6 +130,8 @@ The deploy scripts read `GOOGLE_CLOUD_PROJECT` and `CLOUD_RUN_DEPLOY_ACCOUNT` fr
 
 - After Cloud Run UAT deploy succeeds, the script syncs the isolated UAT Mac host workspace to the same Git commit, installs host dependencies, initializes the PRD Briefing SQLite schema under the UAT data root, restarts the UAT Mac local-agent on port `7008`, and verifies public UAT local-agent health through the fixed live portal `/uat-local-agent` proxy. This keeps UAT's Cloud Run frontend and UAT local-agent-backed backend/cache code aligned without restarting the live local-agent.
 
+- If UAT deploy fails because `local-agent-uat-hmac-secret` is missing or inaccessible in Secret Manager, rerun UAT with `CLOUD_RUN_UAT_LOCAL_AGENT_SECRET_SOURCE=env`. The deploy script reads `LOCAL_AGENT_HMAC_SECRET` from the isolated UAT host `.env`, creates a no-traffic pre-clear revision when the previous service template had `LOCAL_AGENT_HMAC_SECRET` bound as a secret, then deploys the new `uat` tag with the HMAC as a literal env var. This is UAT-only and must still use `--no-traffic`.
+
 - The default UAT Mac host workspace is `~/Workspace/jira-creation-stack-uat-host`, with data under `.team-portal-uat`. Run the setup helper once before the first isolated UAT deploy:
 
 ```bash
