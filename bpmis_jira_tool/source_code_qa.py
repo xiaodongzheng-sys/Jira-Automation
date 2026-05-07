@@ -12598,6 +12598,52 @@ class SourceCodeQAService:
             selected.sort(key=lambda item: item["score"], reverse=True)
         return selected
 
+    def _llm_answer_evidence_context(
+        self,
+        *,
+        entries: list[RepositoryEntry],
+        key: str,
+        question: str,
+        pm_team: str,
+        country: str,
+        matches: list[dict[str, Any]],
+        match_limit: int,
+        request_cache: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        selected_matches = self._select_llm_matches(matches, match_limit, question=question)
+        evidence_summary = self._compress_evidence_cached(question, selected_matches, request_cache=request_cache)
+        trace_paths = self._build_trace_paths(
+            entries=entries,
+            key=key,
+            matches=selected_matches,
+            question=question,
+            request_cache=request_cache,
+        )
+        if trace_paths:
+            evidence_summary["trace_paths"] = trace_paths
+        quality_gate = self._quality_gate_cached(question, evidence_summary, request_cache=request_cache)
+        evidence_pack = self._build_evidence_pack(
+            question=question,
+            evidence_summary=evidence_summary,
+            matches=selected_matches,
+            trace_paths=trace_paths,
+            quality_gate=quality_gate,
+        )
+        domain_context = self._llm_domain_context(
+            pm_team=pm_team,
+            country=country,
+            question=question,
+            evidence_summary=evidence_summary,
+        )
+        return {
+            "selected_matches": selected_matches,
+            "evidence_summary": evidence_summary,
+            "trace_paths": trace_paths,
+            "quality_gate": quality_gate,
+            "evidence_pack": evidence_pack,
+            "domain_context": domain_context,
+        }
+
     def _build_llm_answer(
         self,
         *,
@@ -12630,19 +12676,22 @@ class SourceCodeQAService:
         if effort_assessment:
             llm_route["task"] = "effort_assessment"
         selected_model = self._model_for_role_or_budget("answer", budget)
-        selected_matches = self._select_llm_matches(matches, int(budget["match_limit"]), question=question)
-        evidence_summary = self._compress_evidence_cached(question, selected_matches, request_cache=request_cache)
-        trace_paths = self._build_trace_paths(entries=entries, key=key, matches=selected_matches, question=question, request_cache=request_cache)
-        if trace_paths:
-            evidence_summary["trace_paths"] = trace_paths
-        quality_gate = self._quality_gate_cached(question, evidence_summary, request_cache=request_cache)
-        evidence_pack = self._build_evidence_pack(
+        answer_context = self._llm_answer_evidence_context(
+            entries=entries,
+            key=key,
             question=question,
-            evidence_summary=evidence_summary,
-            matches=selected_matches,
-            trace_paths=trace_paths,
-            quality_gate=quality_gate,
+            matches=matches,
+            match_limit=int(budget["match_limit"]),
+            pm_team=pm_team,
+            country=country,
+            request_cache=request_cache,
         )
+        selected_matches = answer_context["selected_matches"]
+        evidence_summary = answer_context["evidence_summary"]
+        trace_paths = answer_context["trace_paths"]
+        quality_gate = answer_context["quality_gate"]
+        evidence_pack = answer_context["evidence_pack"]
+        domain_context = answer_context["domain_context"]
         if self.llm_provider_name == LLM_PROVIDER_CODEX_CLI_BRIDGE:
             return self._build_codex_llm_answer(
                 entries=entries,
@@ -12671,12 +12720,6 @@ class SourceCodeQAService:
                 effort_assessment=effort_assessment,
             )
         attachment_section = self._context_attachment_section(attachments or [], runtime_evidence or [])
-        domain_context = self._llm_domain_context(
-            pm_team=pm_team,
-            country=country,
-            question=question,
-            evidence_summary=evidence_summary,
-        )
         answer_thinking_budget = self._thinking_budget_for_call(
             role="answer",
             budget_mode=routed_budget_mode,
@@ -12716,25 +12759,22 @@ class SourceCodeQAService:
             routed_budget_mode = COMPACT_DEEP_BUDGET_MODE
             budget = self.llm_budgets[COMPACT_DEEP_BUDGET_MODE]
             selected_model = self._model_for_role_or_budget("answer", budget)
-            selected_matches = self._select_llm_matches(matches, int(budget["match_limit"]), question=question)
-            evidence_summary = self._compress_evidence_cached(question, selected_matches, request_cache=request_cache)
-            trace_paths = self._build_trace_paths(entries=entries, key=key, matches=selected_matches, question=question, request_cache=request_cache)
-            if trace_paths:
-                evidence_summary["trace_paths"] = trace_paths
-            quality_gate = self._quality_gate_cached(question, evidence_summary, request_cache=request_cache)
-            evidence_pack = self._build_evidence_pack(
+            answer_context = self._llm_answer_evidence_context(
+                entries=entries,
+                key=key,
                 question=question,
-                evidence_summary=evidence_summary,
-                matches=selected_matches,
-                trace_paths=trace_paths,
-                quality_gate=quality_gate,
-            )
-            domain_context = self._llm_domain_context(
                 pm_team=pm_team,
                 country=country,
-                question=question,
-                evidence_summary=evidence_summary,
+                matches=matches,
+                match_limit=int(budget["match_limit"]),
+                request_cache=request_cache,
             )
+            selected_matches = answer_context["selected_matches"]
+            evidence_summary = answer_context["evidence_summary"]
+            trace_paths = answer_context["trace_paths"]
+            quality_gate = answer_context["quality_gate"]
+            evidence_pack = answer_context["evidence_pack"]
+            domain_context = answer_context["domain_context"]
             answer_thinking_budget = self._thinking_budget_for_call(
                 role="answer",
                 budget_mode=routed_budget_mode,
