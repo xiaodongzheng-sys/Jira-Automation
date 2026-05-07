@@ -13880,11 +13880,7 @@ class SourceCodeQAService:
             repair_reason = "; ".join(severe_repair_reasons[:6])
             if deep_needed:
                 deep_started = time.perf_counter()
-                if progress_callback:
-                    try:
-                        progress_callback("codex_deep_investigation", "Expanding investigation from Codex gaps.", 0, 0)
-                    except Exception:
-                        pass
+                self._report_query_progress(progress_callback, "codex_deep_investigation", "Expanding investigation from Codex gaps.", 0, 0)
                 before_keys = {(item.get("repo"), item.get("path"), item.get("line_start"), item.get("line_end")) for item in candidate_matches}
                 terms_started = time.perf_counter()
                 deep_investigation_terms = self._codex_deep_investigation_terms(
