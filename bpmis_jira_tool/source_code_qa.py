@@ -2446,27 +2446,14 @@ class SourceCodeQAService:
             0,
             0,
         )
-        evidence_summary = self._compress_evidence_cached(question, top_matches, request_cache=request_cache)
-        quality_gate = self._quality_gate_cached(question, evidence_summary, request_cache=request_cache)
-        trace_paths = [] if exact_lookup_sufficient or not should_expand_matches else self._build_trace_paths(entries=query_entries, key=key, matches=top_matches, question=question, request_cache=request_cache)
-        if trace_paths:
-            evidence_summary["trace_paths"] = trace_paths
-        repo_graph = (
-            {
-                "version": 2,
-                "nodes": [{"name": entry.display_name, "url": entry.url} for entry in query_entries],
-                "edges": [],
-                "skipped": "exact_lookup_sufficient",
-            }
-            if exact_lookup_sufficient or not should_expand_matches
-            else self._build_repo_dependency_graph(key=key, entries=query_entries, request_cache=request_cache)
-        )
-        evidence_pack = self._build_evidence_pack(
+        evidence_summary, quality_gate, trace_paths, repo_graph, evidence_pack = self._build_query_answer_context(
             question=question,
-            evidence_summary=evidence_summary,
             matches=top_matches,
-            trace_paths=trace_paths,
-            quality_gate=quality_gate,
+            entries=query_entries,
+            key=key,
+            exact_lookup_sufficient=exact_lookup_sufficient,
+            should_expand_matches=should_expand_matches,
+            request_cache=request_cache,
         )
         payload = self._query_success_payload(
             question=question,
@@ -2528,6 +2515,51 @@ class SourceCodeQAService:
             payload=payload,
             started_at=started_at,
         )
+
+    def _build_query_answer_context(
+        self,
+        *,
+        question: str,
+        matches: list[dict[str, Any]],
+        entries: list[RepositoryEntry],
+        key: str,
+        exact_lookup_sufficient: bool,
+        should_expand_matches: bool,
+        request_cache: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
+        evidence_summary = self._compress_evidence_cached(question, matches, request_cache=request_cache)
+        quality_gate = self._quality_gate_cached(question, evidence_summary, request_cache=request_cache)
+        trace_paths = (
+            []
+            if exact_lookup_sufficient or not should_expand_matches
+            else self._build_trace_paths(
+                entries=entries,
+                key=key,
+                matches=matches,
+                question=question,
+                request_cache=request_cache,
+            )
+        )
+        if trace_paths:
+            evidence_summary["trace_paths"] = trace_paths
+        repo_graph = (
+            {
+                "version": 2,
+                "nodes": [{"name": entry.display_name, "url": entry.url} for entry in entries],
+                "edges": [],
+                "skipped": "exact_lookup_sufficient",
+            }
+            if exact_lookup_sufficient or not should_expand_matches
+            else self._build_repo_dependency_graph(key=key, entries=entries, request_cache=request_cache)
+        )
+        evidence_pack = self._build_evidence_pack(
+            question=question,
+            evidence_summary=evidence_summary,
+            matches=matches,
+            trace_paths=trace_paths,
+            quality_gate=quality_gate,
+        )
+        return evidence_summary, quality_gate, trace_paths, repo_graph, evidence_pack
 
     def _augment_query_payload_with_llm_answer(
         self,
