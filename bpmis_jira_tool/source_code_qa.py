@@ -1897,6 +1897,42 @@ class SourceCodeQAService:
             "background_deep_job_id": "",
         }
 
+    def _record_empty_query_payload(
+        self,
+        *,
+        key: str,
+        question: str,
+        answer_mode: str,
+        llm_budget_mode: str,
+        started_at: float,
+        status: str,
+        summary: str,
+        trace_id: str,
+        repo_status: list[dict[str, Any]] | None = None,
+        index_freshness: dict[str, Any] | None = None,
+        query_mode: str = QUERY_MODE_DEEP,
+        extra_fields: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        payload = self._empty_query_payload(
+            key,
+            repo_status=repo_status,
+            index_freshness=index_freshness,
+            status=status,
+            summary=summary,
+            trace_id=trace_id,
+        )
+        if extra_fields:
+            payload.update(extra_fields)
+        return self._record_query_payload(
+            key=key,
+            question=question,
+            answer_mode=answer_mode,
+            llm_budget_mode=llm_budget_mode,
+            query_mode=query_mode,
+            payload=payload,
+            started_at=started_at,
+        )
+
     def query(
         self,
         *,
@@ -1926,19 +1962,15 @@ class SourceCodeQAService:
         original_question = question
         entries = self._load_entries_for_key(key)
         if not entries:
-            payload = self._empty_query_payload(
-                key,
-                status="empty_config",
-                summary="No repositories are configured for this PM Team and country yet.",
-                trace_id=trace_id,
-            )
-            return self._record_query_payload(
+            return self._record_empty_query_payload(
                 key=key,
                 question=question,
                 answer_mode=answer_mode,
                 llm_budget_mode=llm_budget_mode,
-                payload=payload,
                 started_at=started_at,
+                status="empty_config",
+                summary="No repositories are configured for this PM Team and country yet.",
+                trace_id=trace_id,
             )
         query_entries, repository_scope = self._filter_entries_for_question_repository_scope(original_question, entries)
         question, followup_context = self._apply_conversation_context(
@@ -1949,19 +1981,15 @@ class SourceCodeQAService:
         )
         tokens = self._question_tokens(question)
         if not tokens:
-            payload = self._empty_query_payload(
-                key,
-                status="weak_question",
-                summary="No confident match. Try adding exact class, API, table, field, or function names.",
-                trace_id=trace_id,
-            )
-            return self._record_query_payload(
+            return self._record_empty_query_payload(
                 key=key,
                 question=question,
                 answer_mode=answer_mode,
                 llm_budget_mode=llm_budget_mode,
-                payload=payload,
                 started_at=started_at,
+                status="weak_question",
+                summary="No confident match. Try adding exact class, API, table, field, or function names.",
+                trace_id=trace_id,
             )
         domain_profile = self._domain_profile(pm_team, country)
         tokens = self._expand_tokens_with_domain_profile(tokens, question, domain_profile)
