@@ -12892,6 +12892,38 @@ class SourceCodeQAService:
             },
         }
 
+    def _llm_final_answer_payload(
+        self,
+        *,
+        pm_team: str,
+        country: str,
+        question: str,
+        prompt_context: str,
+        vertex_two_pass: bool,
+        vertex_draft_check: dict[str, Any] | None,
+        draft_answer: str,
+        attachment_section: str,
+        attachments: list[dict[str, Any]],
+        answer_max_output_tokens: int,
+        answer_thinking_config: dict[str, Any],
+    ) -> dict[str, Any]:
+        final_prompt = self._llm_user_prompt(
+            pm_team=pm_team,
+            country=country,
+            question=question,
+            context=prompt_context,
+            self_check=vertex_draft_check if vertex_two_pass else None,
+            attachment_section=attachment_section,
+        )
+        if vertex_two_pass:
+            final_prompt = self._vertex_final_prompt(final_prompt=final_prompt, draft_answer=draft_answer)
+        return self._llm_answer_payload(
+            prompt=final_prompt,
+            attachments=attachments,
+            max_output_tokens=answer_max_output_tokens,
+            thinking_config=answer_thinking_config,
+        )
+
     def _vertex_draft_payload(
         self,
         *,
@@ -13392,21 +13424,18 @@ class SourceCodeQAService:
                 prompt_context=prompt_context,
                 attachment_section=attachment_section,
             )
-        final_prompt = self._llm_user_prompt(
+        payload = self._llm_final_answer_payload(
             pm_team=pm_team,
             country=country,
             question=question,
-            context=prompt_context,
-            self_check=vertex_draft_check if vertex_two_pass else None,
+            prompt_context=prompt_context,
+            vertex_two_pass=vertex_two_pass,
+            vertex_draft_check=vertex_draft_check,
+            draft_answer=draft_answer,
             attachment_section=attachment_section,
-        )
-        if vertex_two_pass:
-            final_prompt = self._vertex_final_prompt(final_prompt=final_prompt, draft_answer=draft_answer)
-        payload = self._llm_answer_payload(
-            prompt=final_prompt,
             attachments=attachments or [],
-            max_output_tokens=answer_max_output_tokens,
-            thinking_config=answer_thinking_config,
+            answer_max_output_tokens=answer_max_output_tokens,
+            answer_thinking_config=answer_thinking_config,
         )
         result = self.llm_provider.generate(
             payload=payload,
