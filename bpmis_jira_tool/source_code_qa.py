@@ -14142,7 +14142,6 @@ class SourceCodeQAService:
             finish_reason=finish_reason,
             selected_matches=candidate_matches,
         )
-        answer_contract = final["answer_contract"]
         llm_route = {
             **llm_route,
             **self._codex_repair_route_fields(
@@ -14185,32 +14184,26 @@ class SourceCodeQAService:
             deep_investigation_rounds=deep_investigation_rounds,
             deep_investigation_added=deep_investigation_added,
         )
-        return {
-            "llm_answer": final["answer"],
-            "llm_budget_mode": routed_budget_mode,
-            "llm_requested_budget_mode": llm_budget_mode,
-            "llm_route": llm_route,
-            "llm_provider": self.llm_provider.name,
-            "llm_cached": False,
-            "llm_usage": usage,
-            "llm_model": effective_model,
-            "llm_thinking_budget": 0,
-            "llm_attempts": attempts,
-            "llm_latency_ms": llm_latency_ms,
-            "llm_attempt_log": llm_attempt_log,
-            "llm_finish_reason": finish_reason,
-            "answer_quality": quality_gate,
-            "answer_self_check": self._skipped_codex_answer_check(),
-            "answer_claim_check": claim_check,
-            "answer_judge": answer_judge,
-            "structured_answer": final["structured_answer"],
-            "answer_contract": answer_contract,
-            "evidence_pack": evidence_pack,
-            "codex_cli_summary": codex_cli_summary,
-            "codex_cli_trace": codex_cli_trace,
-            "cache_metadata": self._answer_cache_metadata(cache_key),
-            "llm_timing": timing,
-        }
+        return self._codex_llm_answer_result_payload(
+            final=final,
+            routed_budget_mode=routed_budget_mode,
+            llm_budget_mode=llm_budget_mode,
+            llm_route=llm_route,
+            usage=usage,
+            effective_model=effective_model,
+            attempts=attempts,
+            llm_latency_ms=llm_latency_ms,
+            llm_attempt_log=llm_attempt_log,
+            finish_reason=finish_reason,
+            quality_gate=quality_gate,
+            claim_check=claim_check,
+            answer_judge=answer_judge,
+            evidence_pack=evidence_pack,
+            codex_cli_summary=codex_cli_summary,
+            codex_cli_trace=codex_cli_trace,
+            cache_key=cache_key,
+            timing=timing,
+        )
 
     @staticmethod
     def _match_is_definition_only(match: dict[str, Any], focus_terms: list[str]) -> bool:
@@ -14325,6 +14318,55 @@ class SourceCodeQAService:
             "repair_ms": 0,
             "exit_codes": [],
             "timeout": False,
+        }
+
+    def _codex_llm_answer_result_payload(
+        self,
+        *,
+        final: dict[str, Any],
+        routed_budget_mode: str,
+        llm_budget_mode: str,
+        llm_route: dict[str, Any],
+        usage: dict[str, Any],
+        effective_model: str,
+        attempts: int,
+        llm_latency_ms: int,
+        llm_attempt_log: list[dict[str, Any]],
+        finish_reason: str,
+        quality_gate: dict[str, Any],
+        claim_check: dict[str, Any],
+        answer_judge: dict[str, Any],
+        evidence_pack: dict[str, Any],
+        codex_cli_summary: dict[str, Any],
+        codex_cli_trace: dict[str, Any],
+        cache_key: str,
+        timing: dict[str, int],
+    ) -> dict[str, Any]:
+        return {
+            "llm_answer": final["answer"],
+            "llm_budget_mode": routed_budget_mode,
+            "llm_requested_budget_mode": llm_budget_mode,
+            "llm_route": llm_route,
+            "llm_provider": self.llm_provider.name,
+            "llm_cached": False,
+            "llm_usage": usage,
+            "llm_model": effective_model,
+            "llm_thinking_budget": 0,
+            "llm_attempts": attempts,
+            "llm_latency_ms": llm_latency_ms,
+            "llm_attempt_log": llm_attempt_log,
+            "llm_finish_reason": finish_reason,
+            "answer_quality": quality_gate,
+            "answer_self_check": self._skipped_codex_answer_check(),
+            "answer_claim_check": claim_check,
+            "answer_judge": answer_judge,
+            "structured_answer": final["structured_answer"],
+            "answer_contract": final["answer_contract"],
+            "evidence_pack": evidence_pack,
+            "codex_cli_summary": codex_cli_summary,
+            "codex_cli_trace": codex_cli_trace,
+            "cache_metadata": self._answer_cache_metadata(cache_key),
+            "llm_timing": timing,
         }
 
     def _codex_deep_investigation_needed(
