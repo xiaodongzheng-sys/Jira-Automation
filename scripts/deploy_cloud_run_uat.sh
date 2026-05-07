@@ -453,7 +453,7 @@ if [[ "$ENV_SECRET_PRECLEAR_REQUIRED" == "1" ]]; then
     --no-traffic \
     --tag "${UAT_TAG}-secret-clear" \
     --clear-secrets \
-    --update-env-vars "LOCAL_AGENT_HMAC_SECRET=$uat_hmac_secret"
+    --remove-env-vars "LOCAL_AGENT_HMAC_SECRET"
 fi
 
 "$GCLOUD_BIN" run deploy "$SERVICE" \
