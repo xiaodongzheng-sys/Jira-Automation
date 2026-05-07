@@ -3291,146 +3291,7 @@ class SourceCodeQAService:
         reusable_index = self._open_reusable_index(index_path)
         try:
             with sqlite3.connect(tmp_path) as connection:
-                connection.execute("pragma journal_mode=off")
-                connection.execute("pragma synchronous=off")
-                connection.executescript(
-                    """
-                    create table metadata (key text primary key, value text not null);
-                    create table files (
-                        path text primary key,
-                        lower_path text not null,
-                        size integer not null,
-                        mtime_ns integer not null,
-                        line_count integer not null,
-                        symbols text not null
-                    );
-                    create table lines (
-                        file_path text not null,
-                        line_no integer not null,
-                        line_text text not null,
-                        lower_text text not null,
-                        symbols text not null,
-                        is_declaration integer not null,
-                        has_pathish integer not null,
-                        primary key (file_path, line_no)
-                    );
-                    create index idx_lines_file_path on lines(file_path);
-                    create table file_tokens (
-                        token text not null,
-                        file_path text not null,
-                        primary key (token, file_path)
-                    );
-                    create index idx_file_tokens_path on file_tokens(file_path);
-                    create table line_tokens (
-                        token text not null,
-                        file_path text not null,
-                        line_no integer not null,
-                        primary key (token, file_path, line_no)
-                    );
-                    create index idx_line_tokens_location on line_tokens(file_path, line_no);
-                    create table definitions (
-                        name text not null,
-                        lower_name text not null,
-                        kind text not null,
-                        file_path text not null,
-                        line_no integer not null,
-                        signature text not null
-                    );
-                    create index idx_definitions_lower_name on definitions(lower_name);
-                    create index idx_definitions_file_path on definitions(file_path);
-                    create table references_index (
-                        target text not null,
-                        lower_target text not null,
-                        kind text not null,
-                        file_path text not null,
-                        line_no integer not null,
-                        context text not null
-                    );
-                    create index idx_references_lower_target on references_index(lower_target);
-                    create index idx_references_file_path on references_index(file_path);
-                    create table code_entities (
-                        entity_id text primary key,
-                        name text not null,
-                        lower_name text not null,
-                        kind text not null,
-                        language text not null,
-                        file_path text not null,
-                        line_no integer not null,
-                        parent text not null,
-                        signature text not null
-                    );
-                    create index idx_entities_lower_name on code_entities(lower_name);
-                    create index idx_entities_file_path on code_entities(file_path);
-                    create index idx_entities_kind on code_entities(kind);
-                    create table entity_edges (
-                        from_entity_id text not null,
-                        from_file text not null,
-                        from_line integer not null,
-                        edge_kind text not null,
-                        to_name text not null,
-                        lower_to_name text not null,
-                        to_entity_id text not null,
-                        to_file text not null,
-                        to_line integer not null,
-                        evidence text not null
-                    );
-                    create index idx_entity_edges_from on entity_edges(from_entity_id);
-                    create index idx_entity_edges_from_file on entity_edges(from_file);
-                    create index idx_entity_edges_lower_to_name on entity_edges(lower_to_name);
-                    create index idx_entity_edges_to_file on entity_edges(to_file);
-                    create index idx_entity_edges_kind on entity_edges(edge_kind);
-                    create table graph_edges (
-                        from_file text not null,
-                        from_line integer not null,
-                        symbol text not null,
-                        lower_symbol text not null,
-                        edge_kind text not null,
-                        to_file text not null,
-                        to_line integer not null
-                    );
-                    create index idx_graph_from_file on graph_edges(from_file);
-                    create index idx_graph_lower_symbol on graph_edges(lower_symbol);
-                    create index idx_graph_to_file on graph_edges(to_file);
-                    create table flow_edges (
-                        from_file text not null,
-                        from_line integer not null,
-                        from_kind text not null,
-                        from_name text not null,
-                        edge_kind text not null,
-                        to_name text not null,
-                        to_file text not null,
-                        to_line integer not null,
-                        evidence text not null
-                    );
-                    create index idx_flow_from_file on flow_edges(from_file);
-                    create index idx_flow_to_file on flow_edges(to_file);
-                    create index idx_flow_to_name on flow_edges(to_name);
-                    create index idx_flow_edge_kind on flow_edges(edge_kind);
-                    create table semantic_chunks (
-                        chunk_id text primary key,
-                        file_path text not null,
-                        start_line integer not null,
-                        end_line integer not null,
-                        chunk_text text not null,
-                        lower_text text not null,
-                        tokens text not null,
-                        symbols text not null,
-                        embedding text not null
-                    );
-                    create index idx_semantic_chunks_file_path on semantic_chunks(file_path);
-                    create table semantic_chunk_tokens (
-                        token text not null,
-                        chunk_id text not null,
-                        file_path text not null,
-                        primary key (token, chunk_id)
-                    );
-                    create index idx_semantic_chunk_tokens_chunk on semantic_chunk_tokens(chunk_id);
-                    create index idx_semantic_chunk_tokens_file on semantic_chunk_tokens(file_path);
-                    """
-                )
-                file_fts_enabled = self._try_create_file_fts(connection)
-                fts_enabled = self._try_create_fts(connection)
-                semantic_fts_enabled = self._try_create_semantic_fts(connection)
+                file_fts_enabled, fts_enabled, semantic_fts_enabled = self._create_repo_index_schema(connection)
                 for file_path in self._iter_text_files(repo_path):
                     relative_path = str(file_path.relative_to(repo_path))
                     try:
@@ -3654,6 +3515,149 @@ class SourceCodeQAService:
             if reusable_index is not None:
                 reusable_index.close()
             lock_path.unlink(missing_ok=True)
+
+    def _create_repo_index_schema(self, connection: sqlite3.Connection) -> tuple[bool, bool, bool]:
+        connection.execute("pragma journal_mode=off")
+        connection.execute("pragma synchronous=off")
+        connection.executescript(
+            """
+            create table metadata (key text primary key, value text not null);
+            create table files (
+                path text primary key,
+                lower_path text not null,
+                size integer not null,
+                mtime_ns integer not null,
+                line_count integer not null,
+                symbols text not null
+            );
+            create table lines (
+                file_path text not null,
+                line_no integer not null,
+                line_text text not null,
+                lower_text text not null,
+                symbols text not null,
+                is_declaration integer not null,
+                has_pathish integer not null,
+                primary key (file_path, line_no)
+            );
+            create index idx_lines_file_path on lines(file_path);
+            create table file_tokens (
+                token text not null,
+                file_path text not null,
+                primary key (token, file_path)
+            );
+            create index idx_file_tokens_path on file_tokens(file_path);
+            create table line_tokens (
+                token text not null,
+                file_path text not null,
+                line_no integer not null,
+                primary key (token, file_path, line_no)
+            );
+            create index idx_line_tokens_location on line_tokens(file_path, line_no);
+            create table definitions (
+                name text not null,
+                lower_name text not null,
+                kind text not null,
+                file_path text not null,
+                line_no integer not null,
+                signature text not null
+            );
+            create index idx_definitions_lower_name on definitions(lower_name);
+            create index idx_definitions_file_path on definitions(file_path);
+            create table references_index (
+                target text not null,
+                lower_target text not null,
+                kind text not null,
+                file_path text not null,
+                line_no integer not null,
+                context text not null
+            );
+            create index idx_references_lower_target on references_index(lower_target);
+            create index idx_references_file_path on references_index(file_path);
+            create table code_entities (
+                entity_id text primary key,
+                name text not null,
+                lower_name text not null,
+                kind text not null,
+                language text not null,
+                file_path text not null,
+                line_no integer not null,
+                parent text not null,
+                signature text not null
+            );
+            create index idx_entities_lower_name on code_entities(lower_name);
+            create index idx_entities_file_path on code_entities(file_path);
+            create index idx_entities_kind on code_entities(kind);
+            create table entity_edges (
+                from_entity_id text not null,
+                from_file text not null,
+                from_line integer not null,
+                edge_kind text not null,
+                to_name text not null,
+                lower_to_name text not null,
+                to_entity_id text not null,
+                to_file text not null,
+                to_line integer not null,
+                evidence text not null
+            );
+            create index idx_entity_edges_from on entity_edges(from_entity_id);
+            create index idx_entity_edges_from_file on entity_edges(from_file);
+            create index idx_entity_edges_lower_to_name on entity_edges(lower_to_name);
+            create index idx_entity_edges_to_file on entity_edges(to_file);
+            create index idx_entity_edges_kind on entity_edges(edge_kind);
+            create table graph_edges (
+                from_file text not null,
+                from_line integer not null,
+                symbol text not null,
+                lower_symbol text not null,
+                edge_kind text not null,
+                to_file text not null,
+                to_line integer not null
+            );
+            create index idx_graph_from_file on graph_edges(from_file);
+            create index idx_graph_lower_symbol on graph_edges(lower_symbol);
+            create index idx_graph_to_file on graph_edges(to_file);
+            create table flow_edges (
+                from_file text not null,
+                from_line integer not null,
+                from_kind text not null,
+                from_name text not null,
+                edge_kind text not null,
+                to_name text not null,
+                to_file text not null,
+                to_line integer not null,
+                evidence text not null
+            );
+            create index idx_flow_from_file on flow_edges(from_file);
+            create index idx_flow_to_file on flow_edges(to_file);
+            create index idx_flow_to_name on flow_edges(to_name);
+            create index idx_flow_edge_kind on flow_edges(edge_kind);
+            create table semantic_chunks (
+                chunk_id text primary key,
+                file_path text not null,
+                start_line integer not null,
+                end_line integer not null,
+                chunk_text text not null,
+                lower_text text not null,
+                tokens text not null,
+                symbols text not null,
+                embedding text not null
+            );
+            create index idx_semantic_chunks_file_path on semantic_chunks(file_path);
+            create table semantic_chunk_tokens (
+                token text not null,
+                chunk_id text not null,
+                file_path text not null,
+                primary key (token, chunk_id)
+            );
+            create index idx_semantic_chunk_tokens_chunk on semantic_chunk_tokens(chunk_id);
+            create index idx_semantic_chunk_tokens_file on semantic_chunk_tokens(file_path);
+            """
+        )
+        file_fts_enabled = self._try_create_file_fts(connection)
+        fts_enabled = self._try_create_fts(connection)
+        semantic_fts_enabled = self._try_create_semantic_fts(connection)
+        return file_fts_enabled, fts_enabled, semantic_fts_enabled
 
     def _open_reusable_index(self, index_path: Path) -> sqlite3.Connection | None:
         if not index_path.exists():
