@@ -12834,6 +12834,47 @@ class SourceCodeQAService:
             },
         }
 
+    def _vertex_draft_payload(
+        self,
+        *,
+        pm_team: str,
+        country: str,
+        question: str,
+        context: str,
+        attachment_section: str,
+        attachments: list[dict[str, Any]],
+        max_output_tokens: int,
+        thinking_config: dict[str, Any],
+    ) -> dict[str, Any]:
+        return {
+            "contents": [
+                {
+                    "parts": self._llm_payload_parts(
+                        self._vertex_draft_prompt(
+                            pm_team=pm_team,
+                            country=country,
+                            question=question,
+                            context=context,
+                            attachment_section=attachment_section,
+                        ),
+                        attachments,
+                    )
+                }
+            ],
+            "systemInstruction": {
+                "parts": [
+                    {
+                        "text": self._llm_system_instruction()
+                    }
+                ]
+            },
+            "generationConfig": {
+                "temperature": 0.1,
+                "maxOutputTokens": max(1_800, min(max_output_tokens, 3_600)),
+                "thinkingConfig": thinking_config,
+            },
+        }
+
     def _llm_answer_result_payload(
         self,
         *,
@@ -13168,34 +13209,16 @@ class SourceCodeQAService:
         vertex_draft_claim_check: dict[str, Any] | None = None
         vertex_draft_judge: dict[str, Any] | None = None
         if vertex_two_pass:
-            draft_payload = {
-                "contents": [
-                    {
-                        "parts": self._llm_payload_parts(
-                            self._vertex_draft_prompt(
-                                pm_team=pm_team,
-                                country=country,
-                                question=question,
-                                context=prompt_context,
-                                attachment_section=attachment_section,
-                            ),
-                            attachments or [],
-                        )
-                    }
-                ],
-                "systemInstruction": {
-                    "parts": [
-                        {
-                            "text": self._llm_system_instruction()
-                        }
-                    ]
-                },
-                "generationConfig": {
-                    "temperature": 0.1,
-                    "maxOutputTokens": max(1_800, min(answer_max_output_tokens, 3_600)),
-                    "thinkingConfig": answer_thinking_config,
-                },
-            }
+            draft_payload = self._vertex_draft_payload(
+                pm_team=pm_team,
+                country=country,
+                question=question,
+                context=prompt_context,
+                attachment_section=attachment_section,
+                attachments=attachments or [],
+                max_output_tokens=answer_max_output_tokens,
+                thinking_config=answer_thinking_config,
+            )
             draft_result = self.llm_provider.generate(
                 payload=draft_payload,
                 primary_model=selected_model,
