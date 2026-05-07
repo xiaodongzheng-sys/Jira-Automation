@@ -77,7 +77,7 @@ PYTHONPATH=. ./.venv/bin/python scripts/run_source_code_qa_evals.py --fixture --
 Run the Codex-only fixture profile when validating Source Code Q&A changes:
 
 ```bash
-PYTHONPATH=. ./.venv/bin/python scripts/run_source_code_qa_evals.py --fixture --mock-llm --cases evals/source_code_qa/golden.jsonl --profile codex --json
+PYTHONPATH=. ./.venv/bin/python scripts/run_source_code_qa_evals.py --fixture --mock-llm --cases evals/source_code_qa/golden.jsonl --json
 ```
 
 Use `--fixture` when you want a deterministic miniature repo set for regression checks. It creates AF and CRMS fixture repositories under the selected data root, then runs the same eval cases against generated code instead of depending on whatever repos happen to be synced locally.
