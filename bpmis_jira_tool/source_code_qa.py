@@ -13374,27 +13374,19 @@ class SourceCodeQAService:
             )
         initial_prompt_stats = self._codex_prompt_stats(prompt_context)
         candidate_repo_count = len({item.get("repo") for item in candidate_paths})
-        _log_source_code_qa_timing(
-            "codex_prompt",
-            elapsed_ms=0,
+        self._log_codex_prompt_timing(
+            prompt_context=prompt_context,
+            prompt_stats=initial_prompt_stats,
             trace_id=trace_id,
-            provider=self.llm_provider.name,
-            model=selected_model,
+            selected_model=selected_model,
             query_mode=query_mode,
             phase="initial",
             prompt_mode=prompt_mode,
-            prompt_sha256=hashlib.sha256(prompt_context.encode("utf-8")).hexdigest()[:16],
-            role_prompt_present="Source Code & Runtime Evidence Assistant" in prompt_context,
             pm_team=pm_team,
             country=country,
             candidate_path_count=len(candidate_paths),
             candidate_repo_count=candidate_repo_count,
             scope_repo_count=len(scope_roots),
-            retrieval_role="hints",
-            repair_policy="severe_only",
-            prompt_chars=initial_prompt_stats["prompt_chars"],
-            prompt_bytes=initial_prompt_stats["prompt_bytes"],
-            estimated_prompt_tokens=initial_prompt_stats["estimated_prompt_tokens"],
         )
         is_followup = bool(followup_context and (followup_context.get("used") or followup_context.get("question") or followup_context.get("recent_turns")))
         cache_key = self._answer_cache_key(
@@ -13754,27 +13746,20 @@ class SourceCodeQAService:
             )
             repair_prompt_stats = self._codex_prompt_stats(repair_context)
             repair_candidate_repo_count = len({item.get("repo") for item in candidate_paths})
-            _log_source_code_qa_timing(
-                "codex_prompt",
-                elapsed_ms=0,
+            self._log_codex_prompt_timing(
+                prompt_context=repair_context,
+                prompt_stats=repair_prompt_stats,
                 trace_id=trace_id,
-                provider=self.llm_provider.name,
-                model=selected_model,
+                selected_model=selected_model,
                 query_mode=query_mode,
                 phase="repair",
                 prompt_mode=CODEX_INVESTIGATION_PROMPT_MODE,
-                prompt_sha256=hashlib.sha256(repair_context.encode("utf-8")).hexdigest()[:16],
-                role_prompt_present="Source Code & Runtime Evidence Assistant" in repair_context,
                 pm_team=pm_team,
                 country=country,
                 candidate_path_count=len(candidate_paths),
                 candidate_repo_count=repair_candidate_repo_count,
                 scope_repo_count=len(scope_roots),
-                retrieval_role="hints",
-                repair_policy="severe_only",
-                prompt_chars=repair_prompt_stats["prompt_chars"],
-                prompt_bytes=repair_prompt_stats["prompt_bytes"],
-                estimated_prompt_tokens=repair_prompt_stats["estimated_prompt_tokens"],
+                include_repair_fields=True,
                 repair_issue_count=repair_issue_count,
                 repair_reason=repair_reason,
                 deep_investigation_added=deep_investigation_added,
@@ -14220,6 +14205,56 @@ class SourceCodeQAService:
             scope_roots=scope_roots,
             attachment_section=attachment_section,
             runtime_section=runtime_section,
+        )
+
+    def _log_codex_prompt_timing(
+        self,
+        *,
+        prompt_context: str,
+        prompt_stats: dict[str, Any],
+        trace_id: str,
+        selected_model: str,
+        query_mode: str,
+        phase: str,
+        prompt_mode: str,
+        pm_team: str,
+        country: str,
+        candidate_path_count: int,
+        candidate_repo_count: int,
+        scope_repo_count: int,
+        include_repair_fields: bool = False,
+        repair_issue_count: int = 0,
+        repair_reason: str = "",
+        deep_investigation_added: int = 0,
+    ) -> None:
+        fields: dict[str, Any] = {
+            "phase": phase,
+            "prompt_mode": prompt_mode,
+            "prompt_sha256": hashlib.sha256(prompt_context.encode("utf-8")).hexdigest()[:16],
+            "role_prompt_present": "Source Code & Runtime Evidence Assistant" in prompt_context,
+            "pm_team": pm_team,
+            "country": country,
+            "candidate_path_count": candidate_path_count,
+            "candidate_repo_count": candidate_repo_count,
+            "scope_repo_count": scope_repo_count,
+            "retrieval_role": "hints",
+            "repair_policy": "severe_only",
+            "prompt_chars": prompt_stats["prompt_chars"],
+            "prompt_bytes": prompt_stats["prompt_bytes"],
+            "estimated_prompt_tokens": prompt_stats["estimated_prompt_tokens"],
+        }
+        if include_repair_fields:
+            fields["repair_issue_count"] = repair_issue_count
+            fields["repair_reason"] = repair_reason
+            fields["deep_investigation_added"] = deep_investigation_added
+        _log_source_code_qa_timing(
+            "codex_prompt",
+            elapsed_ms=0,
+            trace_id=trace_id,
+            provider=self.llm_provider.name,
+            model=selected_model,
+            query_mode=query_mode,
+            **fields,
         )
 
     def _codex_payload(
