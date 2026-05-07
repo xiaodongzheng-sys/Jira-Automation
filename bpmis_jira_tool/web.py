@@ -98,6 +98,7 @@ from bpmis_jira_tool.seatalk_dashboard import SeaTalkDashboardService
 from bpmis_jira_tool.bpmis_client import build_bpmis_client
 from bpmis_jira_tool.bpmis_projects import BPMISProjectStore, PortalJiraCreationService, PortalProjectSyncService
 from bpmis_jira_tool.source_code_qa import CRMS_COUNTRIES, ALL_COUNTRY, IDENTIFIER_PATTERN, CodexCliBridgeSourceCodeQALLMProvider, SourceCodeQAService
+from bpmis_jira_tool.source_code_qa_factory import build_source_code_qa_service_from_settings
 from bpmis_jira_tool.source_code_qa_sql_artifacts import (
     build_source_code_qa_sql_readme as _build_source_code_qa_sql_readme,
     extract_source_code_qa_sql_blocks as _extract_source_code_qa_sql_blocks,
@@ -2319,57 +2320,7 @@ def create_app() -> Flask:
         data_root / "source_code_qa" / "model_availability.json"
     )
     app.config["PRD_BRIEFING_STORE"] = BriefingStore(data_root / "prd_briefing")
-    app.config["SOURCE_CODE_QA_SERVICE"] = SourceCodeQAService(
-        data_root=data_root,
-        team_profiles=TEAM_PROFILE_DEFAULTS,
-        gitlab_token=settings.source_code_qa_gitlab_token,
-        gitlab_username=settings.source_code_qa_gitlab_username,
-        llm_provider=settings.source_code_qa_llm_provider,
-        gemini_api_key=settings.source_code_qa_gemini_api_key,
-        gemini_api_base_url=settings.source_code_qa_gemini_api_base_url,
-        openai_api_key=settings.source_code_qa_openai_api_key,
-        openai_api_base_url=settings.source_code_qa_openai_api_base_url,
-        openai_model=settings.source_code_qa_openai_model,
-        openai_cheap_model=settings.source_code_qa_openai_fast_model,
-        openai_deep_model=settings.source_code_qa_openai_deep_model,
-        openai_fallback_model=settings.source_code_qa_openai_fallback_model,
-        gemini_model=settings.source_code_qa_gemini_model,
-        gemini_cheap_model=settings.source_code_qa_gemini_fast_model,
-        gemini_deep_model=settings.source_code_qa_gemini_deep_model,
-        gemini_fallback_model=settings.source_code_qa_gemini_fallback_model,
-        vertex_credentials_file=settings.source_code_qa_vertex_credentials_file,
-        vertex_project_id=settings.source_code_qa_vertex_project_id,
-        vertex_location=settings.source_code_qa_vertex_location,
-        vertex_model=settings.source_code_qa_vertex_model,
-        vertex_cheap_model=settings.source_code_qa_vertex_fast_model,
-        vertex_deep_model=settings.source_code_qa_vertex_deep_model,
-        vertex_fallback_model=settings.source_code_qa_vertex_fallback_model,
-        query_rewrite_model=settings.source_code_qa_query_rewrite_model,
-        planner_model=settings.source_code_qa_planner_model,
-        answer_model=settings.source_code_qa_answer_model,
-        judge_model=settings.source_code_qa_judge_model,
-        repair_model=settings.source_code_qa_repair_model,
-        llm_judge_enabled=settings.source_code_qa_llm_judge_enabled,
-        semantic_index_model=settings.source_code_qa_embedding_model,
-        semantic_index_enabled=settings.source_code_qa_semantic_index_enabled,
-        embedding_provider=settings.source_code_qa_embedding_provider,
-        embedding_api_key=settings.source_code_qa_embedding_api_key,
-        embedding_api_base_url=settings.source_code_qa_embedding_api_base_url,
-        llm_cache_ttl_seconds=settings.source_code_qa_llm_cache_ttl_seconds,
-        llm_timeout_seconds=settings.source_code_qa_llm_timeout_seconds,
-        codex_timeout_seconds=settings.source_code_qa_codex_timeout_seconds,
-        codex_concurrency=settings.source_code_qa_codex_concurrency,
-        codex_top_path_limit=settings.source_code_qa_codex_top_path_limit,
-        codex_repair_enabled=settings.source_code_qa_codex_repair_enabled,
-        codex_session_mode=settings.source_code_qa_codex_session_mode,
-        codex_session_max_turns=settings.source_code_qa_codex_session_max_turns,
-        codex_cache_followups=settings.source_code_qa_codex_cache_followups,
-        llm_max_retries=settings.source_code_qa_llm_max_retries,
-        llm_backoff_seconds=settings.source_code_qa_llm_backoff_seconds,
-        llm_max_backoff_seconds=settings.source_code_qa_llm_max_backoff_seconds,
-        git_timeout_seconds=settings.source_code_qa_git_timeout_seconds,
-        max_file_bytes=settings.source_code_qa_max_file_bytes,
-    )
+    app.config["SOURCE_CODE_QA_SERVICE"] = build_source_code_qa_service_from_settings(settings)
     app.config["GET_USER_IDENTITY"] = lambda: _get_user_identity(settings)
     app.config["CAN_ACCESS_PRD_BRIEFING"] = lambda: _can_access_prd_briefing(settings)
     app.config["CAN_ACCESS_PRD_SELF_ASSESSMENT"] = lambda: _can_access_prd_self_assessment(settings)
