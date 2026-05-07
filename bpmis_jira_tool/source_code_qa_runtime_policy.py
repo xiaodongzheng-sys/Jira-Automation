@@ -10,15 +10,10 @@ LLM_ROUTER_VERSION = 7
 LLM_CACHE_VERSION = 16
 LLM_RUNTIME_VERSION = 2
 PLANNER_TOOL_DSL_VERSION = 1
-GEMINI_MIN_THINKING_BUDGET = 512
-GEMINI_MAX_THINKING_BUDGET = 24576
 COMPACT_DEEP_BUDGET_MODE = "compact_deep"
 LLM_PROMPT_COMPACT_THRESHOLD_TOKENS = 18_000
 LLM_PROMPT_TIGHT_THRESHOLD_TOKENS = 24_000
-VERTEX_PROMPT_COMPACT_THRESHOLD_TOKENS = 72_000
-VERTEX_PROMPT_TIGHT_THRESHOLD_TOKENS = 96_000
 LLM_TOKEN_ESTIMATE_CHARS_PER_TOKEN = 3.0
-GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 DEFAULT_SEMANTIC_INDEX_MODEL = "local-token-hybrid-v1"
 DEFAULT_DOMAIN_PROFILE_PATH = Path(__file__).resolve().parent.parent / "config" / "source_code_qa_domain_profiles.json"
 DEFAULT_DOMAIN_KNOWLEDGE_PACK_PATH = Path(__file__).resolve().parent.parent / "config" / "source_code_qa_domain_knowledge_packs.json"
@@ -52,7 +47,7 @@ DEFAULT_LLM_BUDGETS = {
         "snippet_char_budget": 5_000,
         "thinking_budget": 0,
         "max_output_tokens": 500,
-        "model": "gemini-2.5-flash-lite",
+        "model": "codex-cli",
     },
     "balanced": {
         "match_limit": 6,
@@ -60,7 +55,7 @@ DEFAULT_LLM_BUDGETS = {
         "snippet_char_budget": 8_000,
         "thinking_budget": 512,
         "max_output_tokens": 700,
-        "model": "gemini-2.5-flash",
+        "model": "codex-cli",
     },
     "deep": {
         "match_limit": 12,
@@ -68,7 +63,7 @@ DEFAULT_LLM_BUDGETS = {
         "snippet_char_budget": 24_000,
         "thinking_budget": 1024,
         "max_output_tokens": 1_400,
-        "model": "gemini-2.5-flash",
+        "model": "codex-cli",
     },
     COMPACT_DEEP_BUDGET_MODE: {
         "match_limit": 8,
@@ -76,37 +71,7 @@ DEFAULT_LLM_BUDGETS = {
         "snippet_char_budget": 8_000,
         "thinking_budget": 512,
         "max_output_tokens": 2_000,
-        "model": "gemini-2.5-flash",
-    },
-}
-VERTEX_QUALITY_LLM_BUDGETS = {
-    "cheap": {
-        "match_limit": 10,
-        "snippet_line_budget": 90,
-        "snippet_char_budget": 24_000,
-        "thinking_budget": 512,
-        "max_output_tokens": 1_800,
-    },
-    "balanced": {
-        "match_limit": 18,
-        "snippet_line_budget": 180,
-        "snippet_char_budget": 48_000,
-        "thinking_budget": 2048,
-        "max_output_tokens": 2_800,
-    },
-    "deep": {
-        "match_limit": 28,
-        "snippet_line_budget": 260,
-        "snippet_char_budget": 86_000,
-        "thinking_budget": 4096,
-        "max_output_tokens": 4_800,
-    },
-    COMPACT_DEEP_BUDGET_MODE: {
-        "match_limit": 18,
-        "snippet_line_budget": 140,
-        "snippet_char_budget": 44_000,
-        "thinking_budget": 2048,
-        "max_output_tokens": 4_000,
+        "model": "codex-cli",
     },
 }
 LLM_BUDGETS = DEFAULT_LLM_BUDGETS

@@ -542,6 +542,7 @@ def build_daily_briefing(
     other_updates = _sort_report_intelligence_items(other_updates)
     my_todos = _sort_report_intelligence_items(my_todos)
     direct_action_todos, watch_delegate_todos = _split_todos_by_action_type(my_todos)
+    reminders = _filter_reminders_already_covered_by_watch_delegate(reminders, watch_delegate_todos)
     deduped_topic_count = _apply_cross_section_topic_metadata(
         project_updates=project_updates,
         other_updates=other_updates,
@@ -594,6 +595,10 @@ def render_email(*, briefing: dict[str, Any], now: datetime, window_label: str =
     watch_delegate_todos = [item for item in briefing.get("watch_delegate_todos") or [] if isinstance(item, dict)]
     if not direct_action_todos and not watch_delegate_todos:
         direct_action_todos, watch_delegate_todos = _split_todos_by_action_type(_normalize_todo_items(todos))
+    reminders = _filter_reminders_already_covered_by_watch_delegate(
+        [item for item in briefing.get("team_member_reminders") or [] if isinstance(item, dict)],
+        watch_delegate_todos,
+    )
     updates = [
         item
         for item in (briefing.get("project_updates") or [])
@@ -604,7 +609,6 @@ def render_email(*, briefing: dict[str, Any], now: datetime, window_label: str =
         for item in (briefing.get("other_updates") or [])
         if isinstance(item, dict) and _is_display_other_update_signal(item)
     ]
-    reminders = [item for item in briefing.get("team_member_reminders") or [] if isinstance(item, dict)]
     has_any_display_signal = bool(direct_action_todos or watch_delegate_todos or updates or other_updates or reminders)
     text_lines = [
         f"Subject: {subject}",
@@ -895,7 +899,10 @@ def build_trello_card_specs(*, briefing: dict[str, Any], run_date: str, window_l
         direct_action_todos, watch_delegate_todos = _split_todos_by_action_type(
             _normalize_todo_items([item for item in briefing.get("my_todos") or [] if isinstance(item, dict)])
         )
-    reminders = [item for item in briefing.get("team_member_reminders") or [] if isinstance(item, dict)]
+    reminders = _filter_reminders_already_covered_by_watch_delegate(
+        [item for item in briefing.get("team_member_reminders") or [] if isinstance(item, dict)],
+        watch_delegate_todos,
+    )
 
     specs: list[TrelloCardSpec] = []
     for item in direct_action_todos:
@@ -1027,6 +1034,7 @@ def _daily_brief_user_prompt(
         "## Section Rules\n"
         "my_todos: include only Xiaodong-owned actions, decisions needed from Xiaodong, follow-ups Xiaodong clearly needs to drive, or watch/delegate items where Xiaodong should ensure another owner follows through. Do not include tasks fully owned by other people with no Xiaodong follow-up value. Max 8 items. Sort high priority first, then earliest due date, then most actionable.\n"
         "For each my_todos item, set action_type=direct_action only when Xiaodong must personally reply, decide, review, approve, attend, provide, or drive the next step. Set action_type=watch_delegate when Xiaodong mainly needs to monitor, ensure, follow up with someone, check with a team, or confirm another owner follows through.\n"
+        "If a teammate follow-up topic is already represented as a my_todos watch_delegate item, do not repeat it in team_member_reminders.\n"
         "project_updates: include updates from SeaTalk or Gmail where Xiaodong is involved, mentioned, directly asked, or clearly participating. Summarize the decision, milestone, blocker, or current state. Max 10 items. Sort blocked and in_progress before done.\n"
         "other_updates: include useful awareness from SeaTalk or Gmail where Xiaodong is not directly involved but the information may matter to a Digital Banking PM. Prioritize incident, launch, policy/process, risk/compliance, cross-team dependency, leadership decision, and cross-product milestone. useful_awareness should be rare and only included when genuinely PM-relevant, especially when matched to a VIP, priority keyword, or key project. Include at most 5 useful_awareness items and at most 8 other_updates total. Do not include generic chatter, greetings, pure thanks, meeting logistics with no decision, or low-value FYI.\n"
         "team_member_reminders: use SeaTalk only. Never create these from Gmail. Only include people from the explicit allowed reminder list below. Max 8 items. Sort by most actionable first.\n\n"
@@ -1527,6 +1535,73 @@ def _filter_seatalk_reminders(items: list[dict[str, Any]]) -> list[dict[str, Any
         item["domain"] = domain
         filtered.append(item)
     return filtered
+
+
+def _filter_reminders_already_covered_by_watch_delegate(
+    reminders: list[dict[str, Any]],
+    watch_delegate_todos: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not reminders or not watch_delegate_todos:
+        return reminders
+    return [
+        item
+        for item in reminders
+        if not any(_brief_items_are_same_followup_event(item, todo) for todo in watch_delegate_todos)
+    ]
+
+
+def _brief_items_are_same_followup_event(reminder: dict[str, Any], todo: dict[str, Any]) -> bool:
+    if _display_domain(reminder.get("domain")) != _display_domain(todo.get("domain")):
+        return False
+    reminder_tokens = _topic_tokens(reminder, fields=("reminder", "title", "summary"))
+    todo_tokens = _topic_tokens(todo, fields=("task", "title", "summary"))
+    if not reminder_tokens or not todo_tokens:
+        return False
+    overlap = reminder_tokens & todo_tokens
+    min_size = min(len(reminder_tokens), len(todo_tokens))
+    if len(overlap) >= 3 and (len(overlap) / max(min_size, 1)) >= 0.35:
+        return True
+    reminder_evidence = _normalize_dedupe_text(str(reminder.get("evidence") or ""))
+    todo_evidence = _normalize_dedupe_text(str(todo.get("evidence") or ""))
+    if reminder_evidence and reminder_evidence == todo_evidence and len(overlap) >= 1:
+        return True
+    return False
+
+
+def _topic_tokens(item: dict[str, Any], *, fields: tuple[str, ...]) -> set[str]:
+    text = " ".join(str(item.get(field) or "") for field in fields)
+    tokens = re.findall(r"[a-z0-9]+|[\u4e00-\u9fff]+", text.lower())
+    stopwords = {
+        "the",
+        "a",
+        "an",
+        "and",
+        "or",
+        "to",
+        "for",
+        "of",
+        "on",
+        "in",
+        "is",
+        "are",
+        "with",
+        "whether",
+        "please",
+        "follow",
+        "up",
+        "check",
+        "confirm",
+        "ensure",
+        "monitor",
+        "tomorrow",
+        "today",
+        "team",
+        "teams",
+        "local",
+        "needs",
+        "need",
+    }
+    return {token for token in tokens if token not in stopwords and len(token) > 1}
 
 
 def _is_sdlc_checker_reminder_item(item: dict[str, Any]) -> bool:

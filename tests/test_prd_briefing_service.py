@@ -36,20 +36,16 @@ from prd_briefing.service import (
 from prd_briefing.storage import BriefingStore
 
 
-class FakeOpenAIClient:
+class FakeTextClient:
     def __init__(self):
         self.last_system_prompt = None
         self.last_user_prompt = None
         self.answer_calls = 0
-        self.chat_model = "gpt-4.1-mini"
-        self.model_id = "fake:gpt-4.1-mini"
+        self.model_id = "codex:test"
         self.answer_response = "LLM answer"
 
     def is_configured(self):
         return False
-
-    def embed_texts(self, texts):
-        raise AssertionError("Embeddings should not be called in this test.")
 
     def create_answer(self, system_prompt, user_prompt):
         self.last_system_prompt = system_prompt
@@ -100,7 +96,7 @@ class PRDBriefingServiceTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.store = BriefingStore(Path(self.temp_dir.name))
-        self.openai_client = FakeOpenAIClient()
+        self.text_client = FakeTextClient()
         self.voice_service = FakeVoiceService()
         page = IngestedConfluencePage(
             page_id="123",
@@ -136,7 +132,7 @@ class PRDBriefingServiceTests(unittest.TestCase):
         self.service = PRDBriefingService(
             store=self.store,
             confluence=FakeConnector(page),
-            openai_client=self.openai_client,
+            text_client=self.text_client,
             voice_service=self.voice_service,
             walkthrough_prewarm_enabled=False,
         )
@@ -204,8 +200,8 @@ class PRDBriefingServiceTests(unittest.TestCase):
         self.assertIn("如果...那么", chinese_prompt)
 
     def test_presentation_cache_hit_reuses_outline_without_second_llm_call(self):
-        self.openai_client.is_configured = lambda: True
-        self.openai_client.answer_response = json.dumps([
+        self.text_client.is_configured = lambda: True
+        self.text_client.answer_response = json.dumps([
             {
                 "id": "chunk-1",
                 "title": "主流程",
@@ -218,7 +214,7 @@ class PRDBriefingServiceTests(unittest.TestCase):
             owner_key="anon:presentation",
             page_ref="https://example.atlassian.net/wiki/pages/123",
         )
-        calls_after_first = self.openai_client.answer_calls
+        calls_after_first = self.text_client.answer_calls
         second = self.service.process_prd_for_presentation(
             owner_key="anon:presentation",
             page_ref="https://example.atlassian.net/wiki/pages/123",
@@ -227,13 +223,13 @@ class PRDBriefingServiceTests(unittest.TestCase):
         self.assertFalse(first["cached"])
         self.assertTrue(second["cached"])
         self.assertEqual(calls_after_first, 1)
-        self.assertEqual(self.openai_client.answer_calls, 1)
+        self.assertEqual(self.text_client.answer_calls, 1)
         self.assertEqual(second["chunks"][0]["media"]["type"], "table")
         self.assertEqual(second["session"]["version_number"], "5")
 
     def test_presentation_cache_misses_when_page_version_changes(self):
-        self.openai_client.is_configured = lambda: True
-        self.openai_client.answer_response = json.dumps([
+        self.text_client.is_configured = lambda: True
+        self.text_client.answer_response = json.dumps([
             {"id": "chunk-1", "title": "主流程", "content": "这一段说明审批主流程。"}
         ])
 
@@ -248,7 +244,7 @@ class PRDBriefingServiceTests(unittest.TestCase):
         )
 
         self.assertFalse(second["cached"])
-        self.assertEqual(self.openai_client.answer_calls, 2)
+        self.assertEqual(self.text_client.answer_calls, 2)
 
     def test_media_ref_restores_image_table_or_none(self):
         chunks = attach_presentation_media(
@@ -269,8 +265,8 @@ class PRDBriefingServiceTests(unittest.TestCase):
         self.assertEqual(chunks[2]["media"], {"type": "none", "content": ""})
 
     def test_generate_audio_preserves_chunk_media_and_uses_version_cache_key(self):
-        self.openai_client.is_configured = lambda: True
-        self.openai_client.answer_response = json.dumps([
+        self.text_client.is_configured = lambda: True
+        self.text_client.answer_response = json.dumps([
             {
                 "id": "chunk-1",
                 "title": "主流程",
@@ -296,8 +292,8 @@ class PRDBriefingServiceTests(unittest.TestCase):
         self.assertEqual(self.voice_service.synthesize_calls[-1]["language_code"], "zh")
 
     def test_presentation_audio_uses_english_session_language(self):
-        self.openai_client.is_configured = lambda: True
-        self.openai_client.answer_response = json.dumps([
+        self.text_client.is_configured = lambda: True
+        self.text_client.answer_response = json.dumps([
             {
                 "id": "chunk-1",
                 "title": "Main Flow",
@@ -321,20 +317,12 @@ class PRDBriefingServiceTests(unittest.TestCase):
     def test_presentation_audio_cache_is_scoped_by_page_version_and_chunk(self):
         voice = VoiceService(
             store=self.store,
-            openai_client=self.openai_client,
             tts_provider="edge",
             edge_mandarin_voice="zh-CN-XiaozhenNeural",
             edge_english_voice="en-US-JennyNeural",
             edge_rate="-12%",
             edge_mandarin_rate="+0%",
             edge_english_rate="-5%",
-            openai_mandarin_voice="alloy",
-            openai_voice_speed=1.0,
-            openai_custom_voice_enabled=False,
-            openai_tts_fallback_enabled=False,
-            elevenlabs_api_key=None,
-            elevenlabs_mandarin_model_id="eleven_multilingual_v2",
-            elevenlabs_mandarin_voice_id=None,
         )
         calls = []
         voice._synthesize_with_edge_tts_with_boundaries = lambda **kwargs: (calls.append(kwargs) or (b"mp3", []))
@@ -376,20 +364,12 @@ class PRDBriefingServiceTests(unittest.TestCase):
     def test_presentation_audio_cache_is_scoped_by_language_rate(self):
         voice = VoiceService(
             store=self.store,
-            openai_client=self.openai_client,
             tts_provider="edge",
             edge_mandarin_voice="zh-CN-XiaoxiaoNeural",
             edge_english_voice="en-SG-LunaNeural",
             edge_rate="-12%",
             edge_mandarin_rate="+0%",
             edge_english_rate="-5%",
-            openai_mandarin_voice="alloy",
-            openai_voice_speed=1.0,
-            openai_custom_voice_enabled=False,
-            openai_tts_fallback_enabled=False,
-            elevenlabs_api_key=None,
-            elevenlabs_mandarin_model_id="eleven_multilingual_v2",
-            elevenlabs_mandarin_voice_id=None,
         )
         calls = []
         voice._synthesize_with_edge_tts_with_boundaries = lambda **kwargs: (calls.append(kwargs) or (b"mp3", []))
@@ -723,16 +703,16 @@ class PRDBriefingServiceTests(unittest.TestCase):
         self.assertIn("找到这个答案", answer["answer_text"])
 
     def test_developer_walkthrough_prompt_is_engineering_focused(self):
-        self.openai_client.is_configured = lambda: True
+        self.text_client.is_configured = lambda: True
 
         payload = self.service.create_session(
             owner_key="anon:test",
             page_ref="https://example.atlassian.net/wiki/pages/123",
             mode="walkthrough",
         )
-        self.openai_client.answer_calls = 0
-        self.openai_client.last_system_prompt = None
-        self.openai_client.last_user_prompt = None
+        self.text_client.answer_calls = 0
+        self.text_client.last_system_prompt = None
+        self.text_client.last_user_prompt = None
 
         result, cached = self.service._compose_walkthrough_section(  # noqa: SLF001
             owner_key="anon:prompt-test",
@@ -741,21 +721,21 @@ class PRDBriefingServiceTests(unittest.TestCase):
 
         self.assertEqual(result, "LLM answer")
         self.assertFalse(cached)
-        self.assertIn("software engineers", self.openai_client.last_system_prompt)
-        self.assertIn("validation rules", self.openai_client.last_system_prompt)
-        self.assertIn("implementation", self.openai_client.last_user_prompt)
-        self.assertIn("这一块主要是", self.openai_client.last_user_prompt)
+        self.assertIn("software engineers", self.text_client.last_system_prompt)
+        self.assertIn("validation rules", self.text_client.last_system_prompt)
+        self.assertIn("implementation", self.text_client.last_user_prompt)
+        self.assertIn("这一块主要是", self.text_client.last_user_prompt)
 
-    def test_walkthrough_script_is_cached_after_first_openai_call(self):
-        self.openai_client.is_configured = lambda: True
+    def test_walkthrough_script_is_cached_after_first_text_model_call(self):
+        self.text_client.is_configured = lambda: True
         payload = self.service.create_session(
             owner_key="anon:test",
             page_ref="https://example.atlassian.net/wiki/pages/123",
             mode="walkthrough",
         )
-        self.openai_client.answer_calls = 0
-        self.openai_client.last_system_prompt = None
-        self.openai_client.last_user_prompt = None
+        self.text_client.answer_calls = 0
+        self.text_client.last_system_prompt = None
+        self.text_client.last_user_prompt = None
 
         first = self.service.narrate_section(
             session_id=payload["session"]["session_id"],
@@ -774,19 +754,19 @@ class PRDBriefingServiceTests(unittest.TestCase):
         self.assertEqual(second["script"], "LLM answer")
         self.assertFalse(first["cached"])
         self.assertTrue(second["cached"])
-        self.assertEqual(self.openai_client.answer_calls, 1)
+        self.assertEqual(self.text_client.answer_calls, 1)
 
     def test_create_session_supports_english_walkthrough_prompt_and_cache(self):
-        self.openai_client.is_configured = lambda: True
+        self.text_client.is_configured = lambda: True
         payload = self.service.create_session(
             owner_key="anon:english",
             page_ref="https://example.atlassian.net/wiki/pages/123",
             mode="walkthrough",
             language="en",
         )
-        self.openai_client.answer_calls = 0
-        self.openai_client.last_system_prompt = None
-        self.openai_client.last_user_prompt = None
+        self.text_client.answer_calls = 0
+        self.text_client.last_system_prompt = None
+        self.text_client.last_user_prompt = None
 
         first = self.service.narrate_section(
             session_id=payload["session"]["session_id"],
@@ -805,12 +785,12 @@ class PRDBriefingServiceTests(unittest.TestCase):
         self.assertEqual(first["language"], "en")
         self.assertFalse(first["cached"])
         self.assertTrue(second["cached"])
-        self.assertEqual(self.openai_client.answer_calls, 1)
-        self.assertIn("software engineers in English", self.openai_client.last_system_prompt)
-        self.assertIn("around 5 to 9 sentences in English", self.openai_client.last_user_prompt)
+        self.assertEqual(self.text_client.answer_calls, 1)
+        self.assertIn("software engineers in English", self.text_client.last_system_prompt)
+        self.assertIn("around 5 to 9 sentences in English", self.text_client.last_user_prompt)
 
     def test_english_walkthrough_audio_uses_english_language_code(self):
-        self.openai_client.is_configured = lambda: True
+        self.text_client.is_configured = lambda: True
         payload = self.service.create_session(
             owner_key="anon:english-audio",
             page_ref="https://example.atlassian.net/wiki/pages/123",
@@ -888,7 +868,7 @@ class PRDBriefingServiceTests(unittest.TestCase):
         )
 
     def test_narrate_briefing_block_uses_block_payload_cache(self):
-        self.openai_client.is_configured = lambda: True
+        self.text_client.is_configured = lambda: True
         page = IngestedConfluencePage(
             page_id="456",
             title="Assessment PRD",
@@ -919,7 +899,7 @@ class PRDBriefingServiceTests(unittest.TestCase):
             mode="walkthrough",
         )
         block_id = payload["briefing_blocks"][0]["block_id"]
-        self.openai_client.answer_calls = 0
+        self.text_client.answer_calls = 0
 
         first = self.service.narrate_section(
             session_id=payload["session"]["session_id"],
@@ -939,10 +919,10 @@ class PRDBriefingServiceTests(unittest.TestCase):
         self.assertEqual(first["section_indexes"], [0, 1])
         self.assertFalse(first["cached"])
         self.assertTrue(second["cached"])
-        self.assertEqual(self.openai_client.answer_calls, 1)
+        self.assertEqual(self.text_client.answer_calls, 1)
 
     def test_walkthrough_script_reuses_legacy_cached_entry_from_old_model_id(self):
-        self.openai_client.is_configured = lambda: True
+        self.text_client.is_configured = lambda: True
         payload = self.service.create_session(
             owner_key="anon:test",
             page_ref="https://example.atlassian.net/wiki/pages/123",
@@ -1003,12 +983,12 @@ class PRDBriefingServiceTests(unittest.TestCase):
         self.store.cache_script(
             owner_key="anon:test",
             audience="developer_zh",
-            model_id="openai:gpt-4.1-mini|gemini:gemini-2.5-flash",
+            model_id="legacy:text-model",
             prompt_version=WALKTHROUGH_SCRIPT_PROMPT_VERSION,
             section_payload=section_payload,
             script="legacy cached script",
         )
-        self.openai_client.answer_calls = 0
+        self.text_client.answer_calls = 0
 
         result = self.service.narrate_section(
             session_id=payload["session"]["session_id"],
@@ -1020,10 +1000,10 @@ class PRDBriefingServiceTests(unittest.TestCase):
         self.assertEqual(result["script"], "legacy cached script")
         self.assertTrue(result["cached"])
         self.assertFalse(result["audio_cached"])
-        self.assertEqual(self.openai_client.answer_calls, 0)
+        self.assertEqual(self.text_client.answer_calls, 0)
 
     def test_get_session_payload_marks_cached_sections(self):
-        self.openai_client.is_configured = lambda: True
+        self.text_client.is_configured = lambda: True
         payload = self.service.create_session(
             owner_key="anon:test",
             page_ref="https://example.atlassian.net/wiki/pages/123",
@@ -1048,7 +1028,7 @@ class PRDBriefingServiceTests(unittest.TestCase):
         self.assertFalse(refreshed["sections"][1]["walkthrough_audio_cached"])
 
     def test_get_session_payload_marks_cached_audio_sections(self):
-        self.openai_client.is_configured = lambda: True
+        self.text_client.is_configured = lambda: True
         payload = self.service.create_session(
             owner_key="anon:test",
             page_ref="https://example.atlassian.net/wiki/pages/123",
@@ -1143,13 +1123,13 @@ class PRDBriefingServiceTests(unittest.TestCase):
         self.assertEqual(payload["session_overview"]["developer_focus"], [])
 
     def test_developer_overview_does_not_block_on_text_model(self):
-        self.openai_client.is_configured = lambda: True
+        self.text_client.is_configured = lambda: True
         payload = self.service.create_session(
             owner_key="anon:test",
             page_ref="https://example.atlassian.net/wiki/pages/123",
             mode="walkthrough",
         )
-        self.openai_client.answer_calls = 0
+        self.text_client.answer_calls = 0
 
         refreshed = self.service.get_session_payload(
             session_id=payload["session"]["session_id"],
@@ -1158,7 +1138,7 @@ class PRDBriefingServiceTests(unittest.TestCase):
 
         self.assertTrue(refreshed["session_overview"]["background_goal"])
         self.assertTrue(refreshed["session_overview"]["implementation_overview"])
-        self.assertEqual(self.openai_client.answer_calls, 0)
+        self.assertEqual(self.text_client.answer_calls, 0)
 
     def test_low_signal_overview_is_detected(self):
         overview = {
@@ -1176,9 +1156,9 @@ class PRDBriefingServiceTests(unittest.TestCase):
         }
         self.assertTrue(overview_is_low_signal(overview))
 
-    def test_create_session_uses_heuristic_when_openai_overview_is_low_signal(self):
-        self.openai_client.is_configured = lambda: True
-        self.openai_client.create_answer = lambda *args, **kwargs: """
+    def test_create_session_uses_heuristic_when_overview_is_low_signal(self):
+        self.text_client.is_configured = lambda: True
+        self.text_client.create_answer = lambda *args, **kwargs: """
         {
           "overview": "这个 PRD 主要围绕核心业务流程、页面操作和规则约束展开。",
           "scope": ["1.1 Version Control", "1.2 People Involved"],

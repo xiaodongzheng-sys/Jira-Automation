@@ -51,13 +51,8 @@ MEETING_AUDIO_EARLY_SIGNAL_MIN_BYTES = 4096
 MEETING_AUDIO_EARLY_SIGNAL_MIN_GROWTH_BYTES = 2048
 MEETING_AUDIO_MONITOR_OUTPUT_DEVICE_INDEX = "2"
 MEETING_TRANSCRIPT_SEGMENT_SECONDS = 60
-MEETING_PLAYBACK_AUDIO_CHANNELS = 2
-MEETING_PLAYBACK_AUDIO_SAMPLE_RATE = 48000
 MEETING_RECORDING_MODE_AUDIO_ONLY = "audio_only"
-MEETING_RECORDING_MODE_SCREEN_AUDIO = "screen_audio"
 MEETING_AUDIO_POST_STOP_PAD_PROFILE = "post_stop_pad_v1"
-MEETING_BROWSER_AUDIO_PROFILE = "browser_media_recorder_v1"
-MEETING_BROWSER_LINKED_MIN_SECONDS = 10.0
 MEETING_SEGMENTED_AUDIO_PROFILE = "segmented_avfoundation_v1"
 MEETING_SCREENCAPTUREKIT_AUDIO_PROFILE = "screencapturekit_audio_v1"
 MEETING_TRANSCRIPT_REPETITIVE_DOMINANT_RATIO = 0.6
@@ -80,16 +75,7 @@ MEETING_TRANSCRIPT_LANGUAGE_LABELS = {
 @dataclass(frozen=True)
 class MeetingRecorderConfig:
     ffmpeg_bin: str = "ffmpeg"
-    video_input: str = "Capture screen 0"
     audio_input: str = "Meeting Recorder Aggregate"
-    video_fps: int = 15
-    video_max_width: int = 1920
-    video_max_height: int = 1080
-    avfoundation_pixel_format: str = "bgr0"
-    screen_preflight_timeout_seconds: int = 20
-    audio_only_fallback_on_screen_failure: bool = True
-    frame_interval_seconds: int = 60
-    vision_model: str = "gpt-4.1-mini"
     transcribe_provider: str = "whisper_cpp"
     whisper_cpp_bin: str = "whisper-cli"
     whisper_model: str = "~/.cache/whisper.cpp/ggml-medium.bin"
@@ -219,54 +205,6 @@ class GoogleCalendarMeetingService:
                 if normalized:
                     meetings.append(normalized)
         return meetings
-
-
-def meeting_reminder_suppression_key(meeting: dict[str, Any], *, timezone_name: str = "Asia/Singapore") -> str:
-    event_id = str(meeting.get("calendar_event_id") or meeting.get("id") or meeting.get("meeting_link") or meeting.get("title") or "").strip()
-    start_at = _parse_meeting_datetime(str(meeting.get("start") or meeting.get("scheduled_start") or ""), timezone_name=timezone_name)
-    if start_at is None:
-        date_key = datetime.now(ZoneInfo(timezone_name)).strftime("%Y%m%d")
-    else:
-        date_key = start_at.astimezone(ZoneInfo(timezone_name)).strftime("%Y%m%d")
-    safe_event = re.sub(r"[^a-zA-Z0-9_.:-]", "-", event_id)[:160] or "meeting"
-    return f"{date_key}:{safe_event}"
-
-
-def reminder_eligible_meetings(
-    meetings: list[dict[str, Any]],
-    *,
-    now: datetime | None = None,
-    timezone_name: str = "Asia/Singapore",
-    workday_start_hour: int = 9,
-    workday_end_hour: int = 20,
-    lead_seconds: int = 120,
-    grace_seconds: int = 600,
-) -> list[dict[str, Any]]:
-    local_tz = ZoneInfo(timezone_name)
-    current = now or datetime.now(local_tz)
-    if current.tzinfo is None:
-        current = current.replace(tzinfo=local_tz)
-    current = current.astimezone(local_tz)
-    eligible: list[dict[str, Any]] = []
-    for meeting in meetings:
-        if str(meeting.get("platform") or "").strip() not in {"google_meet", "zoom"}:
-            continue
-        start_at = _parse_meeting_datetime(str(meeting.get("start") or meeting.get("scheduled_start") or ""), timezone_name=timezone_name)
-        if start_at is None:
-            continue
-        local_start = start_at.astimezone(local_tz)
-        if not (workday_start_hour <= local_start.hour < workday_end_hour):
-            continue
-        seconds_until_start = int((local_start - current).total_seconds())
-        if seconds_until_start > lead_seconds or seconds_until_start < -grace_seconds:
-            continue
-        item = dict(meeting)
-        item["start"] = str(meeting.get("start") or meeting.get("scheduled_start") or "")
-        item["suppression_key"] = meeting_reminder_suppression_key(item, timezone_name=timezone_name)
-        item["seconds_until_start"] = seconds_until_start
-        eligible.append(item)
-    eligible.sort(key=lambda item: int(item.get("seconds_until_start") or 0))
-    return eligible
 
 
 class MeetingRecordStore:
@@ -739,128 +677,6 @@ class MeetingRecorderRuntime:
         self.store.save_record(record)
         return record
 
-    def import_browser_audio_recording(
-        self,
-        *,
-        owner_email: str,
-        title: str,
-        platform: str,
-        meeting_link: str,
-        started_at: str,
-        stopped_at: str,
-        audio_bytes: bytes,
-        mime_type: str = "",
-        device_label: str = "",
-        capture_source: str = "",
-        preflight_metrics: dict[str, Any] | None = None,
-        transcript_language: str = "",
-    ) -> dict[str, Any]:
-        if not audio_bytes:
-            raise ToolError("Browser audio upload was empty.")
-        ffmpeg_path = _resolve_ffmpeg_bin(self.config.ffmpeg_bin)
-        if not ffmpeg_path:
-            raise ConfigError("MEETING_RECORDER_FFMPEG_BIN must point to a working ffmpeg binary.")
-        record = self.store.create_record(
-            owner_email=owner_email,
-            title=title,
-            platform=platform,
-            meeting_link=meeting_link,
-        )
-        transcript_language = normalize_meeting_transcript_language(transcript_language)
-        record["transcript_language"] = transcript_language
-        record["transcript_language_label"] = MEETING_TRANSCRIPT_LANGUAGE_LABELS[transcript_language]
-        record_dir = self.store.record_dir(record["record_id"])
-        extension = _browser_audio_extension(mime_type)
-        source_path = record_dir / f"browser-audio{extension}"
-        audio_path = record_dir / "meeting.wav"
-        try:
-            source_path.write_bytes(audio_bytes)
-        except OSError as error:
-            raise ToolError(f"Could not save browser audio upload: {error}") from error
-
-        command = [
-            ffmpeg_path,
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-y",
-            "-i",
-            str(source_path),
-            "-acodec",
-            "pcm_s16le",
-            "-ar",
-            "16000",
-            "-ac",
-            "1",
-            str(audio_path),
-        ]
-        try:
-            _run_command(command, "Could not convert browser audio upload.", timeout_seconds=120)
-        except ToolError as error:
-            record["status"] = "failed"
-            record["error"] = str(error)
-            self.store.save_record(record)
-            raise
-        duration_seconds = _audio_duration_seconds(audio_path)
-        now = _utc_now()
-        record["status"] = "recorded"
-        record["recording_started_at"] = started_at or record.get("created_at") or now
-        record["recording_stopped_at"] = stopped_at or now
-        normalized_capture_source = str(capture_source or "").strip()
-        is_meeting_tab_capture = normalized_capture_source == "browser_tab_audio_linked"
-        capture_mode = "browser_tab_audio" if is_meeting_tab_capture else "browser_microphone"
-        capture_label = "Browser meeting tab audio + microphone" if is_meeting_tab_capture else "Browser microphone"
-        capture_note = (
-            "Linked meeting recording used browser tab audio plus microphone capture to avoid macOS virtual audio devices."
-            if is_meeting_tab_capture
-            else "F2F manual recording used the browser microphone recorder to avoid long-running macOS AVFoundation capture interruptions."
-        )
-        checked_preflight = preflight_metrics if isinstance(preflight_metrics, dict) else {}
-        record["diagnostics_snapshot"] = {
-            "audio_input": str(device_label or capture_label).strip(),
-            "audio_capture_mode": capture_mode,
-            "audio_capture_label": capture_label,
-            "effective_recording_mode": MEETING_RECORDING_MODE_AUDIO_ONLY,
-            "recording_mode": MEETING_RECORDING_MODE_AUDIO_ONLY,
-            "requested_recording_mode": MEETING_RECORDING_MODE_AUDIO_ONLY,
-            "system_audio_configured": False,
-            "configured_audio_input": self.config.audio_input,
-            "audio_signal_verified": duration_seconds > 0,
-            "audio_signal_note": capture_note,
-            "transcript_language": transcript_language,
-            "transcript_language_label": MEETING_TRANSCRIPT_LANGUAGE_LABELS[transcript_language],
-        }
-        if device_label:
-            record["diagnostics_snapshot"]["browser_audio_device_label"] = str(device_label).strip()
-        record["audio_preflight"] = {
-            "status": str(checked_preflight.get("status") or "not_checked").strip(),
-            "checked_at": now,
-            "duration_seconds": _safe_float(checked_preflight.get("duration_seconds")) or 0,
-            "mean_volume_db": _safe_float(checked_preflight.get("rms_db")),
-            "max_volume_db": _safe_float(checked_preflight.get("peak_db")),
-            "warning": "",
-        }
-        record["media"] = {
-            "recording_mode": MEETING_RECORDING_MODE_AUDIO_ONLY,
-            "audio_path": str(audio_path.relative_to(self.store.root_dir)),
-            "audio_url": f"/meeting-recorder/assets/{record['record_id']}/meeting.wav",
-            "audio_format": "wav",
-            "audio_sample_rate": 16000,
-            "audio_channels": 1,
-            "source_audio_path": str(source_path.relative_to(self.store.root_dir)),
-            "source_audio_mime_type": str(mime_type or ""),
-            "audio_original_duration_seconds": duration_seconds,
-            "audio_capture_profile": MEETING_BROWSER_AUDIO_PROFILE,
-            "browser_audio_capture_source": normalized_capture_source or "browser_audio_f2f",
-            "audio_conversion_command": _redact_command(command),
-        }
-        record["recording_health"] = self._recording_health(record)
-        if record["recording_health"].get("status") == "failed":
-            record["status"] = "failed"
-            record["error"] = str(record["recording_health"].get("warning") or "").strip()
-        self.store.save_record(record)
-        return record
-
     def _finalize_segmented_audio_recording(self, record: dict[str, Any]) -> dict[str, Any]:
         media = record.get("media") if isinstance(record.get("media"), dict) else {}
         if str(media.get("audio_capture_profile") or "") != MEETING_SEGMENTED_AUDIO_PROFILE:
@@ -1095,11 +911,6 @@ class MeetingRecorderRuntime:
         for candidate_pid in _find_recorder_processes_for_paths(candidates):
             _terminate_process_id(candidate_pid)
 
-    def repair_video_playback(self, *, record_id: str, owner_email: str) -> dict[str, Any]:
-        record = self.store.get_record(record_id)
-        _assert_record_owner(record, owner_email)
-        raise ToolError("Video recording and playback repair are no longer supported. Meeting Recorder is audio-only.")
-
     def _audio_preflight(self, *, ffmpeg_path: str, audio_input: str) -> dict[str, Any]:
         checked_at = _utc_now()
         with _temporary_path("meeting-audio-preflight", ".wav") as audio_path:
@@ -1148,31 +959,6 @@ class MeetingRecorderRuntime:
             "warning": warning,
         }
 
-    def _screen_capture_preflight(self, *, ffmpeg_path: str) -> dict[str, Any]:
-        checked_at = _utc_now()
-        with _temporary_path("meeting-screen-preflight", ".mp4") as video_path:
-            command = _build_ffmpeg_screen_preflight_command(
-                ffmpeg_path=ffmpeg_path,
-                video_input=self.config.video_input,
-                video_path=video_path,
-                avfoundation_pixel_format=self.config.avfoundation_pixel_format,
-            )
-            try:
-                _run_command(
-                    command,
-                    "Could not verify meeting screen capture.",
-                    timeout_seconds=max(8, int(self.config.screen_preflight_timeout_seconds or 20)),
-                )
-                if not video_path.exists() or video_path.stat().st_size <= 0:
-                    raise ToolError("Screen preflight produced no video bytes.")
-            except Exception as error:  # noqa: BLE001
-                return {
-                    "status": "unavailable",
-                    "checked_at": checked_at,
-                    "warning": f"Screen capture is unavailable. {error}",
-                }
-        return {"status": "ok", "checked_at": checked_at, "warning": ""}
-
     def _recording_health(self, record: dict[str, Any]) -> dict[str, Any]:
         media = record.get("media") if isinstance(record.get("media"), dict) else {}
         relative = str(media.get("audio_path") or "").strip()
@@ -1197,22 +983,9 @@ class MeetingRecorderRuntime:
         volume_metrics = _audio_volume_metrics(media_path) if media_bytes > 0 else {}
         mean_volume_db = volume_metrics.get("mean_volume_db")
         max_volume_db = volume_metrics.get("max_volume_db")
-        capture_profile = str(media.get("audio_capture_profile") or "")
-        capture_source = str(media.get("browser_audio_capture_source") or "")
-        is_linked_browser_capture = (
-            capture_profile == MEETING_BROWSER_AUDIO_PROFILE
-            and capture_source == "browser_tab_audio_linked"
-        )
         if media_duration_seconds is not None and elapsed_seconds:
             minimum_expected_seconds = elapsed_seconds * 0.7
-            if is_linked_browser_capture and elapsed_seconds < MEETING_BROWSER_LINKED_MIN_SECONDS:
-                status = "failed"
-                warning = (
-                    f"Browser meeting-tab recording lasted only {elapsed_seconds:.0f}s. "
-                    "This is too short to be a useful meeting recording; keep the Zoom/Meet tab audio share active "
-                    "and do not stop until the meeting audio has played."
-                )
-            elif source_duration_seconds is not None and source_duration_seconds < minimum_expected_seconds:
+            if source_duration_seconds is not None and source_duration_seconds < minimum_expected_seconds:
                 status = "failed"
                 warning = (
                     f"Recorder captured only {source_duration_seconds:.0f}s of source audio for a "
@@ -1382,15 +1155,6 @@ class MeetingProcessingService:
             }
         ]
 
-    def _video_path(self, record: dict[str, Any]) -> Path:
-        relative = str((record.get("media") or {}).get("video_path") or "").strip()
-        if not relative:
-            raise ToolError("Recorded meeting video is missing.")
-        video_path = (self.store.root_dir / relative).resolve()
-        if not video_path.exists():
-            raise ToolError("Recorded meeting video file was not found.")
-        return video_path
-
     def _recorded_audio_path(self, record: dict[str, Any]) -> Path:
         relative = str((record.get("media") or {}).get("audio_path") or "").strip()
         if not relative:
@@ -1398,37 +1162,6 @@ class MeetingProcessingService:
         audio_path = (self.store.root_dir / relative).resolve()
         if not audio_path.exists():
             raise ToolError("Recorded meeting audio file was not found.")
-        return audio_path
-
-    def _extract_audio(self, record: dict[str, Any], video_path: Path) -> Path:
-        ffmpeg_path = _resolve_ffmpeg_bin(self.config.ffmpeg_bin)
-        if not ffmpeg_path:
-            raise ConfigError("ffmpeg is required to extract meeting audio.")
-        audio_path = self.store.record_dir(record["record_id"]) / "audio.wav"
-        command = [
-            ffmpeg_path,
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-y",
-            "-fflags",
-            "+genpts",
-            "-i",
-            str(video_path),
-            "-map",
-            "0:a:0",
-            "-vn",
-            "-af",
-            "aresample=async=1:first_pts=0",
-            "-acodec",
-            "pcm_s16le",
-            "-ar",
-            "16000",
-            "-ac",
-            "1",
-            str(audio_path),
-        ]
-        _run_command(command, "Could not extract audio from meeting video.")
         return audio_path
 
     def _transcribe_audio(
@@ -1839,41 +1572,6 @@ class MeetingProcessingService:
         quality["transcribe_realtime_ratio"] = round(elapsed / float(duration_seconds or 0), 4) if elapsed is not None and float(duration_seconds or 0) > 0 else None
         quality["language_retry_count"] = int(transcript.get("language_retry_count") or 0)
 
-    def _extract_visual_evidence(self, record: dict[str, Any], video_path: Path) -> list[dict[str, Any]]:
-        ffmpeg_path = _resolve_ffmpeg_bin(self.config.ffmpeg_bin)
-        if not ffmpeg_path:
-            return []
-        keyframe_dir = self.store.record_dir(record["record_id"]) / "keyframes"
-        keyframe_dir.mkdir(parents=True, exist_ok=True)
-        frame_pattern = keyframe_dir / "frame-%04d.jpg"
-        interval = max(15, min(int(self.config.frame_interval_seconds or 60), 600))
-        command = [
-            ffmpeg_path,
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-y",
-            "-i",
-            str(video_path),
-            "-vf",
-            f"fps=1/{interval}",
-            "-q:v",
-            "3",
-            str(frame_pattern),
-        ]
-        _run_command(command, "Could not extract meeting screen keyframes.")
-        evidence = []
-        for index, frame_path in enumerate(sorted(keyframe_dir.glob("frame-*.jpg"))[:30], start=1):
-            timestamp = (index - 1) * interval
-            evidence.append(
-                {
-                    "timestamp_seconds": timestamp,
-                    "image_url": f"/meeting-recorder/assets/{record['record_id']}/keyframes/{frame_path.name}",
-                    "summary": f"Video snapshot captured around {timestamp // 60:02d}:{timestamp % 60:02d}.",
-                }
-            )
-        return evidence
-
     def _transcript_quality(self, *, audio_path: Path, chunks: list[dict[str, Any]], detected_language: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         duration = _audio_duration_seconds(audio_path)
         if duration <= 0:
@@ -1996,137 +1694,6 @@ class MeetingProcessingService:
             "- Do not include transcript excerpts unless needed for clarity."
         )
         return self.text_client.create_answer(system_prompt=system_prompt, user_prompt=user_prompt).strip()
-
-
-def cleanup_legacy_video_assets(
-    *,
-    store: MeetingRecordStore,
-    config: MeetingRecorderConfig,
-    owner_email: str = "",
-) -> dict[str, Any]:
-    """Convert legacy screen-video records to audio-only metadata and remove video assets."""
-    records = store.list_records(owner_email=owner_email) if owner_email else _load_all_records(store)
-    summary = {
-        "checked": 0,
-        "updated": 0,
-        "audio_extracted": 0,
-        "video_assets_deleted": 0,
-        "warnings": [],
-    }
-    ffmpeg_path = _resolve_ffmpeg_bin(config.ffmpeg_bin)
-    for record in records:
-        summary["checked"] += 1
-        media = record.get("media") if isinstance(record.get("media"), dict) else {}
-        if not _record_has_legacy_video(media, record):
-            continue
-        record_id = str(record.get("record_id") or "").strip()
-        record_dir = store.record_dir(record_id)
-        media = dict(media)
-        warnings = list(record.get("cleanup_warnings") or [])
-        audio_relative = str(media.get("audio_path") or "").strip()
-        video_relative = str(media.get("video_path") or "").strip()
-        video_path = (store.root_dir / video_relative).resolve() if video_relative else None
-        audio_path = (store.root_dir / audio_relative).resolve() if audio_relative else None
-
-        if (not audio_path or not audio_path.exists()) and video_path and video_path.exists() and ffmpeg_path:
-            output_path = record_dir / "meeting.wav"
-            command = _build_ffmpeg_legacy_video_audio_extract_command(
-                ffmpeg_path=ffmpeg_path,
-                video_path=video_path,
-                audio_path=output_path,
-            )
-            try:
-                _run_command(command, "Could not extract audio from legacy meeting video.", timeout_seconds=7200)
-                if output_path.exists() and output_path.stat().st_size > 0:
-                    media.update(
-                        {
-                            "audio_path": str(output_path.relative_to(store.root_dir)),
-                            "audio_url": f"/meeting-recorder/assets/{record_id}/meeting.wav",
-                            "audio_format": "wav",
-                            "audio_sample_rate": 16000,
-                            "audio_channels": 1,
-                            "legacy_video_audio_extracted_at": _utc_now(),
-                            "legacy_video_audio_extract_command": _redact_command(command),
-                        }
-                    )
-                    summary["audio_extracted"] += 1
-                else:
-                    warnings.append("Legacy video audio extraction produced no audio bytes.")
-            except ToolError as error:
-                warnings.append(str(error))
-        elif (not audio_path or not audio_path.exists()) and video_path and video_path.exists() and not ffmpeg_path:
-            warnings.append("ffmpeg is required to extract audio from legacy meeting video before deleting it.")
-
-        for key in ("video_path", "playback_video_path"):
-            deleted = _delete_legacy_media_path(store=store, record_dir=record_dir, relative_path=str(media.get(key) or ""))
-            if deleted:
-                summary["video_assets_deleted"] += 1
-        keyframes_dir = record_dir / "keyframes"
-        if keyframes_dir.exists():
-            shutil.rmtree(keyframes_dir, ignore_errors=True)
-            summary["video_assets_deleted"] += 1
-
-        for key in (
-            "video_path",
-            "video_url",
-            "playback_video_path",
-            "playback_video_url",
-            "playback_repair_command",
-            "playback_profile",
-            "playback_audio_channels",
-            "playback_audio_sample_rate",
-            "playback_repaired_at",
-            "playback_bytes",
-        ):
-            media.pop(key, None)
-        media["recording_mode"] = MEETING_RECORDING_MODE_AUDIO_ONLY
-        media["legacy_video_cleanup_at"] = _utc_now()
-        record["media"] = media
-        record["visual_evidence"] = []
-        if warnings:
-            record["cleanup_warnings"] = warnings
-            summary["warnings"].append({"record_id": record_id, "warnings": warnings})
-        store.save_record(record)
-        summary["updated"] += 1
-    return summary
-
-
-def _load_all_records(store: MeetingRecordStore) -> list[dict[str, Any]]:
-    records: list[dict[str, Any]] = []
-    for metadata_path in sorted(store.records_dir.glob("*/metadata.json"), reverse=True):
-        try:
-            payload = json.loads(metadata_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        if isinstance(payload, dict):
-            records.append(payload)
-    return records
-
-
-def _record_has_legacy_video(media: dict[str, Any], record: dict[str, Any]) -> bool:
-    return bool(
-        media.get("video_path")
-        or media.get("video_url")
-        or media.get("playback_video_path")
-        or media.get("playback_video_url")
-        or record.get("visual_evidence")
-    )
-
-
-def _delete_legacy_media_path(*, store: MeetingRecordStore, record_dir: Path, relative_path: str) -> bool:
-    relative = str(relative_path or "").strip()
-    if not relative:
-        return False
-    candidate = (store.root_dir / relative).resolve()
-    root = record_dir.resolve()
-    if root not in candidate.parents and candidate != root:
-        candidate = (root / Path(relative).name).resolve()
-    if root not in candidate.parents and candidate != root:
-        return False
-    if candidate.exists() and candidate.is_file():
-        candidate.unlink(missing_ok=True)
-        return True
-    return False
 
 
 def _assert_record_owner(record: dict[str, Any], owner_email: str) -> None:
@@ -2831,17 +2398,6 @@ def _wait_for_audio_recorder_ready(*, process: subprocess.Popen[str], audio_path
     }
 
 
-def _browser_audio_extension(mime_type: str) -> str:
-    normalized = str(mime_type or "").split(";", 1)[0].strip().lower()
-    if normalized in {"audio/wav", "audio/x-wav", "audio/wave"}:
-        return ".wav"
-    if normalized in {"audio/mp4", "audio/aac", "audio/x-m4a"}:
-        return ".m4a"
-    if normalized in {"audio/ogg", "application/ogg"}:
-        return ".ogg"
-    return ".webm"
-
-
 def _usable_audio_segments(segment_dir: Path) -> list[Path]:
     if not segment_dir.exists() or not segment_dir.is_dir():
         return []
@@ -3109,115 +2665,6 @@ def _avfoundation_devices(ffmpeg_path: str | None) -> dict[str, list[str]]:
     return _parse_avfoundation_devices(f"{completed.stderr}\n{completed.stdout}")
 
 
-def _build_ffmpeg_recording_command(
-    *,
-    ffmpeg_path: str,
-    video_input: str,
-    audio_input: str,
-    video_path: Path,
-    video_fps: int,
-    video_max_width: int,
-    video_max_height: int,
-    avfoundation_pixel_format: str,
-) -> list[str]:
-    fps = _bounded_int(video_fps, default=15, minimum=5, maximum=30)
-    max_width = _bounded_int(video_max_width, default=1920, minimum=640, maximum=2560)
-    max_height = _bounded_int(video_max_height, default=1080, minimum=360, maximum=1600)
-    pixel_format = _safe_avfoundation_pixel_format(avfoundation_pixel_format)
-    scale_filter = (
-        f"scale='if(gt(iw/ih,{max_width}/{max_height}),min({max_width},iw),-2)'"
-        f":'if(gt(iw/ih,{max_width}/{max_height}),-2,min({max_height},ih))'"
-        f":flags=bicubic,fps={fps},format=yuv420p"
-    )
-    return [
-        ffmpeg_path,
-        "-hide_banner",
-        "-nostdin",
-        "-loglevel",
-        "warning",
-        "-y",
-        "-thread_queue_size",
-        "512",
-        "-f",
-        "avfoundation",
-        "-framerate",
-        str(fps),
-        "-pixel_format",
-        pixel_format,
-        "-i",
-        f"{video_input}:",
-        "-thread_queue_size",
-        "512",
-        "-f",
-        "avfoundation",
-        "-i",
-        f":{audio_input}",
-        "-map",
-        "0:v:0",
-        "-map",
-        "1:a:0",
-        "-vf",
-        scale_filter,
-        "-c:v",
-        "libx264",
-        "-preset",
-        "veryfast",
-        "-profile:v",
-        "high",
-        "-level",
-        "4.2",
-        "-g",
-        str(fps * 2),
-        "-pix_fmt",
-        "yuv420p",
-        "-c:a",
-        "aac",
-        "-ac",
-        str(MEETING_PLAYBACK_AUDIO_CHANNELS),
-        "-ar",
-        str(MEETING_PLAYBACK_AUDIO_SAMPLE_RATE),
-        "-b:a",
-        "128k",
-        "-movflags",
-        "+faststart",
-        str(video_path),
-    ]
-
-
-def _build_ffmpeg_screen_preflight_command(
-    *,
-    ffmpeg_path: str,
-    video_input: str,
-    video_path: Path,
-    avfoundation_pixel_format: str,
-) -> list[str]:
-    return [
-        ffmpeg_path,
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-y",
-        "-f",
-        "avfoundation",
-        "-framerate",
-        "5",
-        "-pixel_format",
-        _safe_avfoundation_pixel_format(avfoundation_pixel_format),
-        "-i",
-        f"{video_input}:",
-        "-t",
-        "1",
-        "-frames:v",
-        "1",
-        "-an",
-        "-c:v",
-        "libx264",
-        "-pix_fmt",
-        "yuv420p",
-        str(video_path),
-    ]
-
-
 def _build_ffmpeg_audio_recording_command(*, ffmpeg_path: str, audio_input: str, audio_path: Path) -> list[str]:
     return [
         ffmpeg_path,
@@ -3416,57 +2863,6 @@ def _build_ffmpeg_audio_post_stop_pad_command(
     ]
 
 
-def _build_ffmpeg_legacy_video_audio_extract_command(*, ffmpeg_path: str, video_path: Path, audio_path: Path) -> list[str]:
-    return [
-        ffmpeg_path,
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-y",
-        "-fflags",
-        "+genpts",
-        "-i",
-        str(video_path),
-        "-map",
-        "0:a:0",
-        "-vn",
-        "-af",
-        "aresample=async=1:first_pts=0",
-        "-acodec",
-        "pcm_s16le",
-        "-ar",
-        "16000",
-        "-ac",
-        "1",
-        str(audio_path),
-    ]
-
-
-def _build_ffmpeg_playback_repair_command(*, ffmpeg_path: str, source_path: Path, output_path: Path) -> list[str]:
-    return [
-        ffmpeg_path,
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-y",
-        "-i",
-        str(source_path),
-        "-c:v",
-        "copy",
-        "-c:a",
-        "aac",
-        "-ac",
-        str(MEETING_PLAYBACK_AUDIO_CHANNELS),
-        "-ar",
-        str(MEETING_PLAYBACK_AUDIO_SAMPLE_RATE),
-        "-b:a",
-        "128k",
-        "-movflags",
-        "+faststart",
-        str(output_path),
-    ]
-
-
 def _parse_avfoundation_devices(output: str) -> dict[str, list[str]]:
     video_devices: list[str] = []
     audio_devices: list[str] = []
@@ -3496,12 +2892,6 @@ def _bounded_int(value: int | str | None, *, default: int, minimum: int, maximum
     except (TypeError, ValueError):
         parsed = default
     return max(minimum, min(parsed, maximum))
-
-
-def _safe_avfoundation_pixel_format(value: str | None) -> str:
-    normalized = str(value or "").strip().lower()
-    supported = {"bgr0", "0rgb", "nv12", "uyvy422", "yuyv422"}
-    return normalized if normalized in supported else "bgr0"
 
 
 def _effective_audio_input(configured_audio_input: str, audio_devices: list[str]) -> str:
@@ -3588,13 +2978,6 @@ def _audio_capture_status(audio_input: str, audio_devices: list[str]) -> dict[st
 def _looks_like_system_audio_device(name: str) -> bool:
     lowered = str(name or "").strip().lower()
     return any(token in lowered for token in ("blackhole", "soundflower", "loopback", "aggregate", "multi-output"))
-
-
-def _normalize_recording_mode(*, recording_mode: str, meeting_link: str) -> str:
-    normalized = str(recording_mode or "").strip().lower().replace("-", "_")
-    if normalized in {"audio", "audio_only", "onsite", "screen", "screen_audio", "video", "video_audio"}:
-        return MEETING_RECORDING_MODE_AUDIO_ONLY
-    return MEETING_RECORDING_MODE_AUDIO_ONLY
 
 
 def _safe_record_id(record_id: str) -> str:

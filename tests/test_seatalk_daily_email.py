@@ -758,7 +758,7 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         self.assertEqual(payload["quality_metadata"]["high_confidence_todo_count"], 1)
         self.assertGreaterEqual(payload["quality_metadata"]["deduped_topic_count"], 1)
         self.assertIn("GRC evaluation group", payload["watch_delegate_todos"][0]["evidence"])
-        self.assertIn("GRC evaluation group", payload["team_member_reminders"][0]["evidence"])
+        self.assertEqual(payload["team_member_reminders"], [])
 
     def test_build_daily_briefing_injects_only_matched_report_intelligence(self):
         class MatchedService(FakeSeaTalkService):
@@ -955,6 +955,40 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         self.assertIn("Suggested Team Follow-up", text_body)
         self.assertIn("Rene Chong: Check the case.", html_body)
 
+        _, text_body, html_body = render_email(
+            briefing={
+                "watch_delegate_todos": [
+                    {
+                        "task": "Ensure Rene and Ker Yin confirm PH/ID local report usage before DWH ingestion is paused by ES migration.",
+                        "domain": "Anti-fraud",
+                        "priority": "high",
+                        "due": "TBD",
+                        "evidence": "SeaTalk rule_trigger_log_tab migration discussion",
+                    }
+                ],
+                "team_member_reminders": [
+                    {
+                        "domain": "Anti-fraud",
+                        "person": "Ker Yin",
+                        "reminder": "Check with local AF whether rule_trigger_log_tab is used for PH reports before DWH sync is paused.",
+                        "evidence": "SeaTalk rule_trigger_log_tab migration discussion",
+                    },
+                    {
+                        "domain": "Anti-fraud",
+                        "person": "Rene Chong",
+                        "reminder": "Check with local teams and validate the user-facing impact note for rule_trigger_log_tab DWH cutover.",
+                        "evidence": "SeaTalk rule_trigger_log_tab migration discussion",
+                    },
+                ],
+            },
+            now=now,
+        )
+        self.assertIn("Watch / Delegate", text_body)
+        self.assertIn("Ensure Rene and Ker Yin confirm", text_body)
+        self.assertNotIn("Suggested Team Follow-up", text_body)
+        self.assertNotIn("Ker Yin: Check with local AF", html_body)
+        self.assertNotIn("Rene Chong: Check with local teams", html_body)
+
     def test_daily_brief_prompt_allows_empty_low_signal_sections(self):
         prompt = _daily_brief_user_prompt(
             history_text="SeaTalk Chat History Export\n",
@@ -966,6 +1000,7 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
 
         self.assertIn("Empty arrays are expected when a section has no important signal", prompt)
         self.assertIn("Do not fill sections just to produce a report", prompt)
+        self.assertIn("already represented as a my_todos watch_delegate item", prompt)
         self.assertIn("Report Intelligence Matches", prompt)
         self.assertIn("Use these matches only as prioritization hints", prompt)
 
@@ -1013,6 +1048,33 @@ class SeaTalkDailyEmailTests(unittest.TestCase):
         self.assertIn("Due: today", specs[0].description)
         self.assertIn("Section: Watch / Delegate", specs[1].description)
         self.assertIn("Person: Rene Chong", specs[2].description)
+
+    def test_build_trello_card_specs_drops_followups_covered_by_watch_delegate(self):
+        briefing = {
+            "watch_delegate_todos": [
+                {
+                    "task": "Follow up with Liye on the DWH timeline for Credit Risk monitoring data ingestion and 31 May report target.",
+                    "domain": "Credit Risk",
+                    "priority": "medium",
+                    "due": "2026-05-08",
+                    "evidence": "SeaTalk Credit Risk PM requirement",
+                }
+            ],
+            "team_member_reminders": [
+                {
+                    "domain": "Credit Risk",
+                    "person": "Liye",
+                    "reminder": "Confirm the DWH ingestion timeline tomorrow so the 31 May report target can be assessed.",
+                    "evidence": "SeaTalk Credit Risk PM requirement",
+                    "source_type": "seatalk",
+                }
+            ],
+        }
+
+        specs = build_trello_card_specs(briefing=briefing, run_date="2026-05-07")
+
+        self.assertEqual([spec.section for spec in specs], ["Watch / Delegate"])
+        self.assertEqual(specs[0].name, "[Watch] Follow up with Liye on the DWH timeline for Credit Risk monitoring data ingestion and 31 May report target")
 
     def test_trello_client_reuses_list_and_creates_cards(self):
         class FakeResponse:

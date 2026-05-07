@@ -15,7 +15,6 @@
   const effortJobsUrlTemplate = root.dataset.effortJobsUrl || jobsUrlTemplate;
   const feedbackUrl = root.dataset.feedbackUrl;
   const sessionsUrl = root.dataset.sessionsUrl;
-  const modelAvailabilityUrl = root.dataset.modelAvailabilityUrl;
   const canManage = root.dataset.canManage === 'true';
   const options = JSON.parse(root.dataset.options || '{}');
 
@@ -53,9 +52,6 @@
   const evidenceSummary = document.querySelector('[data-source-evidence-summary]');
   const debugTrace = document.querySelector('[data-source-debug-trace]');
   const indexHealth = document.querySelector('[data-source-index-health]');
-  const modelAvailability = document.querySelector('[data-source-model-availability]');
-  const modelAvailabilityStatus = document.querySelector('[data-source-model-availability-status]');
-  const saveModelAvailabilityButton = document.querySelector('[data-source-save-model-availability]');
   const runtimeEvidencePmTeam = document.querySelector('[data-source-runtime-pm-team]');
   const runtimeEvidenceCountry = document.querySelector('[data-source-runtime-country]');
   const runtimeEvidenceSourceType = document.querySelector('[data-source-runtime-source-type]');
@@ -87,7 +83,6 @@
   let gitAuthReady = false;
   let llmReady = false;
   let llmProviders = {};
-  let modelAvailabilityPayload = {};
   let llmPolicy = {};
   let indexHealthPayload = {};
   let configLoadState = 'idle';
@@ -1364,13 +1359,6 @@
     `;
   };
 
-  const renderModelAvailability = () => {
-    if (!modelAvailability) return;
-    modelAvailability.querySelectorAll('input[type="checkbox"]').forEach((input) => {
-      input.checked = Boolean(modelAvailabilityPayload[input.value]);
-    });
-  };
-
   const updateLlmProviderOptions = (providerOptions = []) => {
     if (!llmProvider || !Array.isArray(providerOptions) || !providerOptions.length) return;
     const previousValue = llmProvider.value;
@@ -1454,7 +1442,6 @@
       gitAuthReady = Boolean(payload.git_auth_ready);
       llmReady = Boolean(payload.llm_ready);
       llmProviders = payload.llm_providers || {};
-      modelAvailabilityPayload = payload.model_availability || {};
       llmPolicy = payload.llm_policy || {};
       indexHealthPayload = payload.index_health || {};
       if (payload.options) {
@@ -1464,7 +1451,6 @@
       }
       updateCountryVisibility();
       updateLlmProviderOptions(payload.options?.llm_providers || []);
-      renderModelAvailability();
       if (!gitAuthReady && adminStatus) {
         adminStatus.textContent = 'Set SOURCE_CODE_QA_GITLAB_TOKEN on the server before running Sync / Refresh.';
       } else if (adminStatus && llmPolicy.provider) {
@@ -1505,32 +1491,6 @@
       renderSelectedConfig();
     } catch (error) {
       adminStatus.textContent = error.message || 'Save failed.';
-    }
-  };
-
-  const collectModelAvailability = () => {
-    const availability = {};
-    modelAvailability?.querySelectorAll('input[type="checkbox"]').forEach((input) => {
-      availability[input.value] = input.checked;
-    });
-    return availability;
-  };
-
-  const saveModelAvailability = async () => {
-    if (!canManage || !modelAvailabilityUrl) return;
-    if (modelAvailabilityStatus) modelAvailabilityStatus.textContent = 'Saving model availability...';
-    try {
-      const payload = await apiFetchJson(modelAvailabilityUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ availability: collectModelAvailability() }),
-      }, { attempts: 3 });
-      modelAvailabilityPayload = payload.model_availability || {};
-      updateLlmProviderOptions(payload.options?.llm_providers || []);
-      renderModelAvailability();
-      if (modelAvailabilityStatus) modelAvailabilityStatus.textContent = 'Model availability saved.';
-    } catch (error) {
-      if (modelAvailabilityStatus) modelAvailabilityStatus.textContent = error.message || 'Save failed.';
     }
   };
 
@@ -2871,7 +2831,6 @@
     }
   });
   saveButton?.addEventListener('click', saveConfig);
-  saveModelAvailabilityButton?.addEventListener('click', saveModelAvailability);
   runtimeEvidencePmTeam?.addEventListener('change', () => {
     updateRuntimeEvidenceCountryOptions();
     loadRuntimeEvidence();

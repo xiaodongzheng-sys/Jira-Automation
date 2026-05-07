@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import hashlib
-import math
 import re
 import threading
 import asyncio
@@ -12,14 +11,12 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-import requests
 from bs4 import BeautifulSoup
 
 from .confluence import ConfluenceConnector, ParsedSection
 from .models import AnswerPayload, ChunkRecord, Citation
-from .openai_client import OpenAIClient
 from .storage import BriefingStore, citation_from_chunk
-from .text_generation import TextGenerationClient
+from .text_generation import CodexTextGenerationClient
 
 
 DEVELOPER_AUDIENCE = "developer_zh"
@@ -198,26 +195,11 @@ def build_walkthrough_block_user_prompt(*, block: dict[str, Any], source_lines: 
 
 
 class RetrievalService:
-    def __init__(self, openai_client: OpenAIClient) -> None:
-        self.openai_client = openai_client
-
     def rank(self, query: str, chunks: list[ChunkRecord], limit: int = 6) -> list[ChunkRecord]:
         if not chunks:
             return []
-        if self.openai_client.is_configured():
-            try:
-                query_embedding = self.openai_client.embed_texts([query])[0]
-                for chunk in chunks:
-                    if chunk.embedding:
-                        chunk.score = cosine_similarity(query_embedding, chunk.embedding)
-                    else:
-                        chunk.score = keyword_score(query, chunk.content)
-            except Exception:  # noqa: BLE001
-                for chunk in chunks:
-                    chunk.score = keyword_score(query, chunk.content)
-        else:
-            for chunk in chunks:
-                chunk.score = keyword_score(query, chunk.content)
+        for chunk in chunks:
+            chunk.score = keyword_score(query, chunk.content)
         return [chunk for chunk in sorted(chunks, key=lambda item: item.score, reverse=True)[:limit] if chunk_has_signal(chunk)]
 
 
@@ -226,36 +208,20 @@ class VoiceService:
         self,
         *,
         store: BriefingStore,
-        openai_client: OpenAIClient,
         tts_provider: str,
         edge_mandarin_voice: str,
         edge_english_voice: str,
         edge_rate: str,
         edge_mandarin_rate: str | None,
         edge_english_rate: str | None,
-        openai_mandarin_voice: str,
-        openai_voice_speed: float,
-        openai_custom_voice_enabled: bool,
-        openai_tts_fallback_enabled: bool,
-        elevenlabs_api_key: str | None,
-        elevenlabs_mandarin_model_id: str,
-        elevenlabs_mandarin_voice_id: str | None,
     ) -> None:
         self.store = store
-        self.openai_client = openai_client
-        self.tts_provider = str(tts_provider or "edge").strip().lower() or "edge"
+        self.tts_provider = "edge"
         self.edge_mandarin_voice = str(edge_mandarin_voice or "zh-CN-XiaoxiaoNeural").strip() or "zh-CN-XiaoxiaoNeural"
         self.edge_english_voice = str(edge_english_voice or "en-SG-LunaNeural").strip() or "en-SG-LunaNeural"
         self.edge_rate = str(edge_rate or "-12%").strip() or "-12%"
         self.edge_mandarin_rate = str(edge_mandarin_rate or self.edge_rate or "+0%").strip() or "+0%"
         self.edge_english_rate = str(edge_english_rate or self.edge_rate or "-5%").strip() or "-5%"
-        self.openai_mandarin_voice = openai_mandarin_voice
-        self.openai_voice_speed = openai_voice_speed
-        self.openai_custom_voice_enabled = openai_custom_voice_enabled
-        self.openai_tts_fallback_enabled = openai_tts_fallback_enabled
-        self.elevenlabs_api_key = (elevenlabs_api_key or "").strip()
-        self.elevenlabs_mandarin_model_id = elevenlabs_mandarin_model_id
-        self.elevenlabs_mandarin_voice_id = (elevenlabs_mandarin_voice_id or "").strip()
 
     def synthesize(self, *, session_id: str, text: str, language_code: str, owner_key: str) -> str | None:
         normalized_text = optimize_tts_text(text, language_code=language_code)
@@ -264,8 +230,6 @@ class VoiceService:
         suffix = "mp3"
         provider = ""
         model_id = ""
-
-        elevenlabs_voice_id = self.elevenlabs_mandarin_voice_id
 
         if self.tts_provider == "edge":
             voice_id = self._edge_voice_for_language(language_code)
@@ -287,49 +251,6 @@ class VoiceService:
             except Exception:  # noqa: BLE001
                 audio_bytes = None
             suffix = "mp3"
-        elif self.tts_provider == "elevenlabs" and self.elevenlabs_api_key and elevenlabs_voice_id:
-            provider = "elevenlabs"
-            model_id = self.elevenlabs_mandarin_model_id
-            cached = self.store.get_cached_audio(
-                owner_key=owner_key,
-                provider=provider,
-                voice_id=elevenlabs_voice_id,
-                language_code=language_code,
-                model_id=model_id,
-                text=normalized_text,
-            )
-            if cached:
-                return cached
-            audio_bytes = self._synthesize_with_elevenlabs(
-                text=normalized_text,
-                voice_id=elevenlabs_voice_id,
-                language_code=language_code,
-                model_id=model_id,
-            )
-            suffix = "mp3"
-        elif self.tts_provider == "openai" and self.openai_tts_fallback_enabled and self.openai_client.is_configured():
-            voice_id = self.openai_mandarin_voice
-            provider = "openai"
-            model_id = str(self.openai_client.tts_model)
-            cached = self.store.get_cached_audio(
-                owner_key=owner_key,
-                provider=provider,
-                voice_id=voice_id,
-                language_code=language_code,
-                model_id=model_id,
-                text=normalized_text,
-            )
-            if cached:
-                return cached
-            try:
-                audio_bytes, suffix = self.openai_client.synthesize_speech(
-                    text=normalized_text,
-                    voice=voice_id,
-                    instructions=self._build_openai_voice_instructions(language_code=language_code),
-                    speed=self.openai_voice_speed,
-                )
-            except Exception:  # noqa: BLE001
-                audio_bytes = None
 
         if not audio_bytes:
             return None
@@ -338,7 +259,7 @@ class VoiceService:
             self.store.cache_audio(
                 owner_key=owner_key,
                 provider=provider,
-                voice_id=voice_id or elevenlabs_voice_id,
+                voice_id=voice_id,
                 language_code=language_code,
                 model_id=model_id,
                 text=normalized_text,
@@ -433,7 +354,6 @@ class VoiceService:
         )
 
     def _resolve_cache_target(self, *, language_code: str) -> dict[str, str] | None:
-        elevenlabs_voice_id = self.elevenlabs_mandarin_voice_id
         if self.tts_provider == "edge":
             edge_rate = self._edge_rate_for_language(language_code)
             return {
@@ -441,29 +361,7 @@ class VoiceService:
                 "voice_id": self._edge_voice_for_language(language_code),
                 "model_id": f"edge-tts:{edge_rate}",
             }
-        if self.tts_provider == "elevenlabs" and self.elevenlabs_api_key and elevenlabs_voice_id:
-            return {
-                "provider": "elevenlabs",
-                "voice_id": elevenlabs_voice_id,
-                "model_id": self.elevenlabs_mandarin_model_id,
-            }
-        if self.tts_provider == "openai" and self.openai_tts_fallback_enabled and self.openai_client.is_configured():
-            return {
-                "provider": "openai",
-                "voice_id": self.openai_mandarin_voice,
-                "model_id": str(self.openai_client.tts_model),
-            }
         return None
-
-    def _build_openai_voice_instructions(self, *, language_code: str = "zh") -> str:
-        language_name = "English" if str(language_code or "").lower().startswith("en") else "Mandarin"
-        return (
-            f"Speak like an experienced product manager walking software engineers through a requirement in {language_name}. "
-            "Sound natural, grounded, and practical, as if you are in a normal requirement grooming session. "
-            "Use calm confidence, short pauses between ideas, and slightly slower pacing for dense logic. "
-            "Emphasize what the flow is, what needs to be built, and what developers need to pay attention to. "
-            "Do not sound robotic, theatrical, overly polished, or like you are reading bullet points word for word."
-        )
 
     def _edge_voice_for_language(self, language_code: str) -> str:
         return self.edge_mandarin_voice if str(language_code or "").lower().startswith("zh") else self.edge_english_voice
@@ -526,42 +424,6 @@ class VoiceService:
             raise result["error"]
         return result.get("value", b"")
 
-    def _synthesize_with_elevenlabs(self, *, text: str, voice_id: str, language_code: str, model_id: str) -> bytes:
-        response = requests.post(
-            f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}",
-            headers={
-                "xi-api-key": self.elevenlabs_api_key,
-                "Content-Type": "application/json",
-            },
-            params={"output_format": "mp3_44100_128"},
-            json={
-                "text": text,
-                "model_id": model_id,
-                "language_code": language_code,
-                "voice_settings": self._elevenlabs_voice_settings(language_code),
-            },
-            timeout=180,
-        )
-        response.raise_for_status()
-        return response.content
-
-    def _elevenlabs_voice_settings(self, language_code: str) -> dict[str, Any]:
-        if language_code.startswith("zh"):
-            return {
-                "stability": 0.6,
-                "similarity_boost": 0.86,
-                "style": 0.08,
-                "use_speaker_boost": True,
-                "speed": 0.92,
-            }
-        return {
-            "stability": 0.46,
-            "similarity_boost": 0.8,
-            "style": 0.16,
-            "use_speaker_boost": True,
-            "speed": 0.98,
-        }
-
 
 class PRDBriefingService:
     def __init__(
@@ -569,19 +431,15 @@ class PRDBriefingService:
         *,
         store: BriefingStore,
         confluence: ConfluenceConnector,
-        openai_client: OpenAIClient,
-        text_client: TextGenerationClient | None = None,
+        text_client: CodexTextGenerationClient,
         voice_service: VoiceService,
-        answer_audio_enabled: bool = False,
         walkthrough_prewarm_enabled: bool = True,
     ) -> None:
         self.store = store
         self.confluence = confluence
-        self.openai_client = openai_client
-        self.text_client = text_client or openai_client
+        self.text_client = text_client
         self.voice_service = voice_service
-        self.retrieval = RetrievalService(openai_client)
-        self.answer_audio_enabled = answer_audio_enabled
+        self.retrieval = RetrievalService()
         self.walkthrough_prewarm_enabled = walkthrough_prewarm_enabled
 
     def create_session(self, *, owner_key: str, page_ref: str, mode: str, language: str = "zh") -> dict[str, Any]:
@@ -836,14 +694,6 @@ class PRDBriefingService:
             groundedness=groundedness,
             citations=citations,
         )
-        if groundedness != "unsupported" and self.answer_audio_enabled:
-            audio_path = self.voice_service.synthesize(
-                session_id=session_id,
-                text=answer,
-                language_code=payload.answer_language,
-                owner_key=owner_key,
-            )
-            payload.audio_url = f"/prd-briefing/assets/{audio_path}" if audio_path else None
         self.store.add_message(session_id, "user", question)
         self.store.add_message(session_id, "assistant", payload.answer_text, answer=payload)
         return {
@@ -940,14 +790,7 @@ class PRDBriefingService:
         sections: list[ParsedSection],
     ) -> list[ChunkRecord]:
         contents = [section.content for section in sections]
-        embeddings: list[list[float] | None]
-        if self.openai_client.is_configured():
-            try:
-                embeddings = self.openai_client.embed_texts(contents)
-            except Exception:  # noqa: BLE001
-                embeddings = [None for _ in contents]
-        else:
-            embeddings = [None for _ in contents]
+        embeddings: list[list[float] | None] = [None for _ in contents]
         return [
             ChunkRecord(
                 source_id=source_id,
@@ -1009,7 +852,7 @@ class PRDBriefingService:
         legacy_cached_script = cache_lookup["legacy_cached_script"]
         if legacy_cached_script:
             # Normalize legacy cache entries under the current model id so later
-            # requests hit the fast path without needing OpenAI again.
+            # requests hit the fast path.
             self.store.cache_script(
                 owner_key=owner_key,
                 audience=walkthrough_audience(language),
@@ -1182,7 +1025,7 @@ class PRDBriefingService:
         prompt = prompt or build_walkthrough_section_system_prompt(language)
         notes = notes if notes is not None else (section.get("briefing_notes") or [])
         body = body or build_walkthrough_section_user_prompt(section=section, notes=notes, language=language)
-        model_id = str(getattr(self.text_client, "model_id", getattr(self.openai_client, "chat_model", "text_model")))
+        model_id = str(self.text_client.model_id)
         section_payload = json.dumps(
             {
                 "section_path": section["section_path"],
@@ -1246,7 +1089,7 @@ class PRDBriefingService:
             ensure_ascii=False,
             sort_keys=True,
         )
-        model_id = str(getattr(self.text_client, "model_id", getattr(self.openai_client, "chat_model", "text_model")))
+        model_id = str(self.text_client.model_id)
         block_payload = json.dumps(
             {
                 "payload_type": "briefing_block",
@@ -1357,15 +1200,6 @@ class PRDBriefingService:
     ) -> dict[str, Any]:
         prioritized_sections = select_sections_for_overview(sections)
         return build_two_part_fallback_overview(session["title"], prioritized_sections)
-
-
-def cosine_similarity(a: list[float], b: list[float]) -> float:
-    numerator = sum(x * y for x, y in zip(a, b))
-    denominator_a = math.sqrt(sum(x * x for x in a))
-    denominator_b = math.sqrt(sum(y * y for y in b))
-    if not denominator_a or not denominator_b:
-        return 0.0
-    return numerator / (denominator_a * denominator_b)
 
 
 def tokenize(value: str) -> set[str]:

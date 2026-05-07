@@ -411,8 +411,6 @@ class TeamPortalAccessTests(unittest.TestCase):
                 "TEAM_PORTAL_BASE_URL": "https://jira-tool.example.com",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "SOURCE_CODE_QA_GITLAB_TOKEN": "secret-token",
-                "SOURCE_CODE_QA_GEMINI_API_KEY": "",
-                "GEMINI_API_KEY": "",
             },
             clear=False,
         ), patch("bpmis_jira_tool.web._build_bpmis_client_for_current_user", return_value=_FakeNonAdminBPMISClient()):
@@ -443,7 +441,6 @@ class TeamPortalAccessTests(unittest.TestCase):
                     b"Effort Assessment",
                     b"Sync / Refresh",
                     b"Save Config",
-                    b"Model Availability",
                     b"Team Dashboard",
                     b"Meeting Recorder",
                     b"SeaTalk Management",
@@ -517,8 +514,6 @@ class TeamPortalAccessTests(unittest.TestCase):
                 "TEAM_PORTAL_BASE_URL": "https://jira-tool.example.com",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "SOURCE_CODE_QA_GITLAB_TOKEN": "secret-token",
-                "SOURCE_CODE_QA_GEMINI_API_KEY": "",
-                "GEMINI_API_KEY": "",
             },
             clear=False,
         ), patch("bpmis_jira_tool.web._build_bpmis_client_for_current_user", return_value=_FakeNonAdminBPMISClient()):
@@ -561,7 +556,6 @@ class TeamPortalAccessTests(unittest.TestCase):
                 "gmail_seatalk_demo_seatalk_todos_api",
                 "local_agent_public_proxy",
                 "meeting_recorder_asset",
-                "meeting_recorder_browser_audio_api",
                 "meeting_recorder_delete_api",
                 "meeting_recorder_diagnostics_api",
                 "meeting_recorder_page",
@@ -569,9 +563,6 @@ class TeamPortalAccessTests(unittest.TestCase):
                 "meeting_recorder_process_job_api",
                 "meeting_recorder_record_api",
                 "meeting_recorder_records_api",
-                "meeting_recorder_reminder_telemetry_api",
-                "meeting_recorder_reminders_api",
-                "meeting_recorder_repair_video_api",
                 "meeting_recorder_send_email_api",
                 "meeting_recorder_signal_check_api",
                 "meeting_recorder_start_api",
@@ -584,7 +575,6 @@ class TeamPortalAccessTests(unittest.TestCase):
                 "productization_upgrade_summary_issues",
                 "productization_upgrade_summary_llm_descriptions",
                 "productization_upgrade_summary_versions",
-                "removed_sheet_automation_job_api",
                 "save_team_dashboard_members",
                 "save_team_dashboard_monthly_report_template",
                 "save_team_dashboard_report_intelligence",
@@ -639,15 +629,13 @@ class TeamPortalAccessTests(unittest.TestCase):
                     ("get", "/api/source-code-qa/config", {200}),
                     ("get", "/api/source-code-qa/sessions", {200}),
                     ("post", "/api/source-code-qa/sessions", {200}, {"pm_team": "AF", "country": "All", "llm_provider": "codex_cli_bridge"}),
-                    ("post", "/api/source-code-qa/query", {400}, {"pm_team": "AF", "country": "All", "question": "x", "llm_provider": "gemini"}),
+                    ("post", "/api/source-code-qa/query", {200}, {"pm_team": "AF", "country": "All", "question": "x", "llm_provider": "gemini"}),
                     ("post", "/api/source-code-qa/feedback", {200}, {"rating": "useful", "question": "x"}),
                     ("get", "/api/source-code-qa/attachments/missing", {400}),
                     ("post", "/api/source-code-qa/attachments", {400}),
                     ("get", "/api/productization-upgrade-summary/versions?q=26Q2", {200}),
                     ("get", "/api/productization-upgrade-summary/issues?version_id=88", {200}),
                     ("get", "/api/productization-upgrade-summary/llm-descriptions?version_id=88", {200}),
-                    ("post", "/api/jobs/preview", {404}),
-                    ("post", "/api/jobs/run", {404}),
                     ("post", "/api/jobs/sync-bpmis-projects", {200}),
                     ("get", "/api/jobs/missing", {404}),
                     ("get", "/team-dashboard", {302}),
@@ -684,8 +672,6 @@ class TeamPortalAccessTests(unittest.TestCase):
                 "TEAM_PORTAL_BASE_URL": "https://jira-tool.example.com",
                 "TEAM_PORTAL_DATA_DIR": temp_dir,
                 "SOURCE_CODE_QA_GITLAB_TOKEN": "secret-token",
-                "SOURCE_CODE_QA_GEMINI_API_KEY": "",
-                "GEMINI_API_KEY": "",
             },
             clear=False,
         ), patch("bpmis_jira_tool.web._build_bpmis_client_for_current_user", return_value=_FakeNonAdminBPMISClient()):
@@ -814,25 +800,6 @@ class TeamPortalAccessTests(unittest.TestCase):
                     response.get_json(),
                     {"status": "ok", "revision": _current_release_revision()},
                 )
-
-    def test_removed_sheet_preview_job_endpoint_rejects_post(self):
-        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
-            os.environ,
-            {
-                "FLASK_SECRET_KEY": "test-secret",
-                "TEAM_PORTAL_DATA_DIR": temp_dir,
-                "TEAM_PORTAL_BASE_URL": "",
-                "TEAM_ALLOWED_EMAIL_DOMAINS": "",
-                "TEAM_PORTAL_CONFIG_ENCRYPTION_KEY": "",
-            },
-            clear=False,
-        ):
-            app = create_app()
-            app.testing = True
-
-            with app.test_client() as client:
-                response = client.post("/api/jobs/preview")
-                self.assertEqual(response.status_code, 404)
 
     def test_sync_job_does_not_require_google_connection(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(

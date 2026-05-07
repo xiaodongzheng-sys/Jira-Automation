@@ -54,7 +54,7 @@ node --check static/source_code_qa.js
 ENV_FILE=/dev/null ./.venv/bin/python scripts/run_source_code_qa_release_gate.py
 ```
 
-- For Source Code Q&A changes, run the release gate/evals that match the changed retrieval or provider behavior:
+- For Source Code Q&A changes, run the release gate/evals that match the changed retrieval or provider behavior. Source Code Q&A is Codex-only for LLM answers and uses the local token hybrid index for semantic retrieval; do not configure Gemini, Vertex AI, OpenAI-compatible, or remote embedding providers for this workflow:
 
 ```bash
 ./.venv/bin/python scripts/run_source_code_qa_release_gate.py

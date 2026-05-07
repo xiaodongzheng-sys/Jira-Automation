@@ -45,13 +45,7 @@ from bpmis_jira_tool.source_code_qa_evidence_policy import (
     TOOL_LOOP_TRACE_PREFIX,
 )
 from bpmis_jira_tool.source_code_qa_embeddings import (
-    DEFAULT_VERTEX_EMBEDDING_MODEL,
-    OPENAI_COMPATIBLE_API_BASE_URL,
     SourceCodeQAEmbeddingProvider,
-    OpenAICompatibleEmbeddingProvider,
-    VertexAIEmbeddingProvider,
-    VERTEX_EMBEDDING_DOCUMENT_TASK,
-    VERTEX_EMBEDDING_QUERY_TASK,
 )
 from bpmis_jira_tool.source_code_qa_codex_refs import (
     codex_candidate_path_layers,
@@ -67,16 +61,9 @@ from bpmis_jira_tool.source_code_qa_codex_prompts import (
 )
 from bpmis_jira_tool.source_code_qa_llm_providers import (
     CodexCliBridgeSourceCodeQALLMProvider,
-    GeminiSourceCodeQALLMProvider,
     LLM_PROVIDER_ALLOWED_QUERY_CHOICES,
     LLM_PROVIDER_CODEX_CLI_BRIDGE,
-    LLM_PROVIDER_GEMINI,
-    LLM_PROVIDER_OPENAI_COMPATIBLE,
-    LLM_PROVIDER_VERTEX_AI,
-    OpenAICompatibleSourceCodeQALLMProvider,
     SourceCodeQALLMProvider,
-    UnsupportedSourceCodeQALLMProvider,
-    VertexAISourceCodeQALLMProvider,
 )
 from bpmis_jira_tool.source_code_qa_match_grading import (
     evidence_role,
@@ -155,22 +142,14 @@ from bpmis_jira_tool.source_code_qa_runtime_policy import (
     LLM_CACHE_VERSION,
     LLM_RUNTIME_VERSION,
     PLANNER_TOOL_DSL_VERSION,
-    GEMINI_MIN_THINKING_BUDGET,
-    GEMINI_MAX_THINKING_BUDGET,
     COMPACT_DEEP_BUDGET_MODE,
     LLM_PROMPT_COMPACT_THRESHOLD_TOKENS,
     LLM_PROMPT_TIGHT_THRESHOLD_TOKENS,
-    VERTEX_PROMPT_COMPACT_THRESHOLD_TOKENS,
-    VERTEX_PROMPT_TIGHT_THRESHOLD_TOKENS,
     LLM_TOKEN_ESTIMATE_CHARS_PER_TOKEN,
-    GEMINI_API_BASE_URL,
     DEFAULT_SEMANTIC_INDEX_MODEL,
     DEFAULT_DOMAIN_PROFILE_PATH,
     DEFAULT_DOMAIN_KNOWLEDGE_PACK_PATH,
     DEFAULT_LLM_TIMEOUT_SECONDS,
-    DEFAULT_LLM_MAX_RETRIES,
-    DEFAULT_LLM_BACKOFF_SECONDS,
-    DEFAULT_LLM_MAX_BACKOFF_SECONDS,
     DEFAULT_CODEX_CLI_MODEL,
     DEFAULT_CODEX_TIMEOUT_SECONDS,
     DEFAULT_CODEX_TOP_PATH_LIMIT,
@@ -191,7 +170,6 @@ from bpmis_jira_tool.source_code_qa_runtime_policy import (
     MAX_TARGETED_SEMANTIC_CHUNKS,
     SYNC_JOB_LOCK_TIMEOUT_SECONDS,
     DEFAULT_LLM_BUDGETS,
-    VERTEX_QUALITY_LLM_BUDGETS,
     ANSWER_SELF_CHECK_WEAK_PHRASES,
     PRODUCTION_EVIDENCE_TIERS,
     SKIP_DIRS,
@@ -199,10 +177,8 @@ from bpmis_jira_tool.source_code_qa_runtime_policy import (
     STOPWORDS,
 )
 from bpmis_jira_tool.source_code_qa_types import (
-    LLMGenerateResult,
     RepositoryEntry,
     SourceCodeQAIndexUnavailable,
-    SourceCodeQALLMError,
 )
 
 
@@ -250,26 +226,7 @@ class SourceCodeQAService:
         team_profiles: dict[str, dict[str, Any]],
         gitlab_token: str | None = None,
         gitlab_username: str = "oauth2",
-        llm_provider: str = LLM_PROVIDER_GEMINI,
-        gemini_api_key: str | None = None,
-        gemini_api_base_url: str = GEMINI_API_BASE_URL,
-        openai_api_key: str | None = None,
-        openai_api_base_url: str = OPENAI_COMPATIBLE_API_BASE_URL,
-        openai_model: str = "gpt-4.1-mini",
-        openai_cheap_model: str = "gpt-4.1-mini",
-        openai_deep_model: str = "gpt-4.1",
-        openai_fallback_model: str = "gpt-4.1-mini",
-        gemini_model: str = "gemini-2.5-flash",
-        gemini_cheap_model: str = "gemini-2.5-flash-lite",
-        gemini_deep_model: str = "gemini-2.5-flash",
-        gemini_fallback_model: str = "gemini-2.5-flash-lite",
-        vertex_credentials_file: str | None = None,
-        vertex_project_id: str | None = None,
-        vertex_location: str = "global",
-        vertex_model: str = "gemini-2.5-flash",
-        vertex_cheap_model: str = "gemini-2.5-flash-lite",
-        vertex_deep_model: str = "gemini-2.5-flash",
-        vertex_fallback_model: str = "gemini-2.5-flash-lite",
+        llm_provider: str = LLM_PROVIDER_CODEX_CLI_BRIDGE,
         query_rewrite_model: str | None = None,
         planner_model: str | None = None,
         answer_model: str | None = None,
@@ -278,9 +235,6 @@ class SourceCodeQAService:
         llm_judge_enabled: bool = False,
         semantic_index_model: str = DEFAULT_SEMANTIC_INDEX_MODEL,
         semantic_index_enabled: bool = True,
-        embedding_provider: str = "local_token_hybrid",
-        embedding_api_key: str | None = None,
-        embedding_api_base_url: str = OPENAI_COMPATIBLE_API_BASE_URL,
         llm_cache_ttl_seconds: int = 1800,
         llm_timeout_seconds: int = DEFAULT_LLM_TIMEOUT_SECONDS,
         codex_timeout_seconds: int | None = None,
@@ -290,12 +244,11 @@ class SourceCodeQAService:
         codex_session_mode: str = CODEX_SESSION_MODE_EPHEMERAL,
         codex_session_max_turns: int = 8,
         codex_cache_followups: bool = False,
-        llm_max_retries: int = DEFAULT_LLM_MAX_RETRIES,
-        llm_backoff_seconds: float = DEFAULT_LLM_BACKOFF_SECONDS,
-        llm_max_backoff_seconds: float = DEFAULT_LLM_MAX_BACKOFF_SECONDS,
         git_timeout_seconds: int = 90,
         max_file_bytes: int = 500_000,
+        **deprecated_provider_kwargs: Any,
     ) -> None:
+        del deprecated_provider_kwargs
         self.base_data_root = data_root
         self.data_root = data_root / "source_code_qa"
         self.config_path = self.data_root / "config.json"
@@ -311,39 +264,16 @@ class SourceCodeQAService:
         self.team_profiles = team_profiles
         self.gitlab_token = str(gitlab_token or "").strip()
         self.gitlab_username = str(gitlab_username or "oauth2").strip() or "oauth2"
-        self.llm_provider_name = str(llm_provider or LLM_PROVIDER_GEMINI).strip().lower() or LLM_PROVIDER_GEMINI
-        self.gemini_api_key = str(gemini_api_key or "").strip()
-        self.gemini_api_base_url = str(gemini_api_base_url or GEMINI_API_BASE_URL).strip() or GEMINI_API_BASE_URL
-        self.openai_api_key = str(openai_api_key or "").strip()
-        self.openai_api_base_url = str(openai_api_base_url or OPENAI_COMPATIBLE_API_BASE_URL).strip() or OPENAI_COMPATIBLE_API_BASE_URL
-        self.openai_model = str(openai_model or "gpt-4.1-mini").strip() or "gpt-4.1-mini"
-        self.openai_cheap_model = str(openai_cheap_model or self.openai_model).strip() or self.openai_model
-        self.openai_deep_model = str(openai_deep_model or self.openai_model).strip() or self.openai_model
-        self.openai_fallback_model = str(openai_fallback_model or self.openai_cheap_model).strip() or self.openai_cheap_model
-        self.gemini_model = str(gemini_model or "gemini-2.5-flash").strip() or "gemini-2.5-flash"
-        self.gemini_cheap_model = str(gemini_cheap_model or "gemini-2.5-flash-lite").strip() or "gemini-2.5-flash-lite"
-        self.gemini_deep_model = str(gemini_deep_model or self.gemini_model).strip() or self.gemini_model
-        self.gemini_fallback_model = str(gemini_fallback_model or "gemini-2.5-flash-lite").strip() or "gemini-2.5-flash-lite"
-        self.vertex_credentials_file = str(vertex_credentials_file or "").strip()
-        self.vertex_project_id = str(vertex_project_id or "").strip()
-        self.vertex_location = str(vertex_location or "global").strip() or "global"
-        self.vertex_model = str(vertex_model or "gemini-2.5-flash").strip() or "gemini-2.5-flash"
-        self.vertex_cheap_model = str(vertex_cheap_model or "gemini-2.5-flash-lite").strip() or "gemini-2.5-flash-lite"
-        self.vertex_deep_model = str(vertex_deep_model or self.vertex_model).strip() or self.vertex_model
-        self.vertex_fallback_model = str(vertex_fallback_model or "gemini-2.5-flash-lite").strip() or "gemini-2.5-flash-lite"
+        self.llm_provider_name = self.normalize_query_llm_provider(llm_provider)
         self.query_rewrite_model = str(query_rewrite_model or "").strip()
         self.planner_model = str(planner_model or "").strip()
         self.answer_model = str(answer_model or "").strip()
         self.judge_model = str(judge_model or "").strip()
         self.repair_model = str(repair_model or "").strip()
         self.llm_judge_enabled = bool(llm_judge_enabled)
-        self.embedding_provider_name = str(embedding_provider or "local_token_hybrid").strip().lower() or "local_token_hybrid"
+        self.embedding_provider_name = "local_token_hybrid"
         self.semantic_index_model = str(semantic_index_model or DEFAULT_SEMANTIC_INDEX_MODEL).strip() or DEFAULT_SEMANTIC_INDEX_MODEL
-        if self.embedding_provider_name == LLM_PROVIDER_VERTEX_AI and self.semantic_index_model.startswith("local-"):
-            self.semantic_index_model = DEFAULT_VERTEX_EMBEDDING_MODEL
         self.semantic_index_enabled = bool(semantic_index_enabled)
-        self.embedding_api_key = str(embedding_api_key or "").strip()
-        self.embedding_api_base_url = str(embedding_api_base_url or OPENAI_COMPATIBLE_API_BASE_URL).strip() or OPENAI_COMPATIBLE_API_BASE_URL
         self.llm_timeout_seconds = max(5, int(llm_timeout_seconds or DEFAULT_LLM_TIMEOUT_SECONDS))
         self.codex_timeout_seconds = max(
             10,
@@ -368,12 +298,6 @@ class SourceCodeQAService:
         self.codex_session_max_turns = max(1, min(int(codex_session_max_turns or 8), 30))
         self.codex_cache_followups = bool(codex_cache_followups)
         self.codex_model = self._codex_cli_model()
-        self.llm_max_retries = max(0, int(llm_max_retries or 0))
-        self.llm_backoff_seconds = max(0.0, float(llm_backoff_seconds or 0.0))
-        self.llm_max_backoff_seconds = max(
-            self.llm_backoff_seconds,
-            float(llm_max_backoff_seconds or self.llm_backoff_seconds or DEFAULT_LLM_MAX_BACKOFF_SECONDS),
-        )
         self.llm_provider = self._build_llm_provider()
         self.embedding_provider = self._build_embedding_provider()
         self.llm_budgets = self._build_llm_budgets()
@@ -394,25 +318,6 @@ class SourceCodeQAService:
             gitlab_token=self.gitlab_token,
             gitlab_username=self.gitlab_username,
             llm_provider=normalized,
-            gemini_api_key=self.gemini_api_key,
-            gemini_api_base_url=self.gemini_api_base_url,
-            openai_api_key=self.openai_api_key,
-            openai_api_base_url=self.openai_api_base_url,
-            openai_model=self.openai_model,
-            openai_cheap_model=self.openai_cheap_model,
-            openai_deep_model=self.openai_deep_model,
-            openai_fallback_model=self.openai_fallback_model,
-            gemini_model=self.gemini_model,
-            gemini_cheap_model=self.gemini_cheap_model,
-            gemini_deep_model=self.gemini_deep_model,
-            gemini_fallback_model=self.gemini_fallback_model,
-            vertex_credentials_file=self.vertex_credentials_file,
-            vertex_project_id=self.vertex_project_id,
-            vertex_location=self.vertex_location,
-            vertex_model=self.vertex_model,
-            vertex_cheap_model=self.vertex_cheap_model,
-            vertex_deep_model=self.vertex_deep_model,
-            vertex_fallback_model=self.vertex_fallback_model,
             query_rewrite_model=self.query_rewrite_model,
             planner_model=self.planner_model,
             answer_model=self.answer_model,
@@ -421,9 +326,6 @@ class SourceCodeQAService:
             llm_judge_enabled=self.llm_judge_enabled,
             semantic_index_model=self.semantic_index_model,
             semantic_index_enabled=self.semantic_index_enabled,
-            embedding_provider=self.embedding_provider_name,
-            embedding_api_key=self.embedding_api_key,
-            embedding_api_base_url=self.embedding_api_base_url,
             llm_cache_ttl_seconds=self.llm_cache_ttl_seconds,
             llm_timeout_seconds=self.llm_timeout_seconds,
             codex_timeout_seconds=self.codex_timeout_seconds,
@@ -433,9 +335,6 @@ class SourceCodeQAService:
             codex_session_mode=self.codex_session_mode,
             codex_session_max_turns=self.codex_session_max_turns,
             codex_cache_followups=self.codex_cache_followups,
-            llm_max_retries=self.llm_max_retries,
-            llm_backoff_seconds=self.llm_backoff_seconds,
-            llm_max_backoff_seconds=self.llm_max_backoff_seconds,
             git_timeout_seconds=self.git_timeout_seconds,
             max_file_bytes=self.max_file_bytes,
         )
@@ -465,8 +364,6 @@ class SourceCodeQAService:
             ],
             "llm_providers": [
                 {"value": LLM_PROVIDER_CODEX_CLI_BRIDGE, "label": "Codex"},
-                {"value": LLM_PROVIDER_GEMINI, "label": "Gemini (Unavailable)", "disabled": True},
-                {"value": LLM_PROVIDER_VERTEX_AI, "label": "Vertex AI"},
             ],
         }
 
@@ -486,23 +383,10 @@ class SourceCodeQAService:
                     {"budget": "balanced", "reason": "api_config_rule_or_5_plus_matches"},
                     {"budget": "cheap", "reason": "simple_lookup"},
                 ],
-                "gemini_only_policy": {
-                    "cheap": "Flash-Lite for simple lookup and lightweight judge/rewrite work.",
-                    "balanced": "Flash with moderate thinking for API, config, rule, or multi-match questions.",
-                    "deep": "Flash with higher thinking for data-source, cross-repo, root-cause, and repair work.",
-                    COMPACT_DEEP_BUDGET_MODE: "Flash with compact evidence and low thinking for token-heavy code questions.",
-                },
                 "token_pressure": {
                     "compact_threshold": LLM_PROMPT_COMPACT_THRESHOLD_TOKENS,
                     "tight_threshold": LLM_PROMPT_TIGHT_THRESHOLD_TOKENS,
-                    "vertex_compact_threshold": VERTEX_PROMPT_COMPACT_THRESHOLD_TOKENS,
-                    "vertex_tight_threshold": VERTEX_PROMPT_TIGHT_THRESHOLD_TOKENS,
                     "strategy": "switch balanced/deep answers to compact_deep before the model call when estimated prompt tokens are high",
-                },
-                "vertex_quality_profile": {
-                    "enabled": self.llm_provider_name == LLM_PROVIDER_VERTEX_AI,
-                    "quality_floor": "cheap requests are routed to balanced",
-                    "context_policy": "raw code snippets are primary evidence; compressed facts are navigation hints",
                 },
             },
             "planner_tools": self._planner_tool_registry(),
@@ -514,10 +398,6 @@ class SourceCodeQAService:
             "runtime": {
                 "version": LLM_RUNTIME_VERSION,
                 "timeout_seconds": self.llm_timeout_seconds,
-                "max_retries": self.llm_max_retries,
-                "backoff_seconds": self.llm_backoff_seconds,
-                "max_backoff_seconds": self.llm_max_backoff_seconds,
-                "retry_after": "honored",
                 "fallback_model": self._llm_fallback_model(),
             },
             "semantic_retrieval": {
@@ -556,100 +436,25 @@ class SourceCodeQAService:
         }
 
     def llm_unavailable_message(self) -> str:
-        if self.llm_provider_name == LLM_PROVIDER_OPENAI_COMPATIBLE:
-            return "LLM mode is not configured yet. Set SOURCE_CODE_QA_OPENAI_API_KEY or OPENAI_API_KEY on the server first."
-        if self.llm_provider_name == LLM_PROVIDER_GEMINI:
-            return "LLM mode is not configured yet. Set SOURCE_CODE_QA_GEMINI_API_KEY or GEMINI_API_KEY on the server first."
-        if self.llm_provider_name == LLM_PROVIDER_CODEX_CLI_BRIDGE:
-            return "Codex is unavailable. Run `codex login` with ChatGPT on this server before using Codex mode."
-        if self.llm_provider_name == LLM_PROVIDER_VERTEX_AI:
-            return (
-                "Vertex AI mode is not configured yet. Set SOURCE_CODE_QA_VERTEX_CREDENTIALS_FILE "
-                "or GOOGLE_APPLICATION_CREDENTIALS, and set SOURCE_CODE_QA_VERTEX_PROJECT_ID / SOURCE_CODE_QA_VERTEX_LOCATION if needed."
-            )
-        return f"LLM mode is not configured yet. Provider {self.llm_provider_name!r} is unsupported or missing credentials."
+        return "Codex is unavailable. Run `codex login` with ChatGPT on this server before using Codex mode."
 
     def _build_llm_provider(self) -> SourceCodeQALLMProvider:
-        if self.llm_provider_name == LLM_PROVIDER_GEMINI:
-            return GeminiSourceCodeQALLMProvider(
-                api_key=self.gemini_api_key,
-                api_base_url=self.gemini_api_base_url,
-                timeout_seconds=self.llm_timeout_seconds,
-                max_retries=self.llm_max_retries,
-                backoff_seconds=self.llm_backoff_seconds,
-                max_backoff_seconds=self.llm_max_backoff_seconds,
-            )
-        if self.llm_provider_name == LLM_PROVIDER_OPENAI_COMPATIBLE:
-            return OpenAICompatibleSourceCodeQALLMProvider(
-                api_key=self.openai_api_key,
-                api_base_url=self.openai_api_base_url,
-                timeout_seconds=self.llm_timeout_seconds,
-                max_retries=self.llm_max_retries,
-                backoff_seconds=self.llm_backoff_seconds,
-                max_backoff_seconds=self.llm_max_backoff_seconds,
-            )
-        if self.llm_provider_name == LLM_PROVIDER_CODEX_CLI_BRIDGE:
-            return CodexCliBridgeSourceCodeQALLMProvider(
-                workspace_root=self.repo_root,
-                timeout_seconds=self.codex_timeout_seconds,
-                concurrency_limit=self.codex_concurrency,
-                session_mode=self.codex_session_mode,
-            )
-        if self.llm_provider_name == LLM_PROVIDER_VERTEX_AI:
-            return VertexAISourceCodeQALLMProvider(
-                credentials_file=self.vertex_credentials_file,
-                project_id=self.vertex_project_id,
-                location=self.vertex_location,
-                timeout_seconds=self.llm_timeout_seconds,
-                max_retries=self.llm_max_retries,
-                backoff_seconds=self.llm_backoff_seconds,
-                max_backoff_seconds=self.llm_max_backoff_seconds,
-            )
-        return UnsupportedSourceCodeQALLMProvider(self.llm_provider_name)
+        return CodexCliBridgeSourceCodeQALLMProvider(
+            workspace_root=self.repo_root,
+            timeout_seconds=self.codex_timeout_seconds,
+            concurrency_limit=self.codex_concurrency,
+            session_mode=self.codex_session_mode,
+        )
 
     def _build_embedding_provider(self) -> SourceCodeQAEmbeddingProvider:
-        if self.embedding_provider_name == LLM_PROVIDER_VERTEX_AI:
-            model = self.semantic_index_model
-            if model.startswith("local-"):
-                model = DEFAULT_VERTEX_EMBEDDING_MODEL
-            return VertexAIEmbeddingProvider(
-                credentials_file=self.vertex_credentials_file,
-                project_id=self.vertex_project_id,
-                location=self.vertex_location,
-                model=model,
-            )
-        if self.embedding_provider_name == "openai_compatible" or not self.semantic_index_model.startswith("local-"):
-            return OpenAICompatibleEmbeddingProvider(
-                api_key=self.embedding_api_key,
-                api_base_url=self.embedding_api_base_url,
-                model=self.semantic_index_model,
-            )
         return SourceCodeQAEmbeddingProvider()
 
     def _build_llm_budgets(self) -> dict[str, dict[str, Any]]:
         budgets = json.loads(json.dumps(DEFAULT_LLM_BUDGETS))
-        if self.llm_provider_name == LLM_PROVIDER_OPENAI_COMPATIBLE:
-            budgets["cheap"]["model"] = self.openai_cheap_model
-            budgets["balanced"]["model"] = self.openai_model
-            budgets["deep"]["model"] = self.openai_deep_model
-            budgets[COMPACT_DEEP_BUDGET_MODE]["model"] = self.openai_deep_model
-        elif self.llm_provider_name == LLM_PROVIDER_CODEX_CLI_BRIDGE:
-            budgets["cheap"]["model"] = self.codex_model
-            budgets["balanced"]["model"] = self.codex_model
-            budgets["deep"]["model"] = self.codex_model
-            budgets[COMPACT_DEEP_BUDGET_MODE]["model"] = self.codex_model
-        elif self.llm_provider_name == LLM_PROVIDER_VERTEX_AI:
-            for budget_name, overrides in VERTEX_QUALITY_LLM_BUDGETS.items():
-                budgets[budget_name].update(overrides)
-            budgets["cheap"]["model"] = self.vertex_cheap_model
-            budgets["balanced"]["model"] = self.vertex_model
-            budgets["deep"]["model"] = self.vertex_deep_model
-            budgets[COMPACT_DEEP_BUDGET_MODE]["model"] = self.vertex_deep_model
-        else:
-            budgets["cheap"]["model"] = self.gemini_cheap_model
-            budgets["balanced"]["model"] = self.gemini_model
-            budgets["deep"]["model"] = self.gemini_deep_model
-            budgets[COMPACT_DEEP_BUDGET_MODE]["model"] = self.gemini_deep_model
+        budgets["cheap"]["model"] = self.codex_model
+        budgets["balanced"]["model"] = self.codex_model
+        budgets["deep"]["model"] = self.codex_model
+        budgets[COMPACT_DEEP_BUDGET_MODE]["model"] = self.codex_model
         return budgets
 
     def _build_model_policy_matrix(self) -> dict[str, dict[str, Any]]:
@@ -698,47 +503,11 @@ class SourceCodeQAService:
         quality_gate: dict[str, Any] | None = None,
         retry: bool = False,
     ) -> int:
-        if self.llm_provider_name not in {LLM_PROVIDER_GEMINI, LLM_PROVIDER_VERTEX_AI}:
-            return int((budget or {}).get("thinking_budget") or 0)
-        role = str(role or "").strip().lower()
-        mode = str(budget_mode or "").strip().lower()
-        base = int((budget or {}).get("thinking_budget") or 0)
-        if role in {"judge", "query_rewrite", "planner"} or mode == "cheap":
-            return 0
-        if retry or role == "repair":
-            return 2048
-        gate_status = str((quality_gate or {}).get("status") or "").strip().lower()
-        if gate_status and gate_status != "sufficient":
-            return max(base, 1024)
-        if mode == "deep":
-            return max(base, 1024)
-        if mode == COMPACT_DEEP_BUDGET_MODE:
-            return max(base, 512)
-        if mode == "balanced":
-            return max(base, 512)
-        return base
+        del role, budget_mode, quality_gate, retry
+        return int((budget or {}).get("thinking_budget") or 0)
 
     def _normalize_thinking_budget_for_provider(self, budget: int | None) -> int:
-        value = int(budget or 0)
-        if self.llm_provider_name not in {LLM_PROVIDER_GEMINI, LLM_PROVIDER_VERTEX_AI}:
-            return value
-        if value <= 0:
-            return 0
-        return max(GEMINI_MIN_THINKING_BUDGET, min(value, GEMINI_MAX_THINKING_BUDGET))
-
-    @staticmethod
-    def _is_gemini_3_model(model: str | None) -> bool:
-        return str(model or "").strip().lower().startswith("gemini-3")
-
-    @staticmethod
-    def _gemini_3_thinking_level(*, role: str, budget_mode: str) -> str:
-        normalized_role = str(role or "").strip().lower()
-        normalized_mode = str(budget_mode or "").strip().lower()
-        if normalized_role in {"repair", "judge"}:
-            return "HIGH"
-        if normalized_mode in {"deep", COMPACT_DEEP_BUDGET_MODE, "balanced"}:
-            return "HIGH"
-        return "MEDIUM"
+        return int(budget or 0)
 
     def _thinking_config_for_provider(
         self,
@@ -748,8 +517,7 @@ class SourceCodeQAService:
         role: str = "",
         budget_mode: str = "",
     ) -> dict[str, Any]:
-        if self.llm_provider_name == LLM_PROVIDER_VERTEX_AI and self._is_gemini_3_model(model):
-            return {"thinkingLevel": self._gemini_3_thinking_level(role=role, budget_mode=budget_mode)}
+        del model, role, budget_mode
         return {"thinkingBudget": self._normalize_thinking_budget_for_provider(budget)}
 
     @staticmethod
@@ -775,31 +543,13 @@ class SourceCodeQAService:
         return "normal"
 
     def _llm_prompt_pressure_for_provider(self, estimated_prompt_tokens: int) -> str:
-        if self.llm_provider_name == LLM_PROVIDER_VERTEX_AI:
-            if estimated_prompt_tokens >= VERTEX_PROMPT_TIGHT_THRESHOLD_TOKENS:
-                return "tight"
-            if estimated_prompt_tokens >= VERTEX_PROMPT_COMPACT_THRESHOLD_TOKENS:
-                return "compact"
-            return "normal"
         return self._llm_prompt_pressure(estimated_prompt_tokens)
 
     def _llm_fallback_model(self) -> str:
-        if self.llm_provider_name == LLM_PROVIDER_OPENAI_COMPATIBLE:
-            return self.openai_fallback_model
-        if self.llm_provider_name == LLM_PROVIDER_CODEX_CLI_BRIDGE:
-            return self.codex_model
-        if self.llm_provider_name == LLM_PROVIDER_VERTEX_AI:
-            return self.vertex_fallback_model
-        return self.gemini_fallback_model
+        return self.codex_model
 
     def _llm_default_model(self) -> str:
-        if self.llm_provider_name == LLM_PROVIDER_OPENAI_COMPATIBLE:
-            return self.openai_model
-        if self.llm_provider_name == LLM_PROVIDER_CODEX_CLI_BRIDGE:
-            return self.codex_model
-        if self.llm_provider_name == LLM_PROVIDER_VERTEX_AI:
-            return self.vertex_model
-        return self.gemini_model
+        return self.codex_model
 
     @staticmethod
     def _codex_cli_model() -> str:
@@ -4051,7 +3801,7 @@ class SourceCodeQAService:
             return chunks
         texts = [chunk[4] for chunk in chunks]
         try:
-            embeddings = self.embedding_provider.embed_texts(texts, task_type=VERTEX_EMBEDDING_DOCUMENT_TASK)
+            embeddings = self.embedding_provider.embed_texts(texts)
         except ToolError:
             return chunks
         enriched = []
@@ -7387,7 +7137,7 @@ class SourceCodeQAService:
 
     def _query_embedding(self, question: str) -> list[float]:
         try:
-            rows = self.embedding_provider.embed_texts([question[:6000]], task_type=VERTEX_EMBEDDING_QUERY_TASK)
+            rows = self.embedding_provider.embed_texts([question[:6000]])
         except ToolError:
             return []
         return rows[0] if rows else []
@@ -12930,9 +12680,6 @@ class SourceCodeQAService:
         country: str,
         question: str,
         prompt_context: str,
-        vertex_two_pass: bool,
-        vertex_draft_check: dict[str, Any] | None,
-        draft_answer: str,
         attachment_section: str,
         attachments: list[dict[str, Any]],
         answer_max_output_tokens: int,
@@ -12943,11 +12690,9 @@ class SourceCodeQAService:
             country=country,
             question=question,
             context=prompt_context,
-            self_check=vertex_draft_check if vertex_two_pass else None,
+            self_check=None,
             attachment_section=attachment_section,
         )
-        if vertex_two_pass:
-            final_prompt = self._vertex_final_prompt(final_prompt=final_prompt, draft_answer=draft_answer)
         return self._llm_answer_payload(
             prompt=final_prompt,
             attachments=attachments,
@@ -12962,13 +12707,6 @@ class SourceCodeQAService:
         country: str,
         question: str,
         prompt_context: str,
-        vertex_two_pass: bool,
-        vertex_draft_check: dict[str, Any] | None,
-        draft_answer: str,
-        draft_usage: dict[str, Any],
-        draft_attempts: int,
-        draft_latency_ms: int,
-        draft_attempt_log: list[dict[str, Any]],
         evidence_summary: dict[str, Any],
         quality_gate: dict[str, Any],
         selected_model: str,
@@ -12982,9 +12720,6 @@ class SourceCodeQAService:
             country=country,
             question=question,
             prompt_context=prompt_context,
-            vertex_two_pass=vertex_two_pass,
-            vertex_draft_check=vertex_draft_check,
-            draft_answer=draft_answer,
             attachment_section=attachment_section,
             attachments=attachments,
             answer_max_output_tokens=answer_max_output_tokens,
@@ -13002,11 +12737,11 @@ class SourceCodeQAService:
             "payload": payload,
             "answer": answer,
             "structured_answer": self._parse_structured_answer(answer),
-            "usage": self._merge_llm_usage(draft_usage, result_usage) if vertex_two_pass else result_usage,
+            "usage": result_usage,
             "effective_model": result.model,
-            "attempts": draft_attempts + result.attempts,
-            "llm_latency_ms": draft_latency_ms + int(result.latency_ms or 0),
-            "llm_attempt_log": [*draft_attempt_log, *[dict(item) for item in result.attempt_log]],
+            "attempts": result.attempts,
+            "llm_latency_ms": int(result.latency_ms or 0),
+            "llm_attempt_log": [dict(item) for item in result.attempt_log],
             "finish_reason": finish_reason,
             "answer_check": self._answer_self_check(question, answer, evidence_summary, quality_gate),
             "token_limited_generation": self._finish_reason_is_token_limited(finish_reason),
@@ -13109,12 +12844,8 @@ class SourceCodeQAService:
             question=question,
             evidence_summary=retry_evidence_summary,
         )
-        if self.llm_provider_name == LLM_PROVIDER_VERTEX_AI and not token_limited_generation:
-            retry_snippet_line_budget = min(int(budget["snippet_line_budget"]) + 100, 320)
-            retry_snippet_char_budget = min(int(budget["snippet_char_budget"]) + 16_000, 100_000)
-        else:
-            retry_snippet_line_budget = 45 if token_limited_generation else min(int(budget["snippet_line_budget"]) + 60, 180)
-            retry_snippet_char_budget = 6_000 if token_limited_generation else min(int(budget["snippet_char_budget"]) + 8000, 28_000)
+        retry_snippet_line_budget = 45 if token_limited_generation else min(int(budget["snippet_line_budget"]) + 60, 180)
+        retry_snippet_char_budget = 6_000 if token_limited_generation else min(int(budget["snippet_char_budget"]) + 8000, 28_000)
         retry_context = self._build_compressed_llm_context(
             retry_evidence_summary,
             retry_quality_gate,
@@ -13135,10 +12866,7 @@ class SourceCodeQAService:
         )
         retry_thinking_budget = 0 if token_limited_generation else self._normalize_thinking_budget_for_provider(retry_thinking_budget)
         retry_model = self._model_for_role_or_budget("repair", self.llm_budgets.get("deep") or budget)
-        if self.llm_provider_name == LLM_PROVIDER_VERTEX_AI:
-            retry_max_output_tokens = 2_400 if token_limited_generation else min(max(int(budget["max_output_tokens"]) + 800, 3_200), 5_600)
-        else:
-            retry_max_output_tokens = 2_400 if token_limited_generation else min(max(int(budget["max_output_tokens"]) + 500, 900), 1_600)
+        retry_max_output_tokens = 2_400 if token_limited_generation else min(max(int(budget["max_output_tokens"]) + 500, 900), 1_600)
         retry_payload["generationConfig"] = {
             **payload["generationConfig"],
             "maxOutputTokens": retry_max_output_tokens,
@@ -13207,95 +12935,6 @@ class SourceCodeQAService:
                 "repair_model": retry_result.model,
                 "repair_thinking_budget": retry_thinking_budget,
             },
-        }
-
-    def _vertex_draft_payload(
-        self,
-        *,
-        pm_team: str,
-        country: str,
-        question: str,
-        context: str,
-        attachment_section: str,
-        attachments: list[dict[str, Any]],
-        max_output_tokens: int,
-        thinking_config: dict[str, Any],
-    ) -> dict[str, Any]:
-        return {
-            "contents": [
-                {
-                    "parts": self._llm_payload_parts(
-                        self._vertex_draft_prompt(
-                            pm_team=pm_team,
-                            country=country,
-                            question=question,
-                            context=context,
-                            attachment_section=attachment_section,
-                        ),
-                        attachments,
-                    )
-                }
-            ],
-            "systemInstruction": {
-                "parts": [
-                    {
-                        "text": self._llm_system_instruction()
-                    }
-                ]
-            },
-            "generationConfig": {
-                "temperature": 0.1,
-                "maxOutputTokens": max(1_800, min(max_output_tokens, 3_600)),
-                "thinkingConfig": thinking_config,
-            },
-        }
-
-    def _vertex_draft_answer_result(
-        self,
-        *,
-        pm_team: str,
-        country: str,
-        question: str,
-        prompt_context: str,
-        attachment_section: str,
-        attachments: list[dict[str, Any]],
-        answer_max_output_tokens: int,
-        answer_thinking_config: dict[str, Any],
-        selected_model: str,
-        evidence_summary: dict[str, Any],
-        quality_gate: dict[str, Any],
-        selected_matches: list[dict[str, Any]],
-        evidence_pack: dict[str, Any],
-    ) -> dict[str, Any]:
-        draft_payload = self._vertex_draft_payload(
-            pm_team=pm_team,
-            country=country,
-            question=question,
-            context=prompt_context,
-            attachment_section=attachment_section,
-            attachments=attachments,
-            max_output_tokens=answer_max_output_tokens,
-            thinking_config=answer_thinking_config,
-        )
-        draft_result = self.llm_provider.generate(
-            payload=draft_payload,
-            primary_model=selected_model,
-            fallback_model=self._llm_fallback_model(),
-        )
-        draft_answer = self.llm_provider.extract_text(draft_result.payload)
-        draft_check = self._answer_self_check(question, draft_answer, evidence_summary, quality_gate)
-        draft_claim_check = self._verify_answer_claims(draft_answer, evidence_summary, selected_matches)
-        draft_judge = self._run_answer_judge(question, draft_answer, evidence_pack, draft_claim_check)
-        return {
-            "draft_answer": draft_answer,
-            "draft_usage": self._normalize_llm_usage(draft_result.usage or draft_result.payload.get("usageMetadata") or {}),
-            "draft_attempts": draft_result.attempts,
-            "draft_latency_ms": int(draft_result.latency_ms or 0),
-            "draft_attempt_log": [dict(item) for item in draft_result.attempt_log],
-            "vertex_draft_check": draft_check,
-            "vertex_draft_claim_check": draft_claim_check,
-            "vertex_draft_judge": draft_judge,
-            "vertex_draft_model": draft_result.model,
         }
 
     def _llm_answer_result_payload(
@@ -13694,7 +13333,6 @@ class SourceCodeQAService:
         answer_max_output_tokens = int(budget["max_output_tokens"])
         if routed_budget_mode == COMPACT_DEEP_BUDGET_MODE and token_pressure == "tight":
             answer_max_output_tokens = max(answer_max_output_tokens, 2_400)
-        vertex_two_pass = self.llm_provider_name == LLM_PROVIDER_VERTEX_AI
         cache_key = self._llm_answer_cache_key(
             selected_model=selected_model,
             question=question,
@@ -13703,7 +13341,7 @@ class SourceCodeQAService:
             prompt_context=prompt_context,
             attachment_section=attachment_section,
         )
-        cached = None if vertex_two_pass else self._load_cached_answer(cache_key)
+        cached = self._load_cached_answer(cache_key)
         if cached is not None:
             return self._cached_llm_answer_payload(
                 cached=cached,
@@ -13719,56 +13357,11 @@ class SourceCodeQAService:
                 answer_thinking_budget=answer_thinking_budget,
                 cache_key=cache_key,
             )
-        vertex_context = self._vertex_two_pass_answer_context(
-            vertex_two_pass=vertex_two_pass,
-            entries=entries,
-            key=key,
-            pm_team=pm_team,
-            country=country,
-            question=question,
-            matches=matches,
-            selected_matches=selected_matches,
-            evidence_summary=evidence_summary,
-            quality_gate=quality_gate,
-            evidence_pack=evidence_pack,
-            prompt_context=prompt_context,
-            llm_route=llm_route,
-            cache_key=cache_key,
-            selected_model=selected_model,
-            routed_budget_mode=routed_budget_mode,
-            requested_answer_mode=requested_answer_mode,
-            budget=budget,
-            attachment_section=attachment_section,
-            attachments=attachments or [],
-            answer_max_output_tokens=answer_max_output_tokens,
-            answer_thinking_config=answer_thinking_config,
-            request_cache=request_cache,
-        )
-        selected_matches = vertex_context["selected_matches"]
-        evidence_summary = vertex_context["evidence_summary"]
-        quality_gate = vertex_context["quality_gate"]
-        evidence_pack = vertex_context["evidence_pack"]
-        prompt_context = vertex_context["prompt_context"]
-        llm_route = vertex_context["llm_route"]
-        cache_key = vertex_context["cache_key"]
-        draft_answer = vertex_context["draft_answer"]
-        draft_usage = vertex_context["draft_usage"]
-        draft_attempts = vertex_context["draft_attempts"]
-        draft_latency_ms = vertex_context["draft_latency_ms"]
-        draft_attempt_log = vertex_context["draft_attempt_log"]
-        vertex_draft_check = vertex_context["vertex_draft_check"]
         initial_answer_context = self._generate_initial_llm_answer(
             pm_team=pm_team,
             country=country,
             question=question,
             prompt_context=prompt_context,
-            vertex_two_pass=vertex_two_pass,
-            vertex_draft_check=vertex_draft_check,
-            draft_answer=draft_answer,
-            draft_usage=draft_usage,
-            draft_attempts=draft_attempts,
-            draft_latency_ms=draft_latency_ms,
-            draft_attempt_log=draft_attempt_log,
             evidence_summary=evidence_summary,
             quality_gate=quality_gate,
             selected_model=selected_model,
@@ -14005,149 +13598,6 @@ class SourceCodeQAService:
             "llm_route": llm_route,
             "token_pressure": token_pressure,
             "final_prompt_tokens": final_prompt_tokens,
-        }
-
-    def _vertex_two_pass_answer_context(
-        self,
-        *,
-        vertex_two_pass: bool,
-        entries: list[RepositoryEntry],
-        key: str,
-        pm_team: str,
-        country: str,
-        question: str,
-        matches: list[dict[str, Any]],
-        selected_matches: list[dict[str, Any]],
-        evidence_summary: dict[str, Any],
-        quality_gate: dict[str, Any],
-        evidence_pack: dict[str, Any],
-        prompt_context: str,
-        llm_route: dict[str, Any],
-        cache_key: str,
-        selected_model: str,
-        routed_budget_mode: str,
-        requested_answer_mode: str,
-        budget: dict[str, Any],
-        attachment_section: str,
-        attachments: list[dict[str, Any]],
-        answer_max_output_tokens: int,
-        answer_thinking_config: dict[str, Any],
-        request_cache: dict[str, Any] | None,
-    ) -> dict[str, Any]:
-        draft_answer = ""
-        draft_usage: dict[str, Any] = {}
-        draft_attempts = 0
-        draft_latency_ms = 0
-        draft_attempt_log: list[dict[str, Any]] = []
-        vertex_draft_check: dict[str, Any] | None = None
-        if vertex_two_pass:
-            draft_result = self._vertex_draft_answer_result(
-                pm_team=pm_team,
-                country=country,
-                question=question,
-                prompt_context=prompt_context,
-                attachment_section=attachment_section,
-                attachments=attachments,
-                answer_max_output_tokens=answer_max_output_tokens,
-                answer_thinking_config=answer_thinking_config,
-                selected_model=selected_model,
-                evidence_summary=evidence_summary,
-                quality_gate=quality_gate,
-                selected_matches=selected_matches,
-                evidence_pack=evidence_pack,
-            )
-            draft_answer = draft_result["draft_answer"]
-            draft_usage = draft_result["draft_usage"]
-            draft_attempts = draft_result["draft_attempts"]
-            draft_latency_ms = draft_result["draft_latency_ms"]
-            draft_attempt_log = draft_result["draft_attempt_log"]
-            vertex_draft_check = draft_result["vertex_draft_check"]
-            vertex_draft_claim_check = draft_result["vertex_draft_claim_check"]
-            vertex_draft_judge = draft_result["vertex_draft_judge"]
-            vertex_draft_model = draft_result["vertex_draft_model"]
-            vertex_retry_matches = self._expand_answer_retry_matches(
-                entries=entries,
-                key=key,
-                question=question,
-                matches=matches,
-                draft_answer=draft_answer,
-                answer_check=vertex_draft_check,
-                claim_check=vertex_draft_claim_check,
-                answer_judge=vertex_draft_judge,
-                evidence_summary=evidence_summary,
-                quality_gate=quality_gate,
-                limit=int(budget["match_limit"]) + 10,
-                request_cache=request_cache,
-            )
-            if vertex_retry_matches:
-                retry_match_limit = int(budget["match_limit"]) + 6
-                selected_matches = self._select_llm_matches(vertex_retry_matches, retry_match_limit, question=question)
-                evidence_summary = self._compress_evidence_cached(question, selected_matches, request_cache=request_cache)
-                trace_paths = self._build_trace_paths(
-                    entries=entries,
-                    key=key,
-                    matches=selected_matches,
-                    question=question,
-                    request_cache=request_cache,
-                )
-                if trace_paths:
-                    evidence_summary["trace_paths"] = trace_paths
-                quality_gate = self._quality_gate_cached(question, evidence_summary, request_cache=request_cache)
-                evidence_pack = self._build_evidence_pack(
-                    question=question,
-                    evidence_summary=evidence_summary,
-                    matches=selected_matches,
-                    trace_paths=trace_paths,
-                    quality_gate=quality_gate,
-                )
-                domain_context = self._llm_domain_context(
-                    pm_team=pm_team,
-                    country=country,
-                    question=question,
-                    evidence_summary=evidence_summary,
-                )
-                prompt_context = self._build_compressed_llm_context(
-                    evidence_summary,
-                    quality_gate,
-                    evidence_pack,
-                    selected_matches,
-                    domain_context=domain_context,
-                    snippet_line_budget=min(int(budget["snippet_line_budget"]) + 120, 360),
-                    snippet_char_budget=min(int(budget["snippet_char_budget"]) + 24_000, 120_000),
-                )
-                llm_route = {
-                    **llm_route,
-                    "vertex_second_pass": True,
-                    "vertex_second_pass_match_count": len(selected_matches),
-                }
-            llm_route = {
-                **llm_route,
-                "vertex_two_pass": True,
-                "vertex_draft_model": vertex_draft_model,
-                "vertex_final_schema": True,
-            }
-            cache_key = self._llm_answer_cache_key(
-                selected_model=selected_model,
-                question=question,
-                requested_answer_mode=requested_answer_mode,
-                routed_budget_mode=routed_budget_mode,
-                prompt_context=prompt_context,
-                attachment_section=attachment_section,
-            )
-        return {
-            "selected_matches": selected_matches,
-            "evidence_summary": evidence_summary,
-            "quality_gate": quality_gate,
-            "evidence_pack": evidence_pack,
-            "prompt_context": prompt_context,
-            "llm_route": llm_route,
-            "cache_key": cache_key,
-            "draft_answer": draft_answer,
-            "draft_usage": draft_usage,
-            "draft_attempts": draft_attempts,
-            "draft_latency_ms": draft_latency_ms,
-            "draft_attempt_log": draft_attempt_log,
-            "vertex_draft_check": vertex_draft_check,
         }
 
     def _build_codex_llm_answer(
@@ -15714,7 +15164,7 @@ class SourceCodeQAService:
             "contents": [{"parts": [{"text": prompt}]}],
             "systemInstruction": {"parts": [{"text": self._codex_system_instruction()}]},
         }
-        full_prompt = CodexCliBridgeSourceCodeQALLMProvider._prompt_from_gemini_payload(payload)
+        full_prompt = CodexCliBridgeSourceCodeQALLMProvider._prompt_from_llm_payload(payload)
         return {
             "prompt_chars": len(full_prompt),
             "prompt_bytes": len(full_prompt.encode("utf-8")),
@@ -16673,13 +16123,6 @@ class SourceCodeQAService:
     ) -> tuple[str, dict[str, Any], dict[str, Any]]:
         requested = str(requested_budget_mode or "auto").strip().lower() or "auto"
         if requested in self.llm_budgets:
-            if self.llm_provider_name == LLM_PROVIDER_VERTEX_AI and requested == "cheap":
-                return "balanced", self.llm_budgets["balanced"], {
-                    "mode": "provider_quality_floor",
-                    "requested": requested,
-                    "selected": "balanced",
-                    "reason": "vertex_quality_floor",
-                }
             return requested, self.llm_budgets[requested], {"mode": "manual", "requested": requested, "reason": "user_selected"}
         intent = self._question_intent(question)
         trace_stages = {str(match.get("trace_stage") or "") for match in matches}
@@ -16687,21 +16130,6 @@ class SourceCodeQAService:
         lowered_question = str(question or "").lower()
         simple_lookup = self._is_simple_symbol_lookup_question(question)
         deep_reasons: list[str] = []
-        if self.llm_provider_name == LLM_PROVIDER_VERTEX_AI:
-            if intent.get("data_source"):
-                deep_reasons.append("data_source_trace")
-            if any(intent.get(key) for key in ("error", "impact_analysis", "module_dependency", "message_flow", "test_coverage", "operational_boundary", "static_qa")):
-                deep_reasons.append("vertex_complex_code_reasoning")
-            if "root cause" in lowered_question or "why" in lowered_question or "cross-repo" in lowered_question:
-                deep_reasons.append("root_cause_or_cross_repo")
-            if not simple_lookup and (len(matches) >= 8 or {"flow_graph", "entity_graph", "code_graph"} & retrievals):
-                deep_reasons.append("vertex_large_evidence_bundle")
-            if deep_reasons:
-                mode = "deep"
-            else:
-                mode = "balanced"
-                deep_reasons.append("vertex_quality_default")
-            return mode, self.llm_budgets[mode], {"mode": "auto", "requested": requested, "selected": mode, "reason": ",".join(deep_reasons)}
         if intent.get("data_source"):
             deep_reasons.append("data_source_trace")
         if intent.get("error") or "root cause" in lowered_question or "why" in lowered_question:
@@ -16826,7 +16254,6 @@ class SourceCodeQAService:
         snippet_char_budget: int,
         compact: bool = False,
     ) -> str:
-        vertex_native = self.llm_provider_name == LLM_PROVIDER_VERTEX_AI
         sections = [
             "Evidence summary and guardrails:",
             f"- Quality gate: {quality_gate.get('status')} / confidence={quality_gate.get('confidence')} / missing={', '.join(quality_gate.get('missing') or []) or 'none'}",
@@ -16843,15 +16270,9 @@ class SourceCodeQAService:
                 )
         snippet_context = self._build_llm_context(
             matches,
-            snippet_line_budget=max(8, min(int(snippet_line_budget or 40), 320 if vertex_native else 180)),
-            snippet_char_budget=max(1200, min(int(snippet_char_budget or 5000), 100_000 if vertex_native else 28_000)),
+            snippet_line_budget=max(8, min(int(snippet_line_budget or 40), 180)),
+            snippet_char_budget=max(1200, min(int(snippet_char_budget or 5000), 28_000)),
         )
-        if snippet_context and vertex_native:
-            sections.append("\nPrimary raw code evidence:")
-            sections.append(
-                "Use these snippets as the source of truth. The structured facts below are navigation hints, not a substitute for the code."
-            )
-            sections.append(snippet_context)
         if evidence_pack:
             sections.append(f"- Evidence pack v{evidence_pack.get('version')}:")
             typed_items = evidence_pack.get("items") or []
@@ -16917,27 +16338,12 @@ class SourceCodeQAService:
                     for edge in path.get("edges") or []
                 )
                 sections.append(f"  - {path.get('repo')}: {edge_text}")
-        if snippet_context and not vertex_native:
+        if snippet_context:
             sections.append("\nSecondary raw snippets for grounding:")
             sections.append(snippet_context)
         return "\n".join(sections)
 
     def _llm_system_instruction(self) -> str:
-        if self.llm_provider_name == LLM_PROVIDER_VERTEX_AI:
-            return (
-                "You are a senior codebase analyst for an internal portal. "
-                "Answer only from the provided retrieval evidence. "
-                "Use primary raw code evidence as the source of truth, and use structured facts only to navigate, group, and verify the code. "
-                "Do not let compressed facts override a raw snippet. "
-                "Reason through call flow, data flow, and configuration links when the evidence supports it. "
-                "Never upgrade DTO/carrier evidence into a final data source. "
-                "Separate confirmed_from_code, inferred_from_code, and not_found/missing evidence instead of blending certainty levels. "
-                "Avoid speculative language such as likely, suggests, or appears unless explicitly marking missing evidence. "
-                "Prioritize the user's actual question and give the direct answer first. "
-                "Use short citation tags for concrete code-backed claims. "
-                "Do not omit evidence that is necessary to answer the question. "
-                "If the evidence is insufficient for a confident answer, say exactly what is missing and the closest confirmed flow."
-            )
         return (
             "You are a codebase analyst for an internal portal. "
             "Answer only from the provided retrieval evidence. "
@@ -17018,45 +16424,6 @@ class SourceCodeQAService:
             "- Add short citation tags like [S1] next to concrete code-backed claims.\n"
             "- Avoid listing file paths or line ranges unless the user asks for code locations.\n"
             "- If unsure, explain the uncertainty instead of inventing details.\n"
-        )
-
-    def _vertex_draft_prompt(
-        self,
-        *,
-        pm_team: str,
-        country: str,
-        question: str,
-        context: str,
-        attachment_section: str = "",
-    ) -> str:
-        return (
-            f"PM Team: {pm_team}\n"
-            f"Country: {country}\n"
-            f"Question: {question}\n\n"
-            "Internal retrieval evidence for grounding only:\n"
-            f"{context}\n\n"
-            f"{(attachment_section + chr(10) + chr(10)) if attachment_section else ''}"
-            "First-pass task for Vertex AI:\n"
-            "- Write a prose draft answer only; do not return JSON in this pass.\n"
-            "- Use raw code snippets as the source of truth and cite concrete claims with tags like [S1].\n"
-            "- Identify any missing upstream/downstream/source evidence explicitly.\n"
-            "- Do not turn DTO, request, input, or info classes into final data sources.\n"
-            "- This draft will be used to run a second retrieval pass before the final structured answer.\n"
-        )
-
-    @staticmethod
-    def _vertex_final_prompt(*, final_prompt: str, draft_answer: str) -> str:
-        draft = str(draft_answer or "").strip()
-        if len(draft) > 5000:
-            draft = f"{draft[:5000]}\n...[draft truncated]"
-        return (
-            f"{final_prompt}\n"
-            "Vertex first-pass draft for verification only:\n"
-            f"{draft or '(empty draft)'}\n\n"
-            "Final pass instruction:\n"
-            "- Return the required JSON object now.\n"
-            "- Use the first-pass draft only as a checklist; keep only claims supported by the updated evidence.\n"
-            "- Prefer the updated second-pass evidence over the draft when they differ.\n"
         )
 
     def _finalize_llm_answer(
@@ -17159,7 +16526,7 @@ class SourceCodeQAService:
         }
 
     def _trust_provider_final_answer(self) -> bool:
-        return self.llm_provider_name in {LLM_PROVIDER_CODEX_CLI_BRIDGE, LLM_PROVIDER_VERTEX_AI}
+        return self.llm_provider_name == LLM_PROVIDER_CODEX_CLI_BRIDGE
 
     @staticmethod
     def _trusted_provider_check() -> dict[str, Any]:
@@ -17980,29 +17347,8 @@ class SourceCodeQAService:
         answer_judge: dict[str, Any] | None = None,
         request_cache: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
+        del draft_answer, answer_check, claim_check, answer_judge
         agent_plan = self._build_agent_plan(question, evidence_summary, quality_gate)
-        if self.llm_provider_name == LLM_PROVIDER_VERTEX_AI:
-            vertex_terms = self._vertex_second_pass_terms(
-                question=question,
-                draft_answer=draft_answer,
-                evidence_summary=evidence_summary,
-                quality_gate=quality_gate,
-                answer_check=answer_check or {},
-                claim_check=claim_check or {},
-                answer_judge=answer_judge or {},
-                matches=matches,
-            )
-            if vertex_terms:
-                agent_plan = {
-                    "steps": [
-                        {
-                            "name": "vertex_answer_guided_retrieval",
-                            "purpose": "Use the first Vertex draft and evidence checks to retrieve missing concrete code evidence.",
-                            "terms": vertex_terms,
-                        }
-                    ],
-                    "provider": "vertex_answer_guided",
-                }
         if not agent_plan.get("steps"):
             agent_plan = {
                 "steps": [
@@ -18024,65 +17370,6 @@ class SourceCodeQAService:
             limit=max(int(limit or 12), 12),
             request_cache=request_cache,
         )
-
-    def _vertex_second_pass_terms(
-        self,
-        *,
-        question: str,
-        draft_answer: str,
-        evidence_summary: dict[str, Any],
-        quality_gate: dict[str, Any],
-        answer_check: dict[str, Any],
-        claim_check: dict[str, Any],
-        answer_judge: dict[str, Any],
-        matches: list[dict[str, Any]],
-    ) -> list[str]:
-        if self.llm_provider_name != LLM_PROVIDER_VERTEX_AI:
-            return []
-        texts = [
-            question,
-            draft_answer,
-            " ".join(str(item) for item in quality_gate.get("missing") or []),
-            " ".join(str(item) for item in answer_check.get("issues") or []),
-            " ".join(str(item) for item in claim_check.get("unsupported_claims") or []),
-            " ".join(str(item) for item in answer_judge.get("repair_targets") or []),
-        ]
-        for bucket in (
-            "entry_points",
-            "data_carriers",
-            "field_population",
-            "downstream_components",
-            "data_sources",
-            "api_or_config",
-            "rule_or_error_logic",
-            "impact_surfaces",
-            "test_coverage",
-            "operational_boundaries",
-        ):
-            texts.extend(str(item) for item in evidence_summary.get(bucket) or [])
-        for match in matches[:12]:
-            texts.append(str(match.get("path") or ""))
-            texts.append(str(match.get("reason") or ""))
-        terms: list[str] = []
-        for text in texts:
-            for token in re.findall(r"[A-Za-z][A-Za-z0-9_./:-]{2,}", str(text or "")):
-                cleaned = token.strip("._/-:").lower()
-                if len(cleaned) < 3 or cleaned in STOPWORDS or cleaned in LOW_VALUE_CALL_SYMBOLS:
-                    continue
-                if cleaned in {"answer", "evidence", "missing", "claim", "claims", "source", "sources"}:
-                    continue
-                if cleaned not in terms:
-                    terms.append(cleaned)
-        intent = evidence_summary.get("intent") or self._question_intent(question)
-        if intent.get("data_source"):
-            terms.extend(["repository", "mapper", "dao", "jdbc", "select", "from", "client", "provider"])
-        if intent.get("api"):
-            terms.extend(["controller", "requestmapping", "postmapping", "client", "endpoint"])
-        deduped: list[str] = []
-        for term in terms:
-            if term not in deduped:
-                deduped.append(term)
-        return deduped[:36]
 
     def _answer_cache_key(self, *, provider: str, model: str, question: str, answer_mode: str, llm_budget_mode: str, context: str) -> str:
         normalized_question = " ".join(str(question or "").strip().lower().split())

@@ -62,7 +62,6 @@ from bpmis_jira_tool.source_code_qa_stores import (
 from bpmis_jira_tool.user_config import WebConfigStore
 from bpmis_jira_tool.work_memory import WorkMemoryStore, meeting_record_memory_items, team_dashboard_memory_items
 from prd_briefing.confluence import ConfluenceConnector
-from prd_briefing.openai_client import OpenAIClient
 from prd_briefing.reviewer import PRDBriefingReviewRequest, PRDReviewRequest, PRDReviewService
 from prd_briefing.service import PRDBriefingService, VoiceService
 from prd_briefing.storage import BriefingStore
@@ -533,67 +532,6 @@ def create_local_agent_app() -> Flask:
         )
         return jsonify({"status": "ok", "record": _meeting_record_summary(record)})
 
-    @app.post("/api/local-agent/meeting-recorder/browser-audio")
-    def meeting_recorder_browser_audio():
-        return jsonify({
-            "status": "error",
-            "message": "Browser recording fallback is disabled. Grant Screen & System Audio Recording and Microphone permissions, then start recording again.",
-        }), HTTPStatus.GONE
-        payload = request.get_json(silent=True) or {}
-        try:
-            audio_bytes = base64.b64decode(str(payload.get("audio_base64") or ""), validate=True)
-        except (ValueError, TypeError) as error:
-            raise ToolError("Browser audio upload was not valid base64.") from error
-        meeting_link = str(payload.get("meeting_link") or payload.get("meetingLink") or "").strip()
-        capture_source = str(payload.get("browser_audio_capture_source") or payload.get("capture_source") or "").strip()
-        capture_path = capture_source or ("browser_tab_audio_linked" if meeting_link else "browser_audio_f2f")
-        current_app.logger.warning(
-            "local_agent_event %s",
-            json.dumps(
-                {
-                    "event": "meeting_recorder_browser_audio_received",
-                    "capture_path": capture_path,
-                    "owner_email_present": bool(str(payload.get("owner_email") or "").strip()),
-                    "audio_bytes": len(audio_bytes),
-                    "mime_type": str(payload.get("mime_type") or "").strip()[:120],
-                    "browser_audio_device_label": str(payload.get("browser_audio_device_label") or "").strip()[:160],
-                    "started_at_present": bool(str(payload.get("recording_started_at") or payload.get("started_at") or "").strip()),
-                    "stopped_at_present": bool(str(payload.get("recording_stopped_at") or payload.get("stopped_at") or "").strip()),
-                },
-                sort_keys=True,
-            ),
-        )
-        record = _get_meeting_recorder_runtime().import_browser_audio_recording(
-            owner_email=str(payload.get("owner_email") or "").strip().lower(),
-            title=str(payload.get("title") or "Untitled meeting").strip(),
-            platform=str(payload.get("platform") or meeting_platform_from_link(meeting_link)).strip(),
-            meeting_link=meeting_link,
-            started_at=str(payload.get("recording_started_at") or payload.get("started_at") or "").strip(),
-            stopped_at=str(payload.get("recording_stopped_at") or payload.get("stopped_at") or "").strip(),
-            audio_bytes=audio_bytes,
-            mime_type=str(payload.get("mime_type") or "").strip(),
-            device_label=str(payload.get("browser_audio_device_label") or "").strip(),
-            capture_source=capture_path,
-            preflight_metrics=payload.get("browser_audio_preflight") if isinstance(payload.get("browser_audio_preflight"), dict) else {},
-            transcript_language=normalize_meeting_transcript_language(payload.get("transcript_language") or payload.get("transcriptLanguage")),
-        )
-        current_app.logger.warning(
-            "local_agent_event %s",
-            json.dumps(
-                {
-                    "event": "meeting_recorder_browser_audio_saved",
-                    "capture_path": capture_path,
-                    "record_id": str(record.get("record_id") or ""),
-                    "record_status": str(record.get("status") or ""),
-                    "duration_seconds": float(((record.get("recording_health") or {}) if isinstance(record.get("recording_health"), dict) else {}).get("duration_seconds") or 0),
-                    "max_volume_db": ((record.get("recording_health") or {}) if isinstance(record.get("recording_health"), dict) else {}).get("max_volume_db"),
-                    "audio_capture_profile": str(((record.get("media") or {}) if isinstance(record.get("media"), dict) else {}).get("audio_capture_profile") or ""),
-                },
-                sort_keys=True,
-            ),
-        )
-        return jsonify({"status": "ok", "record": _meeting_record_summary(record)})
-
     @app.post("/api/local-agent/meeting-recorder/process")
     def meeting_recorder_process():
         payload = request.get_json(silent=True) or {}
@@ -632,13 +570,6 @@ def create_local_agent_app() -> Flask:
                 "error_retryable": False,
             }), HTTPStatus.NOT_FOUND
         return jsonify(_public_meeting_recorder_process_job_snapshot(snapshot))
-
-    @app.post("/api/local-agent/meeting-recorder/repair-video")
-    def meeting_recorder_repair_video():
-        return jsonify({
-            "status": "error",
-            "message": "Video recording and playback repair are no longer supported. Meeting Recorder is audio-only.",
-        }), HTTPStatus.BAD_REQUEST
 
     @app.post("/api/local-agent/meeting-recorder/send-email")
     def meeting_recorder_send_email():
@@ -2157,16 +2088,7 @@ def _build_bpmis_project_store(settings: Settings) -> BPMISProjectStore:
 def _meeting_recorder_config(settings: Settings) -> MeetingRecorderConfig:
     return MeetingRecorderConfig(
         ffmpeg_bin=settings.meeting_recorder_ffmpeg_bin,
-        video_input=settings.meeting_recorder_video_input,
         audio_input=settings.meeting_recorder_audio_input,
-        video_fps=settings.meeting_recorder_video_fps,
-        video_max_width=settings.meeting_recorder_video_max_width,
-        video_max_height=settings.meeting_recorder_video_max_height,
-        avfoundation_pixel_format=settings.meeting_recorder_avfoundation_pixel_format,
-        screen_preflight_timeout_seconds=settings.meeting_recorder_screen_preflight_timeout_seconds,
-        audio_only_fallback_on_screen_failure=settings.meeting_recorder_audio_only_fallback_on_screen_failure,
-        frame_interval_seconds=settings.meeting_recorder_frame_interval_seconds,
-        vision_model=settings.meeting_recorder_vision_model,
         transcribe_provider=settings.meeting_recorder_transcribe_provider,
         whisper_cpp_bin=settings.meeting_recorder_whisper_cpp_bin,
         whisper_model=settings.meeting_recorder_whisper_model,
@@ -2365,14 +2287,6 @@ def _build_prd_review_service(settings: Settings) -> PRDReviewService:
 
 def _build_prd_briefing_service(settings: Settings) -> PRDBriefingService:
     store = BriefingStore(_data_root(settings) / "prd_briefing")
-    openai_client = OpenAIClient(
-        api_key=settings.openai_api_key,
-        base_url=settings.openai_api_base_url,
-        text_model=settings.prd_briefing_text_model,
-        embedding_model=settings.prd_briefing_embedding_model,
-        transcription_model=settings.prd_briefing_transcription_model,
-        tts_model=settings.prd_briefing_tts_model,
-    )
     text_client = CodexTextGenerationClient(
         settings=settings,
         workspace_root=Path(__file__).resolve().parent.parent,
@@ -2388,28 +2302,18 @@ def _build_prd_briefing_service(settings: Settings) -> PRDBriefingService:
     )
     voice_service = VoiceService(
         store=store,
-        openai_client=openai_client,
         tts_provider=settings.prd_briefing_tts_provider,
         edge_mandarin_voice=settings.prd_briefing_edge_mandarin_voice,
         edge_english_voice=settings.prd_briefing_edge_english_voice,
         edge_rate=settings.prd_briefing_edge_rate,
         edge_mandarin_rate=settings.prd_briefing_edge_mandarin_rate,
         edge_english_rate=settings.prd_briefing_edge_english_rate,
-        openai_mandarin_voice=settings.prd_briefing_openai_mandarin_voice,
-        openai_voice_speed=settings.prd_briefing_openai_voice_speed,
-        openai_custom_voice_enabled=settings.prd_briefing_openai_custom_voice_enabled,
-        openai_tts_fallback_enabled=settings.prd_briefing_openai_tts_fallback_enabled,
-        elevenlabs_api_key=settings.elevenlabs_api_key,
-        elevenlabs_mandarin_model_id=settings.elevenlabs_mandarin_model_id,
-        elevenlabs_mandarin_voice_id=settings.elevenlabs_mandarin_voice_id,
     )
     return PRDBriefingService(
         store=store,
         confluence=confluence,
-        openai_client=openai_client,
         text_client=text_client,
         voice_service=voice_service,
-        answer_audio_enabled=settings.prd_briefing_answer_audio_enabled,
         walkthrough_prewarm_enabled=False,
     )
 

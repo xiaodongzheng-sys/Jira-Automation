@@ -6,7 +6,6 @@ import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import Mock, patch
-from zoneinfo import ZoneInfo
 
 from bpmis_jira_tool.errors import ToolError
 from bpmis_jira_tool.meeting_recorder import (
@@ -15,14 +14,10 @@ from bpmis_jira_tool.meeting_recorder import (
     MeetingRecorderConfig,
     MeetingRecorderRuntime,
     MeetingRecordStore,
-    cleanup_legacy_video_assets,
     _audio_capture_status,
     _build_ffmpeg_audio_post_stop_pad_command,
     _build_ffmpeg_audio_recording_command,
     _build_ffmpeg_audio_segment_command,
-    _build_ffmpeg_playback_repair_command,
-    _build_ffmpeg_recording_command,
-    _build_ffmpeg_screen_preflight_command,
     _effective_audio_input,
     _effective_recording_audio_input,
     _meeting_minutes_markdown_to_html,
@@ -31,9 +26,7 @@ from bpmis_jira_tool.meeting_recorder import (
     _SegmentedAudioRecorder,
     extract_meeting_links,
     meeting_platform_from_link,
-    meeting_reminder_suppression_key,
     normalize_calendar_event,
-    reminder_eligible_meetings,
 )
 
 
@@ -139,74 +132,11 @@ class MeetingRecorderParsingTests(unittest.TestCase):
             _effective_recording_audio_input(
                 "Meeting Recorder Aggregate",
                 devices["audio_devices"],
-                recording_mode="screen_audio",
+                recording_mode="audio_only",
                 meeting_link="https://zoom.us/j/123",
             ),
             "Meeting Recorder Aggregate",
         )
-
-    def test_ffmpeg_recording_command_uses_browser_safe_video_encoding(self):
-        command = _build_ffmpeg_recording_command(
-            ffmpeg_path="/opt/homebrew/bin/ffmpeg",
-            video_input="Capture screen 0",
-            audio_input="default",
-            video_path=Path("/tmp/meeting.mp4"),
-            video_fps=15,
-            video_max_width=1920,
-            video_max_height=1080,
-            avfoundation_pixel_format="bgr0",
-        )
-
-        self.assertIn("-pixel_format", command)
-        self.assertEqual(command[command.index("-pixel_format") + 1], "bgr0")
-        self.assertIn("Capture screen 0:", command)
-        self.assertIn(":default", command)
-        self.assertNotIn("Capture screen 0:default", command)
-        self.assertIn("-map", command)
-        self.assertIn("-vf", command)
-        self.assertEqual(
-            command[command.index("-vf") + 1],
-            "scale='if(gt(iw/ih,1920/1080),min(1920,iw),-2)':'if(gt(iw/ih,1920/1080),-2,min(1080,ih))':flags=bicubic,fps=15,format=yuv420p",
-        )
-        self.assertEqual(command[command.index("-profile:v") + 1], "high")
-        self.assertEqual(command[command.index("-level") + 1], "4.2")
-        self.assertEqual(command[command.index("-pix_fmt") + 1], "yuv420p")
-        self.assertIn("-c:a", command)
-        self.assertEqual(command[command.index("-c:a") + 1], "aac")
-        self.assertIn("-ac", command)
-        self.assertEqual(command[command.index("-ac") + 1], "2")
-        self.assertIn("-ar", command)
-        self.assertEqual(command[command.index("-ar") + 1], "48000")
-
-    def test_ffmpeg_screen_preflight_command_writes_video_file(self):
-        command = _build_ffmpeg_screen_preflight_command(
-            ffmpeg_path="/opt/homebrew/bin/ffmpeg",
-            video_input="Capture screen 0",
-            video_path=Path("/tmp/preflight.mp4"),
-            avfoundation_pixel_format="bgr0",
-        )
-
-        self.assertIn("Capture screen 0:", command)
-        self.assertIn("-frames:v", command)
-        self.assertIn("-an", command)
-        self.assertEqual(command[-1], "/tmp/preflight.mp4")
-
-    def test_screen_preflight_uses_configured_timeout(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            runtime = MeetingRecorderRuntime(
-                store=MeetingRecordStore(Path(temp_dir)),
-                config=MeetingRecorderConfig(screen_preflight_timeout_seconds=30),
-            )
-
-            def fake_run(command, *_args, **_kwargs):
-                Path(command[-1]).write_bytes(b"video")
-                return Mock(stdout="", stderr="")
-
-            with patch("bpmis_jira_tool.meeting_recorder._run_command", side_effect=fake_run) as run_command:
-                result = runtime._screen_capture_preflight(ffmpeg_path="/opt/homebrew/bin/ffmpeg")
-
-        self.assertEqual(result["status"], "ok")
-        self.assertEqual(run_command.call_args.kwargs["timeout_seconds"], 30)
 
     def test_ffmpeg_audio_recording_command_uses_audio_input_only(self):
         command = _build_ffmpeg_audio_recording_command(
@@ -263,100 +193,6 @@ class MeetingRecorderParsingTests(unittest.TestCase):
         self.assertEqual(command[command.index("-t") + 1], "43.200")
         self.assertEqual(command[command.index("-acodec") + 1], "pcm_s16le")
         self.assertEqual(command[-1], "/tmp/meeting.padded.wav")
-
-    def test_ffmpeg_playback_repair_command_copies_video_and_rebuilds_stereo_audio(self):
-        command = _build_ffmpeg_playback_repair_command(
-            ffmpeg_path="/opt/homebrew/bin/ffmpeg",
-            source_path=Path("/tmp/meeting.mp4"),
-            output_path=Path("/tmp/meeting.playback.mp4"),
-        )
-
-        self.assertEqual(command[command.index("-c:v") + 1], "copy")
-        self.assertEqual(command[command.index("-c:a") + 1], "aac")
-        self.assertEqual(command[command.index("-ac") + 1], "2")
-        self.assertEqual(command[command.index("-ar") + 1], "48000")
-        self.assertEqual(command[command.index("-movflags") + 1], "+faststart")
-
-    def test_reminder_eligible_meetings_filters_by_window_hours_and_platform(self):
-        now = datetime(2026, 5, 4, 9, 58, tzinfo=ZoneInfo("Asia/Singapore"))
-        meetings = [
-            {
-                "calendar_event_id": "meet-soon",
-                "title": "Record me",
-                "platform": "google_meet",
-                "start": "2026-05-04T10:00:00+08:00",
-                "meeting_link": "https://meet.google.com/abc-defg-hij",
-            },
-            {
-                "calendar_event_id": "too-early",
-                "title": "Too early",
-                "platform": "zoom",
-                "start": "2026-05-04T08:59:00+08:00",
-                "meeting_link": "https://zoom.us/j/123",
-            },
-            {
-                "calendar_event_id": "too-late",
-                "title": "Too late",
-                "platform": "google_meet",
-                "start": "2026-05-04T20:00:00+08:00",
-                "meeting_link": "https://meet.google.com/late-one",
-            },
-            {
-                "calendar_event_id": "not-meeting",
-                "title": "Office",
-                "platform": "unknown",
-                "start": "2026-05-04T10:00:00+08:00",
-                "meeting_link": "https://example.com",
-            },
-            {
-                "calendar_event_id": "future",
-                "title": "Future",
-                "platform": "zoom",
-                "start": "2026-05-04T10:04:00+08:00",
-                "meeting_link": "https://zoom.us/j/456",
-            },
-        ]
-
-        eligible = reminder_eligible_meetings(meetings, now=now)
-
-        self.assertEqual([item["calendar_event_id"] for item in eligible], ["meet-soon"])
-        self.assertEqual(eligible[0]["seconds_until_start"], 120)
-        self.assertEqual(eligible[0]["suppression_key"], "20260504:meet-soon")
-
-    def test_reminder_eligible_meetings_keeps_grace_window_after_start(self):
-        now = datetime(2026, 5, 4, 10, 9, tzinfo=ZoneInfo("Asia/Singapore"))
-        meetings = [
-            {
-                "calendar_event_id": "within-grace",
-                "title": "Within grace",
-                "platform": "zoom",
-                "start": "2026-05-04T10:00:00+08:00",
-                "meeting_link": "https://zoom.us/j/123",
-            },
-            {
-                "calendar_event_id": "outside-grace",
-                "title": "Outside grace",
-                "platform": "zoom",
-                "start": "2026-05-04T09:58:00+08:00",
-                "meeting_link": "https://zoom.us/j/456",
-            },
-        ]
-
-        eligible = reminder_eligible_meetings(meetings, now=now)
-
-        self.assertEqual([item["calendar_event_id"] for item in eligible], ["within-grace"])
-        self.assertEqual(eligible[0]["seconds_until_start"], -540)
-
-    def test_meeting_reminder_suppression_key_is_stable_by_event_and_date(self):
-        meeting = {
-            "calendar_event_id": "event/with spaces",
-            "title": "Review",
-            "platform": "google_meet",
-            "start": "2026-05-04T10:00:00+08:00",
-        }
-
-        self.assertEqual(meeting_reminder_suppression_key(meeting), "20260504:event-with-spaces")
-
 
 class MeetingRecordStoreTests(unittest.TestCase):
     def test_create_list_get_and_delete_record(self):
@@ -595,43 +431,6 @@ class MeetingRecorderRuntimeTests(unittest.TestCase):
         self.assertEqual(health["status"], "failed")
         self.assertIn("captured only 3s of source audio for a 11s recording", health["warning"])
         self.assertEqual(health["source_duration_seconds"], 3.061313)
-
-    def test_linked_browser_audio_recording_health_fails_when_too_short(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            store = MeetingRecordStore(root)
-            runtime = MeetingRecorderRuntime(store=store, config=MeetingRecorderConfig())
-            record = store.create_record(
-                owner_email="owner@npt.sg",
-                title="Zoom",
-                platform="zoom",
-                meeting_link="https://zoom.us/j/123",
-            )
-            audio_path = store.record_dir(record["record_id"]) / "meeting.wav"
-            audio_path.write_bytes(b"audio")
-            record.update(
-                {
-                    "recording_started_at": "2026-05-03T09:39:46+00:00",
-                    "recording_stopped_at": "2026-05-03T09:39:49+00:00",
-                    "media": {
-                        "audio_capture_profile": "browser_media_recorder_v1",
-                        "browser_audio_capture_source": "browser_tab_audio_linked",
-                        "recording_mode": "audio_only",
-                        "audio_path": str(audio_path.relative_to(store.root_dir)),
-                        "audio_original_duration_seconds": 2.58,
-                    },
-                }
-            )
-
-            with patch("bpmis_jira_tool.meeting_recorder._audio_duration_seconds", return_value=2.58), patch(
-                "bpmis_jira_tool.meeting_recorder._audio_volume_metrics",
-                return_value={"mean_volume_db": -33.0, "max_volume_db": -17.8},
-            ):
-                health = runtime._recording_health(record)
-
-        self.assertEqual(health["status"], "failed")
-        self.assertIn("lasted only 3s", health["warning"])
-        self.assertIn("too short", health["warning"])
 
     def test_audio_only_recording_health_warns_when_media_duration_is_too_long(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -926,14 +725,14 @@ class MeetingRecorderRuntimeTests(unittest.TestCase):
                     title="Zoom review",
                     platform="zoom",
                     meeting_link="https://zoom.us/j/123",
-                    recording_mode="screen_audio",
+                    recording_mode="audio_only",
                 )
 
         self.assertEqual(record["media"]["recording_mode"], "audio_only")
         self.assertEqual(record["media"]["audio_capture_profile"], "screencapturekit_audio_v1")
         self.assertIn("audio_path", record["media"])
         self.assertNotIn("video_path", record["media"])
-        self.assertEqual(record["diagnostics_snapshot"]["requested_recording_mode"], "screen_audio")
+        self.assertEqual(record["diagnostics_snapshot"]["requested_recording_mode"], "audio_only")
         command = runtime._processes[record["record_id"]].command
         self.assertEqual(command[:3], ["nice", "-n", "10"])
         self.assertIn("--system-output", command)
@@ -961,44 +760,6 @@ class MeetingRecorderRuntimeTests(unittest.TestCase):
                     meeting_link="https://zoom.us/j/123",
                     recording_mode="audio_only",
                 )
-
-    def test_linked_meeting_audio_only_never_calls_legacy_screen_preflight(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            store = MeetingRecordStore(root)
-            runtime = MeetingRecorderRuntime(
-                store=store,
-                config=MeetingRecorderConfig(
-                    ffmpeg_bin="/opt/homebrew/bin/ffmpeg",
-                    audio_only_fallback_on_screen_failure=False,
-                ),
-            )
-
-            with patch("bpmis_jira_tool.meeting_recorder._resolve_ffmpeg_bin", return_value="/opt/homebrew/bin/ffmpeg"), patch(
-                "bpmis_jira_tool.meeting_recorder._avfoundation_devices",
-                return_value={
-                    "video_devices": ["Capture screen 0"],
-                    "audio_devices": ["Meeting Recorder Aggregate"],
-                },
-            ), patch.object(
-                runtime,
-                "_screen_capture_preflight",
-            ) as screen_preflight, patch(
-                "bpmis_jira_tool.meeting_recorder._resolve_screencapturekit_helper",
-                return_value=Path("/tmp/meeting-screencapture-helper"),
-            ), patch(
-                "bpmis_jira_tool.meeting_recorder._ScreenCaptureKitAudioRecorder.start",
-                return_value={"status": "ok", "latency_seconds": 0.2, "bytes": 48000, "pid": 1234},
-            ):
-                runtime.start_recording(
-                    owner_email="owner@npt.sg",
-                    title="Zoom review",
-                    platform="zoom",
-                    meeting_link="https://zoom.us/j/123",
-                    recording_mode="screen_audio",
-                )
-
-        screen_preflight.assert_not_called()
 
     def test_screencapturekit_start_failure_marks_record_failed(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1132,32 +893,6 @@ class MeetingRecorderRuntimeTests(unittest.TestCase):
         self.assertEqual(check["failure_count"], 2)
         self.assertIn("stopped repeatedly", check["warning"])
 
-    def test_repair_video_playback_is_unsupported(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            store = MeetingRecordStore(root)
-            record = store.create_record(
-                owner_email="owner@npt.sg",
-                title="Review",
-                platform="zoom",
-                meeting_link="https://zoom.us/j/123",
-            )
-            video_path = store.record_dir(record["record_id"]) / "meeting.mp4"
-            video_path.write_bytes(b"source-video")
-            record["media"] = {
-                "video_path": str(video_path.relative_to(root)),
-                "video_url": f"/meeting-recorder/assets/{record['record_id']}/meeting.mp4",
-            }
-            store.save_record(record)
-            runtime = MeetingRecorderRuntime(
-                store=store,
-                config=MeetingRecorderConfig(ffmpeg_bin="/opt/homebrew/bin/ffmpeg"),
-            )
-
-            with self.assertRaisesRegex(Exception, "audio-only"):
-                runtime.repair_video_playback(record_id=record["record_id"], owner_email="owner@npt.sg")
-
-
 class FakeTextClient:
     def __init__(self):
         self.calls = []
@@ -1249,14 +984,10 @@ class MeetingProcessingServiceTests(unittest.TestCase):
             )
 
             with patch.object(service, "_transcribe_audio", return_value={"text": "Alice approved.", "chunks": [], "segments": [], "quality": {}}) as transcribe:
-                with patch.object(service, "_extract_audio") as extract_audio:
-                    with patch.object(service, "_extract_visual_evidence") as visual:
-                        processed = service.process_recording(record_id=record["record_id"], owner_email="owner@npt.sg")
+                processed = service.process_recording(record_id=record["record_id"], owner_email="owner@npt.sg")
 
         self.assertEqual(processed["status"], "completed")
         self.assertEqual(transcribe.call_args.args[0], audio_path.resolve())
-        extract_audio.assert_not_called()
-        visual.assert_not_called()
         self.assertEqual(processed["visual_evidence"], [])
         self.assertEqual(processed["transcript"]["text"], "Alice approved.")
 
@@ -1319,91 +1050,6 @@ class MeetingProcessingServiceTests(unittest.TestCase):
         self.assertEqual(candidates[0]["speaker_source"], "local_microphone")
         self.assertEqual(candidates[0]["speaker_confidence"], "candidate")
         self.assertTrue(owner_transcript_exists)
-
-    def test_extract_audio_preserves_sparse_meeting_audio_timeline(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            store = MeetingRecordStore(root)
-            record = store.create_record(
-                owner_email="owner@npt.sg",
-                title="Zoom",
-                platform="zoom",
-                meeting_link="https://zoom.us/j/123",
-            )
-            video_path = store.record_dir(record["record_id"]) / "meeting.mp4"
-            video_path.write_bytes(b"video")
-            service = MeetingProcessingService(
-                store=store,
-                config=MeetingRecorderConfig(ffmpeg_bin="/opt/homebrew/bin/ffmpeg"),
-                text_client=FakeTextClient(),
-            )
-
-            with patch("bpmis_jira_tool.meeting_recorder._resolve_ffmpeg_bin", return_value="/opt/homebrew/bin/ffmpeg"), patch(
-                "bpmis_jira_tool.meeting_recorder._run_command"
-            ) as run_command:
-                audio_path = service._extract_audio(record, video_path)
-
-        command = run_command.call_args.args[0]
-        self.assertEqual(audio_path, store.record_dir(record["record_id"]) / "audio.wav")
-        self.assertIn("-fflags", command)
-        self.assertEqual(command[command.index("-fflags") + 1], "+genpts")
-        self.assertIn("-map", command)
-        self.assertEqual(command[command.index("-map") + 1], "0:a:0")
-        self.assertIn("-af", command)
-        self.assertEqual(command[command.index("-af") + 1], "aresample=async=1:first_pts=0")
-
-    def test_cleanup_legacy_video_assets_extracts_audio_and_removes_video_metadata(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            store = MeetingRecordStore(root)
-            record = store.create_record(
-                owner_email="owner@npt.sg",
-                title="Legacy Zoom",
-                platform="zoom",
-                meeting_link="https://zoom.us/j/123",
-            )
-            record_dir = store.record_dir(record["record_id"])
-            video_path = record_dir / "meeting.mp4"
-            playback_path = record_dir / "meeting.playback.mp4"
-            keyframe_dir = record_dir / "keyframes"
-            keyframe_dir.mkdir()
-            (keyframe_dir / "frame-0001.jpg").write_bytes(b"jpg")
-            video_path.write_bytes(b"video")
-            playback_path.write_bytes(b"playback")
-            record["media"] = {
-                "recording_mode": "screen_audio",
-                "video_path": str(video_path.relative_to(root)),
-                "video_url": f"/meeting-recorder/assets/{record['record_id']}/meeting.mp4",
-                "playback_video_path": str(playback_path.relative_to(root)),
-                "playback_video_url": f"/meeting-recorder/assets/{record['record_id']}/meeting.playback.mp4",
-            }
-            record["visual_evidence"] = [{"image_url": "x"}]
-            store.save_record(record)
-
-            def fake_run(command, *_args, **_kwargs):
-                Path(command[-1]).write_bytes(b"audio")
-                return Mock(stdout="", stderr="")
-
-            with patch("bpmis_jira_tool.meeting_recorder._resolve_ffmpeg_bin", return_value="/opt/homebrew/bin/ffmpeg"), patch(
-                "bpmis_jira_tool.meeting_recorder._run_command",
-                side_effect=fake_run,
-            ):
-                summary = cleanup_legacy_video_assets(
-                    store=store,
-                    config=MeetingRecorderConfig(ffmpeg_bin="/opt/homebrew/bin/ffmpeg"),
-                )
-
-            cleaned = store.get_record(record["record_id"])
-            self.assertEqual(summary["updated"], 1)
-            self.assertEqual(summary["audio_extracted"], 1)
-            self.assertEqual(cleaned["media"]["recording_mode"], "audio_only")
-            self.assertEqual(cleaned["media"]["audio_path"], f"records/{record['record_id']}/meeting.wav")
-            self.assertNotIn("video_path", cleaned["media"])
-            self.assertNotIn("playback_video_path", cleaned["media"])
-            self.assertEqual(cleaned["visual_evidence"], [])
-            self.assertFalse(video_path.exists())
-            self.assertFalse(playback_path.exists())
-            self.assertFalse(keyframe_dir.exists())
 
     def test_send_minutes_email_attaches_transcript_text_file(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1898,7 +1544,7 @@ class MeetingProcessingServiceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             service = MeetingProcessingService(
                 store=MeetingRecordStore(Path(temp_dir)),
-                config=MeetingRecorderConfig(transcribe_provider="openai"),
+                config=MeetingRecorderConfig(transcribe_provider="remote_api"),
                 text_client=FakeTextClient(),
             )
 
@@ -1972,13 +1618,6 @@ class MeetingRecorderRouteTests(unittest.TestCase):
         payload = response.get_json()
         self.assertEqual(payload["records"][0]["title"], "Review")
 
-    def test_non_admin_cannot_access_reminders_api(self):
-        with self.app.test_client() as client:
-            self._login(client, email="owner@npt.sg", scopes=[CALENDAR_READONLY_SCOPE])
-            response = client.get("/api/meeting-recorder/reminders")
-
-        self.assertEqual(response.status_code, 403)
-
     def test_upcoming_calendar_api_returns_next_three_meetings(self):
         fake_calendar = Mock()
         fake_calendar.upcoming_meetings.return_value = [
@@ -2002,78 +1641,6 @@ class MeetingRecorderRouteTests(unittest.TestCase):
         payload = response.get_json()
         self.assertEqual([item["calendar_event_id"] for item in payload["meetings"]], ["event-1", "event-2", "event-3"])
 
-    def test_reminders_api_returns_empty_when_auto_reminders_disabled(self):
-        fake_calendar = Mock()
-
-        with patch("bpmis_jira_tool.web._build_calendar_meeting_service", return_value=fake_calendar), patch(
-            "bpmis_jira_tool.web.reminder_eligible_meetings",
-            wraps=reminder_eligible_meetings,
-        ), patch(
-            "bpmis_jira_tool.web._meeting_recorder_diagnostics_payload",
-            return_value={"audio_capture_label": "Aggregate device configured", "system_audio_configured": True},
-        ):
-            with self.app.test_client() as client:
-                self._login(client, email="xiaodong.zheng@npt.sg", scopes=[CALENDAR_READONLY_SCOPE])
-                response = client.get("/api/meeting-recorder/reminders")
-
-        self.assertEqual(response.status_code, 200)
-        payload = response.get_json()
-        self.assertTrue(payload["calendar_connected"])
-        self.assertFalse(payload["reminders_enabled"])
-        self.assertEqual(payload["debug"]["reason"], "disabled")
-        self.assertEqual(payload["meetings"], [])
-        self.assertIsNone(payload["active_recording"])
-        fake_calendar.upcoming_meetings.assert_not_called()
-
-    def test_reminders_api_stays_disabled_when_calendar_not_connected(self):
-        with self.app.test_client() as client:
-            self._login(client, email="xiaodong.zheng@npt.sg", scopes=[])
-            response = client.get("/api/meeting-recorder/reminders")
-
-        self.assertEqual(response.status_code, 200)
-        payload = response.get_json()
-        self.assertTrue(payload["calendar_connected"])
-        self.assertFalse(payload["reminders_enabled"])
-        self.assertEqual(payload["debug"]["reason"], "disabled")
-
-    def test_reminder_telemetry_endpoint_logs_compact_event(self):
-        with patch("bpmis_jira_tool.web._log_portal_event") as log_event:
-            with self.app.test_client() as client:
-                self._login(client, email="xiaodong.zheng@npt.sg")
-                response = client.post(
-                    "/api/meeting-recorder/reminder-telemetry",
-                    json={
-                        "event": "poll_success",
-                        "reason": "visible",
-                        "meeting_count": 1,
-                        "suppressed_count": 2,
-                        "active_recording": False,
-                        "page_path": "/",
-                    },
-                )
-
-        self.assertEqual(response.status_code, 200)
-        log_event.assert_called_once()
-        logged = log_event.call_args.kwargs
-        self.assertEqual(logged["telemetry_event"], "poll_success")
-        self.assertEqual(logged["reason"], "visible")
-        self.assertEqual(logged["meeting_count"], 1)
-
-    def test_repair_video_route_is_unsupported_for_admin_and_blocks_non_admin(self):
-        fake_runtime = Mock()
-        self.app.config["MEETING_RECORDER_RUNTIME"] = fake_runtime
-
-        with self.app.test_client() as client:
-            self._login(client, email="owner@npt.sg")
-            denied = client.post("/api/meeting-recorder/records/meeting-1/repair-video")
-            self._login(client, email="xiaodong.zheng@npt.sg")
-            response = client.post("/api/meeting-recorder/records/meeting-1/repair-video")
-
-        self.assertEqual(denied.status_code, 403)
-        self.assertEqual(response.status_code, 400)
-        self.assertIn("audio-only", response.get_json()["message"])
-        fake_runtime.repair_video_playback.assert_not_called()
-
     def test_diagnostics_and_records_use_local_agent_when_configured(self):
         fake_client = Mock()
         fake_client.meeting_recorder_diagnostics.return_value = {"ffmpeg_configured": True, "ffmpeg_path": "/opt/homebrew/bin/ffmpeg"}
@@ -2093,19 +1660,6 @@ class MeetingRecorderRouteTests(unittest.TestCase):
         self.assertEqual(records.get_json()["records"][0]["record_id"], "meeting-1")
         fake_client.meeting_recorder_diagnostics.assert_called_once_with()
         fake_client.meeting_recorder_records.assert_called_once_with(owner_email="xiaodong.zheng@npt.sg")
-
-    def test_repair_video_route_does_not_delegate_to_local_agent_when_configured(self):
-        fake_client = Mock()
-
-        with patch("bpmis_jira_tool.web._local_agent_meeting_recorder_enabled", return_value=True):
-            with patch("bpmis_jira_tool.web._build_local_agent_client", return_value=fake_client):
-                with self.app.test_client() as client:
-                    self._login(client, email="xiaodong.zheng@npt.sg")
-                    response = client.post("/api/meeting-recorder/records/meeting-1/repair-video")
-
-        self.assertEqual(response.status_code, 400)
-        self.assertIn("audio-only", response.get_json()["message"])
-        fake_client.meeting_recorder_repair_video.assert_not_called()
 
     def test_meeting_asset_proxy_forwards_range_to_local_agent(self):
         fake_response = FakeStreamingResponse(
@@ -2198,24 +1752,6 @@ class MeetingRecorderRouteTests(unittest.TestCase):
         self.assertNotIn("attachment", response.headers.get("Content-Disposition", ""))
         self.assertTrue(fake_response.closed)
 
-    def test_base_template_does_not_render_meeting_indicator_or_reminder_script(self):
-        with self.app.test_client() as client:
-            self._login(client, email="xiaodong.zheng@npt.sg", scopes=[CALENDAR_READONLY_SCOPE])
-            response = client.get("/meeting-recorder")
-
-        self.assertEqual(response.status_code, 200)
-        self.assertNotIn(b"data-meeting-recorder-indicator", response.data)
-        self.assertNotIn(b"meeting_recorder_reminder.js", response.data)
-
-    def test_reminder_script_polls_on_visibility_focus_and_reports_telemetry(self):
-        source = Path("static/meeting_recorder_reminder.js").read_text(encoding="utf-8")
-
-        self.assertIn("visibilitychange", source)
-        self.assertIn("window.addEventListener('focus'", source)
-        self.assertIn("/api/meeting-recorder/reminder-telemetry", source)
-        self.assertIn("poll_success", source)
-        self.assertIn("readSuppressed", source)
-
     def test_meeting_recorder_script_reports_audio_status_and_transcript_quality(self):
         source = Path("static/meeting_recorder.js").read_text(encoding="utf-8")
         template = Path("templates/meeting_recorder.html").read_text(encoding="utf-8")
@@ -2250,11 +1786,8 @@ class MeetingRecorderRouteTests(unittest.TestCase):
         self.assertIn(">Mixed<", template)
         self.assertIn("const value = String(nodes.transcriptLanguage?.value || 'zh')", source)
         self.assertIn("?.value || 'zh'", source)
-        self.assertIn("browser_fallback_enabled: false", source)
         self.assertIn("Grant Screen & System Audio Recording and Microphone permissions, then start recording again.", source)
-        self.assertNotIn("click Start Recording again to use browser microphone fallback", source)
-        self.assertNotIn("using browser microphone fallback", source)
-        self.assertNotIn("f2fBrowserFallbackArmed", source)
+        self.assertNotIn("browser", source.lower())
         self.assertNotIn("screen_audio", source)
         self.assertNotIn("/repair-video", source)
         self.assertIn("Transcript may be incomplete", source)
@@ -2477,26 +2010,6 @@ class MeetingRecorderRouteTests(unittest.TestCase):
             owner_email="xiaodong.zheng@npt.sg",
             send_email_on_complete=True,
         )
-
-    def test_browser_audio_upload_is_disabled(self):
-        fake_runtime = Mock()
-        self.app.config["MEETING_RECORDER_RUNTIME"] = fake_runtime
-
-        with self.app.test_client() as client:
-            self._login(client, email="xiaodong.zheng@npt.sg")
-            response = client.post(
-                "/api/meeting-recorder/browser-audio",
-                json={
-                    "title": "Browser Audio",
-                    "audio_base64": "YXVkaW8=",
-                    "mime_type": "audio/webm",
-                    "transcript_language": "en",
-                },
-            )
-
-        self.assertEqual(response.status_code, 410)
-        self.assertIn("Browser recording fallback is disabled", response.get_json()["message"])
-        fake_runtime.import_browser_audio_recording.assert_not_called()
 
     def test_auto_process_email_failure_does_not_fail_completed_minutes_job(self):
         record = self.app.config["MEETING_RECORD_STORE"].create_record(

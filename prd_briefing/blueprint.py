@@ -10,7 +10,6 @@ from bpmis_jira_tool.errors import ToolError
 from bpmis_jira_tool.local_agent_client import LocalAgentClient
 
 from .confluence import ConfluenceConnector
-from .openai_client import OpenAIClient
 from .reviewer import PRDBriefingReviewRequest, PRDReviewService
 from .service import PRDBriefingService, VoiceService
 from .storage import BriefingStore
@@ -318,14 +317,6 @@ def _build_prd_review_service() -> PRDReviewService:
 def _build_service() -> PRDBriefingService:
     settings = current_app.config["SETTINGS"]
     store: BriefingStore = current_app.config["PRD_BRIEFING_STORE"]
-    openai_client = OpenAIClient(
-        api_key=settings.openai_api_key,
-        base_url=settings.openai_api_base_url,
-        text_model=settings.prd_briefing_text_model,
-        embedding_model=settings.prd_briefing_embedding_model,
-        transcription_model=settings.prd_briefing_transcription_model,
-        tts_model=settings.prd_briefing_tts_model,
-    )
     text_client = CodexTextGenerationClient(
         settings=settings,
         workspace_root=Path(__file__).resolve().parent.parent,
@@ -341,26 +332,16 @@ def _build_service() -> PRDBriefingService:
     )
     voice_service = VoiceService(
         store=store,
-        openai_client=openai_client,
         tts_provider=settings.prd_briefing_tts_provider,
         edge_mandarin_voice=settings.prd_briefing_edge_mandarin_voice,
         edge_english_voice=settings.prd_briefing_edge_english_voice,
         edge_rate=settings.prd_briefing_edge_rate,
         edge_mandarin_rate=settings.prd_briefing_edge_mandarin_rate,
         edge_english_rate=settings.prd_briefing_edge_english_rate,
-        openai_mandarin_voice=settings.prd_briefing_openai_mandarin_voice,
-        openai_voice_speed=settings.prd_briefing_openai_voice_speed,
-        openai_custom_voice_enabled=settings.prd_briefing_openai_custom_voice_enabled,
-        openai_tts_fallback_enabled=settings.prd_briefing_openai_tts_fallback_enabled,
-        elevenlabs_api_key=settings.elevenlabs_api_key,
-        elevenlabs_mandarin_model_id=settings.elevenlabs_mandarin_model_id,
-        elevenlabs_mandarin_voice_id=settings.elevenlabs_mandarin_voice_id,
     )
     return PRDBriefingService(
         store=store,
         confluence=confluence,
-        openai_client=openai_client,
         text_client=text_client,
         voice_service=voice_service,
-        answer_audio_enabled=settings.prd_briefing_answer_audio_enabled,
     )

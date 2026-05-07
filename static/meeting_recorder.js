@@ -8,7 +8,6 @@
     selectedRecordId: root.dataset.selectedRecordId || '',
     initialSelectionPending: Boolean(root.dataset.selectedRecordId),
     diagnostics: null,
-    browserRecording: null,
     signalCheckToken: 0,
     signalCheckTimer: null,
   };
@@ -138,224 +137,6 @@
       if (nodes.recordingStatus) nodes.recordingStatus.textContent = error.message || 'Meeting processing failed.';
     }
   };
-
-  const telemetry = (event, data = {}) => {
-    fetch('/api/meeting-recorder/reminder-telemetry', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        event,
-        page_path: window.location.pathname,
-        ...data,
-      }),
-    }).catch(() => {});
-  };
-
-  const browserAudioMimeType = () => {
-    const candidates = [
-      'audio/webm;codecs=opus',
-      'audio/webm',
-      'audio/mp4',
-      'audio/ogg;codecs=opus',
-    ];
-    return candidates.find((candidate) => window.MediaRecorder?.isTypeSupported?.(candidate)) || '';
-  };
-
-  const browserAudioSupportSnapshot = () => ({
-    get_user_media_supported: Boolean(navigator.mediaDevices?.getUserMedia),
-    get_display_media_supported: Boolean(navigator.mediaDevices?.getDisplayMedia),
-    media_recorder_supported: Boolean(window.MediaRecorder),
-    selected_mime_type: browserAudioMimeType(),
-    protocol: window.location.protocol,
-    host: window.location.host,
-  });
-
-  const isVirtualAudioInputLabel = (label) => {
-    const normalized = String(label || '').toLowerCase();
-    return [
-      'blackhole',
-      'meeting recorder',
-      'aggregate',
-      'multi-output',
-      'soundflower',
-      'loopback',
-    ].some((needle) => normalized.includes(needle));
-  };
-
-  const audioInputDevices = async () => {
-    if (!navigator.mediaDevices?.enumerateDevices) return [];
-    try {
-      return (await navigator.mediaDevices.enumerateDevices())
-        .filter((device) => device.kind === 'audioinput');
-    } catch (_error) {
-      return [];
-    }
-  };
-
-  const choosePreferredAudioInput = (devices, currentLabel = '') => {
-    const inputs = Array.isArray(devices) ? devices.filter((device) => device.kind === 'audioinput') : [];
-    const realInputs = inputs.filter((device) => !isVirtualAudioInputLabel(device.label));
-    const currentLooksReal = currentLabel && !isVirtualAudioInputLabel(currentLabel);
-    if (currentLooksReal) return null;
-    const priority = [
-      /macbook.*microphone/i,
-      /built-?in.*microphone/i,
-      /airpods|headset|usb|external/i,
-      /microphone/i,
-    ];
-    for (const pattern of priority) {
-      const match = realInputs.find((device) => pattern.test(device.label || ''));
-      if (match) return match;
-    }
-    return realInputs[0] || null;
-  };
-
-  const browserAudioConstraints = (deviceId = '') => ({
-    audio: {
-      ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
-      echoCancellation: true,
-      noiseSuppression: true,
-      autoGainControl: true,
-    },
-  });
-
-  const browserMeetingTabConstraints = () => ({
-    video: true,
-    audio: true,
-  });
-
-  const stopStreamTracks = (stream) => {
-    stream?.getTracks?.().forEach((track) => track.stop());
-  };
-
-  const watchCaptureTrackEnds = (stream, capturePath) => {
-    if (!stream?.getTracks) return () => {};
-    const disposers = [];
-    stream.getTracks().forEach((track) => {
-      const handler = () => {
-        const active = state.browserRecording;
-        if (!active || active.capturePath !== capturePath) return;
-        const reason = `${track.kind || 'media'} track ended`;
-        active.captureEndedAt = new Date().toISOString();
-        active.captureEndReason = reason;
-        if (nodes.recordingStatus) {
-          nodes.recordingStatus.textContent = 'Meeting tab audio sharing stopped. Stop this recording and start again.';
-        }
-        telemetry('browser_audio_capture_track_ended', {
-          capture_path: capturePath,
-          track_kind: track.kind || '',
-          track_label: track.label || '',
-          elapsed_ms: Math.max(0, Date.now() - new Date(active.startedAt).getTime()),
-        });
-      };
-      track.addEventListener('ended', handler);
-      disposers.push(() => track.removeEventListener('ended', handler));
-    });
-    return () => disposers.forEach((dispose) => dispose());
-  };
-
-  const closeAudioContext = (context) => {
-    const closePromise = context?.close?.();
-    if (closePromise?.catch) closePromise.catch(() => {});
-  };
-
-  const mixBrowserMeetingAudio = async (micStream, meetingStream) => {
-    const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
-    if (!AudioContextCtor) {
-      throw new Error('This browser cannot mix meeting tab audio and microphone audio.');
-    }
-    const meetingAudioTracks = meetingStream.getAudioTracks();
-    if (!meetingAudioTracks.length) {
-      throw new Error('Chrome did not provide meeting tab audio. Select the meeting Chrome tab and enable tab audio sharing.');
-    }
-    const context = new AudioContextCtor();
-    if (context.state === 'suspended') await context.resume();
-    const destination = context.createMediaStreamDestination();
-    const sources = [];
-    const connectStream = (stream) => {
-      const source = context.createMediaStreamSource(stream);
-      source.connect(destination);
-      sources.push(source);
-    };
-    connectStream(meetingStream);
-    if (micStream.getAudioTracks().length) connectStream(micStream);
-    return {
-      stream: destination.stream,
-      context,
-      sources,
-      meetingAudioTrackLabel: meetingAudioTracks.map((track) => track.label || '').filter(Boolean).join(' | '),
-      meetingVideoTrackLabel: meetingStream.getVideoTracks().map((track) => track.label || '').filter(Boolean).join(' | '),
-      meetingAudioTrackCount: meetingAudioTracks.length,
-    };
-  };
-
-  const amplitudeToDb = (value) => {
-    const amplitude = Math.max(0, Number(value) || 0);
-    if (!amplitude) return -120;
-    return Math.max(-120, 20 * Math.log10(amplitude));
-  };
-
-  const measureBrowserAudioSignal = async (stream, durationMs = 1200) => {
-    const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
-    if (!AudioContextCtor) return { status: 'unavailable', rms_db: null, peak_db: null };
-    const context = new AudioContextCtor();
-    try {
-      if (context.state === 'suspended') await context.resume();
-      const source = context.createMediaStreamSource(stream);
-      const analyser = context.createAnalyser();
-      analyser.fftSize = 2048;
-      source.connect(analyser);
-      const samples = new Float32Array(analyser.fftSize);
-      let sampleCount = 0;
-      let sumSquares = 0;
-      let peak = 0;
-      const started = performance.now();
-      await new Promise((resolve) => {
-        const collect = () => {
-          analyser.getFloatTimeDomainData(samples);
-          for (const sample of samples) {
-            const abs = Math.abs(sample);
-            peak = Math.max(peak, abs);
-            sumSquares += sample * sample;
-          }
-          sampleCount += samples.length;
-          if (performance.now() - started >= durationMs) {
-            resolve();
-            return;
-          }
-          window.requestAnimationFrame(collect);
-        };
-        collect();
-      });
-      source.disconnect();
-      const rms = Math.sqrt(sumSquares / Math.max(1, sampleCount));
-      return {
-        status: 'ok',
-        rms_db: amplitudeToDb(rms),
-        peak_db: amplitudeToDb(peak),
-      };
-    } catch (error) {
-      return {
-        status: 'unavailable',
-        rms_db: null,
-        peak_db: null,
-        warning: error.message || '',
-      };
-    } finally {
-      const closePromise = context.close?.();
-      if (closePromise?.catch) closePromise.catch(() => {});
-    }
-  };
-
-  const blobToBase64 = (blob) => new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      const result = String(reader.result || '');
-      resolve(result.includes(',') ? result.split(',').pop() : result);
-    };
-    reader.onerror = () => reject(reader.error || new Error('Could not read browser audio.'));
-    reader.readAsDataURL(blob);
-  });
 
   const platformLabel = (platform) => {
     if (platform === 'google_meet') return 'Google Meet';
@@ -687,23 +468,13 @@
           }
           await loadRecords();
           await loadRecord(recordId);
-          telemetry('recording_signal_check_failed', {
-            outcome: 'error',
-            reason: recordId,
-            error_message: health.warning || record.error || '',
-          });
           return;
         }
         if (nodes.recordingStatus && state.activeRecordId === recordId) {
           nodes.recordingStatus.textContent = `Recording: ${record.title || 'Untitled meeting'}`;
         }
         scheduleSignalCheck(recordId, 3000, remainingChecks - 1, token);
-      } catch (error) {
-        telemetry('recording_signal_check_error', {
-          outcome: 'error',
-          reason: recordId,
-          error_message: error.message || '',
-        });
+      } catch (_error) {
         scheduleSignalCheck(recordId, 3000, remainingChecks - 1, token);
       }
     }, delayMs);
@@ -733,14 +504,6 @@
   const startRecording = async (meeting) => {
     clearSignalChecks();
     const meetingLink = String(meeting?.meeting_link || '').trim();
-    const support = browserAudioSupportSnapshot();
-    telemetry('recording_start_decision', {
-      capture_path: meetingLink ? 'screencapturekit_audio' : 'screencapturekit_f2f',
-      meeting_link_present: Boolean(meetingLink),
-      title_present: Boolean(String(meeting?.title || '').trim()),
-      browser_fallback_enabled: false,
-      ...support,
-    });
     let payload;
     try {
       payload = await api('/api/meeting-recorder/start', {
@@ -759,11 +522,6 @@
       });
     } catch (error) {
       if (!meetingLink && isScreenCaptureKitStartupFailure(error)) {
-        telemetry('screencapturekit_permission_required', {
-          capture_path: 'screencapturekit_f2f',
-          sck_error_message: error.message || '',
-          ...support,
-        });
         throw new Error(
           `${error.message || 'ScreenCaptureKit helper could not start.'} ` +
           'Grant Screen & System Audio Recording and Microphone permissions, then start recording again.'
@@ -779,312 +537,8 @@
   };
 
   const stopRecording = async (recordId) => {
-    if (recordId === 'browser-audio' && state.browserRecording) {
-      await stopBrowserAudioRecording();
-      return;
-    }
     clearSignalChecks();
     const payload = await api(`/api/meeting-recorder/records/${encodeURIComponent(recordId)}/stop`, { method: 'POST' });
-    setRecordingState(null);
-    await loadRecords();
-    await loadRecord(payload.record.record_id);
-    await monitorAutoProcessJob(payload.record.record_id, payload);
-  };
-
-  const startBrowserAudioRecording = async (meeting) => {
-    clearSignalChecks();
-    const meetingLink = String(meeting?.meeting_link || '').trim();
-    const isLinkedMeeting = Boolean(meetingLink);
-    const capturePath = isLinkedMeeting ? 'browser_tab_audio_linked' : 'browser_audio_f2f';
-    const captureLabel = isLinkedMeeting ? 'Browser meeting tab audio + microphone' : 'Browser microphone';
-    const mimeType = browserAudioMimeType();
-    telemetry('browser_audio_get_user_media_started', {
-      capture_path: capturePath,
-      selected_mime_type: mimeType,
-    });
-    let micStream;
-    let meetingStream;
-    let recordingStream;
-    let mix = null;
-    let devices = [];
-    let preferredDevice = null;
-    let activeTrackLabel = '';
-    let preflight = { status: 'not_checked', rms_db: null, peak_db: null };
-    let cleanupCaptureHandlers = () => {};
-    try {
-      micStream = await navigator.mediaDevices.getUserMedia(browserAudioConstraints());
-      activeTrackLabel = micStream.getAudioTracks()[0]?.label || '';
-      devices = await audioInputDevices();
-      preferredDevice = choosePreferredAudioInput(devices, activeTrackLabel);
-      if (preferredDevice?.deviceId) {
-        stopStreamTracks(micStream);
-        micStream = await navigator.mediaDevices.getUserMedia(browserAudioConstraints(preferredDevice.deviceId));
-        activeTrackLabel = micStream.getAudioTracks()[0]?.label || preferredDevice.label || '';
-      }
-      if (isLinkedMeeting) {
-        if (nodes.recordingStatus) nodes.recordingStatus.textContent = 'Select the meeting tab and share tab audio...';
-        meetingStream = await navigator.mediaDevices.getDisplayMedia(browserMeetingTabConstraints());
-        cleanupCaptureHandlers = watchCaptureTrackEnds(meetingStream, capturePath);
-        mix = await mixBrowserMeetingAudio(micStream, meetingStream);
-        recordingStream = mix.stream;
-      } else {
-        recordingStream = micStream;
-      }
-      preflight = await measureBrowserAudioSignal(recordingStream);
-      telemetry('browser_audio_preflight_checked', {
-        capture_path: capturePath,
-        selected_mime_type: mimeType,
-        active_track_label: activeTrackLabel,
-        preferred_device_label: preferredDevice?.label || '',
-        input_device_count: devices.length,
-        preflight_rms_db: preflight.rms_db,
-        preflight_peak_db: preflight.peak_db,
-        meeting_audio_track_label: mix?.meetingAudioTrackLabel || '',
-        meeting_video_track_label: mix?.meetingVideoTrackLabel || '',
-        meeting_audio_track_count: mix?.meetingAudioTrackCount || 0,
-        audio_input_labels: devices.map((device) => device.label || '').filter(Boolean).slice(0, 12).join(' | '),
-      });
-      if (!isLinkedMeeting && preflight.status === 'ok' && Number(preflight.peak_db) <= -80) {
-        stopStreamTracks(recordingStream);
-        telemetry('browser_audio_preflight_too_quiet', {
-          capture_path: capturePath,
-          selected_mime_type: mimeType,
-          active_track_label: activeTrackLabel,
-          preferred_device_label: preferredDevice?.label || '',
-          input_device_count: devices.length,
-          preflight_rms_db: preflight.rms_db,
-          preflight_peak_db: preflight.peak_db,
-        });
-        throw new Error('Chrome is receiving silence from the selected microphone. Check macOS/Chrome microphone input, then start again.');
-      }
-    } catch (error) {
-      cleanupCaptureHandlers();
-      stopStreamTracks(recordingStream);
-      stopStreamTracks(micStream);
-      stopStreamTracks(meetingStream);
-      closeAudioContext(mix?.context);
-      telemetry('browser_audio_get_user_media_failed', {
-        capture_path: capturePath,
-        selected_mime_type: mimeType,
-        active_track_label: activeTrackLabel,
-        preferred_device_label: preferredDevice?.label || '',
-        input_device_count: devices.length,
-        preflight_rms_db: preflight.rms_db,
-        preflight_peak_db: preflight.peak_db,
-        meeting_audio_track_label: mix?.meetingAudioTrackLabel || '',
-        meeting_video_track_label: mix?.meetingVideoTrackLabel || '',
-        meeting_audio_track_count: mix?.meetingAudioTrackCount || 0,
-        error_name: error.name || '',
-        error_message: error.message || '',
-      });
-      throw error;
-    }
-    const recorder = new MediaRecorder(recordingStream, mimeType ? { mimeType } : undefined);
-    const chunks = [];
-    const startedAt = new Date().toISOString();
-    recorder.addEventListener('dataavailable', (event) => {
-      if (event.data?.size) chunks.push(event.data);
-    });
-    recorder.start(1000);
-    telemetry('browser_audio_recording_started', {
-      capture_path: capturePath,
-      selected_mime_type: mimeType,
-      recorder_mime_type: recorder.mimeType || '',
-      active_track_label: activeTrackLabel,
-      preferred_device_label: preferredDevice?.label || '',
-      input_device_count: devices.length,
-      preflight_rms_db: preflight.rms_db,
-      preflight_peak_db: preflight.peak_db,
-      meeting_audio_track_label: mix?.meetingAudioTrackLabel || '',
-      meeting_video_track_label: mix?.meetingVideoTrackLabel || '',
-      meeting_audio_track_count: mix?.meetingAudioTrackCount || 0,
-    });
-    state.browserRecording = {
-      recorder,
-      stream: recordingStream,
-      sourceStreams: [micStream, meetingStream].filter(Boolean),
-      audioContext: mix?.context || null,
-      chunks,
-      startedAt,
-      title: meeting?.title || 'Untitled meeting',
-      meetingLink,
-      platform: meeting?.platform || '',
-      transcriptLanguage: meeting?.transcript_language || selectedTranscriptLanguage(),
-      mimeType: recorder.mimeType || mimeType || 'audio/webm',
-      activeTrackLabel,
-      preferredDeviceLabel: preferredDevice?.label || '',
-      inputDeviceCount: devices.length,
-      capturePath,
-      captureLabel,
-      meetingAudioTrackLabel: mix?.meetingAudioTrackLabel || '',
-      meetingVideoTrackLabel: mix?.meetingVideoTrackLabel || '',
-      meetingAudioTrackCount: mix?.meetingAudioTrackCount || 0,
-      preflight,
-      cleanupCaptureHandlers,
-      captureEndedAt: '',
-      captureEndReason: '',
-    };
-    state.activeRecordId = 'browser-audio';
-    state.selectedRecordId = 'browser-audio';
-    if (nodes.recordingStatus) {
-      nodes.recordingStatus.textContent = `Recording: ${state.browserRecording.title}`;
-    }
-    nodes.detail.innerHTML = `<p class="empty-state">${escapeHtml(captureLabel)} recording is active. Audio will be saved after stopping.</p>`;
-    await loadRecords();
-  };
-
-  const stopBrowserAudioRecording = async () => {
-    const active = state.browserRecording;
-    if (!active) return;
-    if (nodes.recordingStatus) nodes.recordingStatus.textContent = `Finalizing ${active.captureLabel || 'browser audio'}...`;
-    const stoppedAt = new Date().toISOString();
-    telemetry('browser_audio_stop_started', {
-      capture_path: active.capturePath || 'browser_audio_f2f',
-      chunk_count: active.chunks.length,
-      recorder_mime_type: active.mimeType || '',
-      recorder_state: active.recorder.state || '',
-      active_track_label: active.activeTrackLabel || '',
-      preferred_device_label: active.preferredDeviceLabel || '',
-      input_device_count: active.inputDeviceCount || 0,
-      preflight_rms_db: active.preflight?.rms_db,
-      preflight_peak_db: active.preflight?.peak_db,
-      meeting_audio_track_label: active.meetingAudioTrackLabel || '',
-      meeting_video_track_label: active.meetingVideoTrackLabel || '',
-      meeting_audio_track_count: active.meetingAudioTrackCount || 0,
-      capture_ended_at: active.captureEndedAt || '',
-      capture_end_reason: active.captureEndReason || '',
-    });
-    const stopped = active.recorder.state === 'inactive'
-      ? Promise.resolve('already_inactive')
-      : new Promise((resolve) => {
-        let resolved = false;
-        let timeoutId = 0;
-        const done = (outcome) => {
-          if (resolved) return;
-          resolved = true;
-          window.clearTimeout(timeoutId);
-          resolve(outcome);
-        };
-        timeoutId = window.setTimeout(() => done('timeout'), 3000);
-        active.recorder.addEventListener('stop', () => done('stop_event'), { once: true });
-        try {
-          active.recorder.requestData?.();
-        } catch (_error) {
-          // Some browsers throw if requestData races with stop; stopping can still succeed.
-        }
-        try {
-          active.recorder.stop();
-        } catch (_error) {
-          done('stop_error');
-        }
-      });
-    const stopOutcome = await stopped;
-    active.cleanupCaptureHandlers?.();
-    stopStreamTracks(active.stream);
-    (active.sourceStreams || []).forEach((sourceStream) => stopStreamTracks(sourceStream));
-    closeAudioContext(active.audioContext);
-    const blob = new Blob(active.chunks, { type: active.mimeType || 'audio/webm' });
-    const elapsedMs = Math.max(0, new Date(stoppedAt).getTime() - new Date(active.startedAt).getTime());
-    telemetry('browser_audio_stop_finished', {
-      capture_path: active.capturePath || 'browser_audio_f2f',
-      blob_size: blob.size,
-      chunk_count: active.chunks.length,
-      elapsed_ms: elapsedMs,
-      recorder_mime_type: active.mimeType || '',
-      recorder_state: active.recorder.state || '',
-      stop_outcome: stopOutcome,
-      active_track_label: active.activeTrackLabel || '',
-      preferred_device_label: active.preferredDeviceLabel || '',
-      input_device_count: active.inputDeviceCount || 0,
-      preflight_rms_db: active.preflight?.rms_db,
-      preflight_peak_db: active.preflight?.peak_db,
-      meeting_audio_track_label: active.meetingAudioTrackLabel || '',
-      meeting_video_track_label: active.meetingVideoTrackLabel || '',
-      meeting_audio_track_count: active.meetingAudioTrackCount || 0,
-      capture_ended_at: active.captureEndedAt || '',
-      capture_end_reason: active.captureEndReason || '',
-    });
-    if (!blob.size) {
-      state.browserRecording = null;
-      setRecordingState(null);
-      await loadRecords();
-      throw new Error('Browser did not return any audio data. Refresh the page and start a new recording.');
-    }
-    if (nodes.recordingStatus) nodes.recordingStatus.textContent = 'Preparing browser audio...';
-    telemetry('browser_audio_upload_started', {
-      capture_path: active.capturePath || 'browser_audio_f2f',
-      blob_size: blob.size,
-      chunk_count: active.chunks.length,
-      elapsed_ms: elapsedMs,
-      recorder_mime_type: active.mimeType || '',
-      active_track_label: active.activeTrackLabel || '',
-      preferred_device_label: active.preferredDeviceLabel || '',
-      input_device_count: active.inputDeviceCount || 0,
-      preflight_rms_db: active.preflight?.rms_db,
-      preflight_peak_db: active.preflight?.peak_db,
-      meeting_audio_track_label: active.meetingAudioTrackLabel || '',
-      meeting_video_track_label: active.meetingVideoTrackLabel || '',
-      meeting_audio_track_count: active.meetingAudioTrackCount || 0,
-    });
-    const audioBase64 = await blobToBase64(blob);
-    if (nodes.recordingStatus) nodes.recordingStatus.textContent = 'Uploading browser audio...';
-    let payload;
-    try {
-      payload = await api('/api/meeting-recorder/browser-audio', {
-        method: 'POST',
-        body: JSON.stringify({
-          title: active.title,
-          meeting_link: active.meetingLink,
-          platform: active.platform,
-          recording_started_at: active.startedAt,
-          recording_stopped_at: stoppedAt,
-          mime_type: blob.type || active.mimeType || 'audio/webm',
-          audio_base64: audioBase64,
-          browser_audio_device_label: [
-            active.meetingAudioTrackLabel ? `tab: ${active.meetingAudioTrackLabel}` : '',
-            active.activeTrackLabel ? `mic: ${active.activeTrackLabel}` : '',
-          ].filter(Boolean).join(' | ') || active.activeTrackLabel || '',
-          browser_audio_capture_source: active.capturePath || 'browser_audio_f2f',
-          transcript_language: active.transcriptLanguage || 'mixed',
-          browser_audio_preflight: active.preflight || {},
-        }),
-      });
-    } catch (error) {
-      telemetry('browser_audio_upload_failed', {
-        capture_path: active.capturePath || 'browser_audio_f2f',
-        blob_size: blob.size,
-        chunk_count: active.chunks.length,
-        elapsed_ms: elapsedMs,
-        recorder_mime_type: active.mimeType || '',
-        active_track_label: active.activeTrackLabel || '',
-        preferred_device_label: active.preferredDeviceLabel || '',
-        input_device_count: active.inputDeviceCount || 0,
-        preflight_rms_db: active.preflight?.rms_db,
-        preflight_peak_db: active.preflight?.peak_db,
-        meeting_audio_track_label: active.meetingAudioTrackLabel || '',
-        meeting_video_track_label: active.meetingVideoTrackLabel || '',
-        meeting_audio_track_count: active.meetingAudioTrackCount || 0,
-        error_message: error.message || '',
-      });
-      throw error;
-    }
-    telemetry('browser_audio_upload_succeeded', {
-      capture_path: active.capturePath || 'browser_audio_f2f',
-      blob_size: blob.size,
-      chunk_count: active.chunks.length,
-      elapsed_ms: elapsedMs,
-      recorder_mime_type: active.mimeType || '',
-      active_track_label: active.activeTrackLabel || '',
-      preferred_device_label: active.preferredDeviceLabel || '',
-      input_device_count: active.inputDeviceCount || 0,
-      preflight_rms_db: active.preflight?.rms_db,
-      preflight_peak_db: active.preflight?.peak_db,
-      meeting_audio_track_label: active.meetingAudioTrackLabel || '',
-      meeting_video_track_label: active.meetingVideoTrackLabel || '',
-      meeting_audio_track_count: active.meetingAudioTrackCount || 0,
-      record_id: payload.record?.record_id || '',
-    });
-    state.browserRecording = null;
     setRecordingState(null);
     await loadRecords();
     await loadRecord(payload.record.record_id);
@@ -1158,18 +612,7 @@
       }
     }
     const selectedDate = nodes.recordDate?.value || localDateValue();
-    const activeBrowserRecord = state.browserRecording ? {
-      record_id: 'browser-audio',
-      title: state.browserRecording.title || 'Untitled meeting',
-      platform: 'f2f',
-      status: 'recording',
-      recording_started_at: state.browserRecording.startedAt,
-      recording_stopped_at: '',
-      created_at: state.browserRecording.startedAt,
-      minutes_status: 'pending',
-    } : null;
-    const allRecords = activeBrowserRecord ? [activeBrowserRecord, ...serverRecords] : serverRecords;
-    const records = allRecords.filter((record) => recordDateValue(record) === selectedDate);
+    const records = serverRecords.filter((record) => recordDateValue(record) === selectedDate);
     if (!records.length) {
       nodes.records.innerHTML = `<p class="empty-state">No meeting recordings on ${escapeHtml(selectedDate)}.</p>`;
       if (state.selectedRecordId && !state.initialSelectionPending) {
@@ -1197,12 +640,6 @@
     nodes.records.querySelectorAll('[data-record-id]').forEach((button) => {
       button.addEventListener('click', () => {
         const recordId = button.dataset.recordId || '';
-        if (recordId === 'browser-audio' && state.browserRecording) {
-          state.selectedRecordId = 'browser-audio';
-          updateRecordSelection();
-          nodes.detail.innerHTML = '<p class="empty-state">Browser microphone recording is active. Audio will be saved after stopping.</p>';
-          return;
-        }
         loadRecord(recordId);
       });
     });
@@ -1430,13 +867,11 @@
           link.remove();
           window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
           if (status) status.textContent = `Download started: ${filename}`;
-          telemetry('recording_download_started', { outcome: 'ok', reason: recordId || '' });
         } catch (error) {
           if (status) {
             status.textContent = error.message || 'Could not download audio.';
             status.classList.add('inline-status-error');
           }
-          telemetry('recording_download_failed', { outcome: 'error', reason: recordId || '', error_message: error.message || '' });
         } finally {
           button.disabled = false;
           button.textContent = originalText;

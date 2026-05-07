@@ -1112,8 +1112,6 @@ class SourceCodeQAGeneratedArtifactStore:
 class SourceCodeQAModelAvailabilityStore:
     DEFAULT_AVAILABILITY = {
         "codex_cli_bridge": True,
-        "gemini": False,
-        "vertex_ai": True,
     }
 
     def __init__(self, storage_path: Path | None = None) -> None:

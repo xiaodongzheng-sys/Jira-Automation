@@ -35,13 +35,11 @@ name_pattern = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 allowed_prefixes = (
     "BPMIS_",
     "CONFLUENCE_",
-    "ELEVENLABS_",
     "GEMINI_",
     "GMAIL_",
     "GOOGLE_APPLICATION_",
     "GOOGLE_CLOUD_",
     "JIRA_",
-    "OPENAI_",
     "PRD_BRIEFING_",
     "SEATALK_",
     "SOURCE_CODE_QA_",

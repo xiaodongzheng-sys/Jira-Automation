@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -77,7 +76,6 @@ from bpmis_jira_tool.meeting_recorder import (
     MeetingRecordStore,
     _utc_now,
     meeting_platform_from_link,
-    reminder_eligible_meetings,
 )
 from bpmis_jira_tool.monthly_report import (
     DEFAULT_MONTHLY_REPORT_RECIPIENT,
@@ -314,39 +312,6 @@ def _meeting_recorder_record_summaries_for_current_user(settings: Settings) -> l
     if _local_agent_meeting_recorder_enabled(settings):
         return _build_local_agent_client(settings).meeting_recorder_records(owner_email=_current_google_email())
     return [_meeting_record_summary(record) for record in _get_meeting_record_store().list_records(owner_email=_current_google_email())]
-
-
-def _meeting_recorder_reminder_debug(
-    *,
-    reason: str,
-    calendar_connected: bool,
-    meeting_count: int = 0,
-    active_recording: dict[str, Any] | None = None,
-    diagnostics: dict[str, Any] | None = None,
-    error: Exception | None = None,
-) -> dict[str, Any]:
-    diagnostics = diagnostics or {}
-    return {
-        "reason": reason,
-        "checked_at": datetime.now(timezone.utc).isoformat(),
-        "poll_seconds": 60,
-        "timezone": "Asia/Singapore",
-        "eligible_window": {"lead_seconds": 120, "grace_seconds": 600, "workday_start_hour": 9, "workday_end_hour": 20},
-        "calendar_connected": calendar_connected,
-        "eligible_meeting_count": meeting_count,
-        "active_recording": bool(active_recording),
-        "diagnostics": {
-            "audio_capture_label": diagnostics.get("audio_capture_label", ""),
-            "audio_capture_mode": diagnostics.get("audio_capture_mode", ""),
-            "audio_signal_verified": bool(diagnostics.get("audio_signal_verified")),
-            "system_audio_configured": bool(diagnostics.get("system_audio_configured")),
-            "ffmpeg_configured": bool(diagnostics.get("ffmpeg_configured")),
-            "whisper_cpp_configured": bool(diagnostics.get("whisper_cpp_configured")),
-            "whisper_model_exists": bool(diagnostics.get("whisper_model_exists")),
-        },
-        "error_category": _classify_portal_error(error).get("error_category") if error else "",
-        "error_code": _classify_portal_error(error).get("error_code") if error else "",
-    }
 
 
 def _try_acquire_gmail_export_lock(email: str) -> bool:
@@ -602,7 +567,6 @@ def create_app() -> Flask:
                 "can_access_prd_self_assessment": False,
                 "can_access_gmail_seatalk_demo": False,
                 "can_access_meeting_recorder": False,
-                "meeting_recorder_reminder_enabled": False,
                 "can_access_source_code_qa": False,
                 "can_manage_source_code_qa": False,
                 "asset_revision": _current_release_revision(),
@@ -675,7 +639,6 @@ def create_app() -> Flask:
             "can_access_prd_self_assessment": _can_access_prd_self_assessment(settings),
             "can_access_gmail_seatalk_demo": _can_access_gmail_seatalk_demo(settings),
             "can_access_meeting_recorder": _can_access_meeting_recorder(settings),
-            "meeting_recorder_reminder_enabled": _meeting_recorder_reminder_enabled(settings),
             "can_access_source_code_qa": _can_access_source_code_qa(settings),
             "can_manage_source_code_qa": _can_manage_source_code_qa(settings),
             "asset_revision": _current_release_revision(),
@@ -891,9 +854,7 @@ def create_app() -> Flask:
             return access_gate
         try:
             service = _build_source_code_qa_service()
-            gemini_service = _build_source_code_qa_service("gemini")
             codex_service = _build_source_code_qa_service("codex_cli_bridge")
-            vertex_service = _build_source_code_qa_service("vertex_ai")
             model_availability = _source_code_qa_model_availability()
             return jsonify(
                 {
@@ -906,9 +867,7 @@ def create_app() -> Flask:
                     "llm_ready": service.llm_ready(),
                     "llm_provider": settings.source_code_qa_llm_provider,
                     "llm_providers": {
-                        "gemini": {"ready": gemini_service.llm_ready(), "label": "Gemini", "available": model_availability["gemini"]},
                         "codex_cli_bridge": {"ready": codex_service.llm_ready(), "label": "Codex", "available": model_availability["codex_cli_bridge"]},
-                        "vertex_ai": {"ready": vertex_service.llm_ready(), "label": "Vertex AI", "available": model_availability["vertex_ai"]},
                     },
                     "llm_model": service.llm_budgets["balanced"]["model"],
                     "llm_cheap_model": service.llm_budgets["cheap"]["model"],
@@ -2400,131 +2359,6 @@ def create_app() -> Flask:
             current_app.logger.exception("Meeting Recorder calendar load failed.")
             return jsonify({"status": "error", "message": "Upcoming meetings could not be loaded right now."}), HTTPStatus.INTERNAL_SERVER_ERROR
 
-    @app.get("/api/meeting-recorder/reminders")
-    def meeting_recorder_reminders_api():
-        access_gate = _require_meeting_recorder_access(settings, api=True)
-        if access_gate is not None:
-            return access_gate
-        if not settings.meeting_recorder_reminder_enabled:
-            debug = _meeting_recorder_reminder_debug(reason="disabled", calendar_connected=True)
-            return jsonify(
-                {
-                    "status": "ok",
-                    "calendar_connected": True,
-                    "reminders_enabled": False,
-                    "meetings": [],
-                    "active_recording": None,
-                    "poll_seconds": 3600,
-                    "timezone": "Asia/Singapore",
-                    "debug": debug,
-                }
-            )
-        if not _google_credentials_have_scopes(CALENDAR_READONLY_SCOPE):
-            debug = _meeting_recorder_reminder_debug(reason="calendar_not_connected", calendar_connected=False)
-            return jsonify(
-                {
-                    "status": "ok",
-                    "calendar_connected": False,
-                    "meetings": [],
-                    "active_recording": None,
-                    "poll_seconds": 60,
-                    "timezone": "Asia/Singapore",
-                    "debug": debug,
-                }
-            )
-        try:
-            meetings = _build_calendar_meeting_service().upcoming_meetings(days=1, max_results=20)
-            eligible = reminder_eligible_meetings(meetings, timezone_name="Asia/Singapore")
-            records = _meeting_recorder_record_summaries_for_current_user(settings)
-            active_recording = next((record for record in records if str(record.get("status") or "") == "recording"), None)
-            diagnostics: dict[str, Any] = {}
-            diagnostics_error: Exception | None = None
-            try:
-                diagnostics = _meeting_recorder_diagnostics_payload(settings)
-            except Exception as error:  # noqa: BLE001
-                diagnostics_error = error
-                diagnostics = {}
-            reason = "diagnostics_failed" if diagnostics_error else "eligible_meetings_found" if eligible else "no_eligible_meetings"
-            if active_recording:
-                reason = "active_recording"
-            debug = _meeting_recorder_reminder_debug(
-                reason=reason,
-                calendar_connected=True,
-                meeting_count=len(eligible),
-                active_recording=active_recording,
-                diagnostics=diagnostics,
-                error=diagnostics_error,
-            )
-            return jsonify(
-                {
-                    "status": "ok",
-                    "calendar_connected": True,
-                    "meetings": eligible,
-                    "active_recording": active_recording,
-                    "diagnostics": diagnostics,
-                    "poll_seconds": 60,
-                    "timezone": "Asia/Singapore",
-                    "debug": debug,
-                }
-            )
-        except Exception as error:  # noqa: BLE001
-            _log_portal_event(
-                "meeting_recorder_reminders_unexpected_error",
-                level=logging.ERROR,
-                **_build_request_log_context(settings, user_identity=_get_user_identity(settings), extra=_classify_portal_error(error)),
-            )
-            current_app.logger.exception("Meeting Recorder reminders failed.")
-            debug = _meeting_recorder_reminder_debug(reason="api_error", calendar_connected=True, error=error)
-            return (
-                jsonify({"status": "error", "message": "Meeting reminders could not be loaded right now.", "debug": debug}),
-                HTTPStatus.INTERNAL_SERVER_ERROR,
-            )
-
-    @app.post("/api/meeting-recorder/reminder-telemetry")
-    def meeting_recorder_reminder_telemetry_api():
-        access_gate = _require_meeting_recorder_access(settings, api=True)
-        if access_gate is not None:
-            return access_gate
-        payload = request.get_json(silent=True) or {}
-        allowed_event = str(payload.get("event") or "unknown").strip()[:80]
-        extra = {
-            "telemetry_event": allowed_event,
-            "reason": str(payload.get("reason") or "").strip()[:80],
-            "outcome": str(payload.get("outcome") or "").strip()[:80],
-            "page_path": str(payload.get("page_path") or "").strip()[:240],
-            "capture_path": str(payload.get("capture_path") or "").strip()[:120],
-            "meeting_link_present": bool(payload.get("meeting_link_present")),
-            "get_user_media_supported": bool(payload.get("get_user_media_supported")),
-            "media_recorder_supported": bool(payload.get("media_recorder_supported")),
-            "selected_mime_type": str(payload.get("selected_mime_type") or "").strip()[:120],
-            "recorder_mime_type": str(payload.get("recorder_mime_type") or "").strip()[:120],
-            "recorder_state": str(payload.get("recorder_state") or "").strip()[:80],
-            "stop_outcome": str(payload.get("stop_outcome") or "").strip()[:80],
-            "active_track_label": str(payload.get("active_track_label") or "").strip()[:160],
-            "preferred_device_label": str(payload.get("preferred_device_label") or "").strip()[:160],
-            "input_device_count": int(payload.get("input_device_count") or 0),
-            "audio_input_labels": str(payload.get("audio_input_labels") or "").strip()[:800],
-            "preflight_rms_db": _safe_float(payload.get("preflight_rms_db")),
-            "preflight_peak_db": _safe_float(payload.get("preflight_peak_db")),
-            "blob_size": int(payload.get("blob_size") or 0),
-            "chunk_count": int(payload.get("chunk_count") or 0),
-            "elapsed_ms": int(payload.get("elapsed_ms") or 0),
-            "record_id": str(payload.get("record_id") or "").strip()[:120],
-            "protocol": str(payload.get("protocol") or "").strip()[:40],
-            "host": str(payload.get("host") or "").strip()[:200],
-            "error_name": str(payload.get("error_name") or "").strip()[:120],
-            "meeting_count": int(payload.get("meeting_count") or 0),
-            "suppressed_count": int(payload.get("suppressed_count") or 0),
-            "active_recording": bool(payload.get("active_recording")),
-            "error_category": str(payload.get("error_category") or "").strip()[:120],
-            "error_message": str(payload.get("error_message") or "").strip()[:500],
-        }
-        _log_portal_event(
-            "meeting_recorder_reminder_telemetry",
-            **_build_request_log_context(settings, user_identity=_get_user_identity(settings), extra=extra),
-        )
-        return jsonify({"status": "ok"})
-
     @app.get("/api/meeting-recorder/records")
     def meeting_recorder_records_api():
         access_gate = _require_meeting_recorder_access(settings, api=True)
@@ -2644,120 +2478,6 @@ def create_app() -> Flask:
         except ToolError as error:
             return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
 
-    @app.post("/api/meeting-recorder/browser-audio")
-    def meeting_recorder_browser_audio_api():
-        access_gate = _require_meeting_recorder_access(settings, api=True)
-        if access_gate is not None:
-            return access_gate
-        return jsonify({
-            "status": "error",
-            "message": "Browser recording fallback is disabled. Grant Screen & System Audio Recording and Microphone permissions, then start recording again.",
-        }), HTTPStatus.GONE
-        payload = request.get_json(silent=True) or {}
-        try:
-            audio_base64 = str(payload.get("audio_base64") or "")
-            if not audio_base64:
-                raise ToolError("Browser audio upload was empty.")
-            meeting_link = str(payload.get("meeting_link") or payload.get("meetingLink") or "").strip()
-            capture_source = str(payload.get("browser_audio_capture_source") or payload.get("capture_source") or "").strip()
-            capture_path = capture_source or ("browser_tab_audio_linked" if meeting_link else "browser_audio_f2f")
-            _log_portal_event(
-                "meeting_recorder_browser_audio_received",
-                **_build_request_log_context(
-                    settings,
-                    user_identity=_get_user_identity(settings),
-                    extra={
-                        "capture_path": capture_path,
-                        "audio_base64_length": len(audio_base64),
-                        "mime_type": str(payload.get("mime_type") or "").strip()[:120],
-                        "browser_audio_device_label": str(payload.get("browser_audio_device_label") or "").strip()[:160],
-                        "started_at_present": bool(str(payload.get("recording_started_at") or payload.get("started_at") or "").strip()),
-                        "stopped_at_present": bool(str(payload.get("recording_stopped_at") or payload.get("stopped_at") or "").strip()),
-                    },
-                ),
-            )
-            recording_mode = "audio_only"
-            remote_payload = {
-                "owner_email": _current_google_email(),
-                "title": str(payload.get("title") or "Untitled meeting").strip(),
-                "meeting_link": meeting_link,
-                "recording_mode": recording_mode,
-                "platform": str(payload.get("platform") or meeting_platform_from_link(meeting_link)).strip(),
-                "recording_started_at": str(payload.get("recording_started_at") or payload.get("started_at") or "").strip(),
-                "recording_stopped_at": str(payload.get("recording_stopped_at") or payload.get("stopped_at") or "").strip(),
-                "mime_type": str(payload.get("mime_type") or "").strip(),
-                "audio_base64": audio_base64,
-                "browser_audio_device_label": str(payload.get("browser_audio_device_label") or "").strip(),
-                "browser_audio_capture_source": capture_path,
-                "transcript_language": normalize_meeting_transcript_language(payload.get("transcript_language") or payload.get("transcriptLanguage")),
-                "browser_audio_preflight": payload.get("browser_audio_preflight") if isinstance(payload.get("browser_audio_preflight"), dict) else {},
-            }
-            if _local_agent_meeting_recorder_enabled(settings):
-                result = _build_local_agent_client(settings).meeting_recorder_browser_audio(remote_payload)
-                record = result.get("record") or {}
-                record_id = str(record.get("record_id") or "").strip()
-                process_payload = _meeting_recorder_auto_process_payload(
-                    settings=settings,
-                    record_id=record_id,
-                    owner_email=_current_google_email(),
-                ) if record_id else {"auto_process_error": "Meeting processing could not be queued because the recording id was missing."}
-                _log_portal_event(
-                    "meeting_recorder_browser_audio_forwarded",
-                    **_build_request_log_context(
-                        settings,
-                        user_identity=_get_user_identity(settings),
-                        extra={
-                            "capture_path": capture_path,
-                            "record_id": str(record.get("record_id") or "").strip()[:120],
-                            "record_status": str(record.get("status") or "").strip()[:80],
-                            "max_volume_db": ((record.get("recording_health") or {}) if isinstance(record.get("recording_health"), dict) else {}).get("max_volume_db"),
-                            "audio_capture_profile": str(((record.get("media") or {}) if isinstance(record.get("media"), dict) else {}).get("audio_capture_profile") or "").strip()[:120],
-                        },
-                    ),
-                )
-                return jsonify({"status": "ok", "record": record, **process_payload})
-            try:
-                audio_bytes = base64.b64decode(audio_base64, validate=True)
-            except (ValueError, TypeError) as error:
-                raise ToolError("Browser audio upload was not valid base64.") from error
-            record = _get_meeting_recorder_runtime().import_browser_audio_recording(
-                owner_email=_current_google_email(),
-                title=remote_payload["title"],
-                platform=remote_payload["platform"],
-                meeting_link=meeting_link,
-                started_at=remote_payload["recording_started_at"],
-                stopped_at=remote_payload["recording_stopped_at"],
-                audio_bytes=audio_bytes,
-                mime_type=remote_payload["mime_type"],
-                device_label=remote_payload["browser_audio_device_label"],
-                capture_source=remote_payload["browser_audio_capture_source"],
-                preflight_metrics=remote_payload["browser_audio_preflight"],
-                transcript_language=normalize_meeting_transcript_language(payload.get("transcript_language") or payload.get("transcriptLanguage")),
-            )
-            process_payload = _meeting_recorder_auto_process_payload(
-                settings=settings,
-                record_id=str(record.get("record_id") or ""),
-                owner_email=_current_google_email(),
-            )
-            _log_portal_event(
-                "meeting_recorder_browser_audio_saved",
-                **_build_request_log_context(
-                    settings,
-                    user_identity=_get_user_identity(settings),
-                    extra={
-                        "capture_path": capture_path,
-                        "record_id": str(record.get("record_id") or "").strip()[:120],
-                        "record_status": str(record.get("status") or "").strip()[:80],
-                        "duration_seconds": float(((record.get("recording_health") or {}) if isinstance(record.get("recording_health"), dict) else {}).get("duration_seconds") or 0),
-                        "max_volume_db": ((record.get("recording_health") or {}) if isinstance(record.get("recording_health"), dict) else {}).get("max_volume_db"),
-                        "audio_capture_profile": str(((record.get("media") or {}) if isinstance(record.get("media"), dict) else {}).get("audio_capture_profile") or "").strip()[:120],
-                    },
-                ),
-            )
-            return jsonify({"status": "ok", "record": _meeting_record_summary(record), **process_payload})
-        except (ConfigError, ToolError) as error:
-            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
-
     @app.post("/api/meeting-recorder/records/<record_id>/process")
     def meeting_recorder_process_api(record_id: str):
         access_gate = _require_meeting_recorder_access(settings, api=True)
@@ -2809,16 +2529,6 @@ def create_app() -> Flask:
             return jsonify(_public_meeting_recorder_process_job_snapshot(snapshot))
         except (ConfigError, ToolError, requests.RequestException) as error:
             return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
-
-    @app.post("/api/meeting-recorder/records/<record_id>/repair-video")
-    def meeting_recorder_repair_video_api(record_id: str):
-        access_gate = _require_meeting_recorder_access(settings, api=True)
-        if access_gate is not None:
-            return access_gate
-        return jsonify({
-            "status": "error",
-            "message": "Video recording and playback repair are no longer supported. Meeting Recorder is audio-only.",
-        }), HTTPStatus.BAD_REQUEST
 
     @app.post("/api/meeting-recorder/records/<record_id>/send-email")
     def meeting_recorder_send_email_api(record_id: str):
@@ -4524,11 +4234,6 @@ def create_app() -> Flask:
                 HTTPStatus.INTERNAL_SERVER_ERROR,
             )
 
-    @app.post("/api/jobs/preview")
-    @app.post("/api/jobs/run")
-    def removed_sheet_automation_job_api():
-        return jsonify({"status": "error", "message": "Job not found."}), HTTPStatus.NOT_FOUND
-
     @app.get("/api/jobs/<job_id>")
     def get_job(job_id: str):
         snapshot = current_app.config["JOB_STORE"].snapshot(job_id)
@@ -4777,16 +4482,7 @@ def _build_gmail_dashboard_service() -> GmailDashboardService:
 def _meeting_recorder_config(settings: Settings) -> MeetingRecorderConfig:
     return MeetingRecorderConfig(
         ffmpeg_bin=settings.meeting_recorder_ffmpeg_bin,
-        video_input=settings.meeting_recorder_video_input,
         audio_input=settings.meeting_recorder_audio_input,
-        video_fps=settings.meeting_recorder_video_fps,
-        video_max_width=settings.meeting_recorder_video_max_width,
-        video_max_height=settings.meeting_recorder_video_max_height,
-        avfoundation_pixel_format=settings.meeting_recorder_avfoundation_pixel_format,
-        screen_preflight_timeout_seconds=settings.meeting_recorder_screen_preflight_timeout_seconds,
-        audio_only_fallback_on_screen_failure=settings.meeting_recorder_audio_only_fallback_on_screen_failure,
-        frame_interval_seconds=settings.meeting_recorder_frame_interval_seconds,
-        vision_model=settings.meeting_recorder_vision_model,
         transcribe_provider=settings.meeting_recorder_transcribe_provider,
         whisper_cpp_bin=settings.meeting_recorder_whisper_cpp_bin,
         whisper_model=settings.meeting_recorder_whisper_model,
@@ -5825,10 +5521,6 @@ def _can_access_meeting_recorder(settings: Settings) -> bool:
     return _is_portal_admin()
 
 
-def _meeting_recorder_reminder_enabled(settings: Settings) -> bool:
-    return bool(settings.meeting_recorder_reminder_enabled and _can_access_meeting_recorder(settings))
-
-
 def _can_access_source_code_qa(settings: Settings) -> bool:
     return _is_portal_user()
 
@@ -5866,9 +5558,10 @@ def _source_code_qa_git_auth_ready(service: Any, settings: Settings) -> bool:
 
 def _build_source_code_qa_service(llm_provider: str | None = None) -> SourceCodeQAService:
     service: SourceCodeQAService = current_app.config["SOURCE_CODE_QA_SERVICE"]
-    resolved = service if llm_provider is None else service.with_llm_provider(str(llm_provider or ""))
+    normalized_provider = SourceCodeQAService.normalize_query_llm_provider(llm_provider)
+    resolved = service if llm_provider is None else service.with_llm_provider(normalized_provider)
     if _local_agent_source_code_qa_enabled(current_app.config["SETTINGS"]):
-        return RemoteSourceCodeQAService(_build_local_agent_client(current_app.config["SETTINGS"]), service, llm_provider=llm_provider or resolved.llm_provider_name)
+        return RemoteSourceCodeQAService(_build_local_agent_client(current_app.config["SETTINGS"]), service, llm_provider=normalized_provider or resolved.llm_provider_name)
     return resolved
 
 

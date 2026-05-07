@@ -499,19 +499,6 @@ class LocalAgentServerTests(unittest.TestCase):
         self.assertIn("Stop the recording", response.get_json()["message"])
         response.close()
 
-    def test_signed_meeting_recorder_repair_video_is_unsupported(self):
-        fake_runtime = Mock()
-        self.app.config["MEETING_RECORDER_RUNTIME"] = fake_runtime
-
-        response = self._post_signed(
-            "/api/local-agent/meeting-recorder/repair-video",
-            {"record_id": "meeting-1", "owner_email": "owner@npt.sg"},
-        )
-
-        self.assertEqual(response.status_code, 400)
-        self.assertIn("audio-only", response.get_json()["message"])
-        fake_runtime.repair_video_playback.assert_not_called()
-
     def test_signed_meeting_recorder_start_allows_blank_link_for_sck_f2f(self):
         fake_runtime = Mock()
         fake_runtime.start_recording.return_value = {
