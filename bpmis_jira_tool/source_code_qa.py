@@ -112,11 +112,6 @@ from bpmis_jira_tool.source_code_qa_patterns import (
     SQL_READ_TABLE_PATTERN,
     SQL_WRITE_TABLE_PATTERN,
     EXACT_LOOKUP_TERM_PATTERN,
-    CODE_USAGE_SUFFIXES,
-    NON_FUNCTION_USAGE_SUFFIXES,
-    USAGE_QUERY_HINTS,
-    FUNCTION_USAGE_QUERY_HINTS,
-    COMPLEX_REASONING_QUERY_HINTS,
     PROPERTIES_KEY_PATTERN,
     CONFIG_ASSIGNMENT_PATTERN,
     CONFIG_PLACEHOLDER_PATTERN,
@@ -7459,123 +7454,6 @@ class SourceCodeQAService:
             if term not in terms:
                 terms.append(term)
         return terms[:8]
-
-    @staticmethod
-    def _simple_function_usage_symbols(question: str) -> list[str]:
-        text = str(question or "")
-        lowered = f" {text.lower()} "
-        has_usage_hint = any(hint in lowered for hint in USAGE_QUERY_HINTS)
-        has_function_hint = any(hint in lowered for hint in FUNCTION_USAGE_QUERY_HINTS)
-        if not (has_usage_hint and has_function_hint):
-            return []
-        if any(hint in lowered for hint in COMPLEX_REASONING_QUERY_HINTS):
-            return []
-        noise = {
-            "any",
-            "function",
-            "functions",
-            "method",
-            "methods",
-            "used",
-            "usage",
-            "referenced",
-            "called",
-            "check",
-        }
-        symbols: list[str] = []
-        for raw in IDENTIFIER_PATTERN.findall(text):
-            candidate = raw.strip("`'\".,;()[]{}<>")
-            lowered_candidate = candidate.lower()
-            if len(candidate) < 4 or lowered_candidate in STOPWORDS or lowered_candidate in LOW_VALUE_CALL_SYMBOLS or lowered_candidate in noise:
-                continue
-            if candidate not in symbols:
-                symbols.append(candidate)
-        return symbols[:4]
-
-    @staticmethod
-    def _match_contains_any_symbol(match: dict[str, Any], symbols: list[str]) -> bool:
-        haystack = f"{match.get('path') or ''}\n{match.get('snippet') or ''}".lower()
-        return any(symbol.lower() in haystack for symbol in symbols)
-
-    @classmethod
-    def _match_has_function_usage_evidence(cls, match: dict[str, Any], symbols: list[str]) -> bool:
-        path = str(match.get("path") or "")
-        suffix = Path(path).suffix.lower()
-        if suffix in NON_FUNCTION_USAGE_SUFFIXES or suffix not in CODE_USAGE_SUFFIXES:
-            return False
-        lines = str(match.get("snippet") or "").splitlines()
-        for index, line in enumerate(lines):
-            line_lower = line.lower()
-            if not any(symbol.lower() in line_lower for symbol in symbols):
-                continue
-            if cls._line_is_ui_or_config_literal(line):
-                continue
-            window = lines[max(0, index - 6) : min(len(lines), index + 4)]
-            window_text = "\n".join(window)
-            window_lower = window_text.lower()
-            for symbol in symbols:
-                lowered_symbol = symbol.lower()
-                accessor = cls._accessor_suffix(symbol).lower()
-                if re.search(rf"\b(?:get|set|is){re.escape(accessor)}\s*\(", window_lower):
-                    return True
-                if re.search(rf"(?<![A-Za-z0-9_]){re.escape(lowered_symbol)}\s*\(", line_lower):
-                    return True
-                if re.search(rf"\.\s*{re.escape(lowered_symbol)}\b", line_lower):
-                    return True
-            if cls._window_has_function_boundary(window) and cls._line_looks_like_executable_code(line):
-                return True
-        return False
-
-    @staticmethod
-    def _accessor_suffix(symbol: str) -> str:
-        parts = [part for part in re.split(r"[_\W]+", str(symbol or "")) if part]
-        if len(parts) > 1:
-            return "".join(part[:1].upper() + part[1:] for part in parts)
-        value = str(symbol or "")
-        return value[:1].upper() + value[1:]
-
-    @staticmethod
-    def _line_is_ui_or_config_literal(line: str) -> bool:
-        lowered = str(line or "").lower()
-        return any(
-            marker in lowered
-            for marker in (
-                "label",
-                "placeholder",
-                "tooltip",
-                "title",
-                "rules",
-                "columns",
-                "field:",
-                "name:",
-                "prop:",
-                "key:",
-                "value:",
-            )
-        )
-
-    @staticmethod
-    def _line_looks_like_executable_code(line: str) -> bool:
-        stripped = str(line or "").strip()
-        lowered = stripped.lower()
-        return bool(
-            re.search(r"\b(if|for|while|switch|case|return|throw|new)\b", lowered)
-            or "=" in stripped
-            or "." in stripped
-            or "->" in stripped
-            or "=>" in stripped
-        )
-
-    @staticmethod
-    def _window_has_function_boundary(lines: list[str]) -> bool:
-        for line in lines:
-            if JAVA_METHOD_DEF_PATTERN.search(line) or PY_DEF_PATTERN.search(line) or JS_DEF_PATTERN.search(line):
-                return True
-            if re.search(r"\b(?:public|private|protected)\s+[A-Za-z0-9_<>, ?\[\]]+\s+[A-Za-z_][A-Za-z0-9_]*\s*\(", line):
-                return True
-            if re.search(r"\b(?:async\s+)?[A-Za-z_][A-Za-z0-9_]*\s*=\s*(?:async\s*)?\([^)]*\)\s*=>", line):
-                return True
-        return False
 
     @staticmethod
     def _exact_lookup_is_sufficient(terms: list[str], matches: list[dict[str, Any]]) -> bool:
