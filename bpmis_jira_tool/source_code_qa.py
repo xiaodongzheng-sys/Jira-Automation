@@ -11029,6 +11029,16 @@ class SourceCodeQAService:
                     "tools": ["find_tables", "find_api_routes", "trace_flow", "search_code"],
                 }
             )
+        deduped_steps = self._dedupe_agent_plan_steps(steps)
+        return {
+            "mode": "local_agentic_retrieval",
+            "recipe_version": 3,
+            "status": "planned" if deduped_steps else "not_needed",
+            "intent": intent,
+            "steps": deduped_steps[:6],
+        }
+
+    def _dedupe_agent_plan_steps(self, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
         deduped_steps: list[dict[str, Any]] = []
         seen: set[str] = set()
         for step in steps:
@@ -11045,13 +11055,7 @@ class SourceCodeQAService:
             ]
             deduped_steps.append({**step, "terms": terms[:20], "tools": list(dict.fromkeys(tools))[:5]})
             seen.add(name)
-        return {
-            "mode": "local_agentic_retrieval",
-            "recipe_version": 3,
-            "status": "planned" if deduped_steps else "not_needed",
-            "intent": intent,
-            "steps": deduped_steps[:6],
-        }
+        return deduped_steps
 
     def _planner_seed_terms(self, question: str, evidence_summary: dict[str, Any]) -> list[str]:
         terms: list[str] = []
