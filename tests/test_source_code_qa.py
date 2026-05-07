@@ -7937,7 +7937,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             text='{"ok":true}',
         )
 
-        with patch("bpmis_jira_tool.source_code_qa.requests.post", return_value=fake_response) as mocked_post:
+        with patch("bpmis_jira_tool.source_code_qa_llm_providers.requests.post", return_value=fake_response) as mocked_post:
             self._build_all_indexes(service)
             payload = service.query(
                 pm_team="AF",
@@ -8030,7 +8030,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             text='{"ok":true}',
         )
 
-        with patch("bpmis_jira_tool.source_code_qa.requests.post", side_effect=[capped_response, repaired_response]) as mocked_post:
+        with patch("bpmis_jira_tool.source_code_qa_llm_providers.requests.post", side_effect=[capped_response, repaired_response]) as mocked_post:
             self._build_all_indexes(service)
             payload = service.query(
                 pm_team="AF",
@@ -8106,7 +8106,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             text='{"ok":true}',
         )
 
-        with patch("bpmis_jira_tool.source_code_qa.requests.post", return_value=fake_response) as mocked_post:
+        with patch("bpmis_jira_tool.source_code_qa_llm_providers.requests.post", return_value=fake_response) as mocked_post:
             payload = service.query(
                 pm_team="AF",
                 country="All",
@@ -8171,7 +8171,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             text='{"ok":true}',
         )
 
-        with patch("bpmis_jira_tool.source_code_qa.requests.post", return_value=fake_response) as mocked_post:
+        with patch("bpmis_jira_tool.source_code_qa_llm_providers.requests.post", return_value=fake_response) as mocked_post:
             payload = service.query(
                 pm_team="AF",
                 country="All",
@@ -8364,7 +8364,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             text='{"ok":true}',
         )
 
-        with patch("bpmis_jira_tool.source_code_qa.requests.post", return_value=fake_response) as mocked_post:
+        with patch("bpmis_jira_tool.source_code_qa_llm_providers.requests.post", return_value=fake_response) as mocked_post:
             self._build_all_indexes(service)
             payload = service.query(
                 pm_team="AF",
@@ -8424,10 +8424,10 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         )
 
         with patch(
-            "bpmis_jira_tool.source_code_qa.service_account.Credentials.from_service_account_file",
+            "bpmis_jira_tool.source_code_qa_llm_providers.service_account.Credentials.from_service_account_file",
             return_value=FakeCredentials(),
         ) as mocked_credentials, patch(
-            "bpmis_jira_tool.source_code_qa.requests.post",
+            "bpmis_jira_tool.source_code_qa_llm_providers.requests.post",
             return_value=fake_response,
         ) as mocked_post:
             result = provider.generate(
@@ -8474,10 +8474,10 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         )
 
         with patch(
-            "bpmis_jira_tool.source_code_qa.service_account.Credentials.from_service_account_file",
+            "bpmis_jira_tool.source_code_qa_embeddings.service_account.Credentials.from_service_account_file",
             return_value=FakeCredentials(),
         ), patch(
-            "bpmis_jira_tool.source_code_qa.requests.post",
+            "bpmis_jira_tool.source_code_qa_embeddings.requests.post",
             return_value=fake_response,
         ) as mocked_post:
             rows = provider.embed_texts(["find createIssue"], task_type="CODE_RETRIEVAL_QUERY")
@@ -8746,8 +8746,8 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         image_path = Path(self.temp_dir.name) / "screenshot.png"
         image_path.write_bytes(b"fake-png")
         payload["_codex_image_paths"] = [str(image_path)]
-        with patch("bpmis_jira_tool.source_code_qa.shutil.which", return_value="/usr/local/bin/codex"), patch(
-            "bpmis_jira_tool.source_code_qa.subprocess.run",
+        with patch("bpmis_jira_tool.source_code_qa_llm_providers.shutil.which", return_value="/usr/local/bin/codex"), patch(
+            "bpmis_jira_tool.source_code_qa_llm_providers.subprocess.run",
             side_effect=fake_run,
         ):
             result = provider.generate(payload=payload, primary_model="codex-cli", fallback_model="codex-cli")
@@ -8791,10 +8791,10 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             "_codex_candidate_repo_count": 2,
         }
 
-        with patch("bpmis_jira_tool.source_code_qa.shutil.which", return_value="/usr/local/bin/codex"), patch(
-            "bpmis_jira_tool.source_code_qa.subprocess.run",
+        with patch("bpmis_jira_tool.source_code_qa_llm_providers.shutil.which", return_value="/usr/local/bin/codex"), patch(
+            "bpmis_jira_tool.source_code_qa_llm_providers.subprocess.run",
             side_effect=fake_run,
-        ), patch("bpmis_jira_tool.source_code_qa.LOGGER.warning") as warning_log:
+        ), patch("bpmis_jira_tool.source_code_qa_llm_providers.LOGGER.warning") as warning_log:
             with self.assertRaisesRegex(ToolError, "Codex CLI returned API error: Bad Request"):
                 provider.generate(payload=payload, primary_model="codex-cli", fallback_model="codex-cli")
 
@@ -8836,8 +8836,8 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             )
             return SimpleNamespace(returncode=0, stdout='{"type":"done"}\n', stderr="")
 
-        with patch("bpmis_jira_tool.source_code_qa.shutil.which", return_value="/opt/tools/rg"), patch(
-            "bpmis_jira_tool.source_code_qa.subprocess.run",
+        with patch("bpmis_jira_tool.source_code_qa_llm_providers.shutil.which", return_value="/opt/tools/rg"), patch(
+            "bpmis_jira_tool.source_code_qa_llm_providers.subprocess.run",
             side_effect=fake_run,
         ):
             provider.generate(payload={"contents": [{"parts": [{"text": "hi"}]}]}, primary_model="codex-cli", fallback_model="codex-cli")
@@ -8865,8 +8865,8 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             )
             return SimpleNamespace(returncode=0, stdout='{"session_id":"session-123","type":"done"}\n', stderr="")
 
-        with patch("bpmis_jira_tool.source_code_qa.shutil.which", return_value="/usr/local/bin/codex"), patch(
-            "bpmis_jira_tool.source_code_qa.subprocess.run",
+        with patch("bpmis_jira_tool.source_code_qa_llm_providers.shutil.which", return_value="/usr/local/bin/codex"), patch(
+            "bpmis_jira_tool.source_code_qa_llm_providers.subprocess.run",
             side_effect=fake_run,
         ):
             result = provider.generate(
@@ -8943,11 +8943,11 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         def fake_named_temp(*_args, **_kwargs):
             return open(output_path, "r+", encoding="utf-8")
 
-        with patch("bpmis_jira_tool.source_code_qa.shutil.which", return_value="/usr/local/bin/codex"), patch(
-            "bpmis_jira_tool.source_code_qa.subprocess.run",
+        with patch("bpmis_jira_tool.source_code_qa_llm_providers.shutil.which", return_value="/usr/local/bin/codex"), patch(
+            "bpmis_jira_tool.source_code_qa_llm_providers.subprocess.run",
             side_effect=fake_run,
-        ), patch("bpmis_jira_tool.source_code_qa.subprocess.Popen", side_effect=FakeProcess), patch(
-            "bpmis_jira_tool.source_code_qa.tempfile.NamedTemporaryFile",
+        ), patch("bpmis_jira_tool.source_code_qa_llm_providers.subprocess.Popen", side_effect=FakeProcess), patch(
+            "bpmis_jira_tool.source_code_qa_llm_providers.tempfile.NamedTemporaryFile",
             side_effect=fake_named_temp,
         ):
             try:
@@ -9202,8 +9202,8 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             )
             return SimpleNamespace(returncode=0, stdout='{"type":"done"}\n', stderr="")
 
-        with patch("bpmis_jira_tool.source_code_qa.shutil.which", return_value="/usr/local/bin/codex"), patch(
-            "bpmis_jira_tool.source_code_qa.subprocess.run",
+        with patch("bpmis_jira_tool.source_code_qa_llm_providers.shutil.which", return_value="/usr/local/bin/codex"), patch(
+            "bpmis_jira_tool.source_code_qa_llm_providers.subprocess.run",
             side_effect=fake_run,
         ), patch("bpmis_jira_tool.source_code_qa._log_source_code_qa_timing", side_effect=lambda component, **fields: timing_logs.append((component, fields))):
             service._build_llm_answer(
@@ -9290,8 +9290,8 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             )
             return SimpleNamespace(returncode=0, stdout='{"type":"done"}\n', stderr="")
 
-        with patch("bpmis_jira_tool.source_code_qa.shutil.which", return_value="/usr/local/bin/codex"), patch(
-            "bpmis_jira_tool.source_code_qa.subprocess.run",
+        with patch("bpmis_jira_tool.source_code_qa_llm_providers.shutil.which", return_value="/usr/local/bin/codex"), patch(
+            "bpmis_jira_tool.source_code_qa_llm_providers.subprocess.run",
             side_effect=fake_run,
         ), patch("bpmis_jira_tool.source_code_qa._log_source_code_qa_timing", side_effect=lambda component, **fields: timing_logs.append((component, fields))):
             payload = service._build_llm_answer(
@@ -9586,8 +9586,8 @@ class SourceCodeQAServiceTests(unittest.TestCase):
                 )
             return SimpleNamespace(returncode=0, stdout='{"type":"done"}\n', stderr="")
 
-        with patch("bpmis_jira_tool.source_code_qa.shutil.which", return_value="/usr/local/bin/codex"), patch(
-            "bpmis_jira_tool.source_code_qa.subprocess.run",
+        with patch("bpmis_jira_tool.source_code_qa_llm_providers.shutil.which", return_value="/usr/local/bin/codex"), patch(
+            "bpmis_jira_tool.source_code_qa_llm_providers.subprocess.run",
             side_effect=fake_run,
         ):
             payload = service._build_llm_answer(
@@ -9688,8 +9688,8 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             )
             return SimpleNamespace(returncode=0, stdout='{"type":"done"}\n', stderr="")
 
-        with patch("bpmis_jira_tool.source_code_qa.shutil.which", return_value="/usr/local/bin/codex"), patch(
-            "bpmis_jira_tool.source_code_qa.subprocess.run",
+        with patch("bpmis_jira_tool.source_code_qa_llm_providers.shutil.which", return_value="/usr/local/bin/codex"), patch(
+            "bpmis_jira_tool.source_code_qa_llm_providers.subprocess.run",
             side_effect=fake_run,
         ):
             payload = service._build_llm_answer(
@@ -9769,8 +9769,8 @@ class SourceCodeQAServiceTests(unittest.TestCase):
                 )
             return SimpleNamespace(returncode=0, stdout='{"type":"done"}\n', stderr="")
 
-        with patch("bpmis_jira_tool.source_code_qa.shutil.which", return_value="/usr/local/bin/codex"), patch(
-            "bpmis_jira_tool.source_code_qa.subprocess.run",
+        with patch("bpmis_jira_tool.source_code_qa_llm_providers.shutil.which", return_value="/usr/local/bin/codex"), patch(
+            "bpmis_jira_tool.source_code_qa_llm_providers.subprocess.run",
             side_effect=fake_run,
         ):
             payload = service._build_llm_answer(
@@ -9870,8 +9870,8 @@ class SourceCodeQAServiceTests(unittest.TestCase):
                 )
             return SimpleNamespace(returncode=0, stdout='{"type":"done"}\n', stderr="")
 
-        with patch("bpmis_jira_tool.source_code_qa.shutil.which", return_value="/usr/local/bin/codex"), patch(
-            "bpmis_jira_tool.source_code_qa.subprocess.run",
+        with patch("bpmis_jira_tool.source_code_qa_llm_providers.shutil.which", return_value="/usr/local/bin/codex"), patch(
+            "bpmis_jira_tool.source_code_qa_llm_providers.subprocess.run",
             side_effect=fake_run,
         ):
             payload = service._build_llm_answer(
@@ -9943,8 +9943,8 @@ class SourceCodeQAServiceTests(unittest.TestCase):
                 Path(output_path).write_text('{"detail":"Bad Request"}', encoding="utf-8")
             return SimpleNamespace(returncode=0, stdout='{"type":"done"}\n', stderr="")
 
-        with patch("bpmis_jira_tool.source_code_qa.shutil.which", return_value="/usr/local/bin/codex"), patch(
-            "bpmis_jira_tool.source_code_qa.subprocess.run",
+        with patch("bpmis_jira_tool.source_code_qa_llm_providers.shutil.which", return_value="/usr/local/bin/codex"), patch(
+            "bpmis_jira_tool.source_code_qa_llm_providers.subprocess.run",
             side_effect=fake_run,
         ):
             payload = service._build_llm_answer(
@@ -9972,8 +9972,8 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             timeout_seconds=20,
             codex_binary="codex",
         )
-        with patch("bpmis_jira_tool.source_code_qa.shutil.which", return_value="/usr/local/bin/codex"), patch(
-            "bpmis_jira_tool.source_code_qa.subprocess.run",
+        with patch("bpmis_jira_tool.source_code_qa_llm_providers.shutil.which", return_value="/usr/local/bin/codex"), patch(
+            "bpmis_jira_tool.source_code_qa_llm_providers.subprocess.run",
             return_value=SimpleNamespace(returncode=0, stdout="Logged in using API key\n", stderr=""),
         ):
             self.assertFalse(provider.ready())
@@ -9990,8 +9990,8 @@ class SourceCodeQAServiceTests(unittest.TestCase):
                 return SimpleNamespace(returncode=0, stdout="Logged in using ChatGPT\n", stderr="")
             return SimpleNamespace(returncode=2, stdout="", stderr="quota exhausted")
 
-        with patch("bpmis_jira_tool.source_code_qa.shutil.which", return_value="/usr/local/bin/codex"), patch(
-            "bpmis_jira_tool.source_code_qa.subprocess.run",
+        with patch("bpmis_jira_tool.source_code_qa_llm_providers.shutil.which", return_value="/usr/local/bin/codex"), patch(
+            "bpmis_jira_tool.source_code_qa_llm_providers.subprocess.run",
             side_effect=fake_run,
         ):
             with self.assertRaisesRegex(ToolError, "Codex unavailable"):
@@ -10046,7 +10046,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             raise_for_status=lambda: None,
         )
 
-        with patch("bpmis_jira_tool.source_code_qa.requests.post", return_value=fake_response) as mocked_post:
+        with patch("bpmis_jira_tool.source_code_qa_llm_providers.requests.post", return_value=fake_response) as mocked_post:
             self._build_all_indexes(service)
             payload = service.query(
                 pm_team="AF",
@@ -10127,7 +10127,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             raise_for_status=lambda: None,
         )
 
-        with patch("bpmis_jira_tool.source_code_qa.requests.post", return_value=fake_response) as mocked_post, patch.object(
+        with patch("bpmis_jira_tool.source_code_qa_llm_providers.requests.post", return_value=fake_response) as mocked_post, patch.object(
             service,
             "_estimate_llm_tokens",
             side_effect=[25000, 12000],
@@ -10201,7 +10201,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             raise_for_status=lambda: None,
         )
 
-        with patch("bpmis_jira_tool.source_code_qa.requests.post", return_value=fake_response) as mocked_post:
+        with patch("bpmis_jira_tool.source_code_qa_llm_providers.requests.post", return_value=fake_response) as mocked_post:
             self._build_all_indexes(service)
             payload = service.query(
                 pm_team="AF",
@@ -10261,7 +10261,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
                 import requests
                 raise requests.HTTPError(response=self)
 
-        with patch("bpmis_jira_tool.source_code_qa.requests.post", return_value=FakeErrorResponse()):
+        with patch("bpmis_jira_tool.source_code_qa_llm_providers.requests.post", return_value=FakeErrorResponse()):
             self._build_all_indexes(service)
             with self.assertRaises(SourceCodeQALLMError):
                 service.query(
@@ -10305,7 +10305,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             text = '{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","message":"quota exceeded"}}'
             headers = {"Retry-After": "3"}
 
-        with patch("bpmis_jira_tool.source_code_qa.requests.post", return_value=RateLimitedResponse()):
+        with patch("bpmis_jira_tool.source_code_qa_llm_providers.requests.post", return_value=RateLimitedResponse()):
             self._build_all_indexes(service)
             with self.assertRaises(SourceCodeQALLMError):
                 service.query(
@@ -10363,8 +10363,8 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             raise_for_status=lambda: None,
         )
 
-        with patch("bpmis_jira_tool.source_code_qa.time.sleep"), patch(
-            "bpmis_jira_tool.source_code_qa.requests.post",
+        with patch("bpmis_jira_tool.source_code_qa_llm_providers.time.sleep"), patch(
+            "bpmis_jira_tool.source_code_qa_llm_providers.requests.post",
             side_effect=[RetryableResponse(), RetryableResponse(), RetryableResponse(), success_response],
         ) as mocked_post:
             self._build_all_indexes(service)
@@ -10411,8 +10411,8 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             text='{"ok":true}',
         )
 
-        with patch("bpmis_jira_tool.source_code_qa.time.sleep") as mocked_sleep, patch(
-            "bpmis_jira_tool.source_code_qa.requests.post",
+        with patch("bpmis_jira_tool.source_code_qa_llm_providers.time.sleep") as mocked_sleep, patch(
+            "bpmis_jira_tool.source_code_qa_llm_providers.requests.post",
             side_effect=[RateLimitedResponse(), success_response],
         ) as mocked_post:
             result = service.llm_provider.generate(
