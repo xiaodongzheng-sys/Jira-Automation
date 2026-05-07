@@ -318,7 +318,7 @@ Run these after the Mac-hosted portal is updated:
 - Source Code Q&A with Codex answers from the Mac-hosted portal and does not block on repo clone/pull/index work.
 - Source Code Q&A attachment smoke passes for one small text file; for image-capable releases, confirm Codex mode receives the image through the Cloudflare Tunnel portal path.
 - Source Code Q&A active repo config contains the expected GitLab repositories, not fixture/demo `git.example.com` URLs, and index health is `ready`.
-- Source Code Q&A nightly eval is disabled for the live stack by default and is advisory only. Use `scripts/run_source_code_qa_release_gate.py` plus `scripts/source_code_qa_ops_summary.py --strict` as the release/health gates.
+- Source Code Q&A nightly eval has been removed. Use `scripts/run_source_code_qa_release_gate.py` plus `scripts/source_code_qa_ops_summary.py --strict` as the release/health gates.
 - SeaTalk Summary reads Mac desktop data from the Mac host.
 - `./scripts/run_team_stack.sh doctor` is clean.
 

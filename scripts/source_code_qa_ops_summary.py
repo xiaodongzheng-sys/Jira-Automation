@@ -8,7 +8,6 @@ import json
 import os
 import statistics
 import sys
-import time
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -135,7 +134,6 @@ def build_summary(data_root: Path, *, limit: int = 200, strict: bool = False) ->
     telemetry_rows = _read_tail_jsonl(source_root / "telemetry.jsonl", limit)
     feedback_rows = _read_tail_jsonl(source_root / "feedback.jsonl", limit)
     review_rows = _read_tail_jsonl(source_root / "review_queue.jsonl", limit)
-    eval_status = _read_json(data_root / "run" / "source_code_qa_eval_status.json")
     issues: list[str] = []
 
     lines: list[str] = []
@@ -181,15 +179,6 @@ def build_summary(data_root: Path, *, limit: int = 200, strict: bool = False) ->
     else:
         lines.append("review_queue=0")
 
-    state = eval_status.get("state") or "missing"
-    updated_unix = eval_status.get("updated_unix")
-    if isinstance(updated_unix, int):
-        age = int(time.time()) - updated_unix
-        lines.append(f"latest_eval_state={state} age_seconds={age}")
-    else:
-        lines.append(f"latest_eval_state={state}")
-    if eval_status.get("failed_cases"):
-        lines.append(f"latest_eval_failed_cases={eval_status.get('failed_cases')}")
     if strict:
         lines.append(f"ops_summary_status={'fail' if issues else 'pass'}")
         if issues:

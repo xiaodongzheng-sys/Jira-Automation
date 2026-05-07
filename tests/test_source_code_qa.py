@@ -4081,11 +4081,6 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             json.dumps({"created_at": "2026-04-25T10:02:00+08:00", "rating": "needs_deeper_trace"}) + "\n",
             encoding="utf-8",
         )
-        (run_root / "source_code_qa_eval_status.json").write_text(
-            json.dumps({"state": "passed", "updated_unix": int(time.time())}),
-            encoding="utf-8",
-        )
-
         summary = "\n".join(build_summary(data_root, limit=20))
 
         self.assertIn("telemetry_window=2", summary)
@@ -4093,7 +4088,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertIn("no_match_rate=1/2", summary)
         self.assertIn("feedback_window=1", summary)
         self.assertIn("review_queue=0", summary)
-        self.assertIn("latest_eval_state=passed", summary)
+        self.assertNotIn("latest_eval_state", summary)
 
     def test_ops_summary_flags_fixture_repo_config_in_strict_mode(self):
         from scripts.source_code_qa_ops_summary import build_summary
@@ -4311,8 +4306,8 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertEqual(gate["missing_or_thin_teams"], [])
         self.assertEqual(gate["missing_or_thin_segments"], [])
 
-    def test_nightly_fixture_eval_uses_isolated_data_root(self):
-        from scripts.run_source_code_qa_nightly_eval import run_nightly_eval
+    def test_release_eval_report_uses_isolated_data_root(self):
+        from scripts.run_source_code_qa_release_gate import run_release_eval_report
 
         calls = []
 
@@ -4329,8 +4324,8 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             return {"status": "ok", "review_items": 0}, "{}", "", 0
 
         output_dir = Path(self.temp_dir.name) / "eval_runs"
-        with patch("scripts.run_source_code_qa_nightly_eval._run_json_command", side_effect=fake_run):
-            report = run_nightly_eval(output_dir=output_dir, cases=["evals/source_code_qa/golden.jsonl"], fixture=True, include_useful_feedback=False)
+        with patch("scripts.run_source_code_qa_release_gate._run_json_command", side_effect=fake_run):
+            report = run_release_eval_report(output_dir=output_dir, cases=["evals/source_code_qa/golden.jsonl"], fixture=True, include_useful_feedback=False)
 
         self.assertEqual(report["status"], "pass")
         self.assertEqual(report["eval"]["team_buckets"]["AF"]["total"], 1)
@@ -4344,7 +4339,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
 
         captured = {}
 
-        def fake_run_nightly_eval(**kwargs):
+        def fake_run_release_eval_report(**kwargs):
             captured.update(kwargs)
             return {
                 "status": "pass",
@@ -4359,7 +4354,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
                 "review_queue": {"returncode": 0},
             }
 
-        with patch("scripts.run_source_code_qa_release_gate.run_nightly_eval", side_effect=fake_run_nightly_eval):
+        with patch("scripts.run_source_code_qa_release_gate.run_release_eval_report", side_effect=fake_run_release_eval_report):
             gate = run_release_gate(
                 data_root=Path(self.temp_dir.name),
                 cases=["evals/source_code_qa/llm_smoke.jsonl"],
@@ -4377,8 +4372,8 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertEqual(gate["status"], "pass")
         self.assertTrue(captured["mock_llm"])
 
-    def test_nightly_eval_can_pass_mock_llm_to_main_eval(self):
-        from scripts.run_source_code_qa_nightly_eval import run_nightly_eval
+    def test_release_eval_report_can_pass_mock_llm_to_main_eval(self):
+        from scripts.run_source_code_qa_release_gate import run_release_eval_report
 
         calls = []
 
@@ -4395,8 +4390,8 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             return {"status": "ok", "review_items": 0}, "{}", "", 0
 
         output_dir = Path(self.temp_dir.name) / "eval_runs"
-        with patch("scripts.run_source_code_qa_nightly_eval._run_json_command", side_effect=fake_run):
-            report = run_nightly_eval(
+        with patch("scripts.run_source_code_qa_release_gate._run_json_command", side_effect=fake_run):
+            report = run_release_eval_report(
                 output_dir=output_dir,
                 cases=["evals/source_code_qa/golden.jsonl"],
                 fixture=True,

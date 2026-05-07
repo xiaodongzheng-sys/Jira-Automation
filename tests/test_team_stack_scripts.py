@@ -1366,13 +1366,13 @@ fi
         self.assertIn('TUNNEL_FOREGROUND_SCRIPT="$CLOUDFLARE_FOREGROUND_SCRIPT"', guard_script)
         self.assertIn('"tunnel_provider":"$(json_escape "$TUNNEL_PROVIDER")"', guard_script)
         self.assertIn('"tunnel_health":"$(json_escape "$tunnel_health")"', guard_script)
-        self.assertIn('SOURCE_QA_EVAL_ENABLED="${SOURCE_CODE_QA_NIGHTLY_EVAL_ENABLED:-0}"', guard_script)
+        self.assertNotIn("SOURCE_CODE_QA" + "_NIGHTLY_EVAL", guard_script)
 
-    def test_stack_doctor_treats_source_code_qa_nightly_eval_as_advisory(self):
+    def test_stack_doctor_omits_source_code_qa_scheduled_eval(self):
         stack_script = (PROJECT_ROOT / "scripts/run_team_stack.sh").read_text(encoding="utf-8")
 
-        self.assertIn("== Source Code QA Eval (advisory) ==", stack_script)
-        self.assertNotIn('[[ "$line" == "state=failed" ]]', stack_script)
+        self.assertNotIn("== Source Code QA Eval", stack_script)
+        self.assertNotIn("source_code_qa" + "_eval_status.json", stack_script)
 
     def test_stack_doctor_reports_cloudflare_tunnel_provider(self):
         stack_script = PROJECT_ROOT / "scripts/run_team_stack.sh"

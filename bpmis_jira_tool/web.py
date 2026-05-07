@@ -7602,14 +7602,13 @@ def _source_code_qa_release_gate_payload(settings: Settings) -> dict[str, Any]:
     if not data_root.is_absolute():
         data_root = (PROJECT_ROOT / data_root).resolve()
     gate = _read_json_file(data_root / "run" / "source_code_qa_release_gate.json")
-    eval_status = _read_json_file(data_root / "run" / "source_code_qa_eval_status.json")
     latest_eval = _read_json_file(data_root / "source_code_qa" / "eval_runs" / "latest.json")
-    status = str(gate.get("status") or eval_status.get("state") or latest_eval.get("status") or "missing")
-    updated_at = gate.get("timestamp") or latest_eval.get("timestamp") or eval_status.get("updated_at")
+    status = str(gate.get("status") or latest_eval.get("status") or "missing")
+    updated_at = gate.get("timestamp") or latest_eval.get("timestamp")
     return {
         "status": status,
         "updated_at": updated_at,
-        "summary": gate.get("summary") or eval_status.get("message") or "",
+        "summary": gate.get("summary") or "",
         "thresholds": gate.get("thresholds") or {},
         "checks": gate.get("checks") or {},
         "latest_eval": {

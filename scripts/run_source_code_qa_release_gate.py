@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import shutil
+import subprocess
 import sys
 from typing import Any
 
@@ -16,7 +18,6 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from bpmis_jira_tool.config import Settings
-from scripts.run_source_code_qa_nightly_eval import run_nightly_eval
 
 
 RELEASE_GATE_CASES = ["evals/source_code_qa/release_gate.jsonl"]
@@ -34,6 +35,21 @@ DEFAULT_THRESHOLDS = {
     "required_eval_teams": ["AF", "CRMS", "GRC"],
     "require_review_queue": True,
 }
+
+
+def _run_json_command(args: list[str]) -> tuple[dict[str, Any], str, str, int]:
+    env = dict(os.environ)
+    existing_pythonpath = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = str(ROOT_DIR) if not existing_pythonpath else f"{ROOT_DIR}{os.pathsep}{existing_pythonpath}"
+    completed = subprocess.run(args, cwd=ROOT_DIR, env=env, capture_output=True, text=True, check=False)
+    stdout = completed.stdout or ""
+    stderr = completed.stderr or ""
+    payload: dict[str, Any] = {}
+    try:
+        payload = json.loads(stdout)
+    except json.JSONDecodeError:
+        payload = {"status": "error", "message": "command did not return JSON"}
+    return payload, stdout, stderr, int(completed.returncode)
 
 
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -80,7 +96,7 @@ def evaluate_release_gate(report: dict[str, Any], thresholds: dict[str, Any] | N
         if int((segment_buckets.get(segment) or {}).get("failed") or 0) > max_failed_per_segment
     ]
     checks = {
-        "nightly_status": report.get("status") == "pass",
+        "eval_report_status": report.get("status") == "pass",
         "eval_failed": eval_failed <= int(rules["max_eval_failed"]),
         "eval_team_coverage": not missing_or_thin_teams,
         "eval_failed_per_team": not failing_teams,
@@ -111,6 +127,134 @@ def evaluate_release_gate(report: dict[str, Any], thresholds: dict[str, Any] | N
     }
 
 
+def run_release_eval_report(
+    *,
+    output_dir: Path,
+    cases: list[str],
+    fixture: bool,
+    include_useful_feedback: bool,
+    mock_llm: bool = True,
+) -> dict[str, Any]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    fixture_data_root = output_dir / "fixture_data"
+    if fixture:
+        shutil.rmtree(fixture_data_root, ignore_errors=True)
+    eval_args = [
+        sys.executable,
+        "scripts/run_source_code_qa_evals.py",
+        "--json",
+    ]
+    if fixture:
+        eval_args.extend(["--fixture", "--data-root", str(fixture_data_root)])
+    if mock_llm:
+        eval_args.append("--mock-llm")
+    for case_path in cases:
+        eval_args.extend(["--cases", case_path])
+    eval_payload, eval_stdout, eval_stderr, eval_returncode = _run_json_command(eval_args)
+
+    llm_smoke_data_root = output_dir / "llm_smoke_data"
+    shutil.rmtree(llm_smoke_data_root, ignore_errors=True)
+    llm_smoke_args = [
+        sys.executable,
+        "scripts/run_source_code_qa_evals.py",
+        "--json",
+        "--fixture",
+        "--mock-llm",
+        "--data-root",
+        str(llm_smoke_data_root),
+        "--cases",
+        "evals/source_code_qa/llm_smoke.jsonl",
+    ]
+    llm_smoke_payload, llm_smoke_stdout, llm_smoke_stderr, llm_smoke_returncode = _run_json_command(llm_smoke_args)
+
+    feedback_output = output_dir / f"feedback_candidates_{timestamp}.jsonl"
+    feedback_args = [
+        sys.executable,
+        "scripts/source_code_qa_feedback_to_eval.py",
+        "--json",
+        "--output",
+        str(feedback_output),
+    ]
+    if include_useful_feedback:
+        feedback_args.append("--include-useful")
+    feedback_payload, feedback_stdout, feedback_stderr, feedback_returncode = _run_json_command(feedback_args)
+
+    review_output = output_dir / f"review_queue_{timestamp}.jsonl"
+    review_args = [
+        sys.executable,
+        "scripts/source_code_qa_review_queue.py",
+        "--json",
+        "--output",
+        str(review_output),
+    ]
+    review_payload, review_stdout, review_stderr, review_returncode = _run_json_command(review_args)
+
+    report = {
+        "status": "pass"
+        if (
+            eval_returncode == 0
+            and eval_payload.get("status") == "pass"
+            and llm_smoke_returncode == 0
+            and llm_smoke_payload.get("status") == "pass"
+            and review_returncode == 0
+        )
+        else "fail",
+        "timestamp": timestamp,
+        "fixture": fixture,
+        "mock_llm": bool(mock_llm),
+        "cases": cases,
+        "eval": {
+            "returncode": eval_returncode,
+            "status": eval_payload.get("status"),
+            "total": eval_payload.get("total"),
+            "failed": eval_payload.get("failed"),
+            "failure_buckets": eval_payload.get("failure_buckets") or {},
+            "coverage_buckets": eval_payload.get("coverage_buckets") or {},
+            "team_buckets": eval_payload.get("team_buckets") or {},
+            "segment_buckets": eval_payload.get("segment_buckets") or {},
+            "route_buckets": eval_payload.get("route_buckets") or {},
+        },
+        "feedback_candidates": {
+            "returncode": feedback_returncode,
+            "status": feedback_payload.get("status"),
+            "feedback_records": feedback_payload.get("feedback_records"),
+            "candidates": feedback_payload.get("candidates"),
+            "draft_statuses": feedback_payload.get("draft_statuses") or {},
+            "output": str(feedback_output),
+        },
+        "llm_smoke": {
+            "returncode": llm_smoke_returncode,
+            "status": llm_smoke_payload.get("status"),
+            "total": llm_smoke_payload.get("total"),
+            "failed": llm_smoke_payload.get("failed"),
+            "route_buckets": llm_smoke_payload.get("route_buckets") or {},
+        },
+        "review_queue": {
+            "returncode": review_returncode,
+            "status": review_payload.get("status"),
+            "review_items": review_payload.get("review_items"),
+            "high_priority": review_payload.get("high_priority"),
+            "output": str(review_output),
+        },
+        "raw": {
+            "eval_stdout": eval_stdout[-20000:],
+            "eval_stderr": eval_stderr[-8000:],
+            "llm_smoke_stdout": llm_smoke_stdout[-12000:],
+            "llm_smoke_stderr": llm_smoke_stderr[-4000:],
+            "feedback_stdout": feedback_stdout[-12000:],
+            "feedback_stderr": feedback_stderr[-4000:],
+            "review_stdout": review_stdout[-12000:],
+            "review_stderr": review_stderr[-4000:],
+        },
+    }
+    report_path = output_dir / f"source_code_qa_eval_{timestamp}.json"
+    report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+    (output_dir / "latest.json").write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+    report["report_path"] = str(report_path)
+    return report
+
+
 def run_release_gate(
     *,
     data_root: Path,
@@ -121,7 +265,7 @@ def run_release_gate(
     thresholds: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     output_dir = data_root / "source_code_qa" / "eval_runs"
-    report = run_nightly_eval(
+    report = run_release_eval_report(
         output_dir=output_dir,
         cases=cases,
         fixture=fixture,
@@ -131,17 +275,6 @@ def run_release_gate(
     gate = evaluate_release_gate(report, thresholds=thresholds)
     run_root = data_root / "run"
     _atomic_write_json(run_root / "source_code_qa_release_gate.json", gate)
-    _atomic_write_json(
-        run_root / "source_code_qa_eval_status.json",
-        {
-            "state": "passed" if gate["status"] == "pass" else "failed",
-            "message": gate["summary"],
-            "updated_at": gate["timestamp"],
-            "updated_unix": int(datetime.now(timezone.utc).timestamp()),
-            "failed_cases": report.get("eval", {}).get("failed_cases") or [],
-            "release_gate": gate["status"],
-        },
-    )
     return gate
 
 
