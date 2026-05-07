@@ -6622,7 +6622,6 @@ class SourceCodeQAService:
             self._increment_retrieval_stat(request_cache, "targeted_index_rows_misses")
         file_rows_by_path: dict[str, sqlite3.Row] = {}
         line_rows_by_key: dict[tuple[str, int], sqlite3.Row] = {}
-        semantic_rows_by_id: dict[str, sqlite3.Row] = {}
 
         def add_file_rows(rows: list[sqlite3.Row]) -> None:
             for row in rows:
@@ -6791,70 +6790,17 @@ class SourceCodeQAService:
                 add_file_rows(connection.execute("select * from files order by path limit ?", (min(max_target_files, 80),)).fetchall())
             except sqlite3.Error:
                 pass
-        if self.semantic_index_enabled:
-            for row in self._semantic_fts_search_rows(
-                connection,
-                tokens,
-                focus_terms,
-                index_path=index_path,
-                request_cache=request_cache,
-            ):
-                chunk_id = str(row.get("chunk_id") if isinstance(row, dict) else row["chunk_id"])
-                try:
-                    chunk_row = connection.execute("select * from semantic_chunks where chunk_id = ?", (chunk_id,)).fetchone()
-                except sqlite3.Error:
-                    chunk_row = None
-                if chunk_row is not None:
-                    semantic_rows_by_id.setdefault(chunk_id, chunk_row)
-                if len(semantic_rows_by_id) >= max_target_semantic_chunks:
-                    break
-            if not semantic_rows_by_id and query_terms:
-                token_lookup_supported = True
-                try:
-                    rows = connection.execute(
-                        f"""
-                        select semantic_chunks.*
-                        from semantic_chunk_tokens
-                        join semantic_chunks on semantic_chunks.chunk_id = semantic_chunk_tokens.chunk_id
-                        where semantic_chunk_tokens.token in ({placeholders(query_terms[:12])})
-                        group by semantic_chunks.chunk_id
-                        order by count(*) desc, semantic_chunks.file_path, semantic_chunks.start_line
-                        limit ?
-                        """,
-                        (*query_terms[:12], max_target_semantic_chunks),
-                    ).fetchall()
-                except sqlite3.Error:
-                    token_lookup_supported = False
-                    rows = []
-                if not rows and not token_lookup_supported:
-                    for term in query_terms[:12]:
-                        try:
-                            rows.extend(
-                                connection.execute(
-                                    "select * from semantic_chunks where lower_text like ? order by file_path, start_line limit ?",
-                                    (f"%{term}%", max_target_semantic_chunks),
-                                ).fetchall()
-                            )
-                        except sqlite3.Error:
-                            continue
-                for row in rows:
-                    if len(semantic_rows_by_id) >= max_target_semantic_chunks:
-                        break
-                    chunk_id = str(row["chunk_id"] if "chunk_id" in row.keys() else f"{row['file_path']}:{row['start_line']}")
-                    semantic_rows_by_id.setdefault(chunk_id, row)
-            if file_rows_by_path and len(semantic_rows_by_id) < max_target_semantic_chunks:
-                paths = list(file_rows_by_path)[: (10 if simple_intent else 80)]
-                semantic_fill_limit = min(max_target_semantic_chunks - len(semantic_rows_by_id), 32 if simple_intent else max_target_semantic_chunks)
-                try:
-                    rows = connection.execute(
-                        f"select * from semantic_chunks where file_path in ({placeholders(paths)}) order by file_path, start_line limit ?",
-                        (*paths, semantic_fill_limit),
-                    ).fetchall()
-                except sqlite3.Error:
-                    rows = []
-                for row in rows:
-                    chunk_id = str(row["chunk_id"] if "chunk_id" in row.keys() else f"{row['file_path']}:{row['start_line']}")
-                    semantic_rows_by_id.setdefault(chunk_id, row)
+        semantic_rows_by_id = self._targeted_semantic_rows_by_id(
+            connection,
+            index_path,
+            tokens=tokens,
+            focus_terms=focus_terms,
+            query_terms=query_terms,
+            file_paths=list(file_rows_by_path),
+            simple_intent=simple_intent,
+            max_target_semantic_chunks=max_target_semantic_chunks,
+            request_cache=request_cache,
+        )
         file_rows = list(file_rows_by_path.values())
         line_rows = sorted(line_rows_by_key.values(), key=lambda row: (str(row["file_path"]), int(row["line_no"])))
         files_by_path = {str(row["path"]): row for row in file_rows}
@@ -6901,6 +6847,94 @@ class SourceCodeQAService:
         if request_cache is not None:
             rows_cache[cache_key] = payload
         return payload
+
+    def _targeted_semantic_rows_by_id(
+        self,
+        connection: sqlite3.Connection,
+        index_path: Path,
+        *,
+        tokens: list[str],
+        focus_terms: list[str],
+        query_terms: list[str],
+        file_paths: list[str],
+        simple_intent: bool,
+        max_target_semantic_chunks: int,
+        request_cache: dict[str, Any] | None = None,
+    ) -> dict[str, sqlite3.Row]:
+        semantic_rows_by_id: dict[str, sqlite3.Row] = {}
+        if not self.semantic_index_enabled:
+            return semantic_rows_by_id
+
+        def placeholders(values: list[str]) -> str:
+            return ",".join("?" for _ in values)
+
+        for row in self._semantic_fts_search_rows(
+            connection,
+            tokens,
+            focus_terms,
+            index_path=index_path,
+            request_cache=request_cache,
+        ):
+            chunk_id = str(row.get("chunk_id") if isinstance(row, dict) else row["chunk_id"])
+            try:
+                chunk_row = connection.execute("select * from semantic_chunks where chunk_id = ?", (chunk_id,)).fetchone()
+            except sqlite3.Error:
+                chunk_row = None
+            if chunk_row is not None:
+                semantic_rows_by_id.setdefault(chunk_id, chunk_row)
+            if len(semantic_rows_by_id) >= max_target_semantic_chunks:
+                break
+        if not semantic_rows_by_id and query_terms:
+            token_lookup_supported = True
+            try:
+                rows = connection.execute(
+                    f"""
+                    select semantic_chunks.*
+                    from semantic_chunk_tokens
+                    join semantic_chunks on semantic_chunks.chunk_id = semantic_chunk_tokens.chunk_id
+                    where semantic_chunk_tokens.token in ({placeholders(query_terms[:12])})
+                    group by semantic_chunks.chunk_id
+                    order by count(*) desc, semantic_chunks.file_path, semantic_chunks.start_line
+                    limit ?
+                    """,
+                    (*query_terms[:12], max_target_semantic_chunks),
+                ).fetchall()
+            except sqlite3.Error:
+                token_lookup_supported = False
+                rows = []
+            if not rows and not token_lookup_supported:
+                for term in query_terms[:12]:
+                    try:
+                        rows.extend(
+                            connection.execute(
+                                "select * from semantic_chunks where lower_text like ? order by file_path, start_line limit ?",
+                                (f"%{term}%", max_target_semantic_chunks),
+                            ).fetchall()
+                        )
+                    except sqlite3.Error:
+                        continue
+            for row in rows:
+                if len(semantic_rows_by_id) >= max_target_semantic_chunks:
+                    break
+                chunk_id = str(row["chunk_id"] if "chunk_id" in row.keys() else f"{row['file_path']}:{row['start_line']}")
+                semantic_rows_by_id.setdefault(chunk_id, row)
+        if file_paths and len(semantic_rows_by_id) < max_target_semantic_chunks:
+            paths = file_paths[: (10 if simple_intent else 80)]
+            semantic_fill_limit = min(
+                max_target_semantic_chunks - len(semantic_rows_by_id),
+                32 if simple_intent else max_target_semantic_chunks,
+            )
+            try:
+                rows = connection.execute(
+                    f"select * from semantic_chunks where file_path in ({placeholders(paths)}) order by file_path, start_line limit ?",
+                    (*paths, semantic_fill_limit),
+                ).fetchall()
+            except sqlite3.Error:
+                rows = []
+            for row in rows:
+                chunk_id = str(row["chunk_id"] if "chunk_id" in row.keys() else f"{row['file_path']}:{row['start_line']}")
+                semantic_rows_by_id.setdefault(chunk_id, row)
+        return semantic_rows_by_id
 
     def _cached_file_lines(
         self,
