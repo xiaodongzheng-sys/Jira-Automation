@@ -13543,109 +13543,44 @@ class SourceCodeQAService:
                 answer_thinking_budget=answer_thinking_budget,
                 cache_key=cache_key,
             )
-        draft_answer = ""
-        draft_usage: dict[str, Any] = {}
-        draft_attempts = 0
-        draft_latency_ms = 0
-        draft_attempt_log: list[dict[str, Any]] = []
-        vertex_draft_check: dict[str, Any] | None = None
-        vertex_draft_claim_check: dict[str, Any] | None = None
-        vertex_draft_judge: dict[str, Any] | None = None
-        vertex_draft_model = selected_model
-        if vertex_two_pass:
-            draft_result = self._vertex_draft_answer_result(
-                pm_team=pm_team,
-                country=country,
-                question=question,
-                prompt_context=prompt_context,
-                attachment_section=attachment_section,
-                attachments=attachments or [],
-                answer_max_output_tokens=answer_max_output_tokens,
-                answer_thinking_config=answer_thinking_config,
-                selected_model=selected_model,
-                evidence_summary=evidence_summary,
-                quality_gate=quality_gate,
-                selected_matches=selected_matches,
-                evidence_pack=evidence_pack,
-            )
-            draft_answer = draft_result["draft_answer"]
-            draft_usage = draft_result["draft_usage"]
-            draft_attempts = draft_result["draft_attempts"]
-            draft_latency_ms = draft_result["draft_latency_ms"]
-            draft_attempt_log = draft_result["draft_attempt_log"]
-            vertex_draft_check = draft_result["vertex_draft_check"]
-            vertex_draft_claim_check = draft_result["vertex_draft_claim_check"]
-            vertex_draft_judge = draft_result["vertex_draft_judge"]
-            vertex_draft_model = draft_result["vertex_draft_model"]
-            vertex_retry_matches = self._expand_answer_retry_matches(
-                entries=entries,
-                key=key,
-                question=question,
-                matches=matches,
-                draft_answer=draft_answer,
-                answer_check=vertex_draft_check,
-                claim_check=vertex_draft_claim_check,
-                answer_judge=vertex_draft_judge,
-                evidence_summary=evidence_summary,
-                quality_gate=quality_gate,
-                limit=int(budget["match_limit"]) + 10,
-                request_cache=request_cache,
-            )
-            if vertex_retry_matches:
-                retry_match_limit = int(budget["match_limit"]) + 6
-                selected_matches = self._select_llm_matches(vertex_retry_matches, retry_match_limit, question=question)
-                evidence_summary = self._compress_evidence_cached(question, selected_matches, request_cache=request_cache)
-                trace_paths = self._build_trace_paths(
-                    entries=entries,
-                    key=key,
-                    matches=selected_matches,
-                    question=question,
-                    request_cache=request_cache,
-                )
-                if trace_paths:
-                    evidence_summary["trace_paths"] = trace_paths
-                quality_gate = self._quality_gate_cached(question, evidence_summary, request_cache=request_cache)
-                evidence_pack = self._build_evidence_pack(
-                    question=question,
-                    evidence_summary=evidence_summary,
-                    matches=selected_matches,
-                    trace_paths=trace_paths,
-                    quality_gate=quality_gate,
-                )
-                domain_context = self._llm_domain_context(
-                    pm_team=pm_team,
-                    country=country,
-                    question=question,
-                    evidence_summary=evidence_summary,
-                )
-                prompt_context = self._build_compressed_llm_context(
-                    evidence_summary,
-                    quality_gate,
-                    evidence_pack,
-                    selected_matches,
-                    domain_context=domain_context,
-                    snippet_line_budget=min(int(budget["snippet_line_budget"]) + 120, 360),
-                    snippet_char_budget=min(int(budget["snippet_char_budget"]) + 24_000, 120_000),
-                )
-                llm_route = {
-                    **llm_route,
-                    "vertex_second_pass": True,
-                    "vertex_second_pass_match_count": len(selected_matches),
-                }
-            llm_route = {
-                **llm_route,
-                "vertex_two_pass": True,
-                "vertex_draft_model": vertex_draft_model,
-                "vertex_final_schema": True,
-            }
-            cache_key = self._llm_answer_cache_key(
-                selected_model=selected_model,
-                question=question,
-                requested_answer_mode=requested_answer_mode,
-                routed_budget_mode=routed_budget_mode,
-                prompt_context=prompt_context,
-                attachment_section=attachment_section,
-            )
+        vertex_context = self._vertex_two_pass_answer_context(
+            vertex_two_pass=vertex_two_pass,
+            entries=entries,
+            key=key,
+            pm_team=pm_team,
+            country=country,
+            question=question,
+            matches=matches,
+            selected_matches=selected_matches,
+            evidence_summary=evidence_summary,
+            quality_gate=quality_gate,
+            evidence_pack=evidence_pack,
+            prompt_context=prompt_context,
+            llm_route=llm_route,
+            cache_key=cache_key,
+            selected_model=selected_model,
+            routed_budget_mode=routed_budget_mode,
+            requested_answer_mode=requested_answer_mode,
+            budget=budget,
+            attachment_section=attachment_section,
+            attachments=attachments or [],
+            answer_max_output_tokens=answer_max_output_tokens,
+            answer_thinking_config=answer_thinking_config,
+            request_cache=request_cache,
+        )
+        selected_matches = vertex_context["selected_matches"]
+        evidence_summary = vertex_context["evidence_summary"]
+        quality_gate = vertex_context["quality_gate"]
+        evidence_pack = vertex_context["evidence_pack"]
+        prompt_context = vertex_context["prompt_context"]
+        llm_route = vertex_context["llm_route"]
+        cache_key = vertex_context["cache_key"]
+        draft_answer = vertex_context["draft_answer"]
+        draft_usage = vertex_context["draft_usage"]
+        draft_attempts = vertex_context["draft_attempts"]
+        draft_latency_ms = vertex_context["draft_latency_ms"]
+        draft_attempt_log = vertex_context["draft_attempt_log"]
+        vertex_draft_check = vertex_context["vertex_draft_check"]
         payload = self._llm_final_answer_payload(
             pm_team=pm_team,
             country=country,
@@ -13978,6 +13913,149 @@ class SourceCodeQAService:
             "llm_route": llm_route,
             "token_pressure": token_pressure,
             "final_prompt_tokens": final_prompt_tokens,
+        }
+
+    def _vertex_two_pass_answer_context(
+        self,
+        *,
+        vertex_two_pass: bool,
+        entries: list[RepositoryEntry],
+        key: str,
+        pm_team: str,
+        country: str,
+        question: str,
+        matches: list[dict[str, Any]],
+        selected_matches: list[dict[str, Any]],
+        evidence_summary: dict[str, Any],
+        quality_gate: dict[str, Any],
+        evidence_pack: dict[str, Any],
+        prompt_context: str,
+        llm_route: dict[str, Any],
+        cache_key: str,
+        selected_model: str,
+        routed_budget_mode: str,
+        requested_answer_mode: str,
+        budget: dict[str, Any],
+        attachment_section: str,
+        attachments: list[dict[str, Any]],
+        answer_max_output_tokens: int,
+        answer_thinking_config: dict[str, Any],
+        request_cache: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        draft_answer = ""
+        draft_usage: dict[str, Any] = {}
+        draft_attempts = 0
+        draft_latency_ms = 0
+        draft_attempt_log: list[dict[str, Any]] = []
+        vertex_draft_check: dict[str, Any] | None = None
+        if vertex_two_pass:
+            draft_result = self._vertex_draft_answer_result(
+                pm_team=pm_team,
+                country=country,
+                question=question,
+                prompt_context=prompt_context,
+                attachment_section=attachment_section,
+                attachments=attachments,
+                answer_max_output_tokens=answer_max_output_tokens,
+                answer_thinking_config=answer_thinking_config,
+                selected_model=selected_model,
+                evidence_summary=evidence_summary,
+                quality_gate=quality_gate,
+                selected_matches=selected_matches,
+                evidence_pack=evidence_pack,
+            )
+            draft_answer = draft_result["draft_answer"]
+            draft_usage = draft_result["draft_usage"]
+            draft_attempts = draft_result["draft_attempts"]
+            draft_latency_ms = draft_result["draft_latency_ms"]
+            draft_attempt_log = draft_result["draft_attempt_log"]
+            vertex_draft_check = draft_result["vertex_draft_check"]
+            vertex_draft_claim_check = draft_result["vertex_draft_claim_check"]
+            vertex_draft_judge = draft_result["vertex_draft_judge"]
+            vertex_draft_model = draft_result["vertex_draft_model"]
+            vertex_retry_matches = self._expand_answer_retry_matches(
+                entries=entries,
+                key=key,
+                question=question,
+                matches=matches,
+                draft_answer=draft_answer,
+                answer_check=vertex_draft_check,
+                claim_check=vertex_draft_claim_check,
+                answer_judge=vertex_draft_judge,
+                evidence_summary=evidence_summary,
+                quality_gate=quality_gate,
+                limit=int(budget["match_limit"]) + 10,
+                request_cache=request_cache,
+            )
+            if vertex_retry_matches:
+                retry_match_limit = int(budget["match_limit"]) + 6
+                selected_matches = self._select_llm_matches(vertex_retry_matches, retry_match_limit, question=question)
+                evidence_summary = self._compress_evidence_cached(question, selected_matches, request_cache=request_cache)
+                trace_paths = self._build_trace_paths(
+                    entries=entries,
+                    key=key,
+                    matches=selected_matches,
+                    question=question,
+                    request_cache=request_cache,
+                )
+                if trace_paths:
+                    evidence_summary["trace_paths"] = trace_paths
+                quality_gate = self._quality_gate_cached(question, evidence_summary, request_cache=request_cache)
+                evidence_pack = self._build_evidence_pack(
+                    question=question,
+                    evidence_summary=evidence_summary,
+                    matches=selected_matches,
+                    trace_paths=trace_paths,
+                    quality_gate=quality_gate,
+                )
+                domain_context = self._llm_domain_context(
+                    pm_team=pm_team,
+                    country=country,
+                    question=question,
+                    evidence_summary=evidence_summary,
+                )
+                prompt_context = self._build_compressed_llm_context(
+                    evidence_summary,
+                    quality_gate,
+                    evidence_pack,
+                    selected_matches,
+                    domain_context=domain_context,
+                    snippet_line_budget=min(int(budget["snippet_line_budget"]) + 120, 360),
+                    snippet_char_budget=min(int(budget["snippet_char_budget"]) + 24_000, 120_000),
+                )
+                llm_route = {
+                    **llm_route,
+                    "vertex_second_pass": True,
+                    "vertex_second_pass_match_count": len(selected_matches),
+                }
+            llm_route = {
+                **llm_route,
+                "vertex_two_pass": True,
+                "vertex_draft_model": vertex_draft_model,
+                "vertex_final_schema": True,
+            }
+            cache_key = self._llm_answer_cache_key(
+                selected_model=selected_model,
+                question=question,
+                requested_answer_mode=requested_answer_mode,
+                routed_budget_mode=routed_budget_mode,
+                prompt_context=prompt_context,
+                attachment_section=attachment_section,
+            )
+        return {
+            "selected_matches": selected_matches,
+            "evidence_summary": evidence_summary,
+            "quality_gate": quality_gate,
+            "evidence_pack": evidence_pack,
+            "prompt_context": prompt_context,
+            "llm_route": llm_route,
+            "cache_key": cache_key,
+            "draft_answer": draft_answer,
+            "draft_usage": draft_usage,
+            "draft_attempts": draft_attempts,
+            "draft_latency_ms": draft_latency_ms,
+            "draft_attempt_log": draft_attempt_log,
+            "vertex_draft_check": vertex_draft_check,
         }
 
     def _build_codex_llm_answer(
