@@ -12059,32 +12059,7 @@ class SourceCodeQAService:
         trace_paths: list[dict[str, Any]],
         quality_gate: dict[str, Any],
     ) -> dict[str, Any]:
-        pack: dict[str, Any] = {
-            "version": 2,
-            "intent": evidence_summary.get("intent") or self._question_intent(question),
-            "items": [],
-            "entry_points": [],
-            "call_chain": [],
-            "read_write_points": [],
-            "external_dependencies": [],
-            "module_dependencies": [],
-            "message_flows": [],
-            "tables": [],
-            "apis": [],
-            "configs": [],
-            "static_findings": [],
-            "impact_surfaces": [],
-            "test_coverage": [],
-            "operational_boundaries": [],
-            "source_tiers": [],
-            "source_conflicts": [],
-            "missing_hops": [],
-            "citation_map": [],
-            "confirmed_facts": [],
-            "inferred_facts": [],
-            "missing_facts": [],
-            "evidence_limits": [],
-        }
+        pack = self._new_evidence_pack(question, evidence_summary)
         adders = {
             key: self._limited_fact_adder(pack[key], 10)
             for key in pack
@@ -12317,6 +12292,34 @@ class SourceCodeQAService:
         pack["items"] = pack["items"][:40]
         self._classify_evidence_pack_items(pack)
         return pack
+
+    def _new_evidence_pack(self, question: str, evidence_summary: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "version": 2,
+            "intent": evidence_summary.get("intent") or self._question_intent(question),
+            "items": [],
+            "entry_points": [],
+            "call_chain": [],
+            "read_write_points": [],
+            "external_dependencies": [],
+            "module_dependencies": [],
+            "message_flows": [],
+            "tables": [],
+            "apis": [],
+            "configs": [],
+            "static_findings": [],
+            "impact_surfaces": [],
+            "test_coverage": [],
+            "operational_boundaries": [],
+            "source_tiers": [],
+            "source_conflicts": [],
+            "missing_hops": [],
+            "citation_map": [],
+            "confirmed_facts": [],
+            "inferred_facts": [],
+            "missing_facts": [],
+            "evidence_limits": [],
+        }
 
     def _classify_evidence_pack_items(self, pack: dict[str, Any]) -> None:
         confirmed_types = {"table", "api", "external_dependency", "config", "static_finding", "test_coverage", "operational_boundary"}
