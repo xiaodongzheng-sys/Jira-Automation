@@ -13972,18 +13972,6 @@ class SourceCodeQAService:
         answer_thinking_config = token_pressure_context["answer_thinking_config"]
         llm_route = token_pressure_context["llm_route"]
         token_pressure = token_pressure_context["token_pressure"]
-        final_prompt_tokens = token_pressure_context["final_prompt_tokens"]
-        if token_pressure != "normal":
-            llm_route = {
-                **llm_route,
-                "token_pressure": {
-                    "status": token_pressure,
-                    "initial_estimated_prompt_tokens": initial_prompt_tokens,
-                    "final_estimated_prompt_tokens": final_prompt_tokens,
-                    "compact_threshold": LLM_PROMPT_COMPACT_THRESHOLD_TOKENS,
-                    "tight_threshold": LLM_PROMPT_TIGHT_THRESHOLD_TOKENS,
-                },
-            }
         if effort_assessment:
             llm_route["task"] = "effort_assessment"
         answer_max_output_tokens = int(budget["max_output_tokens"])
@@ -14274,6 +14262,17 @@ class SourceCodeQAService:
                     attachment_section=attachment_section,
                 )
             )
+        if token_pressure != "normal":
+            llm_route = {
+                **llm_route,
+                "token_pressure": {
+                    "status": token_pressure,
+                    "initial_estimated_prompt_tokens": initial_prompt_tokens,
+                    "final_estimated_prompt_tokens": final_prompt_tokens,
+                    "compact_threshold": LLM_PROMPT_COMPACT_THRESHOLD_TOKENS,
+                    "tight_threshold": LLM_PROMPT_TIGHT_THRESHOLD_TOKENS,
+                },
+            }
         return {
             "selected_matches": selected_matches,
             "evidence_summary": evidence_summary,
