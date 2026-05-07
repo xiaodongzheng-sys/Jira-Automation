@@ -13855,16 +13855,7 @@ class SourceCodeQAService:
         deep_investigation_rounds = 0
         deep_investigation_terms: list[str] = []
         deep_investigation_added = 0
-        repair_prepare_started = time.perf_counter()
-        deep_needed_raw = self._codex_deep_investigation_needed(
-            question=question,
-            answer=answer,
-            structured_answer=structured_answer,
-            quality_gate=quality_gate,
-            answer_judge=answer_judge,
-            codex_validation=codex_validation,
-        )
-        severe_repair_reasons = self._codex_severe_repair_reasons(
+        repair_decision = self._codex_repair_decision(
             question=question,
             answer=answer,
             structured_answer=structured_answer,
@@ -13873,38 +13864,17 @@ class SourceCodeQAService:
             answer_judge=answer_judge,
             codex_validation=codex_validation,
             finish_reason=finish_reason,
-        )
-        if deep_needed_raw and self._codex_high_risk_question(question):
-            severe_repair_reasons.append("deep_investigation_needed_for_high_risk_question")
-        if effort_assessment:
-            severe_repair_reasons = self._codex_effort_assessment_repair_reasons(
-                answer=answer,
-                repair_reasons=severe_repair_reasons,
-            )
-        severe_repair_reasons = list(dict.fromkeys([reason for reason in severe_repair_reasons if reason]))
-        repair_issues = severe_repair_reasons
-        deep_needed = any(reason == "deep_investigation_needed_for_high_risk_question" for reason in severe_repair_reasons)
-        repair_issue_count = len([issue for issue in repair_issues if issue]) + (1 if deep_needed else 0)
-        repair_will_run = bool(self.codex_repair_enabled and severe_repair_reasons)
-        repair_decision_ms = int((time.perf_counter() - repair_prepare_started) * 1000)
-        _log_source_code_qa_timing(
-            "codex_repair_prepare",
-            elapsed_ms=repair_decision_ms,
+            effort_assessment=effort_assessment,
             trace_id=trace_id,
-            provider=self.llm_provider.name,
-            model=selected_model,
+            selected_model=selected_model,
             query_mode=query_mode,
-            phase="repair_prepare",
-            repair_enabled=self.codex_repair_enabled,
-            repair_policy="severe_only",
-            repair_will_run=repair_will_run,
-            repair_reason="; ".join(severe_repair_reasons[:6]),
-            repair_issue_count=repair_issue_count,
-            validation_issue_count=len([issue for issue in codex_validation.get("issues") or [] if issue]),
-            validation_warning_count=len([issue for issue in codex_validation.get("warnings") or [] if issue]),
-            judge_issue_count=len([issue for issue in answer_judge.get("issues") or [] if issue]),
-            deep_investigation_needed=bool(deep_needed),
         )
+        severe_repair_reasons = repair_decision["severe_repair_reasons"]
+        repair_issues = repair_decision["repair_issues"]
+        deep_needed = repair_decision["deep_needed"]
+        repair_issue_count = repair_decision["repair_issue_count"]
+        repair_will_run = repair_decision["repair_will_run"]
+        repair_decision_ms = repair_decision["repair_decision_ms"]
         if repair_will_run:
             repair_attempted = True
             repair_reason = "; ".join(severe_repair_reasons[:6])
@@ -14367,6 +14337,81 @@ class SourceCodeQAService:
             "codex_cli_trace": codex_cli_trace,
             "cache_metadata": self._answer_cache_metadata(cache_key),
             "llm_timing": timing,
+        }
+
+    def _codex_repair_decision(
+        self,
+        *,
+        question: str,
+        answer: str,
+        structured_answer: dict[str, Any],
+        quality_gate: dict[str, Any],
+        evidence_pack: dict[str, Any],
+        answer_judge: dict[str, Any],
+        codex_validation: dict[str, Any],
+        finish_reason: str,
+        effort_assessment: bool,
+        trace_id: str,
+        selected_model: str,
+        query_mode: str,
+    ) -> dict[str, Any]:
+        repair_prepare_started = time.perf_counter()
+        deep_needed_raw = self._codex_deep_investigation_needed(
+            question=question,
+            answer=answer,
+            structured_answer=structured_answer,
+            quality_gate=quality_gate,
+            answer_judge=answer_judge,
+            codex_validation=codex_validation,
+        )
+        severe_repair_reasons = self._codex_severe_repair_reasons(
+            question=question,
+            answer=answer,
+            structured_answer=structured_answer,
+            quality_gate=quality_gate,
+            evidence_pack=evidence_pack,
+            answer_judge=answer_judge,
+            codex_validation=codex_validation,
+            finish_reason=finish_reason,
+        )
+        if deep_needed_raw and self._codex_high_risk_question(question):
+            severe_repair_reasons.append("deep_investigation_needed_for_high_risk_question")
+        if effort_assessment:
+            severe_repair_reasons = self._codex_effort_assessment_repair_reasons(
+                answer=answer,
+                repair_reasons=severe_repair_reasons,
+            )
+        severe_repair_reasons = list(dict.fromkeys([reason for reason in severe_repair_reasons if reason]))
+        repair_issues = severe_repair_reasons
+        deep_needed = any(reason == "deep_investigation_needed_for_high_risk_question" for reason in severe_repair_reasons)
+        repair_issue_count = len([issue for issue in repair_issues if issue]) + (1 if deep_needed else 0)
+        repair_will_run = bool(self.codex_repair_enabled and severe_repair_reasons)
+        repair_decision_ms = int((time.perf_counter() - repair_prepare_started) * 1000)
+        _log_source_code_qa_timing(
+            "codex_repair_prepare",
+            elapsed_ms=repair_decision_ms,
+            trace_id=trace_id,
+            provider=self.llm_provider.name,
+            model=selected_model,
+            query_mode=query_mode,
+            phase="repair_prepare",
+            repair_enabled=self.codex_repair_enabled,
+            repair_policy="severe_only",
+            repair_will_run=repair_will_run,
+            repair_reason="; ".join(severe_repair_reasons[:6]),
+            repair_issue_count=repair_issue_count,
+            validation_issue_count=len([issue for issue in codex_validation.get("issues") or [] if issue]),
+            validation_warning_count=len([issue for issue in codex_validation.get("warnings") or [] if issue]),
+            judge_issue_count=len([issue for issue in answer_judge.get("issues") or [] if issue]),
+            deep_investigation_needed=bool(deep_needed),
+        )
+        return {
+            "severe_repair_reasons": severe_repair_reasons,
+            "repair_issues": repair_issues,
+            "deep_needed": deep_needed,
+            "repair_issue_count": repair_issue_count,
+            "repair_will_run": repair_will_run,
+            "repair_decision_ms": repair_decision_ms,
         }
 
     def _codex_deep_investigation_needed(
