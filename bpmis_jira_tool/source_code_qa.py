@@ -18805,6 +18805,54 @@ class SourceCodeQAService:
         temp_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
         os.replace(temp_path, path)
 
+    @staticmethod
+    def _query_telemetry_match_counts(
+        matches: list[dict[str, Any]],
+    ) -> tuple[dict[str, int], dict[str, int]]:
+        stage_counts: dict[str, int] = {}
+        retrieval_counts: dict[str, int] = {}
+        for match in matches:
+            stage = str(match.get("trace_stage") or "direct")
+            retrieval = str(match.get("retrieval") or "file_scan")
+            stage_counts[stage] = stage_counts.get(stage, 0) + 1
+            retrieval_counts[retrieval] = retrieval_counts.get(retrieval, 0) + 1
+        return stage_counts, retrieval_counts
+
+    @staticmethod
+    def _query_telemetry_tool_trace_summary(tool_trace: list[Any]) -> dict[str, Any]:
+        return {
+            "steps": len(tool_trace),
+            "phases": sorted({str(step.get("phase") or "unknown") for step in tool_trace if isinstance(step, dict)}),
+            "tools": sorted({str(step.get("tool") or "unknown") for step in tool_trace if isinstance(step, dict)})[:20],
+            "matches_added": sum(int(step.get("matches_added") or 0) for step in tool_trace if isinstance(step, dict)),
+        }
+
+    @staticmethod
+    def _query_telemetry_evidence_pack_summary(evidence_pack: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "version": evidence_pack.get("version"),
+            "items": len(evidence_pack.get("items") or []),
+            "entry_points": len(evidence_pack.get("entry_points") or []),
+            "call_chain": len(evidence_pack.get("call_chain") or []),
+            "read_write_points": len(evidence_pack.get("read_write_points") or []),
+            "external_dependencies": len(evidence_pack.get("external_dependencies") or []),
+            "tables": len(evidence_pack.get("tables") or []),
+            "apis": len(evidence_pack.get("apis") or []),
+            "static_findings": len(evidence_pack.get("static_findings") or []),
+            "impact_surfaces": len(evidence_pack.get("impact_surfaces") or []),
+            "test_coverage": len(evidence_pack.get("test_coverage") or []),
+            "operational_boundaries": len(evidence_pack.get("operational_boundaries") or []),
+            "missing_hops": len(evidence_pack.get("missing_hops") or []),
+        }
+
+    @staticmethod
+    def _query_telemetry_answer_policy_statuses(policies: list[Any]) -> dict[str, str]:
+        return {
+            str(policy.get("name") or "unknown"): str(policy.get("status") or "unknown")
+            for policy in policies
+            if isinstance(policy, dict)
+        }
+
     def _record_query_telemetry(
         self,
         *,
@@ -18822,13 +18870,7 @@ class SourceCodeQAService:
             evidence_pack = payload.get("evidence_pack") or {}
             tool_trace = payload.get("tool_trace") or []
             policies = answer_contract.get("policies") or (payload.get("answer_quality") or {}).get("policies") or []
-            stage_counts: dict[str, int] = {}
-            retrieval_counts: dict[str, int] = {}
-            for match in matches:
-                stage = str(match.get("trace_stage") or "direct")
-                retrieval = str(match.get("retrieval") or "file_scan")
-                stage_counts[stage] = stage_counts.get(stage, 0) + 1
-                retrieval_counts[retrieval] = retrieval_counts.get(retrieval, 0) + 1
+            stage_counts, retrieval_counts = self._query_telemetry_match_counts(matches)
             record = {
                 "timestamp": self._now_iso(),
                 "key": key,
@@ -18872,33 +18914,10 @@ class SourceCodeQAService:
                 "answer_claim_check": payload.get("answer_claim_check") or {},
                 "answer_judge": payload.get("answer_judge") or {},
                 "codex_cli_summary": self._codex_telemetry_summary(payload),
-                "tool_trace_summary": {
-                    "steps": len(tool_trace),
-                    "phases": sorted({str(step.get("phase") or "unknown") for step in tool_trace if isinstance(step, dict)}),
-                    "tools": sorted({str(step.get("tool") or "unknown") for step in tool_trace if isinstance(step, dict)})[:20],
-                    "matches_added": sum(int(step.get("matches_added") or 0) for step in tool_trace if isinstance(step, dict)),
-                },
+                "tool_trace_summary": self._query_telemetry_tool_trace_summary(tool_trace),
                 "answer_contract": answer_contract,
-                "evidence_pack_summary": {
-                    "version": evidence_pack.get("version"),
-                    "items": len(evidence_pack.get("items") or []),
-                    "entry_points": len(evidence_pack.get("entry_points") or []),
-                    "call_chain": len(evidence_pack.get("call_chain") or []),
-                    "read_write_points": len(evidence_pack.get("read_write_points") or []),
-                    "external_dependencies": len(evidence_pack.get("external_dependencies") or []),
-                    "tables": len(evidence_pack.get("tables") or []),
-                    "apis": len(evidence_pack.get("apis") or []),
-                    "static_findings": len(evidence_pack.get("static_findings") or []),
-                    "impact_surfaces": len(evidence_pack.get("impact_surfaces") or []),
-                    "test_coverage": len(evidence_pack.get("test_coverage") or []),
-                    "operational_boundaries": len(evidence_pack.get("operational_boundaries") or []),
-                    "missing_hops": len(evidence_pack.get("missing_hops") or []),
-                },
-                "answer_policy_statuses": {
-                    str(policy.get("name") or "unknown"): str(policy.get("status") or "unknown")
-                    for policy in policies
-                    if isinstance(policy, dict)
-                },
+                "evidence_pack_summary": self._query_telemetry_evidence_pack_summary(evidence_pack),
+                "answer_policy_statuses": self._query_telemetry_answer_policy_statuses(policies),
                 "structured_answer_confidence": (payload.get("structured_answer") or {}).get("confidence"),
                 "llm_usage": payload.get("llm_usage") or {},
                 "fallback": bool(payload.get("fallback_notice")),
