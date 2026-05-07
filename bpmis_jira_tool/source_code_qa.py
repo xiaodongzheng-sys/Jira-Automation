@@ -77,6 +77,11 @@ from bpmis_jira_tool.source_code_qa_llm_providers import (
     UnsupportedSourceCodeQALLMProvider,
     VertexAISourceCodeQALLMProvider,
 )
+from bpmis_jira_tool.source_code_qa_match_grading import (
+    evidence_role,
+    match_answer_grade,
+    match_is_definition_only,
+)
 from bpmis_jira_tool.source_code_qa_patterns import (
     HTTPS_URL_PATTERN,
     IDENTIFIER_PATTERN,
@@ -13941,41 +13946,15 @@ class SourceCodeQAService:
 
     @staticmethod
     def _match_is_definition_only(match: dict[str, Any], focus_terms: list[str]) -> bool:
-        path = str(match.get("path") or "").lower()
-        snippet = str(match.get("snippet") or "").lower()
-        if any(term in path for term in ("enum", "constant", "constants")):
-            return True
-        if re.search(r"\b(enum|interface)\s+\w+", snippet):
-            return True
-        if re.search(r"\b(class|public|private|protected)\s+\w+", snippet) and not any(marker in snippet for marker in ("select ", "insert ", "update ", "delete ", "repository", "mapper", "client", "controller")):
-            return True
-        return False
+        return match_is_definition_only(match, focus_terms)
 
     @staticmethod
     def _evidence_role(path: str, snippet: str, reason: str) -> str:
-        lowered_path = str(path or "").lower()
-        lowered = f"{snippet or ''} {reason or ''}".lower()
-        if any(marker in lowered_path for marker in ("mapper", "repository", "dao")) or re.search(r"\bselect\b.+\bfrom\b", lowered):
-            return "data_source"
-        if any(marker in lowered_path for marker in ("client", "controller", "api")) or any(marker in lowered for marker in ("requestmapping", "postmapping", "getmapping", "resttemplate", "webclient", "feign")):
-            return "api"
-        if "config" in lowered_path or "properties" in lowered_path or "apollo" in lowered:
-            return "config"
-        if "test" in lowered_path:
-            return "test"
-        if any(marker in lowered for marker in ("enum", "constant")):
-            return "definition"
-        return "logic"
+        return evidence_role(path, snippet, reason)
 
     @classmethod
     def _match_answer_grade(cls, match: dict[str, Any], *, intent_label: str = "general") -> bool:
-        path = str(match.get("path") or "").lower()
-        snippet = str(match.get("snippet") or "")
-        reason = str(match.get("reason") or "")
-        role = cls._evidence_role(path, snippet, reason)
-        if intent_label == "data_source":
-            return role in {"data_source", "api", "config"}
-        return role not in {"definition", "test"}
+        return match_answer_grade(match, intent_label=intent_label)
 
     def _codex_deep_investigation_needed(
         self,
