@@ -13881,7 +13881,6 @@ class SourceCodeQAService:
         )
         selected_matches = answer_context["selected_matches"]
         evidence_summary = answer_context["evidence_summary"]
-        trace_paths = answer_context["trace_paths"]
         quality_gate = answer_context["quality_gate"]
         evidence_pack = answer_context["evidence_pack"]
         domain_context = answer_context["domain_context"]
