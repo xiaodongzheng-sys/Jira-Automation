@@ -2220,10 +2220,6 @@ h2,
   color: #667085;
 }
 
-.workspace-head {
-  align-items: center;
-}
-
 .workspace-head h2 {
   margin-bottom: 6px;
   font-size: 2rem;
@@ -2316,10 +2312,6 @@ h2,
   box-shadow: 0 8px 18px rgba(22, 119, 255, 0.22);
 }
 
-.button:hover {
-  background: #4096ff;
-}
-
 .button-secondary {
   background: #f0f7ff;
   color: #1677ff;
@@ -2352,14 +2344,6 @@ textarea:focus {
   border-color: #d6e4ff;
 }
 
-.run-progress-bar {
-  background: #e6f4ff;
-}
-
-.run-progress-fill {
-  background: linear-gradient(90deg, #1677ff 0%, #69b1ff 100%);
-}
-
 .premium-table-wrap {
   background: #ffffff;
   border-color: #eaecf0;
@@ -2368,11 +2352,6 @@ textarea:focus {
 th {
   color: #667085;
   background: #fafafa;
-}
-
-th,
-td {
-  border-bottom-color: #f0f0f0;
 }
 
 .badge-created,
@@ -2418,10 +2397,6 @@ td {
     grid-template-columns: 1fr;
   }
 
-  .executive-list li {
-    grid-template-columns: 1fr;
-    gap: 6px;
-  }
 }
 
 /* Final Ant-style system override */

@@ -16,6 +16,7 @@ from openpyxl import Workbook
 
 from bpmis_jira_tool.errors import ToolError
 from bpmis_jira_tool.source_code_qa import (
+    CODE_INDEX_VERSION,
     CodexCliBridgeSourceCodeQALLMProvider,
     RepositoryEntry,
     SourceCodeQAService,
@@ -2790,11 +2791,11 @@ class SourceCodeQAServiceTests(unittest.TestCase):
                 "create table lines (file_path text, line_no integer, line_text text, lower_text text, symbols text, is_declaration integer, has_pathish integer)"
             )
             connection.execute(
-                "create table semantic_chunks (file_path text, start_line integer, end_line integer, chunk_text text, lower_text text, tokens text, symbols text, embedding text)"
+                "create table semantic_chunks (file_path text, start_line integer, end_line integer, chunk_text text, lower_text text, tokens text, symbols text)"
             )
             connection.execute("insert into files values ('src/App.java', 'src/app.java', '[]')")
             connection.execute("insert into lines values ('src/App.java', 1, 'class App {}', 'class app {}', '[]', 1, 0)")
-            connection.execute("insert into semantic_chunks values ('src/App.java', 1, 1, 'class App {}', 'class app {}', '[]', '[]', '[]')")
+            connection.execute("insert into semantic_chunks values ('src/App.java', 1, 1, 'class App {}', 'class app {}', '[]', '[]')")
             connection.commit()
         request_cache = self.service._new_retrieval_request_cache()
         with sqlite3.connect(index_path) as connection:
@@ -2817,7 +2818,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             connection.execute("create table file_tokens (token text, file_path text)")
             connection.execute("create table line_tokens (token text, file_path text, line_no integer)")
             connection.execute(
-                "create table semantic_chunks (chunk_id text, file_path text, start_line integer, end_line integer, chunk_text text, lower_text text, tokens text, symbols text, embedding text)"
+                "create table semantic_chunks (chunk_id text, file_path text, start_line integer, end_line integer, chunk_text text, lower_text text, tokens text, symbols text)"
             )
             connection.execute("create table semantic_chunk_tokens (token text, chunk_id text, file_path text)")
             for index in range(300):
@@ -2834,7 +2835,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             )
             connection.execute("insert into line_tokens values ('needlevalue', 'src/service/Late.java', 9001)")
             connection.execute(
-                "insert into semantic_chunks values ('late-1', 'src/service/Late.java', 9001, 9001, 'return needleValue;', 'return needlevalue;', '[\"needlevalue\"]', '[\"needlevalue\"]', '[]')"
+                "insert into semantic_chunks values ('late-1', 'src/service/Late.java', 9001, 9001, 'return needleValue;', 'return needlevalue;', '[\"needlevalue\"]', '[\"needlevalue\"]')"
             )
             connection.execute("insert into semantic_chunk_tokens values ('needlevalue', 'late-1', 'src/service/Late.java')")
             connection.commit()
@@ -2887,13 +2888,13 @@ class SourceCodeQAServiceTests(unittest.TestCase):
                 "create table lines (file_path text, line_no integer, line_text text, lower_text text, symbols text, is_declaration integer, has_pathish integer)"
             )
             connection.execute(
-                "create table semantic_chunks (file_path text, start_line integer, end_line integer, chunk_text text, lower_text text, tokens text, symbols text, embedding text)"
+                "create table semantic_chunks (file_path text, start_line integer, end_line integer, chunk_text text, lower_text text, tokens text, symbols text)"
             )
             connection.execute("insert into files values ('src/App.java', 'src/app.java', '[]')")
             connection.execute("insert into lines values ('src/App.java', 1, 'class App {', 'class app {', '[]', 1, 0)")
             connection.execute("insert into lines values ('src/App.java', 2, '  void run() {}', '  void run() {}', '[]', 1, 0)")
             connection.execute("insert into lines values ('src/App.java', 3, '}', '}', '[]', 0, 0)")
-            connection.execute("insert into semantic_chunks values ('src/App.java', 1, 3, 'class App {}', 'class app {}', '[]', '[]', '[]')")
+            connection.execute("insert into semantic_chunks values ('src/App.java', 1, 3, 'class App {}', 'class app {}', '[]', '[]')")
             connection.commit()
         request_cache = self.service._new_retrieval_request_cache()
         with sqlite3.connect(index_path) as connection:
@@ -3804,6 +3805,10 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             file_fts_count = connection.execute("select count(*) from files_fts").fetchone()[0]
             fts_count = connection.execute("select count(*) from lines_fts").fetchone()[0]
             semantic_fts_count = connection.execute("select count(*) from semantic_chunks_fts").fetchone()[0]
+            semantic_columns = {row[1] for row in connection.execute("pragma table_info(semantic_chunks)").fetchall()}
+        self.assertEqual(metadata["version"], str(CODE_INDEX_VERSION))
+        self.assertEqual(CODE_INDEX_VERSION, 30)
+        self.assertNotIn("embedding", semantic_columns)
         self.assertGreaterEqual(definition_count, 3)
         self.assertGreaterEqual(reference_count, 3)
         self.assertGreaterEqual(entity_count, 3)

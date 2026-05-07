@@ -109,6 +109,96 @@ from bpmis_jira_tool.source_code_qa_sql_artifacts import (
     extract_source_code_qa_sql_blocks as _extract_source_code_qa_sql_blocks,
     format_source_code_qa_sql_text as _format_source_code_qa_sql_text,
 )
+from bpmis_jira_tool.web_source_code_qa_runtime import (
+    bind_source_code_qa_runtime_helpers,
+    _source_code_qa_codex_session_lock,
+    _record_source_code_qa_work_memory,
+    _get_source_code_qa_session_store,
+    _get_source_code_qa_attachment_store,
+    _get_source_code_qa_generated_artifact_store,
+    _get_source_code_qa_runtime_evidence_store,
+    _can_access_source_code_qa,
+    _can_manage_source_code_qa,
+    _source_code_qa_auth_payload,
+    _source_code_qa_git_auth_ready,
+    _build_source_code_qa_service,
+    _source_code_qa_query_sync_mode,
+    _source_code_qa_scope_has_queryable_index,
+    _prepare_source_code_qa_auto_sync,
+    _local_agent_source_code_qa_enabled,
+    _source_code_qa_options_payload,
+    _source_code_qa_runtime_capabilities_payload,
+    _source_code_qa_provider_available,
+    _source_code_qa_public_answer_mode,
+    _source_code_qa_query_mode,
+    _source_code_qa_attachment_ids,
+    _resolve_source_code_qa_query_attachments,
+    _source_code_qa_public_attachments,
+    _resolve_source_code_qa_runtime_evidence,
+    _source_code_qa_public_runtime_evidence,
+    _source_code_qa_public_generated_artifacts,
+    _build_source_code_qa_generated_artifacts,
+    _build_source_code_qa_session_context,
+    _source_code_qa_release_gate_payload,
+    _require_source_code_qa_access,
+    _require_source_code_qa_manage_access,
+    _classify_source_code_qa_job_error,
+    _public_source_code_qa_job_snapshot,
+    _source_code_qa_job_snapshot_for_current_user,
+)
+from bpmis_jira_tool.web_source_code_qa_effort import (
+    bind_source_code_qa_effort_helpers,
+    _source_code_qa_effort_assessment_language,
+    _source_code_qa_effort_sentences,
+    _source_code_qa_effort_matches,
+    _source_code_qa_effort_unique,
+    _source_code_qa_load_json_file,
+    _load_source_code_qa_effort_dictionaries,
+    _load_source_code_qa_domain_profile_config,
+    _load_source_code_qa_domain_knowledge_config,
+    _source_code_qa_effort_domain_entries,
+    _source_code_qa_effort_country_hint,
+    _source_code_qa_effort_term_matches,
+    _source_code_qa_effort_scope_terms_by_team,
+    _source_code_qa_effort_scope_guard,
+    _source_code_qa_effort_scope_mismatch_result,
+    _source_code_qa_effort_seed_terms,
+    _source_code_qa_effort_entry_applies,
+    _source_code_qa_effort_group_typed_candidates,
+    _build_source_code_qa_effort_business_plan,
+    _build_source_code_qa_effort_technical_candidates,
+    _build_source_code_qa_effort_estimation_rubric,
+    _source_code_qa_effort_json_block,
+    _build_source_code_qa_effort_assessment_prompt,
+    _source_code_qa_effort_compact_terms,
+    _build_source_code_qa_effort_evidence_query,
+    _source_code_qa_effort_evidence_digest,
+    _source_code_qa_effort_runtime_digest,
+    _source_code_qa_effort_cache_key,
+    _source_code_qa_effort_cache_root,
+    _load_source_code_qa_effort_cached_result,
+    _store_source_code_qa_effort_cached_result,
+    _source_code_qa_effort_compact_evidence,
+    _source_code_qa_effort_matrix_terms,
+    _source_code_qa_effort_match_text,
+    _source_code_qa_effort_matrix_quality,
+    _build_source_code_qa_effort_evidence_matrix,
+    _source_code_qa_effort_generic_output_guard,
+    _build_source_code_qa_effort_compact_synthesis_prompt,
+    _source_code_qa_effort_missing_evidence,
+    _source_code_qa_effort_confidence,
+    _source_code_qa_effort_code_change_points,
+    _source_code_qa_effort_fallback_answer,
+    _build_source_code_qa_effort_structured_assessment,
+    _source_code_qa_effort_sanitize_visible_answer,
+    _normalize_source_code_qa_effort_assessment_result,
+    _run_source_code_qa_effort_assessment_job,
+)
+from bpmis_jira_tool.web_source_code_qa_jobs import (
+    bind_source_code_qa_job_helpers,
+    _run_source_code_qa_sync_job,
+    _run_source_code_qa_query_job,
+)
 from bpmis_jira_tool.source_code_qa_stores import (
     SourceCodeQAAttachmentStore,
     SourceCodeQAGeneratedArtifactStore,
@@ -136,6 +226,7 @@ from bpmis_jira_tool.user_config import (
     TEAM_PROFILE_DEFAULTS,
     WebConfigStore,
 )
+from bpmis_jira_tool.web_source_code_qa_routes import register_source_code_qa_routes
 from bpmis_jira_tool.web_work_memory_routes import register_work_memory_routes
 from bpmis_jira_tool.work_memory import (
     WorkMemoryStore,
@@ -192,7 +283,6 @@ _gmail_export_active_users: set[str] = set()
 _gmail_export_active_users_lock = threading.Lock()
 _source_code_qa_codex_session_locks: dict[str, threading.Lock] = {}
 _source_code_qa_codex_session_locks_guard = threading.Lock()
-
 
 def _bool_env_from_env(name: str, default: bool = False) -> bool:
     value = os.environ.get(name)
@@ -334,16 +424,6 @@ def _release_gmail_export_lock(email: str) -> None:
         _gmail_export_active_users.discard(normalized)
 
 
-def _source_code_qa_codex_session_lock(session_id: str) -> threading.Lock:
-    normalized = str(session_id or "").strip()
-    if not normalized:
-        normalized = "_no_session"
-    with _source_code_qa_codex_session_locks_guard:
-        lock = _source_code_qa_codex_session_locks.get(normalized)
-        if lock is None:
-            lock = threading.Lock()
-            _source_code_qa_codex_session_locks[normalized] = lock
-        return lock
 
 
 def _count_configured_lines(value: Any) -> int:
@@ -496,6 +576,10 @@ def _get_daily_brief_archive_store(settings: Settings) -> DailyBriefArchiveStore
 
 
 def create_app() -> Flask:
+    bind_source_code_qa_runtime_helpers(globals())
+    bind_source_code_qa_effort_helpers(globals())
+    bind_source_code_qa_job_helpers(globals())
+
     settings = Settings.from_env()
     package_dir = Path(__file__).resolve().parent
     project_root = package_dir.parent
@@ -826,486 +910,7 @@ def create_app() -> Flask:
     def access_denied():
         return render_template("access_denied.html", page_title="Access Restricted"), HTTPStatus.FORBIDDEN
 
-    @app.get("/source-code-qa")
-    def source_code_qa():
-        access_gate = _require_source_code_qa_access(settings)
-        if access_gate is not None:
-            return access_gate
-        user_identity = _get_user_identity(settings)
-        service = _build_source_code_qa_service()
-        return render_template(
-            "source_code_qa.html",
-            page_title="Source Code Q&A",
-            user_identity=user_identity,
-            options=_source_code_qa_options_payload(service),
-            team_profiles=TEAM_PROFILE_DEFAULTS,
-            country_options=list(CRMS_COUNTRIES),
-            all_country=ALL_COUNTRY,
-            can_manage_source_code_qa=_can_manage_source_code_qa(settings),
-            asset_revision=_current_release_revision(),
-        )
-
-    @app.get("/api/source-code-qa/config")
-    def source_code_qa_config_api():
-        access_gate = _require_source_code_qa_access(settings, api=True)
-        if access_gate is not None:
-            return access_gate
-        try:
-            service = _build_source_code_qa_service()
-            codex_service = _build_source_code_qa_service("codex_cli_bridge")
-            return jsonify(
-                {
-                    "status": "ok",
-                    "answer_mode": "auto",
-                    "query_mode": "deep",
-                    "can_manage": _can_manage_source_code_qa(settings),
-                    "auth": _source_code_qa_auth_payload(settings),
-                    "git_auth_ready": _source_code_qa_git_auth_ready(service, settings),
-                    "llm_ready": service.llm_ready(),
-                    "llm_provider": settings.source_code_qa_llm_provider,
-                    "llm_providers": {
-                        "codex_cli_bridge": {"ready": codex_service.llm_ready(), "label": "Codex", "available": codex_service.llm_ready()},
-                    },
-                    "llm_model": service.llm_budgets["balanced"]["model"],
-                    "llm_cheap_model": service.llm_budgets["cheap"]["model"],
-                    "llm_deep_model": service.llm_budgets["deep"]["model"],
-                    "llm_fallback_model": service._llm_fallback_model(),
-                    "llm_policy": service.llm_policy_payload(),
-                    "index_health": service.index_health_payload(),
-                    "release_gate": _source_code_qa_release_gate_payload(settings),
-                    "domain_knowledge": service.domain_knowledge_payload(),
-                    "options": _source_code_qa_options_payload(service),
-                    "config": service.load_config(),
-                }
-            )
-        except ToolError as error:
-            status_code = HTTPStatus.SERVICE_UNAVAILABLE if _is_local_agent_unavailable_error(error) else HTTPStatus.BAD_REQUEST
-            return jsonify({"status": "error", "message": str(error), "error_category": _tool_error_category(error)}), status_code
-        except Exception as error:  # noqa: BLE001 - keep API clients on JSON even for unexpected failures.
-            request_id = getattr(g, "request_id", "")
-            current_app.logger.exception("Source Code Q&A config failed unexpectedly")
-            return (
-                jsonify(
-                    {
-                        "status": "error",
-                        "message": "Source Code Q&A config failed unexpectedly. Please refresh; if it repeats, share the request ID.",
-                        "request_id": request_id,
-                        "error_category": "source_code_qa_internal",
-                        "error_retryable": True,
-                    }
-                ),
-                HTTPStatus.INTERNAL_SERVER_ERROR,
-            )
-
-    @app.post("/api/source-code-qa/config")
-    def source_code_qa_save_config_api():
-        access_gate = _require_source_code_qa_manage_access(settings, api=True)
-        if access_gate is not None:
-            return access_gate
-        payload = request.get_json(silent=True)
-        if not isinstance(payload, dict):
-            payload = {}
-        try:
-            result = _build_source_code_qa_service().save_mapping(
-                pm_team=str(payload.get("pm_team") or ""),
-                country=str(payload.get("country") or ""),
-                repositories=payload.get("repositories") or [],
-            )
-            return jsonify({"status": "ok", **result})
-        except ToolError as error:
-            status_code = HTTPStatus.SERVICE_UNAVAILABLE if _is_local_agent_unavailable_error(error) else HTTPStatus.BAD_REQUEST
-            return jsonify({"status": "error", "message": str(error), "error_category": _tool_error_category(error)}), status_code
-
-    @app.post("/api/source-code-qa/sync")
-    def source_code_qa_sync_api():
-        access_gate = _require_source_code_qa_manage_access(settings, api=True)
-        if access_gate is not None:
-            return access_gate
-        payload = request.get_json(silent=True) or {}
-        pm_team = str(payload.get("pm_team") or "")
-        country = str(payload.get("country") or "")
-        job_store: JobStore = current_app.config["JOB_STORE"]
-        job = job_store.create("source-code-qa-sync", title="Sync Source Code Repositories")
-        app_obj = current_app._get_current_object()
-        thread = threading.Thread(
-            target=_run_source_code_qa_sync_job,
-            args=(app_obj, job.job_id, settings, pm_team, country),
-            daemon=True,
-        )
-        thread.start()
-        return jsonify({"status": "queued", "job_id": job.job_id})
-
-    @app.route("/api/source-code-qa/sessions", methods=["GET", "POST"])
-    def source_code_qa_sessions_api():
-        access_gate = _require_source_code_qa_access(settings, api=True)
-        if access_gate is not None:
-            return access_gate
-        store = _get_source_code_qa_session_store()
-        owner_email = _current_google_email() or "local"
-        if request.method == "GET":
-            limit = request.args.get("limit", "30")
-            try:
-                limit_value = int(limit)
-            except ValueError:
-                limit_value = 30
-            return jsonify({"status": "ok", "sessions": store.list(owner_email=owner_email, limit=limit_value)})
-
-        payload = request.get_json(silent=True) or {}
-        session_payload = store.create(
-            owner_email=owner_email,
-            pm_team=str(payload.get("pm_team") or ""),
-            country=str(payload.get("country") or ""),
-            llm_provider=str(payload.get("llm_provider") or ""),
-            title=str(payload.get("title") or ""),
-        )
-        return jsonify({"status": "ok", "session": session_payload})
-
-    @app.get("/api/source-code-qa/sessions/<session_id>")
-    def source_code_qa_session_api(session_id: str):
-        access_gate = _require_source_code_qa_access(settings, api=True)
-        if access_gate is not None:
-            return access_gate
-        store = _get_source_code_qa_session_store()
-        session_payload = store.get(session_id, owner_email=_current_google_email() or "local")
-        if session_payload is None:
-            return jsonify({"status": "error", "message": "Source Code Q&A session was not found."}), HTTPStatus.NOT_FOUND
-        return jsonify({"status": "ok", "session": session_payload})
-
-    @app.post("/api/source-code-qa/sessions/<session_id>/archive")
-    def source_code_qa_session_archive_api(session_id: str):
-        access_gate = _require_source_code_qa_access(settings, api=True)
-        if access_gate is not None:
-            return access_gate
-        store = _get_source_code_qa_session_store()
-        archived = store.archive(session_id, owner_email=_current_google_email() or "local")
-        if archived is None:
-            return jsonify({"status": "error", "message": "Source Code Q&A session was not found."}), HTTPStatus.NOT_FOUND
-        return jsonify(archived)
-
-    @app.post("/api/source-code-qa/attachments")
-    def source_code_qa_attachments_api():
-        access_gate = _require_source_code_qa_access(settings, api=True)
-        if access_gate is not None:
-            return access_gate
-        owner_email = _current_google_email() or "local"
-        session_id = str(request.form.get("session_id") or "").strip()
-        if not session_id:
-            return jsonify({"status": "error", "message": "A Source Code Q&A session is required before uploading attachments."}), HTTPStatus.BAD_REQUEST
-        if _get_source_code_qa_session_store().get(session_id, owner_email=owner_email) is None:
-            return jsonify({"status": "error", "message": "Source Code Q&A session was not found."}), HTTPStatus.NOT_FOUND
-        uploaded = request.files.get("file")
-        if uploaded is None:
-            return jsonify({"status": "error", "message": "Upload a file field named file."}), HTTPStatus.BAD_REQUEST
-        try:
-            content = uploaded.read()
-            attachment = _get_source_code_qa_attachment_store().save_bytes(
-                owner_email=owner_email,
-                session_id=session_id,
-                filename=uploaded.filename or "attachment",
-                mime_type=uploaded.mimetype or "",
-                content=content,
-            )
-            return jsonify({"status": "ok", "attachment": attachment})
-        except ToolError as error:
-            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
-
-    @app.get("/api/source-code-qa/attachments/<attachment_id>")
-    def source_code_qa_attachment_api(attachment_id: str):
-        access_gate = _require_source_code_qa_access(settings, api=True)
-        if access_gate is not None:
-            return access_gate
-        owner_email = _current_google_email() or "local"
-        session_id = str(request.args.get("session_id") or "").strip()
-        if not session_id:
-            return jsonify({"status": "error", "message": "session_id is required."}), HTTPStatus.BAD_REQUEST
-        if _get_source_code_qa_session_store().get(session_id, owner_email=owner_email) is None:
-            return jsonify({"status": "error", "message": "Source Code Q&A session was not found."}), HTTPStatus.NOT_FOUND
-        try:
-            metadata, content = _get_source_code_qa_attachment_store().get_bytes(
-                owner_email=owner_email,
-                session_id=session_id,
-                attachment_id=attachment_id,
-            )
-        except ToolError as error:
-            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.NOT_FOUND
-        return send_file(
-            io.BytesIO(content),
-            mimetype=metadata.get("mime_type") or "application/octet-stream",
-            download_name=metadata.get("filename") or "attachment",
-            as_attachment=False,
-        )
-
-    @app.get("/api/source-code-qa/generated-artifacts/<artifact_id>")
-    def source_code_qa_generated_artifact_api(artifact_id: str):
-        access_gate = _require_source_code_qa_access(settings, api=True)
-        if access_gate is not None:
-            return access_gate
-        owner_email = _current_google_email() or "local"
-        session_id = str(request.args.get("session_id") or "").strip()
-        if not session_id:
-            return jsonify({"status": "error", "message": "session_id is required."}), HTTPStatus.BAD_REQUEST
-        if _get_source_code_qa_session_store().get(session_id, owner_email=owner_email) is None:
-            return jsonify({"status": "error", "message": "Source Code Q&A session was not found."}), HTTPStatus.NOT_FOUND
-        try:
-            metadata, content = _get_source_code_qa_generated_artifact_store().get_bytes(
-                owner_email=owner_email,
-                session_id=session_id,
-                artifact_id=artifact_id,
-            )
-        except ToolError as error:
-            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.NOT_FOUND
-        return send_file(
-            io.BytesIO(content),
-            mimetype=metadata.get("mime_type") or "application/zip",
-            download_name=metadata.get("filename") or "source-code-qa-sql-package.zip",
-            as_attachment=True,
-        )
-
-    @app.route("/api/source-code-qa/runtime-evidence", methods=["GET", "POST"])
-    def source_code_qa_runtime_evidence_api():
-        access_gate = _require_source_code_qa_manage_access(settings, api=True)
-        if access_gate is not None:
-            return access_gate
-        store = _get_source_code_qa_runtime_evidence_store()
-        if request.method == "GET":
-            try:
-                evidence = store.list(
-                    pm_team=str(request.args.get("pm_team") or ""),
-                    country=str(request.args.get("country") or ""),
-                )
-                return jsonify({"status": "ok", "evidence": evidence})
-            except ToolError as error:
-                return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
-
-        uploaded = request.files.get("file")
-        if uploaded is None:
-            return jsonify({"status": "error", "message": "Upload a file field named file."}), HTTPStatus.BAD_REQUEST
-        try:
-            evidence = store.save_bytes(
-                pm_team=str(request.form.get("pm_team") or ""),
-                country=str(request.form.get("country") or ""),
-                source_type=str(request.form.get("source_type") or "other"),
-                uploaded_by=_current_google_email() or "local",
-                filename=uploaded.filename or "runtime-evidence",
-                mime_type=uploaded.mimetype or "",
-                content=uploaded.read(),
-            )
-            return jsonify({"status": "ok", "evidence": evidence, "items": store.list(pm_team=evidence["pm_team"], country=evidence["country"])})
-        except ToolError as error:
-            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
-
-    @app.delete("/api/source-code-qa/runtime-evidence/<evidence_id>")
-    def source_code_qa_runtime_evidence_delete_api(evidence_id: str):
-        access_gate = _require_source_code_qa_manage_access(settings, api=True)
-        if access_gate is not None:
-            return access_gate
-        try:
-            pm_team = str(request.args.get("pm_team") or "")
-            country = str(request.args.get("country") or "")
-            deleted = _get_source_code_qa_runtime_evidence_store().delete(
-                pm_team=pm_team,
-                country=country,
-                evidence_id=evidence_id,
-            )
-            return jsonify(
-                {
-                    "status": "ok",
-                    "deleted": deleted,
-                    "evidence": _get_source_code_qa_runtime_evidence_store().list(pm_team=pm_team, country=country),
-                }
-            )
-        except ToolError as error:
-            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
-
-    @app.post("/api/source-code-qa/query")
-    def source_code_qa_query_api():
-        access_gate = _require_source_code_qa_access(settings, api=True)
-        if access_gate is not None:
-            return access_gate
-        payload = request.get_json(silent=True) or {}
-        if payload.get("async"):
-            if not _source_code_qa_provider_available(payload.get("llm_provider")):
-                return jsonify({"status": "error", "message": "Selected Source Code Q&A model is unavailable."}), HTTPStatus.BAD_REQUEST
-            job_store: JobStore = current_app.config["JOB_STORE"]
-            job = job_store.create("source-code-qa-query", title="Source Code Q&A Query")
-            app_obj = current_app._get_current_object()
-            async_payload = dict(payload)
-            async_payload["query_mode"] = _source_code_qa_query_mode(payload.get("query_mode"))
-            owner_email = _current_google_email() or "local"
-            async_payload["_session_owner_email"] = owner_email
-            session_id = str(payload.get("session_id") or "").strip()
-            if session_id:
-                try:
-                    attachments = _resolve_source_code_qa_query_attachments(payload, owner_email=owner_email, session_id=session_id)
-                    session_payload = _get_source_code_qa_session_store().append_pending_question(
-                        session_id,
-                        owner_email=owner_email,
-                        pm_team=str(payload.get("pm_team") or ""),
-                        country=str(payload.get("country") or ""),
-                        llm_provider=str(payload.get("llm_provider") or ""),
-                        question=str(payload.get("question") or ""),
-                        job_id=job.job_id,
-                        attachments=attachments,
-                    )
-                    if session_payload is not None:
-                        async_payload["_resolved_attachments"] = attachments
-                except ToolError:
-                    pass
-            scheduler: SourceCodeQAQueryScheduler = current_app.config["SOURCE_CODE_QA_QUERY_SCHEDULER"]
-            scheduler.submit(app=app_obj, job_id=job.job_id, payload=async_payload, owner_email=owner_email)
-            snapshot = _public_source_code_qa_job_snapshot(job_store.snapshot(job.job_id) or {})
-            return jsonify({**snapshot, "status": "queued", "job_id": job.job_id, "session_id": session_id})
-        try:
-            if not _source_code_qa_provider_available(payload.get("llm_provider")):
-                raise ToolError("Selected Source Code Q&A model is unavailable.")
-            service = _build_source_code_qa_service(payload.get("llm_provider"))
-            session_store = _get_source_code_qa_session_store()
-            session_id = str(payload.get("session_id") or "").strip()
-            owner_email = _current_google_email() or "local"
-            conversation_context = payload.get("conversation_context") if isinstance(payload.get("conversation_context"), dict) else None
-            if conversation_context is None and session_id:
-                conversation_context = session_store.get_context(session_id, owner_email=owner_email)
-            if isinstance(payload.get("_resolved_attachments"), list):
-                attachments = payload.get("_resolved_attachments") or []
-            else:
-                attachments = _resolve_source_code_qa_query_attachments(payload, owner_email=owner_email, session_id=session_id)
-            pm_team = str(payload.get("pm_team") or "")
-            country = str(payload.get("country") or "")
-            query_mode = _source_code_qa_query_mode(payload.get("query_mode"))
-            runtime_evidence = _resolve_source_code_qa_runtime_evidence(pm_team=pm_team, country=country)
-            auto_sync = _prepare_source_code_qa_auto_sync(service, pm_team=pm_team, country=country)
-            def run_query() -> dict[str, Any]:
-                return service.query(
-                    pm_team=pm_team,
-                    country=country,
-                    question=str(payload.get("question") or ""),
-                    answer_mode=_source_code_qa_public_answer_mode(payload.get("answer_mode")),
-                    llm_budget_mode="auto",
-                    query_mode=query_mode,
-                    conversation_context=conversation_context,
-                    attachments=attachments,
-                    runtime_evidence=runtime_evidence,
-                )
-
-            if service.llm_provider_name == "codex_cli_bridge" and session_id:
-                with _source_code_qa_codex_session_lock(session_id):
-                    result = run_query()
-            else:
-                result = run_query()
-            result["auto_sync"] = auto_sync
-            result["attachments"] = _source_code_qa_public_attachments(attachments)
-            result["runtime_evidence"] = _source_code_qa_public_runtime_evidence(runtime_evidence)
-            if session_id:
-                result["generated_artifacts"] = _build_source_code_qa_generated_artifacts(
-                    owner_email=owner_email,
-                    session_id=session_id,
-                    pm_team=pm_team,
-                    country=country,
-                    question=str(payload.get("question") or ""),
-                    result=result,
-                    runtime_evidence=runtime_evidence,
-                )
-                session_payload = session_store.append_exchange(
-                    session_id,
-                    owner_email=owner_email,
-                    pm_team=str(payload.get("pm_team") or ""),
-                    country=str(payload.get("country") or ""),
-                    llm_provider=str(payload.get("llm_provider") or ""),
-                    question=str(payload.get("question") or ""),
-                    result=result,
-                    context=_build_source_code_qa_session_context(result, payload),
-                    attachments=attachments,
-                )
-                if session_payload is not None:
-                    result["session"] = session_payload
-                    result["session_id"] = session_id
-            _record_source_code_qa_work_memory(
-                owner_email=owner_email,
-                pm_team=pm_team,
-                country=country,
-                question=str(payload.get("question") or ""),
-                result=result,
-                session_id=session_id,
-            )
-            return jsonify(result)
-        except ToolError as error:
-            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
-        except Exception as error:  # noqa: BLE001 - keep API clients on JSON even for unexpected failures.
-            request_id = getattr(g, "request_id", "")
-            current_app.logger.exception("Source Code Q&A query failed unexpectedly")
-            return (
-                jsonify(
-                    {
-                        "status": "error",
-                        "message": "Source Code Q&A failed unexpectedly. Please retry; if it repeats, share the request ID.",
-                        "request_id": request_id,
-                        "error_category": "source_code_qa_internal",
-                        "error_retryable": True,
-                    }
-                ),
-                HTTPStatus.INTERNAL_SERVER_ERROR,
-            )
-
-    @app.post("/api/source-code-qa/effort-assessment")
-    def source_code_qa_effort_assessment_api():
-        access_gate = _require_source_code_qa_manage_access(settings, api=True)
-        if access_gate is not None:
-            return access_gate
-        payload = request.get_json(silent=True) or {}
-        requirement = str(payload.get("requirement") or "").strip()
-        if not requirement:
-            return jsonify({"status": "error", "message": "Business requirement is empty."}), HTTPStatus.BAD_REQUEST
-        if not _source_code_qa_provider_available(payload.get("llm_provider")):
-            return jsonify({"status": "error", "message": "Selected Source Code Q&A model is unavailable."}), HTTPStatus.BAD_REQUEST
-
-        job_store: JobStore = current_app.config["JOB_STORE"]
-        job = job_store.create("source-code-qa-effort-assessment", title="Source Code Q&A Effort Assessment")
-        app_obj = current_app._get_current_object()
-        assessment_payload = {
-            "pm_team": str(payload.get("pm_team") or ""),
-            "country": str(payload.get("country") or ""),
-            "language": _source_code_qa_effort_assessment_language(payload.get("language")),
-            "requirement": requirement,
-            "llm_provider": str(payload.get("llm_provider") or ""),
-            "answer_mode": "auto",
-            "query_mode": "deep",
-            "_session_owner_email": _current_google_email() or "local",
-        }
-        scheduler: SourceCodeQAQueryScheduler = current_app.config["SOURCE_CODE_QA_QUERY_SCHEDULER"]
-        scheduler.submit(
-            app=app_obj,
-            job_id=job.job_id,
-            payload=assessment_payload,
-            owner_email=assessment_payload["_session_owner_email"],
-            runner=_run_source_code_qa_effort_assessment_job,
-        )
-        snapshot = _public_source_code_qa_job_snapshot(job_store.snapshot(job.job_id) or {})
-        return jsonify({**snapshot, "status": "queued", "job_id": job.job_id})
-
-    @app.get("/api/source-code-qa/effort-assessment/latest")
-    def source_code_qa_effort_assessment_latest_api():
-        access_gate = _require_source_code_qa_manage_access(settings, api=True)
-        if access_gate is not None:
-            return access_gate
-        result = current_app.config["JOB_STORE"].latest_completed_result("source-code-qa-effort-assessment")
-        if not result:
-            return jsonify({"status": "empty", "result": {}})
-        return jsonify({"status": "ok", "result": result})
-
-    @app.post("/api/source-code-qa/feedback")
-    def source_code_qa_feedback_api():
-        access_gate = _require_source_code_qa_access(settings, api=True)
-        if access_gate is not None:
-            return access_gate
-        payload = request.get_json(silent=True) or {}
-        try:
-            result = _build_source_code_qa_service().save_feedback(
-                user_email=_current_google_email() or "",
-                payload=payload,
-            )
-            return jsonify(result)
-        except ToolError as error:
-            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
+    register_source_code_qa_routes(app, settings, globals())
 
     register_work_memory_routes(
         app,
@@ -3887,148 +3492,6 @@ def create_app() -> Flask:
             return jsonify(_public_source_code_qa_job_snapshot(snapshot))
         return jsonify(snapshot)
 
-    @app.get("/api/source-code-qa/query-jobs/<job_id>")
-    def source_code_qa_query_job_api(job_id: str):
-        access_gate = _require_source_code_qa_access(settings, api=True)
-        if access_gate is not None:
-            return access_gate
-        snapshot = _source_code_qa_job_snapshot_for_current_user(job_id)
-        if snapshot is None:
-            return jsonify(
-                {
-                    "status": "error",
-                    "message": "Source Code Q&A job was not found.",
-                    "error_category": "job_not_found",
-                    "error_code": "job_not_found",
-                    "error_retryable": False,
-                }
-            ), HTTPStatus.NOT_FOUND
-        return jsonify(_public_source_code_qa_job_snapshot(snapshot))
-
-    @app.get("/api/source-code-qa/query-jobs/<job_id>/events")
-    def source_code_qa_query_job_events_api(job_id: str):
-        access_gate = _require_source_code_qa_access(settings, api=True)
-        if access_gate is not None:
-            return access_gate
-        if _source_code_qa_job_snapshot_for_current_user(job_id) is None:
-            return jsonify(
-                {
-                    "status": "error",
-                    "message": "Source Code Q&A job was not found.",
-                    "error_category": "job_not_found",
-                    "error_code": "job_not_found",
-                    "error_retryable": False,
-                }
-            ), HTTPStatus.NOT_FOUND
-
-        def event_stream():
-            last_payload = ""
-            deadline = time.time() + 900
-            while time.time() < deadline:
-                snapshot = _source_code_qa_job_snapshot_for_current_user(job_id)
-                if snapshot is None:
-                    payload = {
-                        "status": "error",
-                        "state": "failed",
-                        "message": "Source Code Q&A job was not found.",
-                        "error": "Source Code Q&A job was not found.",
-                        "error_category": "job_not_found",
-                        "error_code": "job_not_found",
-                        "error_retryable": False,
-                    }
-                    yield f"event: failed\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
-                    return
-                payload = _public_source_code_qa_job_snapshot(snapshot)
-                payload_text = json.dumps(payload, ensure_ascii=False)
-                if payload_text != last_payload:
-                    event_name = "message"
-                    if payload.get("state") == "completed":
-                        event_name = "completed"
-                    elif payload.get("state") == "failed":
-                        event_name = "failed"
-                    yield f"event: {event_name}\ndata: {payload_text}\n\n"
-                    last_payload = payload_text
-                    if payload.get("state") in {"completed", "failed"}:
-                        return
-                else:
-                    yield ": keepalive\n\n"
-                time.sleep(0.9)
-
-        return Response(
-            stream_with_context(event_stream()),
-            mimetype="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "X-Accel-Buffering": "no",
-            },
-        )
-
-    @app.get("/api/source-code-qa/effort-assessment-jobs/<job_id>")
-    def source_code_qa_effort_assessment_job_api(job_id: str):
-        access_gate = _require_source_code_qa_manage_access(settings, api=True)
-        if access_gate is not None:
-            return access_gate
-        snapshot = current_app.config["JOB_STORE"].snapshot(job_id)
-        if snapshot is None or snapshot.get("action") != "source-code-qa-effort-assessment":
-            return jsonify(
-                {
-                    "status": "error",
-                    "message": "Source Code Q&A effort assessment job was not found.",
-                    "error_category": "job_not_found",
-                    "error_code": "job_not_found",
-                    "error_retryable": False,
-                }
-            ), HTTPStatus.NOT_FOUND
-        return jsonify(_public_source_code_qa_job_snapshot(snapshot))
-
-    @app.get("/api/source-code-qa/effort-assessment-jobs/<job_id>/events")
-    def source_code_qa_effort_assessment_job_events_api(job_id: str):
-        access_gate = _require_source_code_qa_manage_access(settings, api=True)
-        if access_gate is not None:
-            return access_gate
-
-        def event_stream():
-            last_payload = ""
-            deadline = time.time() + 900
-            while time.time() < deadline:
-                snapshot = current_app.config["JOB_STORE"].snapshot(job_id)
-                if snapshot is None or snapshot.get("action") != "source-code-qa-effort-assessment":
-                    payload = {
-                        "status": "error",
-                        "state": "failed",
-                        "message": "Source Code Q&A effort assessment job was not found.",
-                        "error": "Source Code Q&A effort assessment job was not found.",
-                        "error_category": "job_not_found",
-                        "error_code": "job_not_found",
-                        "error_retryable": False,
-                    }
-                    yield f"event: failed\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
-                    return
-                payload = _public_source_code_qa_job_snapshot(snapshot)
-                payload_text = json.dumps(payload, ensure_ascii=False)
-                if payload_text != last_payload:
-                    event_name = "message"
-                    if payload.get("state") == "completed":
-                        event_name = "completed"
-                    elif payload.get("state") == "failed":
-                        event_name = "failed"
-                    yield f"event: {event_name}\ndata: {payload_text}\n\n"
-                    last_payload = payload_text
-                    if payload.get("state") in {"completed", "failed"}:
-                        return
-                else:
-                    yield ": keepalive\n\n"
-                time.sleep(0.9)
-
-        return Response(
-            stream_with_context(event_stream()),
-            mimetype="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "X-Accel-Buffering": "no",
-            },
-        )
-
     def _start_job(action: str):
         login_gate = _require_google_login(settings, api=True)
         if login_gate is not None:
@@ -4195,26 +3658,6 @@ def _record_meeting_work_memory(record: dict[str, Any]) -> dict[str, int]:
     return _record_work_memory_items(meeting_record_memory_items(record), event="meeting_recorder")
 
 
-def _record_source_code_qa_work_memory(
-    *,
-    owner_email: str,
-    pm_team: str,
-    country: str,
-    question: str,
-    result: dict[str, Any],
-    session_id: str = "",
-    job_id: str = "",
-) -> dict[str, int]:
-    item = source_code_qa_memory_item(
-        owner_email=owner_email,
-        pm_team=pm_team,
-        country=country,
-        question=question,
-        result=result,
-        session_id=session_id,
-        job_id=job_id,
-    )
-    return _record_work_memory_items([item], event="source_code_qa")
 
 
 SENT_MONTHLY_REPORT_SUBJECT_PATTERN = re.compile(
@@ -4973,32 +4416,12 @@ def _build_monthly_report_service(settings: Settings) -> MonthlyReportService:
     )
 
 
-def _get_source_code_qa_session_store():
-    settings: Settings = current_app.config["SETTINGS"]
-    if _local_agent_source_code_qa_enabled(settings):
-        return RemoteSourceCodeQASessionStore(_build_local_agent_client(settings))
-    return current_app.config["SOURCE_CODE_QA_SESSION_STORE"]
 
 
-def _get_source_code_qa_attachment_store():
-    settings: Settings = current_app.config["SETTINGS"]
-    if _local_agent_source_code_qa_enabled(settings):
-        return RemoteSourceCodeQAAttachmentStore(_build_local_agent_client(settings))
-    return current_app.config["SOURCE_CODE_QA_ATTACHMENT_STORE"]
 
 
-def _get_source_code_qa_generated_artifact_store():
-    settings: Settings = current_app.config["SETTINGS"]
-    if _local_agent_source_code_qa_enabled(settings):
-        return RemoteSourceCodeQAGeneratedArtifactStore(_build_local_agent_client(settings))
-    return current_app.config["SOURCE_CODE_QA_GENERATED_ARTIFACT_STORE"]
 
 
-def _get_source_code_qa_runtime_evidence_store():
-    settings: Settings = current_app.config["SETTINGS"]
-    if _local_agent_source_code_qa_enabled(settings):
-        return RemoteSourceCodeQARuntimeEvidenceStore(_build_local_agent_client(settings))
-    return current_app.config["SOURCE_CODE_QA_RUNTIME_EVIDENCE_STORE"]
 
 
 def _get_seatalk_todo_store(settings: Settings):
@@ -5139,131 +4562,24 @@ def _can_access_meeting_recorder(settings: Settings) -> bool:
     return _is_portal_admin()
 
 
-def _can_access_source_code_qa(settings: Settings) -> bool:
-    return _is_portal_user()
 
 
-def _can_manage_source_code_qa(settings: Settings) -> bool:
-    return _is_portal_admin()
 
 
 def _can_access_work_memory(settings: Settings) -> bool:
     return _is_portal_admin()
 
 
-def _source_code_qa_auth_payload(settings: Settings) -> dict[str, Any]:
-    email = _current_google_email()
-    owner_email = settings.source_code_qa_owner_email.strip().lower()
-    normalized_admins = {PORTAL_ADMIN_EMAIL}
-    if _is_portal_admin(email):
-        match_source = "portal_admin"
-    else:
-        match_source = ""
-    return {
-        "signed_in_email": email,
-        "can_manage": _is_portal_admin(email),
-        "owner_email": owner_email,
-        "admin_email_count": len(normalized_admins),
-        "admin_match_source": match_source,
-    }
 
 
-def _source_code_qa_git_auth_ready(service: Any, settings: Settings) -> bool:
-    if hasattr(service, "git_auth_ready"):
-        return bool(service.git_auth_ready())
-    return bool(settings.source_code_qa_gitlab_token)
 
 
-def _build_source_code_qa_service(llm_provider: str | None = None) -> SourceCodeQAService:
-    service: SourceCodeQAService = current_app.config["SOURCE_CODE_QA_SERVICE"]
-    normalized_provider = SourceCodeQAService.normalize_query_llm_provider(llm_provider)
-    resolved = service if llm_provider is None else service.with_llm_provider(normalized_provider)
-    if _local_agent_source_code_qa_enabled(current_app.config["SETTINGS"]):
-        return RemoteSourceCodeQAService(_build_local_agent_client(current_app.config["SETTINGS"]), service, llm_provider=normalized_provider or resolved.llm_provider_name)
-    return resolved
 
 
-def _source_code_qa_query_sync_mode(settings: Settings) -> str:
-    mode = str(os.getenv("SOURCE_CODE_QA_QUERY_SYNC_MODE") or "").strip().lower()
-    if mode in {"blocking", "background", "disabled"}:
-        return mode
-    return "background" if _local_agent_source_code_qa_enabled(settings) else "blocking"
 
 
-def _source_code_qa_scope_has_queryable_index(service: Any, key: str) -> bool:
-    try:
-        health = service.index_health_payload()
-    except Exception:  # noqa: BLE001
-        current_app.logger.warning("Source Code Q&A index health check failed before query auto-sync.", exc_info=True)
-        return True
-    scope = (health.get("keys") or {}).get(key) if isinstance(health, dict) else None
-    repos = scope.get("repos") if isinstance(scope, dict) else []
-    if not isinstance(repos, list):
-        return True
-    return any(
-        (repo.get("index") or {}).get("queryable")
-        and str((repo.get("index") or {}).get("state") or "").lower() in {"ready", "stale"}
-        for repo in repos
-        if isinstance(repo, dict)
-    )
 
 
-def _prepare_source_code_qa_auto_sync(
-    service: Any,
-    *,
-    pm_team: str,
-    country: str,
-    progress_callback: Any | None = None,
-) -> dict[str, Any]:
-    settings: Settings = current_app.config["SETTINGS"]
-    mode = _source_code_qa_query_sync_mode(settings)
-    key = service.mapping_key(pm_team, country) if hasattr(service, "mapping_key") else f"{pm_team}:{country}"
-    if mode == "disabled":
-        return {
-            "attempted": False,
-            "status": "skipped",
-            "reason": "query-time repository auto-sync is disabled",
-            "key": key,
-        }
-    if mode == "background":
-        if not _source_code_qa_scope_has_queryable_index(service, key):
-            if progress_callback:
-                progress_callback("auto_sync_check", "Preparing the first repository index for this scope.", 0, 1)
-            result = service.ensure_synced_today(pm_team=pm_team, country=country)
-            if progress_callback:
-                progress_callback("auto_sync_completed", "Repository index is ready; starting code search.", 1, 1)
-            return result
-        if progress_callback:
-            progress_callback("auto_sync_queued", "Repository freshness check is running in the background.", 0, 1)
-        if hasattr(service, "ensure_synced_today_background"):
-            return service.ensure_synced_today_background(pm_team=pm_team, country=country)
-
-        app_obj = current_app._get_current_object()
-        logger = current_app.logger
-
-        def run_background_sync() -> None:
-            with app_obj.app_context():
-                try:
-                    service.ensure_synced_today(pm_team=pm_team, country=country)
-                except Exception:
-                    logger.exception("Source Code Q&A background auto-sync failed for %s.", key)
-
-        threading.Thread(target=run_background_sync, daemon=True).start()
-        return {
-            "attempted": False,
-            "status": "background_queued",
-            "reason": "repository freshness check queued in the background",
-            "key": key,
-        }
-    if progress_callback:
-        progress_callback("auto_sync_check", "Checking repository sync schedule.", 0, 1)
-    result = service.ensure_synced_today(pm_team=pm_team, country=country)
-    if progress_callback:
-        if result.get("attempted"):
-            progress_callback("auto_sync_completed", "Repository auto-sync completed; starting code search.", 1, 1)
-        else:
-            progress_callback("auto_sync_completed", "Repository indexes do not need scheduled sync; starting code search.", 1, 1)
-    return result
 
 
 def _build_local_agent_client(settings: Settings) -> LocalAgentClient:
@@ -5342,13 +4658,6 @@ def _local_agent_mode_enabled(settings: Settings) -> bool:
     return mode in {"sync", "remote", "cloud_run", "enabled"}
 
 
-def _local_agent_source_code_qa_enabled(settings: Settings) -> bool:
-    return bool(
-        _local_agent_mode_enabled(settings)
-        and settings.local_agent_base_url
-        and settings.local_agent_hmac_secret
-        and settings.local_agent_source_code_qa_enabled
-    )
 
 
 def _local_agent_seatalk_enabled(settings: Settings) -> bool:
@@ -5376,235 +4685,46 @@ def _local_agent_work_memory_enabled(settings: Settings) -> bool:
     )
 
 
-def _source_code_qa_options_payload(service: SourceCodeQAService) -> dict[str, Any]:
-    options = service.options_payload()
-    providers = []
-    for provider in options.get("llm_providers") or []:
-        provider_payload = dict(provider)
-        value = str(provider_payload.get("value") or "")
-        available = value in LLM_PROVIDER_ALLOWED_QUERY_CHOICES
-        provider_payload["available"] = available
-        provider_payload["disabled"] = not available
-        base_label = str(provider_payload.get("label") or value).replace(" (Unavailable)", "")
-        provider_payload["label"] = base_label if available else f"{base_label} (Unavailable)"
-        providers.append(provider_payload)
-    options["llm_providers"] = providers
-    options["runtime_capabilities"] = _source_code_qa_runtime_capabilities_payload()
-    return options
 
 
-def _source_code_qa_runtime_capabilities_payload() -> dict[str, dict[str, dict[str, bool]]]:
-    teams = ("AF", "GRC", "CRMS")
-    countries = (ALL_COUNTRY, *tuple(CRMS_COUNTRIES))
-    capabilities = {
-        team: {
-            country: {"hasConfig": False, "hasDB": False, "hasDictionary": False}
-            for country in countries
-        }
-        for team in teams
-    }
-    try:
-        store = _get_source_code_qa_runtime_evidence_store()
-        for team in teams:
-            for country in countries:
-                try:
-                    evidence_items = store.list(pm_team=team, country=country)
-                except ToolError:
-                    evidence_items = []
-                for item in evidence_items:
-                    source_type = str(item.get("source_type") or "").strip().lower()
-                    if source_type == "apollo":
-                        capabilities[team][country]["hasConfig"] = True
-                    elif source_type == "db":
-                        capabilities[team][country]["hasDB"] = True
-                    elif source_type == "data_dictionary":
-                        capabilities[team][country]["hasDictionary"] = True
-    except Exception:  # noqa: BLE001 - capability badges are advisory only.
-        return capabilities
-    return capabilities
 
 
-def _source_code_qa_provider_available(llm_provider: str | None) -> bool:
-    provider = str(llm_provider or LLM_PROVIDER_CODEX_CLI_BRIDGE).strip().lower() or LLM_PROVIDER_CODEX_CLI_BRIDGE
-    return provider in LLM_PROVIDER_ALLOWED_QUERY_CHOICES
 
 
-def _source_code_qa_public_answer_mode(answer_mode: str | None) -> str:
-    mode = str(answer_mode or "auto").strip()
-    return mode if mode == "auto" else "auto"
 
 
-def _source_code_qa_query_mode(query_mode: str | None) -> str:
-    return "deep"
 
 
-def _source_code_qa_attachment_ids(payload: dict[str, Any]) -> list[str]:
-    raw_ids = payload.get("attachment_ids") if isinstance(payload, dict) else []
-    if raw_ids is None:
-        return []
-    if not isinstance(raw_ids, list):
-        raise ToolError("attachment_ids must be a list.")
-    attachment_ids = [str(item or "").strip() for item in raw_ids if str(item or "").strip()]
-    if len(attachment_ids) > SourceCodeQAAttachmentStore.MAX_ATTACHMENTS:
-        raise ToolError(f"At most {SourceCodeQAAttachmentStore.MAX_ATTACHMENTS} attachments are supported per Source Code Q&A question.")
-    return attachment_ids
 
 
-def _resolve_source_code_qa_query_attachments(
-    payload: dict[str, Any],
-    *,
-    owner_email: str,
-    session_id: str,
-) -> list[dict[str, Any]]:
-    attachment_ids = _source_code_qa_attachment_ids(payload)
-    if not attachment_ids:
-        return []
-    if not session_id:
-        raise ToolError("A Source Code Q&A session is required before sending attachments.")
-    session_payload = _get_source_code_qa_session_store().get(session_id, owner_email=owner_email)
-    if session_payload is None:
-        raise ToolError("Source Code Q&A session was not found for these attachments.")
-    return _get_source_code_qa_attachment_store().resolve_many(
-        owner_email=owner_email,
-        session_id=session_id,
-        attachment_ids=attachment_ids,
-    )
 
 
-def _source_code_qa_public_attachments(attachments: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [
-        SourceCodeQAAttachmentStore.public_metadata(item)
-        for item in attachments
-        if isinstance(item, dict)
-    ]
 
 
-def _resolve_source_code_qa_runtime_evidence(*, pm_team: str, country: str) -> list[dict[str, Any]]:
-    try:
-        return _get_source_code_qa_runtime_evidence_store().resolve_scope(pm_team=pm_team, country=country)
-    except ToolError:
-        raise
-    except Exception as error:  # noqa: BLE001 - runtime evidence must not break code Q&A.
-        current_app.logger.warning("Source Code Q&A runtime evidence could not be loaded: %s", error)
-        return []
 
 
-def _source_code_qa_public_runtime_evidence(evidence: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [
-        SourceCodeQARuntimeEvidenceStore.public_metadata(item)
-        for item in evidence
-        if isinstance(item, dict)
-    ]
 
 
-def _source_code_qa_public_generated_artifacts(artifacts: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [
-        SourceCodeQAGeneratedArtifactStore.public_metadata(item)
-        for item in artifacts
-        if isinstance(item, dict)
-    ]
 
 
-def _build_source_code_qa_generated_artifacts(
-    *,
-    owner_email: str,
-    session_id: str,
-    pm_team: str,
-    country: str,
-    question: str,
-    result: dict[str, Any],
-    runtime_evidence: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    answer_text = str(result.get("llm_answer") or result.get("answer") or result.get("rendered_answer") or "")
-    sql_blocks = _extract_source_code_qa_sql_blocks(answer_text)
-    if not sql_blocks:
-        return []
-    try:
-        artifact = _get_source_code_qa_generated_artifact_store().save_sql_package(
-            owner_email=owner_email,
-            session_id=session_id,
-            pm_team=pm_team,
-            country=country,
-            question=question,
-            sql=sql_blocks[0],
-            readme=_build_source_code_qa_sql_readme(
-                pm_team=pm_team,
-                country=country,
-                question=question,
-                sql=sql_blocks[0],
-                result=result,
-                runtime_evidence=runtime_evidence,
-            ),
-        )
-    except Exception as error:  # noqa: BLE001 - artifact packaging must not fail the answer.
-        current_app.logger.warning("Source Code Q&A generated SQL artifact could not be saved: %s", error)
-        return []
-    return [artifact]
 
 
-def _source_code_qa_effort_assessment_language(value: Any) -> str:
-    normalized = str(value or "").strip().lower()
-    if normalized in {"en", "english"}:
-        return "en"
-    return "zh"
 
 
-def _source_code_qa_effort_sentences(text: str) -> list[str]:
-    raw = str(text or "").strip()
-    if not raw:
-        return []
-    parts = re.split(r"(?<=[。！？!?])\s+|\n+", raw)
-    return [part.strip() for part in parts if part.strip()]
 
 
-def _source_code_qa_effort_matches(text: str, patterns: list[str]) -> bool:
-    lowered = str(text or "").lower()
-    return any(re.search(pattern, lowered, flags=re.IGNORECASE) for pattern in patterns)
 
 
-def _source_code_qa_effort_unique(items: list[Any]) -> list[Any]:
-    seen: set[str] = set()
-    output: list[Any] = []
-    for item in items:
-        if item is None:
-            continue
-        key = json.dumps(item, ensure_ascii=False, sort_keys=True) if isinstance(item, dict) else str(item)
-        if key in seen:
-            continue
-        seen.add(key)
-        output.append(item)
-    return output
 
 
-def _source_code_qa_load_json_file(path: Path) -> dict[str, Any]:
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return payload if isinstance(payload, dict) else {}
 
 
-@lru_cache(maxsize=1)
-def _load_source_code_qa_effort_dictionaries() -> dict[str, Any]:
-    return _source_code_qa_load_json_file(SOURCE_CODE_QA_EFFORT_DICTIONARY_PATH)
 
 
-@lru_cache(maxsize=1)
-def _load_source_code_qa_domain_profile_config() -> dict[str, Any]:
-    return _source_code_qa_load_json_file(SOURCE_CODE_QA_DOMAIN_PROFILES_PATH)
 
 
-@lru_cache(maxsize=1)
-def _load_source_code_qa_domain_knowledge_config() -> dict[str, Any]:
-    return _source_code_qa_load_json_file(SOURCE_CODE_QA_DOMAIN_KNOWLEDGE_PATH)
 
 
-def _source_code_qa_effort_domain_entries(pm_team: str) -> list[dict[str, Any]]:
-    dictionaries = _load_source_code_qa_effort_dictionaries()
-    domain = ((dictionaries.get("domains") or {}).get(str(pm_team or "").upper()) or {})
-    entries = domain.get("entries") if isinstance(domain, dict) else []
-    entries = entries if isinstance(entries, list) else []
-    return [entry for entry in entries if isinstance(entry, dict)]
 
 
 SOURCE_CODE_QA_EFFORT_SCOPE_ALIASES: dict[str, list[str]] = {
@@ -5689,1541 +4809,77 @@ SOURCE_CODE_QA_EFFORT_SCOPE_COMMON_TERMS = {
 }
 
 
-def _source_code_qa_effort_country_hint(requirement: str, fallback: str) -> str:
-    text = f" {str(requirement or '').lower()} "
-    if re.search(r"(?<![a-z0-9])sg(?![a-z0-9])", text) or "singapore" in text:
-        return "SG"
-    if re.search(r"(?<![a-z0-9])id(?![a-z0-9])", text) or "indonesia" in text:
-        return "ID"
-    if re.search(r"(?<![a-z0-9])ph(?![a-z0-9])", text) or "philippines" in text:
-        return "PH"
-    return str(fallback or "").strip() or "All"
-
-
-def _source_code_qa_effort_term_matches(text: str, term: str) -> bool:
-    normalized_text = str(text or "").lower()
-    normalized_term = str(term or "").strip().lower()
-    if not normalized_term:
-        return False
-    if len(normalized_term) <= 3 and re.fullmatch(r"[a-z0-9]+", normalized_term):
-        return bool(re.search(rf"(?<![a-z0-9]){re.escape(normalized_term)}(?![a-z0-9])", normalized_text))
-    return normalized_term in normalized_text
-
-
-def _source_code_qa_effort_scope_terms_by_team() -> dict[str, list[str]]:
-    teams = set(SOURCE_CODE_QA_EFFORT_SCOPE_ALIASES)
-    dictionaries = _load_source_code_qa_effort_dictionaries()
-    teams.update(str(team or "").upper() for team in ((dictionaries.get("domains") or {}).keys()))
-    knowledge = _load_source_code_qa_domain_knowledge_config()
-    teams.update(str(team or "").upper() for team in (((knowledge.get("domains") or {}) if isinstance(knowledge, dict) else {}).keys()))
-    terms_by_team: dict[str, list[str]] = {}
-    for team in sorted(team for team in teams if team):
-        terms: list[str] = list(SOURCE_CODE_QA_EFFORT_SCOPE_ALIASES.get(team, []))
-        for entry in _source_code_qa_effort_domain_entries(team):
-            terms.append(str(entry.get("id") or ""))
-            for key in ("business_aliases", "technical_terms", "product_terms", "limit_terms", "evidence_hints"):
-                terms.extend(str(item) for item in (entry.get(key) or []) if item)
-        domain = ((knowledge.get("domains") or {}).get(team) or {}) if isinstance(knowledge, dict) else {}
-        if isinstance(domain, dict):
-            for module in domain.get("module_map") or []:
-                if not isinstance(module, dict):
-                    continue
-                terms.append(str(module.get("name") or ""))
-                for key in ("aliases", "repo_hints", "code_hints", "business_flows"):
-                    terms.extend(str(item) for item in (module.get(key) or []) if item)
-            for item in domain.get("terminology") or []:
-                if not isinstance(item, dict):
-                    continue
-                terms.append(str(item.get("term") or ""))
-                terms.extend(str(value) for value in (item.get("aliases") or []) if value)
-                terms.extend(str(value) for value in (item.get("code_terms") or []) if value)
-            retrieval_terms = domain.get("retrieval_terms") if isinstance(domain.get("retrieval_terms"), dict) else {}
-            for values in retrieval_terms.values():
-                terms.extend(str(item) for item in (values or []) if item)
-        filtered = []
-        for term in _source_code_qa_effort_unique(terms):
-            normalized = str(term or "").strip()
-            lowered = normalized.lower()
-            if len(lowered) < 3 or lowered in SOURCE_CODE_QA_EFFORT_SCOPE_COMMON_TERMS:
-                continue
-            filtered.append(normalized)
-        terms_by_team[team] = filtered[:120]
-    return terms_by_team
-
-
-def _source_code_qa_effort_scope_guard(
-    *,
-    pm_team: str,
-    country: str,
-    requirement: str,
-) -> dict[str, Any]:
-    selected_team = str(pm_team or "").strip().upper()
-    terms_by_team = _source_code_qa_effort_scope_terms_by_team()
-    scores: dict[str, int] = {}
-    matched_terms: dict[str, list[str]] = {}
-    for team, terms in terms_by_team.items():
-        score = 0
-        hits: list[str] = []
-        for term in terms:
-            if not _source_code_qa_effort_term_matches(requirement, term):
-                continue
-            lowered = str(term).lower()
-            explicit = lowered in {item.lower() for item in SOURCE_CODE_QA_EFFORT_SCOPE_ALIASES.get(team, [])}
-            score += 6 if explicit else 2
-            hits.append(str(term))
-        if selected_team == team and selected_team and _source_code_qa_effort_term_matches(requirement, selected_team):
-            score += 8
-            hits.append(selected_team)
-        scores[team] = score
-        matched_terms[team] = _source_code_qa_effort_unique(hits)[:12]
-    best_team = max(scores, key=lambda key: scores.get(key, 0), default=selected_team)
-    selected_score = scores.get(selected_team, 0)
-    best_score = scores.get(best_team, 0)
-    mismatch = (
-        bool(selected_team)
-        and bool(best_team)
-        and best_team != selected_team
-        and best_score >= 10
-        and best_score >= selected_score + 6
-        and best_score >= selected_score * 2 + 4
-    )
-    return {
-        "status": "mismatch" if mismatch else "ok",
-        "selected_pm_team": selected_team,
-        "selected_country": str(country or "").strip() or "All",
-        "suggested_pm_team": best_team if mismatch else selected_team,
-        "suggested_country": _source_code_qa_effort_country_hint(requirement, country) if mismatch else str(country or "").strip() or "All",
-        "scores": scores,
-        "matched_terms": matched_terms,
-        "reason": (
-            f"Requirement terms match {best_team} more strongly than selected {selected_team}."
-            if mismatch
-            else "Selected scope is compatible with requirement terms."
-        ),
-    }
-
-
-def _source_code_qa_effort_scope_mismatch_result(
-    *,
-    pm_team: str,
-    country: str,
-    language: str,
-    requirement: str,
-    llm_provider: str,
-    business_plan: dict[str, Any],
-    technical_candidates: dict[str, Any],
-    estimation_rubric: dict[str, Any],
-    scope_guard: dict[str, Any],
-) -> dict[str, Any]:
-    suggested_team = str(scope_guard.get("suggested_pm_team") or "").strip() or "the correct PM team"
-    suggested_country = str(scope_guard.get("suggested_country") or "").strip() or "the correct country"
-    matched = ", ".join(str(item) for item in (scope_guard.get("matched_terms") or {}).get(suggested_team, [])[:8])
-    if language == "zh":
-        answer = "\n".join(
-            [
-                "Scope Mismatch / 选择范围不匹配",
-                f"当前选择的是 {pm_team}:{country}，但需求文本更像 {suggested_team}:{suggested_country} 的改动。",
-                f"命中的范围信号: {matched or '未记录'}。",
-                f"请切换 PM Team 到 {suggested_team}、Country 到 {suggested_country} 后重新运行 Effort Assessment。",
-                "这次不会基于当前 repo 生成 BE/FE 人天估算，避免把错误代码库里的能力硬套到需求上。",
-            ]
-        )
-    else:
-        answer = "\n".join(
-            [
-                "Scope Mismatch",
-                f"The selected scope is {pm_team}:{country}, but the requirement matches {suggested_team}:{suggested_country} more strongly.",
-                f"Matched scope signals: {matched or 'not recorded'}.",
-                f"Switch PM Team to {suggested_team} and Country to {suggested_country}, then run Effort Assessment again.",
-                "No BE/FE estimate was generated from the selected repository scope to avoid misleading output.",
-            ]
-        )
-    missing_evidence = [
-        f"Selected repository scope {pm_team}:{country} does not match requirement signals for {suggested_team}:{suggested_country}."
-    ]
-    return {
-        "status": "scope_mismatch",
-        "summary": "Selected repository scope does not match the requirement.",
-        "llm_answer": answer,
-        "llm_provider": llm_provider or "default",
-        "llm_model": "",
-        "trace_id": f"effort-scope-{hashlib.sha1(str(requirement or '').encode('utf-8')).hexdigest()[:12]}",
-        "matches": [],
-        "citations": [],
-        "missing_evidence": missing_evidence,
-        "assessment_confidence": "scope_mismatch",
-        "effort_evidence_status": "scope_mismatch",
-        "effort_scope_guard": scope_guard,
-        "effort_evidence_matrix": {"version": 1, "groups": [], "quality": {"confirmed_group_count": 0, "inferred_group_count": 0, "missing_group_count": 0, "status": "scope_mismatch"}},
-        "effort_evidence_matrix_quality": {"confirmed_group_count": 0, "inferred_group_count": 0, "missing_group_count": 0, "status": "scope_mismatch"},
-        "effort_generic_output_guard": {"status": "blocked", "issues": ["scope_mismatch"], "confirmed_or_inferred_group_count": 0},
-        "effort_timing": {"cache_hit": False, "scope_guard": scope_guard},
-        "structured_assessment": {
-            "version": 2,
-            "language": language,
-            "confidence": "scope_mismatch",
-            "business_understanding": business_plan,
-            "code_change_points": [],
-            "be_estimate": [],
-            "fe_estimate": [],
-            "confirmed_evidence": [],
-            "inferred_impact": [],
-            "missing_evidence": missing_evidence,
-            "questions": [f"Should this request be assessed under {suggested_team}:{suggested_country}?"],
-        },
-        "assessment": {
-            "type": "effort_assessment",
-            "pm_team": pm_team,
-            "country": country,
-            "language": language,
-            "requirement": requirement,
-            "business_plan": business_plan,
-            "technical_candidates": technical_candidates,
-            "estimation_rubric": estimation_rubric,
-            "structured_assessment": {},
-            "confidence": "scope_mismatch",
-            "missing_evidence": missing_evidence,
-            "evidence_status": "scope_mismatch",
-            "scope_guard": scope_guard,
-        },
-    }
-
-
-def _source_code_qa_effort_seed_terms(pm_team: str) -> list[str]:
-    team = str(pm_team or "").upper()
-    terms: list[str] = []
-    profiles = _load_source_code_qa_domain_profile_config()
-    profile = profiles.get(team) if isinstance(profiles, dict) else {}
-    if isinstance(profile, dict):
-        for key in ("data_carriers", "source_terms", "api_terms", "config_terms", "logic_terms", "field_population_terms"):
-            terms.extend(str(item) for item in (profile.get(key) or []) if item)
-    knowledge = _load_source_code_qa_domain_knowledge_config()
-    domain = ((knowledge.get("domains") or {}).get(team) or {}) if isinstance(knowledge, dict) else {}
-    if isinstance(domain, dict):
-        for module in domain.get("module_map") or []:
-            if not isinstance(module, dict):
-                continue
-            terms.append(str(module.get("name") or ""))
-            terms.extend(str(item) for item in (module.get("aliases") or []) if item)
-            terms.extend(str(item) for item in (module.get("code_hints") or []) if item)
-        for term in domain.get("terminology") or []:
-            if not isinstance(term, dict):
-                continue
-            terms.append(str(term.get("term") or ""))
-            terms.extend(str(item) for item in (term.get("aliases") or []) if item)
-            terms.extend(str(item) for item in (term.get("code_terms") or []) if item)
-        retrieval_terms = domain.get("retrieval_terms") if isinstance(domain.get("retrieval_terms"), dict) else {}
-        for values in retrieval_terms.values():
-            terms.extend(str(item) for item in (values or []) if item)
-    return [str(item) for item in _source_code_qa_effort_unique([item for item in terms if str(item or "").strip()])]
-
-
-def _source_code_qa_effort_entry_applies(entry: dict[str, Any], *, country: str, requirement: str) -> bool:
-    countries = [str(item).upper() for item in (entry.get("country_terms") or []) if item]
-    if countries and str(country or "").upper() not in countries:
-        return False
-    aliases = [str(item) for item in (entry.get("business_aliases") or []) if str(item or "").strip()]
-    technical_terms = [str(item) for item in (entry.get("technical_terms") or []) if str(item or "").strip()]
-    haystack = str(requirement or "").lower()
-    for value in [*aliases, *technical_terms]:
-        normalized = value.lower().strip()
-        if not normalized:
-            continue
-        if normalized in haystack:
-            return True
-    return False
-
-
-def _source_code_qa_effort_group_typed_candidates(entries: list[dict[str, Any]], *, seed_terms: list[str]) -> dict[str, list[str]]:
-    grouped: dict[str, list[str]] = {
-        "backend_service": [],
-        "frontend_surface": [],
-        "table_or_config": [],
-        "workflow_rule": [],
-        "downstream_reporting": [],
-    }
-    for entry in entries:
-        terms = [str(item) for item in (entry.get("technical_terms") or []) if item]
-        for surface in entry.get("surfaces") or []:
-            surface_key = str(surface or "").strip()
-            if surface_key in grouped:
-                grouped[surface_key].extend(terms)
-    if seed_terms:
-        grouped["backend_service"].extend(seed_terms[:30])
-    return {key: _source_code_qa_effort_unique(values)[:60] for key, values in grouped.items()}
-
-
-def _build_source_code_qa_effort_business_plan(
-    *,
-    pm_team: str,
-    country: str,
-    language: str,
-    requirement: str,
-) -> dict[str, Any]:
-    raw_requirement = str(requirement or "").strip()
-    sentences = _source_code_qa_effort_sentences(raw_requirement)
-    option_matches = list(
-        re.finditer(
-            r"(方案\s*[一二12]|option\s*[12])\s*[:：]?\s*(.*?)(?=(?:方案\s*[一二12]|option\s*[12])\s*[:：]|$)",
-            raw_requirement,
-            flags=re.IGNORECASE | re.DOTALL,
-        )
-    )
-    options = []
-    for index, match in enumerate(option_matches, start=1):
-        body = re.sub(r"\s+", " ", match.group(2).strip())
-        if body:
-            options.append({"id": f"option_{index}", "label": match.group(1).strip(), "summary": body[:1200]})
-    has_explicit_options = bool(options)
-    if not options:
-        options.append({"id": "option_1", "label": "single proposed change", "summary": raw_requirement[:1200]})
-
-    user_segments = []
-    if _source_code_qa_effort_matches(raw_requirement, [r"高收入", r"annual\s*income", r"income\s*[><=]", r"120k"]):
-        user_segments.append("high income customers")
-    if _source_code_qa_effort_matches(raw_requirement, [r"好用户", r"good\s+customer", r"premium"]):
-        user_segments.append("qualified or good customers")
-
-    products = []
-    if _source_code_qa_effort_matches(raw_requirement, [r"信用卡", r"credit\s*card"]):
-        products.append("credit card")
-    if _source_code_qa_effort_matches(raw_requirement, [r"现金分期", r"cash\s*installment", r"cash\s*instalment"]):
-        products.append("cash installment")
-    if _source_code_qa_effort_matches(raw_requirement, [r"cashline", r"cash\s*line"]):
-        products.append("cashline")
-
-    limit_types = []
-    if _source_code_qa_effort_matches(raw_requirement, [r"额度", r"limit"]):
-        limit_types.append("limit amount")
-    if _source_code_qa_effort_matches(raw_requirement, [r"信用卡.*额度", r"credit\s*card.*limit"]):
-        limit_types.append("credit card limit")
-    if _source_code_qa_effort_matches(raw_requirement, [r"现金分期.*(专项)?额度", r"cash\s*installment.*limit"]):
-        limit_types.append("cash installment dedicated limit")
-    if _source_code_qa_effort_matches(raw_requirement, [r"103", r"104", r"sub\s*product", r"子产品"]):
-        limit_types.append("sub-product limit 103/104")
-
-    flow_changes = []
-    if _source_code_qa_effort_matches(raw_requirement, [r"申请", r"apply", r"application"]):
-        flow_changes.append("application flow")
-    if _source_code_qa_effort_matches(raw_requirement, [r"报送", r"submission", r"reporting"]):
-        flow_changes.append("reporting or downstream submission")
-    if _source_code_qa_effort_matches(raw_requirement, [r"用户教育", r"感知", r"引导", r"education", r"guide"]):
-        flow_changes.append("user education or guidance")
-
-    decision_points = [
-        sentence[:800]
-        for sentence in sentences
-        if _source_code_qa_effort_matches(sentence, [r"核心问题", r"是否", r"是不是", r"可以讨论", r"确认", r"how", r"whether"])
-    ]
-    goals = []
-    if _source_code_qa_effort_matches(raw_requirement, [r"策略区分", r"区分", r"separate", r"differentiat"]):
-        goals.append("differentiate limit strategy by customer/product context")
-    if _source_code_qa_effort_matches(raw_requirement, [r"感知", r"转化", r"教育", r"conversion"]):
-        goals.append("make the limit or product path understandable to customers")
-    if not goals:
-        goals.append("assess technical impact for the requested business change")
-
-    return {
-        "raw_requirement": raw_requirement,
-        "pm_team": pm_team,
-        "country": country,
-        "language": language,
-        "business_goals": _source_code_qa_effort_unique(goals),
-        "options": options,
-        "has_explicit_options": has_explicit_options,
-        "user_segments": _source_code_qa_effort_unique(user_segments),
-        "products": _source_code_qa_effort_unique(products),
-        "limit_types": _source_code_qa_effort_unique(limit_types),
-        "flow_changes": _source_code_qa_effort_unique(flow_changes),
-        "decision_points": _source_code_qa_effort_unique(decision_points)[:8],
-    }
-
-
-def _build_source_code_qa_effort_technical_candidates(
-    *,
-    pm_team: str,
-    country: str,
-    business_plan: dict[str, Any],
-    requirement: str,
-) -> dict[str, Any]:
-    raw_requirement = str(requirement or "")
-    seed_terms = _source_code_qa_effort_seed_terms(pm_team)
-    domain_entries = _source_code_qa_effort_domain_entries(pm_team)
-    matched_entries = [
-        entry for entry in domain_entries
-        if _source_code_qa_effort_entry_applies(entry, country=country, requirement=raw_requirement)
-    ]
-    terms = [
-        "limit",
-        "credit limit",
-        "product limit",
-        "sub product limit",
-        "API",
-        "config",
-        "strategy",
-        "workflow",
-        "front end screen",
-        "application flow",
-    ]
-    backend_surfaces = ["API validation", "service strategy", "workflow decision rule", "config lookup"]
-    frontend_surfaces = ["limit display", "application entry", "customer guidance copy"]
-    configs_or_tables = ["limitAmount", "productCode", "productType", "subProductCode"]
-    product_terms = []
-    limit_terms = []
-    evidence_hints = []
-    domain_notes = []
-    for entry in matched_entries:
-        terms.extend(str(item) for item in (entry.get("technical_terms") or []) if item)
-        product_terms.extend(str(item) for item in (entry.get("product_terms") or []) if item)
-        limit_terms.extend(str(item) for item in (entry.get("limit_terms") or []) if item)
-        evidence_hints.extend(str(item) for item in (entry.get("evidence_hints") or []) if item)
-        for surface in entry.get("surfaces") or []:
-            surface_value = str(surface or "")
-            if surface_value == "backend_service":
-                backend_surfaces.append(str(entry.get("id") or "backend service impact"))
-            elif surface_value == "frontend_surface":
-                frontend_surfaces.append(str(entry.get("id") or "frontend impact"))
-            elif surface_value in {"table_or_config", "downstream_reporting"}:
-                configs_or_tables.extend(str(item) for item in (entry.get("technical_terms") or []) if item)
-    terms.extend(seed_terms[:80])
-
-    if str(pm_team or "").upper() == "CRMS":
-        backend_surfaces.extend(
-            [
-                "CRMS underwriting and eligibility decision",
-                "borrower/product/sub-product limit calculation",
-                "cash installment limit strategy",
-                "credit card daily consumption limit strategy",
-                "cashline application or redirect flow",
-                "downstream reporting payload",
-            ]
-        )
-        frontend_surfaces.extend(
-            [
-                "credit card and cash installment limit display",
-                "cashline application entry",
-                "limit explanation and customer education",
-            ]
-        )
-        domain_notes.append("CRMS dictionary v1: income-based credit, cash installment, cashline, and product/sub-product limits.")
-
-    for key in ("products", "limit_types", "flow_changes"):
-        for value in business_plan.get(key) or []:
-            terms.append(str(value))
-    if _source_code_qa_effort_matches(raw_requirement, [r"报送", r"submission", r"reporting"]):
-        terms.extend(["reporting", "submission", "report payload"])
-    if _source_code_qa_effort_matches(raw_requirement, [r"前端", r"展示", r"入口", r"引导", r"screen", r"display", r"entry"]):
-        terms.extend(["screen", "display", "entry point", "guide copy"])
-
-    return {
-        "pm_team": pm_team,
-        "country": country,
-        "search_terms": _source_code_qa_effort_unique(terms)[:80],
-        "backend_surfaces": _source_code_qa_effort_unique(backend_surfaces)[:40],
-        "frontend_surfaces": _source_code_qa_effort_unique(frontend_surfaces)[:30],
-        "configs_or_tables": _source_code_qa_effort_unique(configs_or_tables)[:50],
-        "product_terms": _source_code_qa_effort_unique(product_terms)[:40],
-        "limit_terms": _source_code_qa_effort_unique(limit_terms)[:40],
-        "evidence_hints": _source_code_qa_effort_unique(evidence_hints)[:40],
-        "matched_dictionary_entries": [str(entry.get("id") or "") for entry in matched_entries if entry.get("id")],
-        "typed_candidates": _source_code_qa_effort_group_typed_candidates(matched_entries, seed_terms=seed_terms),
-        "domain_notes": domain_notes,
-    }
-
-
-def _build_source_code_qa_effort_estimation_rubric(
-    *,
-    business_plan: dict[str, Any],
-    technical_candidates: dict[str, Any],
-) -> dict[str, Any]:
-    text = " ".join(
-        [
-            " ".join(str(item) for item in business_plan.get("products") or []),
-            " ".join(str(item) for item in business_plan.get("limit_types") or []),
-            " ".join(str(item) for item in business_plan.get("flow_changes") or []),
-            " ".join(str(item) for item in technical_candidates.get("backend_surfaces") or []),
-            " ".join(str(item) for item in technical_candidates.get("frontend_surfaces") or []),
-        ]
-    )
-    high_complexity = _source_code_qa_effort_matches(
-        text,
-        [r"underwriting", r"borrower", r"sub[-\s]?product", r"reporting", r"submission", r"授信", r"额度模型"],
-    )
-    medium_complexity = _source_code_qa_effort_matches(text, [r"api", r"service", r"strategy", r"workflow", r"limit"])
-    frontend_required = bool(technical_candidates.get("frontend_surfaces"))
-    option_estimates = []
-    for index, option in enumerate(business_plan.get("options") or [], start=1):
-        option_text = str(option.get("summary") or "")
-        option_high = high_complexity or _source_code_qa_effort_matches(option_text, [r"cashline", r"独立", r"报送", r"模型", r"多产品"])
-        option_medium = medium_complexity or _source_code_qa_effort_matches(option_text, [r"额度", r"limit", r"策略", r"rule"])
-        be_range = "8-15 PD" if option_high else ("3-6 PD" if option_medium else "1-3 PD")
-        fe_range = "3-6 PD" if _source_code_qa_effort_matches(option_text, [r"用户教育", r"感知", r"入口", r"展示", r"guide", r"display"]) else ("1-3 PD" if frontend_required else "0-1 PD")
-        option_estimates.append(
-            {
-                "id": option.get("id") or f"option_{index}",
-                "label": option.get("label") or f"Option {index}",
-                "be_person_days": be_range,
-                "fe_person_days": fe_range,
-                "basis": "planning-grade estimate before Dev final sizing",
-            }
-        )
-    return {
-        "rules": [
-            "Config or rule parameter only: low complexity.",
-            "BE API plus service, strategy, or limit-flow change: medium complexity.",
-            "Underwriting engine, limit model, reporting, or multi-product limit linkage: high complexity.",
-            "FE display, guidance, application entry, and customer education are estimated separately.",
-            "Final answer must separate confirmed evidence, inferred impact, and missing evidence.",
-        ],
-        "complexity_drivers": {
-            "backend": "high" if high_complexity else ("medium" if medium_complexity else "low"),
-            "frontend": "medium" if frontend_required else "low",
-        },
-        "option_estimates": option_estimates,
-    }
-
-
-def _source_code_qa_effort_json_block(value: dict[str, Any]) -> str:
-    return json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True)[:12000]
-
-
-def _build_source_code_qa_effort_assessment_prompt(
-    *,
-    pm_team: str,
-    country: str,
-    language: str,
-    requirement: str,
-    llm_provider: str,
-    runtime_evidence: list[dict[str, Any]],
-    business_plan: dict[str, Any],
-    technical_candidates: dict[str, Any],
-    estimation_rubric: dict[str, Any],
-) -> str:
-    team_label = str((TEAM_PROFILE_DEFAULTS.get(pm_team) or {}).get("label") or pm_team or "Selected PM Team").strip()
-    output_language = "Chinese" if language == "zh" else "English"
-    runtime_items = [
-        item for item in runtime_evidence
-        if isinstance(item, dict)
-    ]
-    runtime_summary = ", ".join(
-        sorted(
-            {
-                f"{item.get('pm_team') or pm_team}:{item.get('country') or country}:{item.get('source_type') or 'runtime'}"
-                for item in runtime_items
-            }
-        )
-    ) or "none"
-    raw_requirement = str(requirement or "").strip()[:8000]
-    has_explicit_options = bool(business_plan.get("has_explicit_options"))
-    technical_change_section = "方案 1/2 代码改动点" if has_explicit_options else "代码改动点"
-    option_rule = (
-        "- The requirement contains explicit alternatives; keep the original option labels and compare each option separately."
-        if has_explicit_options
-        else "- The requirement does not contain explicit Option 1/Option 2 alternatives; do not invent option labels. Use 'proposed change' instead."
-    )
-    return "\n".join(
-        [
-            "You are performing a Source Code Q&A Effort Assessment for a new business requirement.",
-            "",
-            "Context:",
-            f"- PM Team: {pm_team} ({team_label})",
-            f"- Country: {country}",
-            f"- Answer language: {output_language}",
-            f"- Selected model provider: {llm_provider or 'default'}",
-            f"- Runtime evidence available: {len(runtime_items)} item(s): {runtime_summary}",
-            "",
-            "Original business requirement, verbatim:",
-            raw_requirement,
-            "",
-            "Business plan extracted from the requirement:",
-            _source_code_qa_effort_json_block(business_plan),
-            "",
-            "Technical candidates for repository evidence search:",
-            _source_code_qa_effort_json_block(technical_candidates),
-            "",
-            "Estimation rubric:",
-            _source_code_qa_effort_json_block(estimation_rubric),
-            "",
-            "Optimized assessment task:",
-            "- Use the business plan and technical candidates as the focused search map. Do not rely only on the original business wording.",
-            "- Map the requirement to likely impacted repositories, modules, files, APIs, tables, configs, scheduled jobs, front-end screens and components, and tests.",
-            "- Use current source-code evidence internally as the basis for implementation impact and person-day estimates.",
-            "- If exact table or path lookup misses, record it as a warning and continue with focused technical-candidate search.",
-            "- Use runtime evidence only as supporting context.",
-            "- Translate technical findings into business-readable change points. Do not expose evidence, citations, or file-path proof lists in the visible final answer.",
-            "- Estimate BE and FE work as ranges in person-days. Use 0 person-days if no FE or BE change is found, but explain why.",
-            "- Include QA/test and integration impact in the relevant BE/FE estimate notes instead of creating a third estimate bucket.",
-            "",
-            "Required output sections:",
-            "1. 业务理解 / Business Understanding",
-            f"2. {technical_change_section} / Code Change Points",
-            "3. BE 人天 / BE Person-days",
-            "4. FE 人天 / FE Person-days",
-            "5. QA / Integration Impact",
-            "6. Assumptions / Risks",
-            "7. Confirmation Questions",
-            "",
-            "Output rules:",
-            f"- Write the final answer in {output_language}.",
-            option_rule,
-            "- Keep the answer concise but specific enough for PM and engineering planning.",
-            "- Do not include visible sections named Evidence, Source / Runtime Evidence, Confirmed / Inferred / Missing Evidence, or Missing Evidence.",
-            "- Do not include source citations, S-id references such as [S1], file-path proof lists, or runtime-evidence filenames in the final answer.",
-            "- Code change points must be understandable to business users: describe behavior, process, rule, UI, API, data, integration, and testing changes before technical names.",
-            "- Person-day estimates must be ranges such as 1-2 PD or 3-5 PD, with one sentence explaining the driver for each range.",
-            "- If source evidence is weak, still estimate with low confidence and state the planning assumption without adding an evidence section.",
-        ]
-    )
-
-
-def _source_code_qa_effort_compact_terms(technical_candidates: dict[str, Any], requirement: str) -> list[str]:
-    terms: list[str] = []
-    for key in ("search_terms", "configs_or_tables", "product_terms", "limit_terms", "evidence_hints"):
-        terms.extend(str(item) for item in (technical_candidates.get(key) or []) if str(item or "").strip())
-    typed_candidates = technical_candidates.get("typed_candidates") if isinstance(technical_candidates.get("typed_candidates"), dict) else {}
-    for values in typed_candidates.values():
-        terms.extend(str(item) for item in (values or []) if str(item or "").strip())
-    terms.extend(IDENTIFIER_PATTERN.findall(str(requirement or "")))
-    return [str(item) for item in _source_code_qa_effort_unique(terms) if str(item or "").strip()][:36]
-
-
-def _build_source_code_qa_effort_evidence_query(
-    *,
-    requirement: str,
-    business_plan: dict[str, Any],
-    technical_candidates: dict[str, Any],
-) -> str:
-    goals = ", ".join(str(item) for item in (business_plan.get("business_goals") or [])[:4])
-    products = ", ".join(str(item) for item in (business_plan.get("products") or [])[:6])
-    limit_types = ", ".join(str(item) for item in (business_plan.get("limit_types") or [])[:6])
-    flow_changes = ", ".join(str(item) for item in (business_plan.get("flow_changes") or [])[:6])
-    terms = ", ".join(_source_code_qa_effort_compact_terms(technical_candidates, requirement)[:28])
-    dictionary_entries = ", ".join(str(item) for item in (technical_candidates.get("matched_dictionary_entries") or [])[:10])
-    return "\n".join(
-        [
-            "Effort assessment evidence lookup. Find current source-code evidence for implementation impact.",
-            f"Requirement summary: {str(requirement or '').strip()[:1200]}",
-            f"Business goals: {goals or 'planning-grade technical impact assessment'}",
-            f"Products: {products or 'n/a'}",
-            f"Limit/flow terms: {', '.join(item for item in (limit_types, flow_changes) if item) or 'n/a'}",
-            f"Technical search terms: {terms or 'n/a'}",
-            f"Dictionary hits: {dictionary_entries or 'none'}",
-            "Focus on impacted APIs, services, strategies, configs/tables, frontend screens, tests, and downstream/reporting paths.",
-        ]
-    )
-
-
-def _source_code_qa_effort_evidence_digest(evidence_result: dict[str, Any]) -> dict[str, Any]:
-    matches = evidence_result.get("matches") if isinstance(evidence_result.get("matches"), list) else []
-    return {
-        "index_freshness": evidence_result.get("index_freshness") or {},
-        "matches": [
-            {
-                "repo": match.get("repo"),
-                "path": match.get("path"),
-                "line_start": match.get("line_start"),
-                "line_end": match.get("line_end"),
-                "retrieval": match.get("retrieval"),
-                "trace_stage": match.get("trace_stage"),
-            }
-            for match in matches[:16]
-            if isinstance(match, dict)
-        ],
-    }
-
-
-def _source_code_qa_effort_runtime_digest(runtime_evidence: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    digest: list[dict[str, Any]] = []
-    for item in runtime_evidence:
-        if not isinstance(item, dict):
-            continue
-        digest.append(
-            {
-                "source_type": item.get("source_type") or "",
-                "filename": item.get("filename") or "",
-                "sha256": hashlib.sha256(str(item.get("text") or "").encode("utf-8")).hexdigest()[:16],
-            }
-        )
-    return digest
-
-
-def _source_code_qa_effort_cache_key(
-    *,
-    pm_team: str,
-    country: str,
-    language: str,
-    requirement: str,
-    llm_provider: str,
-    evidence_query: str,
-    evidence_result: dict[str, Any],
-    evidence_matrix: dict[str, Any],
-    runtime_evidence: list[dict[str, Any]],
-) -> str:
-    dictionaries = _load_source_code_qa_effort_dictionaries()
-    payload = {
-        "version": 4,
-        "pm_team": pm_team,
-        "country": country,
-        "language": language,
-        "requirement_sha256": hashlib.sha256(str(requirement or "").encode("utf-8")).hexdigest(),
-        "llm_provider": llm_provider or "default",
-        "evidence_query_sha256": hashlib.sha256(str(evidence_query or "").encode("utf-8")).hexdigest(),
-        "effort_dictionary_version": dictionaries.get("version"),
-        "effort_dictionary_updated_at": dictionaries.get("updated_at"),
-        "runtime_evidence": _source_code_qa_effort_runtime_digest(runtime_evidence),
-        "evidence": _source_code_qa_effort_evidence_digest(evidence_result),
-        "evidence_matrix": {
-            "version": evidence_matrix.get("version") if isinstance(evidence_matrix, dict) else 0,
-            "groups": [
-                {
-                    "key": group.get("key"),
-                    "status": group.get("status"),
-                    "terms": group.get("terms") or [],
-                    "match_count": len(group.get("matches") or []),
-                }
-                for group in ((evidence_matrix or {}).get("groups") or [])
-                if isinstance(group, dict)
-            ],
-        },
-    }
-    return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
-
-
-def _source_code_qa_effort_cache_root(settings: Settings) -> Path:
-    return _team_portal_data_root(settings) / "source_code_qa" / "effort_assessment_cache"
-
-
-def _load_source_code_qa_effort_cached_result(settings: Settings, cache_key: str) -> dict[str, Any] | None:
-    try:
-        path = _source_code_qa_effort_cache_root(settings) / f"{cache_key}.json"
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    result = payload.get("result") if isinstance(payload, dict) else None
-    if not isinstance(result, dict):
-        return None
-    result = dict(result)
-    result["effort_cache_hit"] = True
-    result["effort_cache_key"] = cache_key
-    if isinstance(result.get("llm_route"), dict):
-        result["llm_route"] = {**result["llm_route"], "task": "effort_assessment", "effort_cache_hit": True}
-    return result
-
-
-def _store_source_code_qa_effort_cached_result(settings: Settings, cache_key: str, result: dict[str, Any]) -> None:
-    try:
-        cache_root = _source_code_qa_effort_cache_root(settings)
-        cache_root.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "version": 4,
-            "cache_key": cache_key,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "result": result,
-        }
-        (cache_root / f"{cache_key}.json").write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True), encoding="utf-8")
-    except (OSError, TypeError):
-        current_app.logger.warning("Could not store Source Code Q&A effort assessment cache.", exc_info=True)
-
-
-def _source_code_qa_effort_compact_evidence(result: dict[str, Any]) -> dict[str, Any]:
-    matches = result.get("matches") if isinstance(result.get("matches"), list) else []
-    citations = result.get("citations") if isinstance(result.get("citations"), list) else []
-    evidence_outline = result.get("evidence_outline") if isinstance(result.get("evidence_outline"), dict) else {}
-    return {
-        "status": result.get("status") or "",
-        "summary": result.get("summary") or "",
-        "answer_quality": result.get("answer_quality") or {},
-        "evidence_outline": evidence_outline,
-        "citations": citations[:12],
-        "matches": [
-            {
-                "repo": match.get("repo"),
-                "path": match.get("path"),
-                "line_start": match.get("line_start"),
-                "line_end": match.get("line_end"),
-                "retrieval": match.get("retrieval"),
-                "trace_stage": match.get("trace_stage"),
-                "reason": match.get("reason"),
-                "snippet": str(match.get("snippet") or "")[:900],
-            }
-            for match in matches[:12]
-            if isinstance(match, dict)
-        ],
-    }
-
-
-def _source_code_qa_effort_matrix_terms(
-    *,
-    key: str,
-    business_plan: dict[str, Any],
-    technical_candidates: dict[str, Any],
-) -> list[str]:
-    typed_candidates = technical_candidates.get("typed_candidates") if isinstance(technical_candidates.get("typed_candidates"), dict) else {}
-    if key == "business_rule":
-        values = (
-            list(business_plan.get("business_goals") or [])
-            + list(business_plan.get("products") or [])
-            + list(business_plan.get("limit_types") or [])
-            + list(business_plan.get("decision_points") or [])
-            + list(technical_candidates.get("product_terms") or [])
-            + list(technical_candidates.get("limit_terms") or [])
-        )
-    elif key == "workflow_api":
-        values = (
-            list(business_plan.get("flow_changes") or [])
-            + list(technical_candidates.get("backend_surfaces") or [])
-            + list(typed_candidates.get("backend_service") or [])
-            + list(typed_candidates.get("api") or [])
-            + list(typed_candidates.get("workflow") or [])
-        )
-    elif key == "config_table":
-        values = (
-            list(technical_candidates.get("configs_or_tables") or [])
-            + list(typed_candidates.get("configuration") or [])
-            + list(typed_candidates.get("table") or [])
-        )
-    elif key == "frontend_surface":
-        values = list(technical_candidates.get("frontend_surfaces") or []) + list(typed_candidates.get("frontend_surface") or [])
-    elif key == "downstream_reporting":
-        values = (
-            list(typed_candidates.get("downstream_reporting") or [])
-            + list(typed_candidates.get("integration") or [])
-            + list(typed_candidates.get("downstream") or [])
-        )
-    else:
-        values = list(typed_candidates.get("test") or []) + ["test", "qa", "regression", "integration"]
-    return _source_code_qa_effort_unique(str(item) for item in values if str(item or "").strip())[:12]
-
-
-def _source_code_qa_effort_match_text(match: dict[str, Any]) -> str:
-    return " ".join(
-        str(match.get(field) or "")
-        for field in ("repo", "path", "reason", "snippet", "retrieval", "trace_stage")
-    ).lower()
-
-
-def _source_code_qa_effort_matrix_quality(matrix: dict[str, Any]) -> dict[str, Any]:
-    groups = matrix.get("groups") if isinstance(matrix, dict) else []
-    if not isinstance(groups, list):
-        groups = []
-    counts = {"confirmed": 0, "inferred": 0, "missing": 0}
-    for group in groups:
-        if not isinstance(group, dict):
-            continue
-        status = str(group.get("status") or "missing")
-        if status in counts:
-            counts[status] += 1
-    return {
-        "confirmed_group_count": counts["confirmed"],
-        "inferred_group_count": counts["inferred"],
-        "missing_group_count": counts["missing"],
-        "status": "confirmed" if counts["confirmed"] >= 3 and counts["missing"] == 0 else ("partial" if counts["confirmed"] else "planning_assumption"),
-    }
-
-
-def _build_source_code_qa_effort_evidence_matrix(
-    *,
-    evidence_result: dict[str, Any],
-    business_plan: dict[str, Any],
-    technical_candidates: dict[str, Any],
-) -> dict[str, Any]:
-    matches = evidence_result.get("matches") if isinstance(evidence_result.get("matches"), list) else []
-    group_defs = [
-        ("business_rule", "Business rule / decision logic", ("rule", "decision", "limit", "amount", "income", "product", "strategy")),
-        ("workflow_api", "Workflow / API / service path", ("api", "service", "controller", "workflow", "approval", "review", "appeal", "suspension")),
-        ("config_table", "Config / table / parameter", ("config", "table", "mapper", "sql", "apollo", "properties", "param", "dictionary")),
-        ("frontend_surface", "Frontend screen / operation path", ("frontend", "screen", "page", "component", "vue", "react", "template", "webform")),
-        ("downstream_reporting", "Downstream / reporting / integration", ("report", "submission", "downstream", "dwh", "cbs", "integration", "mq", "sync")),
-        ("tests", "Tests / QA regression", ("test", "spec", "qa", "regression", "integration")),
-    ]
-    groups: list[dict[str, Any]] = []
-    for key, title, fallback_markers in group_defs:
-        terms = _source_code_qa_effort_matrix_terms(
-            key=key,
-            business_plan=business_plan,
-            technical_candidates=technical_candidates,
-        )
-        markers = [marker.lower() for marker in list(fallback_markers) + [term for term in terms if len(str(term)) >= 3]]
-        group_matches: list[dict[str, Any]] = []
-        for match in matches:
-            if not isinstance(match, dict):
-                continue
-            match_text = _source_code_qa_effort_match_text(match)
-            if any(str(marker).lower() in match_text for marker in markers):
-                group_matches.append(
-                    {
-                        "repo": match.get("repo"),
-                        "path": match.get("path"),
-                        "line_start": match.get("line_start"),
-                        "line_end": match.get("line_end"),
-                        "reason": match.get("reason"),
-                        "retrieval": match.get("retrieval"),
-                    }
-                )
-        status = "confirmed" if group_matches else ("inferred" if terms else "missing")
-        groups.append(
-            {
-                "key": key,
-                "title": title,
-                "status": status,
-                "terms": terms,
-                "matches": group_matches[:6],
-                "planning_note": (
-                    "Grounded by retrieved source-code references."
-                    if status == "confirmed"
-                    else (
-                        "Candidate impact inferred from requirement and domain dictionary; visible answer must phrase this as a planning assumption."
-                        if status == "inferred"
-                        else "No source or candidate evidence found for this workstream."
-                    )
-                ),
-            }
-        )
-    matrix = {
-        "version": 1,
-        "groups": groups,
-    }
-    matrix["quality"] = _source_code_qa_effort_matrix_quality(matrix)
-    return matrix
-
-
-def _source_code_qa_effort_generic_output_guard(answer: str, evidence_matrix: dict[str, Any]) -> dict[str, Any]:
-    text = str(answer or "")
-    generic_patterns = (
-        "api validation, service strategy",
-        "service strategy, workflow decision rule",
-        "config lookup",
-        "frontend_guidance",
-        "test/regression suite",
-    )
-    issues = [pattern for pattern in generic_patterns if pattern.lower() in text.lower()]
-    confirmed_or_inferred = [
-        group for group in (evidence_matrix.get("groups") or [])
-        if isinstance(group, dict) and group.get("status") in {"confirmed", "inferred"}
-    ]
-    if "code change" in text.lower() or "代码改动" in text:
-        status = "ok" if not issues and confirmed_or_inferred else "warning"
-    else:
-        status = "warning"
-        issues.append("missing_code_change_section")
-    return {
-        "status": status,
-        "issues": _source_code_qa_effort_unique(issues),
-        "confirmed_or_inferred_group_count": len(confirmed_or_inferred),
-    }
-
-
-def _build_source_code_qa_effort_compact_synthesis_prompt(
-    *,
-    pm_team: str,
-    country: str,
-    language: str,
-    requirement: str,
-    llm_provider: str,
-    runtime_evidence: list[dict[str, Any]],
-    business_plan: dict[str, Any],
-    technical_candidates: dict[str, Any],
-    estimation_rubric: dict[str, Any],
-    evidence_result: dict[str, Any],
-    evidence_matrix: dict[str, Any],
-) -> str:
-    output_language = "Chinese" if language == "zh" else "English"
-    return "\n".join(
-        [
-            "You are performing a Source Code Q&A Effort Assessment. Use the compact evidence pack below; do not restart broad repository exploration unless required evidence is contradictory.",
-            "",
-            "Context:",
-            f"- PM Team: {pm_team}",
-            f"- Country: {country}",
-            f"- Answer language: {output_language}",
-            f"- Selected model provider: {llm_provider or 'default'}",
-            f"- Runtime evidence available: {len(runtime_evidence)} item(s)",
-            "",
-            "Original business requirement, verbatim:",
-            str(requirement or "").strip()[:4000],
-            "",
-            "Business plan:",
-            _source_code_qa_effort_json_block(business_plan),
-            "",
-            "Technical candidates:",
-            _source_code_qa_effort_json_block(technical_candidates),
-            "",
-            "Estimation rubric:",
-            _source_code_qa_effort_json_block(estimation_rubric),
-            "",
-            "Compact source-code evidence pack from the indexed repositories:",
-            _source_code_qa_effort_json_block(_source_code_qa_effort_compact_evidence(evidence_result)),
-            "",
-            "Internal evidence matrix for planning quality. Use it for grounding only; do not expose it in the final answer:",
-            _source_code_qa_effort_json_block(evidence_matrix),
-            "",
-            "Instructions:",
-            "- Produce the final effort assessment from this evidence pack, business plan, runtime evidence, and rubric.",
-            "- Use source-code evidence internally to decide impact, but do not expose evidence, citations, S-id references, file paths, or proof lists in the visible final answer.",
-            "- Explain detailed code change points in business-readable language: behavior/process/rule/UI/API/data/integration/testing impact first, technical names only when useful.",
-            "- Every visible code change point must be grounded in a confirmed or inferred evidence-matrix workstream; if a workstream is only inferred, phrase it as a planning assumption.",
-            "- Do not output generic keyword strings such as API validation, service strategy, config lookup, frontend_guidance, or test/regression suite as change points.",
-            "- Missing source-code evidence is acceptable; continue with low confidence and state planning assumptions without creating a visible evidence section.",
-            "- Do not invent Option 1/Option 2 labels unless the original requirement had explicit alternatives.",
-            "- Estimate BE and FE as person-day ranges and break down the driver by rule/workflow, backend/API, config/data, frontend, and integration/QA where applicable.",
-            "- Include QA/test and integration impact inside the relevant BE/FE notes.",
-            "",
-            "Required output sections:",
-            "1. 业务理解 / Business Understanding",
-            "2. 代码改动点 / Code Change Points",
-            "3. BE 人天 / BE Person-days",
-            "4. FE 人天 / FE Person-days",
-            "5. QA / Integration Impact",
-            "6. Assumptions / Risks",
-            "7. Confirmation Questions",
-            "",
-            "Do not include visible sections named Evidence, Source / Runtime Evidence, Confirmed / Inferred / Missing Evidence, Missing Evidence, or source/runtime proof.",
-            "",
-            f"Write the final answer in {output_language}.",
-        ]
-    )
-
-
-def _source_code_qa_effort_missing_evidence(
-    *,
-    result: dict[str, Any],
-    technical_candidates: dict[str, Any],
-) -> list[str]:
-    missing: list[str] = []
-    matches = result.get("matches") if isinstance(result, dict) else []
-    if not isinstance(matches, list) or not matches:
-        missing.append("No confirmed source-code references were found for the technical candidates.")
-    exact_lookup = result.get("exact_lookup") if isinstance(result, dict) else None
-    if isinstance(exact_lookup, dict) and exact_lookup.get("terms") and not exact_lookup.get("matched_terms"):
-        missing.append("Exact table/path lookup did not match; assessment continued with focused candidate search.")
-    if technical_candidates.get("backend_surfaces") and (not isinstance(matches, list) or not matches):
-        missing.append("Backend impact surfaces need Dev confirmation against current repositories.")
-    return _source_code_qa_effort_unique(missing)
-
-
-def _source_code_qa_effort_confidence(result: dict[str, Any], missing_evidence: list[str]) -> str:
-    matches = result.get("matches") if isinstance(result, dict) else []
-    if str(result.get("status") or "").lower() == "no_match":
-        return "low"
-    if isinstance(matches, list) and len(matches) >= 3 and not missing_evidence:
-        return "high"
-    if isinstance(matches, list) and matches:
-        return "medium"
-    return "low"
-
-
-def _source_code_qa_effort_code_change_points(
-    *,
-    language: str,
-    business_plan: dict[str, Any],
-    technical_candidates: dict[str, Any],
-    estimation_rubric: dict[str, Any],
-) -> list[dict[str, str]]:
-    is_zh = language == "zh"
-    typed_candidates = technical_candidates.get("typed_candidates") if isinstance(technical_candidates.get("typed_candidates"), dict) else {}
-    backend_terms = [str(item) for item in (technical_candidates.get("backend_surfaces") or [])[:6] if str(item or "").strip()]
-    frontend_terms = [str(item) for item in (technical_candidates.get("frontend_surfaces") or [])[:6] if str(item or "").strip()]
-    config_terms = [str(item) for item in (technical_candidates.get("configs_or_tables") or [])[:6] if str(item or "").strip()]
-    reporting_terms = [str(item) for item in (typed_candidates.get("downstream_reporting") or [])[:6] if str(item or "").strip()]
-    products = [str(item) for item in (business_plan.get("products") or [])[:4] if str(item or "").strip()]
-    limit_types = [str(item) for item in (business_plan.get("limit_types") or [])[:4] if str(item or "").strip()]
-    flow_changes = [str(item) for item in (business_plan.get("flow_changes") or [])[:4] if str(item or "").strip()]
-    estimates = [item for item in (estimation_rubric.get("option_estimates") or []) if isinstance(item, dict)]
-
-    def join_terms(items: list[str], fallback: str) -> str:
-        return ", ".join(items) if items else fallback
-
-    points: list[dict[str, str]] = []
-
-    def add(area: str, change: str, technical_surface: str, impact: str) -> None:
-        if not change.strip():
-            return
-        points.append(
-            {
-                "area": area,
-                "change": change,
-                "likely_technical_surface": technical_surface,
-                "impact": impact,
-            }
-        )
-
-    if flow_changes or products or limit_types:
-        add(
-            "业务规则 / Business Rules" if is_zh else "Business Rules",
-            (
-                f"把需求中的流程、产品和额度规则落到系统判断中，覆盖 {join_terms(flow_changes + products + limit_types, '当前业务规则')}。"
-                if is_zh
-                else f"Map the requested flow, product, and limit-rule changes into system decision logic for {join_terms(flow_changes + products + limit_types, 'the affected business rules')}."
-            ),
-            join_terms(backend_terms + config_terms, "service/config rule layer" if not is_zh else "服务/配置规则层"),
-            "影响审批、授信、额度或流程判断口径。" if is_zh else "Affects approval, credit, limit, or workflow decisions.",
-        )
-    if backend_terms or typed_candidates.get("backend_service"):
-        add(
-            "后端服务 / Backend" if is_zh else "Backend",
-            (
-                f"调整后端接口、服务或策略逻辑，让新规则能在核心流程中被计算、校验和保存。"
-                if is_zh
-                else "Update backend APIs, services, or strategy logic so the new rule can be calculated, validated, and persisted in the core flow."
-            ),
-            join_terms(backend_terms or [str(item) for item in (typed_candidates.get("backend_service") or [])[:6]], "backend service/API layer"),
-            "主要决定 BE 人天范围。" if is_zh else "This is the main driver for BE person-days.",
-        )
-    if config_terms or typed_candidates.get("configuration"):
-        add(
-            "配置与数据 / Config & Data" if is_zh else "Config & Data",
-            (
-                f"新增或调整配置、字典、表字段映射或参数，确保规则可配置且不同环境口径一致。"
-                if is_zh
-                else "Add or adjust configuration, dictionary, table-field mapping, or parameters so the rule is configurable and consistent across environments."
-            ),
-            join_terms(config_terms or [str(item) for item in (typed_candidates.get("configuration") or [])[:6]], "config/table mapping"),
-            "需要迁移、参数发布或数据校验配合。" if is_zh else "May require migration, parameter rollout, or data validation.",
-        )
-    if frontend_terms or typed_candidates.get("frontend_surface"):
-        add(
-            "前端页面 / Frontend" if is_zh else "Frontend",
-            (
-                "调整页面入口、字段展示、提示文案或用户操作路径，让用户能理解并使用新的业务规则。"
-                if is_zh
-                else "Update screen entry points, field display, helper copy, or user flow so users can understand and use the new business rule."
-            ),
-            join_terms(frontend_terms or [str(item) for item in (typed_candidates.get("frontend_surface") or [])[:6]], "frontend screen/component"),
-            "决定是否需要 FE 人天；无页面变化时可为 0-1 PD。" if is_zh else "Determines FE effort; can be 0-1 PD if no user-facing screen changes.",
-        )
-    if reporting_terms or typed_candidates.get("integration") or typed_candidates.get("downstream"):
-        add(
-            "下游与报送 / Integration" if is_zh else "Integration",
-            (
-                "检查并调整下游接口、报送字段或同步任务，避免新规则只在主流程生效但下游口径不一致。"
-                if is_zh
-                else "Check and adjust downstream APIs, reporting fields, or sync jobs so the new rule does not diverge between the main flow and downstream consumers."
-            ),
-            join_terms(reporting_terms, "downstream/reporting path" if not is_zh else "下游/报送链路"),
-            "增加联调和回归测试成本。" if is_zh else "Adds integration and regression testing cost.",
-        )
-    add(
-        "测试与验收 / QA" if is_zh else "QA",
-        (
-            "补充单元测试、接口测试和关键业务场景回归，覆盖正常、边界和回退场景。"
-            if is_zh
-            else "Add unit, API, and key business regression tests covering normal, boundary, and rollback scenarios."
-        ),
-        "test/regression suite",
-        "测试工作包含在 BE/FE 估算说明中。" if is_zh else "Testing work is included in the BE/FE estimate notes.",
-    )
-
-    if estimates:
-        estimate_summary = "; ".join(
-            f"{item.get('label') or item.get('id') or 'option'}: BE {item.get('be_person_days') or 'n/a'}, FE {item.get('fe_person_days') or 'n/a'}"
-            for item in estimates[:3]
-        )
-        for point in points:
-            point.setdefault("estimate_hint", estimate_summary)
-    return points[:6]
-
-
-def _source_code_qa_effort_fallback_answer(
-    *,
-    language: str,
-    business_plan: dict[str, Any],
-    technical_candidates: dict[str, Any],
-    estimation_rubric: dict[str, Any],
-    missing_evidence: list[str],
-) -> str:
-    options = estimation_rubric.get("option_estimates") or []
-    has_explicit_options = bool(business_plan.get("has_explicit_options"))
-    option_lines = "\n".join(
-        f"- {item.get('label')}: BE {item.get('be_person_days')}, FE {item.get('fe_person_days')} ({item.get('basis')})"
-        for item in options
-        if isinstance(item, dict)
-    )
-    code_change_points = _source_code_qa_effort_code_change_points(
-        language=language,
-        business_plan=business_plan,
-        technical_candidates=technical_candidates,
-        estimation_rubric=estimation_rubric,
-    )
-    point_lines = "\n".join(
-        f"- {item['area']}: {item['change']} ({item['impact']})"
-        for item in code_change_points
-    )
-    if language == "zh":
-        goals = ", ".join(str(item) for item in business_plan.get("business_goals") or [])
-        technical_title = "方案 1/2 代码改动点" if has_explicit_options else "代码改动点"
-        confirmation_questions = [
-            "- 额度策略是否只改参数，还是需要新增产品/子产品额度模型?",
-            "- 是否需要前端新增 cashline 申请入口或额度解释文案?",
-        ]
-        if has_explicit_options:
-            confirmation_questions.insert(0, "- 方案 1 和方案 2 是否二选一，还是都需要落地?")
-        return "\n".join(
-            [
-                "业务理解",
-                f"- 目标: {goals or '评估业务需求对应的技术改造范围'}",
-                "",
-                technical_title,
-                point_lines or "- 按当前需求描述，需要调整业务规则、后端流程、可能的前端展示和测试回归范围。",
-                "",
-                "BE 人天 / FE 人天",
-                option_lines or "- 单方案: BE 3-6 PD, FE 1-3 PD，低置信度。",
-                "",
-                "QA / Integration Impact",
-                "- 需要覆盖核心业务路径、边界条件、配置发布和下游联调回归。",
-                "",
-                "Assumptions / Risks",
-                "- 这是 planning-grade 低置信度估算，不替代 Dev final sizing。",
-                "- 如果涉及授信引擎、额度模型、报送或多产品额度联动，BE 复杂度应按高复杂度处理。",
-                "",
-                "Confirmation Questions",
-                *confirmation_questions,
-            ]
-        )
-    technical_title = "Option Code Change Points" if has_explicit_options else "Code Change Points"
-    confirmation_questions = [
-        "- Is the requested limit change a config-only rule update or a new limit model?",
-        "- Does the change require FE display, application entry, or customer education copy?",
-    ]
-    if has_explicit_options:
-        confirmation_questions.insert(0, "- Are the listed options alternatives, or should more than one be implemented?")
-    return "\n".join(
-        [
-            "Business Understanding",
-            f"- Goals: {', '.join(str(item) for item in business_plan.get('business_goals') or [])}",
-            "",
-            technical_title,
-            point_lines or "- Adjust business rules, backend flow, possible frontend display, and regression testing scope based on the requirement.",
-            "",
-            "BE / FE Person-days",
-            option_lines or "- Single option: BE 3-6 PD, FE 1-3 PD, low confidence.",
-            "",
-            "QA / Integration Impact",
-            "- Cover core business paths, boundary conditions, configuration rollout, and downstream integration regression.",
-            "",
-            "Assumptions / Risks",
-            "- This is a planning-grade low-confidence estimate and does not replace Dev final sizing.",
-            "",
-            "Confirmation Questions",
-            *confirmation_questions,
-        ]
-    )
-
-
-def _build_source_code_qa_effort_structured_assessment(
-    *,
-    result: dict[str, Any],
-    language: str,
-    business_plan: dict[str, Any],
-    technical_candidates: dict[str, Any],
-    estimation_rubric: dict[str, Any],
-    missing_evidence: list[str],
-    confidence: str,
-) -> dict[str, Any]:
-    matches = result.get("matches") if isinstance(result.get("matches"), list) else []
-    evidence_matrix = result.get("effort_evidence_matrix") if isinstance(result.get("effort_evidence_matrix"), dict) else {}
-    evidence_groups = evidence_matrix.get("groups") if isinstance(evidence_matrix.get("groups"), list) else []
-    confirmed_evidence = [
-        {
-            "repo": str(match.get("repo") or ""),
-            "path": str(match.get("path") or ""),
-            "line_start": match.get("line_start") or 0,
-            "line_end": match.get("line_end") or 0,
-        }
-        for match in matches[:8]
-        if isinstance(match, dict)
-    ]
-    typed_candidates = technical_candidates.get("typed_candidates") if isinstance(technical_candidates.get("typed_candidates"), dict) else {}
-    inferred_impact = [
-        {
-            "surface": surface,
-            "terms": [str(item) for item in (terms or [])[:12]],
-        }
-        for surface, terms in typed_candidates.items()
-        if terms
-    ]
-    code_change_points = _source_code_qa_effort_code_change_points(
-        language=language,
-        business_plan=business_plan,
-        technical_candidates=technical_candidates,
-        estimation_rubric=estimation_rubric,
-    )
-    matrix_status_by_key = {
-        str(group.get("key") or ""): str(group.get("status") or "missing")
-        for group in evidence_groups
-        if isinstance(group, dict)
-    }
-    workstream_by_area = (
-        ("business_rule", ("business", "业务规则")),
-        ("workflow_api", ("backend", "后端", "api", "服务")),
-        ("config_table", ("config", "data", "配置", "数据")),
-        ("frontend_surface", ("frontend", "前端", "页面")),
-        ("downstream_reporting", ("integration", "下游", "报送", "联调")),
-        ("tests", ("qa", "测试", "验收")),
-    )
-    for point in code_change_points:
-        area_text = str(point.get("area") or "").lower()
-        workstream_key = next(
-            (
-                key
-                for key, markers in workstream_by_area
-                if any(marker in area_text for marker in markers)
-            ),
-            "",
-        )
-        status = matrix_status_by_key.get(workstream_key, "inferred" if workstream_key else "missing")
-        point["evidence_status"] = status
-        point["workstream"] = workstream_key or "planning"
-        if status == "inferred":
-            point["planning_assumption"] = "Candidate impact inferred from requirement/domain dictionary; Dev confirmation required."
-        elif status == "missing":
-            point["planning_assumption"] = "No direct source evidence found; treat as planning assumption."
-    return {
-        "version": 2,
-        "language": language,
-        "confidence": confidence,
-        "business_understanding": {
-            "goals": business_plan.get("business_goals") or [],
-            "user_segments": business_plan.get("user_segments") or [],
-            "products": business_plan.get("products") or [],
-            "limit_types": business_plan.get("limit_types") or [],
-            "flow_changes": business_plan.get("flow_changes") or [],
-            "decision_points": business_plan.get("decision_points") or [],
-        },
-        "option_impacts": [
-            {
-                "id": item.get("id") or "",
-                "label": item.get("label") or "",
-                "summary": item.get("summary") or "",
-            }
-            for item in (business_plan.get("options") or [])
-            if isinstance(item, dict)
-        ],
-        "code_change_points": code_change_points,
-        "be_estimate": [
-            {
-                "option_id": item.get("id") or "",
-                "person_days": item.get("be_person_days") or "",
-                "basis": item.get("basis") or "",
-            }
-            for item in (estimation_rubric.get("option_estimates") or [])
-            if isinstance(item, dict)
-        ],
-        "fe_estimate": [
-            {
-                "option_id": item.get("id") or "",
-                "person_days": item.get("fe_person_days") or "",
-                "basis": item.get("basis") or "",
-            }
-            for item in (estimation_rubric.get("option_estimates") or [])
-            if isinstance(item, dict)
-        ],
-        "confirmed_evidence": confirmed_evidence,
-        "inferred_impact": inferred_impact,
-        "missing_evidence": missing_evidence,
-        "evidence_matrix_quality": evidence_matrix.get("quality") or _source_code_qa_effort_matrix_quality(evidence_matrix),
-        "questions": (
-            ["Are the listed options alternatives, or should more than one be implemented?"]
-            if business_plan.get("has_explicit_options")
-            else []
-        ) + [
-            "Is the requested limit change a config-only rule update or a new limit model?",
-            "Does the change require FE display, application entry, or customer education copy?",
-        ],
-        "dictionary_entries": technical_candidates.get("matched_dictionary_entries") or [],
-    }
-
-
-def _source_code_qa_effort_sanitize_visible_answer(value: Any) -> str:
-    text = str(value or "")
-    if not text.strip():
-        return ""
-    allowed_heading_patterns = (
-        "business understanding",
-        "业务理解",
-        "code change",
-        "代码改动",
-        "technical change",
-        "技术改造",
-        "be person",
-        "be 人天",
-        "fe person",
-        "fe 人天",
-        "qa",
-        "integration",
-        "assumptions",
-        "risks",
-        "assumptions / risks",
-        "假设",
-        "风险",
-        "confirmation questions",
-        "确认问题",
-        "需要确认",
-    )
-    blocked_heading_patterns = (
-        "confirmed / inferred / missing evidence",
-        "source / runtime evidence",
-        "source/runtime evidence",
-        "missing evidence",
-        "runtime evidence",
-        "source evidence",
-        "evidence",
-        "证据",
-    )
-
-    def normalized_heading(line: str) -> str:
-        value = re.sub(r"^[#*\s>\-]*", "", line.strip())
-        value = re.sub(r"^\d+[\.)、]\s*", "", value)
-        value = value.strip("*:： ").lower()
-        return value
-
-    output: list[str] = []
-    skipping = False
-    for line in text.splitlines():
-        heading = normalized_heading(line)
-        is_blocked = any(pattern in heading for pattern in blocked_heading_patterns)
-        is_allowed = any(pattern in heading for pattern in allowed_heading_patterns)
-        if is_blocked and not is_allowed:
-            skipping = True
-            continue
-        if skipping and is_allowed:
-            skipping = False
-        if skipping:
-            continue
-        output.append(line)
-    cleaned = "\n".join(output).strip()
-    cleaned = re.sub(r"\s*\[S\d+\]", "", cleaned)
-    cleaned = re.sub(
-        r"(?:[\w.-]+/)+[\w.-]+\.(?:py|java|js|ts|tsx|vue|sql|xml|yaml|yml|properties|kt|go|rb|php|html|css|sh)(?::\d+(?:-\d+)?)?",
-        "source module",
-        cleaned,
-        flags=re.IGNORECASE,
-    )
-    return cleaned
-
-
-def _normalize_source_code_qa_effort_assessment_result(
-    *,
-    result: dict[str, Any],
-    language: str,
-    business_plan: dict[str, Any],
-    technical_candidates: dict[str, Any],
-    estimation_rubric: dict[str, Any],
-    evidence_matrix: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    normalized = dict(result or {})
-    if evidence_matrix is not None:
-        normalized["effort_evidence_matrix"] = evidence_matrix
-    elif not isinstance(normalized.get("effort_evidence_matrix"), dict):
-        normalized["effort_evidence_matrix"] = _build_source_code_qa_effort_evidence_matrix(
-            evidence_result=normalized,
-            business_plan=business_plan,
-            technical_candidates=technical_candidates,
-        )
-    missing_evidence = _source_code_qa_effort_missing_evidence(
-        result=normalized,
-        technical_candidates=technical_candidates,
-    )
-    confidence = _source_code_qa_effort_confidence(normalized, missing_evidence)
-    if str(normalized.get("status") or "").lower() == "no_match":
-        normalized["status"] = "ok"
-        normalized["effort_evidence_status"] = "warning"
-        normalized["summary"] = "Effort assessment completed with low confidence because source-code evidence is missing."
-        normalized["llm_answer"] = _source_code_qa_effort_fallback_answer(
-            language=language,
-            business_plan=business_plan,
-            technical_candidates=technical_candidates,
-            estimation_rubric=estimation_rubric,
-            missing_evidence=missing_evidence,
-        )
-    else:
-        normalized["effort_evidence_status"] = "warning" if missing_evidence else "confirmed"
-        if not normalized.get("summary"):
-            normalized["summary"] = "Effort assessment completed."
-        normalized["llm_answer"] = _source_code_qa_effort_sanitize_visible_answer(normalized.get("llm_answer") or normalized.get("answer") or "")
-    normalized["assessment_confidence"] = confidence
-    normalized["missing_evidence"] = missing_evidence
-    normalized["effort_evidence_matrix_quality"] = _source_code_qa_effort_matrix_quality(
-        normalized.get("effort_evidence_matrix") if isinstance(normalized.get("effort_evidence_matrix"), dict) else {}
-    )
-    normalized["effort_generic_output_guard"] = _source_code_qa_effort_generic_output_guard(
-        normalized.get("llm_answer") or "",
-        normalized.get("effort_evidence_matrix") if isinstance(normalized.get("effort_evidence_matrix"), dict) else {},
-    )
-    normalized["structured_assessment"] = _build_source_code_qa_effort_structured_assessment(
-        result=normalized,
-        language=language,
-        business_plan=business_plan,
-        technical_candidates=technical_candidates,
-        estimation_rubric=estimation_rubric,
-        missing_evidence=missing_evidence,
-        confidence=confidence,
-    )
-    return normalized
-
-
-
-def _build_source_code_qa_session_context(result: dict[str, Any], request_payload: dict[str, Any]) -> dict[str, Any]:
-    compact = _compact_source_code_qa_session_payload(result)
-    matches = compact.get("matches") or []
-    codex_trace = compact.get("codex_cli_trace") if isinstance(compact.get("codex_cli_trace"), dict) else {}
-    candidate_paths = (compact.get("llm_route") or {}).get("candidate_paths") or []
-    inspected_paths: list[dict[str, Any]] = []
-    for raw_path in codex_trace.get("probable_inspected_files") or []:
-        raw_text = str(raw_path or "")
-        matched = None
-        for candidate in candidate_paths:
-            if isinstance(candidate, dict) and str(candidate.get("path") or "") and str(candidate.get("path") or "") in raw_text:
-                matched = candidate
-                break
-        if matched:
-            inspected_paths.append({**matched, "source": "codex_cli_trace"})
-    if not inspected_paths:
-        inspected_paths = [
-            item for item in candidate_paths[:5]
-            if isinstance(item, dict) and str(item.get("trace_stage") or "") == "followup_memory"
-        ]
-    session_id = str(codex_trace.get("session_id") or "").strip()
-    return {
-        "key": f"{request_payload.get('pm_team') or ''}:{request_payload.get('country') or ALL_COUNTRY}",
-        "pm_team": request_payload.get("pm_team") or "",
-        "country": request_payload.get("country") or ALL_COUNTRY,
-        "question": request_payload.get("question") or "",
-        "trace_id": compact.get("trace_id") or "",
-        "summary": compact.get("summary") or "",
-        "answer": compact.get("llm_answer") or "",
-        "rendered_answer": compact.get("llm_answer") or "",
-        "attachments": compact.get("attachments") or [],
-        "llm_provider": compact.get("llm_provider") or "",
-        "llm_model": compact.get("llm_model") or "",
-        "llm_route": compact.get("llm_route") or {},
-        "codex_session_max_turns": (compact.get("llm_route") or {}).get("codex_session_max_turns") or 8,
-        "codex_cli_summary": compact.get("codex_cli_summary") or {},
-        "codex_cli_trace": codex_trace,
-        "codex_cli_session": {
-            "session_id": session_id,
-            "mode": codex_trace.get("session_mode") or "",
-            "last_used_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        } if session_id else {},
-        "codex_inspected_paths": inspected_paths[:12],
-        "codex_citation_validation": compact.get("codex_citation_validation") or {},
-        "codex_candidate_paths": candidate_paths,
-        "repo_scope": list(dict.fromkeys([match.get("repo") for match in matches if match.get("repo")]))[:8],
-        "matches": matches[:8],
-        "matches_snapshot": matches[:10],
-        "trace_paths": (result.get("trace_paths") or [])[:5],
-        "query_mode": compact.get("query_mode") or "",
-        "deadline_seconds": compact.get("deadline_seconds") or 0,
-        "deadline_hit": bool(compact.get("deadline_hit")),
-        "fallback_used": bool(compact.get("fallback_used")),
-        "fallback_answer_quality": compact.get("fallback_answer_quality") or "",
-        "fallback_evidence_count": compact.get("fallback_evidence_count") or 0,
-        "fallback_claim_count": compact.get("fallback_claim_count") or 0,
-        "deadline_fallback_reason": compact.get("deadline_fallback_reason") or "",
-        "structured_answer": compact.get("structured_answer") or {},
-        "answer_contract": compact.get("answer_contract") or {},
-        "evidence_pack": result.get("evidence_pack") or {},
-        "answer_quality": compact.get("answer_quality") or {},
-    }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 def _read_json_file(path: Path) -> dict[str, Any]:
@@ -7245,27 +4901,6 @@ def _callable_accepts_keyword(func: Any, keyword: str) -> bool:
     )
 
 
-def _source_code_qa_release_gate_payload(settings: Settings) -> dict[str, Any]:
-    data_root = settings.team_portal_data_dir
-    if not data_root.is_absolute():
-        data_root = (PROJECT_ROOT / data_root).resolve()
-    gate = _read_json_file(data_root / "run" / "source_code_qa_release_gate.json")
-    latest_eval = _read_json_file(data_root / "source_code_qa" / "eval_runs" / "latest.json")
-    status = str(gate.get("status") or latest_eval.get("status") or "missing")
-    updated_at = gate.get("timestamp") or latest_eval.get("timestamp")
-    return {
-        "status": status,
-        "updated_at": updated_at,
-        "summary": gate.get("summary") or "",
-        "thresholds": gate.get("thresholds") or {},
-        "checks": gate.get("checks") or {},
-        "latest_eval": {
-            "status": latest_eval.get("status"),
-            "eval": latest_eval.get("eval") or {},
-            "llm_smoke": latest_eval.get("llm_smoke") or {},
-            "report_path": latest_eval.get("report_path"),
-        },
-    }
 
 
 def _google_credentials_have_scopes(*required_scopes: str) -> bool:
@@ -7331,34 +4966,8 @@ def _require_meeting_recorder_access(settings: Settings, *, api: bool = False):
     return None
 
 
-def _require_source_code_qa_access(settings: Settings, *, api: bool = False):
-    login_gate = _require_google_login(settings, api=api)
-    if login_gate is not None:
-        return login_gate
-    message = "Source Code Q&A is available to signed-in @npt.sg users and the configured test account."
-    if not _can_access_source_code_qa(settings):
-        if api:
-            return jsonify({"status": "error", "message": message}), HTTPStatus.FORBIDDEN
-        flash(message, "error")
-        return redirect(url_for("index"))
-    return None
 
 
-def _require_source_code_qa_manage_access(settings: Settings, *, api: bool = False):
-    access_gate = _require_source_code_qa_access(settings, api=api)
-    if access_gate is not None:
-        return access_gate
-    auth_payload = _source_code_qa_auth_payload(settings)
-    message = (
-        f"Source Code Q&A repository admin is restricted to {PORTAL_ADMIN_EMAIL}. "
-        f"Signed in as {auth_payload['signed_in_email'] or 'unknown'}."
-    )
-    if not _can_manage_source_code_qa(settings):
-        if api:
-            return jsonify({"status": "error", "message": message, "auth": auth_payload}), HTTPStatus.FORBIDDEN
-        flash(message, "error")
-        return redirect(url_for("source_code_qa"))
-    return None
 
 
 def _require_work_memory_access(settings: Settings, *, api: bool = False):
@@ -7670,67 +5279,10 @@ def _results_for_display(results: list[dict[str, Any]] | list[object], *, includ
     return filtered
 
 
-def _classify_source_code_qa_job_error(message: str) -> dict[str, Any]:
-    normalized = str(message or "").lower()
-    if "local-agent" in normalized or "local agent" in normalized or "connection refused" in normalized:
-        return {"error_category": "local_agent_offline", "error_code": "local_agent_unavailable", "error_retryable": True}
-    if "ngrok" in normalized or "err_ngrok_3200" in normalized or "gateway" in normalized or "html error" in normalized:
-        return {"error_category": "gateway_disconnected", "error_code": "gateway_disconnected", "error_retryable": True}
-    if "rate limit" in normalized or "quota" in normalized:
-        return {"error_category": "codex_timeout_or_rate_limit", "error_code": "llm_rate_limited", "error_retryable": True}
-    if "timeout" in normalized or "timed out" in normalized:
-        return {"error_category": "codex_timeout_or_rate_limit", "error_code": "llm_timeout", "error_retryable": True}
-    return {"error_category": "job_failed", "error_code": "source_code_qa_job_failed", "error_retryable": True}
 
 
-def _public_source_code_qa_job_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
-    payload = dict(snapshot)
-    payload.pop("owner_email", None)
-    payload.setdefault("status", "ok")
-    payload["progress"] = snapshot.get("progress") if isinstance(snapshot.get("progress"), dict) else {
-        "stage": snapshot.get("stage") or "",
-        "current": snapshot.get("current") or 0,
-        "total": snapshot.get("total") or 0,
-        "message": snapshot.get("message") or "",
-    }
-    state = str(payload.get("state") or "")
-    payload["query_mode"] = _source_code_qa_query_mode(payload.get("query_mode"))
-    payload["queued_position"] = int(payload.get("queued_position") or 0)
-    payload["eta_seconds_range"] = [
-        max(0, int(value or 0))
-        for value in (payload.get("eta_seconds_range") if isinstance(payload.get("eta_seconds_range"), list) else [])
-    ][:2]
-    payload["running_user_count"] = int(payload.get("running_user_count") or 0)
-    payload["last_progress_at"] = float(payload.get("last_progress_at") or payload.get("updated_at") or 0)
-    if payload.get("stalled_retryable"):
-        payload["error_category"] = payload.get("error_category") or "job_stalled"
-        payload["error_code"] = payload.get("error_code") or "job_stalled_retryable"
-        payload["error_retryable"] = True
-    if state == "running":
-        payload.setdefault("error_category", "job_running")
-        payload.setdefault("error_code", "")
-        payload.setdefault("error_retryable", True)
-    if state == "queued":
-        payload.setdefault("error_category", "job_queued")
-        payload.setdefault("error_code", "")
-        payload.setdefault("error_retryable", True)
-    if state == "failed":
-        classification = _classify_source_code_qa_job_error(str(payload.get("error") or payload.get("message") or ""))
-        for key, value in classification.items():
-            if not payload.get(key):
-                payload[key] = value
-    return payload
 
 
-def _source_code_qa_job_snapshot_for_current_user(job_id: str) -> dict[str, Any] | None:
-    snapshot = current_app.config["JOB_STORE"].snapshot(job_id)
-    if snapshot is None or snapshot.get("action") != "source-code-qa-query":
-        return None
-    owner_email = str(snapshot.get("owner_email") or "").strip().lower()
-    current_email = _current_google_email()
-    if owner_email and owner_email != current_email and not _can_manage_source_code_qa(current_app.config["SETTINGS"]):
-        return None
-    return snapshot
 
 
 def _sanitize_meeting_recorder_job_error(error: object, *, unexpected: bool = False) -> str:
@@ -8009,448 +5561,10 @@ def _serialize_results(results: list[object], *, include_skipped: bool = True) -
     return _results_for_display(results, include_skipped=include_skipped)
 
 
-def _run_source_code_qa_sync_job(
-    app: Flask,
-    job_id: str,
-    settings: Settings,
-    pm_team: str,
-    country: str,
-) -> None:
-    del settings
-    with app.app_context():
-        job_store: JobStore = app.config["JOB_STORE"]
-        job_store.update(
-            job_id,
-            state="running",
-            stage="syncing",
-            message="Syncing repositories and rebuilding the source-code index.",
-            current=0,
-            total=1,
-        )
-        try:
-            result = _build_source_code_qa_service().sync(pm_team=pm_team, country=country)
-            status = str(result.get("status") or "ok")
-            summary = "Source repositories are synced." if status == "ok" else "Source repository sync completed with issues."
-            job_store.complete(
-                job_id,
-                results=[result],
-                notice={
-                    "title": "Source Code Sync",
-                    "tone": "success" if status == "ok" else "warning",
-                    "summary": summary,
-                    "details": [f"Status: {status}", f"Repositories: {len(result.get('results') or [])}"],
-                },
-            )
-        except ToolError as error:
-            job_store.fail(job_id, str(error))
-        except Exception as error:  # pragma: no cover - defensive guard for background worker failures.
-            app.logger.exception("Source code QA sync job failed unexpectedly.")
-            job_store.fail(job_id, f"Unexpected error: {error}")
 
 
-def _run_source_code_qa_query_job(app: Flask, job_id: str, payload: dict[str, Any]) -> None:
-    with app.app_context():
-        job_store: JobStore = app.config["JOB_STORE"]
-
-        def progress_callback(stage: str, message: str, current: int, total: int) -> None:
-            job_store.update(
-                job_id,
-                state="running",
-                stage=stage,
-                message=message,
-                current=current,
-                total=total,
-            )
-
-        try:
-            if not _source_code_qa_provider_available(payload.get("llm_provider")):
-                raise ToolError("Selected Source Code Q&A model is unavailable.")
-            service = _build_source_code_qa_service(payload.get("llm_provider"))
-            pm_team = str(payload.get("pm_team") or "")
-            country = str(payload.get("country") or "")
-            query_mode = _source_code_qa_query_mode(payload.get("query_mode"))
-            session_store = _get_source_code_qa_session_store()
-            session_id = str(payload.get("session_id") or "").strip()
-            owner_email = str(payload.get("_session_owner_email") or "").strip().lower() or "local"
-            conversation_context = payload.get("conversation_context") if isinstance(payload.get("conversation_context"), dict) else None
-            if conversation_context is None and session_id:
-                conversation_context = session_store.get_context(session_id, owner_email=owner_email)
-            if isinstance(payload.get("_resolved_attachments"), list):
-                attachments = payload.get("_resolved_attachments") or []
-            else:
-                attachments = _resolve_source_code_qa_query_attachments(payload, owner_email=owner_email, session_id=session_id)
-            runtime_evidence = _resolve_source_code_qa_runtime_evidence(pm_team=pm_team, country=country)
-            auto_sync = _prepare_source_code_qa_auto_sync(
-                service,
-                pm_team=pm_team,
-                country=country,
-                progress_callback=progress_callback,
-            )
-            def run_query() -> dict[str, Any]:
-                return service.query(
-                    pm_team=pm_team,
-                    country=country,
-                    question=str(payload.get("question") or ""),
-                    answer_mode=_source_code_qa_public_answer_mode(payload.get("answer_mode")),
-                    llm_budget_mode="auto",
-                    query_mode=query_mode,
-                    conversation_context=conversation_context,
-                    attachments=attachments,
-                    runtime_evidence=runtime_evidence,
-                    progress_callback=progress_callback,
-                )
-
-            if service.llm_provider_name == "codex_cli_bridge" and session_id:
-                progress_callback("codex_session_lock", "Waiting for this chat's Codex session slot.", 0, 1)
-                with _source_code_qa_codex_session_lock(session_id):
-                    result = run_query()
-            else:
-                result = run_query()
-            result["auto_sync"] = auto_sync
-            result["attachments"] = _source_code_qa_public_attachments(attachments)
-            result["runtime_evidence"] = _source_code_qa_public_runtime_evidence(runtime_evidence)
-            if session_id:
-                result["generated_artifacts"] = _build_source_code_qa_generated_artifacts(
-                    owner_email=owner_email,
-                    session_id=session_id,
-                    pm_team=pm_team,
-                    country=country,
-                    question=str(payload.get("question") or ""),
-                    result=result,
-                    runtime_evidence=runtime_evidence,
-                )
-                session_write_started = time.perf_counter()
-                session_payload = session_store.append_exchange(
-                    session_id,
-                    owner_email=owner_email,
-                    pm_team=pm_team,
-                    country=country,
-                    llm_provider=str(payload.get("llm_provider") or ""),
-                    question=str(payload.get("question") or ""),
-                    result=result,
-                    context=_build_source_code_qa_session_context(result, payload),
-                    attachments=attachments,
-                )
-                current_app.logger.warning(
-                    "source_code_qa_timing %s",
-                    json.dumps(
-                        {
-                            "event": "source_code_qa_timing",
-                            "component": "session_write",
-                            "elapsed_ms": int((time.perf_counter() - session_write_started) * 1000),
-                            "job_id": job_id,
-                            "trace_id": str(result.get("trace_id") or ""),
-                            "session_id": session_id,
-                            "owner_email": owner_email,
-                            "message_count": len(session_payload.get("messages") or []) if isinstance(session_payload, dict) else 0,
-                            "status": "ok" if session_payload is not None else "missing_session",
-                        },
-                        ensure_ascii=False,
-                        sort_keys=True,
-                    ),
-                )
-                if session_payload is not None:
-                    result["session"] = session_payload
-                    result["session_id"] = session_id
-            status = str(result.get("status") or "ok")
-            started_at = float((job_store.snapshot(job_id) or {}).get("started_at") or time.time())
-            elapsed_seconds = max(0.0, time.time() - started_at)
-            if elapsed_seconds > 120:
-                current_app.logger.warning(
-                    "source_code_qa_slow_query job_id=%s owner=%s elapsed_seconds=%.1f stage=%s",
-                    job_id,
-                    owner_email,
-                    elapsed_seconds,
-                    str((job_store.snapshot(job_id) or {}).get("stage") or ""),
-                )
-            _record_source_code_qa_work_memory(
-                owner_email=owner_email,
-                pm_team=pm_team,
-                country=country,
-                question=str(payload.get("question") or ""),
-                result=result,
-                session_id=session_id,
-                job_id=job_id,
-            )
-            job_store.complete(
-                job_id,
-                results=[result],
-                notice={
-                    "title": "Source Code Q&A",
-                    "tone": "success" if status == "ok" else "warning",
-                    "summary": result.get("summary") or "Source Code Q&A completed.",
-                    "details": [f"Status: {status}", f"Trace: {result.get('trace_id') or 'n/a'}"],
-                },
-            )
-        except ToolError as error:
-            job_store.fail(job_id, str(error), **_classify_source_code_qa_job_error(str(error)))
-        except Exception as error:  # pragma: no cover - defensive guard for background worker failures.
-            app.logger.exception("Source code QA query job failed unexpectedly.")
-            message = f"Unexpected error: {error}"
-            job_store.fail(job_id, message, **_classify_source_code_qa_job_error(message))
 
 
-def _run_source_code_qa_effort_assessment_job(app: Flask, job_id: str, payload: dict[str, Any]) -> None:
-    with app.app_context():
-        job_store: JobStore = app.config["JOB_STORE"]
-
-        def progress_callback(stage: str, message: str, current: int, total: int) -> None:
-            job_store.update(
-                job_id,
-                state="running",
-                stage=stage,
-                message=message,
-                current=current,
-                total=total,
-            )
-
-        try:
-            if not _source_code_qa_provider_available(payload.get("llm_provider")):
-                raise ToolError("Selected Source Code Q&A model is unavailable.")
-            service = _build_source_code_qa_service(payload.get("llm_provider"))
-            pm_team = str(payload.get("pm_team") or "")
-            country = str(payload.get("country") or "")
-            language = _source_code_qa_effort_assessment_language(payload.get("language"))
-            requirement = str(payload.get("requirement") or "").strip()
-            if not requirement:
-                raise ToolError("Business requirement is empty.")
-            settings: Settings = app.config["SETTINGS"]
-            progress_callback("assessment_prompt", "Building optimized effort assessment evidence query.", 0, 1)
-            runtime_evidence = _resolve_source_code_qa_runtime_evidence(pm_team=pm_team, country=country)
-            business_plan = _build_source_code_qa_effort_business_plan(
-                pm_team=pm_team,
-                country=country,
-                language=language,
-                requirement=requirement,
-            )
-            technical_candidates = _build_source_code_qa_effort_technical_candidates(
-                pm_team=pm_team,
-                country=country,
-                business_plan=business_plan,
-                requirement=requirement,
-            )
-            estimation_rubric = _build_source_code_qa_effort_estimation_rubric(
-                business_plan=business_plan,
-                technical_candidates=technical_candidates,
-            )
-            llm_provider = str(payload.get("llm_provider") or "")
-            scope_guard = _source_code_qa_effort_scope_guard(pm_team=pm_team, country=country, requirement=requirement)
-            if scope_guard.get("status") == "mismatch":
-                result = _source_code_qa_effort_scope_mismatch_result(
-                    pm_team=pm_team,
-                    country=country,
-                    language=language,
-                    requirement=requirement,
-                    llm_provider=llm_provider,
-                    business_plan=business_plan,
-                    technical_candidates=technical_candidates,
-                    estimation_rubric=estimation_rubric,
-                    scope_guard=scope_guard,
-                )
-                current_app.logger.warning(
-                    "source_code_qa_effort_assessment_scope_mismatch %s",
-                    json.dumps(
-                        {
-                            "event": "source_code_qa_effort_assessment_scope_mismatch",
-                            "job_id": job_id,
-                            "pm_team": pm_team,
-                            "country": country,
-                            "scope_guard": scope_guard,
-                        },
-                        ensure_ascii=False,
-                        sort_keys=True,
-                    ),
-                )
-                job_store.complete(
-                    job_id,
-                    results=[result],
-                    notice={
-                        "title": "Effort Assessment",
-                        "tone": "warning",
-                        "summary": result["summary"],
-                        "details": [
-                            f"Selected: {pm_team}:{country}",
-                            f"Suggested: {scope_guard.get('suggested_pm_team')}:{scope_guard.get('suggested_country')}",
-                            "Status: scope_mismatch",
-                        ],
-                    },
-                )
-                return
-            effort_started = time.perf_counter()
-            evidence_query = _build_source_code_qa_effort_evidence_query(
-                requirement=requirement,
-                business_plan=business_plan,
-                technical_candidates=technical_candidates,
-            )
-            progress_callback("effort_evidence", "Searching focused source-code evidence for effort assessment.", 0, 1)
-            evidence_started = time.perf_counter()
-            evidence_result = service.query(
-                pm_team=pm_team,
-                country=country,
-                question=evidence_query,
-                limit=16,
-                answer_mode="retrieval_only",
-                llm_budget_mode="cheap",
-                query_mode="deep",
-                conversation_context=None,
-                attachments=[],
-                runtime_evidence=runtime_evidence,
-                progress_callback=progress_callback,
-            )
-            evidence_latency_ms = int((time.perf_counter() - evidence_started) * 1000)
-            evidence_matrix = _build_source_code_qa_effort_evidence_matrix(
-                evidence_result=evidence_result,
-                business_plan=business_plan,
-                technical_candidates=technical_candidates,
-            )
-            evidence_matrix["scope_guard"] = scope_guard
-            evidence_matrix_quality = _source_code_qa_effort_matrix_quality(evidence_matrix)
-            cache_key = _source_code_qa_effort_cache_key(
-                pm_team=pm_team,
-                country=country,
-                language=language,
-                requirement=requirement,
-                llm_provider=llm_provider,
-                evidence_query=evidence_query,
-                evidence_result=evidence_result,
-                evidence_matrix=evidence_matrix,
-                runtime_evidence=runtime_evidence,
-            )
-            result = _load_source_code_qa_effort_cached_result(settings, cache_key)
-            if result is None:
-                synthesis_prompt = _build_source_code_qa_effort_compact_synthesis_prompt(
-                    pm_team=pm_team,
-                    country=country,
-                    language=language,
-                    requirement=requirement,
-                    llm_provider=llm_provider,
-                    runtime_evidence=runtime_evidence,
-                    business_plan=business_plan,
-                    technical_candidates=technical_candidates,
-                    estimation_rubric=estimation_rubric,
-                    evidence_result=evidence_result,
-                    evidence_matrix=evidence_matrix,
-                )
-                progress_callback("effort_synthesis", "Generating compact code-grounded effort assessment.", 0, 1)
-                synthesis_started = time.perf_counter()
-                result = service.query(
-                    pm_team=pm_team,
-                    country=country,
-                    question=synthesis_prompt,
-                    limit=16,
-                    answer_mode="auto",
-                    llm_budget_mode="auto",
-                    query_mode="deep",
-                    conversation_context=None,
-                    attachments=[],
-                    runtime_evidence=runtime_evidence,
-                    progress_callback=progress_callback,
-                    effort_assessment=True,
-                )
-                synthesis_latency_ms = int((time.perf_counter() - synthesis_started) * 1000)
-                if isinstance(result.get("llm_route"), dict):
-                    result["llm_route"] = {
-                        **result["llm_route"],
-                        "task": "effort_assessment",
-                        "effort_cache_hit": False,
-                        "effort_evidence_query_sha256": hashlib.sha256(evidence_query.encode("utf-8")).hexdigest()[:16],
-                        "effort_evidence_matrix_quality": evidence_matrix_quality,
-                    }
-                result["effort_evidence_matrix"] = evidence_matrix
-                result["effort_timing"] = {
-                    "evidence_retrieval_ms": evidence_latency_ms,
-                    "synthesis_ms": synthesis_latency_ms,
-                    "repair_decision_ms": int(
-                        ((result.get("llm_route") or {}).get("codex_repair_decision_ms") or 0)
-                        if isinstance(result.get("llm_route"), dict)
-                        else 0
-                    ),
-                    "total_ms": int((time.perf_counter() - effort_started) * 1000),
-                    "cache_hit": False,
-                    "evidence_matrix_quality": evidence_matrix_quality,
-                }
-                result["effort_cache_key"] = cache_key
-                _store_source_code_qa_effort_cached_result(settings, cache_key, result)
-            else:
-                result["effort_evidence_matrix"] = evidence_matrix
-                result["effort_timing"] = {
-                    **(result.get("effort_timing") if isinstance(result.get("effort_timing"), dict) else {}),
-                    "evidence_retrieval_ms": evidence_latency_ms,
-                    "cache_hit": True,
-                    "evidence_matrix_quality": evidence_matrix_quality,
-                    "repair_decision_ms": int(
-                        ((result.get("llm_route") or {}).get("codex_repair_decision_ms") or 0)
-                        if isinstance(result.get("llm_route"), dict)
-                        else 0
-                    ),
-                }
-            result = _normalize_source_code_qa_effort_assessment_result(
-                result=result,
-                language=language,
-                business_plan=business_plan,
-                technical_candidates=technical_candidates,
-                estimation_rubric=estimation_rubric,
-                evidence_matrix=evidence_matrix,
-            )
-            if isinstance(result.get("effort_timing"), dict):
-                result["effort_timing"] = {
-                    **result["effort_timing"],
-                    "generic_output_guard": result.get("effort_generic_output_guard") or {},
-                }
-            result["effort_evidence_query"] = evidence_query
-            result["effort_evidence_result"] = _source_code_qa_effort_compact_evidence(evidence_result)
-            result["assessment"] = {
-                "type": "effort_assessment",
-                "pm_team": pm_team,
-                "country": country,
-                "language": language,
-                "requirement": requirement,
-                "business_plan": business_plan,
-                "technical_candidates": technical_candidates,
-                "estimation_rubric": estimation_rubric,
-                "structured_assessment": result.get("structured_assessment") or {},
-                "confidence": result.get("assessment_confidence") or "low",
-                "missing_evidence": result.get("missing_evidence") or [],
-                "evidence_status": result.get("effort_evidence_status") or "warning",
-            }
-            current_app.logger.warning(
-                "source_code_qa_effort_assessment_quality %s",
-                json.dumps(
-                    {
-                        "event": "source_code_qa_effort_assessment_quality",
-                        "job_id": job_id,
-                        "trace_id": str(result.get("trace_id") or ""),
-                        "evidence_matrix_quality": result.get("effort_evidence_matrix_quality") or {},
-                        "generic_output_guard": result.get("effort_generic_output_guard") or {},
-                        "cache_hit": bool((result.get("effort_timing") or {}).get("cache_hit")) if isinstance(result.get("effort_timing"), dict) else False,
-                    },
-                    ensure_ascii=False,
-                    sort_keys=True,
-                ),
-            )
-            result["runtime_evidence"] = _source_code_qa_public_runtime_evidence(runtime_evidence)
-            status = str(result.get("status") or "ok")
-            notice_tone = "warning" if result.get("effort_evidence_status") == "warning" else ("success" if status == "ok" else "warning")
-            job_store.complete(
-                job_id,
-                results=[result],
-                notice={
-                    "title": "Effort Assessment",
-                    "tone": notice_tone,
-                    "summary": result.get("summary") or "Effort assessment completed.",
-                    "details": [
-                        f"Status: {status}",
-                        f"Evidence: {result.get('effort_evidence_status') or 'n/a'}",
-                        f"Trace: {result.get('trace_id') or 'n/a'}",
-                    ],
-                },
-            )
-        except ToolError as error:
-            job_store.fail(job_id, str(error), **_classify_source_code_qa_job_error(str(error)))
-        except Exception as error:  # pragma: no cover - defensive guard for background worker failures.
-            app.logger.exception("Source code QA effort assessment job failed unexpectedly.")
-            message = f"Unexpected error: {error}"
-            job_store.fail(job_id, message, **_classify_source_code_qa_job_error(message))
 
 
 def _run_team_dashboard_monthly_report_draft_job(

@@ -74,13 +74,11 @@ Run only the LLM answer smoke eval without calling an external model:
 PYTHONPATH=. ./.venv/bin/python scripts/run_source_code_qa_evals.py --fixture --mock-llm --cases evals/source_code_qa/llm_smoke.jsonl
 ```
 
-Compare provider profiles side by side when validating Vertex changes:
+Run the Codex-only fixture profile when validating Source Code Q&A changes:
 
 ```bash
-PYTHONPATH=. ./.venv/bin/python scripts/run_source_code_qa_evals.py --fixture --mock-llm --cases evals/source_code_qa/golden.jsonl --compare-profiles gemini,vertex,vertex_embedding --json
+PYTHONPATH=. ./.venv/bin/python scripts/run_source_code_qa_evals.py --fixture --mock-llm --cases evals/source_code_qa/golden.jsonl --profile codex --json
 ```
-
-`vertex_embedding` uses `SOURCE_CODE_QA_EMBEDDING_PROVIDER=vertex_ai` behavior with `gemini-embedding-001` by default when the configured embedding model is still local-only. For live non-mock runs, make sure the Vertex service account and project settings are present before running the comparison.
 
 Use `--fixture` when you want a deterministic miniature repo set for regression checks. It creates AF and CRMS fixture repositories under the selected data root, then runs the same eval cases against generated code instead of depending on whatever repos happen to be synced locally.
 
@@ -88,7 +86,7 @@ The JSON output includes LLM routing and quality metadata (`llm_provider`, `llm_
 
 Eval summaries also include `failure_buckets` (`retrieval`, `answer_policy`, `answer_content`, `query_status`, or `other`), `coverage_buckets`, and per-case `answer_policies`. Use these buckets to decide whether a failure needs retrieval/index work, policy tuning, answer rendering changes, or broader scenario coverage.
 
-LLM and semantic retrieval can be switched without changing eval cases. `SOURCE_CODE_QA_LLM_PROVIDER=gemini` keeps the default Gemini route, while `SOURCE_CODE_QA_LLM_PROVIDER=openai_compatible` uses OpenAI-compatible `/chat/completions` settings. Semantic retrieval defaults to `local-token-hybrid-v1`; set `SOURCE_CODE_QA_EMBEDDING_PROVIDER=openai_compatible` and a non-local `SOURCE_CODE_QA_EMBEDDING_MODEL` to persist real embedding vectors in the chunk index.
+Source Code Q&A now runs on the Codex bridge only. Historical Gemini, Vertex, OpenAI-compatible, and remote embedding profiles have been retired; semantic retrieval uses the local token-hybrid index and does not require an external embedding provider.
 
 The fixture now contains Java, Python, TypeScript, and two AF repos so the eval runner can validate Tree-sitter parser coverage, symbol edges, Feign/service-name matching, and HTTP-path cross-repo graph edges deterministically.
 

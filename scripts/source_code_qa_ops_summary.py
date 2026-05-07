@@ -99,7 +99,7 @@ def _source_config_summary(source_root: Path) -> tuple[list[str], list[str]]:
 
 def _index_health_summary(data_root: Path) -> tuple[list[str], list[str]]:
     try:
-        from bpmis_jira_tool.source_code_qa import SourceCodeQAService
+        from bpmis_jira_tool.source_code_qa import CODE_INDEX_VERSION, SourceCodeQAService
         from bpmis_jira_tool.user_config import TEAM_PROFILE_DEFAULTS
 
         service = SourceCodeQAService(data_root=data_root, team_profiles=TEAM_PROFILE_DEFAULTS)
@@ -126,6 +126,17 @@ def _index_health_summary(data_root: Path) -> tuple[list[str], list[str]]:
             suffix = f", ...(+{len(stale) - 5})" if len(stale) > 5 else ""
             lines.append(f"stale_index_repos={len(stale)} {preview}{suffix}")
         issues.append("configured repositories do not all have ready indexes")
+    wrong_version: list[str] = []
+    for key, payload in (health.get("keys") or {}).items():
+        for repo in payload.get("repos") or []:
+            index = repo.get("index") or {}
+            if index.get("state") == "ready" and int(index.get("index_version") or 0) != CODE_INDEX_VERSION:
+                wrong_version.append(f"{key}:{repo.get('display_name') or repo.get('url')}@v{index.get('index_version') or 'unknown'}")
+    if wrong_version:
+        preview = ", ".join(wrong_version[:5])
+        suffix = f", ...(+{len(wrong_version) - 5})" if len(wrong_version) > 5 else ""
+        lines.append(f"non_current_index_versions={len(wrong_version)} expected_v{CODE_INDEX_VERSION} {preview}{suffix}")
+        issues.append("configured repositories do not all use the current index schema")
     return lines, issues
 
 
