@@ -2279,6 +2279,41 @@ class SourceCodeQAService:
             started_at=started_at,
         )
 
+    def _should_expand_query_matches(
+        self,
+        *,
+        question: str,
+        top_matches: list[dict[str, Any]],
+        exact_lookup_sufficient: bool,
+        simple_quality_trace: bool,
+        synced_entries: list[tuple[RepositoryEntry, Path]],
+        started_at: float,
+        latency_guarded_query_expansion: bool,
+        request_cache: dict[str, Any],
+        report: Any,
+    ) -> bool:
+        should_expand_matches = not exact_lookup_sufficient
+        if top_matches and should_expand_matches and simple_quality_trace:
+            early_evidence_summary = self._compress_evidence_cached(question, top_matches, request_cache=request_cache)
+            early_quality_gate = self._quality_gate_cached(question, early_evidence_summary, request_cache=request_cache)
+            if (
+                early_quality_gate.get("status") == "sufficient"
+                and early_quality_gate.get("confidence") in {"medium", "high"}
+                and (len(synced_entries) >= 5 or time.time() - started_at >= 6.0)
+            ):
+                self._increment_retrieval_stat(request_cache, "early_quality_short_circuits")
+                report("quality_gate", "Ranked evidence is sufficient; skipping deeper local expansion.", 0, 0)
+                return False
+        if top_matches and should_expand_matches and latency_guarded_query_expansion:
+            self._increment_retrieval_stat(request_cache, "deep_expansion_latency_guards")
+            report("quality_gate", "Skipping deeper expansion because retrieval already hit the latency guard.", 0, 0)
+            return False
+        if top_matches and should_expand_matches and time.time() - started_at >= 8.0:
+            self._increment_retrieval_stat(request_cache, "deep_expansion_latency_guards")
+            report("quality_gate", "Skipping deeper expansion because retrieval already has enough evidence and hit the latency guard.", 0, 0)
+            return False
+        return should_expand_matches
+
     def _rank_and_expand_query_matches(
         self,
         *,
@@ -2306,26 +2341,17 @@ class SourceCodeQAService:
             if exact_matches
             else matches[:result_limit]
         )
-        should_expand_matches = not exact_lookup_sufficient
-        if top_matches and should_expand_matches and simple_quality_trace:
-            early_evidence_summary = self._compress_evidence_cached(question, top_matches, request_cache=request_cache)
-            early_quality_gate = self._quality_gate_cached(question, early_evidence_summary, request_cache=request_cache)
-            if (
-                early_quality_gate.get("status") == "sufficient"
-                and early_quality_gate.get("confidence") in {"medium", "high"}
-                and (len(synced_entries) >= 5 or time.time() - started_at >= 6.0)
-            ):
-                should_expand_matches = False
-                self._increment_retrieval_stat(request_cache, "early_quality_short_circuits")
-                report("quality_gate", "Ranked evidence is sufficient; skipping deeper local expansion.", 0, 0)
-        if top_matches and should_expand_matches and latency_guarded_query_expansion:
-            should_expand_matches = False
-            self._increment_retrieval_stat(request_cache, "deep_expansion_latency_guards")
-            report("quality_gate", "Skipping deeper expansion because retrieval already hit the latency guard.", 0, 0)
-        if top_matches and should_expand_matches and time.time() - started_at >= 8.0:
-            should_expand_matches = False
-            self._increment_retrieval_stat(request_cache, "deep_expansion_latency_guards")
-            report("quality_gate", "Skipping deeper expansion because retrieval already has enough evidence and hit the latency guard.", 0, 0)
+        should_expand_matches = self._should_expand_query_matches(
+            question=question,
+            top_matches=top_matches,
+            exact_lookup_sufficient=exact_lookup_sufficient,
+            simple_quality_trace=simple_quality_trace,
+            synced_entries=synced_entries,
+            started_at=started_at,
+            latency_guarded_query_expansion=latency_guarded_query_expansion,
+            request_cache=request_cache,
+            report=report,
+        )
         if top_matches and should_expand_matches and self._is_dependency_question(question):
             report("dependency_expansion", "Expanding dependency evidence from top matches.", 0, 0)
             dependency_matches = self._expand_dependency_matches(
