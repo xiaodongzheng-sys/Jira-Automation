@@ -38,9 +38,6 @@ def build_source_code_qa_service_from_settings(settings: Settings) -> SourceCode
         codex_session_mode=settings.source_code_qa_codex_session_mode,
         codex_session_max_turns=settings.source_code_qa_codex_session_max_turns,
         codex_cache_followups=settings.source_code_qa_codex_cache_followups,
-        llm_max_retries=settings.source_code_qa_llm_max_retries,
-        llm_backoff_seconds=settings.source_code_qa_llm_backoff_seconds,
-        llm_max_backoff_seconds=settings.source_code_qa_llm_max_backoff_seconds,
         git_timeout_seconds=settings.source_code_qa_git_timeout_seconds,
         max_file_bytes=settings.source_code_qa_max_file_bytes,
     )

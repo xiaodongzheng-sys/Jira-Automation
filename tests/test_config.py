@@ -73,14 +73,7 @@ class ConfigTests(unittest.TestCase):
                 os.chdir(original_cwd)
 
     def test_source_code_qa_defaults_to_codex_only(self):
-        with patch.dict(
-            os.environ,
-            {
-                "SOURCE_CODE_QA_LLM_PROVIDER": "vertex_ai",
-                "SOURCE_CODE_QA_EMBEDDING_PROVIDER": "vertex_ai",
-            },
-            clear=True,
-        ), patch("bpmis_jira_tool.config.find_dotenv", return_value=""):
+        with patch.dict(os.environ, {}, clear=True), patch("bpmis_jira_tool.config.find_dotenv", return_value=""):
             settings = Settings.from_env()
 
         self.assertEqual(settings.source_code_qa_llm_provider, "codex_cli_bridge")
@@ -96,9 +89,6 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(settings.source_code_qa_codex_session_mode, "ephemeral")
         self.assertEqual(settings.source_code_qa_codex_session_max_turns, 8)
         self.assertFalse(settings.source_code_qa_codex_cache_followups)
-        self.assertEqual(settings.source_code_qa_llm_max_retries, 2)
-        self.assertEqual(settings.source_code_qa_llm_backoff_seconds, 1.0)
-        self.assertEqual(settings.source_code_qa_llm_max_backoff_seconds, 8.0)
         self.assertEqual(settings.local_agent_connect_timeout_seconds, 10)
         self.assertEqual(settings.meeting_recorder_audio_input, "Meeting Recorder Aggregate")
         self.assertEqual(settings.meeting_recorder_transcript_segment_workers, 2)
@@ -180,9 +170,6 @@ class ConfigTests(unittest.TestCase):
             "SOURCE_CODE_QA_REPAIR_MODEL": "repair-deep",
             "SOURCE_CODE_QA_LLM_JUDGE_ENABLED": "true",
             "SOURCE_CODE_QA_LLM_TIMEOUT_SECONDS": "45",
-            "SOURCE_CODE_QA_LLM_MAX_RETRIES": "4",
-            "SOURCE_CODE_QA_LLM_BACKOFF_SECONDS": "0.5",
-            "SOURCE_CODE_QA_LLM_MAX_BACKOFF_SECONDS": "3.5",
         }
         with patch.dict(os.environ, env, clear=True):
             settings = Settings.from_env()
@@ -194,9 +181,6 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(settings.source_code_qa_repair_model, "repair-deep")
         self.assertTrue(settings.source_code_qa_llm_judge_enabled)
         self.assertEqual(settings.source_code_qa_llm_timeout_seconds, 45)
-        self.assertEqual(settings.source_code_qa_llm_max_retries, 4)
-        self.assertEqual(settings.source_code_qa_llm_backoff_seconds, 0.5)
-        self.assertEqual(settings.source_code_qa_llm_max_backoff_seconds, 3.5)
 
 
 if __name__ == "__main__":

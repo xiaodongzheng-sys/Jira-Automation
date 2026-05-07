@@ -163,6 +163,18 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertIn("data-source-preview-attachment", script)
         self.assertIn("Please wait for image upload to finish.", script)
 
+    def test_frontend_css_is_loaded_from_page_specific_asset(self):
+        template = Path("templates/source_code_qa.html").read_text(encoding="utf-8")
+        global_stylesheet = Path("static/style.css").read_text(encoding="utf-8")
+        page_stylesheet = Path("static/source_code_qa.css").read_text(encoding="utf-8")
+
+        self.assertIn("source_code_qa.css", template)
+        self.assertIn(".source-qa-chat-shell", page_stylesheet)
+        self.assertIn(".source-qa-session-messages", page_stylesheet)
+        self.assertIn(".source-qa-status", global_stylesheet)
+        self.assertNotIn(".source-qa-chat-shell", global_stylesheet)
+        self.assertNotIn(".source-qa-session-messages", global_stylesheet)
+
     def test_frontend_caches_effort_assessment_draft_and_result(self):
         script = Path("static/source_code_qa.js").read_text(encoding="utf-8")
         template = Path("templates/source_code_qa.html").read_text(encoding="utf-8")
@@ -353,68 +365,6 @@ class SourceCodeQARouteTests(unittest.TestCase):
         payload = valid.get_json()
         self.assertEqual(payload["key"], "AF:All")
         self.assertEqual(payload["repositories"][0]["display_name"], "Repo One")
-
-    def test_model_availability_is_owner_only_and_disables_provider_option(self):
-        with self.app.test_client() as client:
-            self._login(client, "teammate@npt.sg")
-            forbidden = client.post(
-                "/api/source-code-qa/model-availability",
-                json={"availability": {"codex_cli_bridge": True}},
-            )
-            self._login(client, "xiaodong.zheng@npt.sg")
-            saved = client.post(
-                "/api/source-code-qa/model-availability",
-                json={"availability": {"codex_cli_bridge": True}},
-            )
-            self._login(client, "teammate@npt.sg")
-            config_response = client.get("/api/source-code-qa/config")
-            page_response = client.get("/source-code-qa")
-
-        self.assertEqual(forbidden.status_code, 403)
-        self.assertEqual(saved.status_code, 200)
-        payload = config_response.get_json()
-        self.assertEqual([item["value"] for item in payload["options"]["llm_providers"]], ["codex_cli_bridge"])
-        codex_option = next(item for item in payload["options"]["llm_providers"] if item["value"] == "codex_cli_bridge")
-        self.assertFalse(codex_option["disabled"])
-        self.assertNotIn(b'<option value="vertex_ai"', page_response.data)
-        self.assertNotIn(b'value="vertex_ai" disabled', page_response.data)
-
-    def test_query_api_normalizes_legacy_unavailable_model_provider(self):
-        selected = []
-
-        def fake_query(**kwargs):
-            return {"status": "ok", "answer_mode": "auto", "matches": [], "llm_provider": "codex_cli_bridge"}
-
-        original = SourceCodeQAService.with_llm_provider
-
-        def fake_with_provider(service, provider):
-            selected.append(provider)
-            return original(service, provider)
-
-        with self.app.test_client() as client:
-            self._login(client, "xiaodong.zheng@npt.sg")
-            client.post(
-                "/api/source-code-qa/model-availability",
-                json={"availability": {"codex_cli_bridge": True}},
-            )
-            self._login(client, "teammate@npt.sg")
-            with patch("bpmis_jira_tool.source_code_qa.SourceCodeQAService.with_llm_provider", new=fake_with_provider), patch(
-                "bpmis_jira_tool.source_code_qa.SourceCodeQAService.ensure_synced_today",
-                return_value={"attempted": False, "status": "fresh"},
-            ), patch("bpmis_jira_tool.source_code_qa.SourceCodeQAService.query", side_effect=fake_query):
-                response = client.post(
-                    "/api/source-code-qa/query",
-                    json={
-                        "pm_team": "AF",
-                        "country": "All",
-                        "question": "where is createIssue",
-                        "answer_mode": "auto",
-                        "llm_provider": "vertex_ai",
-                    },
-                )
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(selected, ["codex_cli_bridge"])
 
     def test_effort_assessment_is_admin_only_and_validates_input(self):
         with self.app.test_client() as client:
@@ -875,7 +825,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
                         "country": "All",
                         "language": "en",
                         "requirement": "Add a new workflow",
-                        "llm_provider": "vertex_ai",
+                        "llm_provider": "not-real",
                     },
                 )
 
@@ -887,7 +837,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
             self._login(client, "teammate@npt.sg")
             created = client.post(
                 "/api/source-code-qa/sessions",
-                json={"pm_team": "AF", "country": "All", "llm_provider": "vertex_ai"},
+                json={"pm_team": "AF", "country": "All", "llm_provider": "codex_cli_bridge"},
             )
             self.assertEqual(created.status_code, 200)
             session_payload = created.get_json()["session"]
@@ -1762,39 +1712,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("codex_cli_bridge", selected)
 
-    def test_query_api_legacy_llm_provider_falls_back_to_codex(self):
-        selected = []
-
-        def fake_query(**kwargs):
-            return {"status": "ok", "answer_mode": "auto", "matches": [], "llm_provider": "codex_cli_bridge"}
-
-        original = SourceCodeQAService.with_llm_provider
-
-        def fake_with_provider(service, provider):
-            selected.append(provider)
-            return original(service, provider)
-
-        with patch("bpmis_jira_tool.source_code_qa.SourceCodeQAService.with_llm_provider", new=fake_with_provider), patch(
-            "bpmis_jira_tool.source_code_qa.SourceCodeQAService.ensure_synced_today",
-            return_value={"attempted": False, "status": "fresh"},
-        ), patch("bpmis_jira_tool.source_code_qa.SourceCodeQAService.query", side_effect=fake_query):
-            with self.app.test_client() as client:
-                self._login(client, "teammate@npt.sg")
-                response = client.post(
-                    "/api/source-code-qa/query",
-                    json={
-                        "pm_team": "AF",
-                        "country": "All",
-                        "question": "where is createIssue",
-                        "answer_mode": "auto",
-                        "llm_provider": "vertex_ai",
-                    },
-                )
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(selected, ["codex_cli_bridge"])
-
-    def test_query_api_invalid_llm_provider_falls_back_to_codex(self):
+    def test_query_api_invalid_llm_provider_is_rejected(self):
         selected = []
 
         def fake_query(**kwargs):
@@ -1823,8 +1741,8 @@ class SourceCodeQARouteTests(unittest.TestCase):
                     },
                 )
 
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(SourceCodeQAService.normalize_query_llm_provider(selected[-1]), "codex_cli_bridge")
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(selected, [])
 
     def test_query_api_ignores_client_llm_budget_selection(self):
         captured = {}
@@ -2031,6 +1949,8 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertNotIn("max_retries", payload["llm_policy"]["runtime"])
         self.assertEqual(payload["llm_policy"]["model_policy"]["answer"]["model"], os.getenv("SOURCE_CODE_QA_CODEX_MODEL", "codex-cli"))
         self.assertTrue(payload["llm_policy"]["judge"]["enabled"])
+        self.assertEqual(payload["llm_policy"]["judge"]["mode"], "deterministic_evidence_judge")
+        self.assertNotIn("cache", payload["llm_policy"]["judge"])
         self.assertEqual(payload["llm_policy"]["planner_tools"]["version"], 1)
         self.assertEqual(payload["llm_policy"]["semantic_retrieval"]["model"], "local-token-hybrid-v1")
         self.assertEqual(payload["llm_policy"]["semantic_retrieval"]["embedding_provider"]["provider"], "local_token_hybrid")
@@ -2426,7 +2346,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
                     "trace_id": "trace-123",
                     "replay_context": {
                         "trace_id": "trace-123",
-                        "answer_mode": "gemini_flash",
+                        "answer_mode": "auto",
                         "llm_model": "codex-cli",
                         "rendered_answer": "createIssue is handled by IssueController.",
                         "answer_contract": {"status": "satisfied"},
@@ -2468,7 +2388,7 @@ class SourceCodeQARouteTests(unittest.TestCase):
                     "comment": "missed repository",
                     "replay_context": {
                         "trace_id": "trace-abc",
-                        "answer_mode": "gemini_flash",
+                        "answer_mode": "auto",
                         "llm_model": "codex-cli",
                         "answer_contract": {"status": "satisfied"},
                         "evidence_pack": {"items": [{"type": "entry_point", "claim": "IssueController"}]},
@@ -2668,7 +2588,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertEqual(merged[0]["score"], 9)
         self.assertEqual(merged[1]["path"], "controller/IssueController.java")
 
-    def test_attachment_prompt_and_gemini_parts_keep_attachment_evidence_separate(self):
+    def test_attachment_prompt_and_codex_image_paths_keep_attachment_evidence_separate(self):
         image_path = Path(self.temp_dir.name) / "screen.png"
         image_path.write_bytes(b"fake-image")
         attachment = {
@@ -2682,15 +2602,13 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         }
 
         section = self.service._attachment_prompt_section([attachment])
-        parts = self.service._llm_payload_parts("Question prompt", [attachment])
+        image_paths = self.service._attachment_image_paths([attachment])
 
         self.assertIn("User attachments", section)
         self.assertIn("not repository facts", section)
         self.assertIn("extract visible facts exactly", section)
         self.assertIn("missing_production_evidence", section)
-        self.assertEqual(parts[0], {"text": "Question prompt"})
-        self.assertEqual(parts[1]["inlineData"]["mimeType"], "image/png")
-        self.assertTrue(parts[1]["inlineData"]["data"])
+        self.assertEqual(image_paths, [str(image_path)])
 
     def test_non_crms_country_normalizes_to_shared_repository_mapping(self):
         self.assertEqual(self.service.mapping_key("AF", "PH"), "AF:All")
@@ -3235,7 +3153,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertIn("Previous answer", followup["answer"])
         self.assertEqual(followup["codex_candidate_paths"][0]["path"], "repository/IssueRepository.java")
 
-    def test_legacy_provider_followup_terms_still_use_codex_context(self):
+    def test_followup_terms_use_codex_context(self):
         augmented, followup = self.service._apply_conversation_context(
             "continue with this",
             {
@@ -7356,54 +7274,6 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertIn("EngineTermLoanPreCheckLayer1Input", flattened_terms)
         self.assertNotIn("UnderwritingInitiationDTO", flattened_terms)
 
-    def test_answer_self_check_retries_weak_data_source_answer(self):
-        compressed = {
-            "intent": self.service._question_intent("What data source does Term Loan Pre Check 1 check?"),
-            "entry_points": ["Credit Risk:engine/TermLoanPreCheckEngine.java:1-5"],
-            "data_carriers": ["DataSourceResult"],
-            "field_population": ["UnderwritingInitiationProvider populates UnderwritingInitiationDTO"],
-            "downstream_components": ["DataSourceResultRepository"],
-            "data_sources": ["Credit Risk:repository/DataSourceResultRepository.java:10-14: select * from cr_data_source_result"],
-            "api_or_config": [],
-            "rule_or_error_logic": [],
-            "source_count": 3,
-        }
-        quality = self.service._quality_gate("What data source does Term Loan Pre Check 1 check?", compressed)
-
-        check = self.service._answer_self_check(
-            "What data source does Term Loan Pre Check 1 check?",
-            "The evidence does not specify the actual data source.",
-            compressed,
-            quality,
-        )
-
-        self.assertEqual(check["status"], "retry")
-        self.assertTrue(check["issues"])
-
-    def test_answer_self_check_rejects_dto_only_data_source_answer(self):
-        compressed = {
-            "intent": self.service._question_intent("What data source does Term Loan Pre Check 1 check?"),
-            "entry_points": ["Credit Risk:engine/TermLoanPreCheckEngine.java:1-5"],
-            "data_carriers": ["UnderwritingInitiationDTO", "CustomerInfo", "LoanInfo", "CreditRiskInfo"],
-            "field_population": ["UnderwritingInitiationProvider populates UnderwritingInitiationDTO"],
-            "downstream_components": ["DataSourceResultRepository"],
-            "data_sources": ["Credit Risk:repository/DataSourceResultRepository.java:10-14: select * from cr_data_source_result"],
-            "api_or_config": [],
-            "rule_or_error_logic": [],
-            "source_count": 4,
-        }
-        quality = self.service._quality_gate("What data source does Term Loan Pre Check 1 check?", compressed)
-
-        check = self.service._answer_self_check(
-            "What data source does Term Loan Pre Check 1 check?",
-            "Term Loan Precheck 1 uses data from UnderwritingInitiationDTO, CustomerInfo, LoanInfo, and CreditRiskInfo.",
-            compressed,
-            quality,
-        )
-
-        self.assertEqual(check["status"], "retry")
-        self.assertIn("answer stops at DTO/carrier layer instead of tracing upstream source", check["issues"])
-
     def test_answer_judge_requests_repair_for_uncited_thin_answer(self):
         evidence_pack = {
             "version": 2,
@@ -7433,7 +7303,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertEqual(judge["status"], "repair")
         self.assertTrue(judge["repair_targets"])
 
-    def test_llm_answer_judge_can_request_repair(self):
+    def test_deterministic_answer_judge_can_request_repair(self):
         service = SourceCodeQAService(
             data_root=Path(self.temp_dir.name),
             team_profiles=TEAM_PROFILE_DEFAULTS,
@@ -7499,7 +7369,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertIn("answer omits typed table/API/client source evidence", judge["issues"])
         mocked_generate.assert_not_called()
 
-    def test_llm_answer_judge_is_cached(self):
+    def test_deterministic_answer_judge_does_not_call_provider(self):
         service = SourceCodeQAService(
             data_root=Path(self.temp_dir.name),
             team_profiles=TEAM_PROFILE_DEFAULTS,
@@ -7570,41 +7440,6 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertEqual(second["mode"], "deterministic_evidence_judge")
         self.assertFalse(second.get("cached", False))
         mocked_generate.assert_not_called()
-
-    def test_llm_finalizer_blocks_dto_only_source_answer_when_source_missing(self):
-        compressed = {
-            "intent": self.service._question_intent("What data sources does Term Loan Precheck 1 underwriting call?"),
-            "entry_points": ["Credit Risk:engine/Layer4TermLoanPreCheckEngineStrategy.java:1-8"],
-            "data_carriers": ["DataSourceResult (Credit Risk:engine/Layer4TermLoanPreCheckEngineStrategy.java:1-8)"],
-            "field_population": ["Credit Risk:engine/Layer4TermLoanPreCheckEngineStrategy.java:1-8: input.setDataSourceResult(result)"],
-            "downstream_components": [],
-            "data_sources": [],
-            "api_or_config": [],
-            "rule_or_error_logic": [],
-            "source_count": 2,
-        }
-        quality = self.service._quality_gate("What data sources does Term Loan Precheck 1 underwriting call?", compressed)
-        final = self.service._finalize_llm_answer(
-            question="What data sources does Term Loan Precheck 1 underwriting call?",
-            answer="It likely uses internal or external financial providers through integrations.",
-            structured_answer=self.service._parse_structured_answer("It likely uses internal or external financial providers through integrations."),
-            evidence_summary=compressed,
-            quality_gate=quality,
-            claim_check={"status": "needs_citation", "issues": ["concrete answer claims need citation-backed evidence"]},
-            selected_matches=[
-                {
-                    "repo": "Credit Risk",
-                    "path": "engine/Layer4TermLoanPreCheckEngineStrategy.java",
-                    "line_start": 1,
-                    "line_end": 8,
-                }
-            ],
-        )
-
-        self.assertEqual(final["answer_contract"]["status"], "blocked_missing_source")
-        self.assertNotIn("likely", final["answer"].lower())
-        self.assertIn("I cannot confirm the final upstream data source", final["answer"])
-        self.assertIn("Missing link", final["answer"])
 
     def test_imported_dao_is_not_treated_as_concrete_data_source(self):
         matches = [
@@ -7760,76 +7595,6 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         policy_statuses = {policy["name"]: policy["status"] for policy in payload["answer_quality"]["policies"]}
         self.assertEqual(policy_statuses["operational_boundary"], "satisfied")
 
-    def test_claim_verifier_flags_uncited_concrete_claims(self):
-        evidence_summary = {
-            "data_sources": ["Portal Repo:repository/IssueRepository.java:3-5: select * from issue_table"],
-            "api_or_config": [],
-        }
-        selected_matches = [
-            {
-                "repo": "Portal Repo",
-                "path": "repository/IssueRepository.java",
-                "line_start": 1,
-                "line_end": 5,
-            }
-        ]
-
-        check = self.service._verify_answer_claims(
-            "Issue creation reads from issue_table through IssueRepository.",
-            evidence_summary,
-            selected_matches,
-        )
-
-        self.assertEqual(check["status"], "needs_citation")
-        self.assertTrue(check["unsupported_claims"])
-
-    def test_claim_verifier_requires_citation_to_support_claim_terms(self):
-        evidence_summary = {
-            "data_sources": ["Portal Repo:repository/IssueRepository.java:3-5: select * from issue_table"],
-            "api_or_config": [],
-        }
-        selected_matches = [
-            {
-                "repo": "Portal Repo",
-                "path": "controller/IssueController.java",
-                "line_start": 1,
-                "line_end": 5,
-                "snippet": "public class IssueController { public void createIssue() {} }",
-            }
-        ]
-
-        check = self.service._verify_answer_claims(
-            '{"direct_answer":"Uses issue_table","claims":[{"text":"IssueRepository reads issue_table","citations":["S1"]}],"missing_evidence":[],"confidence":"high"}',
-            evidence_summary,
-            selected_matches,
-        )
-
-        self.assertEqual(check["status"], "needs_citation")
-        self.assertIn("IssueRepository reads issue_table", check["unsupported_claims"][0])
-
-    def test_claim_verifier_accepts_structured_supported_citation(self):
-        evidence_summary = {
-            "data_sources": ["Portal Repo:repository/IssueRepository.java:3-5: select * from issue_table"],
-            "api_or_config": [],
-        }
-        selected_matches = [
-            {
-                "repo": "Portal Repo",
-                "path": "repository/IssueRepository.java",
-                "line_start": 1,
-                "line_end": 5,
-                "snippet": "class IssueRepository { void read(){ jdbcTemplate.queryForObject(\"select * from issue_table\", mapper); } }",
-            }
-        ]
-
-        check = self.service._verify_answer_claims(
-            '{"direct_answer":"Uses issue_table","claims":[{"text":"IssueRepository reads issue_table","citations":["S1"]}],"missing_evidence":[],"confidence":"high"}',
-            evidence_summary,
-            selected_matches,
-        )
-
-        self.assertEqual(check["status"], "ok")
-
     def test_structured_answer_parser_accepts_json_and_fallback_prose(self):
         parsed = self.service._parse_structured_answer(
             '{"direct_answer":"Uses issue_table","confirmed_from_code":["IssueRepository reads issue_table [S1]"],'
@@ -7848,82 +7613,6 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertEqual(fallback["format"], "prose_fallback")
         self.assertEqual(fallback["claims"][0]["citations"], ["S1"])
         self.assertEqual(fallback["confirmed_from_code"], [])
-
-    def test_structured_answer_renderer_uses_investigation_sections_for_screenshots(self):
-        structured = self.service._parse_structured_answer(
-            json.dumps(
-                {
-                    "direct_answer": "Likely aggregate-status mismatch; not confirmed RCA without production row/log evidence.",
-                    "attachment_facts": ["Screenshot shows User ID 1106805455 and Trace ID 17534058."],
-                    "screenshot_evidence": ["LC failed while Facial Recognition Result showed Passed."],
-                    "source_code_evidence": ["admin/FvResultMapper.java maps facial_verify_status 0 to Passed [S1]."],
-                    "confirmed_from_code": ["Admin display reads stored facial_verify_status [S1]."],
-                    "inferred_from_code": ["Component failure and aggregate status may be written independently."],
-                    "not_found": ["No production DB row for Trace ID 17534058 was provided."],
-                    "missing_production_evidence": ["Need FV DB row/logs for Trace ID 17534058."],
-                    "next_checks": ["Query FV record by Trace ID 17534058 and compare component fields with facial_verify_status."],
-                    "claims": [{"text": "Admin display reads stored facial_verify_status", "citations": ["S1"]}],
-                    "missing_evidence": [],
-                    "confidence": "medium",
-                }
-            )
-        )
-
-        rendered = self.service._render_structured_answer(
-            structured,
-            {
-                "confirmed_from_code": structured["confirmed_from_code"],
-                "inferred_from_code": structured["inferred_from_code"],
-                "not_found": structured["not_found"],
-                "missing_links": [],
-                "confidence": "medium",
-            },
-        )
-
-        self.assertIn("Conclusion", rendered)
-        self.assertIn("Screenshot Evidence", rendered)
-        self.assertIn("Source-code Evidence", rendered)
-        self.assertIn("Missing Production Evidence", rendered)
-        self.assertIn("Next Checks", rendered)
-        self.assertIn("Trace ID 17534058", rendered)
-
-    def test_finalizer_preserves_structured_json_for_display(self):
-        structured = {
-            "direct_answer": "Issue creation reads issue_table.",
-            "confirmed_from_code": ["IssueRepository reads issue_table [S1]"],
-            "inferred_from_code": [],
-            "not_found": [],
-            "claims": [{"text": "IssueRepository reads issue_table", "citations": ["S1"]}],
-            "missing_evidence": ["No service caller evidence."],
-            "confidence": "medium",
-            "format": "json",
-        }
-
-        final = self.service._finalize_llm_answer(
-            question="what table does IssueRepository use",
-            answer=json.dumps(structured),
-            structured_answer=structured,
-            evidence_summary={
-                "intent": self.service._question_intent("what table does IssueRepository use"),
-                "data_sources": ["Portal Repo:repository/IssueRepository.java:1-5: issue_table"],
-            },
-            quality_gate={"status": "sufficient", "confidence": "medium", "missing": []},
-            claim_check={"status": "ok", "issues": []},
-            selected_matches=[
-                {
-                    "repo": "Portal Repo",
-                    "path": "repository/IssueRepository.java",
-                    "line_start": 1,
-                    "line_end": 5,
-                    "snippet": "jdbcTemplate.queryForObject(\"select * from issue_table\", mapper)",
-                }
-            ],
-        )
-
-        self.assertEqual(final["structured_answer"]["format"], "json")
-        self.assertEqual(final["structured_answer"]["direct_answer"], "Issue creation reads issue_table.")
-        self.assertEqual(final["structured_answer"]["claims"][0]["text"], "IssueRepository reads issue_table")
-        self.assertNotIn("Missing evidence:", final["structured_answer"]["direct_answer"])
 
     def test_trusted_model_finalizer_returns_raw_codex_answer(self):
         structured = {
@@ -8040,11 +7729,11 @@ class SourceCodeQAServiceTests(unittest.TestCase):
                 pm_team="AF",
                 country="All",
                 question="where is batchCreateJiraIssue",
-                answer_mode="gemini_flash",
+                answer_mode="auto",
                 llm_budget_mode="balanced",
             )
 
-        self.assertEqual(payload["answer_mode"], "gemini_flash")
+        self.assertEqual(payload["answer_mode"], "auto")
         self.assertIn("Short answer", payload["llm_answer"])
         self.assertEqual(payload["llm_usage"]["promptTokenCount"], 123)
         self.assertEqual(payload["llm_provider"], "codex_cli_bridge")
@@ -8116,7 +7805,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
                 pm_team="AF",
                 country="All",
                 question="where is batchCreateJiraIssue",
-                answer_mode="gemini_flash",
+                answer_mode="auto",
                 llm_budget_mode="balanced",
             )
 
@@ -8177,11 +7866,11 @@ class SourceCodeQAServiceTests(unittest.TestCase):
                 pm_team="AF",
                 country="All",
                 question="Is fdMaturityDate used in any function?",
-                answer_mode="gemini_flash",
+                answer_mode="auto",
                 llm_budget_mode="balanced",
             )
 
-        self.assertEqual(payload["answer_mode"], "gemini_flash")
+        self.assertEqual(payload["answer_mode"], "auto")
         self.assertEqual(payload["llm_provider"], "codex_cli_bridge")
         self.assertIn("fdMaturityDate only appears", payload["llm_answer"])
         self.assertEqual(mocked_generate.call_count, 1)
@@ -8229,11 +7918,11 @@ class SourceCodeQAServiceTests(unittest.TestCase):
                 pm_team="AF",
                 country="All",
                 question="Is fdMaturityDate used in any function?",
-                answer_mode="gemini_flash",
+                answer_mode="auto",
                 llm_budget_mode="balanced",
             )
 
-        self.assertEqual(payload["answer_mode"], "gemini_flash")
+        self.assertEqual(payload["answer_mode"], "auto")
         self.assertNotIn("llm_cost_skip", payload)
         self.assertIn("LoanChecker.validate", payload["llm_answer"])
         mocked_generate.assert_called()
@@ -8302,40 +7991,6 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertIn("extract_record_tab", payload["exact_lookup"]["matched_terms"])
         self.assertIn("card_income_screening_flow_status_tab", payload["exact_lookup"]["matched_terms"])
 
-    def test_malformed_or_capped_llm_answer_is_downgraded(self):
-        question = "Which table stores the Credit Card LLM extracted payslip fields?"
-        raw_answer = '{ "direct_answer": "The provided evidence does not specify the table"'
-        structured = self.service._parse_structured_answer(raw_answer)
-
-        final = self.service._finalize_llm_answer(
-            question=question,
-            answer=raw_answer,
-            structured_answer=structured,
-            evidence_summary={
-                "intent": self.service._question_intent(question),
-                "data_sources": ["credit-risk:mapper/ExtractRecordDAO-ext.xml:1-3: update extract_record_tab set response_body = ..."],
-            },
-            quality_gate={"status": "sufficient", "confidence": "high", "missing": []},
-            claim_check={"status": "needs_citation", "issues": ["concrete answer claims need citation-backed evidence"]},
-            selected_matches=[
-                {
-                    "repo": "credit-risk",
-                    "path": "mapper/ExtractRecordDAO-ext.xml",
-                    "line_start": 1,
-                    "line_end": 3,
-                    "snippet": "update extract_record_tab set response_body = #{updateDO.responseBody}",
-                }
-            ],
-            answer_judge={"status": "repair", "issues": ["answer omits typed table/API/client source evidence"]},
-            finish_reason="MAX_TOKENS",
-        )
-
-        self.assertFalse(final["answer"].lstrip().startswith("{"))
-        self.assertIn("could not produce a reliable final answer", final["answer"])
-        self.assertEqual(final["answer_contract"]["status"], "unreliable_llm_answer")
-        self.assertEqual(final["answer_contract"]["confidence"], "low")
-        self.assertEqual(final["structured_answer"]["confidence"], "low")
-
     def test_llm_answer_cache_requires_current_versions(self):
         service = SourceCodeQAService(
             data_root=Path(self.temp_dir.name),
@@ -8348,7 +8003,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             provider="codex_cli_bridge",
             model="codex-cli",
             question="where is createIssue",
-            answer_mode="gemini_flash",
+            answer_mode="auto",
             llm_budget_mode="balanced",
             context="S1 createIssue",
         )
@@ -8369,22 +8024,16 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         cache_path.write_text(json.dumps(stale_payload), encoding="utf-8")
         self.assertIsNone(service._load_cached_answer(cache_key))
 
-    def test_legacy_provider_inputs_normalize_to_codex_and_local_embedding(self):
+    def test_codex_provider_uses_local_embedding(self):
         service = SourceCodeQAService(
             data_root=Path(self.temp_dir.name),
             team_profiles=TEAM_PROFILE_DEFAULTS,
-            llm_provider="vertex_ai",
-            embedding_provider="vertex_ai",
+            llm_provider="codex_cli_bridge",
             semantic_index_model="local-token-hybrid-v1",
-            vertex_credentials_file="/tmp/missing.json",
-            vertex_project_id="demo-project",
-            vertex_location="us-central1",
             gitlab_token="secret-token",
             git_timeout_seconds=5,
             max_file_bytes=200_000,
         )
-        self.assertEqual(SourceCodeQAService.normalize_query_llm_provider("gemini"), "codex_cli_bridge")
-        self.assertEqual(SourceCodeQAService.normalize_query_llm_provider("openai_compatible"), "codex_cli_bridge")
         self.assertEqual(service.llm_provider_name, "codex_cli_bridge")
         self.assertEqual(service.llm_provider.name, "codex_cli_bridge")
         self.assertEqual(service.embedding_provider_name, "local_token_hybrid")
@@ -8395,15 +8044,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertEqual(routed_mode, "cheap")
         self.assertEqual(routed_budget["model"], os.getenv("SOURCE_CODE_QA_CODEX_MODEL", "codex-cli"))
         self.assertEqual(route["mode"], "manual")
-        self.assertEqual(
-            service._thinking_config_for_provider(
-                512,
-                model="legacy-provider-model",
-                role="answer",
-                budget_mode="cheap",
-            ),
-            {"thinkingBudget": 512},
-        )
+
     def test_codex_cli_bridge_provider_returns_answer(self):
         provider = CodexCliBridgeSourceCodeQALLMProvider(
             workspace_root=Path(self.temp_dir.name),
@@ -9730,19 +9371,6 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertEqual(payload["llm_model"], os.getenv("SOURCE_CODE_QA_CODEX_MODEL", "codex-cli"))
         self.assertEqual(payload["llm_thinking_budget"], 0)
         self.assertNotIn("thinkingConfig", mocked_generate.call_args.kwargs["payload"]["generationConfig"])
-
-    def test_codex_thinking_budget_is_not_gemini_clamped(self):
-        service = SourceCodeQAService(
-            data_root=Path(self.temp_dir.name),
-            team_profiles=TEAM_PROFILE_DEFAULTS,
-            gitlab_token="secret-token",
-            git_timeout_seconds=5,
-            max_file_bytes=200_000,
-        )
-
-        self.assertEqual(service._normalize_thinking_budget_for_provider(0), 0)
-        self.assertEqual(service._normalize_thinking_budget_for_provider(256), 256)
-        self.assertEqual(service._normalize_thinking_budget_for_provider(999999), 999999)
 
     def test_token_heavy_auto_route_uses_compact_deep_budget(self):
         service = SourceCodeQAService(

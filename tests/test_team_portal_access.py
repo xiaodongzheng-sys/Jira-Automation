@@ -49,10 +49,6 @@ class _UnavailableLocalAgentClient:
     def source_code_qa_config(self, *, llm_provider=None):
         raise ToolError("Mac local-agent is unavailable: connection refused")
 
-    def source_code_qa_model_availability_get(self):
-        raise ToolError("Mac local-agent is unavailable: connection refused")
-
-
 class _NoStartThread:
     def __init__(self, *args, **kwargs):
         self.args = args
@@ -487,7 +483,6 @@ class TeamPortalAccessTests(unittest.TestCase):
                 blocked_requests = [
                     ("post", "/api/source-code-qa/config", {"pm_team": "AF", "country": "All", "repositories": []}),
                     ("post", "/api/source-code-qa/sync", {"pm_team": "AF", "country": "All"}),
-                    ("post", "/api/source-code-qa/model-availability", {"availability": {"codex_cli_bridge": True}}),
                     ("get", "/api/source-code-qa/runtime-evidence?pm_team=AF&country=SG", None),
                     ("post", "/api/source-code-qa/effort-assessment", {"pm_team": "AF", "country": "All", "requirement": "new flow"}),
                     ("get", "/api/team-dashboard/config", None),
@@ -588,7 +583,6 @@ class TeamPortalAccessTests(unittest.TestCase):
                 "source_code_qa_effort_assessment_latest_api",
                 "source_code_qa_feedback_api",
                 "source_code_qa_generated_artifact_api",
-                "source_code_qa_model_availability_api",
                 "source_code_qa_query_api",
                 "source_code_qa_query_job_api",
                 "source_code_qa_query_job_events_api",
@@ -629,7 +623,7 @@ class TeamPortalAccessTests(unittest.TestCase):
                     ("get", "/api/source-code-qa/config", {200}),
                     ("get", "/api/source-code-qa/sessions", {200}),
                     ("post", "/api/source-code-qa/sessions", {200}, {"pm_team": "AF", "country": "All", "llm_provider": "codex_cli_bridge"}),
-                    ("post", "/api/source-code-qa/query", {200}, {"pm_team": "AF", "country": "All", "question": "x", "llm_provider": "gemini"}),
+                    ("post", "/api/source-code-qa/query", {400}, {"pm_team": "AF", "country": "All", "question": "x", "llm_provider": "not-real"}),
                     ("post", "/api/source-code-qa/feedback", {200}, {"rating": "useful", "question": "x"}),
                     ("get", "/api/source-code-qa/attachments/missing", {400}),
                     ("post", "/api/source-code-qa/attachments", {400}),
@@ -650,7 +644,6 @@ class TeamPortalAccessTests(unittest.TestCase):
                     ("get", "/api/gmail-sea-talk-demo/dashboard", {403}),
                     ("get", "/api/source-code-qa/runtime-evidence?pm_team=AF&country=SG", {403}),
                     ("post", "/api/source-code-qa/sync", {403}, {"pm_team": "AF", "country": "All"}),
-                    ("post", "/api/source-code-qa/model-availability", {403}, {"availability": {"codex_cli_bridge": True}}),
                     ("post", "/api/source-code-qa/effort-assessment", {403}, {"pm_team": "AF", "country": "All", "requirement": "x"}),
                     ("get", "/api/source-code-qa/effort-assessment/latest", {403}),
                 ]
@@ -704,6 +697,7 @@ class TeamPortalAccessTests(unittest.TestCase):
             self.assertIsNotNone(source_soup.select_one(selector), selector)
         self.assertIsNone(source_soup.select_one("[data-source-view-tab='admin']"))
         self.assertIsNone(source_soup.select_one("[data-source-view-tab='effort']"))
+        self.assertIsNotNone(source_soup.find("link", href=lambda value: value and "source_code_qa.css" in value))
         self.assertIsNotNone(source_soup.find("script", src=lambda value: value and "source_code_qa.js" in value))
 
         prd_soup = BeautifulSoup(prd_response.get_data(as_text=True), "html.parser")

@@ -55,7 +55,6 @@ from bpmis_jira_tool.source_code_qa_factory import build_source_code_qa_service_
 from bpmis_jira_tool.source_code_qa_stores import (
     SourceCodeQAAttachmentStore,
     SourceCodeQAGeneratedArtifactStore,
-    SourceCodeQAModelAvailabilityStore,
     SourceCodeQARuntimeEvidenceStore,
     SourceCodeQASessionStore,
 )
@@ -821,7 +820,7 @@ def create_local_agent_app() -> Flask:
         if not asset_path.exists() or not asset_path.is_file():
             raise ToolError("Meeting asset not found.")
         media = record.get("media") if isinstance(record.get("media"), dict) else {}
-        active_media_paths = [str(media.get("audio_path") or "").strip(), str(media.get("video_path") or "").strip()]
+        active_media_paths = [str(media.get("audio_path") or "").strip()]
         active_asset_paths = {
             (_get_meeting_record_store().root_dir / media_path).resolve()
             for media_path in active_media_paths
@@ -1011,18 +1010,6 @@ def create_local_agent_app() -> Flask:
             )
         except ToolError as error:
             return jsonify({"status": "error", "message": str(error)}), HTTPStatus.NOT_FOUND
-
-    @app.post("/api/local-agent/source-code-qa/model-availability/get")
-    def source_code_qa_model_availability_get():
-        return jsonify({"status": "ok", "availability": _build_source_code_qa_model_availability_store(settings).get()})
-
-    @app.post("/api/local-agent/source-code-qa/model-availability/save")
-    def source_code_qa_model_availability_save():
-        payload = request.get_json(silent=True) or {}
-        availability = _build_source_code_qa_model_availability_store(settings).save(
-            payload.get("availability") if isinstance(payload.get("availability"), dict) else {}
-        )
-        return jsonify({"status": "ok", "availability": availability})
 
     @app.post("/api/local-agent/source-code-qa/runtime-evidence/list")
     def source_code_qa_runtime_evidence_list():
@@ -2262,10 +2249,6 @@ def _build_source_code_qa_generated_artifact_store(settings: Settings) -> Source
 
 def _build_source_code_qa_runtime_evidence_store(settings: Settings) -> SourceCodeQARuntimeEvidenceStore:
     return SourceCodeQARuntimeEvidenceStore(_data_root(settings) / "source_code_qa" / "runtime_evidence")
-
-
-def _build_source_code_qa_model_availability_store(settings: Settings) -> SourceCodeQAModelAvailabilityStore:
-    return SourceCodeQAModelAvailabilityStore(_data_root(settings) / "source_code_qa" / "model_availability.json")
 
 
 def _build_prd_review_service(settings: Settings) -> PRDReviewService:

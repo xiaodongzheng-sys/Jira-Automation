@@ -799,16 +799,6 @@ class LocalAgentClient:
         encoded = str(payload.get("content_base64") or "")
         return metadata, base64.b64decode(encoded.encode("ascii")) if encoded else b""
 
-    def source_code_qa_model_availability_get(self) -> dict[str, bool]:
-        payload = self._request("POST", "/api/local-agent/source-code-qa/model-availability/get", {})
-        availability = payload.get("availability")
-        return availability if isinstance(availability, dict) else {}
-
-    def source_code_qa_model_availability_save(self, availability: dict[str, Any]) -> dict[str, bool]:
-        payload = self._request("POST", "/api/local-agent/source-code-qa/model-availability/save", {"availability": availability})
-        saved = payload.get("availability")
-        return saved if isinstance(saved, dict) else {}
-
     def source_code_qa_runtime_evidence_list(self, *, pm_team: str, country: str) -> list[dict[str, Any]]:
         payload = self._request(
             "POST",
@@ -1400,17 +1390,6 @@ class RemoteSourceCodeQAGeneratedArtifactStore:
             session_id=session_id,
             artifact_id=artifact_id,
         )
-
-
-class RemoteSourceCodeQAModelAvailabilityStore:
-    def __init__(self, client: LocalAgentClient) -> None:
-        self.client = client
-
-    def get(self) -> dict[str, bool]:
-        return self.client.source_code_qa_model_availability_get()
-
-    def save(self, availability: dict[str, Any]) -> dict[str, bool]:
-        return self.client.source_code_qa_model_availability_save(availability)
 
 
 class RemoteSourceCodeQARuntimeEvidenceStore:

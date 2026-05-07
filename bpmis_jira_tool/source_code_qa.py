@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import ast
-import base64
 from datetime import date, datetime, timedelta, timezone
 import functools
 import hashlib
@@ -18,7 +17,6 @@ from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 import uuid
 
-import requests
 
 from bpmis_jira_tool.errors import ToolError
 from bpmis_jira_tool.source_code_qa_evidence_policy import (
@@ -188,7 +186,6 @@ ALL_COUNTRY = "All"
 CRMS_COUNTRIES = ("SG", "ID", "PH")
 ANSWER_MODE_AUTO = "auto"
 ANSWER_MODE = "retrieval_only"
-ANSWER_MODE_GEMINI = "gemini_flash"
 QUERY_MODE_DEEP = "deep"
 CONFIG_VERSION = 1
 CODE_INDEX_VERSION = 29
@@ -246,9 +243,7 @@ class SourceCodeQAService:
         codex_cache_followups: bool = False,
         git_timeout_seconds: int = 90,
         max_file_bytes: int = 500_000,
-        **deprecated_provider_kwargs: Any,
     ) -> None:
-        del deprecated_provider_kwargs
         self.base_data_root = data_root
         self.data_root = data_root / "source_code_qa"
         self.config_path = self.data_root / "config.json"
@@ -407,9 +402,8 @@ class SourceCodeQAService:
                 "embedding_provider": self.embedding_provider.public_config(),
             },
             "judge": {
-                "enabled": self.llm_judge_enabled,
-                "mode": "llm_evidence_judge" if self.llm_judge_enabled else "deterministic_evidence_judge",
-                "cache": "enabled",
+                "enabled": True,
+                "mode": "deterministic_evidence_judge",
             },
         }
 
@@ -494,56 +488,14 @@ class SourceCodeQAService:
                 return model
         return str((budget or {}).get("model") or self._llm_default_model()).strip() or self._llm_default_model()
 
-    def _thinking_budget_for_call(
-        self,
-        *,
-        role: str,
-        budget_mode: str,
-        budget: dict[str, Any],
-        quality_gate: dict[str, Any] | None = None,
-        retry: bool = False,
-    ) -> int:
-        del role, budget_mode, quality_gate, retry
-        return int((budget or {}).get("thinking_budget") or 0)
-
-    def _normalize_thinking_budget_for_provider(self, budget: int | None) -> int:
-        return int(budget or 0)
-
-    def _thinking_config_for_provider(
-        self,
-        budget: int | None,
-        *,
-        model: str | None = None,
-        role: str = "",
-        budget_mode: str = "",
-    ) -> dict[str, Any]:
-        del model, role, budget_mode
-        return {"thinkingBudget": self._normalize_thinking_budget_for_provider(budget)}
-
     @staticmethod
     def _finish_reason_needs_generation_repair(finish_reason: str | None) -> bool:
         reason = str(finish_reason or "").strip()
         return reason.upper() in {"MAX_TOKENS", "SAFETY", "RECITATION"} or reason.lower() in {"length", "content_filter"}
 
     @staticmethod
-    def _finish_reason_is_token_limited(finish_reason: str | None) -> bool:
-        reason = str(finish_reason or "").strip()
-        return reason.upper() == "MAX_TOKENS" or reason.lower() == "length"
-
-    @staticmethod
     def _estimate_llm_tokens(text: str) -> int:
         return max(1, int((len(str(text or "")) / LLM_TOKEN_ESTIMATE_CHARS_PER_TOKEN) + 0.999))
-
-    @staticmethod
-    def _llm_prompt_pressure(estimated_prompt_tokens: int) -> str:
-        if estimated_prompt_tokens >= LLM_PROMPT_TIGHT_THRESHOLD_TOKENS:
-            return "tight"
-        if estimated_prompt_tokens >= LLM_PROMPT_COMPACT_THRESHOLD_TOKENS:
-            return "compact"
-        return "normal"
-
-    def _llm_prompt_pressure_for_provider(self, estimated_prompt_tokens: int) -> str:
-        return self._llm_prompt_pressure(estimated_prompt_tokens)
 
     def _llm_fallback_model(self) -> str:
         return self.codex_model
@@ -1548,13 +1500,13 @@ class SourceCodeQAService:
     @staticmethod
     def _normalize_answer_mode(answer_mode: str) -> str:
         normalized_answer_mode = str(answer_mode or ANSWER_MODE).strip() or ANSWER_MODE
-        if normalized_answer_mode not in {ANSWER_MODE, ANSWER_MODE_GEMINI, ANSWER_MODE_AUTO}:
+        if normalized_answer_mode not in {ANSWER_MODE, ANSWER_MODE_AUTO}:
             return ANSWER_MODE_AUTO
         return normalized_answer_mode
 
     @staticmethod
     def _answer_mode_requests_llm(normalized_answer_mode: str) -> bool:
-        return normalized_answer_mode in {ANSWER_MODE_GEMINI, ANSWER_MODE_AUTO}
+        return normalized_answer_mode == ANSWER_MODE_AUTO
 
     @staticmethod
     def _query_uses_simple_quality_trace(intent: dict[str, Any]) -> bool:
@@ -12539,660 +12491,6 @@ class SourceCodeQAService:
             "domain_context": domain_context,
         }
 
-    def _llm_answer_generation_settings(
-        self,
-        *,
-        llm_route: dict[str, Any],
-        selected_model: str,
-        routed_budget_mode: str,
-        budget: dict[str, Any],
-        quality_gate: dict[str, Any],
-        force_zero_thinking: bool = False,
-    ) -> dict[str, Any]:
-        answer_thinking_budget = self._thinking_budget_for_call(
-            role="answer",
-            budget_mode=routed_budget_mode,
-            budget=budget,
-            quality_gate=quality_gate,
-        )
-        if force_zero_thinking:
-            answer_thinking_budget = 0
-        answer_thinking_budget = self._normalize_thinking_budget_for_provider(answer_thinking_budget)
-        answer_thinking_config = self._thinking_config_for_provider(
-            answer_thinking_budget,
-            model=selected_model,
-            role="answer",
-            budget_mode=routed_budget_mode,
-        )
-        return {
-            "answer_thinking_budget": answer_thinking_budget,
-            "answer_thinking_config": answer_thinking_config,
-            "llm_route": {
-                **llm_route,
-                "answer_model": selected_model,
-                "thinking_budget": answer_thinking_budget,
-                "thinking_config": answer_thinking_config,
-            },
-        }
-
-    def _cached_llm_answer_payload(
-        self,
-        *,
-        cached: dict[str, Any],
-        question: str,
-        evidence_summary: dict[str, Any],
-        quality_gate: dict[str, Any],
-        selected_matches: list[dict[str, Any]],
-        evidence_pack: dict[str, Any],
-        routed_budget_mode: str,
-        llm_budget_mode: str,
-        llm_route: dict[str, Any],
-        selected_model: str,
-        answer_thinking_budget: int,
-        cache_key: str,
-    ) -> dict[str, Any]:
-        cached_answer = str(cached["answer"])
-        cached_structured = self._parse_structured_answer(cached_answer)
-        if self._trust_provider_final_answer():
-            cached_claim_check = self._trusted_provider_check()
-            cached_judge = self._trusted_provider_judge()
-            cached_final = self._finalize_trusted_model_answer(
-                question=question,
-                answer=cached_answer,
-                structured_answer=cached_structured,
-                evidence_summary=evidence_summary,
-                quality_gate=cached.get("answer_quality") or quality_gate,
-                claim_check=cached_claim_check,
-                answer_judge=cached_judge,
-                finish_reason=cached.get("finish_reason") or "cache_hit",
-                selected_matches=selected_matches,
-            )
-        else:
-            cached_claim_check = self._verify_answer_claims(cached_answer, evidence_summary, selected_matches)
-            cached_judge = self._run_answer_judge(question, cached_answer, evidence_pack, cached_claim_check)
-            cached_final = self._finalize_llm_answer(
-                question=question,
-                answer=cached_answer,
-                structured_answer=cached_structured,
-                evidence_summary=evidence_summary,
-                quality_gate=cached.get("answer_quality") or quality_gate,
-                claim_check=cached_claim_check,
-                answer_judge=cached_judge,
-                finish_reason=cached.get("finish_reason") or "cache_hit",
-                selected_matches=selected_matches,
-            )
-        return {
-            "llm_answer": cached_final["answer"],
-            "llm_budget_mode": routed_budget_mode,
-            "llm_requested_budget_mode": llm_budget_mode,
-            "llm_route": llm_route,
-            "llm_provider": cached.get("provider") or self.llm_provider.name,
-            "llm_model": cached.get("model") or selected_model,
-            "llm_cached": True,
-            "llm_usage": self._normalize_llm_usage(cached.get("usage") or {}),
-            "llm_thinking_budget": cached.get("thinking_budget", answer_thinking_budget),
-            "llm_latency_ms": 0,
-            "llm_attempt_log": [],
-            "llm_finish_reason": cached.get("finish_reason") or "cache_hit",
-            "answer_quality": cached.get("answer_quality") or quality_gate,
-            "answer_claim_check": cached_claim_check,
-            "answer_judge": cached_judge,
-            "structured_answer": cached_final["structured_answer"],
-            "answer_contract": cached_final["answer_contract"],
-            "evidence_pack": evidence_pack,
-            "cache_metadata": self._answer_cache_metadata(cache_key, cached),
-        }
-
-    def _llm_answer_payload(
-        self,
-        *,
-        prompt: str,
-        attachments: list[dict[str, Any]],
-        max_output_tokens: int,
-        thinking_config: dict[str, Any],
-    ) -> dict[str, Any]:
-        return {
-            "contents": [
-                {
-                    "parts": self._llm_payload_parts(prompt, attachments)
-                }
-            ],
-            "systemInstruction": {
-                "parts": [
-                    {
-                        "text": self._llm_system_instruction()
-                    }
-                ]
-            },
-            "generationConfig": {
-                "temperature": 0.2,
-                "maxOutputTokens": max_output_tokens,
-                "responseMimeType": "application/json",
-                "responseSchema": self._llm_answer_response_schema(),
-                "thinkingConfig": thinking_config,
-            },
-        }
-
-    def _llm_final_answer_payload(
-        self,
-        *,
-        pm_team: str,
-        country: str,
-        question: str,
-        prompt_context: str,
-        attachment_section: str,
-        attachments: list[dict[str, Any]],
-        answer_max_output_tokens: int,
-        answer_thinking_config: dict[str, Any],
-    ) -> dict[str, Any]:
-        final_prompt = self._llm_user_prompt(
-            pm_team=pm_team,
-            country=country,
-            question=question,
-            context=prompt_context,
-            self_check=None,
-            attachment_section=attachment_section,
-        )
-        return self._llm_answer_payload(
-            prompt=final_prompt,
-            attachments=attachments,
-            max_output_tokens=answer_max_output_tokens,
-            thinking_config=answer_thinking_config,
-        )
-
-    def _generate_initial_llm_answer(
-        self,
-        *,
-        pm_team: str,
-        country: str,
-        question: str,
-        prompt_context: str,
-        evidence_summary: dict[str, Any],
-        quality_gate: dict[str, Any],
-        selected_model: str,
-        attachment_section: str,
-        attachments: list[dict[str, Any]],
-        answer_max_output_tokens: int,
-        answer_thinking_config: dict[str, Any],
-    ) -> dict[str, Any]:
-        payload = self._llm_final_answer_payload(
-            pm_team=pm_team,
-            country=country,
-            question=question,
-            prompt_context=prompt_context,
-            attachment_section=attachment_section,
-            attachments=attachments,
-            answer_max_output_tokens=answer_max_output_tokens,
-            answer_thinking_config=answer_thinking_config,
-        )
-        result = self.llm_provider.generate(
-            payload=payload,
-            primary_model=selected_model,
-            fallback_model=self._llm_fallback_model(),
-        )
-        answer = self.llm_provider.extract_text(result.payload)
-        finish_reason = self._llm_finish_reason(result.payload)
-        result_usage = self._normalize_llm_usage(result.usage or result.payload.get("usageMetadata") or {})
-        return {
-            "payload": payload,
-            "answer": answer,
-            "structured_answer": self._parse_structured_answer(answer),
-            "usage": result_usage,
-            "effective_model": result.model,
-            "attempts": result.attempts,
-            "llm_latency_ms": int(result.latency_ms or 0),
-            "llm_attempt_log": [dict(item) for item in result.attempt_log],
-            "finish_reason": finish_reason,
-            "answer_check": self._answer_self_check(question, answer, evidence_summary, quality_gate),
-            "token_limited_generation": self._finish_reason_is_token_limited(finish_reason),
-        }
-
-    def _retry_llm_answer_if_needed(
-        self,
-        *,
-        entries: list[RepositoryEntry],
-        key: str,
-        pm_team: str,
-        country: str,
-        question: str,
-        matches: list[dict[str, Any]],
-        payload: dict[str, Any],
-        budget: dict[str, Any],
-        attachment_section: str,
-        attachments: list[dict[str, Any]],
-        request_cache: dict[str, Any] | None,
-        token_limited_generation: bool,
-        answer: str,
-        structured_answer: dict[str, Any],
-        usage: dict[str, Any],
-        effective_model: str,
-        attempts: int,
-        llm_latency_ms: int,
-        llm_attempt_log: list[dict[str, Any]],
-        finish_reason: str,
-        evidence_summary: dict[str, Any],
-        quality_gate: dict[str, Any],
-        evidence_pack: dict[str, Any],
-        answer_check: dict[str, Any],
-        claim_check: dict[str, Any],
-        answer_judge: dict[str, Any],
-        selected_matches: list[dict[str, Any]],
-        llm_route: dict[str, Any],
-    ) -> dict[str, Any]:
-        state = {
-            "answer": answer,
-            "structured_answer": structured_answer,
-            "usage": usage,
-            "effective_model": effective_model,
-            "attempts": attempts,
-            "llm_latency_ms": llm_latency_ms,
-            "llm_attempt_log": llm_attempt_log,
-            "finish_reason": finish_reason,
-            "evidence_summary": evidence_summary,
-            "quality_gate": quality_gate,
-            "evidence_pack": evidence_pack,
-            "answer_check": answer_check,
-            "claim_check": claim_check,
-            "answer_judge": answer_judge,
-            "selected_matches": selected_matches,
-            "llm_route": llm_route,
-        }
-        if answer_check.get("status") != "retry":
-            return state
-        if token_limited_generation:
-            retry_matches = selected_matches[: max(4, min(int(budget["match_limit"]), 8))]
-        else:
-            retry_matches = self._expand_answer_retry_matches(
-                entries=entries,
-                key=key,
-                question=question,
-                matches=matches,
-                draft_answer=answer,
-                answer_check=answer_check,
-                claim_check=claim_check,
-                answer_judge=answer_judge,
-                evidence_summary=evidence_summary,
-                quality_gate=quality_gate,
-                limit=int(budget["match_limit"]) + 6,
-                request_cache=request_cache,
-            )
-        if not retry_matches:
-            return state
-        retry_match_limit = max(4, min(int(budget["match_limit"]), 8)) if token_limited_generation else int(budget["match_limit"]) + 4
-        retry_selected_matches = self._select_llm_matches(retry_matches, retry_match_limit, question=question)
-        retry_evidence_summary = self._compress_evidence_cached(question, retry_selected_matches, request_cache=request_cache)
-        retry_trace_paths = self._build_trace_paths(
-            entries=entries,
-            key=key,
-            matches=retry_selected_matches,
-            question=question,
-            request_cache=request_cache,
-        )
-        if retry_trace_paths:
-            retry_evidence_summary["trace_paths"] = retry_trace_paths
-        retry_quality_gate = self._quality_gate_cached(question, retry_evidence_summary, request_cache=request_cache)
-        retry_evidence_pack = self._build_evidence_pack(
-            question=question,
-            evidence_summary=retry_evidence_summary,
-            matches=retry_selected_matches,
-            trace_paths=retry_trace_paths,
-            quality_gate=retry_quality_gate,
-        )
-        retry_domain_context = self._llm_domain_context(
-            pm_team=pm_team,
-            country=country,
-            question=question,
-            evidence_summary=retry_evidence_summary,
-        )
-        retry_snippet_line_budget = 45 if token_limited_generation else min(int(budget["snippet_line_budget"]) + 60, 180)
-        retry_snippet_char_budget = 6_000 if token_limited_generation else min(int(budget["snippet_char_budget"]) + 8000, 28_000)
-        retry_context = self._build_compressed_llm_context(
-            retry_evidence_summary,
-            retry_quality_gate,
-            retry_evidence_pack,
-            retry_selected_matches,
-            domain_context=retry_domain_context,
-            snippet_line_budget=retry_snippet_line_budget,
-            snippet_char_budget=retry_snippet_char_budget,
-            compact=token_limited_generation,
-        )
-        retry_payload = dict(payload)
-        retry_thinking_budget = self._thinking_budget_for_call(
-            role="repair",
-            budget_mode="deep",
-            budget=self.llm_budgets.get("deep") or budget,
-            quality_gate=retry_quality_gate,
-            retry=True,
-        )
-        retry_thinking_budget = 0 if token_limited_generation else self._normalize_thinking_budget_for_provider(retry_thinking_budget)
-        retry_model = self._model_for_role_or_budget("repair", self.llm_budgets.get("deep") or budget)
-        retry_max_output_tokens = 2_400 if token_limited_generation else min(max(int(budget["max_output_tokens"]) + 500, 900), 1_600)
-        retry_payload["generationConfig"] = {
-            **payload["generationConfig"],
-            "maxOutputTokens": retry_max_output_tokens,
-            "thinkingConfig": self._thinking_config_for_provider(
-                retry_thinking_budget,
-                model=retry_model,
-                role="repair",
-                budget_mode="deep",
-            ),
-        }
-        retry_payload["contents"] = [
-            {
-                "parts": self._llm_payload_parts(
-                    self._llm_user_prompt(
-                        pm_team=pm_team,
-                        country=country,
-                        question=question,
-                        context=retry_context,
-                        self_check=answer_check,
-                        attachment_section=attachment_section,
-                    ),
-                    attachments,
-                )
-            }
-        ]
-        retry_result = self.llm_provider.generate(
-            payload=retry_payload,
-            primary_model=retry_model,
-            fallback_model=self._llm_fallback_model(),
-        )
-        retry_answer = self.llm_provider.extract_text(retry_result.payload)
-        retry_structured_answer = self._parse_structured_answer(retry_answer)
-        retry_finish_reason = self._llm_finish_reason(retry_result.payload)
-        retry_check = self._answer_self_check(question, retry_answer, retry_evidence_summary, retry_quality_gate)
-        if self._finish_reason_needs_generation_repair(retry_finish_reason):
-            issues = list(retry_check.get("issues") or [])
-            issues.append(f"model finish reason requires caution: {retry_finish_reason}")
-            retry_check = {"status": "retry", "issues": list(dict.fromkeys(issues))}
-        retry_claim_check = self._verify_answer_claims(retry_answer, retry_evidence_summary, retry_selected_matches)
-        retry_judge = self._run_answer_judge(question, retry_answer, retry_evidence_pack, retry_claim_check)
-        retry_check = self._merge_answer_retry_issues(
-            retry_check,
-            retry_claim_check,
-            retry_judge,
-            claim_requires_existing_retry=False,
-        )
-        retry_usage = self._normalize_llm_usage(retry_result.usage or retry_result.payload.get("usageMetadata") or {})
-        return {
-            "answer": retry_answer,
-            "structured_answer": retry_structured_answer,
-            "usage": self._merge_llm_usage(usage, retry_usage),
-            "effective_model": retry_result.model,
-            "attempts": attempts + retry_result.attempts,
-            "llm_latency_ms": llm_latency_ms + int(retry_result.latency_ms or 0),
-            "llm_attempt_log": [*llm_attempt_log, *[dict(item) for item in retry_result.attempt_log]],
-            "finish_reason": retry_finish_reason,
-            "evidence_summary": retry_evidence_summary,
-            "quality_gate": retry_quality_gate,
-            "evidence_pack": retry_evidence_pack,
-            "answer_check": retry_check,
-            "claim_check": retry_claim_check,
-            "answer_judge": retry_judge,
-            "selected_matches": retry_selected_matches,
-            "llm_route": {
-                **llm_route,
-                "repair_model": retry_result.model,
-                "repair_thinking_budget": retry_thinking_budget,
-            },
-        }
-
-    def _llm_answer_result_payload(
-        self,
-        *,
-        answer: str,
-        routed_budget_mode: str,
-        llm_budget_mode: str,
-        llm_route: dict[str, Any],
-        usage: dict[str, Any],
-        effective_model: str,
-        answer_thinking_budget: int,
-        attempts: int,
-        llm_latency_ms: int,
-        llm_attempt_log: list[dict[str, Any]],
-        finish_reason: str,
-        quality_gate: dict[str, Any],
-        answer_check: dict[str, Any],
-        claim_check: dict[str, Any],
-        answer_judge: dict[str, Any],
-        structured_answer: dict[str, Any],
-        answer_contract: dict[str, Any],
-        evidence_pack: dict[str, Any],
-        cache_key: str,
-    ) -> dict[str, Any]:
-        return {
-            "llm_answer": answer,
-            "llm_budget_mode": routed_budget_mode,
-            "llm_requested_budget_mode": llm_budget_mode,
-            "llm_route": llm_route,
-            "llm_provider": self.llm_provider.name,
-            "llm_cached": False,
-            "llm_usage": usage,
-            "llm_model": effective_model,
-            "llm_thinking_budget": llm_route.get("repair_thinking_budget", answer_thinking_budget),
-            "llm_attempts": attempts,
-            "llm_latency_ms": llm_latency_ms,
-            "llm_attempt_log": llm_attempt_log,
-            "llm_finish_reason": finish_reason,
-            "answer_quality": quality_gate,
-            "answer_self_check": answer_check,
-            "answer_claim_check": claim_check,
-            "answer_judge": answer_judge,
-            "structured_answer": structured_answer,
-            "answer_contract": answer_contract,
-            "evidence_pack": evidence_pack,
-            "cache_metadata": self._answer_cache_metadata(cache_key),
-        }
-
-    def _trusted_llm_answer_result(
-        self,
-        *,
-        question: str,
-        answer: str,
-        structured_answer: dict[str, Any],
-        evidence_summary: dict[str, Any],
-        quality_gate: dict[str, Any],
-        finish_reason: str,
-        selected_matches: list[dict[str, Any]],
-        cache_key: str,
-        usage: dict[str, Any],
-        effective_model: str,
-        query_mode: str,
-        routed_budget_mode: str,
-        llm_budget_mode: str,
-        llm_route: dict[str, Any],
-        answer_thinking_budget: int,
-        attempts: int,
-        llm_latency_ms: int,
-        llm_attempt_log: list[dict[str, Any]],
-        answer_check: dict[str, Any],
-        evidence_pack: dict[str, Any],
-    ) -> dict[str, Any]:
-        claim_check = self._trusted_provider_check()
-        answer_judge = self._trusted_provider_judge()
-        final = self._finalize_trusted_model_answer(
-            question=question,
-            answer=answer,
-            structured_answer=structured_answer,
-            evidence_summary=evidence_summary,
-            quality_gate=quality_gate,
-            claim_check=claim_check,
-            answer_judge=answer_judge,
-            finish_reason=finish_reason,
-            selected_matches=selected_matches,
-        )
-        final_answer = final["answer"]
-        self._store_llm_answer_cache(
-            cache_key=cache_key,
-            answer=final_answer,
-            usage=usage,
-            quality_gate=quality_gate,
-            effective_model=effective_model,
-            thinking_budget=llm_route.get("repair_thinking_budget", answer_thinking_budget),
-            finish_reason=finish_reason,
-            query_mode=query_mode,
-            routed_budget_mode=routed_budget_mode,
-        )
-        return self._llm_answer_result_payload(
-            answer=final_answer,
-            routed_budget_mode=routed_budget_mode,
-            llm_budget_mode=llm_budget_mode,
-            llm_route=llm_route,
-            usage=usage,
-            effective_model=effective_model,
-            answer_thinking_budget=answer_thinking_budget,
-            attempts=attempts,
-            llm_latency_ms=llm_latency_ms,
-            llm_attempt_log=llm_attempt_log,
-            finish_reason=finish_reason,
-            quality_gate=quality_gate,
-            answer_check=answer_check,
-            claim_check=claim_check,
-            answer_judge=answer_judge,
-            structured_answer=final["structured_answer"],
-            answer_contract=final["answer_contract"],
-            evidence_pack=evidence_pack,
-            cache_key=cache_key,
-        )
-
-    def _final_llm_answer_result(
-        self,
-        *,
-        question: str,
-        answer: str,
-        structured_answer: dict[str, Any],
-        evidence_summary: dict[str, Any],
-        quality_gate: dict[str, Any],
-        claim_check: dict[str, Any],
-        answer_judge: dict[str, Any],
-        finish_reason: str,
-        selected_matches: list[dict[str, Any]],
-        cache_key: str,
-        usage: dict[str, Any],
-        effective_model: str,
-        query_mode: str,
-        routed_budget_mode: str,
-        llm_budget_mode: str,
-        llm_route: dict[str, Any],
-        answer_thinking_budget: int,
-        attempts: int,
-        llm_latency_ms: int,
-        llm_attempt_log: list[dict[str, Any]],
-        answer_check: dict[str, Any],
-        evidence_pack: dict[str, Any],
-    ) -> dict[str, Any]:
-        final = self._finalize_llm_answer(
-            question=question,
-            answer=answer,
-            structured_answer=structured_answer,
-            evidence_summary=evidence_summary,
-            quality_gate=quality_gate,
-            claim_check=claim_check,
-            answer_judge=answer_judge,
-            finish_reason=finish_reason,
-            selected_matches=selected_matches,
-        )
-        final_answer = final["answer"]
-        self._store_llm_answer_cache(
-            cache_key=cache_key,
-            answer=final_answer,
-            usage=usage,
-            quality_gate=quality_gate,
-            effective_model=effective_model,
-            thinking_budget=llm_route.get("repair_thinking_budget", answer_thinking_budget),
-            finish_reason=finish_reason,
-            query_mode=query_mode,
-            routed_budget_mode=routed_budget_mode,
-        )
-        return self._llm_answer_result_payload(
-            answer=final_answer,
-            routed_budget_mode=routed_budget_mode,
-            llm_budget_mode=llm_budget_mode,
-            llm_route=llm_route,
-            usage=usage,
-            effective_model=effective_model,
-            answer_thinking_budget=answer_thinking_budget,
-            attempts=attempts,
-            llm_latency_ms=llm_latency_ms,
-            llm_attempt_log=llm_attempt_log,
-            finish_reason=finish_reason,
-            quality_gate=quality_gate,
-            answer_check=answer_check,
-            claim_check=claim_check,
-            answer_judge=answer_judge,
-            structured_answer=final["structured_answer"],
-            answer_contract=final["answer_contract"],
-            evidence_pack=evidence_pack,
-            cache_key=cache_key,
-        )
-
-    def _store_llm_answer_cache(
-        self,
-        *,
-        cache_key: str,
-        answer: str,
-        usage: dict[str, Any],
-        quality_gate: dict[str, Any],
-        effective_model: str,
-        thinking_budget: int,
-        finish_reason: str,
-        query_mode: str,
-        routed_budget_mode: str,
-    ) -> None:
-        self._store_cached_answer(
-            cache_key,
-            answer=answer,
-            usage=usage,
-            answer_quality=quality_gate,
-            provider=self.llm_provider.name,
-            model=effective_model,
-            thinking_budget=thinking_budget,
-            finish_reason=finish_reason,
-            query_mode=query_mode,
-            llm_budget_mode=routed_budget_mode,
-        )
-
-    @staticmethod
-    def _merge_answer_retry_issues(
-        answer_check: dict[str, Any],
-        claim_check: dict[str, Any],
-        answer_judge: dict[str, Any],
-        *,
-        claim_requires_existing_retry: bool,
-    ) -> dict[str, Any]:
-        merged_check = answer_check
-        if claim_check.get("status") != "ok" and (
-            not claim_requires_existing_retry or merged_check.get("status") == "retry"
-        ):
-            issues = list(merged_check.get("issues") or [])
-            issues.extend(claim_check.get("issues") or [])
-            merged_check = {"status": "retry", "issues": list(dict.fromkeys(issues))}
-        if answer_judge.get("status") == "repair":
-            issues = list(merged_check.get("issues") or [])
-            issues.extend(answer_judge.get("issues") or [])
-            merged_check = {"status": "retry", "issues": list(dict.fromkeys(issues))}
-        return merged_check
-
-    def _llm_answer_cache_key(
-        self,
-        *,
-        selected_model: str,
-        question: str,
-        requested_answer_mode: str,
-        routed_budget_mode: str,
-        prompt_context: str,
-        attachment_section: str,
-    ) -> str:
-        cache_context = f"{prompt_context}\n\n{attachment_section}" if attachment_section else prompt_context
-        return self._answer_cache_key(
-            provider=self.llm_provider.name,
-            model=selected_model,
-            question=question,
-            answer_mode=requested_answer_mode,
-            llm_budget_mode=routed_budget_mode,
-            context=cache_context,
-        )
-
     def _build_llm_answer(
         self,
         *,
@@ -13206,7 +12504,7 @@ class SourceCodeQAService:
         query_mode: str = QUERY_MODE_DEEP,
         trace_id: str = "",
         followup_context: dict[str, Any] | None = None,
-        requested_answer_mode: str = ANSWER_MODE_GEMINI,
+        requested_answer_mode: str = ANSWER_MODE_AUTO,
         request_cache: dict[str, Any] | None = None,
         progress_callback: Any | None = None,
         attachments: list[dict[str, Any]] | None = None,
@@ -13239,60 +12537,7 @@ class SourceCodeQAService:
         evidence_summary = answer_context["evidence_summary"]
         quality_gate = answer_context["quality_gate"]
         evidence_pack = answer_context["evidence_pack"]
-        domain_context = answer_context["domain_context"]
-        if self.llm_provider_name == LLM_PROVIDER_CODEX_CLI_BRIDGE:
-            return self._build_codex_llm_answer(
-                entries=entries,
-                key=key,
-                pm_team=pm_team,
-                country=country,
-                question=question,
-                matches=matches,
-                selected_matches=selected_matches,
-                evidence_summary=evidence_summary,
-                quality_gate=quality_gate,
-                evidence_pack=evidence_pack,
-                llm_budget_mode=llm_budget_mode,
-                query_mode=query_mode,
-                trace_id=trace_id,
-                routed_budget_mode=routed_budget_mode,
-                budget=budget,
-                llm_route=llm_route,
-                selected_model=selected_model,
-                followup_context=followup_context,
-                requested_answer_mode=requested_answer_mode,
-                request_cache=request_cache,
-                progress_callback=progress_callback,
-                attachments=attachments or [],
-                runtime_evidence=runtime_evidence or [],
-                effort_assessment=effort_assessment,
-            )
-        attachment_section = self._context_attachment_section(attachments or [], runtime_evidence or [])
-        generation_settings = self._llm_answer_generation_settings(
-            llm_route=llm_route,
-            selected_model=selected_model,
-            routed_budget_mode=routed_budget_mode,
-            budget=budget,
-            quality_gate=quality_gate,
-        )
-        answer_thinking_budget = generation_settings["answer_thinking_budget"]
-        answer_thinking_config = generation_settings["answer_thinking_config"]
-        llm_route = generation_settings["llm_route"]
-        if effort_assessment:
-            llm_route["task"] = "effort_assessment"
-        prompt_context = self._build_compressed_llm_context(
-            evidence_summary,
-            quality_gate,
-            evidence_pack,
-            selected_matches,
-            domain_context=domain_context,
-            snippet_line_budget=budget["snippet_line_budget"],
-            snippet_char_budget=budget["snippet_char_budget"],
-        )
-        initial_prompt_tokens = self._estimate_llm_tokens(
-            self._llm_user_prompt(pm_team=pm_team, country=country, question=question, context=prompt_context, attachment_section=attachment_section)
-        )
-        token_pressure_context = self._llm_prompt_context_after_token_pressure(
+        return self._build_codex_llm_answer(
             entries=entries,
             key=key,
             pm_team=pm_team,
@@ -13303,302 +12548,21 @@ class SourceCodeQAService:
             evidence_summary=evidence_summary,
             quality_gate=quality_gate,
             evidence_pack=evidence_pack,
-            domain_context=domain_context,
-            prompt_context=prompt_context,
-            llm_route=llm_route,
-            selected_model=selected_model,
-            routed_budget_mode=routed_budget_mode,
-            budget=budget,
-            answer_thinking_budget=answer_thinking_budget,
-            answer_thinking_config=answer_thinking_config,
-            initial_prompt_tokens=initial_prompt_tokens,
-            attachment_section=attachment_section,
-            request_cache=request_cache,
-        )
-        selected_matches = token_pressure_context["selected_matches"]
-        evidence_summary = token_pressure_context["evidence_summary"]
-        quality_gate = token_pressure_context["quality_gate"]
-        evidence_pack = token_pressure_context["evidence_pack"]
-        domain_context = token_pressure_context["domain_context"]
-        prompt_context = token_pressure_context["prompt_context"]
-        routed_budget_mode = token_pressure_context["routed_budget_mode"]
-        budget = token_pressure_context["budget"]
-        selected_model = token_pressure_context["selected_model"]
-        answer_thinking_budget = token_pressure_context["answer_thinking_budget"]
-        answer_thinking_config = token_pressure_context["answer_thinking_config"]
-        llm_route = token_pressure_context["llm_route"]
-        token_pressure = token_pressure_context["token_pressure"]
-        if effort_assessment:
-            llm_route["task"] = "effort_assessment"
-        answer_max_output_tokens = int(budget["max_output_tokens"])
-        if routed_budget_mode == COMPACT_DEEP_BUDGET_MODE and token_pressure == "tight":
-            answer_max_output_tokens = max(answer_max_output_tokens, 2_400)
-        cache_key = self._llm_answer_cache_key(
-            selected_model=selected_model,
-            question=question,
-            requested_answer_mode=requested_answer_mode,
-            routed_budget_mode=routed_budget_mode,
-            prompt_context=prompt_context,
-            attachment_section=attachment_section,
-        )
-        cached = self._load_cached_answer(cache_key)
-        if cached is not None:
-            return self._cached_llm_answer_payload(
-                cached=cached,
-                question=question,
-                evidence_summary=evidence_summary,
-                quality_gate=quality_gate,
-                selected_matches=selected_matches,
-                evidence_pack=evidence_pack,
-                routed_budget_mode=routed_budget_mode,
-                llm_budget_mode=llm_budget_mode,
-                llm_route=llm_route,
-                selected_model=selected_model,
-                answer_thinking_budget=answer_thinking_budget,
-                cache_key=cache_key,
-            )
-        initial_answer_context = self._generate_initial_llm_answer(
-            pm_team=pm_team,
-            country=country,
-            question=question,
-            prompt_context=prompt_context,
-            evidence_summary=evidence_summary,
-            quality_gate=quality_gate,
-            selected_model=selected_model,
-            attachment_section=attachment_section,
-            attachments=attachments or [],
-            answer_max_output_tokens=answer_max_output_tokens,
-            answer_thinking_config=answer_thinking_config,
-        )
-        payload = initial_answer_context["payload"]
-        answer = initial_answer_context["answer"]
-        structured_answer = initial_answer_context["structured_answer"]
-        usage = initial_answer_context["usage"]
-        effective_model = initial_answer_context["effective_model"]
-        attempts = initial_answer_context["attempts"]
-        llm_latency_ms = initial_answer_context["llm_latency_ms"]
-        llm_attempt_log = initial_answer_context["llm_attempt_log"]
-        finish_reason = initial_answer_context["finish_reason"]
-        answer_check = initial_answer_context["answer_check"]
-        token_limited_generation = initial_answer_context["token_limited_generation"]
-        if self._trust_provider_final_answer():
-            return self._trusted_llm_answer_result(
-                question=question,
-                answer=answer,
-                structured_answer=structured_answer,
-                evidence_summary=evidence_summary,
-                quality_gate=quality_gate,
-                finish_reason=finish_reason,
-                selected_matches=selected_matches,
-                cache_key=cache_key,
-                usage=usage,
-                effective_model=effective_model,
-                query_mode=query_mode,
-                routed_budget_mode=routed_budget_mode,
-                llm_budget_mode=llm_budget_mode,
-                llm_route=llm_route,
-                answer_thinking_budget=answer_thinking_budget,
-                attempts=attempts,
-                llm_latency_ms=llm_latency_ms,
-                llm_attempt_log=llm_attempt_log,
-                answer_check=answer_check,
-                evidence_pack=evidence_pack,
-            )
-        if self._finish_reason_needs_generation_repair(finish_reason):
-            issues = list(answer_check.get("issues") or [])
-            issues.append(f"model finish reason requires repair: {finish_reason}")
-            answer_check = {"status": "retry", "issues": list(dict.fromkeys(issues))}
-        claim_check = self._verify_answer_claims(answer, evidence_summary, selected_matches)
-        answer_judge = self._run_answer_judge(question, answer, evidence_pack, claim_check)
-        answer_check = self._merge_answer_retry_issues(
-            answer_check,
-            claim_check,
-            answer_judge,
-            claim_requires_existing_retry=True,
-        )
-        retry_context = self._retry_llm_answer_if_needed(
-            entries=entries,
-            key=key,
-            pm_team=pm_team,
-            country=country,
-            question=question,
-            matches=matches,
-            payload=payload,
-            budget=budget,
-            attachment_section=attachment_section,
-            attachments=attachments or [],
-            request_cache=request_cache,
-            token_limited_generation=token_limited_generation,
-            answer=answer,
-            structured_answer=structured_answer,
-            usage=usage,
-            effective_model=effective_model,
-            attempts=attempts,
-            llm_latency_ms=llm_latency_ms,
-            llm_attempt_log=llm_attempt_log,
-            finish_reason=finish_reason,
-            evidence_summary=evidence_summary,
-            quality_gate=quality_gate,
-            evidence_pack=evidence_pack,
-            answer_check=answer_check,
-            claim_check=claim_check,
-            answer_judge=answer_judge,
-            selected_matches=selected_matches,
-            llm_route=llm_route,
-        )
-        answer = retry_context["answer"]
-        structured_answer = retry_context["structured_answer"]
-        usage = retry_context["usage"]
-        effective_model = retry_context["effective_model"]
-        attempts = retry_context["attempts"]
-        llm_latency_ms = retry_context["llm_latency_ms"]
-        llm_attempt_log = retry_context["llm_attempt_log"]
-        finish_reason = retry_context["finish_reason"]
-        evidence_summary = retry_context["evidence_summary"]
-        quality_gate = retry_context["quality_gate"]
-        evidence_pack = retry_context["evidence_pack"]
-        answer_check = retry_context["answer_check"]
-        claim_check = retry_context["claim_check"]
-        answer_judge = retry_context["answer_judge"]
-        selected_matches = retry_context["selected_matches"]
-        llm_route = retry_context["llm_route"]
-        return self._final_llm_answer_result(
-            question=question,
-            answer=answer,
-            structured_answer=structured_answer,
-            evidence_summary=evidence_summary,
-            quality_gate=quality_gate,
-            claim_check=claim_check,
-            answer_judge=answer_judge,
-            finish_reason=finish_reason,
-            selected_matches=selected_matches,
-            cache_key=cache_key,
-            usage=usage,
-            effective_model=effective_model,
-            query_mode=query_mode,
-            routed_budget_mode=routed_budget_mode,
             llm_budget_mode=llm_budget_mode,
+            query_mode=query_mode,
+            trace_id=trace_id,
+            routed_budget_mode=routed_budget_mode,
+            budget=budget,
             llm_route=llm_route,
-            answer_thinking_budget=answer_thinking_budget,
-            attempts=attempts,
-            llm_latency_ms=llm_latency_ms,
-            llm_attempt_log=llm_attempt_log,
-            answer_check=answer_check,
-            evidence_pack=evidence_pack,
+            selected_model=selected_model,
+            followup_context=followup_context,
+            requested_answer_mode=requested_answer_mode,
+            request_cache=request_cache,
+            progress_callback=progress_callback,
+            attachments=attachments or [],
+            runtime_evidence=runtime_evidence or [],
+            effort_assessment=effort_assessment,
         )
-
-    def _llm_prompt_context_after_token_pressure(
-        self,
-        *,
-        entries: list[RepositoryEntry],
-        key: str,
-        pm_team: str,
-        country: str,
-        question: str,
-        matches: list[dict[str, Any]],
-        selected_matches: list[dict[str, Any]],
-        evidence_summary: dict[str, Any],
-        quality_gate: dict[str, Any],
-        evidence_pack: dict[str, Any],
-        domain_context: str,
-        prompt_context: str,
-        llm_route: dict[str, Any],
-        selected_model: str,
-        routed_budget_mode: str,
-        budget: dict[str, Any],
-        answer_thinking_budget: int,
-        answer_thinking_config: dict[str, Any],
-        initial_prompt_tokens: int,
-        attachment_section: str,
-        request_cache: dict[str, Any] | None,
-    ) -> dict[str, Any]:
-        token_pressure = self._llm_prompt_pressure_for_provider(initial_prompt_tokens)
-        final_prompt_tokens = initial_prompt_tokens
-        generation_settings = {
-            "answer_thinking_budget": answer_thinking_budget,
-            "answer_thinking_config": answer_thinking_config,
-            "llm_route": llm_route,
-        }
-        if token_pressure != "normal" and routed_budget_mode in {"balanced", "deep"}:
-            original_budget_mode = routed_budget_mode
-            routed_budget_mode = COMPACT_DEEP_BUDGET_MODE
-            budget = self.llm_budgets[COMPACT_DEEP_BUDGET_MODE]
-            selected_model = self._model_for_role_or_budget("answer", budget)
-            answer_context = self._llm_answer_evidence_context(
-                entries=entries,
-                key=key,
-                question=question,
-                pm_team=pm_team,
-                country=country,
-                matches=matches,
-                match_limit=int(budget["match_limit"]),
-                request_cache=request_cache,
-            )
-            selected_matches = answer_context["selected_matches"]
-            evidence_summary = answer_context["evidence_summary"]
-            quality_gate = answer_context["quality_gate"]
-            evidence_pack = answer_context["evidence_pack"]
-            domain_context = answer_context["domain_context"]
-            generation_settings = self._llm_answer_generation_settings(
-                llm_route=llm_route,
-                selected_model=selected_model,
-                routed_budget_mode=routed_budget_mode,
-                budget=budget,
-                quality_gate=quality_gate,
-                force_zero_thinking=token_pressure == "tight",
-            )
-            llm_route = {
-                **generation_settings["llm_route"],
-                "selected": routed_budget_mode,
-                "reason": f"{llm_route.get('reason') or ''},token_pressure_{token_pressure}".strip(","),
-                "original_budget": original_budget_mode,
-            }
-            prompt_context = self._build_compressed_llm_context(
-                evidence_summary,
-                quality_gate,
-                evidence_pack,
-                selected_matches,
-                domain_context=domain_context,
-                snippet_line_budget=budget["snippet_line_budget"],
-                snippet_char_budget=budget["snippet_char_budget"],
-                compact=True,
-            )
-            final_prompt_tokens = self._estimate_llm_tokens(
-                self._llm_user_prompt(
-                    pm_team=pm_team,
-                    country=country,
-                    question=question,
-                    context=prompt_context,
-                    attachment_section=attachment_section,
-                )
-            )
-        if token_pressure != "normal":
-            llm_route = {
-                **llm_route,
-                "token_pressure": {
-                    "status": token_pressure,
-                    "initial_estimated_prompt_tokens": initial_prompt_tokens,
-                    "final_estimated_prompt_tokens": final_prompt_tokens,
-                    "compact_threshold": LLM_PROMPT_COMPACT_THRESHOLD_TOKENS,
-                    "tight_threshold": LLM_PROMPT_TIGHT_THRESHOLD_TOKENS,
-                },
-            }
-        return {
-            "selected_matches": selected_matches,
-            "evidence_summary": evidence_summary,
-            "quality_gate": quality_gate,
-            "evidence_pack": evidence_pack,
-            "domain_context": domain_context,
-            "prompt_context": prompt_context,
-            "routed_budget_mode": routed_budget_mode,
-            "budget": budget,
-            "selected_model": selected_model,
-            "answer_thinking_budget": generation_settings["answer_thinking_budget"],
-            "answer_thinking_config": generation_settings["answer_thinking_config"],
-            "llm_route": llm_route,
-            "token_pressure": token_pressure,
-            "final_prompt_tokens": final_prompt_tokens,
-        }
 
     def _build_codex_llm_answer(
         self,
@@ -13695,6 +12659,24 @@ class SourceCodeQAService:
             llm_budget_mode=routed_budget_mode,
             context=prompt_context,
         )
+        cached = self._load_cached_answer(cache_key)
+        if cached is not None:
+            return self._cached_codex_answer_payload(
+                cached=cached,
+                question=question,
+                structured_answer=self._parse_structured_answer(str(cached.get("answer") or "")),
+                evidence_summary=evidence_summary,
+                quality_gate=quality_gate,
+                evidence_pack=evidence_pack,
+                candidate_matches=candidate_matches,
+                candidate_paths=candidate_paths,
+                scope_roots=scope_roots,
+                prompt_mode=prompt_mode,
+                llm_route=llm_route,
+                llm_budget_mode=llm_budget_mode,
+                routed_budget_mode=routed_budget_mode,
+                cache_key=cache_key,
+            )
         codex_cli_session_id = self._codex_cli_session_id(followup_context)
         initial_result = self._codex_initial_answer_result(
             prompt_context=prompt_context,
@@ -14403,6 +13385,78 @@ class SourceCodeQAService:
             reason for reason in adjusted_reasons
             if reason in allowed_effort_reasons or reason.startswith("finish_reason_")
         ]
+
+    def _cached_codex_answer_payload(
+        self,
+        *,
+        cached: dict[str, Any],
+        question: str,
+        structured_answer: dict[str, Any],
+        evidence_summary: dict[str, Any],
+        quality_gate: dict[str, Any],
+        evidence_pack: dict[str, Any],
+        candidate_matches: list[dict[str, Any]],
+        candidate_paths: list[dict[str, Any]],
+        scope_roots: list[dict[str, str]],
+        prompt_mode: str,
+        llm_route: dict[str, Any],
+        llm_budget_mode: str,
+        routed_budget_mode: str,
+        cache_key: str,
+    ) -> dict[str, Any]:
+        answer = str(cached.get("answer") or "")
+        claim_check = self._trusted_provider_check()
+        answer_judge = self._run_answer_judge(question, answer, evidence_pack, claim_check)
+        final = self._finalize_trusted_model_answer(
+            question=question,
+            answer=answer,
+            structured_answer=structured_answer,
+            evidence_summary=evidence_summary,
+            quality_gate=cached.get("answer_quality") or quality_gate,
+            claim_check=claim_check,
+            answer_judge=answer_judge,
+            finish_reason=cached.get("finish_reason") or "cache_hit",
+            selected_matches=candidate_matches,
+        )
+        candidate_repo_count = len({item.get("repo") for item in candidate_paths})
+        return {
+            "llm_answer": final["answer"],
+            "llm_budget_mode": routed_budget_mode,
+            "llm_requested_budget_mode": llm_budget_mode,
+            "llm_route": {
+                **llm_route,
+                "cache_hit": True,
+                "candidate_paths": candidate_paths,
+                "candidate_repo_count": candidate_repo_count,
+                "candidate_path_count": len(candidate_paths),
+            },
+            "llm_provider": cached.get("provider") or self.llm_provider.name,
+            "llm_cached": True,
+            "llm_usage": self._normalize_llm_usage(cached.get("usage") or {}),
+            "llm_model": cached.get("model") or self.codex_model,
+            "llm_thinking_budget": 0,
+            "llm_attempts": 0,
+            "llm_latency_ms": 0,
+            "llm_attempt_log": [],
+            "llm_finish_reason": cached.get("finish_reason") or "cache_hit",
+            "answer_quality": cached.get("answer_quality") or quality_gate,
+            "answer_self_check": self._skipped_codex_answer_check(),
+            "answer_claim_check": claim_check,
+            "answer_judge": answer_judge,
+            "structured_answer": final["structured_answer"],
+            "answer_contract": final["answer_contract"],
+            "evidence_pack": evidence_pack,
+            "codex_cli_summary": {
+                "cached": True,
+                "prompt_mode": prompt_mode,
+                "candidate_path_count": len(candidate_paths),
+                "candidate_repo_count": candidate_repo_count,
+                "scope_repo_count": len(scope_roots),
+            },
+            "codex_cli_trace": {"cached": True},
+            "cache_metadata": self._answer_cache_metadata(cache_key, cached),
+            "llm_timing": {},
+        }
 
     def _codex_llm_answer_result_payload(
         self,
@@ -15413,29 +14467,6 @@ class SourceCodeQAService:
         return paths[:3]
 
     @staticmethod
-    def _llm_payload_parts(prompt: str, attachments: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        parts: list[dict[str, Any]] = [{"text": prompt}]
-        for item in attachments or []:
-            if str(item.get("kind") or "") != "image":
-                continue
-            path = Path(str(item.get("path") or ""))
-            if not path.exists() or not path.is_file():
-                raise ToolError(f"Image attachment is missing or unreadable: {item.get('filename') or item.get('id') or path}")
-            try:
-                encoded = base64.b64encode(path.read_bytes()).decode("ascii")
-            except OSError as error:
-                raise ToolError(f"Image attachment is unreadable: {item.get('filename') or path}") from error
-            parts.append(
-                {
-                    "inlineData": {
-                        "mimeType": str(item.get("mime_type") or "application/octet-stream"),
-                        "data": encoded,
-                    }
-                }
-            )
-        return parts
-
-    @staticmethod
     def _codex_system_instruction() -> str:
         return codex_system_instruction()
 
@@ -16159,53 +15190,6 @@ class SourceCodeQAService:
         return any(term in lowered for term in ("where is", "where are", "which file", "find ", "在哪里", "在哪"))
 
     @staticmethod
-    def _llm_answer_response_schema() -> dict[str, Any]:
-        string_array = {"type": "ARRAY", "items": {"type": "STRING"}}
-        return {
-            "type": "OBJECT",
-            "properties": {
-                "direct_answer": {"type": "STRING"},
-                "investigation_steps": {
-                    "type": "OBJECT",
-                    "properties": {
-                        "candidate_evidence": string_array,
-                        "gap_verification": string_array,
-                        "certainty_split": string_array,
-                    },
-                    "propertyOrdering": ["candidate_evidence", "gap_verification", "certainty_split"],
-                },
-                "confirmed_from_code": string_array,
-                "inferred_from_code": string_array,
-                "not_found": string_array,
-                "claims": {
-                    "type": "ARRAY",
-                    "items": {
-                        "type": "OBJECT",
-                        "properties": {
-                            "text": {"type": "STRING"},
-                            "citations": string_array,
-                        },
-                        "required": ["text", "citations"],
-                        "propertyOrdering": ["text", "citations"],
-                    },
-                },
-                "missing_evidence": string_array,
-                "confidence": {"type": "STRING", "enum": ["high", "medium", "low"]},
-            },
-            "required": ["direct_answer", "claims", "missing_evidence", "confidence"],
-            "propertyOrdering": [
-                "direct_answer",
-                "investigation_steps",
-                "confirmed_from_code",
-                "inferred_from_code",
-                "not_found",
-                "claims",
-                "missing_evidence",
-                "confidence",
-            ],
-        }
-
-    @staticmethod
     def _llm_versions() -> dict[str, int]:
         return {
             "prompt": LLM_PROMPT_VERSION,
@@ -16216,318 +15200,6 @@ class SourceCodeQAService:
             "index": CODE_INDEX_VERSION,
         }
 
-    def _build_llm_context(self, matches: list[dict[str, Any]], *, snippet_line_budget: int, snippet_char_budget: int) -> str:
-        chunks: list[str] = []
-        remaining_chars = snippet_char_budget
-        for index, match in enumerate(matches, start=1):
-            snippet_lines = str(match.get("snippet") or "").splitlines()
-            snippet = "\n".join(snippet_lines[:snippet_line_budget]).strip()
-            chunk = (
-                f"Citation: [S{index}]\n"
-                f"Repo: {match.get('repo')}\n"
-                f"File: {match.get('path')}\n"
-                f"Lines: {match.get('line_start')}-{match.get('line_end')}\n"
-                f"Trace stage: {match.get('trace_stage') or 'direct'}\n"
-                f"Retrieval: {match.get('retrieval') or 'file_scan'}\n"
-                f"Reason: {match.get('reason')}\n"
-                f"Snippet:\n{snippet}\n"
-            )
-            if len(chunk) > remaining_chars:
-                chunk = chunk[:remaining_chars]
-            if not chunk:
-                break
-            chunks.append(chunk)
-            remaining_chars -= len(chunk)
-            if remaining_chars <= 0:
-                break
-        return "\n\n---\n\n".join(chunks)
-
-    def _build_compressed_llm_context(
-        self,
-        evidence_summary: dict[str, Any],
-        quality_gate: dict[str, Any],
-        evidence_pack: dict[str, Any],
-        matches: list[dict[str, Any]],
-        *,
-        domain_context: str = "",
-        snippet_line_budget: int,
-        snippet_char_budget: int,
-        compact: bool = False,
-    ) -> str:
-        sections = [
-            "Evidence summary and guardrails:",
-            f"- Quality gate: {quality_gate.get('status')} / confidence={quality_gate.get('confidence')} / missing={', '.join(quality_gate.get('missing') or []) or 'none'}",
-        ]
-        if domain_context:
-            sections.append("\nDomain and answer-shape guidance:")
-            sections.append(str(domain_context).strip())
-        policies = quality_gate.get("policies") or []
-        if policies:
-            sections.append("- Evidence policies:")
-            for policy in policies[:6]:
-                sections.append(
-                    f"  - {policy.get('name')}: {policy.get('status')} / required_any={', '.join(policy.get('required_any') or [])}"
-                )
-        snippet_context = self._build_llm_context(
-            matches,
-            snippet_line_budget=max(8, min(int(snippet_line_budget or 40), 180)),
-            snippet_char_budget=max(1200, min(int(snippet_char_budget or 5000), 28_000)),
-        )
-        if evidence_pack:
-            sections.append(f"- Evidence pack v{evidence_pack.get('version')}:")
-            typed_items = evidence_pack.get("items") or []
-            if typed_items:
-                sections.append("  - Typed evidence items:")
-                typed_limit = 6 if compact else 12
-                for item in typed_items[:typed_limit]:
-                    location = ""
-                    if item.get("source_id"):
-                        location = f" [{item.get('source_id')}]"
-                    sections.append(
-                        f"    - {item.get('type')} / confidence={item.get('confidence')} / hop={item.get('hop')}{location}: {item.get('claim')}"
-                    )
-            for label, key in (
-                ("Entry points", "entry_points"),
-                ("Call chain", "call_chain"),
-                ("Read/write points", "read_write_points"),
-                ("External dependencies", "external_dependencies"),
-                ("Tables", "tables"),
-                ("APIs", "apis"),
-                ("Configs", "configs"),
-                ("Static QA findings", "static_findings"),
-                ("Impact surfaces", "impact_surfaces"),
-                ("Test coverage", "test_coverage"),
-                ("Operational boundaries", "operational_boundaries"),
-                ("Source tiers", "source_tiers"),
-                ("Source conflicts", "source_conflicts"),
-                ("Missing hops", "missing_hops"),
-            ):
-                values = evidence_pack.get(key) or []
-                if values:
-                    sections.append(f"  - {label}:")
-                    value_limit = 4 if compact else 8
-                    for value in values[:value_limit]:
-                        sections.append(f"    - {value}")
-        for label, key in (
-            ("Entry points", "entry_points"),
-            ("Data carriers", "data_carriers"),
-            ("Field population trail", "field_population"),
-            ("Downstream components", "downstream_components"),
-            ("Concrete data sources", "data_sources"),
-            ("API or config evidence", "api_or_config"),
-            ("Rule or error logic", "rule_or_error_logic"),
-            ("Static QA findings", "static_findings"),
-            ("Impact surfaces", "impact_surfaces"),
-            ("Test coverage", "test_coverage"),
-            ("Operational boundaries", "operational_boundaries"),
-            ("Source tiers", "source_tiers"),
-            ("Source conflicts", "source_conflicts"),
-        ):
-            values = evidence_summary.get(key) or []
-            if values:
-                sections.append(f"- {label}:")
-                value_limit = 4 if compact else 10
-                sections.extend(f"  - {value}" for value in values[:value_limit])
-        trace_paths = evidence_summary.get("trace_paths") or []
-        if trace_paths:
-            sections.append("- Trace paths:")
-            path_limit = 2 if compact else 5
-            for path in trace_paths[:path_limit]:
-                edge_text = " -> ".join(
-                    f"{edge.get('edge_kind')}:{edge.get('to_name') or edge.get('to_file')}"
-                    for edge in path.get("edges") or []
-                )
-                sections.append(f"  - {path.get('repo')}: {edge_text}")
-        if snippet_context:
-            sections.append("\nSecondary raw snippets for grounding:")
-            sections.append(snippet_context)
-        return "\n".join(sections)
-
-    def _llm_system_instruction(self) -> str:
-        return (
-            "You are a codebase analyst for an internal portal. "
-            "Answer only from the provided retrieval evidence. "
-            "Treat the compressed evidence facts as the primary signal, and snippets as secondary grounding. "
-            "Follow the supplied domain guidance and answer blueprint, but never let domain hints override code evidence. "
-            "Never upgrade DTO/carrier evidence into a final data source. "
-            "Separate confirmed_from_code, inferred_from_code, and not_found/missing evidence instead of blending certainty levels. "
-            "Avoid speculative language such as likely, suggests, or appears unless explicitly marking missing evidence. "
-            "Prioritize answering the user's actual question directly and accurately. "
-            "Do not dump ranked references, but do cite concrete claims with provided citation ids. "
-            "If the evidence is insufficient for a confident answer, say what is missing and give the best next question to ask. "
-            "Keep the answer practical and business-readable."
-        )
-
-    @staticmethod
-    def _llm_user_prompt(
-        *,
-        pm_team: str,
-        country: str,
-        question: str,
-        context: str,
-        self_check: dict[str, Any] | None = None,
-        attachment_section: str = "",
-    ) -> str:
-        retry_note = ""
-        if self_check:
-            retry_note = (
-                "\nPrevious draft self-check failed:\n"
-                f"- Issues: {', '.join(self_check.get('issues') or []) or 'unknown'}\n"
-                "- Regenerate a stronger answer from the updated context. Do not repeat the weak answer pattern.\n"
-            )
-        return (
-            f"PM Team: {pm_team}\n"
-            f"Country: {country}\n"
-            f"Question: {question}\n\n"
-            "Internal retrieval evidence for grounding only:\n"
-            f"{context}\n\n"
-            f"{(attachment_section + chr(10) + chr(10)) if attachment_section else ''}"
-            f"{retry_note}"
-            "Answer requirements:\n"
-            "- Return this JSON shape whenever possible: "
-            "{\"direct_answer\":\"...\",\"investigation_steps\":{\"candidate_evidence\":[\"...\"],"
-            "\"gap_verification\":[\"...\"],\"certainty_split\":[\"...\"]},"
-            "\"attachment_facts\":[\"...\"],\"screenshot_evidence\":[\"...\"],"
-            "\"source_code_evidence\":[\"file/function/field evidence...\"],"
-            "\"confirmed_from_code\":[\"...\"],\"inferred_from_code\":[\"...\"],"
-            "\"not_found\":[\"...\"],\"missing_production_evidence\":[\"...\"],"
-            "\"next_checks\":[\"...\"],\"claims\":[{\"text\":\"...\",\"citations\":[\"S1\"]}],"
-            "\"missing_evidence\":[],\"confidence\":\"high|medium|low\"}. "
-            "If a prose answer is more appropriate, still keep citation tags on concrete claims.\n"
-            "- Start with the direct answer.\n"
-            "- Use investigation_steps to show the three-stage investigation: candidate evidence checked, gap verification performed, and certainty split used.\n"
-            "- For image/screenshot attachments, first extract visible facts exactly into attachment_facts/screenshot_evidence: IDs, trace IDs, timestamps, status values, field names, expected-vs-actual behavior, and business impact.\n"
-            "- For screenshot-driven incident questions, answer with these visible sections: Conclusion, Screenshot Evidence, Source-code Evidence, Missing Production Evidence, Next Checks.\n"
-            "- source_code_evidence must include concrete file/function/class/field/table/API names when available. If you cannot name them, say the source-code evidence is incomplete.\n"
-            "- Put production-code, mapper, client, SQL, route, config, and directly opened file facts in confirmed_from_code.\n"
-            "- Put carrier DTOs, call-chain deductions, and relation hypotheses in inferred_from_code unless a raw snippet directly proves the claim.\n"
-            "- Put absent repository/mapper/client/table hops, missing tests, and evidence-tier conflicts in not_found and missing_evidence.\n"
-            "- Put missing DB rows, trace logs, production config exports, and case-specific runtime checks in missing_production_evidence.\n"
-            "- Put concrete follow-up actions in next_checks, not vague advice.\n"
-            "- Prefer agent trace and two-hop trace evidence when it clarifies downstream service, integration, repository, mapper, API, or table usage.\n"
-            "- Treat raw code snippets as the source of truth when they are provided as primary evidence; use compressed facts as navigation hints and consistency checks.\n"
-            "- If user attachments are present, label their contribution as attachment evidence and do not present it as source-code evidence.\n"
-            "- If uploaded runtime evidence is present, label DB/Apollo/config facts as runtime evidence, keep country scope explicit, and do not present them as source-code evidence.\n"
-            "- Treat uploaded Apollo config as UAT/non-Live reference only unless the user explicitly provides Live evidence; do not conclude current production behavior from UAT Apollo uploads alone.\n"
-            "- Follow the domain-specific evidence rules and answer blueprint when present.\n"
-            "- Apply evidence priority: production code and mapper/client/SQL evidence beat config snapshots, tests, and docs/spec/generated files.\n"
-            "- For data-source questions, a DTO/Input/Info class is not a final data source. Trace backward to the provider/builder/setter and then to repository/mapper/client/API/table when evidence exists.\n"
-            "- A DAO/Mapper import or field declaration is not enough; prefer method bodies, SQL, mapper XML, API client calls, or table names.\n"
-            "- If only DTO fields are known, clearly say that these are carriers, not the upstream source.\n"
-            "- For static QA questions, rank concrete findings by severity and explain why each code line is risky without inventing runtime impact.\n"
-            "- For impact-analysis questions, separate upstream callers/users from downstream dependencies/tables/APIs/configs.\n"
-            "- For test-coverage questions, distinguish direct tests/assertions/mocks from nearby production code; call out missing test evidence explicitly.\n"
-            "- For operational-boundary questions, call out transaction, cache, async, retry, circuit breaker, lock, rate-limit, and authorization annotations as runtime behavior constraints.\n"
-            "- If a quality gate says evidence is missing, do not pretend certainty. Say the closest known flow and the exact missing link.\n"
-            "- Do not use likely/suggests/appears for final data-source claims. Put uncertainty in missing_evidence instead.\n"
-            "- Summarize the relevant logic, data sources, APIs, tables, or classes in plain language when applicable.\n"
-            "- Add short citation tags like [S1] next to concrete code-backed claims.\n"
-            "- Avoid listing file paths or line ranges unless the user asks for code locations.\n"
-            "- If unsure, explain the uncertainty instead of inventing details.\n"
-        )
-
-    def _finalize_llm_answer(
-        self,
-        *,
-        question: str,
-        answer: str,
-        structured_answer: dict[str, Any],
-        evidence_summary: dict[str, Any],
-        quality_gate: dict[str, Any],
-        claim_check: dict[str, Any],
-        selected_matches: list[dict[str, Any]],
-        answer_judge: dict[str, Any] | None = None,
-        finish_reason: str | None = None,
-    ) -> dict[str, Any]:
-        intent = evidence_summary.get("intent") or self._question_intent(question)
-        confirmed_sources = [
-            self._append_fact_citation(fact, selected_matches)
-            for fact in evidence_summary.get("data_sources") or []
-            if self._is_concrete_source_line(str(fact))
-        ]
-        data_carriers = [
-            self._append_fact_citation(fact, selected_matches)
-            for fact in evidence_summary.get("data_carriers") or []
-        ][:8]
-        field_population = [
-            self._append_fact_citation(fact, selected_matches)
-            for fact in evidence_summary.get("field_population") or []
-        ][:8]
-        missing_links = list(
-            dict.fromkeys(
-                [
-                    *(quality_gate.get("missing") or []),
-                    *(structured_answer.get("not_found") or []),
-                    *(structured_answer.get("missing_evidence") or []),
-                ]
-            )
-        )
-        blocked = bool(intent.get("data_source") and not confirmed_sources)
-        weak_answer = any(phrase in str(answer or "").lower() for phrase in ANSWER_SELF_CHECK_WEAK_PHRASES)
-        uncited_claims = claim_check.get("status") not in {None, "ok"}
-        contract = {
-            "intent": intent,
-            "status": "blocked_missing_source" if blocked else "grounded",
-            "confirmed_sources": confirmed_sources[:8],
-            "data_carriers": data_carriers,
-            "field_population": field_population,
-            "missing_links": missing_links[:8],
-            "investigation_steps": structured_answer.get("investigation_steps") or {},
-            "confirmed_from_code": list(dict.fromkeys([*(structured_answer.get("confirmed_from_code") or []), *confirmed_sources]))[:8],
-            "inferred_from_code": list(dict.fromkeys([*(structured_answer.get("inferred_from_code") or []), *data_carriers, *field_population]))[:8],
-            "not_found": list(dict.fromkeys([*(structured_answer.get("not_found") or []), *missing_links]))[:8],
-            "confidence": "low" if blocked else str(structured_answer.get("confidence") or quality_gate.get("confidence") or "medium").lower(),
-            "claim_check": claim_check,
-            "policies": quality_gate.get("policies") or [],
-            "source_tiers": evidence_summary.get("source_tiers") or [],
-            "source_conflicts": evidence_summary.get("source_conflicts") or [],
-        }
-        final_answer = str(answer or "").strip()
-        unreliable_llm_output = self._unreliable_llm_output(
-            answer=answer,
-            structured_answer=structured_answer,
-            claim_check=claim_check,
-            answer_judge=answer_judge or {},
-            finish_reason=finish_reason,
-        )
-        if unreliable_llm_output:
-            contract["status"] = "unreliable_llm_answer"
-            contract["confidence"] = "low"
-            final_answer = self._build_unreliable_llm_answer(
-                contract=contract,
-                answer_judge=answer_judge or {},
-                claim_check=claim_check,
-                finish_reason=finish_reason,
-            )
-        elif blocked:
-            final_answer = self._build_missing_source_answer(contract)
-        elif structured_answer.get("format") == "json" and structured_answer.get("direct_answer"):
-            final_answer = self._render_structured_answer(structured_answer, contract)
-        elif uncited_claims and intent.get("data_source"):
-            final_answer = self._render_structured_answer(structured_answer, contract)
-        elif weak_answer and confirmed_sources:
-            final_answer = self._render_structured_answer(structured_answer, contract)
-        if structured_answer.get("format") == "json" and structured_answer.get("direct_answer") and not blocked and not unreliable_llm_output:
-            final_structured = {
-                **structured_answer,
-                "confirmed_from_code": contract["confirmed_from_code"] or structured_answer.get("confirmed_from_code") or [],
-                "inferred_from_code": contract["inferred_from_code"] or structured_answer.get("inferred_from_code") or [],
-                "not_found": contract["not_found"] or structured_answer.get("not_found") or [],
-                "missing_evidence": missing_links[:8] or structured_answer.get("missing_evidence") or [],
-            }
-        else:
-            final_structured = self._parse_structured_answer(final_answer)
-            if unreliable_llm_output:
-                final_structured = {**final_structured, "confidence": "low"}
-        return {
-            "answer": final_answer,
-            "structured_answer": final_structured,
-            "answer_contract": contract,
-        }
-
-    def _trust_provider_final_answer(self) -> bool:
-        return self.llm_provider_name == LLM_PROVIDER_CODEX_CLI_BRIDGE
-
     @staticmethod
     def _trusted_provider_check() -> dict[str, Any]:
         return {
@@ -16535,15 +15207,6 @@ class SourceCodeQAService:
             "reason": "trusted_provider_passthrough",
             "issues": [],
             "unsupported_claims": [],
-        }
-
-    @staticmethod
-    def _trusted_provider_judge() -> dict[str, Any]:
-        return {
-            "status": "skipped",
-            "mode": "trusted_provider_passthrough",
-            "issues": [],
-            "repair_targets": [],
         }
 
     @staticmethod
@@ -16633,56 +15296,6 @@ class SourceCodeQAService:
         }
 
     @staticmethod
-    def _unreliable_llm_output(
-        *,
-        answer: str,
-        structured_answer: dict[str, Any],
-        claim_check: dict[str, Any],
-        answer_judge: dict[str, Any],
-        finish_reason: str | None,
-    ) -> bool:
-        reason = str(finish_reason or "").strip()
-        broken_jsonish = structured_answer.get("format") == "prose_fallback" and str(answer or "").lstrip().startswith("{")
-        capped = reason.upper() in {"MAX_TOKENS", "SAFETY", "RECITATION"} or reason.lower() in {"length", "content_filter"}
-        judge_status = str((answer_judge or {}).get("status") or "").lower()
-        unsupported = str((claim_check or {}).get("status") or "").lower() not in {"", "ok"}
-        return bool(broken_jsonish or capped or (judge_status in {"repair", "insufficient_evidence"} and unsupported))
-
-    @staticmethod
-    def _build_unreliable_llm_answer(
-        *,
-        contract: dict[str, Any],
-        answer_judge: dict[str, Any],
-        claim_check: dict[str, Any],
-        finish_reason: str | None,
-    ) -> str:
-        lines = [
-            "I could not produce a reliable final answer from this LLM attempt.",
-            "",
-        ]
-        reason = str(finish_reason or "").strip()
-        if reason:
-            lines.append("Why:")
-            lines.append(f"- Model finish reason: {reason}.")
-        for issue in list(answer_judge.get("issues") or [])[:3]:
-            if "Why:" not in lines:
-                lines.append("Why:")
-            lines.append(f"- Evidence judge: {issue}")
-        for issue in list(claim_check.get("issues") or [])[:2]:
-            if "Why:" not in lines:
-                lines.append("Why:")
-            lines.append(f"- Claim check: {issue}")
-        missing = contract.get("missing_links") or []
-        if missing:
-            lines.append("")
-            lines.append("Missing evidence:")
-            for item in missing[:4]:
-                lines.append(f"- {item}")
-        lines.append("")
-        lines.append("Please retry after the index is refreshed or ask with the exact table/class names; the portal should not treat the current LLM output as a confirmed answer.")
-        return "\n".join(lines)
-
-    @staticmethod
     def _append_fact_citation(fact: str, selected_matches: list[dict[str, Any]]) -> str:
         text = str(fact or "").strip()
         if not text:
@@ -16696,118 +15309,15 @@ class SourceCodeQAService:
         return text
 
     @staticmethod
-    def _build_missing_source_answer(contract: dict[str, Any]) -> str:
-        lines = [
-            "I cannot confirm the final upstream data source from the current indexed evidence.",
-            "",
-        ]
-        carriers = [item for item in contract.get("data_carriers") or [] if item]
-        population = [item for item in contract.get("field_population") or [] if item]
-        if carriers or population:
-            lines.append("Confirmed so far:")
-            for item in carriers[:5]:
-                lines.append(f"- Carrier/processing evidence: {item}")
-            for item in population[:5]:
-                lines.append(f"- Population trail: {item}")
-            lines.append("")
-        lines.append("Missing link:")
-        missing = contract.get("missing_links") or ["concrete upstream source/table/API/repository evidence beyond DTO fields"]
-        for item in missing[:4]:
-            lines.append(f"- {item}")
-        lines.append("")
-        lines.append("Next trace target:")
-        lines.append("- Follow the provider/builder/setter into a repository, mapper, client/API, or SQL table method.")
-        return "\n".join(lines)
-
-    @staticmethod
-    def _render_structured_answer(structured_answer: dict[str, Any], contract: dict[str, Any]) -> str:
-        screenshot_evidence = [
-            str(item).strip()
-            for item in [
-                *(structured_answer.get("screenshot_evidence") or []),
-                *(structured_answer.get("attachment_facts") or []),
-            ]
-            if str(item).strip()
-        ]
-        source_code_evidence = [
-            str(item).strip()
-            for item in [
-                *(structured_answer.get("source_code_evidence") or []),
-                *(contract.get("confirmed_from_code") or structured_answer.get("confirmed_from_code") or []),
-            ]
-            if str(item).strip()
-        ]
-        missing_production = [
-            str(item).strip()
-            for item in [
-                *(structured_answer.get("missing_production_evidence") or []),
-                *(structured_answer.get("missing_evidence") or []),
-            ]
-            if str(item).strip()
-        ]
-        next_checks = [str(item).strip() for item in structured_answer.get("next_checks") or [] if str(item).strip()]
-        if screenshot_evidence or source_code_evidence or missing_production or next_checks:
-            lines = ["Conclusion", str(structured_answer.get("direct_answer") or "").strip()]
-            sections = [
-                ("Screenshot Evidence", screenshot_evidence),
-                ("Source-code Evidence", list(dict.fromkeys(source_code_evidence))[:6]),
-            ]
-            inferred = [str(item).strip() for item in contract.get("inferred_from_code") or structured_answer.get("inferred_from_code") or [] if str(item).strip()]
-            if inferred:
-                sections.append(("Inferred / Hypothesis", inferred[:4]))
-            not_found = [str(item).strip() for item in contract.get("not_found") or structured_answer.get("not_found") or [] if str(item).strip()]
-            missing_combined = list(dict.fromkeys([*missing_production, *not_found, *(contract.get("missing_links") or [])]))[:6]
-            sections.extend(
-                [
-                    ("Missing Production Evidence", missing_combined),
-                    ("Next Checks", next_checks[:6]),
-                ]
-            )
-            confidence = str(structured_answer.get("confidence") or contract.get("confidence") or "").strip()
-            for title, items in sections:
-                if not items:
-                    continue
-                lines.extend(["", title])
-                for item in items:
-                    lines.append(f"- {item}")
-            if confidence:
-                lines.extend(["", "Confidence", f"- {confidence}"])
-            return "\n".join(line for line in lines if line is not None).strip()
-
-        lines = [str(structured_answer.get("direct_answer") or "").strip()]
-        confirmed = [str(item).strip() for item in contract.get("confirmed_from_code") or structured_answer.get("confirmed_from_code") or [] if str(item).strip()]
-        inferred = [str(item).strip() for item in contract.get("inferred_from_code") or structured_answer.get("inferred_from_code") or [] if str(item).strip()]
-        not_found = [str(item).strip() for item in contract.get("not_found") or structured_answer.get("not_found") or [] if str(item).strip()]
-        if confirmed:
-            lines.append("")
-            lines.append("Confirmed from code:")
-            for item in confirmed[:5]:
-                lines.append(f"- {item}")
-        if inferred:
-            lines.append("")
-            lines.append("Inferred:")
-            for item in inferred[:4]:
-                lines.append(f"- {item}")
-        claims = [claim for claim in structured_answer.get("claims") or [] if isinstance(claim, dict) and str(claim.get("text") or "").strip()]
-        if claims:
-            lines.append("")
-            for claim in claims[:6]:
-                text = str(claim.get("text") or "").strip()
-                citation_tags = []
-                for item in claim.get("citations") or []:
-                    tag = str(item).strip()
-                    tag = tag if tag.startswith("[") else f"[{tag}]"
-                    if tag not in text:
-                        citation_tags.append(tag)
-                suffix = f" {' '.join(citation_tags)}" if citation_tags else ""
-                lines.append(f"- {text}{suffix}")
-        missing = not_found or contract.get("missing_links") or structured_answer.get("missing_evidence") or []
-        if missing:
-            lines.append("")
-            lines.append("Not found / missing evidence:")
-            for item in missing[:4]:
-                lines.append(f"- {item}")
-        return "\n".join(line for line in lines if line is not None).strip()
+    def _split_answer_claims(answer: str) -> list[str]:
+        claims: list[str] = []
+        for raw_line in str(answer or "").splitlines():
+            line = raw_line.strip(" -\t")
+            if not line:
+                continue
+            parts = re.split(r"(?<=[.!?])\s+", line)
+            claims.extend(part.strip() for part in parts if part.strip())
+        return claims[:16]
 
     def _parse_structured_answer(self, answer: str) -> dict[str, Any]:
         text = str(answer or "").strip()
@@ -16880,58 +15390,6 @@ class SourceCodeQAService:
             "format": "json",
         }
 
-    def _verify_answer_claims(
-        self,
-        answer: str,
-        evidence_summary: dict[str, Any],
-        selected_matches: list[dict[str, Any]],
-    ) -> dict[str, Any]:
-        evidence_text = json.dumps(evidence_summary, ensure_ascii=False).lower()
-        valid_citation_numbers = {str(index) for index in range(1, len(selected_matches) + 1)}
-        issues: list[str] = []
-        checked_claims = 0
-        unsupported_claims: list[str] = []
-        structured = self._parse_structured_answer(answer)
-        parsed_claims = [
-            item
-            for item in structured.get("claims") or []
-            if isinstance(item, dict) and str(item.get("text") or "").strip()
-        ]
-        if not parsed_claims:
-            parsed_claims = [
-                {"text": claim, "citations": [f"S{number}" for number in re.findall(r"\[S(\d+)\]", claim)]}
-                for claim in self._split_answer_claims(answer)
-            ]
-        for parsed_claim in parsed_claims:
-            claim = str(parsed_claim.get("text") or "").strip()
-            lowered = claim.lower()
-            concrete = any(term in lowered for term in ANSWER_CONCRETE_SOURCE_HINTS + API_HINTS + CONFIG_HINTS + RULE_HINTS)
-            if not concrete:
-                continue
-            checked_claims += 1
-            citations = self._claim_citation_numbers(claim, parsed_claim)
-            if citations and not citations <= valid_citation_numbers:
-                issues.append("answer cites evidence ids outside the provided context")
-            valid_citations = citations & valid_citation_numbers
-            if not valid_citations and not any(phrase in lowered for phrase in ANSWER_SELF_CHECK_WEAK_PHRASES):
-                unsupported_claims.append(claim[:220])
-                continue
-            if valid_citations and not self._claim_supported_by_citations(claim, valid_citations, selected_matches):
-                unsupported_claims.append(claim[:220])
-                continue
-            expected_terms = self._answer_expected_terms(evidence_summary, "data_sources")
-            expected_terms.extend(self._answer_expected_terms(evidence_summary, "api_or_config"))
-            if expected_terms and not any(term in lowered for term in expected_terms) and not any(term in evidence_text for term in expected_terms):
-                unsupported_claims.append(claim[:220])
-        if unsupported_claims:
-            issues.append("concrete answer claims need citation-backed evidence")
-        return {
-            "status": "ok" if not issues else "needs_citation",
-            "checked_claims": checked_claims,
-            "unsupported_claims": unsupported_claims[:5],
-            "issues": list(dict.fromkeys(issues)),
-        }
-
     @staticmethod
     def _claim_citation_numbers(claim: str, parsed_claim: dict[str, Any]) -> set[str]:
         numbers = {token for token in re.findall(r"\[S(\d+)\]", str(claim or ""))}
@@ -16941,29 +15399,6 @@ class SourceCodeQAService:
             if match:
                 numbers.add(match.group(1))
         return numbers
-
-    @staticmethod
-    def _claim_supported_by_citations(claim: str, citation_numbers: set[str], selected_matches: list[dict[str, Any]]) -> bool:
-        claim_terms = [
-            term.lower()
-            for term in IDENTIFIER_PATTERN.findall(str(claim or ""))
-            if len(term) >= 4 and term.lower() not in STOPWORDS and term.lower() not in LOW_VALUE_CALL_SYMBOLS
-        ]
-        if not claim_terms:
-            return True
-        for number in citation_numbers:
-            try:
-                match = selected_matches[int(number) - 1]
-            except (IndexError, ValueError):
-                continue
-            evidence_text = " ".join(
-                str(match.get(key) or "")
-                for key in ("path", "snippet", "reason", "retrieval", "trace_stage")
-            ).lower()
-            overlap = {term for term in claim_terms if term in evidence_text}
-            if len(overlap) >= 1:
-                return True
-        return False
 
     def _judge_answer(
         self,
@@ -17046,290 +15481,7 @@ class SourceCodeQAService:
         evidence_pack: dict[str, Any],
         claim_check: dict[str, Any],
     ) -> dict[str, Any]:
-        deterministic = self._judge_answer(question, answer, evidence_pack, claim_check)
-        if self.llm_provider_name == LLM_PROVIDER_CODEX_CLI_BRIDGE:
-            return deterministic
-        if not self.llm_judge_enabled or not self.llm_ready():
-            return deterministic
-        cache_key = self._judge_cache_key(question, answer, evidence_pack, claim_check)
-        cached = self._load_judge_cache(cache_key)
-        if cached is not None:
-            cached["cached"] = True
-            return cached
-        try:
-            judge = self._llm_judge_answer(question, answer, evidence_pack, claim_check, deterministic)
-            self._store_judge_cache(cache_key, judge)
-            return judge
-        except (OSError, ValueError, requests.RequestException, ToolError) as error:
-            fallback = dict(deterministic)
-            fallback["llm_judge_error"] = self._sanitize_error_detail(str(error))
-            return fallback
-
-    def _judge_cache_key(
-        self,
-        question: str,
-        answer: str,
-        evidence_pack: dict[str, Any],
-        claim_check: dict[str, Any],
-    ) -> str:
-        digest = hashlib.sha1(
-            json.dumps(
-                {
-                    "provider": self.llm_provider.name,
-                    "model": self._model_for_role("judge", fallback=str(self.llm_budgets["cheap"]["model"])),
-                    "question": question,
-                    "answer": answer,
-                    "evidence_pack": evidence_pack,
-                    "claim_check": claim_check,
-                    "versions": self._llm_versions(),
-                },
-                ensure_ascii=False,
-                sort_keys=True,
-            ).encode("utf-8")
-        ).hexdigest()
-        return digest
-
-    def _load_judge_cache(self, key: str) -> dict[str, Any] | None:
-        cache_path = self.answer_cache_root / "judge" / f"{key}.json"
-        if not cache_path.exists():
-            return None
-        try:
-            payload = json.loads(cache_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return None
-        expire_at = float(payload.get("expire_at") or 0)
-        if expire_at < datetime.now(timezone.utc).timestamp():
-            cache_path.unlink(missing_ok=True)
-            return None
-        if payload.get("versions") != self._llm_versions():
-            return None
-        judge = payload.get("judge")
-        return judge if isinstance(judge, dict) else None
-
-    def _store_judge_cache(self, key: str, judge: dict[str, Any]) -> None:
-        cache_dir = self.answer_cache_root / "judge"
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "versions": self._llm_versions(),
-            "judge": judge,
-            "expire_at": datetime.now(timezone.utc).timestamp() + self.llm_cache_ttl_seconds,
-        }
-        self._atomic_write_json(cache_dir / f"{key}.json", payload)
-
-    @staticmethod
-    def _llm_judge_response_schema() -> dict[str, Any]:
-        string_array = {"type": "ARRAY", "items": {"type": "STRING"}}
-        return {
-            "type": "OBJECT",
-            "properties": {
-                "status": {"type": "STRING", "enum": ["ok", "warn", "repair", "insufficient_evidence"]},
-                "confidence": {"type": "STRING", "enum": ["high", "medium", "low"]},
-                "issues": string_array,
-                "repair_targets": string_array,
-            },
-            "required": ["status", "confidence", "issues", "repair_targets"],
-            "propertyOrdering": ["status", "confidence", "issues", "repair_targets"],
-        }
-
-    def _llm_judge_answer(
-        self,
-        question: str,
-        answer: str,
-        evidence_pack: dict[str, Any],
-        claim_check: dict[str, Any],
-        deterministic: dict[str, Any],
-    ) -> dict[str, Any]:
-        typed_items = [
-            {
-                "type": item.get("type"),
-                "claim": item.get("claim"),
-                "source_id": item.get("source_id"),
-                "confidence": item.get("confidence"),
-                "supports_answer": item.get("supports_answer"),
-            }
-            for item in evidence_pack.get("items") or []
-            if isinstance(item, dict)
-        ][:18]
-        judge_context = {
-            "question": question,
-            "answer": answer,
-            "claim_check": claim_check,
-            "deterministic_judge": deterministic,
-            "evidence": {
-                "version": evidence_pack.get("version"),
-                "intent": evidence_pack.get("intent"),
-                "items": typed_items,
-                "tables": evidence_pack.get("tables") or [],
-                "apis": evidence_pack.get("apis") or [],
-                "missing_hops": evidence_pack.get("missing_hops") or [],
-            },
-        }
-        judge_model = self._model_for_role("judge", fallback=str(self.llm_budgets["cheap"]["model"]))
-        judge_thinking_config = self._thinking_config_for_provider(
-            0,
-            model=judge_model,
-            role="judge",
-            budget_mode="cheap",
-        )
-        payload = {
-            "contents": [
-                {
-                    "parts": [
-                        {
-                            "text": (
-                                "Judge whether the answer is fully supported by the evidence. "
-                                "Return JSON only. Use repair when the answer invents, overstates, or misses stronger typed evidence. "
-                                "Use insufficient_evidence when evidence itself cannot answer the question.\n\n"
-                                f"{json.dumps(judge_context, ensure_ascii=False)}"
-                            )
-                        }
-                    ]
-                }
-            ],
-            "systemInstruction": {
-                "parts": [
-                    {
-                        "text": (
-                            "You are an evidence judge for source-code QA. "
-                            "Do not answer the user's question. Judge only support, missing evidence, and repair targets."
-                        )
-                    }
-                ]
-            },
-            "generationConfig": {
-                "temperature": 0,
-                "maxOutputTokens": 500,
-                "responseMimeType": "application/json",
-                "responseSchema": self._llm_judge_response_schema(),
-                "thinkingConfig": judge_thinking_config,
-            },
-        }
-        result = self.llm_provider.generate(
-            payload=payload,
-            primary_model=judge_model,
-            fallback_model=self._llm_fallback_model(),
-        )
-        parsed = self._parse_judge_payload(self.llm_provider.extract_text(result.payload))
-        status = str(parsed.get("status") or deterministic.get("status") or "warn").strip().lower()
-        if status == "insufficient_evidence":
-            status = "repair"
-        if status not in {"ok", "warn", "repair"}:
-            status = deterministic.get("status") or "warn"
-        issues = [str(item).strip() for item in parsed.get("issues") or [] if str(item).strip()]
-        repair_targets = [str(item).strip() for item in parsed.get("repair_targets") or [] if str(item).strip()]
-        if deterministic.get("status") == "repair" and status == "ok":
-            status = "warn"
-            issues.extend(deterministic.get("issues") or [])
-        return {
-            "status": status,
-            "mode": "llm_evidence_judge",
-            "model": result.model,
-            "attempts": result.attempts,
-            "usage": self._normalize_llm_usage(result.usage or result.payload.get("usageMetadata") or {}),
-            "deterministic_status": deterministic.get("status"),
-            "checked_items": deterministic.get("checked_items", len(typed_items)),
-            "supporting_items": deterministic.get("supporting_items"),
-            "confidence": str(parsed.get("confidence") or "medium"),
-            "issues": list(dict.fromkeys(issues))[:6],
-            "repair_targets": list(dict.fromkeys(repair_targets))[:6],
-        }
-
-    @staticmethod
-    def _parse_judge_payload(text: str) -> dict[str, Any]:
-        raw = str(text or "").strip()
-        if not raw:
-            return {}
-        try:
-            payload = json.loads(raw)
-        except json.JSONDecodeError:
-            match = re.search(r"\{.*\}", raw, flags=re.DOTALL)
-            if not match:
-                return {"status": "warn", "issues": ["judge returned non-json output"], "repair_targets": []}
-            try:
-                payload = json.loads(match.group(0))
-            except json.JSONDecodeError:
-                return {"status": "warn", "issues": ["judge returned invalid json"], "repair_targets": []}
-        return payload if isinstance(payload, dict) else {}
-
-    @staticmethod
-    def _split_answer_claims(answer: str) -> list[str]:
-        claims: list[str] = []
-        for raw_line in str(answer or "").splitlines():
-            line = raw_line.strip(" -\t")
-            if not line:
-                continue
-            parts = re.split(r"(?<=[.!?])\s+", line)
-            claims.extend(part.strip() for part in parts if part.strip())
-        return claims[:16]
-
-    def _answer_self_check(
-        self,
-        question: str,
-        answer: str,
-        evidence_summary: dict[str, Any],
-        quality_gate: dict[str, Any],
-    ) -> dict[str, Any]:
-        lowered_answer = str(answer or "").lower()
-        intent = evidence_summary.get("intent") or self._question_intent(question)
-        issues: list[str] = []
-        if any(phrase in lowered_answer for phrase in ANSWER_SELF_CHECK_WEAK_PHRASES):
-            issues.append("answer sounds inconclusive")
-        if intent.get("data_source") and quality_gate.get("status") == "sufficient":
-            source_markers = self._answer_expected_terms(evidence_summary, "data_sources")
-            if source_markers and not any(marker in lowered_answer for marker in source_markers):
-                issues.append("answer omits concrete data source terms found in evidence")
-        if intent.get("data_source"):
-            if self._looks_like_dto_only_data_source_answer(answer):
-                issues.append("answer stops at DTO/carrier layer instead of tracing upstream source")
-            if self._has_concrete_source_evidence(evidence_summary) and not self._answer_has_concrete_source_marker(answer):
-                issues.append("answer lacks repository/mapper/client/API/table source marker")
-        if intent.get("api"):
-            api_markers = self._answer_expected_terms(evidence_summary, "api_or_config")
-            if api_markers and not any(marker in lowered_answer for marker in api_markers):
-                issues.append("answer omits concrete API/config terms found in evidence")
-        if intent.get("static_qa"):
-            static_markers = self._answer_expected_terms(evidence_summary, "static_findings")
-            if static_markers and not any(marker in lowered_answer for marker in static_markers):
-                issues.append("answer omits static QA finding terms found in evidence")
-        if intent.get("impact_analysis"):
-            impact_markers = self._answer_expected_terms(evidence_summary, "impact_surfaces")
-            if impact_markers and not any(marker in lowered_answer for marker in impact_markers):
-                issues.append("answer omits impact surface terms found in evidence")
-        if intent.get("test_coverage"):
-            test_markers = self._answer_expected_terms(evidence_summary, "test_coverage")
-            if test_markers and not any(marker in lowered_answer for marker in test_markers):
-                issues.append("answer omits test coverage terms found in evidence")
-        if intent.get("operational_boundary"):
-            boundary_markers = self._answer_expected_terms(evidence_summary, "operational_boundaries")
-            if boundary_markers and not any(marker in lowered_answer for marker in boundary_markers):
-                issues.append("answer omits operational boundary terms found in evidence")
-        retryable = bool(issues) and quality_gate.get("status") != "needs_more_trace" or bool(issues and evidence_summary.get("source_count", 0))
-        return {
-            "status": "retry" if retryable else "ok",
-            "issues": issues,
-        }
-
-    @staticmethod
-    def _looks_like_dto_only_data_source_answer(answer: str) -> bool:
-        lowered = str(answer or "").lower()
-        carrier_terms = ("dto", "input", "info", "context")
-        concrete_terms = ANSWER_CONCRETE_SOURCE_HINTS
-        return any(term in lowered for term in carrier_terms) and not any(term in lowered for term in concrete_terms)
-
-    @staticmethod
-    def _answer_has_concrete_source_marker(answer: str) -> bool:
-        lowered = str(answer or "").lower()
-        return any(term in lowered for term in ANSWER_CONCRETE_SOURCE_HINTS)
-
-    @staticmethod
-    def _answer_expected_terms(evidence_summary: dict[str, Any], bucket: str) -> list[str]:
-        terms: list[str] = []
-        for fact in evidence_summary.get(bucket) or []:
-            for token in re.findall(r"[A-Za-z][A-Za-z0-9_]{4,}", str(fact)):
-                lowered = token.lower()
-                if lowered not in STOPWORDS and lowered not in terms:
-                    terms.append(lowered)
-        return terms[:12]
+        return self._judge_answer(question, answer, evidence_pack, claim_check)
 
     def _expand_answer_retry_matches(
         self,

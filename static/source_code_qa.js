@@ -2050,7 +2050,7 @@
   };
 
   const renderUsageBadges = (payload) => {
-    const llmAnswered = ['gemini_flash', 'auto'].includes(payload?.answer_mode) && Boolean(payload?.llm_answer);
+    const llmAnswered = payload?.answer_mode === 'auto' && Boolean(payload?.llm_answer);
     if (activeCache) {
       if (llmAnswered) {
         activeCache.hidden = false;

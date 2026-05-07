@@ -101,9 +101,6 @@ class Settings:
     source_code_qa_codex_session_mode: str = "ephemeral"
     source_code_qa_codex_session_max_turns: int = 8
     source_code_qa_codex_cache_followups: bool = False
-    source_code_qa_llm_max_retries: int = 2
-    source_code_qa_llm_backoff_seconds: float = 1.0
-    source_code_qa_llm_max_backoff_seconds: float = 8.0
     seatalk_openapi_base_url: str = "https://openapi.seatalk.io"
     seatalk_app_id: str | None = None
     seatalk_app_secret: str | None = None
@@ -204,9 +201,6 @@ class Settings:
             source_code_qa_codex_session_mode=_env_str("SOURCE_CODE_QA_CODEX_SESSION_MODE", "ephemeral"),
             source_code_qa_codex_session_max_turns=int(_env_str("SOURCE_CODE_QA_CODEX_SESSION_MAX_TURNS", "8")),
             source_code_qa_codex_cache_followups=_env_bool("SOURCE_CODE_QA_CODEX_CACHE_FOLLOWUPS", False),
-            source_code_qa_llm_max_retries=int(_env_str("SOURCE_CODE_QA_LLM_MAX_RETRIES", "2")),
-            source_code_qa_llm_backoff_seconds=float(_env_str("SOURCE_CODE_QA_LLM_BACKOFF_SECONDS", "1.0")),
-            source_code_qa_llm_max_backoff_seconds=float(_env_str("SOURCE_CODE_QA_LLM_MAX_BACKOFF_SECONDS", "8.0")),
             seatalk_openapi_base_url=_env_str("SEATALK_OPENAPI_BASE_URL", "https://openapi.seatalk.io"),
             seatalk_app_id=_env_str("SEATALK_APP_ID"),
             seatalk_app_secret=_env_str("SEATALK_APP_SECRET"),

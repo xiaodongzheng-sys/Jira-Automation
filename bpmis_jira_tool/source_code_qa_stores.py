@@ -1109,60 +1109,6 @@ class SourceCodeQAGeneratedArtifactStore:
         return self.public_metadata(item), content
 
 
-class SourceCodeQAModelAvailabilityStore:
-    DEFAULT_AVAILABILITY = {
-        "codex_cli_bridge": True,
-    }
-
-    def __init__(self, storage_path: Path | None = None) -> None:
-        self.storage_path = storage_path
-        self._lock = threading.Lock()
-        self._availability = self._load()
-
-    def _load(self) -> dict[str, bool]:
-        availability = dict(self.DEFAULT_AVAILABILITY)
-        if self.storage_path is None or not self.storage_path.exists():
-            return availability
-        try:
-            payload = json.loads(self.storage_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return availability
-        raw_availability = payload.get("availability") if isinstance(payload, dict) else {}
-        if isinstance(raw_availability, dict):
-            for provider in availability:
-                if provider in raw_availability:
-                    availability[provider] = bool(raw_availability[provider])
-        return availability
-
-    def _persist_locked(self) -> None:
-        if self.storage_path is None:
-            return
-        try:
-            self.storage_path.parent.mkdir(parents=True, exist_ok=True)
-            payload = {
-                "updated_at": time.time(),
-                "availability": self._availability,
-            }
-            temp_path = self.storage_path.with_name(f".{self.storage_path.name}.{os.getpid()}.tmp")
-            temp_path.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True), encoding="utf-8")
-            os.replace(temp_path, self.storage_path)
-        except OSError:
-            return
-
-    def get(self) -> dict[str, bool]:
-        with self._lock:
-            return dict(self._availability)
-
-    def save(self, availability: dict[str, Any]) -> dict[str, bool]:
-        with self._lock:
-            next_availability = dict(self.DEFAULT_AVAILABILITY)
-            for provider in next_availability:
-                if provider in availability:
-                    next_availability[provider] = bool(availability[provider])
-            self._availability = next_availability
-            self._persist_locked()
-            return dict(self._availability)
-
 def _compact_source_code_qa_session_payload(result: dict[str, Any]) -> dict[str, Any]:
     structured = result.get("structured_answer") if isinstance(result.get("structured_answer"), dict) else {}
     answer_claim_check = result.get("answer_claim_check") if isinstance(result.get("answer_claim_check"), dict) else {}

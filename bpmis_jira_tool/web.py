@@ -58,7 +58,6 @@ from bpmis_jira_tool.local_agent_client import (
     RemoteTeamDashboardConfigStore,
     RemoteSourceCodeQAAttachmentStore,
     RemoteSourceCodeQAGeneratedArtifactStore,
-    RemoteSourceCodeQAModelAvailabilityStore,
     RemoteSourceCodeQARuntimeEvidenceStore,
     RemoteSourceCodeQASessionStore,
     RemoteSourceCodeQAService,
@@ -103,6 +102,7 @@ from bpmis_jira_tool.bpmis_projects import BPMISProjectStore, PortalJiraCreation
 from bpmis_jira_tool.source_code_qa import CRMS_COUNTRIES, ALL_COUNTRY, IDENTIFIER_PATTERN, CodexCliBridgeSourceCodeQALLMProvider, SourceCodeQAService
 from bpmis_jira_tool.source_code_qa_factory import build_source_code_qa_service_from_settings
 from bpmis_jira_tool.source_code_qa_jobs import SourceCodeQAQueryScheduler
+from bpmis_jira_tool.source_code_qa_llm_providers import LLM_PROVIDER_ALLOWED_QUERY_CHOICES, LLM_PROVIDER_CODEX_CLI_BRIDGE
 from bpmis_jira_tool.source_code_qa_sql_artifacts import (
     build_source_code_qa_sql_readme as _build_source_code_qa_sql_readme,
     extract_source_code_qa_sql_blocks as _extract_source_code_qa_sql_blocks,
@@ -111,7 +111,6 @@ from bpmis_jira_tool.source_code_qa_sql_artifacts import (
 from bpmis_jira_tool.source_code_qa_stores import (
     SourceCodeQAAttachmentStore,
     SourceCodeQAGeneratedArtifactStore,
-    SourceCodeQAModelAvailabilityStore,
     SourceCodeQARuntimeEvidenceStore,
     SourceCodeQASessionStore,
     _compact_source_code_qa_session_payload,
@@ -545,9 +544,6 @@ def create_app() -> Flask:
     app.config["SOURCE_CODE_QA_RUNTIME_EVIDENCE_STORE"] = SourceCodeQARuntimeEvidenceStore(
         data_root / "source_code_qa" / "runtime_evidence"
     )
-    app.config["SOURCE_CODE_QA_MODEL_AVAILABILITY_STORE"] = SourceCodeQAModelAvailabilityStore(
-        data_root / "source_code_qa" / "model_availability.json"
-    )
     app.config["PRD_BRIEFING_STORE"] = BriefingStore(data_root / "prd_briefing")
     app.config["SOURCE_CODE_QA_SERVICE"] = build_source_code_qa_service_from_settings(settings)
     app.config["GET_USER_IDENTITY"] = lambda: _get_user_identity(settings)
@@ -855,7 +851,6 @@ def create_app() -> Flask:
         try:
             service = _build_source_code_qa_service()
             codex_service = _build_source_code_qa_service("codex_cli_bridge")
-            model_availability = _source_code_qa_model_availability()
             return jsonify(
                 {
                     "status": "ok",
@@ -867,7 +862,7 @@ def create_app() -> Flask:
                     "llm_ready": service.llm_ready(),
                     "llm_provider": settings.source_code_qa_llm_provider,
                     "llm_providers": {
-                        "codex_cli_bridge": {"ready": codex_service.llm_ready(), "label": "Codex", "available": model_availability["codex_cli_bridge"]},
+                        "codex_cli_bridge": {"ready": codex_service.llm_ready(), "label": "Codex", "available": codex_service.llm_ready()},
                     },
                     "llm_model": service.llm_budgets["balanced"]["model"],
                     "llm_cheap_model": service.llm_budgets["cheap"]["model"],
@@ -877,7 +872,6 @@ def create_app() -> Flask:
                     "index_health": service.index_health_payload(),
                     "release_gate": _source_code_qa_release_gate_payload(settings),
                     "domain_knowledge": service.domain_knowledge_payload(),
-                    "model_availability": model_availability,
                     "options": _source_code_qa_options_payload(service),
                     "config": service.load_config(),
                 }
@@ -919,23 +913,6 @@ def create_app() -> Flask:
         except ToolError as error:
             status_code = HTTPStatus.SERVICE_UNAVAILABLE if _is_local_agent_unavailable_error(error) else HTTPStatus.BAD_REQUEST
             return jsonify({"status": "error", "message": str(error), "error_category": _tool_error_category(error)}), status_code
-
-    @app.post("/api/source-code-qa/model-availability")
-    def source_code_qa_model_availability_api():
-        access_gate = _require_source_code_qa_manage_access(settings, api=True)
-        if access_gate is not None:
-            return access_gate
-        payload = request.get_json(silent=True) or {}
-        raw_availability = payload.get("availability") if isinstance(payload.get("availability"), dict) else {}
-        store = _get_source_code_qa_model_availability_store()
-        availability = store.save(raw_availability)
-        return jsonify(
-            {
-                "status": "ok",
-                "model_availability": availability,
-                "options": _source_code_qa_options_payload(_build_source_code_qa_service()),
-            }
-        )
 
     @app.post("/api/source-code-qa/sync")
     def source_code_qa_sync_api():
@@ -2625,7 +2602,7 @@ def create_app() -> Flask:
             if not asset_path.exists():
                 return jsonify({"status": "error", "message": "Meeting asset not found."}), HTTPStatus.NOT_FOUND
             media = record.get("media") if isinstance(record.get("media"), dict) else {}
-            active_media_paths = [str(media.get("audio_path") or "").strip(), str(media.get("video_path") or "").strip()]
+            active_media_paths = [str(media.get("audio_path") or "").strip()]
             active_asset_paths = {
                 (_get_meeting_record_store().root_dir / media_path).resolve()
                 for media_path in active_media_paths
@@ -5376,13 +5353,6 @@ def _get_source_code_qa_runtime_evidence_store():
     return current_app.config["SOURCE_CODE_QA_RUNTIME_EVIDENCE_STORE"]
 
 
-def _get_source_code_qa_model_availability_store():
-    settings: Settings = current_app.config["SETTINGS"]
-    if _local_agent_source_code_qa_enabled(settings):
-        return RemoteSourceCodeQAModelAvailabilityStore(_build_local_agent_client(settings))
-    return current_app.config["SOURCE_CODE_QA_MODEL_AVAILABILITY_STORE"]
-
-
 def _get_seatalk_todo_store(settings: Settings):
     if _local_agent_seatalk_enabled(settings):
         return RemoteSeaTalkTodoStore(_build_local_agent_client(settings))
@@ -5758,18 +5728,13 @@ def _local_agent_work_memory_enabled(settings: Settings) -> bool:
     )
 
 
-def _source_code_qa_model_availability() -> dict[str, bool]:
-    return _get_source_code_qa_model_availability_store().get()
-
-
 def _source_code_qa_options_payload(service: SourceCodeQAService) -> dict[str, Any]:
     options = service.options_payload()
-    availability = _source_code_qa_model_availability()
     providers = []
     for provider in options.get("llm_providers") or []:
         provider_payload = dict(provider)
         value = str(provider_payload.get("value") or "")
-        available = bool(availability.get(value, False))
+        available = value in LLM_PROVIDER_ALLOWED_QUERY_CHOICES
         provider_payload["available"] = available
         provider_payload["disabled"] = not available
         base_label = str(provider_payload.get("label") or value).replace(" (Unavailable)", "")
@@ -5812,13 +5777,13 @@ def _source_code_qa_runtime_capabilities_payload() -> dict[str, dict[str, dict[s
 
 
 def _source_code_qa_provider_available(llm_provider: str | None) -> bool:
-    provider = SourceCodeQAService.normalize_query_llm_provider(llm_provider)
-    return bool(_source_code_qa_model_availability().get(provider, False))
+    provider = str(llm_provider or LLM_PROVIDER_CODEX_CLI_BRIDGE).strip().lower() or LLM_PROVIDER_CODEX_CLI_BRIDGE
+    return provider in LLM_PROVIDER_ALLOWED_QUERY_CHOICES
 
 
 def _source_code_qa_public_answer_mode(answer_mode: str | None) -> str:
     mode = str(answer_mode or "auto").strip()
-    return mode if mode in {"auto", "gemini_flash"} else "auto"
+    return mode if mode == "auto" else "auto"
 
 
 def _source_code_qa_query_mode(query_mode: str | None) -> str:

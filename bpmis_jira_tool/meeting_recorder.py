@@ -2442,7 +2442,7 @@ def _process_exists(pid: int) -> bool:
 def _recorder_process_candidates(*, record: dict[str, Any], store_root: Path) -> list[str]:
     media = record.get("media") if isinstance(record.get("media"), dict) else {}
     candidates: list[str] = []
-    for key in ("audio_path", "video_path", "source_audio_path"):
+    for key in ("audio_path", "source_audio_path"):
         relative = str(media.get(key) or "").strip()
         if relative:
             candidates.append(str((store_root / relative).resolve()))
