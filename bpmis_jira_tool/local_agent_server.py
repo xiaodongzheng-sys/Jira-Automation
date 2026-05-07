@@ -2142,7 +2142,7 @@ def _build_config_store(settings: Settings) -> WebConfigStore:
 
 
 def _build_team_dashboard_config_store(settings: Settings):
-    from bpmis_jira_tool.web import TeamDashboardConfigStore
+    from bpmis_jira_tool.team_dashboard_config import TeamDashboardConfigStore
 
     return TeamDashboardConfigStore(_build_config_store(settings).db_path)
 
