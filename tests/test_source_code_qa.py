@@ -4840,6 +4840,37 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertIn(("route", "/api/issues/create"), rows)
         self.assertIn(("injects", "IssueService"), rows)
 
+    def test_extract_structure_rows_characterizes_spring_route_config_and_sql_edges(self):
+        source = (
+            "@RestController\n"
+            "@RequestMapping(\"/api/issues\")\n"
+            "@ConditionalOnProperty(prefix = \"issue\", name = \"enabled\", havingValue = \"true\")\n"
+            "public class IssueController {\n"
+            "    @Qualifier(\"primaryIssueService\")\n"
+            "    private IssueService issueService;\n"
+            "    @Transactional(rollbackFor = Exception.class)\n"
+            "    @PostMapping(\"/create\")\n"
+            "    public Issue createIssue() {\n"
+            "        return jdbcTemplate.queryForObject(\"select * from issue_table\", mapper);\n"
+            "    }\n"
+            "}\n"
+        )
+
+        rows = self.service._extract_structure_rows("controller/IssueController.java", source.splitlines())
+        definitions = {(row[2], row[0]) for row in rows["definitions"]}
+        references = {(row[2], row[0]) for row in rows["references"]}
+        entity_edges = {(row[3], row[4]) for row in rows["entity_edges"]}
+
+        self.assertIn(("class", "IssueController"), definitions)
+        self.assertIn(("java_method", "IssueController.createIssue"), definitions)
+        self.assertIn(("route", "/api/issues/create"), references)
+        self.assertIn(("bean_condition", "issue.enabled=true"), references)
+        self.assertIn(("bean_qualifier_target", "issueService=primaryIssueService"), references)
+        self.assertIn(("operational_boundary", "Transactional:rollbackFor = Exception.class"), references)
+        self.assertIn(("sql_table", "issue_table"), references)
+        self.assertIn(("route", "/api/issues/create"), entity_edges)
+        self.assertIn(("db_read", "issue_table"), entity_edges)
+
     def test_java_member_calls_resolve_to_qualified_repository_methods(self):
         self.service.save_mapping(
             pm_team="AF",
