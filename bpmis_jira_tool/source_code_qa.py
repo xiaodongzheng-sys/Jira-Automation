@@ -12644,6 +12644,74 @@ class SourceCodeQAService:
             "domain_context": domain_context,
         }
 
+    def _cached_llm_answer_payload(
+        self,
+        *,
+        cached: dict[str, Any],
+        question: str,
+        evidence_summary: dict[str, Any],
+        quality_gate: dict[str, Any],
+        selected_matches: list[dict[str, Any]],
+        evidence_pack: dict[str, Any],
+        routed_budget_mode: str,
+        llm_budget_mode: str,
+        llm_route: dict[str, Any],
+        selected_model: str,
+        answer_thinking_budget: int,
+        cache_key: str,
+    ) -> dict[str, Any]:
+        cached_answer = str(cached["answer"])
+        cached_structured = self._parse_structured_answer(cached_answer)
+        if self._trust_provider_final_answer():
+            cached_claim_check = self._trusted_provider_check()
+            cached_judge = self._trusted_provider_judge()
+            cached_final = self._finalize_trusted_model_answer(
+                question=question,
+                answer=cached_answer,
+                structured_answer=cached_structured,
+                evidence_summary=evidence_summary,
+                quality_gate=cached.get("answer_quality") or quality_gate,
+                claim_check=cached_claim_check,
+                answer_judge=cached_judge,
+                finish_reason=cached.get("finish_reason") or "cache_hit",
+                selected_matches=selected_matches,
+            )
+        else:
+            cached_claim_check = self._verify_answer_claims(cached_answer, evidence_summary, selected_matches)
+            cached_judge = self._run_answer_judge(question, cached_answer, evidence_pack, cached_claim_check)
+            cached_final = self._finalize_llm_answer(
+                question=question,
+                answer=cached_answer,
+                structured_answer=cached_structured,
+                evidence_summary=evidence_summary,
+                quality_gate=cached.get("answer_quality") or quality_gate,
+                claim_check=cached_claim_check,
+                answer_judge=cached_judge,
+                finish_reason=cached.get("finish_reason") or "cache_hit",
+                selected_matches=selected_matches,
+            )
+        return {
+            "llm_answer": cached_final["answer"],
+            "llm_budget_mode": routed_budget_mode,
+            "llm_requested_budget_mode": llm_budget_mode,
+            "llm_route": llm_route,
+            "llm_provider": cached.get("provider") or self.llm_provider.name,
+            "llm_model": cached.get("model") or selected_model,
+            "llm_cached": True,
+            "llm_usage": self._normalize_llm_usage(cached.get("usage") or {}),
+            "llm_thinking_budget": cached.get("thinking_budget", answer_thinking_budget),
+            "llm_latency_ms": 0,
+            "llm_attempt_log": [],
+            "llm_finish_reason": cached.get("finish_reason") or "cache_hit",
+            "answer_quality": cached.get("answer_quality") or quality_gate,
+            "answer_claim_check": cached_claim_check,
+            "answer_judge": cached_judge,
+            "structured_answer": cached_final["structured_answer"],
+            "answer_contract": cached_final["answer_contract"],
+            "evidence_pack": evidence_pack,
+            "cache_metadata": self._answer_cache_metadata(cache_key, cached),
+        }
+
     def _build_llm_answer(
         self,
         *,
@@ -12842,57 +12910,20 @@ class SourceCodeQAService:
         )
         cached = None if vertex_two_pass else self._load_cached_answer(cache_key)
         if cached is not None:
-            cached_answer = str(cached["answer"])
-            cached_structured = self._parse_structured_answer(cached_answer)
-            if self._trust_provider_final_answer():
-                cached_claim_check = self._trusted_provider_check()
-                cached_judge = self._trusted_provider_judge()
-                cached_final = self._finalize_trusted_model_answer(
-                    question=question,
-                    answer=cached_answer,
-                    structured_answer=cached_structured,
-                    evidence_summary=evidence_summary,
-                    quality_gate=cached.get("answer_quality") or quality_gate,
-                    claim_check=cached_claim_check,
-                    answer_judge=cached_judge,
-                    finish_reason=cached.get("finish_reason") or "cache_hit",
-                    selected_matches=selected_matches,
-                )
-            else:
-                cached_claim_check = self._verify_answer_claims(cached_answer, evidence_summary, selected_matches)
-                cached_judge = self._run_answer_judge(question, cached_answer, evidence_pack, cached_claim_check)
-                cached_final = self._finalize_llm_answer(
-                    question=question,
-                    answer=cached_answer,
-                    structured_answer=cached_structured,
-                    evidence_summary=evidence_summary,
-                    quality_gate=cached.get("answer_quality") or quality_gate,
-                    claim_check=cached_claim_check,
-                    answer_judge=cached_judge,
-                    finish_reason=cached.get("finish_reason") or "cache_hit",
-                    selected_matches=selected_matches,
-                )
-            return {
-                "llm_answer": cached_final["answer"],
-                "llm_budget_mode": routed_budget_mode,
-                "llm_requested_budget_mode": llm_budget_mode,
-                "llm_route": llm_route,
-                "llm_provider": cached.get("provider") or self.llm_provider.name,
-                "llm_model": cached.get("model") or selected_model,
-                "llm_cached": True,
-                "llm_usage": self._normalize_llm_usage(cached.get("usage") or {}),
-                "llm_thinking_budget": cached.get("thinking_budget", answer_thinking_budget),
-                "llm_latency_ms": 0,
-                "llm_attempt_log": [],
-                "llm_finish_reason": cached.get("finish_reason") or "cache_hit",
-                "answer_quality": cached.get("answer_quality") or quality_gate,
-                "answer_claim_check": cached_claim_check,
-                "answer_judge": cached_judge,
-                "structured_answer": cached_final["structured_answer"],
-                "answer_contract": cached_final["answer_contract"],
-                "evidence_pack": evidence_pack,
-                "cache_metadata": self._answer_cache_metadata(cache_key, cached),
-            }
+            return self._cached_llm_answer_payload(
+                cached=cached,
+                question=question,
+                evidence_summary=evidence_summary,
+                quality_gate=quality_gate,
+                selected_matches=selected_matches,
+                evidence_pack=evidence_pack,
+                routed_budget_mode=routed_budget_mode,
+                llm_budget_mode=llm_budget_mode,
+                llm_route=llm_route,
+                selected_model=selected_model,
+                answer_thinking_budget=answer_thinking_budget,
+                cache_key=cache_key,
+            )
         draft_answer = ""
         draft_usage: dict[str, Any] = {}
         draft_attempts = 0
