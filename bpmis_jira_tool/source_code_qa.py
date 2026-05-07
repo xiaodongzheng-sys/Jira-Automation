@@ -14317,20 +14317,18 @@ class SourceCodeQAService:
                 deep_investigation_added=deep_investigation_added,
             ),
         }
-        if not (is_followup and not self.codex_cache_followups):
-            self._store_cached_answer(
-                cache_key,
-                answer=final["answer"],
-                usage=usage,
-                answer_quality=quality_gate,
-                provider=self.llm_provider.name,
-                model=effective_model,
-                thinking_budget=0,
-                finish_reason=finish_reason,
-                query_mode=query_mode,
-                llm_budget_mode=routed_budget_mode,
-                trace_id=trace_id,
-            )
+        self._store_codex_answer_cache(
+            is_followup=is_followup,
+            cache_key=cache_key,
+            final=final,
+            usage=usage,
+            quality_gate=quality_gate,
+            effective_model=effective_model,
+            finish_reason=finish_reason,
+            query_mode=query_mode,
+            routed_budget_mode=routed_budget_mode,
+            trace_id=trace_id,
+        )
         codex_cli_summary = self._build_codex_cli_summary(
             llm_route=llm_route,
             codex_validation=codex_validation,
@@ -14530,6 +14528,36 @@ class SourceCodeQAService:
             "cache_metadata": self._answer_cache_metadata(cache_key),
             "llm_timing": timing,
         }
+
+    def _store_codex_answer_cache(
+        self,
+        *,
+        is_followup: bool,
+        cache_key: str,
+        final: dict[str, Any],
+        usage: dict[str, Any],
+        quality_gate: dict[str, Any],
+        effective_model: str,
+        finish_reason: str,
+        query_mode: str,
+        routed_budget_mode: str,
+        trace_id: str,
+    ) -> None:
+        if is_followup and not self.codex_cache_followups:
+            return
+        self._store_cached_answer(
+            cache_key,
+            answer=final["answer"],
+            usage=usage,
+            answer_quality=quality_gate,
+            provider=self.llm_provider.name,
+            model=effective_model,
+            thinking_budget=0,
+            finish_reason=finish_reason,
+            query_mode=query_mode,
+            llm_budget_mode=routed_budget_mode,
+            trace_id=trace_id,
+        )
 
     def _codex_repair_decision(
         self,
