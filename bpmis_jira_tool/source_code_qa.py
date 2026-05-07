@@ -2999,23 +2999,6 @@ class SourceCodeQAService:
             ]
         return str(value)[:text_limit]
 
-    @staticmethod
-    def _is_retryable_llm_rate_limit(error: ToolError) -> bool:
-        status_code = getattr(error, "status_code", None)
-        provider_status = str(getattr(error, "provider_status", "") or "").upper()
-        text = str(error).upper()
-        return status_code == 429 or provider_status == "RESOURCE_EXHAUSTED" or "RESOURCE_EXHAUSTED" in text
-
-    @staticmethod
-    def _llm_retry_after_seconds(error: ToolError) -> float | None:
-        value = getattr(error, "retry_after_seconds", None)
-        if value is None:
-            return None
-        try:
-            return max(0.0, float(value))
-        except (TypeError, ValueError):
-            return None
-
     def _load_entries_for_key(self, key: str) -> list[RepositoryEntry]:
         raw_entries = self.load_config().get("mappings", {}).get(key, [])
         return [self._normalize_entry(entry) for entry in raw_entries]
