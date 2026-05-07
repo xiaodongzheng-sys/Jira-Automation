@@ -60,7 +60,6 @@ from bpmis_jira_tool.source_code_qa_embeddings import (
 from bpmis_jira_tool.source_code_qa_codex_refs import (
     codex_candidate_path_layers,
     codex_repo_relative_root,
-    codex_resolved_file_ref_payload,
     extract_direct_file_refs,
     resolve_codex_file_ref,
 )
@@ -3172,18 +3171,6 @@ class SourceCodeQAService:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(self._now_iso())
         return lock_path
-
-    def _ensure_repo_index(
-        self,
-        *,
-        key: str | None,
-        entry: RepositoryEntry,
-        repo_path: Path,
-    ) -> dict[str, Any]:
-        info = self._repo_index_info(key, entry, repo_path)
-        if info.get("state") == "ready":
-            return info
-        return self._build_repo_index(key or "", entry, repo_path)
 
     def _require_ready_repo_index(
         self,
@@ -7858,78 +7845,6 @@ class SourceCodeQAService:
         except (OSError, sqlite3.Error):
             return []
 
-    def _search_repo_files(
-        self,
-        entry: RepositoryEntry,
-        repo_path: Path,
-        tokens: list[str],
-        *,
-        question: str,
-        focus_terms: list[str] | None = None,
-        trace_stage: str = "direct",
-    ) -> list[dict[str, Any]]:
-        matches: list[dict[str, Any]] = []
-        repo_score = self._repo_match_score(entry, tokens)
-        trace_stage_bonus = 90 if trace_stage == "two_hop" or trace_stage == "query_decomposition" or trace_stage.startswith(TOOL_LOOP_TRACE_PREFIX) or trace_stage.startswith("agent_trace") or trace_stage.startswith("agent_plan") or trace_stage == QUALITY_GATE_TRACE_STAGE else 0
-        normalized_focus_terms = [term.lower() for term in (focus_terms or []) if term]
-        for file_path in self._iter_text_files(repo_path):
-            relative_path = file_path.relative_to(repo_path)
-            path_text = str(relative_path).lower()
-            path_score = sum(10 for token in tokens if token in path_text)
-            if normalized_focus_terms and any(hint in path_text for hint in DEPENDENCY_PATH_HINTS):
-                path_score += 18
-            try:
-                lines = file_path.read_text(encoding="utf-8", errors="ignore").splitlines()
-            except OSError:
-                continue
-            file_symbols = self._collect_symbols(lines)
-            symbol_score = sum(16 for token in tokens if token in file_symbols)
-            symbol_score += sum(20 for term in normalized_focus_terms if term in file_symbols)
-            scored_lines: list[tuple[int, int]] = []
-            for index, line in enumerate(lines, start=1):
-                lowered = line.lower()
-                score = sum(3 + min(lowered.count(token), 3) for token in tokens if token in lowered)
-                line_symbols = self._line_symbols(lowered)
-                score += sum(12 for token in tokens if token in line_symbols)
-                score += sum(16 for term in normalized_focus_terms if term in line_symbols)
-                score += sum(45 for term in normalized_focus_terms if term in lowered)
-                if self._is_declaration_line(line):
-                    score += sum(8 for token in tokens if token in lowered or token in line_symbols)
-                    score += sum(10 for term in normalized_focus_terms if term in lowered or term in line_symbols)
-                if PATHISH_PATTERN.search(line):
-                    score += sum(6 for token in tokens if token in lowered)
-                if score:
-                    proximity_bonus = self._keyword_proximity_bonus(lowered, tokens)
-                    scored_lines.append((index, score + path_score + symbol_score + repo_score + proximity_bonus + trace_stage_bonus))
-            if not scored_lines and (path_score or symbol_score or repo_score):
-                scored_lines.append((1, path_score + symbol_score + repo_score + trace_stage_bonus))
-            if not scored_lines:
-                continue
-            best_line, best_score = max(scored_lines, key=lambda item: item[1])
-            start, end = self._best_snippet_window(lines, best_line)
-            snippet = "\n".join(lines[start - 1 : end]).strip()
-            matches.append(
-                {
-                    "repo": entry.display_name,
-                    "path": str(relative_path),
-                    "line_start": start,
-                    "line_end": end,
-                    "score": best_score,
-                    "snippet": snippet[:2400],
-                    "reason": self._match_reason(
-                        tokens,
-                        path_text,
-                        snippet,
-                        file_symbols=file_symbols,
-                        question=question,
-                        focus_terms=normalized_focus_terms,
-                        trace_stage=trace_stage,
-                    ),
-                    "trace_stage": trace_stage,
-                }
-            )
-        return matches
-
     def _iter_text_files(self, repo_path: Path):
         for path in repo_path.rglob("*"):
             if not path.is_file():
@@ -10517,23 +10432,6 @@ class SourceCodeQAService:
             if len(candidate) >= 6 and normalized_value in candidate:
                 return 0.72
         return 0.0
-
-    @staticmethod
-    def _match_repo_dependency_target(value: str, entries: list[RepositoryEntry], source_name: str) -> RepositoryEntry | None:
-        normalized_value = re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
-        if not normalized_value:
-            return None
-        for entry in entries:
-            if entry.display_name == source_name:
-                continue
-            candidates = {
-                re.sub(r"[^a-z0-9]+", "", entry.display_name.lower()),
-                re.sub(r"[^a-z0-9]+", "", SourceCodeQAService._derive_display_name(entry.url).lower()),
-            }
-            for candidate in candidates:
-                if len(candidate) >= 4 and (candidate in normalized_value or normalized_value in candidate):
-                    return entry
-        return None
 
     @staticmethod
     def _trace_path_edges_for_seed(connection: sqlite3.Connection, seed_path: str) -> list[dict[str, Any]]:
@@ -16362,65 +16260,6 @@ class SourceCodeQAService:
             "common",
         }
 
-    def _followup_core_terms(self, question: str, followup_context: dict[str, Any] | None) -> list[str]:
-        if not followup_context or not self._is_relationship_followup_question(question):
-            return []
-        low_value = self._followup_low_value_terms()
-        texts: list[str] = [
-            str(followup_context.get("previous_question") or ""),
-            str(followup_context.get("question") or ""),
-            str(followup_context.get("summary") or ""),
-            str(followup_context.get("answer") or ""),
-            str(followup_context.get("rendered_answer") or ""),
-            " ".join(str(item) for item in followup_context.get("terms") or []),
-        ]
-        for match in followup_context.get("matches_snapshot") or followup_context.get("matches") or []:
-            if isinstance(match, dict):
-                texts.extend([str(match.get("path") or ""), str(match.get("reason") or ""), str(match.get("snippet") or "")])
-        for item in followup_context.get("codex_candidate_paths") or []:
-            if isinstance(item, dict):
-                texts.extend([str(item.get("path") or ""), str(item.get("reason") or "")])
-        route = followup_context.get("llm_route") if isinstance(followup_context.get("llm_route"), dict) else {}
-        for item in route.get("candidate_paths") or []:
-            if isinstance(item, dict):
-                texts.extend([str(item.get("path") or ""), str(item.get("reason") or "")])
-        for turn in followup_context.get("recent_turns") or []:
-            if not isinstance(turn, dict):
-                continue
-            texts.extend([str(turn.get("question") or ""), str(turn.get("answer") or "")])
-            for match in turn.get("matches_snapshot") or []:
-                if isinstance(match, dict):
-                    texts.extend([str(match.get("path") or ""), str(match.get("reason") or ""), str(match.get("snippet") or "")])
-            for item in turn.get("codex_candidate_paths") or []:
-                if isinstance(item, dict):
-                    texts.extend([str(item.get("path") or ""), str(item.get("reason") or "")])
-
-        scored: dict[str, tuple[str, int]] = {}
-        for index, text in enumerate(texts):
-            weight = 5 if index <= 1 else 1
-            for token in IDENTIFIER_PATTERN.findall(text):
-                clean = token.strip("._/-:")
-                lowered = clean.lower()
-                if len(lowered) < 4 or lowered in STOPWORDS or lowered in LOW_VALUE_CALL_SYMBOLS or lowered in low_value:
-                    continue
-                if re.fullmatch(r"s\d+", lowered):
-                    continue
-                score = weight
-                if any(char.isupper() for char in clean[1:]) or "_" in clean:
-                    score += 3
-                if any(marker in lowered for marker in ("uid", "id", "merchant", "shopee", "identifier")):
-                    score += 3
-                if "/" in clean or "." in clean:
-                    score -= 2
-                existing = scored.get(lowered)
-                if existing:
-                    scored[lowered] = (existing[0], existing[1] + score)
-                else:
-                    scored[lowered] = (clean, score)
-        ordered = sorted(scored.values(), key=lambda item: (-item[1], item[0].lower()))
-        return [term for term, _score in ordered[:10]]
-
-
     def _repo_relative_root(self, repo_root: Path) -> str:
         return codex_repo_relative_root(repo_root, self.repo_root)
 
@@ -16691,14 +16530,6 @@ class SourceCodeQAService:
             merged["unsupported_claims"] = list(dict.fromkeys(unsupported))[:8]
         return merged
 
-    @staticmethod
-    def _mark_codex_answer_unreliable(answer_contract: dict[str, Any], validation: dict[str, Any]) -> dict[str, Any]:
-        contract = dict(answer_contract or {})
-        contract["status"] = "unreliable_llm_answer"
-        contract["confidence"] = "low"
-        contract["codex_citation_validation"] = validation
-        return contract
-
     def _validate_codex_citations(
         self,
         answer: str,
@@ -16785,29 +16616,6 @@ class SourceCodeQAService:
             candidate_paths,
             repo_root=self.repo_root,
             scope_roots=scope_roots,
-        )
-
-    @staticmethod
-    def _codex_resolved_file_ref_payload(
-        *,
-        ref: str,
-        candidate: Path,
-        relative_path: Path,
-        root: Path,
-        repo: str,
-        repo_relative_root: str,
-        start: int,
-        end: int,
-    ) -> dict[str, Any]:
-        return codex_resolved_file_ref_payload(
-            ref=ref,
-            candidate=candidate,
-            relative_path=relative_path,
-            root=root,
-            repo=repo,
-            repo_relative_root=repo_relative_root,
-            start=start,
-            end=end,
         )
 
     def _codex_high_risk_question(self, question: str) -> bool:
@@ -17411,18 +17219,6 @@ class SourceCodeQAService:
             "mode": "trusted_provider_passthrough",
             "issues": [],
             "repair_targets": [],
-        }
-
-    @staticmethod
-    def _skipped_codex_validation() -> dict[str, Any]:
-        return {
-            "status": "skipped",
-            "reason": "trusted_provider_passthrough",
-            "checked_claims": 0,
-            "cited_path_count": 0,
-            "direct_file_refs": [],
-            "issues": [],
-            "unsupported_claims": [],
         }
 
     @staticmethod
