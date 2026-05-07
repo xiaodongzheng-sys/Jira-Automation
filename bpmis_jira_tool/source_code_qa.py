@@ -5374,42 +5374,19 @@ class SourceCodeQAService:
                 for event_name in re.findall(r"\b([A-Z][A-Za-z0-9_]*(?:Event|Message|Command))\b", stripped):
                     add_reference(event_name, "event_consume", line_no, stripped)
                     add_entity_edge(current_method_id or current_class_id or file_entity_id, "event_consume", event_name, line_no, stripped)
-            for table in SQL_TABLE_PATTERN.findall(line):
-                add_reference(table, "sql_table", line_no, stripped)
-                add_entity_edge(current_method_id or current_class_id, "sql_table", table, line_no, stripped)
-            for table in SQL_READ_TABLE_PATTERN.findall(line):
-                add_reference(table, "db_read", line_no, stripped)
-                add_entity_edge(current_method_id or current_class_id, "db_read", table, line_no, stripped)
-            for table in SQL_WRITE_TABLE_PATTERN.findall(line):
-                add_reference(table, "db_write", line_no, stripped)
-                add_entity_edge(current_method_id or current_class_id, "db_write", table, line_no, stripped)
-            for endpoint in HTTP_LITERAL_PATTERN.findall(line):
-                if endpoint.startswith("http") or any(client in stripped.lower() for client in ("resttemplate", "webclient", "feign", "exchange", "postfor", "getfor", "request")):
-                    add_reference(endpoint, "http_endpoint", line_no, stripped)
-                    add_entity_edge(current_method_id or current_class_id or file_entity_id, "http_endpoint", endpoint, line_no, stripped)
-            if suffix in {".properties", ".yaml", ".yml", ".conf", ".toml"}:
-                config_pair = (
-                    self._extract_yaml_config_assignment(line, yaml_config_stack)
-                    if suffix in {".yaml", ".yml"}
-                    else self._extract_config_assignment(stripped)
-                )
-                key_match = PROPERTIES_KEY_PATTERN.search(line)
-                if config_pair:
-                    config_key, config_value = config_pair
-                    add_definition(config_key, "config_key", line_no, stripped)
-                    add_entity_edge(file_entity_id, "config", config_key, line_no, stripped)
-                    if config_value:
-                        add_reference(config_value, "config_value", line_no, stripped)
-                        add_entity_edge(file_entity_id, "config_value", config_value, line_no, stripped)
-                    for endpoint in HTTP_LITERAL_PATTERN.findall(f"'{config_value}'"):
-                        add_reference(endpoint, "http_endpoint", line_no, stripped)
-                        add_entity_edge(file_entity_id, "http_endpoint", endpoint, line_no, stripped)
-                    if re.search(r"\b[a-z0-9-]+-service\b", config_value, re.IGNORECASE):
-                        add_reference(config_value, "downstream_api", line_no, stripped)
-                        add_entity_edge(file_entity_id, "downstream_api", config_value, line_no, stripped)
-                elif key_match:
-                    add_definition(key_match.group(1), "config_key", line_no, stripped)
-                    add_entity_edge(file_entity_id, "config", key_match.group(1), line_no, stripped)
+            self._extract_sql_http_config_structure(
+                line=line,
+                stripped=stripped,
+                line_no=line_no,
+                suffix=suffix,
+                yaml_config_stack=yaml_config_stack,
+                current_method_id=current_method_id,
+                current_class_id=current_class_id,
+                file_entity_id=file_entity_id,
+                add_definition=add_definition,
+                add_reference=add_reference,
+                add_entity_edge=add_entity_edge,
+            )
             field_match = FIELD_OR_PARAM_TYPE_PATTERN.search(line)
             if field_match:
                 add_entity_edge(current_class_id or file_entity_id, "injects", field_match.group(1), line_no, stripped)
@@ -5516,6 +5493,61 @@ class SourceCodeQAService:
             "tree_sitter_language": tree_sitter_language if tree_sitter_used else "",
             "tree_sitter_error": tree_sitter_error,
         }
+
+    def _extract_sql_http_config_structure(
+        self,
+        *,
+        line: str,
+        stripped: str,
+        line_no: int,
+        suffix: str,
+        yaml_config_stack: list[tuple[int, str]],
+        current_method_id: str,
+        current_class_id: str,
+        file_entity_id: str,
+        add_definition: Any,
+        add_reference: Any,
+        add_entity_edge: Any,
+    ) -> None:
+        for table in SQL_TABLE_PATTERN.findall(line):
+            add_reference(table, "sql_table", line_no, stripped)
+            add_entity_edge(current_method_id or current_class_id, "sql_table", table, line_no, stripped)
+        for table in SQL_READ_TABLE_PATTERN.findall(line):
+            add_reference(table, "db_read", line_no, stripped)
+            add_entity_edge(current_method_id or current_class_id, "db_read", table, line_no, stripped)
+        for table in SQL_WRITE_TABLE_PATTERN.findall(line):
+            add_reference(table, "db_write", line_no, stripped)
+            add_entity_edge(current_method_id or current_class_id, "db_write", table, line_no, stripped)
+        for endpoint in HTTP_LITERAL_PATTERN.findall(line):
+            if endpoint.startswith("http") or any(
+                client in stripped.lower()
+                for client in ("resttemplate", "webclient", "feign", "exchange", "postfor", "getfor", "request")
+            ):
+                add_reference(endpoint, "http_endpoint", line_no, stripped)
+                add_entity_edge(current_method_id or current_class_id or file_entity_id, "http_endpoint", endpoint, line_no, stripped)
+        if suffix in {".properties", ".yaml", ".yml", ".conf", ".toml"}:
+            config_pair = (
+                self._extract_yaml_config_assignment(line, yaml_config_stack)
+                if suffix in {".yaml", ".yml"}
+                else self._extract_config_assignment(stripped)
+            )
+            key_match = PROPERTIES_KEY_PATTERN.search(line)
+            if config_pair:
+                config_key, config_value = config_pair
+                add_definition(config_key, "config_key", line_no, stripped)
+                add_entity_edge(file_entity_id, "config", config_key, line_no, stripped)
+                if config_value:
+                    add_reference(config_value, "config_value", line_no, stripped)
+                    add_entity_edge(file_entity_id, "config_value", config_value, line_no, stripped)
+                for endpoint in HTTP_LITERAL_PATTERN.findall(f"'{config_value}'"):
+                    add_reference(endpoint, "http_endpoint", line_no, stripped)
+                    add_entity_edge(file_entity_id, "http_endpoint", endpoint, line_no, stripped)
+                if re.search(r"\b[a-z0-9-]+-service\b", config_value, re.IGNORECASE):
+                    add_reference(config_value, "downstream_api", line_no, stripped)
+                    add_entity_edge(file_entity_id, "downstream_api", config_value, line_no, stripped)
+            elif key_match:
+                add_definition(key_match.group(1), "config_key", line_no, stripped)
+                add_entity_edge(file_entity_id, "config", key_match.group(1), line_no, stripped)
 
     def _extract_test_structure_references(
         self,
