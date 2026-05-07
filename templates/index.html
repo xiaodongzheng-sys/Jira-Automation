@@ -1,5 +1,9 @@
 {% extends "base.html" %}
 
+{% block extra_head %}
+  <link rel="stylesheet" href="{{ url_for('static', filename='productization_upgrade_summary.css', v=asset_revision|default('static')) }}">
+{% endblock %}
+
 {% block body %}
   <section class="portal-compact-hero" aria-label="BPMIS workspace status">
     <div class="portal-compact-title">

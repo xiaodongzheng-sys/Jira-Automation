@@ -1,5 +1,9 @@
 {% extends "base.html" %}
 
+{% block extra_head %}
+  <link rel="stylesheet" href="{{ url_for('static', filename='meeting_recorder.css', v=asset_revision|default('static')) }}">
+{% endblock %}
+
 {% block body %}
 <section class="meeting-recorder-shell" data-meeting-recorder-root data-selected-record-id="{{ selected_record_id }}">
   <header class="tool-hero meeting-recorder-hero">
