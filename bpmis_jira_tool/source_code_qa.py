@@ -13161,6 +13161,260 @@ class SourceCodeQAService:
             thinking_config=answer_thinking_config,
         )
 
+    def _generate_initial_llm_answer(
+        self,
+        *,
+        pm_team: str,
+        country: str,
+        question: str,
+        prompt_context: str,
+        vertex_two_pass: bool,
+        vertex_draft_check: dict[str, Any] | None,
+        draft_answer: str,
+        draft_usage: dict[str, Any],
+        draft_attempts: int,
+        draft_latency_ms: int,
+        draft_attempt_log: list[dict[str, Any]],
+        evidence_summary: dict[str, Any],
+        quality_gate: dict[str, Any],
+        selected_model: str,
+        attachment_section: str,
+        attachments: list[dict[str, Any]],
+        answer_max_output_tokens: int,
+        answer_thinking_config: dict[str, Any],
+    ) -> dict[str, Any]:
+        payload = self._llm_final_answer_payload(
+            pm_team=pm_team,
+            country=country,
+            question=question,
+            prompt_context=prompt_context,
+            vertex_two_pass=vertex_two_pass,
+            vertex_draft_check=vertex_draft_check,
+            draft_answer=draft_answer,
+            attachment_section=attachment_section,
+            attachments=attachments,
+            answer_max_output_tokens=answer_max_output_tokens,
+            answer_thinking_config=answer_thinking_config,
+        )
+        result = self.llm_provider.generate(
+            payload=payload,
+            primary_model=selected_model,
+            fallback_model=self._llm_fallback_model(),
+        )
+        answer = self.llm_provider.extract_text(result.payload)
+        finish_reason = self._llm_finish_reason(result.payload)
+        result_usage = self._normalize_llm_usage(result.usage or result.payload.get("usageMetadata") or {})
+        return {
+            "payload": payload,
+            "answer": answer,
+            "structured_answer": self._parse_structured_answer(answer),
+            "usage": self._merge_llm_usage(draft_usage, result_usage) if vertex_two_pass else result_usage,
+            "effective_model": result.model,
+            "attempts": draft_attempts + result.attempts,
+            "llm_latency_ms": draft_latency_ms + int(result.latency_ms or 0),
+            "llm_attempt_log": [*draft_attempt_log, *[dict(item) for item in result.attempt_log]],
+            "finish_reason": finish_reason,
+            "answer_check": self._answer_self_check(question, answer, evidence_summary, quality_gate),
+            "token_limited_generation": self._finish_reason_is_token_limited(finish_reason),
+        }
+
+    def _retry_llm_answer_if_needed(
+        self,
+        *,
+        entries: list[RepositoryEntry],
+        key: str,
+        pm_team: str,
+        country: str,
+        question: str,
+        matches: list[dict[str, Any]],
+        payload: dict[str, Any],
+        budget: dict[str, Any],
+        attachment_section: str,
+        attachments: list[dict[str, Any]],
+        request_cache: dict[str, Any] | None,
+        token_limited_generation: bool,
+        answer: str,
+        structured_answer: dict[str, Any],
+        usage: dict[str, Any],
+        effective_model: str,
+        attempts: int,
+        llm_latency_ms: int,
+        llm_attempt_log: list[dict[str, Any]],
+        finish_reason: str,
+        evidence_summary: dict[str, Any],
+        quality_gate: dict[str, Any],
+        evidence_pack: dict[str, Any],
+        answer_check: dict[str, Any],
+        claim_check: dict[str, Any],
+        answer_judge: dict[str, Any],
+        selected_matches: list[dict[str, Any]],
+        llm_route: dict[str, Any],
+    ) -> dict[str, Any]:
+        state = {
+            "answer": answer,
+            "structured_answer": structured_answer,
+            "usage": usage,
+            "effective_model": effective_model,
+            "attempts": attempts,
+            "llm_latency_ms": llm_latency_ms,
+            "llm_attempt_log": llm_attempt_log,
+            "finish_reason": finish_reason,
+            "evidence_summary": evidence_summary,
+            "quality_gate": quality_gate,
+            "evidence_pack": evidence_pack,
+            "answer_check": answer_check,
+            "claim_check": claim_check,
+            "answer_judge": answer_judge,
+            "selected_matches": selected_matches,
+            "llm_route": llm_route,
+        }
+        if answer_check.get("status") != "retry":
+            return state
+        if token_limited_generation:
+            retry_matches = selected_matches[: max(4, min(int(budget["match_limit"]), 8))]
+        else:
+            retry_matches = self._expand_answer_retry_matches(
+                entries=entries,
+                key=key,
+                question=question,
+                matches=matches,
+                draft_answer=answer,
+                answer_check=answer_check,
+                claim_check=claim_check,
+                answer_judge=answer_judge,
+                evidence_summary=evidence_summary,
+                quality_gate=quality_gate,
+                limit=int(budget["match_limit"]) + 6,
+                request_cache=request_cache,
+            )
+        if not retry_matches:
+            return state
+        retry_match_limit = max(4, min(int(budget["match_limit"]), 8)) if token_limited_generation else int(budget["match_limit"]) + 4
+        retry_selected_matches = self._select_llm_matches(retry_matches, retry_match_limit, question=question)
+        retry_evidence_summary = self._compress_evidence_cached(question, retry_selected_matches, request_cache=request_cache)
+        retry_trace_paths = self._build_trace_paths(
+            entries=entries,
+            key=key,
+            matches=retry_selected_matches,
+            question=question,
+            request_cache=request_cache,
+        )
+        if retry_trace_paths:
+            retry_evidence_summary["trace_paths"] = retry_trace_paths
+        retry_quality_gate = self._quality_gate_cached(question, retry_evidence_summary, request_cache=request_cache)
+        retry_evidence_pack = self._build_evidence_pack(
+            question=question,
+            evidence_summary=retry_evidence_summary,
+            matches=retry_selected_matches,
+            trace_paths=retry_trace_paths,
+            quality_gate=retry_quality_gate,
+        )
+        retry_domain_context = self._llm_domain_context(
+            pm_team=pm_team,
+            country=country,
+            question=question,
+            evidence_summary=retry_evidence_summary,
+        )
+        if self.llm_provider_name == LLM_PROVIDER_VERTEX_AI and not token_limited_generation:
+            retry_snippet_line_budget = min(int(budget["snippet_line_budget"]) + 100, 320)
+            retry_snippet_char_budget = min(int(budget["snippet_char_budget"]) + 16_000, 100_000)
+        else:
+            retry_snippet_line_budget = 45 if token_limited_generation else min(int(budget["snippet_line_budget"]) + 60, 180)
+            retry_snippet_char_budget = 6_000 if token_limited_generation else min(int(budget["snippet_char_budget"]) + 8000, 28_000)
+        retry_context = self._build_compressed_llm_context(
+            retry_evidence_summary,
+            retry_quality_gate,
+            retry_evidence_pack,
+            retry_selected_matches,
+            domain_context=retry_domain_context,
+            snippet_line_budget=retry_snippet_line_budget,
+            snippet_char_budget=retry_snippet_char_budget,
+            compact=token_limited_generation,
+        )
+        retry_payload = dict(payload)
+        retry_thinking_budget = self._thinking_budget_for_call(
+            role="repair",
+            budget_mode="deep",
+            budget=self.llm_budgets.get("deep") or budget,
+            quality_gate=retry_quality_gate,
+            retry=True,
+        )
+        retry_thinking_budget = 0 if token_limited_generation else self._normalize_thinking_budget_for_provider(retry_thinking_budget)
+        retry_model = self._model_for_role_or_budget("repair", self.llm_budgets.get("deep") or budget)
+        if self.llm_provider_name == LLM_PROVIDER_VERTEX_AI:
+            retry_max_output_tokens = 2_400 if token_limited_generation else min(max(int(budget["max_output_tokens"]) + 800, 3_200), 5_600)
+        else:
+            retry_max_output_tokens = 2_400 if token_limited_generation else min(max(int(budget["max_output_tokens"]) + 500, 900), 1_600)
+        retry_payload["generationConfig"] = {
+            **payload["generationConfig"],
+            "maxOutputTokens": retry_max_output_tokens,
+            "thinkingConfig": self._thinking_config_for_provider(
+                retry_thinking_budget,
+                model=retry_model,
+                role="repair",
+                budget_mode="deep",
+            ),
+        }
+        retry_payload["contents"] = [
+            {
+                "parts": self._llm_payload_parts(
+                    self._llm_user_prompt(
+                        pm_team=pm_team,
+                        country=country,
+                        question=question,
+                        context=retry_context,
+                        self_check=answer_check,
+                        attachment_section=attachment_section,
+                    ),
+                    attachments,
+                )
+            }
+        ]
+        retry_result = self.llm_provider.generate(
+            payload=retry_payload,
+            primary_model=retry_model,
+            fallback_model=self._llm_fallback_model(),
+        )
+        retry_answer = self.llm_provider.extract_text(retry_result.payload)
+        retry_structured_answer = self._parse_structured_answer(retry_answer)
+        retry_finish_reason = self._llm_finish_reason(retry_result.payload)
+        retry_check = self._answer_self_check(question, retry_answer, retry_evidence_summary, retry_quality_gate)
+        if self._finish_reason_needs_generation_repair(retry_finish_reason):
+            issues = list(retry_check.get("issues") or [])
+            issues.append(f"model finish reason requires caution: {retry_finish_reason}")
+            retry_check = {"status": "retry", "issues": list(dict.fromkeys(issues))}
+        retry_claim_check = self._verify_answer_claims(retry_answer, retry_evidence_summary, retry_selected_matches)
+        retry_judge = self._run_answer_judge(question, retry_answer, retry_evidence_pack, retry_claim_check)
+        retry_check = self._merge_answer_retry_issues(
+            retry_check,
+            retry_claim_check,
+            retry_judge,
+            claim_requires_existing_retry=False,
+        )
+        retry_usage = self._normalize_llm_usage(retry_result.usage or retry_result.payload.get("usageMetadata") or {})
+        return {
+            "answer": retry_answer,
+            "structured_answer": retry_structured_answer,
+            "usage": self._merge_llm_usage(usage, retry_usage),
+            "effective_model": retry_result.model,
+            "attempts": attempts + retry_result.attempts,
+            "llm_latency_ms": llm_latency_ms + int(retry_result.latency_ms or 0),
+            "llm_attempt_log": [*llm_attempt_log, *[dict(item) for item in retry_result.attempt_log]],
+            "finish_reason": retry_finish_reason,
+            "evidence_summary": retry_evidence_summary,
+            "quality_gate": retry_quality_gate,
+            "evidence_pack": retry_evidence_pack,
+            "answer_check": retry_check,
+            "claim_check": retry_claim_check,
+            "answer_judge": retry_judge,
+            "selected_matches": retry_selected_matches,
+            "llm_route": {
+                **llm_route,
+                "repair_model": retry_result.model,
+                "repair_thinking_budget": retry_thinking_budget,
+            },
+        }
+
     def _vertex_draft_payload(
         self,
         *,
@@ -13722,7 +13976,7 @@ class SourceCodeQAService:
         draft_latency_ms = vertex_context["draft_latency_ms"]
         draft_attempt_log = vertex_context["draft_attempt_log"]
         vertex_draft_check = vertex_context["vertex_draft_check"]
-        payload = self._llm_final_answer_payload(
+        initial_answer_context = self._generate_initial_llm_answer(
             pm_team=pm_team,
             country=country,
             question=question,
@@ -13730,27 +13984,29 @@ class SourceCodeQAService:
             vertex_two_pass=vertex_two_pass,
             vertex_draft_check=vertex_draft_check,
             draft_answer=draft_answer,
+            draft_usage=draft_usage,
+            draft_attempts=draft_attempts,
+            draft_latency_ms=draft_latency_ms,
+            draft_attempt_log=draft_attempt_log,
+            evidence_summary=evidence_summary,
+            quality_gate=quality_gate,
+            selected_model=selected_model,
             attachment_section=attachment_section,
             attachments=attachments or [],
             answer_max_output_tokens=answer_max_output_tokens,
             answer_thinking_config=answer_thinking_config,
         )
-        result = self.llm_provider.generate(
-            payload=payload,
-            primary_model=selected_model,
-            fallback_model=self._llm_fallback_model(),
-        )
-        answer = self.llm_provider.extract_text(result.payload)
-        structured_answer = self._parse_structured_answer(answer)
-        result_usage = self._normalize_llm_usage(result.usage or result.payload.get("usageMetadata") or {})
-        usage = self._merge_llm_usage(draft_usage, result_usage) if vertex_two_pass else result_usage
-        effective_model = result.model
-        attempts = draft_attempts + result.attempts
-        llm_latency_ms = draft_latency_ms + int(result.latency_ms or 0)
-        llm_attempt_log = [*draft_attempt_log, *[dict(item) for item in result.attempt_log]]
-        finish_reason = self._llm_finish_reason(result.payload)
-        answer_check = self._answer_self_check(question, answer, evidence_summary, quality_gate)
-        token_limited_generation = self._finish_reason_is_token_limited(finish_reason)
+        payload = initial_answer_context["payload"]
+        answer = initial_answer_context["answer"]
+        structured_answer = initial_answer_context["structured_answer"]
+        usage = initial_answer_context["usage"]
+        effective_model = initial_answer_context["effective_model"]
+        attempts = initial_answer_context["attempts"]
+        llm_latency_ms = initial_answer_context["llm_latency_ms"]
+        llm_attempt_log = initial_answer_context["llm_attempt_log"]
+        finish_reason = initial_answer_context["finish_reason"]
+        answer_check = initial_answer_context["answer_check"]
+        token_limited_generation = initial_answer_context["token_limited_generation"]
         if self._trust_provider_final_answer():
             return self._trusted_llm_answer_result(
                 question=question,
@@ -13786,149 +14042,52 @@ class SourceCodeQAService:
             answer_judge,
             claim_requires_existing_retry=True,
         )
-        if answer_check.get("status") == "retry":
-            if token_limited_generation:
-                retry_matches = selected_matches[: max(4, min(int(budget["match_limit"]), 8))]
-            else:
-                retry_matches = self._expand_answer_retry_matches(
-                    entries=entries,
-                    key=key,
-                    question=question,
-                    matches=matches,
-                    draft_answer=answer,
-                    answer_check=answer_check,
-                    claim_check=claim_check,
-                    answer_judge=answer_judge,
-                    evidence_summary=evidence_summary,
-                    quality_gate=quality_gate,
-                    limit=int(budget["match_limit"]) + 6,
-                    request_cache=request_cache,
-                )
-            if retry_matches:
-                retry_match_limit = max(4, min(int(budget["match_limit"]), 8)) if token_limited_generation else int(budget["match_limit"]) + 4
-                retry_selected_matches = self._select_llm_matches(retry_matches, retry_match_limit, question=question)
-                retry_evidence_summary = self._compress_evidence_cached(question, retry_selected_matches, request_cache=request_cache)
-                retry_trace_paths = self._build_trace_paths(
-                    entries=entries,
-                    key=key,
-                    matches=retry_selected_matches,
-                    question=question,
-                    request_cache=request_cache,
-                )
-                if retry_trace_paths:
-                    retry_evidence_summary["trace_paths"] = retry_trace_paths
-                retry_quality_gate = self._quality_gate_cached(question, retry_evidence_summary, request_cache=request_cache)
-                retry_evidence_pack = self._build_evidence_pack(
-                    question=question,
-                    evidence_summary=retry_evidence_summary,
-                    matches=retry_selected_matches,
-                    trace_paths=retry_trace_paths,
-                    quality_gate=retry_quality_gate,
-                )
-                retry_domain_context = self._llm_domain_context(
-                    pm_team=pm_team,
-                    country=country,
-                    question=question,
-                    evidence_summary=retry_evidence_summary,
-                )
-                if self.llm_provider_name == LLM_PROVIDER_VERTEX_AI and not token_limited_generation:
-                    retry_snippet_line_budget = min(int(budget["snippet_line_budget"]) + 100, 320)
-                    retry_snippet_char_budget = min(int(budget["snippet_char_budget"]) + 16_000, 100_000)
-                else:
-                    retry_snippet_line_budget = 45 if token_limited_generation else min(int(budget["snippet_line_budget"]) + 60, 180)
-                    retry_snippet_char_budget = 6_000 if token_limited_generation else min(int(budget["snippet_char_budget"]) + 8000, 28_000)
-                retry_context = self._build_compressed_llm_context(
-                    retry_evidence_summary,
-                    retry_quality_gate,
-                    retry_evidence_pack,
-                    retry_selected_matches,
-                    domain_context=retry_domain_context,
-                    snippet_line_budget=retry_snippet_line_budget,
-                    snippet_char_budget=retry_snippet_char_budget,
-                    compact=token_limited_generation,
-                )
-                retry_payload = dict(payload)
-                retry_thinking_budget = self._thinking_budget_for_call(
-                    role="repair",
-                    budget_mode="deep",
-                    budget=self.llm_budgets.get("deep") or budget,
-                    quality_gate=retry_quality_gate,
-                    retry=True,
-                )
-                retry_thinking_budget = 0 if token_limited_generation else self._normalize_thinking_budget_for_provider(retry_thinking_budget)
-                retry_model = self._model_for_role_or_budget("repair", self.llm_budgets.get("deep") or budget)
-                if self.llm_provider_name == LLM_PROVIDER_VERTEX_AI:
-                    retry_max_output_tokens = 2_400 if token_limited_generation else min(max(int(budget["max_output_tokens"]) + 800, 3_200), 5_600)
-                else:
-                    retry_max_output_tokens = 2_400 if token_limited_generation else min(max(int(budget["max_output_tokens"]) + 500, 900), 1_600)
-                retry_payload["generationConfig"] = {
-                    **payload["generationConfig"],
-                    "maxOutputTokens": retry_max_output_tokens,
-                    "thinkingConfig": self._thinking_config_for_provider(
-                        retry_thinking_budget,
-                        model=retry_model,
-                        role="repair",
-                        budget_mode="deep",
-                    ),
-                }
-                retry_payload["contents"] = [
-                    {
-                        "parts": self._llm_payload_parts(
-                            self._llm_user_prompt(
-                                pm_team=pm_team,
-                                country=country,
-                                question=question,
-                                context=retry_context,
-                                self_check=answer_check,
-                                attachment_section=attachment_section,
-                            ),
-                            attachments or [],
-                        )
-                    }
-                ]
-                retry_result = self.llm_provider.generate(
-                    payload=retry_payload,
-                    primary_model=retry_model,
-                    fallback_model=self._llm_fallback_model(),
-                )
-                retry_answer = self.llm_provider.extract_text(retry_result.payload)
-                retry_structured_answer = self._parse_structured_answer(retry_answer)
-                retry_finish_reason = self._llm_finish_reason(retry_result.payload)
-                retry_check = self._answer_self_check(question, retry_answer, retry_evidence_summary, retry_quality_gate)
-                if self._finish_reason_needs_generation_repair(retry_finish_reason):
-                    issues = list(retry_check.get("issues") or [])
-                    issues.append(f"model finish reason requires caution: {retry_finish_reason}")
-                    retry_check = {"status": "retry", "issues": list(dict.fromkeys(issues))}
-                retry_claim_check = self._verify_answer_claims(retry_answer, retry_evidence_summary, retry_selected_matches)
-                retry_judge = self._run_answer_judge(question, retry_answer, retry_evidence_pack, retry_claim_check)
-                retry_check = self._merge_answer_retry_issues(
-                    retry_check,
-                    retry_claim_check,
-                    retry_judge,
-                    claim_requires_existing_retry=False,
-                )
-                answer = retry_answer
-                structured_answer = retry_structured_answer
-                retry_usage = self._normalize_llm_usage(retry_result.usage or retry_result.payload.get("usageMetadata") or {})
-                usage = self._merge_llm_usage(usage, retry_usage)
-                effective_model = retry_result.model
-                attempts += retry_result.attempts
-                llm_latency_ms += int(retry_result.latency_ms or 0)
-                llm_attempt_log.extend(dict(item) for item in retry_result.attempt_log)
-                finish_reason = retry_finish_reason
-                evidence_summary = retry_evidence_summary
-                quality_gate = retry_quality_gate
-                evidence_pack = retry_evidence_pack
-                answer_check = retry_check
-                claim_check = retry_claim_check
-                answer_judge = retry_judge
-                selected_matches = retry_selected_matches
-                prompt_context = retry_context
-                llm_route = {
-                    **llm_route,
-                    "repair_model": effective_model,
-                    "repair_thinking_budget": retry_thinking_budget,
-                }
+        retry_context = self._retry_llm_answer_if_needed(
+            entries=entries,
+            key=key,
+            pm_team=pm_team,
+            country=country,
+            question=question,
+            matches=matches,
+            payload=payload,
+            budget=budget,
+            attachment_section=attachment_section,
+            attachments=attachments or [],
+            request_cache=request_cache,
+            token_limited_generation=token_limited_generation,
+            answer=answer,
+            structured_answer=structured_answer,
+            usage=usage,
+            effective_model=effective_model,
+            attempts=attempts,
+            llm_latency_ms=llm_latency_ms,
+            llm_attempt_log=llm_attempt_log,
+            finish_reason=finish_reason,
+            evidence_summary=evidence_summary,
+            quality_gate=quality_gate,
+            evidence_pack=evidence_pack,
+            answer_check=answer_check,
+            claim_check=claim_check,
+            answer_judge=answer_judge,
+            selected_matches=selected_matches,
+            llm_route=llm_route,
+        )
+        answer = retry_context["answer"]
+        structured_answer = retry_context["structured_answer"]
+        usage = retry_context["usage"]
+        effective_model = retry_context["effective_model"]
+        attempts = retry_context["attempts"]
+        llm_latency_ms = retry_context["llm_latency_ms"]
+        llm_attempt_log = retry_context["llm_attempt_log"]
+        finish_reason = retry_context["finish_reason"]
+        evidence_summary = retry_context["evidence_summary"]
+        quality_gate = retry_context["quality_gate"]
+        evidence_pack = retry_context["evidence_pack"]
+        answer_check = retry_context["answer_check"]
+        claim_check = retry_context["claim_check"]
+        answer_judge = retry_context["answer_judge"]
+        selected_matches = retry_context["selected_matches"]
+        llm_route = retry_context["llm_route"]
         return self._final_llm_answer_result(
             question=question,
             answer=answer,
