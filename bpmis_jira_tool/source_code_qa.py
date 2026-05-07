@@ -5573,14 +5573,18 @@ class SourceCodeQAService:
                     add_entity_edge(current_method_id or current_class_id or file_entity_id, "call", call, line_no, stripped)
 
         return {
-            "definitions": list(dict.fromkeys(definitions)),
-            "references": list(dict.fromkeys(references)),
-            "entities": list(dict.fromkeys(entities)),
-            "entity_edges": list(dict.fromkeys(entity_edges)),
+            "definitions": self._dedupe_structure_rows(definitions),
+            "references": self._dedupe_structure_rows(references),
+            "entities": self._dedupe_structure_rows(entities),
+            "entity_edges": self._dedupe_structure_rows(entity_edges),
             "tree_sitter_used": tree_sitter_used,
             "tree_sitter_language": tree_sitter_language if tree_sitter_used else "",
             "tree_sitter_error": tree_sitter_error,
         }
+
+    @staticmethod
+    def _dedupe_structure_rows(rows: list[tuple[Any, ...]]) -> list[tuple[Any, ...]]:
+        return list(dict.fromkeys(rows))
 
     def _extract_sql_http_config_structure(
         self,
