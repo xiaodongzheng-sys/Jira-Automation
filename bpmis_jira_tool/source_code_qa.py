@@ -13,7 +13,6 @@ import re
 import shutil
 import sqlite3
 import subprocess
-import threading
 import time
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
@@ -39,10 +38,8 @@ from bpmis_jira_tool.source_code_qa_evidence_policy import (
     LOW_VALUE_CALL_SYMBOLS,
     LOW_VALUE_FOCUS_TERMS,
     MODULE_DEPENDENCY_HINTS,
-    OPERATIONAL_BOUNDARY_HINTS,
     QUALITY_GATE_TRACE_STAGE,
     RULE_HINTS,
-    STATIC_QA_HINTS,
     STATIC_QA_RULES,
     TEST_COVERAGE_HINTS,
     TOOL_LOOP_TRACE_PREFIX,
@@ -53,7 +50,6 @@ from bpmis_jira_tool.source_code_qa_embeddings import (
     SourceCodeQAEmbeddingProvider,
     OpenAICompatibleEmbeddingProvider,
     VertexAIEmbeddingProvider,
-    VERTEX_AI_GLOBAL_API_BASE_URL,
     VERTEX_EMBEDDING_DOCUMENT_TASK,
     VERTEX_EMBEDDING_QUERY_TASK,
 )
@@ -196,10 +192,8 @@ from bpmis_jira_tool.source_code_qa_runtime_policy import (
     SYNC_JOB_LOCK_TIMEOUT_SECONDS,
     DEFAULT_LLM_BUDGETS,
     VERTEX_QUALITY_LLM_BUDGETS,
-    LLM_BUDGETS,
     ANSWER_SELF_CHECK_WEAK_PHRASES,
     PRODUCTION_EVIDENCE_TIERS,
-    WEAK_EVIDENCE_TIERS,
     SKIP_DIRS,
     TEXT_SUFFIXES,
     STOPWORDS,
