@@ -157,6 +157,33 @@ print(data_path / "prd_briefing")
 PY
 }
 
+verify_uat_source_code_qa_ops() {
+  local host_workspace="$1"
+  if [[ "${CLOUD_RUN_UAT_VERIFY_SOURCE_CODE_QA_OPS:-1}" == "0" ]]; then
+    echo "Skipping UAT Source Code QA ops guard because CLOUD_RUN_UAT_VERIFY_SOURCE_CODE_QA_OPS=0."
+    return 0
+  fi
+
+  local host_python="$host_workspace/.venv/bin/python"
+  if [[ ! -x "$host_python" ]]; then
+    echo "Mac local-agent venv is missing: $host_python"
+    echo "Create the host venv first, or set CLOUD_RUN_UAT_VERIFY_SOURCE_CODE_QA_OPS=0 only if Source Code QA is intentionally out of scope."
+    exit 1
+  fi
+  if [[ ! -f "$host_workspace/scripts/source_code_qa_ops_summary.py" ]]; then
+    echo "Source Code QA ops guard is missing: $host_workspace/scripts/source_code_qa_ops_summary.py"
+    exit 1
+  fi
+
+  local data_path
+  data_path="$(resolve_uat_local_agent_data_path "$host_workspace")"
+  echo "Verifying UAT Source Code QA active config and indexes: $data_path"
+  ENV_FILE=/dev/null \
+  PYTHONPATH="$host_workspace" \
+  TEAM_PORTAL_DATA_DIR="$data_path" \
+  "$host_python" "$host_workspace/scripts/source_code_qa_ops_summary.py" --strict
+}
+
 sync_mac_local_agent_for_uat() {
   if [[ "${CLOUD_RUN_UAT_SYNC_LOCAL_AGENT_AFTER_DEPLOY:-1}" == "0" ]]; then
     echo "Skipping Mac local-agent sync because CLOUD_RUN_UAT_SYNC_LOCAL_AGENT_AFTER_DEPLOY=0."
@@ -228,6 +255,8 @@ sync_mac_local_agent_for_uat() {
       ./scripts/run_local_agent.sh restart >/dev/null
     )
   fi
+
+  verify_uat_source_code_qa_ops "$host_workspace"
 
   if [[ "${CLOUD_RUN_UAT_VERIFY_PUBLIC_LOCAL_AGENT:-1}" != "0" && -n "$LOCAL_AGENT_URL" ]]; then
     local local_agent_base="${LOCAL_AGENT_URL%/}"

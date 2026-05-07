@@ -329,7 +329,7 @@ Only when the user explicitly requested Cloud Run live deployment or validation,
 
 ## 7. Easy-To-Miss Release Surfaces
 
-- UAT deploys restart and verify the isolated UAT Mac local-agent by default. If `CLOUD_RUN_UAT_SYNC_LOCAL_AGENT_AFTER_DEPLOY=0` is used, local-agent-backed UAT workflows are not validated until the UAT host workspace is synced, dependencies are installed, PRD cache schema is initialized, UAT local-agent is restarted on port `7008`, and public `/uat-local-agent/healthz` passes.
+- UAT deploys restart and verify the isolated UAT Mac local-agent by default, then run `scripts/source_code_qa_ops_summary.py --strict` against the UAT data root to catch fixture/demo Source Code Q&A repo mappings before signoff. If `CLOUD_RUN_UAT_SYNC_LOCAL_AGENT_AFTER_DEPLOY=0` is used, local-agent-backed UAT workflows are not validated until the UAT host workspace is synced, dependencies are installed, PRD cache schema is initialized, UAT local-agent is restarted on port `7008`, the Source Code Q&A ops guard passes, and public `/uat-local-agent/healthz` passes.
 - UAT deploys must not be promoted if `origin/main` has advanced beyond the tagged UAT commit. Re-deploy UAT from the latest commit instead.
 - Source Code Q&A index/retrieval changes need the Mac-hosted portal restarted because the Mac owns both the primary web request path and durable repos/indexes.
 - Local-agent code changes still need the Mac local-agent restarted when Cloud Run backup mode or local-agent-only features are in use.

@@ -483,6 +483,8 @@ exit 0
         self.assertIn("LOCAL_AGENT_TEAM_PORTAL_DATA_DIR=\"$UAT_LOCAL_AGENT_DATA_DIR\"", contents)
         self.assertIn("LOCAL_AGENT_SCREEN_SESSION=\"$UAT_LOCAL_AGENT_SCREEN_SESSION\"", contents)
         self.assertIn("./scripts/run_local_agent.sh restart", contents)
+        self.assertIn("CLOUD_RUN_UAT_VERIFY_SOURCE_CODE_QA_OPS:-1", contents)
+        self.assertIn("source_code_qa_ops_summary.py\" --strict", contents)
         self.assertIn("/uat-local-agent", contents)
 
     def test_release_checklist_documents_full_gate_and_read_only_smoke(self):
