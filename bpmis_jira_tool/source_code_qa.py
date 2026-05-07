@@ -4183,20 +4183,33 @@ class SourceCodeQAService:
         )
         return len(updates)
 
-    @staticmethod
-    def _build_implementation_edges(connection: sqlite3.Connection) -> int:
-        bean_names_by_class: dict[str, set[str]] = {}
-        for class_name, bean_name in connection.execute(
+    @classmethod
+    def _entity_edge_values_by_class(
+        cls,
+        connection: sqlite3.Connection,
+        edge_kind: str,
+        *,
+        normalize_value: Any = None,
+    ) -> dict[str, set[str]]:
+        values_by_class: dict[str, set[str]] = {}
+        for class_name, target_name in connection.execute(
             """
             select c.name, e.to_name
             from entity_edges e
             join code_entities c on c.entity_id = e.from_entity_id
-            where e.edge_kind = 'bean_name'
-            """
+            where e.edge_kind = ?
+            """,
+            (edge_kind,),
         ):
-            for key in SourceCodeQAService._symbol_lookup_keys(str(class_name)):
-                bean_names_by_class.setdefault(key, set()).add(str(bean_name))
+            value = str(target_name)
+            if normalize_value is not None:
+                value = normalize_value(value)
+            for key in cls._symbol_lookup_keys(str(class_name)):
+                values_by_class.setdefault(key, set()).add(value)
+        return values_by_class
 
+    @classmethod
+    def _primary_classes_by_lookup_key(cls, connection: sqlite3.Connection) -> set[str]:
         primary_classes: set[str] = set()
         for class_name in connection.execute(
             """
@@ -4206,36 +4219,14 @@ class SourceCodeQAService:
             where e.edge_kind = 'bean_primary'
             """
         ):
-            for key in SourceCodeQAService._symbol_lookup_keys(str(class_name[0])):
+            for key in cls._symbol_lookup_keys(str(class_name[0])):
                 primary_classes.add(key)
+        return primary_classes
 
-        profiles_by_class: dict[str, set[str]] = {}
-        for class_name, profile_name in connection.execute(
-            """
-            select c.name, e.to_name
-            from entity_edges e
-            join code_entities c on c.entity_id = e.from_entity_id
-            where e.edge_kind = 'spring_profile'
-            """
-        ):
-            for key in SourceCodeQAService._symbol_lookup_keys(str(class_name)):
-                profiles_by_class.setdefault(key, set()).add(str(profile_name).strip().lower())
-
-        active_profiles = SourceCodeQAService._active_spring_profiles(connection)
-        config_values = SourceCodeQAService._spring_config_values(connection)
-
-        conditions_by_class: dict[str, set[str]] = {}
-        for class_name, condition in connection.execute(
-            """
-            select c.name, e.to_name
-            from entity_edges e
-            join code_entities c on c.entity_id = e.from_entity_id
-            where e.edge_kind = 'bean_condition'
-            """
-        ):
-            for key in SourceCodeQAService._symbol_lookup_keys(str(class_name)):
-                conditions_by_class.setdefault(key, set()).add(str(condition).strip())
-
+    @staticmethod
+    def _bean_qualifier_lookups(
+        connection: sqlite3.Connection,
+    ) -> tuple[dict[str, set[str]], dict[tuple[str, str], set[str]]]:
         qualifiers_by_file: dict[str, set[str]] = {}
         for from_file, qualifier in connection.execute(
             "select from_file, to_name from entity_edges where edge_kind = 'bean_qualifier'"
@@ -4248,6 +4239,25 @@ class SourceCodeQAService:
             variable_name, separator, qualifier = str(target).partition("=")
             if separator and variable_name and qualifier:
                 qualifiers_by_variable.setdefault((str(from_file), variable_name), set()).add(qualifier)
+        return qualifiers_by_file, qualifiers_by_variable
+
+    @classmethod
+    def _build_implementation_edges(cls, connection: sqlite3.Connection) -> int:
+        bean_names_by_class = cls._entity_edge_values_by_class(connection, "bean_name")
+        primary_classes = cls._primary_classes_by_lookup_key(connection)
+        profiles_by_class = cls._entity_edge_values_by_class(
+            connection,
+            "spring_profile",
+            normalize_value=lambda value: value.strip().lower(),
+        )
+        active_profiles = cls._active_spring_profiles(connection)
+        config_values = cls._spring_config_values(connection)
+        conditions_by_class = cls._entity_edge_values_by_class(
+            connection,
+            "bean_condition",
+            normalize_value=lambda value: value.strip(),
+        )
+        qualifiers_by_file, qualifiers_by_variable = cls._bean_qualifier_lookups(connection)
 
         implementors: dict[str, list[dict[str, Any]]] = {}
         for impl_name, from_file, from_line, interface_name in connection.execute(
@@ -4258,8 +4268,8 @@ class SourceCodeQAService:
             where e.edge_kind in ('implements', 'extends')
             """
         ):
-            for key in SourceCodeQAService._symbol_lookup_keys(str(interface_name)):
-                impl_keys = SourceCodeQAService._symbol_lookup_keys(str(impl_name))
+            for key in cls._symbol_lookup_keys(str(interface_name)):
+                impl_keys = cls._symbol_lookup_keys(str(impl_name))
                 bean_names: set[str] = set()
                 for impl_key in impl_keys:
                     bean_names.update(bean_names_by_class.get(impl_key) or set())
@@ -4296,8 +4306,8 @@ class SourceCodeQAService:
             """
         ):
             owner, method_name = str(to_name).rsplit(".", 1)
-            call_variable = SourceCodeQAService._member_call_variable(str(evidence or ""), method_name)
-            for owner_key in SourceCodeQAService._symbol_lookup_keys(owner):
+            call_variable = cls._member_call_variable(str(evidence or ""), method_name)
+            for owner_key in cls._symbol_lookup_keys(owner):
                 candidates = implementors.get(owner_key, [])[:8]
                 qualifiers = qualifiers_by_variable.get((str(from_file), call_variable), set()) if call_variable else set()
                 if not qualifiers:
@@ -4316,7 +4326,7 @@ class SourceCodeQAService:
                     item
                     for item in candidates
                     if any(
-                        SourceCodeQAService._spring_condition_matches(str(condition), config_values)
+                        cls._spring_condition_matches(str(condition), config_values)
                         for condition in (item.get("conditions") or set())
                     )
                 ]
@@ -4336,7 +4346,7 @@ class SourceCodeQAService:
                     matched_conditions = sorted(
                         str(condition)
                         for condition in (item.get("conditions") or set())
-                        if SourceCodeQAService._spring_condition_matches(str(condition), config_values)
+                        if cls._spring_condition_matches(str(condition), config_values)
                     )
                     condition_note = f" condition={matched_conditions[0]};" if matched_conditions else ""
                     primary_note = " primary=true;" if item.get("primary") else ""
