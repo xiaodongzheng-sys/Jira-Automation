@@ -6388,53 +6388,84 @@ class SourceCodeQAService:
                     intent=intent,
                 )
             )
-            if simple_intent and trace_stage == "direct" and len(file_hits) > 60:
-                file_hits = dict(
-                    sorted(
-                        file_hits.items(),
-                        key=lambda item: int(item[1].get("best_score") or 0),
-                        reverse=True,
-                    )[:60]
-                )
-                self._increment_retrieval_stat(request_cache, "simple_file_hit_prunes")
-            for relative_path, hit in file_hits.items():
-                if not hit.get("best_score"):
-                    continue
-                lines = self._cached_file_lines(
+            matches.extend(
+                self._persistent_index_matches_from_hits(
                     connection,
                     index_path,
-                    str(relative_path),
-                    request_cache=request_cache,
-                )
-                if not lines:
-                    continue
-                start, end = self._best_snippet_window(lines, int(hit["best_line"]))
-                snippet = "\n".join(lines[start - 1 : end]).strip()
-                reason = self._match_reason(
-                    tokens,
-                    hit["path_text"],
-                    snippet,
-                    file_symbols=hit["file_symbols"],
+                    entry=entry,
+                    tokens=tokens,
                     question=question,
                     focus_terms=normalized_focus_terms,
                     trace_stage=trace_stage,
+                    simple_intent=simple_intent,
+                    file_hits=file_hits,
+                    request_cache=request_cache,
                 )
-                structure_hits = list(dict.fromkeys(hit.get("structure_hits") or []))
-                if structure_hits:
-                    reason = f"{reason}; structure matched: {', '.join(structure_hits[:4])}"
-                matches.append(
-                    {
-                        "repo": entry.display_name,
-                        "path": relative_path,
-                        "line_start": start,
-                        "line_end": end,
-                        "score": hit["best_score"],
-                        "snippet": snippet[:2400],
-                        "reason": reason,
-                        "trace_stage": trace_stage,
-                        "retrieval": "persistent_index",
-                    }
-                )
+            )
+        return matches
+
+    def _persistent_index_matches_from_hits(
+        self,
+        connection: sqlite3.Connection,
+        index_path: Path,
+        *,
+        entry: RepositoryEntry,
+        tokens: list[str],
+        question: str,
+        focus_terms: list[str],
+        trace_stage: str,
+        simple_intent: bool,
+        file_hits: dict[str, dict[str, Any]],
+        request_cache: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        if simple_intent and trace_stage == "direct" and len(file_hits) > 60:
+            file_hits = dict(
+                sorted(
+                    file_hits.items(),
+                    key=lambda item: int(item[1].get("best_score") or 0),
+                    reverse=True,
+                )[:60]
+            )
+            self._increment_retrieval_stat(request_cache, "simple_file_hit_prunes")
+        matches: list[dict[str, Any]] = []
+        for relative_path, hit in file_hits.items():
+            if not hit.get("best_score"):
+                continue
+            lines = self._cached_file_lines(
+                connection,
+                index_path,
+                str(relative_path),
+                request_cache=request_cache,
+            )
+            if not lines:
+                continue
+            start, end = self._best_snippet_window(lines, int(hit["best_line"]))
+            snippet = "\n".join(lines[start - 1 : end]).strip()
+            reason = self._match_reason(
+                tokens,
+                hit["path_text"],
+                snippet,
+                file_symbols=hit["file_symbols"],
+                question=question,
+                focus_terms=focus_terms,
+                trace_stage=trace_stage,
+            )
+            structure_hits = list(dict.fromkeys(hit.get("structure_hits") or []))
+            if structure_hits:
+                reason = f"{reason}; structure matched: {', '.join(structure_hits[:4])}"
+            matches.append(
+                {
+                    "repo": entry.display_name,
+                    "path": relative_path,
+                    "line_start": start,
+                    "line_end": end,
+                    "score": hit["best_score"],
+                    "snippet": snippet[:2400],
+                    "reason": reason,
+                    "trace_stage": trace_stage,
+                    "retrieval": "persistent_index",
+                }
+            )
         return matches
 
     def _cached_index_rows(
