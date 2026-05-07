@@ -13327,24 +13327,14 @@ class SourceCodeQAService:
         prompt_mode = CODEX_SQL_GENERATION_PROMPT_MODE if question_intent.get("sql_generation") else CODEX_INVESTIGATION_PROMPT_MODE
         llm_route = {
             **llm_route,
-            "answer_model": selected_model,
-            "prompt_mode": prompt_mode,
-            "candidate_paths": candidate_paths,
-            "candidate_path_layers": candidate_path_layers,
-            "candidate_repo_count": len({item.get("repo") for item in candidate_paths}),
-            "candidate_path_count": len(candidate_paths),
-            "scope_repo_roots": scope_roots,
-            "scope_repo_count": len(scope_roots),
-            "retrieval_role": "hints",
-            "codex_repair_enabled": self.codex_repair_enabled,
-            "codex_repair_allowed": bool(self.codex_repair_enabled),
-            "codex_repair_policy": "severe_only",
-            "codex_repair_skipped_reason": "",
-            "query_mode": query_mode,
-            "deadline_seconds": 0,
-            "codex_session_mode": self.codex_session_mode,
-            "codex_session_max_turns": self.codex_session_max_turns,
-            "codex_cache_followups": self.codex_cache_followups,
+            **self._codex_initial_route_fields(
+                selected_model=selected_model,
+                prompt_mode=prompt_mode,
+                candidate_paths=candidate_paths,
+                candidate_path_layers=candidate_path_layers,
+                scope_roots=scope_roots,
+                query_mode=query_mode,
+            ),
         }
         if effort_assessment:
             llm_route["task"] = "effort_assessment"
@@ -14374,6 +14364,37 @@ class SourceCodeQAService:
             "codex_deep_investigation_rounds": deep_investigation_rounds,
             "codex_deep_investigation_terms": deep_investigation_terms[:12],
             "codex_deep_investigation_added": deep_investigation_added,
+        }
+
+    def _codex_initial_route_fields(
+        self,
+        *,
+        selected_model: str,
+        prompt_mode: str,
+        candidate_paths: list[dict[str, Any]],
+        candidate_path_layers: list[dict[str, Any]],
+        scope_roots: list[dict[str, str]],
+        query_mode: str,
+    ) -> dict[str, Any]:
+        return {
+            "answer_model": selected_model,
+            "prompt_mode": prompt_mode,
+            "candidate_paths": candidate_paths,
+            "candidate_path_layers": candidate_path_layers,
+            "candidate_repo_count": len({item.get("repo") for item in candidate_paths}),
+            "candidate_path_count": len(candidate_paths),
+            "scope_repo_roots": scope_roots,
+            "scope_repo_count": len(scope_roots),
+            "retrieval_role": "hints",
+            "codex_repair_enabled": self.codex_repair_enabled,
+            "codex_repair_allowed": bool(self.codex_repair_enabled),
+            "codex_repair_policy": "severe_only",
+            "codex_repair_skipped_reason": "",
+            "query_mode": query_mode,
+            "deadline_seconds": 0,
+            "codex_session_mode": self.codex_session_mode,
+            "codex_session_max_turns": self.codex_session_max_turns,
+            "codex_cache_followups": self.codex_cache_followups,
         }
 
     def _codex_payload(
