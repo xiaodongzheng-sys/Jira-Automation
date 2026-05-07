@@ -12990,9 +12990,8 @@ class SourceCodeQAService:
             priority = max(priority, 35)
         return (priority, int(item.get("rerank_score", item.get("score", 0)) or 0), int(item.get("score") or 0))
 
-    def _select_result_matches(self, matches: list[dict[str, Any]], limit: int, *, question: str = "") -> list[dict[str, Any]]:
-        limit = max(1, int(limit or 1))
-        intent = self._question_intent(question) if question else {}
+    @staticmethod
+    def _result_match_buckets(matches: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
         buckets = {
             "direct": [match for match in matches if match.get("trace_stage") == "direct"],
             "exact_lookup": [match for match in matches if match.get("trace_stage") == "exact_lookup"],
@@ -13018,6 +13017,12 @@ class SourceCodeQAService:
             ),
             reverse=True,
         )
+        return buckets
+
+    def _select_result_matches(self, matches: list[dict[str, Any]], limit: int, *, question: str = "") -> list[dict[str, Any]]:
+        limit = max(1, int(limit or 1))
+        intent = self._question_intent(question) if question else {}
+        buckets = self._result_match_buckets(matches)
         selected: list[dict[str, Any]] = []
         seen: set[tuple[Any, Any, Any, Any]] = set()
         exact_terms_seen: set[str] = set()
