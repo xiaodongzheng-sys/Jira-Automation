@@ -1819,6 +1819,21 @@ class SourceCodeQAService:
     def _answer_mode_requests_llm(normalized_answer_mode: str) -> bool:
         return normalized_answer_mode in {ANSWER_MODE_GEMINI, ANSWER_MODE_AUTO}
 
+    @staticmethod
+    def _report_query_progress(
+        progress_callback: Any | None,
+        stage: str,
+        message: str,
+        current: int = 0,
+        total: int = 0,
+    ) -> None:
+        if not progress_callback:
+            return
+        try:
+            progress_callback(stage, message, current, total)
+        except Exception:
+            return
+
     def query(
         self,
         *,
@@ -1840,14 +1855,7 @@ class SourceCodeQAService:
         query_mode = self.normalize_query_mode(query_mode)
         started_at = time.time()
         trace_id = uuid.uuid4().hex
-
-        def report(stage: str, message: str, current: int = 0, total: int = 0) -> None:
-            if not progress_callback:
-                return
-            try:
-                progress_callback(stage, message, current, total)
-            except Exception:
-                return
+        report = functools.partial(self._report_query_progress, progress_callback)
 
         report("validating", "Validating question and repository scope.", 0, 0)
         if not question:
