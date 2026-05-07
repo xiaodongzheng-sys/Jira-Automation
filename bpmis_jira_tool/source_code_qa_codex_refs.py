@@ -19,6 +19,39 @@ def extract_direct_file_refs(text: str) -> list[str]:
     return refs
 
 
+def codex_candidate_path_layers(
+    candidate_paths: list[dict[str, Any]],
+    followup_context: dict[str, Any] | None,
+) -> dict[str, list[dict[str, Any]]]:
+    confirmed_keys: set[tuple[str, str]] = set()
+    for item in (followup_context or {}).get("codex_inspected_paths") or []:
+        if isinstance(item, dict):
+            confirmed_keys.add((str(item.get("repo") or ""), str(item.get("path") or "")))
+    for item in (followup_context or {}).get("codex_candidate_paths") or []:
+        if isinstance(item, dict) and str(item.get("trace_stage") or "") == "followup_memory":
+            confirmed_keys.add((str(item.get("repo") or ""), str(item.get("path") or "")))
+    layers = {
+        "confirmed_previous_paths": [],
+        "current_high_confidence_paths": [],
+        "current_supporting_paths": [],
+        "maybe_relevant_paths": [],
+    }
+    for item in candidate_paths:
+        key = (str(item.get("repo") or ""), str(item.get("path") or ""))
+        stage = str(item.get("trace_stage") or "").lower()
+        retrieval = str(item.get("retrieval") or "").lower()
+        exists = bool(item.get("file_exists"))
+        if key in confirmed_keys or stage == "followup_memory" or retrieval == "previous_codex_context":
+            layers["confirmed_previous_paths"].append(item)
+        elif exists and stage in {"direct", "call_chain", "read_write", "semantic", "token"}:
+            layers["current_high_confidence_paths"].append(item)
+        elif exists:
+            layers["current_supporting_paths"].append(item)
+        else:
+            layers["maybe_relevant_paths"].append(item)
+    return layers
+
+
 def resolve_codex_file_ref(
     raw_ref: str,
     candidate_paths: list[dict[str, Any]],
