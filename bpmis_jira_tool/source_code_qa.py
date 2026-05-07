@@ -13465,59 +13465,43 @@ class SourceCodeQAService:
         initial_prompt_tokens = self._estimate_llm_tokens(
             self._llm_user_prompt(pm_team=pm_team, country=country, question=question, context=prompt_context, attachment_section=attachment_section)
         )
-        token_pressure = self._llm_prompt_pressure_for_provider(initial_prompt_tokens)
-        if token_pressure != "normal" and routed_budget_mode in {"balanced", "deep"}:
-            original_budget_mode = routed_budget_mode
-            routed_budget_mode = COMPACT_DEEP_BUDGET_MODE
-            budget = self.llm_budgets[COMPACT_DEEP_BUDGET_MODE]
-            selected_model = self._model_for_role_or_budget("answer", budget)
-            answer_context = self._llm_answer_evidence_context(
-                entries=entries,
-                key=key,
-                question=question,
-                pm_team=pm_team,
-                country=country,
-                matches=matches,
-                match_limit=int(budget["match_limit"]),
-                request_cache=request_cache,
-            )
-            selected_matches = answer_context["selected_matches"]
-            evidence_summary = answer_context["evidence_summary"]
-            trace_paths = answer_context["trace_paths"]
-            quality_gate = answer_context["quality_gate"]
-            evidence_pack = answer_context["evidence_pack"]
-            domain_context = answer_context["domain_context"]
-            generation_settings = self._llm_answer_generation_settings(
-                llm_route=llm_route,
-                selected_model=selected_model,
-                routed_budget_mode=routed_budget_mode,
-                budget=budget,
-                quality_gate=quality_gate,
-                force_zero_thinking=token_pressure == "tight",
-            )
-            answer_thinking_budget = generation_settings["answer_thinking_budget"]
-            answer_thinking_config = generation_settings["answer_thinking_config"]
-            llm_route = {
-                **generation_settings["llm_route"],
-                "selected": routed_budget_mode,
-                "reason": f"{llm_route.get('reason') or ''},token_pressure_{token_pressure}".strip(","),
-                "original_budget": original_budget_mode,
-            }
-            prompt_context = self._build_compressed_llm_context(
-                evidence_summary,
-                quality_gate,
-                evidence_pack,
-                selected_matches,
-                domain_context=domain_context,
-                snippet_line_budget=budget["snippet_line_budget"],
-                snippet_char_budget=budget["snippet_char_budget"],
-                compact=True,
-            )
-            final_prompt_tokens = self._estimate_llm_tokens(
-                self._llm_user_prompt(pm_team=pm_team, country=country, question=question, context=prompt_context, attachment_section=attachment_section)
-            )
-        else:
-            final_prompt_tokens = initial_prompt_tokens
+        token_pressure_context = self._llm_prompt_context_after_token_pressure(
+            entries=entries,
+            key=key,
+            pm_team=pm_team,
+            country=country,
+            question=question,
+            matches=matches,
+            selected_matches=selected_matches,
+            evidence_summary=evidence_summary,
+            quality_gate=quality_gate,
+            evidence_pack=evidence_pack,
+            domain_context=domain_context,
+            prompt_context=prompt_context,
+            llm_route=llm_route,
+            selected_model=selected_model,
+            routed_budget_mode=routed_budget_mode,
+            budget=budget,
+            answer_thinking_budget=answer_thinking_budget,
+            answer_thinking_config=answer_thinking_config,
+            initial_prompt_tokens=initial_prompt_tokens,
+            attachment_section=attachment_section,
+            request_cache=request_cache,
+        )
+        selected_matches = token_pressure_context["selected_matches"]
+        evidence_summary = token_pressure_context["evidence_summary"]
+        quality_gate = token_pressure_context["quality_gate"]
+        evidence_pack = token_pressure_context["evidence_pack"]
+        domain_context = token_pressure_context["domain_context"]
+        prompt_context = token_pressure_context["prompt_context"]
+        routed_budget_mode = token_pressure_context["routed_budget_mode"]
+        budget = token_pressure_context["budget"]
+        selected_model = token_pressure_context["selected_model"]
+        answer_thinking_budget = token_pressure_context["answer_thinking_budget"]
+        answer_thinking_config = token_pressure_context["answer_thinking_config"]
+        llm_route = token_pressure_context["llm_route"]
+        token_pressure = token_pressure_context["token_pressure"]
+        final_prompt_tokens = token_pressure_context["final_prompt_tokens"]
         if token_pressure != "normal":
             llm_route = {
                 **llm_route,
@@ -13893,6 +13877,108 @@ class SourceCodeQAService:
             answer_check=answer_check,
             evidence_pack=evidence_pack,
         )
+
+    def _llm_prompt_context_after_token_pressure(
+        self,
+        *,
+        entries: list[RepositoryEntry],
+        key: str,
+        pm_team: str,
+        country: str,
+        question: str,
+        matches: list[dict[str, Any]],
+        selected_matches: list[dict[str, Any]],
+        evidence_summary: dict[str, Any],
+        quality_gate: dict[str, Any],
+        evidence_pack: dict[str, Any],
+        domain_context: str,
+        prompt_context: str,
+        llm_route: dict[str, Any],
+        selected_model: str,
+        routed_budget_mode: str,
+        budget: dict[str, Any],
+        answer_thinking_budget: int,
+        answer_thinking_config: dict[str, Any],
+        initial_prompt_tokens: int,
+        attachment_section: str,
+        request_cache: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        token_pressure = self._llm_prompt_pressure_for_provider(initial_prompt_tokens)
+        final_prompt_tokens = initial_prompt_tokens
+        generation_settings = {
+            "answer_thinking_budget": answer_thinking_budget,
+            "answer_thinking_config": answer_thinking_config,
+            "llm_route": llm_route,
+        }
+        if token_pressure != "normal" and routed_budget_mode in {"balanced", "deep"}:
+            original_budget_mode = routed_budget_mode
+            routed_budget_mode = COMPACT_DEEP_BUDGET_MODE
+            budget = self.llm_budgets[COMPACT_DEEP_BUDGET_MODE]
+            selected_model = self._model_for_role_or_budget("answer", budget)
+            answer_context = self._llm_answer_evidence_context(
+                entries=entries,
+                key=key,
+                question=question,
+                pm_team=pm_team,
+                country=country,
+                matches=matches,
+                match_limit=int(budget["match_limit"]),
+                request_cache=request_cache,
+            )
+            selected_matches = answer_context["selected_matches"]
+            evidence_summary = answer_context["evidence_summary"]
+            quality_gate = answer_context["quality_gate"]
+            evidence_pack = answer_context["evidence_pack"]
+            domain_context = answer_context["domain_context"]
+            generation_settings = self._llm_answer_generation_settings(
+                llm_route=llm_route,
+                selected_model=selected_model,
+                routed_budget_mode=routed_budget_mode,
+                budget=budget,
+                quality_gate=quality_gate,
+                force_zero_thinking=token_pressure == "tight",
+            )
+            llm_route = {
+                **generation_settings["llm_route"],
+                "selected": routed_budget_mode,
+                "reason": f"{llm_route.get('reason') or ''},token_pressure_{token_pressure}".strip(","),
+                "original_budget": original_budget_mode,
+            }
+            prompt_context = self._build_compressed_llm_context(
+                evidence_summary,
+                quality_gate,
+                evidence_pack,
+                selected_matches,
+                domain_context=domain_context,
+                snippet_line_budget=budget["snippet_line_budget"],
+                snippet_char_budget=budget["snippet_char_budget"],
+                compact=True,
+            )
+            final_prompt_tokens = self._estimate_llm_tokens(
+                self._llm_user_prompt(
+                    pm_team=pm_team,
+                    country=country,
+                    question=question,
+                    context=prompt_context,
+                    attachment_section=attachment_section,
+                )
+            )
+        return {
+            "selected_matches": selected_matches,
+            "evidence_summary": evidence_summary,
+            "quality_gate": quality_gate,
+            "evidence_pack": evidence_pack,
+            "domain_context": domain_context,
+            "prompt_context": prompt_context,
+            "routed_budget_mode": routed_budget_mode,
+            "budget": budget,
+            "selected_model": selected_model,
+            "answer_thinking_budget": generation_settings["answer_thinking_budget"],
+            "answer_thinking_config": generation_settings["answer_thinking_config"],
+            "llm_route": llm_route,
+            "token_pressure": token_pressure,
+            "final_prompt_tokens": final_prompt_tokens,
+        }
 
     def _build_codex_llm_answer(
         self,
