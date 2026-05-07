@@ -2374,7 +2374,6 @@ class SourceCodeQARouteTests(unittest.TestCase):
     def test_source_code_qa_scheduler_fairly_rotates_between_users(self):
         path = Path(self.temp_dir.name) / "run" / "jobs.json"
         store = JobStore(path)
-        scheduler = SourceCodeQAQueryScheduler(job_store=store, max_running=2)
         jobs = [store.create("source-code-qa-query", f"job-{index}") for index in range(4)]
         release_events = {job.job_id: threading.Event() for job in jobs}
         started: list[str] = []
@@ -2385,24 +2384,24 @@ class SourceCodeQARouteTests(unittest.TestCase):
             release_events[job_id].wait(timeout=2)
             store.complete(job_id, results=[{"status": "ok"}], notice={"summary": "done"})
 
-        with patch("bpmis_jira_tool.web._run_source_code_qa_query_job", side_effect=fake_run):
-            scheduler.submit(app=self.app, job_id=jobs[0].job_id, payload={}, owner_email="a@npt.sg")
-            scheduler.submit(app=self.app, job_id=jobs[1].job_id, payload={}, owner_email="a@npt.sg")
-            scheduler.submit(app=self.app, job_id=jobs[2].job_id, payload={}, owner_email="a@npt.sg")
-            scheduler.submit(app=self.app, job_id=jobs[3].job_id, payload={}, owner_email="b@npt.sg")
-            self.assertEqual(started[:2], [jobs[0].job_id, jobs[1].job_id])
-            release_events[jobs[0].job_id].set()
-            for _ in range(20):
-                if jobs[3].job_id in started:
-                    break
-                time.sleep(0.05)
-            for event in release_events.values():
-                event.set()
-            for _ in range(20):
-                snapshots = [store.snapshot(job.job_id) for job in jobs]
-                if all(snapshot and snapshot.get("state") == "completed" for snapshot in snapshots):
-                    break
-                time.sleep(0.05)
+        scheduler = SourceCodeQAQueryScheduler(job_store=store, max_running=2, default_runner=fake_run)
+        scheduler.submit(app=self.app, job_id=jobs[0].job_id, payload={}, owner_email="a@npt.sg")
+        scheduler.submit(app=self.app, job_id=jobs[1].job_id, payload={}, owner_email="a@npt.sg")
+        scheduler.submit(app=self.app, job_id=jobs[2].job_id, payload={}, owner_email="a@npt.sg")
+        scheduler.submit(app=self.app, job_id=jobs[3].job_id, payload={}, owner_email="b@npt.sg")
+        self.assertEqual(started[:2], [jobs[0].job_id, jobs[1].job_id])
+        release_events[jobs[0].job_id].set()
+        for _ in range(20):
+            if jobs[3].job_id in started:
+                break
+            time.sleep(0.05)
+        for event in release_events.values():
+            event.set()
+        for _ in range(20):
+            snapshots = [store.snapshot(job.job_id) for job in jobs]
+            if all(snapshot and snapshot.get("state") == "completed" for snapshot in snapshots):
+                break
+            time.sleep(0.05)
 
         self.assertIn(jobs[3].job_id, started[:3])
         self.assertNotEqual(started[:3], [jobs[0].job_id, jobs[1].job_id, jobs[2].job_id])

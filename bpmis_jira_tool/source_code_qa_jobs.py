@@ -17,10 +17,8 @@ def _default_query_mode(_query_mode: str | None) -> str:
     return "deep"
 
 
-def _default_runner(app: Flask, job_id: str, payload: dict[str, Any]) -> None:
-    from bpmis_jira_tool.web import _run_source_code_qa_query_job
-
-    _run_source_code_qa_query_job(app, job_id, payload)
+def _missing_default_runner(_app: Flask, _job_id: str, _payload: dict[str, Any]) -> None:
+    raise RuntimeError("SourceCodeQAQueryScheduler requires a default runner or per-job runner.")
 
 
 class SourceCodeQAQueryScheduler:
@@ -35,7 +33,7 @@ class SourceCodeQAQueryScheduler:
         self.job_store = job_store
         self.max_running = max(1, int(max_running or 2))
         self.query_mode_normalizer = query_mode_normalizer or _default_query_mode
-        self.default_runner = default_runner or _default_runner
+        self.default_runner = default_runner or _missing_default_runner
         self._lock = threading.Lock()
         self._user_queues: dict[str, deque[tuple[str, Flask, dict[str, Any], QueryJobRunner | None]]] = {}
         self._user_order: deque[str] = deque()
