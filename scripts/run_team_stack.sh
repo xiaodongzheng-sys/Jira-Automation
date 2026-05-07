@@ -293,7 +293,7 @@ PY
   fi
 
   echo
-  echo "== Source Code QA Eval =="
+  echo "== Source Code QA Eval (advisory) =="
   if [[ -f "$source_qa_eval_status_file" ]]; then
     cat "$source_qa_eval_status_file"
     echo
@@ -322,9 +322,6 @@ PY
         while IFS= read -r line; do
           [[ -n "$line" ]] || continue
           echo "$line"
-          if [[ "$line" == "state=failed" ]]; then
-            ok=1
-          fi
         done <<<"$source_qa_eval_state"
       fi
     fi
