@@ -12938,6 +12938,58 @@ class SourceCodeQAService:
             "source_conflicts": evidence_pack.get("source_conflicts") or [],
         }
 
+    def _result_match_priority_sort_key(
+        self,
+        item: dict[str, Any],
+        *,
+        intent: dict[str, Any],
+        question: str,
+    ) -> tuple[int, int, int]:
+        retrieval = str(item.get("retrieval") or "")
+        trace_stage = str(item.get("trace_stage") or "")
+        path = str(item.get("path") or "").lower()
+        snippet = str(item.get("snippet") or "").lower()
+        lowered_question = str(question or "").lower()
+        priority = 0
+        if trace_stage == "exact_lookup" or retrieval == "exact_table_path_lookup":
+            priority = max(priority, 70)
+            if path.endswith((".java", ".kt", ".go", ".py", ".ts", ".js")):
+                priority = max(priority, 75)
+        if intent.get("static_qa") and (retrieval == "static_qa" or item.get("static_qa")):
+            priority = max(priority, 60)
+        if intent.get("test_coverage") and (retrieval == "test_coverage" or item.get("test_coverage") or self._is_test_file_path(path)):
+            priority = max(priority, 60)
+        if intent.get("operational_boundary") and (retrieval == "operational_boundary" or item.get("operational_boundary")):
+            priority = max(priority, 60)
+        if intent.get("module_dependency") and (
+            path.endswith(("pom.xml", "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts", "package.json"))
+            or "module_dependency" in str(item.get("reason") or "").lower()
+        ):
+            priority = max(priority, 58)
+        if intent.get("module_dependency"):
+            if ("npm" in lowered_question or "package" in lowered_question or "node" in lowered_question) and path.endswith("package.json"):
+                priority = max(priority, 72)
+            if ("gradle" in lowered_question or "multi-module" in lowered_question) and (
+                path.endswith(("build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts"))
+                or ".gradle" in path
+            ):
+                priority = max(priority, 72)
+            if ("maven" in lowered_question or "pom" in lowered_question) and path.endswith("pom.xml"):
+                priority = max(priority, 72)
+        if intent.get("message_flow") and (
+            any(term in path for term in ("event", "message", "consumer", "producer", "listener"))
+            or any(term in snippet for term in ("kafkalistener", "rabbitlistener", "jmslistener", "kafkatemplate", ".send(", "topic", "queue"))
+            or any(term in str(item.get("reason") or "").lower() for term in ("message_publish", "message_consume", "event_publish", "event_consume", "message_topic"))
+        ):
+            priority = max(priority, 58)
+        if intent.get("impact_analysis") and retrieval in {"planner_caller", "planner_callee", "flow_graph", "entity_graph", "code_graph"}:
+            priority = max(priority, 45)
+        if intent.get("api") and (any(term in path for term in ("controller", "client", "api", "routes")) or any(term in snippet for term in ("requestmapping", "postmapping", "getmapping", "route("))):
+            priority = max(priority, 35)
+        if intent.get("data_source") and (any(term in path for term in ("repository", "mapper", "dao")) or re.search(r"\bselect\b.+\bfrom\b", snippet)):
+            priority = max(priority, 35)
+        return (priority, int(item.get("rerank_score", item.get("score", 0)) or 0), int(item.get("score") or 0))
+
     def _select_result_matches(self, matches: list[dict[str, Any]], limit: int, *, question: str = "") -> list[dict[str, Any]]:
         limit = max(1, int(limit or 1))
         intent = self._question_intent(question) if question else {}
@@ -13055,54 +13107,15 @@ class SourceCodeQAService:
             if len(selected) >= limit:
                 break
 
-        def result_sort_key(item: dict[str, Any]) -> tuple[int, int, int]:
-            retrieval = str(item.get("retrieval") or "")
-            trace_stage = str(item.get("trace_stage") or "")
-            path = str(item.get("path") or "").lower()
-            snippet = str(item.get("snippet") or "").lower()
-            lowered_question = str(question or "").lower()
-            priority = 0
-            if trace_stage == "exact_lookup" or retrieval == "exact_table_path_lookup":
-                priority = max(priority, 70)
-                if path.endswith((".java", ".kt", ".go", ".py", ".ts", ".js")):
-                    priority = max(priority, 75)
-            if intent.get("static_qa") and (retrieval == "static_qa" or item.get("static_qa")):
-                priority = max(priority, 60)
-            if intent.get("test_coverage") and (retrieval == "test_coverage" or item.get("test_coverage") or self._is_test_file_path(path)):
-                priority = max(priority, 60)
-            if intent.get("operational_boundary") and (retrieval == "operational_boundary" or item.get("operational_boundary")):
-                priority = max(priority, 60)
-            if intent.get("module_dependency") and (
-                path.endswith(("pom.xml", "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts", "package.json"))
-                or "module_dependency" in str(item.get("reason") or "").lower()
-            ):
-                priority = max(priority, 58)
-            if intent.get("module_dependency"):
-                if ("npm" in lowered_question or "package" in lowered_question or "node" in lowered_question) and path.endswith("package.json"):
-                    priority = max(priority, 72)
-                if ("gradle" in lowered_question or "multi-module" in lowered_question) and (
-                    path.endswith(("build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts"))
-                    or ".gradle" in path
-                ):
-                    priority = max(priority, 72)
-                if ("maven" in lowered_question or "pom" in lowered_question) and path.endswith("pom.xml"):
-                    priority = max(priority, 72)
-            if intent.get("message_flow") and (
-                any(term in path for term in ("event", "message", "consumer", "producer", "listener"))
-                or any(term in snippet for term in ("kafkalistener", "rabbitlistener", "jmslistener", "kafkatemplate", ".send(", "topic", "queue"))
-                or any(term in str(item.get("reason") or "").lower() for term in ("message_publish", "message_consume", "event_publish", "event_consume", "message_topic"))
-            ):
-                priority = max(priority, 58)
-            if intent.get("impact_analysis") and retrieval in {"planner_caller", "planner_callee", "flow_graph", "entity_graph", "code_graph"}:
-                priority = max(priority, 45)
-            if intent.get("api") and (any(term in path for term in ("controller", "client", "api", "routes")) or any(term in snippet for term in ("requestmapping", "postmapping", "getmapping", "route("))):
-                priority = max(priority, 35)
-            if intent.get("data_source") and (any(term in path for term in ("repository", "mapper", "dao")) or re.search(r"\bselect\b.+\bfrom\b", snippet)):
-                priority = max(priority, 35)
-            return (priority, int(item.get("rerank_score", item.get("score", 0)) or 0), int(item.get("score") or 0))
-
         if any(intent.get(key) for key in ("data_source", "static_qa", "test_coverage", "operational_boundary", "module_dependency", "message_flow")) and not intent.get("impact_analysis"):
-            selected.sort(key=result_sort_key, reverse=True)
+            selected.sort(
+                key=lambda item: self._result_match_priority_sort_key(
+                    item,
+                    intent=intent,
+                    question=question,
+                ),
+                reverse=True,
+            )
         else:
             selected.sort(key=lambda item: item["score"], reverse=True)
         return selected
