@@ -7254,18 +7254,24 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         )
         compressed = self.service._compress_evidence("What data source does Term Loan Pre Check 1 check?", base_matches[:1])
         quality = self.service._quality_gate("What data source does Term Loan Pre Check 1 check?", compressed)
-        quality_matches = self.service._expand_quality_gate_matches(
+        agent_plan = self.service._build_agent_plan(
+            "What data source does Term Loan Pre Check 1 check?",
+            compressed,
+            quality,
+        )
+        quality_matches = self.service._run_agent_plan(
             entries=[type("Entry", (), entry)()],
             key="CRMS:ID",
             question="What data source does Term Loan Pre Check 1 check?",
-            base_matches=base_matches[:1],
+            matches=base_matches[:1],
             evidence_summary=compressed,
             quality_gate=quality,
+            agent_plan=agent_plan,
             limit=12,
         )
 
         self.assertIn("repository/DataSourceResultRepository.java", [match["path"] for match in quality_matches])
-        self.assertTrue(any(match.get("trace_stage") == "quality_gate" for match in quality_matches))
+        self.assertTrue(any(str(match.get("trace_stage") or "").startswith("agent_plan") for match in quality_matches))
 
     def test_agent_plan_includes_data_source_trace_steps(self):
         compressed = {

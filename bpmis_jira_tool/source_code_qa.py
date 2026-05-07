@@ -8162,45 +8162,6 @@ class SourceCodeQAService:
         all_matches.sort(key=lambda item: item["score"], reverse=True)
         return all_matches[: max(6, min(int(limit or 12) * 2, 24))]
 
-    def _expand_quality_gate_matches(
-        self,
-        *,
-        entries: list[RepositoryEntry],
-        key: str,
-        question: str,
-        base_matches: list[dict[str, Any]],
-        evidence_summary: dict[str, Any],
-        quality_gate: dict[str, Any],
-        limit: int,
-        request_cache: dict[str, Any] | None = None,
-    ) -> list[dict[str, Any]]:
-        trace_terms = self._quality_gate_trace_terms(question, evidence_summary, quality_gate, base_matches)
-        if not trace_terms:
-            return []
-        expanded_tokens: list[str] = []
-        for term in trace_terms:
-            expanded_tokens.extend(self._question_tokens(term))
-        expanded_tokens = list(dict.fromkeys(expanded_tokens))[:28]
-
-        matches: list[dict[str, Any]] = []
-        for entry in entries:
-            repo_path = self._repo_path(key, entry)
-            if not (repo_path / ".git").exists():
-                continue
-            matches.extend(
-                self._search_repo(
-                    entry,
-                    repo_path,
-                    expanded_tokens,
-                    question=question,
-                    focus_terms=trace_terms,
-                    trace_stage=QUALITY_GATE_TRACE_STAGE,
-                    request_cache=request_cache,
-                )
-            )
-        matches.sort(key=lambda item: item["score"], reverse=True)
-        return matches[: max(6, min(int(limit or 12), 18))]
-
     def _run_planner_tool_loop(
         self,
         *,
