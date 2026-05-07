@@ -1771,6 +1771,19 @@ class SourceCodeQAService:
             "sync_interval_days": self._auto_sync_interval_days(),
         }
 
+    def _query_exact_lookup_terms(self, question: str) -> tuple[list[str], list[str]]:
+        exact_lookup_terms = self._extract_exact_lookup_terms(question)
+        question_specific_terms = self._question_specific_retrieval_terms(question)
+        if question_specific_terms:
+            specific_exact_terms = [
+                str(term or "").strip().lower()
+                for term in question_specific_terms
+                if "_" in str(term or "")
+                and any(marker in str(term or "").lower() for marker in ("_tab", "_table", "process_info", "response_body"))
+            ]
+            exact_lookup_terms = list(dict.fromkeys([*exact_lookup_terms, *specific_exact_terms]))[:12]
+        return exact_lookup_terms, question_specific_terms
+
     def query(
         self,
         *,
@@ -1863,15 +1876,7 @@ class SourceCodeQAService:
             query_entries = entries
         repo_status = self.repo_status(key)
         index_freshness = self._index_freshness_payload(repo_status)
-        exact_lookup_terms = self._extract_exact_lookup_terms(question)
-        question_specific_terms = self._question_specific_retrieval_terms(question)
-        if question_specific_terms:
-            specific_exact_terms = [
-                str(term or "").strip().lower()
-                for term in question_specific_terms
-                if "_" in str(term or "") and any(marker in str(term or "").lower() for marker in ("_tab", "_table", "process_info", "response_body"))
-            ]
-            exact_lookup_terms = list(dict.fromkeys([*exact_lookup_terms, *specific_exact_terms]))[:12]
+        exact_lookup_terms, question_specific_terms = self._query_exact_lookup_terms(question)
         exact_matches: list[dict[str, Any]] = []
         latency_guarded_query_expansion = False
         synced_entries = [(entry, self._repo_path(key, entry)) for entry in query_entries if (self._repo_path(key, entry) / ".git").exists()]
