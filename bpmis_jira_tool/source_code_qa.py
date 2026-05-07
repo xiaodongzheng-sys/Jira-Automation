@@ -14149,109 +14149,40 @@ class SourceCodeQAService:
             repair_attempted = True
             repair_reason = "; ".join(severe_repair_reasons[:6])
             if deep_needed:
-                deep_started = time.perf_counter()
-                self._report_query_progress(progress_callback, "codex_deep_investigation", "Expanding investigation from Codex gaps.", 0, 0)
-                before_keys = {(item.get("repo"), item.get("path"), item.get("line_start"), item.get("line_end")) for item in candidate_matches}
-                terms_started = time.perf_counter()
-                deep_investigation_terms = self._codex_deep_investigation_terms(
-                    question=question,
-                    answer=answer,
-                    structured_answer=structured_answer,
-                    answer_judge=answer_judge,
-                    codex_validation=codex_validation,
-                )
-                _log_source_code_qa_timing(
-                    "codex_deep_investigation_terms",
-                    elapsed_ms=int((time.perf_counter() - terms_started) * 1000),
-                    trace_id=trace_id,
-                    provider=self.llm_provider.name,
-                    model=selected_model,
-                    query_mode=query_mode,
-                    phase="repair",
-                    term_count=len(deep_investigation_terms),
-                )
-                matches_started = time.perf_counter()
-                expanded_matches = self._codex_deep_investigation_matches(
+                deep_context = self._codex_deep_investigation_context(
                     entries=entries,
                     key=key,
                     question=question,
                     matches=matches,
-                    selected_matches=candidate_matches,
+                    candidate_matches=candidate_matches,
+                    candidate_paths=candidate_paths,
+                    candidate_path_layers=candidate_path_layers,
+                    llm_route=llm_route,
                     evidence_summary=evidence_summary,
                     quality_gate=quality_gate,
+                    evidence_pack=evidence_pack,
+                    answer=answer,
                     structured_answer=structured_answer,
                     answer_judge=answer_judge,
                     codex_validation=codex_validation,
-                    limit=max(int(budget["match_limit"]), self.codex_top_path_limit),
+                    budget=budget,
                     request_cache=request_cache,
-                )
-                _log_source_code_qa_timing(
-                    "codex_deep_investigation_matches",
-                    elapsed_ms=int((time.perf_counter() - matches_started) * 1000),
+                    followup_context=followup_context,
+                    progress_callback=progress_callback,
                     trace_id=trace_id,
-                    provider=self.llm_provider.name,
-                    model=selected_model,
+                    selected_model=selected_model,
                     query_mode=query_mode,
-                    phase="repair",
-                    expanded_match_count=len(expanded_matches or []),
-                    original_match_count=len(matches),
-                    candidate_path_count_before=len(candidate_paths),
                 )
-                if expanded_matches:
-                    rebuild_started = time.perf_counter()
-                    candidate_matches = self._select_llm_matches(expanded_matches, self.codex_repair_top_path_limit, question=question)
-                    candidate_paths = self._codex_candidate_paths(entries=entries, key=key, matches=candidate_matches)
-                    candidate_paths = self._merge_codex_followup_candidate_paths(candidate_paths, followup_context)
-                    candidate_paths = candidate_paths[: self.codex_repair_top_path_limit]
-                    candidate_path_layers = self._codex_candidate_path_layers(candidate_paths, followup_context)
-                    llm_route = {
-                        **llm_route,
-                        "candidate_paths": candidate_paths,
-                        "candidate_path_layers": candidate_path_layers,
-                        "candidate_repo_count": len({item.get("repo") for item in candidate_paths}),
-                        "candidate_path_count": len(candidate_paths),
-                    }
-                    evidence_summary = self._compress_evidence_cached(question, candidate_matches, request_cache=request_cache)
-                    trace_paths = self._build_trace_paths(entries=entries, key=key, matches=candidate_matches, question=question, request_cache=request_cache)
-                    if trace_paths:
-                        evidence_summary["trace_paths"] = trace_paths
-                    quality_gate = self._quality_gate_cached(question, evidence_summary, request_cache=request_cache)
-                    evidence_pack = self._build_evidence_pack(
-                        question=question,
-                        evidence_summary=evidence_summary,
-                        matches=candidate_matches,
-                        trace_paths=trace_paths,
-                        quality_gate=quality_gate,
-                    )
-                    after_keys = {(item.get("repo"), item.get("path"), item.get("line_start"), item.get("line_end")) for item in candidate_matches}
-                    deep_investigation_added = len(after_keys - before_keys)
-                    _log_source_code_qa_timing(
-                        "codex_deep_investigation_rebuild",
-                        elapsed_ms=int((time.perf_counter() - rebuild_started) * 1000),
-                        trace_id=trace_id,
-                        provider=self.llm_provider.name,
-                        model=selected_model,
-                        query_mode=query_mode,
-                        phase="repair",
-                        candidate_path_count=len(candidate_paths),
-                        candidate_repo_count=len({item.get("repo") for item in candidate_paths}),
-                        deep_investigation_added=deep_investigation_added,
-                    )
-                deep_investigation_rounds = 1
-                _log_source_code_qa_timing(
-                    "codex_deep_investigation",
-                    elapsed_ms=int((time.perf_counter() - deep_started) * 1000),
-                    trace_id=trace_id,
-                    provider=self.llm_provider.name,
-                    model=selected_model,
-                    query_mode=query_mode,
-                    phase="repair",
-                    candidate_path_count=len(candidate_paths),
-                    candidate_repo_count=len({item.get("repo") for item in candidate_paths}),
-                    deep_investigation_added=deep_investigation_added,
-                    deep_investigation_rounds=deep_investigation_rounds,
-                    term_count=len(deep_investigation_terms),
-                )
+                candidate_matches = deep_context["candidate_matches"]
+                candidate_paths = deep_context["candidate_paths"]
+                candidate_path_layers = deep_context["candidate_path_layers"]
+                llm_route = deep_context["llm_route"]
+                evidence_summary = deep_context["evidence_summary"]
+                quality_gate = deep_context["quality_gate"]
+                evidence_pack = deep_context["evidence_pack"]
+                deep_investigation_rounds = deep_context["deep_investigation_rounds"]
+                deep_investigation_terms = deep_context["deep_investigation_terms"]
+                deep_investigation_added = deep_context["deep_investigation_added"]
             repair_context = self._codex_repair_brief(
                 pm_team=pm_team,
                 country=country,
@@ -14442,6 +14373,171 @@ class SourceCodeQAService:
             cache_key=cache_key,
             timing=timing,
         )
+
+    def _codex_deep_investigation_context(
+        self,
+        *,
+        entries: list[RepositoryEntry],
+        key: str,
+        question: str,
+        matches: list[dict[str, Any]],
+        candidate_matches: list[dict[str, Any]],
+        candidate_paths: list[dict[str, Any]],
+        candidate_path_layers: dict[str, Any],
+        llm_route: dict[str, Any],
+        evidence_summary: dict[str, Any],
+        quality_gate: dict[str, Any],
+        evidence_pack: dict[str, Any],
+        answer: str,
+        structured_answer: dict[str, Any],
+        answer_judge: dict[str, Any],
+        codex_validation: dict[str, Any],
+        budget: dict[str, Any],
+        request_cache: dict[str, Any] | None,
+        followup_context: dict[str, Any] | None,
+        progress_callback: Any | None,
+        trace_id: str,
+        selected_model: str,
+        query_mode: str,
+    ) -> dict[str, Any]:
+        deep_started = time.perf_counter()
+        self._report_query_progress(
+            progress_callback,
+            "codex_deep_investigation",
+            "Expanding investigation from Codex gaps.",
+            0,
+            0,
+        )
+        before_keys = {
+            (item.get("repo"), item.get("path"), item.get("line_start"), item.get("line_end"))
+            for item in candidate_matches
+        }
+        terms_started = time.perf_counter()
+        deep_investigation_terms = self._codex_deep_investigation_terms(
+            question=question,
+            answer=answer,
+            structured_answer=structured_answer,
+            answer_judge=answer_judge,
+            codex_validation=codex_validation,
+        )
+        _log_source_code_qa_timing(
+            "codex_deep_investigation_terms",
+            elapsed_ms=int((time.perf_counter() - terms_started) * 1000),
+            trace_id=trace_id,
+            provider=self.llm_provider.name,
+            model=selected_model,
+            query_mode=query_mode,
+            phase="repair",
+            term_count=len(deep_investigation_terms),
+        )
+        matches_started = time.perf_counter()
+        expanded_matches = self._codex_deep_investigation_matches(
+            entries=entries,
+            key=key,
+            question=question,
+            matches=matches,
+            selected_matches=candidate_matches,
+            evidence_summary=evidence_summary,
+            quality_gate=quality_gate,
+            structured_answer=structured_answer,
+            answer_judge=answer_judge,
+            codex_validation=codex_validation,
+            limit=max(int(budget["match_limit"]), self.codex_top_path_limit),
+            request_cache=request_cache,
+        )
+        _log_source_code_qa_timing(
+            "codex_deep_investigation_matches",
+            elapsed_ms=int((time.perf_counter() - matches_started) * 1000),
+            trace_id=trace_id,
+            provider=self.llm_provider.name,
+            model=selected_model,
+            query_mode=query_mode,
+            phase="repair",
+            expanded_match_count=len(expanded_matches or []),
+            original_match_count=len(matches),
+            candidate_path_count_before=len(candidate_paths),
+        )
+        deep_investigation_added = 0
+        if expanded_matches:
+            rebuild_started = time.perf_counter()
+            candidate_matches = self._select_llm_matches(
+                expanded_matches,
+                self.codex_repair_top_path_limit,
+                question=question,
+            )
+            candidate_paths = self._codex_candidate_paths(entries=entries, key=key, matches=candidate_matches)
+            candidate_paths = self._merge_codex_followup_candidate_paths(candidate_paths, followup_context)
+            candidate_paths = candidate_paths[: self.codex_repair_top_path_limit]
+            candidate_path_layers = self._codex_candidate_path_layers(candidate_paths, followup_context)
+            llm_route = {
+                **llm_route,
+                "candidate_paths": candidate_paths,
+                "candidate_path_layers": candidate_path_layers,
+                "candidate_repo_count": len({item.get("repo") for item in candidate_paths}),
+                "candidate_path_count": len(candidate_paths),
+            }
+            evidence_summary = self._compress_evidence_cached(question, candidate_matches, request_cache=request_cache)
+            trace_paths = self._build_trace_paths(
+                entries=entries,
+                key=key,
+                matches=candidate_matches,
+                question=question,
+                request_cache=request_cache,
+            )
+            if trace_paths:
+                evidence_summary["trace_paths"] = trace_paths
+            quality_gate = self._quality_gate_cached(question, evidence_summary, request_cache=request_cache)
+            evidence_pack = self._build_evidence_pack(
+                question=question,
+                evidence_summary=evidence_summary,
+                matches=candidate_matches,
+                trace_paths=trace_paths,
+                quality_gate=quality_gate,
+            )
+            after_keys = {
+                (item.get("repo"), item.get("path"), item.get("line_start"), item.get("line_end"))
+                for item in candidate_matches
+            }
+            deep_investigation_added = len(after_keys - before_keys)
+            _log_source_code_qa_timing(
+                "codex_deep_investigation_rebuild",
+                elapsed_ms=int((time.perf_counter() - rebuild_started) * 1000),
+                trace_id=trace_id,
+                provider=self.llm_provider.name,
+                model=selected_model,
+                query_mode=query_mode,
+                phase="repair",
+                candidate_path_count=len(candidate_paths),
+                candidate_repo_count=len({item.get("repo") for item in candidate_paths}),
+                deep_investigation_added=deep_investigation_added,
+            )
+        deep_investigation_rounds = 1
+        _log_source_code_qa_timing(
+            "codex_deep_investigation",
+            elapsed_ms=int((time.perf_counter() - deep_started) * 1000),
+            trace_id=trace_id,
+            provider=self.llm_provider.name,
+            model=selected_model,
+            query_mode=query_mode,
+            phase="repair",
+            candidate_path_count=len(candidate_paths),
+            candidate_repo_count=len({item.get("repo") for item in candidate_paths}),
+            deep_investigation_added=deep_investigation_added,
+            deep_investigation_rounds=deep_investigation_rounds,
+            term_count=len(deep_investigation_terms),
+        )
+        return {
+            "candidate_matches": candidate_matches,
+            "candidate_paths": candidate_paths,
+            "candidate_path_layers": candidate_path_layers,
+            "llm_route": llm_route,
+            "evidence_summary": evidence_summary,
+            "quality_gate": quality_gate,
+            "evidence_pack": evidence_pack,
+            "deep_investigation_rounds": deep_investigation_rounds,
+            "deep_investigation_terms": deep_investigation_terms,
+            "deep_investigation_added": deep_investigation_added,
+        }
 
     @staticmethod
     def _match_is_definition_only(match: dict[str, Any], focus_terms: list[str]) -> bool:
