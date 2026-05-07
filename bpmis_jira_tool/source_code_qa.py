@@ -3717,7 +3717,136 @@ class SourceCodeQAService:
             return None
 
     @staticmethod
+    def _copy_reused_index_rows(
+        old_connection: sqlite3.Connection | None,
+        new_connection: sqlite3.Connection,
+        relative_path: str,
+        select_sql: str,
+        insert_sql: str,
+    ) -> list[sqlite3.Row]:
+        if old_connection is None:
+            return []
+        rows = old_connection.execute(select_sql, (relative_path,)).fetchall()
+        new_connection.executemany(insert_sql, [tuple(row) for row in rows])
+        return rows
+
+    @staticmethod
+    def _insert_reused_file_row(
+        new_connection: sqlite3.Connection,
+        relative_path: str,
+        *,
+        file_fts_enabled: bool,
+        file_row: sqlite3.Row,
+    ) -> None:
+        new_connection.execute(
+            "insert into files(path, lower_path, size, mtime_ns, line_count, symbols) values (?, ?, ?, ?, ?, ?)",
+            (
+                file_row["path"],
+                file_row["lower_path"],
+                file_row["size"],
+                file_row["mtime_ns"],
+                file_row["line_count"],
+                file_row["symbols"],
+            ),
+        )
+        if not file_fts_enabled:
+            return
+        try:
+            symbols = " ".join(json.loads(file_row["symbols"] or "[]"))
+        except (TypeError, json.JSONDecodeError):
+            symbols = ""
+        new_connection.execute(
+            "insert into files_fts(path, content) values (?, ?)",
+            (
+                relative_path,
+                "\n".join(
+                    [
+                        relative_path,
+                        relative_path.replace("/", " ").replace(".", " "),
+                        symbols,
+                    ]
+                ),
+            ),
+        )
+
+    @classmethod
+    def _copy_reused_line_rows(
+        cls,
+        old_connection: sqlite3.Connection | None,
+        new_connection: sqlite3.Connection,
+        relative_path: str,
+        *,
+        fts_enabled: bool,
+    ) -> list[sqlite3.Row]:
+        line_rows = cls._copy_reused_index_rows(
+            old_connection,
+            new_connection,
+            relative_path,
+            """
+            select file_path, line_no, line_text, lower_text, symbols, is_declaration, has_pathish
+            from lines
+            where file_path = ?
+            order by line_no
+            """,
+            """
+            insert into lines(file_path, line_no, line_text, lower_text, symbols, is_declaration, has_pathish)
+            values (?, ?, ?, ?, ?, ?, ?)
+            """,
+        )
+        if fts_enabled and line_rows:
+            new_connection.executemany(
+                "insert into lines_fts(file_path, line_no, content) values (?, ?, ?)",
+                [(row["file_path"], row["line_no"], row["line_text"]) for row in line_rows],
+            )
+        return line_rows
+
+    @classmethod
+    def _copy_reused_semantic_rows(
+        cls,
+        old_connection: sqlite3.Connection | None,
+        new_connection: sqlite3.Connection,
+        relative_path: str,
+        *,
+        semantic_fts_enabled: bool,
+    ) -> list[sqlite3.Row]:
+        semantic_rows = cls._copy_reused_index_rows(
+            old_connection,
+            new_connection,
+            relative_path,
+            """
+            select chunk_id, file_path, start_line, end_line, chunk_text, lower_text, tokens, symbols, embedding
+            from semantic_chunks
+            where file_path = ?
+            """,
+            """
+            insert into semantic_chunks(chunk_id, file_path, start_line, end_line, chunk_text, lower_text, tokens, symbols, embedding)
+            values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+        )
+        if semantic_fts_enabled and semantic_rows:
+            new_connection.executemany(
+                "insert into semantic_chunks_fts(chunk_id, file_path, content) values (?, ?, ?)",
+                [
+                    (
+                        row["chunk_id"],
+                        row["file_path"],
+                        f"{row['chunk_text']}\n{row['tokens']}\n{row['symbols']}",
+                    )
+                    for row in semantic_rows
+                ],
+            )
+        cls._copy_reused_index_rows(
+            old_connection,
+            new_connection,
+            relative_path,
+            "select token, chunk_id, file_path from semantic_chunk_tokens where file_path = ?",
+            "insert or ignore into semantic_chunk_tokens(token, chunk_id, file_path) values (?, ?, ?)",
+        )
+        return semantic_rows
+
+    @classmethod
     def _copy_unchanged_index_file(
+        cls,
         old_connection: sqlite3.Connection | None,
         new_connection: sqlite3.Connection,
         relative_path: str,
@@ -3737,165 +3866,86 @@ class SourceCodeQAService:
                 return None
 
             new_connection.execute("savepoint reuse_index_file")
-            new_connection.execute(
-                "insert into files(path, lower_path, size, mtime_ns, line_count, symbols) values (?, ?, ?, ?, ?, ?)",
-                (
-                    file_row["path"],
-                    file_row["lower_path"],
-                    file_row["size"],
-                    file_row["mtime_ns"],
-                    file_row["line_count"],
-                    file_row["symbols"],
-                ),
+            cls._insert_reused_file_row(
+                new_connection,
+                relative_path,
+                file_fts_enabled=file_fts_enabled,
+                file_row=file_row,
             )
-            if file_fts_enabled:
-                try:
-                    symbols = " ".join(json.loads(file_row["symbols"] or "[]"))
-                except (TypeError, json.JSONDecodeError):
-                    symbols = ""
-                new_connection.execute(
-                    "insert into files_fts(path, content) values (?, ?)",
-                    (
-                        relative_path,
-                        "\n".join(
-                            [
-                                relative_path,
-                                relative_path.replace("/", " ").replace(".", " "),
-                                symbols,
-                            ]
-                        ),
-                    ),
-                )
-
-            line_rows = old_connection.execute(
-                """
-                select file_path, line_no, line_text, lower_text, symbols, is_declaration, has_pathish
-                from lines
-                where file_path = ?
-                order by line_no
-                """,
-                (relative_path,),
-            ).fetchall()
-            new_connection.executemany(
-                """
-                insert into lines(file_path, line_no, line_text, lower_text, symbols, is_declaration, has_pathish)
-                values (?, ?, ?, ?, ?, ?, ?)
-                """,
-                [tuple(row) for row in line_rows],
+            line_rows = cls._copy_reused_line_rows(
+                old_connection,
+                new_connection,
+                relative_path,
+                fts_enabled=fts_enabled,
             )
-            if fts_enabled and line_rows:
-                new_connection.executemany(
-                    "insert into lines_fts(file_path, line_no, content) values (?, ?, ?)",
-                    [(row["file_path"], row["line_no"], row["line_text"]) for row in line_rows],
-                )
-            file_token_rows = old_connection.execute(
+            cls._copy_reused_index_rows(
+                old_connection,
+                new_connection,
+                relative_path,
                 "select token, file_path from file_tokens where file_path = ?",
-                (relative_path,),
-            ).fetchall()
-            new_connection.executemany(
                 "insert or ignore into file_tokens(token, file_path) values (?, ?)",
-                [tuple(row) for row in file_token_rows],
             )
-            line_token_rows = old_connection.execute(
+            cls._copy_reused_index_rows(
+                old_connection,
+                new_connection,
+                relative_path,
                 "select token, file_path, line_no from line_tokens where file_path = ?",
-                (relative_path,),
-            ).fetchall()
-            new_connection.executemany(
                 "insert or ignore into line_tokens(token, file_path, line_no) values (?, ?, ?)",
-                [tuple(row) for row in line_token_rows],
             )
-
-            definition_rows = old_connection.execute(
+            definition_rows = cls._copy_reused_index_rows(
+                old_connection,
+                new_connection,
+                relative_path,
                 "select name, lower_name, kind, file_path, line_no, signature from definitions where file_path = ?",
-                (relative_path,),
-            ).fetchall()
-            new_connection.executemany(
                 "insert into definitions(name, lower_name, kind, file_path, line_no, signature) values (?, ?, ?, ?, ?, ?)",
-                [tuple(row) for row in definition_rows],
             )
-
-            reference_rows = old_connection.execute(
+            reference_rows = cls._copy_reused_index_rows(
+                old_connection,
+                new_connection,
+                relative_path,
                 """
                 select target, lower_target, kind, file_path, line_no, context
                 from references_index
                 where file_path = ?
                 """,
-                (relative_path,),
-            ).fetchall()
-            new_connection.executemany(
                 """
                 insert into references_index(target, lower_target, kind, file_path, line_no, context)
                 values (?, ?, ?, ?, ?, ?)
                 """,
-                [tuple(row) for row in reference_rows],
             )
-
-            entity_rows = old_connection.execute(
+            entity_rows = cls._copy_reused_index_rows(
+                old_connection,
+                new_connection,
+                relative_path,
                 """
                 select entity_id, name, lower_name, kind, language, file_path, line_no, parent, signature
                 from code_entities
                 where file_path = ?
                 """,
-                (relative_path,),
-            ).fetchall()
-            new_connection.executemany(
                 """
                 insert or ignore into code_entities(entity_id, name, lower_name, kind, language, file_path, line_no, parent, signature)
                 values (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                [tuple(row) for row in entity_rows],
             )
-
-            raw_edge_rows = old_connection.execute(
+            raw_edge_rows = cls._copy_reused_index_rows(
+                old_connection,
+                new_connection,
+                relative_path,
                 """
                 select from_entity_id, from_file, from_line, edge_kind, to_name, lower_to_name, to_entity_id, to_file, to_line, evidence
                 from entity_edges
                 where from_file = ? and (to_entity_id = '' or to_file = '')
                 """,
-                (relative_path,),
-            ).fetchall()
-            new_connection.executemany(
                 """
                 insert into entity_edges(from_entity_id, from_file, from_line, edge_kind, to_name, lower_to_name, to_entity_id, to_file, to_line, evidence)
                 values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                [tuple(row) for row in raw_edge_rows],
             )
-
-            semantic_rows = old_connection.execute(
-                """
-                select chunk_id, file_path, start_line, end_line, chunk_text, lower_text, tokens, symbols, embedding
-                from semantic_chunks
-                where file_path = ?
-                """,
-                (relative_path,),
-            ).fetchall()
-            new_connection.executemany(
-                """
-                insert into semantic_chunks(chunk_id, file_path, start_line, end_line, chunk_text, lower_text, tokens, symbols, embedding)
-                values (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                [tuple(row) for row in semantic_rows],
-            )
-            if semantic_fts_enabled and semantic_rows:
-                new_connection.executemany(
-                    "insert into semantic_chunks_fts(chunk_id, file_path, content) values (?, ?, ?)",
-                    [
-                        (
-                            row["chunk_id"],
-                            row["file_path"],
-                            f"{row['chunk_text']}\n{row['tokens']}\n{row['symbols']}",
-                        )
-                        for row in semantic_rows
-                    ],
-                )
-            semantic_token_rows = old_connection.execute(
-                "select token, chunk_id, file_path from semantic_chunk_tokens where file_path = ?",
-                (relative_path,),
-            ).fetchall()
-            new_connection.executemany(
-                "insert or ignore into semantic_chunk_tokens(token, chunk_id, file_path) values (?, ?, ?)",
-                [tuple(row) for row in semantic_token_rows],
+            semantic_rows = cls._copy_reused_semantic_rows(
+                old_connection,
+                new_connection,
+                relative_path,
+                semantic_fts_enabled=semantic_fts_enabled,
             )
 
             new_connection.execute("release savepoint reuse_index_file")
