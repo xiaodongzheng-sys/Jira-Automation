@@ -49,7 +49,7 @@ def _join_url(base_url: str, path: str) -> str:
 
 
 def _fetch_json(url: str) -> dict[str, Any]:
-    request = Request(url, method="GET")
+    request = Request(url, headers={"User-Agent": "team-portal-release-gate/1.0"}, method="GET")
     with urlopen(request, timeout=10) as response:
         payload = json.load(response)
     if not isinstance(payload, dict):
