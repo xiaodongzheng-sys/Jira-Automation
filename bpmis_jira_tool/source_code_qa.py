@@ -4995,23 +4995,13 @@ class SourceCodeQAService:
             if not stripped:
                 continue
             if is_test_file or TEST_ANNOTATION_PATTERN.search(stripped):
-                if TEST_ANNOTATION_PATTERN.search(stripped) or re.search(r"\b(?:test|should)[A-Za-z0-9_]*\s*\(", stripped):
-                    add_reference("test_case", "test_case", line_no, stripped)
-                    add_entity_edge(current_method_id or current_class_id or file_entity_id, "test_case", "test_case", line_no, stripped)
-                if TEST_ASSERTION_PATTERN.search(stripped):
-                    add_reference("assertion", "test_assertion", line_no, stripped)
-                    add_entity_edge(current_method_id or current_class_id or file_entity_id, "test_assertion", "assertion", line_no, stripped)
-                for call_name in CALL_SYMBOL_PATTERN.findall(stripped):
-                    if call_name.lower() not in LOW_VALUE_CALL_SYMBOLS and len(call_name) >= 3:
-                        add_reference(call_name, "test_reference", line_no, stripped)
-                        add_entity_edge(current_method_id or current_class_id or file_entity_id, "test_reference", call_name, line_no, stripped)
-                for subject in re.findall(r"\b([A-Z][A-Za-z0-9_]{3,})\b", stripped):
-                    if subject in {"Test", "BeforeEach", "AfterEach", "Autowired", "MockBean", "Mockito", "Assertions", "Assert"}:
-                        continue
-                    if subject.endswith(("Test", "Tests", "Spec")):
-                        continue
-                    add_reference(subject, "test_subject", line_no, stripped)
-                    add_entity_edge(current_method_id or current_class_id or file_entity_id, "test_subject", subject, line_no, stripped)
+                self._extract_test_structure_references(
+                    stripped=stripped,
+                    line_no=line_no,
+                    current_entity_id=current_method_id or current_class_id or file_entity_id,
+                    add_reference=add_reference,
+                    add_entity_edge=add_entity_edge,
+                )
             package_match = JAVA_PACKAGE_PATTERN.search(stripped)
             if package_match:
                 java_package = package_match.group(1)
@@ -5406,6 +5396,33 @@ class SourceCodeQAService:
             "tree_sitter_language": tree_sitter_language if tree_sitter_used else "",
             "tree_sitter_error": tree_sitter_error,
         }
+
+    def _extract_test_structure_references(
+        self,
+        *,
+        stripped: str,
+        line_no: int,
+        current_entity_id: str,
+        add_reference: Any,
+        add_entity_edge: Any,
+    ) -> None:
+        if TEST_ANNOTATION_PATTERN.search(stripped) or re.search(r"\b(?:test|should)[A-Za-z0-9_]*\s*\(", stripped):
+            add_reference("test_case", "test_case", line_no, stripped)
+            add_entity_edge(current_entity_id, "test_case", "test_case", line_no, stripped)
+        if TEST_ASSERTION_PATTERN.search(stripped):
+            add_reference("assertion", "test_assertion", line_no, stripped)
+            add_entity_edge(current_entity_id, "test_assertion", "assertion", line_no, stripped)
+        for call_name in CALL_SYMBOL_PATTERN.findall(stripped):
+            if call_name.lower() not in LOW_VALUE_CALL_SYMBOLS and len(call_name) >= 3:
+                add_reference(call_name, "test_reference", line_no, stripped)
+                add_entity_edge(current_entity_id, "test_reference", call_name, line_no, stripped)
+        for subject in re.findall(r"\b([A-Z][A-Za-z0-9_]{3,})\b", stripped):
+            if subject in {"Test", "BeforeEach", "AfterEach", "Autowired", "MockBean", "Mockito", "Assertions", "Assert"}:
+                continue
+            if subject.endswith(("Test", "Tests", "Spec")):
+                continue
+            add_reference(subject, "test_subject", line_no, stripped)
+            add_entity_edge(current_entity_id, "test_subject", subject, line_no, stripped)
 
     @staticmethod
     def _language_for_suffix(suffix: str) -> str:
