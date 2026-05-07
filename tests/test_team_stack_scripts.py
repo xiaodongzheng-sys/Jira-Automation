@@ -3,6 +3,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 from pathlib import Path
 
 
@@ -488,6 +490,7 @@ exit 0
 
         self.assertIn("System Full Test Gate", checklist)
         self.assertIn("./.venv/bin/python scripts/run_system_full_test_gate.py --skip-smoke", checklist)
+        self.assertIn("ENV_FILE=/dev/null", checklist)
         self.assertIn("--coverage-fail-under 100", checklist)
         self.assertIn("./.venv/bin/python -m coverage run -m unittest discover -s tests", checklist)
         self.assertIn("node --check static/gmail_seatalk_demo.js", checklist)
@@ -508,6 +511,51 @@ exit 0
             "/api/meeting-recorder",
         ):
             self.assertNotIn(unsafe_command, checklist)
+
+    def test_system_full_test_gate_isolates_env_file_by_default(self):
+        import importlib.util
+
+        gate_path = PROJECT_ROOT / "scripts/run_system_full_test_gate.py"
+        spec = importlib.util.spec_from_file_location("run_system_full_test_gate", gate_path)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        captured_envs: list[dict[str, str]] = []
+
+        def fake_run(*args, **kwargs):
+            captured_envs.append(kwargs["env"])
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        with patch.dict(os.environ, {}, clear=True), patch("subprocess.run", side_effect=fake_run):
+            module._run_command("unit", [sys.executable, "-c", "pass"])
+
+        self.assertEqual(captured_envs[0]["ENV_FILE"], os.devnull)
+
+    def test_system_full_test_gate_preserves_explicit_env_file(self):
+        import importlib.util
+
+        gate_path = PROJECT_ROOT / "scripts/run_system_full_test_gate.py"
+        spec = importlib.util.spec_from_file_location("run_system_full_test_gate", gate_path)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        captured_envs: list[dict[str, str]] = []
+
+        def fake_run(*args, **kwargs):
+            captured_envs.append(kwargs["env"])
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        with patch.dict(os.environ, {"ENV_FILE": "/tmp/explicit.env"}, clear=True), patch(
+            "subprocess.run",
+            side_effect=fake_run,
+        ):
+            module._run_command("unit", [sys.executable, "-c", "pass"])
+
+        self.assertEqual(captured_envs[0]["ENV_FILE"], "/tmp/explicit.env")
 
     def test_uat_local_agent_setup_uses_separate_workspace_port_and_data_root(self):
         setup_script = (PROJECT_ROOT / "scripts/setup_uat_local_agent.sh").read_text(encoding="utf-8")

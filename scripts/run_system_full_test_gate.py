@@ -31,6 +31,7 @@ class GateStep:
 
 def _run_command(name: str, command: list[str]) -> GateStep:
     env = dict(os.environ)
+    env.setdefault("ENV_FILE", os.devnull)
     existing_pythonpath = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = str(ROOT_DIR) if not existing_pythonpath else f"{ROOT_DIR}{os.pathsep}{existing_pythonpath}"
     completed = subprocess.run(command, cwd=ROOT_DIR, env=env, capture_output=True, text=True, check=False)

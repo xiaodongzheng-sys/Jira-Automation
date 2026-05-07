@@ -28,6 +28,8 @@ Run this gate before every portal release. It is intentionally read-only except 
 ./.venv/bin/python scripts/run_system_full_test_gate.py --skip-smoke
 ```
 
+The gate sets `ENV_FILE=/dev/null` for subprocesses unless you explicitly provide `ENV_FILE`, so broad local tests do not silently load real credentials from `.env`.
+
 Use an explicit threshold when validating release tooling changes:
 
 ```bash
@@ -39,17 +41,17 @@ Use an explicit threshold when validating release tooling changes:
 - If debugging a failed step, the equivalent local commands are:
 
 ```bash
-./.venv/bin/python -m coverage erase \
-  && ./.venv/bin/python -m coverage run -m unittest discover -s tests \
-  && ./.venv/bin/python -m coverage report --fail-under 100 \
-  && node --check static/gmail_seatalk_demo.js \
-  && node --check static/productization_upgrade_summary.js \
-  && node --check static/team_dashboard.js \
-  && node --check static/meeting_recorder.js \
-  && node --check static/prd_self_assessment.js \
-  && node --check static/prd_briefing.js \
-  && node --check static/source_code_qa.js \
-  && ./.venv/bin/python scripts/run_source_code_qa_release_gate.py
+ENV_FILE=/dev/null ./.venv/bin/python -m coverage erase
+ENV_FILE=/dev/null ./.venv/bin/python -m coverage run -m unittest discover -s tests
+ENV_FILE=/dev/null ./.venv/bin/python -m coverage report --fail-under 100
+node --check static/gmail_seatalk_demo.js
+node --check static/productization_upgrade_summary.js
+node --check static/team_dashboard.js
+node --check static/meeting_recorder.js
+node --check static/prd_self_assessment.js
+node --check static/prd_briefing.js
+node --check static/source_code_qa.js
+ENV_FILE=/dev/null ./.venv/bin/python scripts/run_source_code_qa_release_gate.py
 ```
 
 - For Source Code Q&A changes, run the release gate/evals that match the changed retrieval or provider behavior:

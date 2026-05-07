@@ -86,5 +86,9 @@ The team edition prototype and future deployment guidance live in:
 ## Tests
 
 ```bash
-./.venv/bin/python -m unittest discover -s tests
+./.venv/bin/python scripts/run_system_full_test_gate.py --skip-smoke
 ```
+
+The release gate defaults broad local test runs to `ENV_FILE=/dev/null` unless
+you set `ENV_FILE` yourself, so it does not silently load local production
+credentials from `.env`.
