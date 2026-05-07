@@ -12836,6 +12836,26 @@ class SourceCodeQAService:
             merged_check = {"status": "retry", "issues": list(dict.fromkeys(issues))}
         return merged_check
 
+    def _llm_answer_cache_key(
+        self,
+        *,
+        selected_model: str,
+        question: str,
+        requested_answer_mode: str,
+        routed_budget_mode: str,
+        prompt_context: str,
+        attachment_section: str,
+    ) -> str:
+        cache_context = f"{prompt_context}\n\n{attachment_section}" if attachment_section else prompt_context
+        return self._answer_cache_key(
+            provider=self.llm_provider.name,
+            model=selected_model,
+            question=question,
+            answer_mode=requested_answer_mode,
+            llm_budget_mode=routed_budget_mode,
+            context=cache_context,
+        )
+
     def _build_llm_answer(
         self,
         *,
@@ -13023,14 +13043,13 @@ class SourceCodeQAService:
         if routed_budget_mode == COMPACT_DEEP_BUDGET_MODE and token_pressure == "tight":
             answer_max_output_tokens = max(answer_max_output_tokens, 2_400)
         vertex_two_pass = self.llm_provider_name == LLM_PROVIDER_VERTEX_AI
-        cache_context = f"{prompt_context}\n\n{attachment_section}" if attachment_section else prompt_context
-        cache_key = self._answer_cache_key(
-            provider=self.llm_provider.name,
-            model=selected_model,
+        cache_key = self._llm_answer_cache_key(
+            selected_model=selected_model,
             question=question,
-            answer_mode=requested_answer_mode,
-            llm_budget_mode=routed_budget_mode,
-            context=cache_context,
+            requested_answer_mode=requested_answer_mode,
+            routed_budget_mode=routed_budget_mode,
+            prompt_context=prompt_context,
+            attachment_section=attachment_section,
         )
         cached = None if vertex_two_pass else self._load_cached_answer(cache_key)
         if cached is not None:
@@ -13159,13 +13178,13 @@ class SourceCodeQAService:
                 "vertex_draft_model": draft_result.model,
                 "vertex_final_schema": True,
             }
-            cache_key = self._answer_cache_key(
-                provider=self.llm_provider.name,
-                model=selected_model,
+            cache_key = self._llm_answer_cache_key(
+                selected_model=selected_model,
                 question=question,
-                answer_mode=requested_answer_mode,
-                llm_budget_mode=routed_budget_mode,
-                context=f"{prompt_context}\n\n{attachment_section}" if attachment_section else prompt_context,
+                requested_answer_mode=requested_answer_mode,
+                routed_budget_mode=routed_budget_mode,
+                prompt_context=prompt_context,
+                attachment_section=attachment_section,
             )
         final_prompt = self._llm_user_prompt(
             pm_team=pm_team,
