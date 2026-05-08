@@ -160,6 +160,8 @@ def build_summary(data_root: Path, *, limit: int = 200, strict: bool = False) ->
         status_counts = Counter(str(row.get("status") or "unknown") for row in telemetry_rows)
         route_counts = Counter(str((row.get("llm_route") or {}).get("mode") or row.get("answer_mode") or "unknown") for row in telemetry_rows)
         policy_counts = Counter(str((row.get("answer_contract") or {}).get("status") or "unknown") for row in telemetry_rows)
+        cache_hits = sum(1 for row in telemetry_rows if bool(row.get("llm_cached")))
+        cache_eligible = sum(1 for row in telemetry_rows if str(row.get("llm_provider") or "") and row.get("llm_cached") is not None)
         latencies = [
             int(row.get("latency_ms") or row.get("total_latency_ms") or 0)
             for row in telemetry_rows
@@ -172,6 +174,7 @@ def build_summary(data_root: Path, *, limit: int = 200, strict: bool = False) ->
         lines.append(f"query_status={_counter_text(status_counts)}")
         lines.append(f"routes={_counter_text(route_counts)}")
         lines.append(f"answer_contract={_counter_text(policy_counts)}")
+        lines.append(f"llm_cache_hits={cache_hits}/{cache_eligible}")
         lines.append(f"latency_ms_p50={int(statistics.median(latencies)) if latencies else 0} p95={_p95(latencies)}")
         lines.append(f"no_match_rate={no_match}/{len(telemetry_rows)} stale_index_hits={stale}")
     else:

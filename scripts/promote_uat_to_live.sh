@@ -103,6 +103,67 @@ classify_live_restart_mode() {
   printf 'portal\n'
 }
 
+live_local_agent_restart_requires_file() {
+  local changed_file="$1"
+  case "$changed_file" in
+    local_agent.py|bpmis_jira_tool/local_agent*|bpmis_jira_tool/source_code_qa*|source_code_qa/*|config/source_code_qa*|scripts/run_local_agent*|requirements*.txt|prd_briefing/*)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+classify_live_local_agent_restart_mode() {
+  local previous_commit="$1"
+  local target_commit="$2"
+  local requested="${PROMOTE_UAT_LOCAL_AGENT_RESTART_MODE:-auto}"
+  case "$requested" in
+    restart|skip)
+      printf '%s\n' "$requested"
+      return 0
+      ;;
+    auto) ;;
+    *)
+      echo "PROMOTE_UAT_LOCAL_AGENT_RESTART_MODE must be auto, restart, or skip." >&2
+      return 1
+      ;;
+  esac
+
+  local changed_files
+  if ! changed_files="$(git -C "$HOST_ROOT" diff --name-only "$previous_commit" "$target_commit")"; then
+    printf 'restart\n'
+    return 0
+  fi
+  while IFS= read -r changed_file; do
+    [[ -n "$changed_file" ]] || continue
+    if live_local_agent_restart_requires_file "$changed_file"; then
+      printf 'restart\n'
+      return 0
+    fi
+  done <<<"$changed_files"
+  printf 'skip\n'
+}
+
+validate_live_candidate_slot() {
+  local target_commit="$1"
+  if [[ "${PROMOTE_UAT_BLUE_GREEN_VALIDATE:-1}" != "1" ]]; then
+    return 0
+  fi
+  if [[ ! -x "$HOST_ROOT/scripts/run_team_portal_slot.sh" ]]; then
+    echo "Live candidate slot script is missing; skipping inactive slot validation."
+    return 0
+  fi
+  local slot_port="${PROMOTE_UAT_BLUE_GREEN_PORT:-5001}"
+  echo "Validating live candidate slot on port $slot_port before switching public live."
+  TEAM_PORTAL_SLOT=candidate \
+  TEAM_PORTAL_SLOT_PORT="$slot_port" \
+  TEAM_PORTAL_SLOT_REVISION="$target_commit" \
+  TEAM_PORTAL_SLOT_REPLACE_STALE=1 \
+  "$HOST_ROOT/scripts/run_team_portal_slot.sh" restart
+}
+
 SERVICE_JSON="$(json_from_gcloud_service)"
 UAT_REVISION="$(printf '%s' "$SERVICE_JSON" | UAT_TAG_VALUE="$UAT_TAG" "$PYTHON_BIN" -c 'import json, os, sys; p=json.load(sys.stdin); tag=os.environ["UAT_TAG_VALUE"]; matches=[t for t in p.get("status", {}).get("traffic", []) if t.get("tag")==tag]; print(matches[0].get("revisionName", "") if matches else "")')"
 UAT_URL="$(printf '%s' "$SERVICE_JSON" | UAT_TAG_VALUE="$UAT_TAG" "$PYTHON_BIN" -c 'import json, os, sys; p=json.load(sys.stdin); tag=os.environ["UAT_TAG_VALUE"]; matches=[t for t in p.get("status", {}).get("traffic", []) if t.get("tag")==tag]; print(matches[0].get("url", "") if matches else "")')"
@@ -161,12 +222,17 @@ if [[ "$HEAD_COMMIT" != "$UAT_COMMIT" ]]; then
 fi
 
 RESTART_MODE="$(classify_live_restart_mode "$PREVIOUS_HEAD" "$UAT_COMMIT")"
+LOCAL_AGENT_RESTART_MODE="$(classify_live_local_agent_restart_mode "$PREVIOUS_HEAD" "$UAT_COMMIT")"
 echo "Live restart mode: $RESTART_MODE"
-if [[ "$RESTART_MODE" == "portal" ]]; then
-  "$HOST_ROOT/scripts/run_team_stack.sh" restart-guard
+echo "Live local-agent restart mode: $LOCAL_AGENT_RESTART_MODE"
+validate_live_candidate_slot "$UAT_COMMIT"
+if [[ "$LOCAL_AGENT_RESTART_MODE" == "restart" ]]; then
+  "$HOST_ROOT/scripts/run_local_agent.sh" restart
 else
-  "$HOST_ROOT/scripts/run_team_stack.sh" restart
+  echo "Skipping live local-agent restart; changed files do not affect local-agent-backed workflows."
 fi
+"$HOST_ROOT/scripts/run_team_stack.sh" restart-guard
+TEAM_PORTAL_SLOT=candidate TEAM_PORTAL_SLOT_PORT="${PROMOTE_UAT_BLUE_GREEN_PORT:-5001}" "$HOST_ROOT/scripts/run_team_portal_slot.sh" stop >/dev/null 2>&1 || true
 SERVED_REVISION="$(curl -fsS --max-time 10 "http://127.0.0.1:5000/healthz" | "$PYTHON_BIN" -c 'import json, sys; print(json.load(sys.stdin).get("revision", ""))')"
 if [[ "$SERVED_REVISION" != "$UAT_COMMIT" ]]; then
   echo "Live portal loopback revision mismatch after restart."

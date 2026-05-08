@@ -149,6 +149,15 @@ Recommended speed/stability profiles:
 
 For Source Code Q&A, Cloud Run deploys set `SOURCE_CODE_QA_QUERY_SYNC_MODE=background` by default. User questions start against the last usable Mac-local index while the Mac local-agent queues the daily freshness check in the background, so repo clone/pull/index work no longer blocks the answer path.
 
+To improve repeat-query latency without reducing answer quality, warm the answer cache with the same deep query path used by real users:
+
+```bash
+TEAM_PORTAL_DATA_DIR=/path/to/.team-portal \
+./scripts/source_code_qa_warm_answer_cache.py --from-recent-slow --limit 5
+```
+
+The ops summary reports `llm_cache_hits` alongside p50/p95 latency so cache effectiveness is visible in `./scripts/run_team_stack.sh doctor`.
+
 The source upload is also trimmed by `.gcloudignore`: docs, tests, eval fixtures, local caches, runtime data, SQLite files, logs, and secrets are excluded from source deploy uploads. Runtime folders such as `bpmis_jira_tool`, `config`, `prd_briefing`, `static`, and `templates` remain included.
 
 Add this OAuth redirect in Google Cloud Console:

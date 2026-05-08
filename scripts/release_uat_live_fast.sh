@@ -151,6 +151,43 @@ run_gate() {
   "$ROOT_DIR/.venv/bin/python" "$ROOT_DIR/scripts/run_system_full_test_gate.py" --skip-smoke --parallel-workers "${RELEASE_UAT_LIVE_GATE_WORKERS:-4}"
 }
 
+run_gate_and_image_in_parallel() {
+  local sha="$1"
+  local work_dir gate_log image_log image_file gate_status=0 image_status=0
+  work_dir="$(mktemp -d "${TMPDIR:-/tmp}/uat-live-release.XXXXXX")"
+  gate_log="$work_dir/gate.log"
+  image_log="$work_dir/image.log"
+  image_file="$work_dir/image.txt"
+
+  run_gate >"$gate_log" 2>&1 &
+  local gate_pid="$!"
+  ensure_prebuilt_image "$sha" >"$image_file" 2>"$image_log" &
+  local image_pid="$!"
+
+  wait "$gate_pid" || gate_status=$?
+  cat "$gate_log" || true
+  wait "$image_pid" || image_status=$?
+  cat "$image_log" || true
+
+  if (( gate_status != 0 )); then
+    echo "Release gate failed; stopping before UAT deploy." >&2
+    rm -rf "$work_dir"
+    return "$gate_status"
+  fi
+  if (( image_status != 0 )); then
+    echo "Prebuilt image preparation failed; stopping before UAT deploy." >&2
+    rm -rf "$work_dir"
+    return "$image_status"
+  fi
+  IMAGE_URI="$(tail -n 1 "$image_file" | tr -d '\r\n')"
+  rm -rf "$work_dir"
+  if [[ -z "$IMAGE_URI" ]]; then
+    echo "Prebuilt image preparation did not return an image URI." >&2
+    return 1
+  fi
+  export IMAGE_URI
+}
+
 smoke() {
   local expected_revision="$1"
   shift
@@ -171,8 +208,8 @@ print_timing_report() {
 
 cd "$ROOT_DIR"
 SHA="$(current_sha)"
-run_gate
-IMAGE_URI="$(ensure_prebuilt_image "$SHA")"
+IMAGE_URI=""
+run_gate_and_image_in_parallel "$SHA"
 
 echo "Deploying UAT with prebuilt image: $IMAGE_URI"
 CLOUD_RUN_IMAGE="$IMAGE_URI" \

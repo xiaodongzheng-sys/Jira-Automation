@@ -4109,6 +4109,8 @@ class SourceCodeQAServiceTests(unittest.TestCase):
                     "status": "ok",
                     "latency_ms": 120,
                     "llm_route": {"mode": "hybrid"},
+                    "llm_provider": "codex_cli_bridge",
+                    "llm_cached": True,
                     "answer_contract": {"status": "satisfied"},
                 }
             )
@@ -4119,6 +4121,8 @@ class SourceCodeQAServiceTests(unittest.TestCase):
                     "status": "no_match",
                     "latency_ms": 360,
                     "llm_route": {"mode": "retrieval"},
+                    "llm_provider": "codex_cli_bridge",
+                    "llm_cached": False,
                     "answer_contract": {"status": "insufficient_evidence"},
                     "index_freshness": {"status": "stale_or_missing"},
                 }
@@ -4134,10 +4138,33 @@ class SourceCodeQAServiceTests(unittest.TestCase):
 
         self.assertIn("telemetry_window=2", summary)
         self.assertIn("query_status=ok=1, no_match=1", summary)
+        self.assertIn("llm_cache_hits=1/2", summary)
         self.assertIn("no_match_rate=1/2", summary)
         self.assertIn("feedback_window=1", summary)
         self.assertIn("review_queue=0", summary)
         self.assertNotIn("latest_eval_state", summary)
+
+    def test_source_code_qa_warm_answer_cache_selects_recent_slow_uncached_questions(self):
+        from scripts.source_code_qa_warm_answer_cache import _recent_slow_questions
+
+        data_root = Path(self.temp_dir.name)
+        source_root = data_root / "source_code_qa"
+        source_root.mkdir(parents=True)
+        (source_root / "telemetry.jsonl").write_text(
+            "\n".join(
+                [
+                    json.dumps({"key": "AF:All", "question_preview": "fast cached", "latency_ms": 1000, "llm_cached": False}),
+                    json.dumps({"key": "AF:All", "question_preview": "slow cached", "latency_ms": 90000, "llm_cached": True}),
+                    json.dumps({"key": "GRC:All", "question_preview": "slow uncached", "latency_ms": 91000, "llm_cached": False}),
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        questions = _recent_slow_questions(data_root, limit=5, min_latency_ms=30000)
+
+        self.assertEqual(questions, [{"pm_team": "GRC", "country": "All", "question": "slow uncached"}])
 
     def test_ops_summary_flags_fixture_repo_config_in_strict_mode(self):
         from scripts.source_code_qa_ops_summary import build_summary

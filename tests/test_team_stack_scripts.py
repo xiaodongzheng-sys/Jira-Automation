@@ -998,6 +998,16 @@ exit 0
         self.assertIn('restart) restart "$GUARD_ENV"', contents)
         self.assertIn('restart-guard) restart_guard "$GUARD_ENV"', contents)
 
+    def test_team_portal_slot_script_starts_candidate_revision(self):
+        slot_script = (PROJECT_ROOT / "scripts/run_team_portal_slot.sh").read_text(encoding="utf-8")
+
+        self.assertIn("TEAM_PORTAL_SLOT_PORT", slot_script)
+        self.assertIn("TEAM_PORTAL_SLOT_REVISION", slot_script)
+        self.assertIn("TEAM_PORTAL_RELEASE_REVISION=$REVISION", slot_script)
+        self.assertIn("slot_revision_matches", slot_script)
+        self.assertIn("TEAM_PORTAL_SLOT_REPLACE_STALE", slot_script)
+        self.assertIn("pid_listens_on_slot_port", slot_script)
+
     def test_promote_uat_to_live_supports_change_aware_restart(self):
         promote_script = PROJECT_ROOT / "scripts/promote_uat_to_live.sh"
 
@@ -1005,6 +1015,12 @@ exit 0
 
         self.assertIn("PROMOTE_UAT_RESTART_MODE", contents)
         self.assertIn("classify_live_restart_mode", contents)
+        self.assertIn("classify_live_local_agent_restart_mode", contents)
+        self.assertIn("live_local_agent_restart_requires_file", contents)
+        self.assertIn("PROMOTE_UAT_BLUE_GREEN_VALIDATE", contents)
+        self.assertIn("TEAM_PORTAL_SLOT_REPLACE_STALE=1", contents)
+        self.assertIn("run_team_portal_slot.sh", contents)
+        self.assertIn("Skipping live local-agent restart", contents)
         self.assertIn("restart-guard", contents)
         self.assertIn("Live restart mode:", contents)
 
@@ -1041,6 +1057,7 @@ exit 0
     def test_fast_uat_live_release_orchestrator_waits_deploys_promotes_and_reports(self):
         script = (PROJECT_ROOT / "scripts/release_uat_live_fast.sh").read_text(encoding="utf-8")
 
+        self.assertIn("run_gate_and_image_in_parallel", script)
         self.assertIn("wait_for_github_image_workflow", script)
         self.assertIn("run watch \"$run_id\"", script)
         self.assertIn("deploy_cloud_run_uat.sh", script)

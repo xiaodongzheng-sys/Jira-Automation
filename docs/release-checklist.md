@@ -222,7 +222,7 @@ For faster UAT releases, use the one-command orchestrator. It runs the release g
 ./scripts/release_uat_fast.sh
 ```
 
-For routine UAT plus live promotion, use the full one-command orchestrator. It waits for the GitHub SHA image when available, falls back to a local image build if needed, deploys UAT from the prebuilt image, runs the read-only smoke, promotes UAT to live, runs the promoted smoke, runs the live doctor, and prints the timing report:
+For routine UAT plus live promotion, use the full one-command orchestrator. It runs the release gate and GitHub SHA image wait in parallel, falls back to a local image build if needed, deploys UAT from the prebuilt image, runs the read-only smoke, promotes UAT to live, runs the promoted smoke, runs the live doctor, and prints the timing report:
 
 ```bash
 ./scripts/release_uat_live_fast.sh
@@ -367,7 +367,7 @@ curl https://app.bankpmtool.uk/api/local-agent/healthz
 
 ## 5. Live Promotion
 
-Run this only after the user explicitly confirms UAT passed and asks to publish Live. The promotion script reads the Cloud Run `uat` tag, verifies the tagged revision's `TEAM_PORTAL_RELEASE_REVISION`, refuses to publish if `origin/main` has moved past that UAT commit, fast-forwards the host workspace, chooses a full or portal-only restart based on the changed files, and verifies `/healthz`.
+Run this only after the user explicitly confirms UAT passed and asks to publish Live. The promotion script reads the Cloud Run `uat` tag, verifies the tagged revision's `TEAM_PORTAL_RELEASE_REVISION`, refuses to publish if `origin/main` has moved past that UAT commit, fast-forwards the host workspace, validates the new portal revision on an inactive local slot, restarts the live guard, restarts the live local-agent only when local-agent-backed files changed, and verifies `/healthz`.
 
 ```bash
 CLOUD_RUN_DEPLOY_ACCOUNT=vertex-ai-user@civil-partition-492805-v7.iam.gserviceaccount.com \
@@ -376,11 +376,17 @@ CLOUD_RUN_DEPLOY_ACCOUNT=vertex-ai-user@civil-partition-492805-v7.iam.gserviceac
 
 The script does not change Cloud Run live traffic. The Cloudflare Tunnel URL remains the primary Live portal.
 
-The default `PROMOTE_UAT_RESTART_MODE=auto` uses a portal-only restart for static/template/docs/test/web-shell changes and a full stack restart for everything else. Override only when you have checked the diff:
+The default `PROMOTE_UAT_RESTART_MODE=auto` still classifies the portal change shape, while `PROMOTE_UAT_LOCAL_AGENT_RESTART_MODE=auto` separately decides whether the live local-agent needs a restart. Static/template/docs/release-script-only changes skip the live local-agent restart. Source Code QA, local-agent, requirements, and PRD briefing backend changes restart it.
+
+Before switching public live, `PROMOTE_UAT_BLUE_GREEN_VALIDATE=1` starts an inactive candidate portal slot on `PROMOTE_UAT_BLUE_GREEN_PORT` (`5001` by default) and checks its `/healthz` revision. This catches bad portal starts before touching the current public slot.
+
+Override only when you have checked the diff:
 
 ```bash
 PROMOTE_UAT_RESTART_MODE=full ./scripts/promote_uat_to_live.sh
 PROMOTE_UAT_RESTART_MODE=portal ./scripts/promote_uat_to_live.sh
+PROMOTE_UAT_LOCAL_AGENT_RESTART_MODE=restart ./scripts/promote_uat_to_live.sh
+PROMOTE_UAT_BLUE_GREEN_VALIDATE=0 ./scripts/promote_uat_to_live.sh
 ```
 
 After promotion, run doctor for the full stack view:
