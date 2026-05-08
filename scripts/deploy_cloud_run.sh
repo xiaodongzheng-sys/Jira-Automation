@@ -66,7 +66,6 @@ included_files = {
     "requirements-cloud-run.txt",
     "app.py",
     "local_agent.py",
-    "jira_web_config.json",
     "scripts/deploy_cloud_run.sh",
     "scripts/deploy_cloud_run_full.sh",
 }

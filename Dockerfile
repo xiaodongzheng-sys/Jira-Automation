@@ -13,7 +13,7 @@ COPY requirements-cloud-run.txt .
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -r requirements-cloud-run.txt
 
-COPY app.py local_agent.py jira_web_config.json ./
+COPY app.py local_agent.py ./
 COPY bpmis_jira_tool ./bpmis_jira_tool
 COPY config ./config
 COPY prd_briefing ./prd_briefing

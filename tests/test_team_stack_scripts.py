@@ -1199,7 +1199,7 @@ exit 0
 
         self.assertNotIn("COPY . .", dockerfile)
         for expected in (
-            "COPY app.py local_agent.py jira_web_config.json ./",
+            "COPY app.py local_agent.py ./",
             "COPY bpmis_jira_tool ./bpmis_jira_tool",
             "COPY config ./config",
             "COPY prd_briefing ./prd_briefing",
