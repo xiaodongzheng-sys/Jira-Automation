@@ -46,7 +46,7 @@ MONTHLY_REPORT_TOKEN_RISK_HIGH = 180_000
 MONTHLY_REPORT_BATCH_TARGET_TOKENS = 55_000
 MONTHLY_REPORT_BATCH_MAX_TOKENS = 80_000
 MONTHLY_REPORT_MERGE_MAX_TOKENS = 120_000
-MONTHLY_REPORT_FINAL_MAX_TOKENS = 120_000
+MONTHLY_REPORT_FINAL_MAX_TOKENS = 80_000
 MONTHLY_REPORT_SUMMARY_MAX_CHARS = 14_000
 MONTHLY_REPORT_BRIEF_MAX_CHARS = 64_000
 MONTHLY_REPORT_MAX_VIP_GMAIL_THREADS = 60
@@ -975,6 +975,7 @@ def build_monthly_report_final_prompt(
     evidence_brief: str,
     monthly_evidence_brief: list[dict[str, Any]],
 ) -> str:
+    included_project_evidence = _compact_monthly_evidence_for_final(monthly_evidence_brief)
     return (
         "# Task\n"
         "Generate Xiaodong Zheng's monthly team report as concise, business-ready Markdown.\n"
@@ -997,10 +998,57 @@ def build_monthly_report_final_prompt(
         f"# Report Period\n{report_period.start_date} to {report_period.end_date}\n\n"
         f"# Monthly Report Template\n{normalize_monthly_report_template(template)}\n\n"
         "# Included Project Evidence JSON\n"
-        f"{_json_block([item for item in monthly_evidence_brief if item.get('include')])}\n\n"
+        f"{_json_block(included_project_evidence)}\n\n"
         "# Compact Evidence Brief\n"
         f"{evidence_brief or 'No readable evidence was found for this monthly report.'}"
     )
+
+
+def _compact_monthly_evidence_for_final(monthly_evidence_brief: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    compacted: list[dict[str, Any]] = []
+    for item in monthly_evidence_brief:
+        if not item.get("include"):
+            continue
+        compacted.append(
+            {
+                "include": True,
+                "project_id": str(item.get("project_id") or item.get("bpmis_id") or "").strip(),
+                "bpmis_id": str(item.get("bpmis_id") or item.get("project_id") or "").strip(),
+                "project_name": str(item.get("project_name") or "").strip(),
+                "product_area": str(item.get("product_area") or "").strip(),
+                "market": str(item.get("market") or "").strip(),
+                "priority": str(item.get("priority") or "").strip(),
+                "jira_ids": _compact_text_list(item.get("jira_ids"), limit=24, max_chars=80),
+                "seatalk_group_ids": _compact_text_list(item.get("seatalk_group_ids"), limit=8, max_chars=80),
+                "material_update_score": _safe_int(item.get("material_update_score")),
+                "status_facts": _compact_text_list(item.get("status_facts"), limit=6, max_chars=320),
+                "timeline_facts": _compact_text_list(item.get("timeline_facts"), limit=5, max_chars=240),
+                "risks": _compact_text_list(item.get("risks"), limit=4, max_chars=320),
+                "decisions_needed": _compact_text_list(item.get("decisions_needed"), limit=4, max_chars=320),
+                "matched_prd_summaries": _compact_text_list(item.get("matched_prd_summaries"), limit=3, max_chars=500),
+            }
+        )
+    return compacted
+
+
+def _compact_text_list(value: Any, *, limit: int, max_chars: int) -> list[str]:
+    items = value if isinstance(value, list) else []
+    compacted: list[str] = []
+    for item in items:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        compacted.append(text[:max_chars])
+        if len(compacted) >= limit:
+            break
+    return compacted
+
+
+def _safe_int(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def build_monthly_report_prd_scope_prompt(

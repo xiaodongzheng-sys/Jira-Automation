@@ -16,6 +16,7 @@ from bpmis_jira_tool.monthly_report import (
     MONTHLY_REPORT_MERGE_MAX_TOKENS,
     MonthlyReportService,
     _estimate_token_count,
+    build_monthly_report_final_prompt,
     build_monthly_project_evidence_brief,
     monthly_report_markdown_to_html,
     normalize_monthly_report_template,
@@ -298,6 +299,59 @@ class MonthlyReportTests(unittest.TestCase):
         for call in evidence_batch_calls:
             self.assertLessEqual(_estimate_token_count(call.kwargs["prompt"]), MONTHLY_REPORT_BATCH_MAX_TOKENS)
         self.assertEqual(result["evidence_summary"]["key_project_count"], 30)
+
+    def test_final_prompt_compacts_included_project_evidence(self):
+        period = resolve_monthly_report_period(datetime(2026, 5, 3, 10, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE))
+        evidence = []
+        for project_index in range(30):
+            evidence.append(
+                {
+                    "include": True,
+                    "project_id": f"BPMIS-{project_index:02d}",
+                    "bpmis_id": f"BPMIS-{project_index:02d}",
+                    "project_name": f"Anti-fraud Evidence Heavy Project {project_index:02d}",
+                    "product_area": "Anti-fraud",
+                    "market": "SG",
+                    "priority": "P0",
+                    "jira_ids": [f"AF-{project_index:02d}-{ticket_index:02d}" for ticket_index in range(40)],
+                    "seatalk_group_ids": [f"group-{ticket_index}" for ticket_index in range(20)],
+                    "material_update_score": 9,
+                    "status_facts": ["UAT validation completed " + ("status detail " * 80) for _ in range(20)],
+                    "timeline_facts": ["Release planned for 2026-05-20 " + ("timeline detail " * 80) for _ in range(20)],
+                    "risks": ["Approval dependency remains open " + ("risk detail " * 80) for _ in range(20)],
+                    "decisions_needed": ["Confirm live rollout owner " + ("decision detail " * 80) for _ in range(20)],
+                    "matched_prd_summaries": ["PRD scope summary " + ("prd detail " * 180) for _ in range(8)],
+                    "aliases": ["alias " * 240 for _ in range(40)],
+                    "matched_seatalk_messages": ["seatalk raw transcript " * 240 for _ in range(12)],
+                    "matched_vip_gmail_threads": ["gmail raw thread " * 240 for _ in range(12)],
+                    "evidence_sources": {"seatalk": ["raw source " * 240 for _ in range(12)]},
+                }
+            )
+        evidence.append(
+            {
+                "include": False,
+                "project_id": "BPMIS-EXCLUDED",
+                "project_name": "Excluded Project",
+                "matched_seatalk_messages": ["excluded raw transcript " * 100],
+            }
+        )
+
+        prompt = build_monthly_report_final_prompt(
+            template="# Template",
+            generated_at=datetime(2026, 5, 3, 10, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE),
+            report_period=period,
+            evidence_brief="Compact brief",
+            monthly_evidence_brief=evidence,
+        )
+
+        self.assertLessEqual(_estimate_token_count(prompt), MONTHLY_REPORT_FINAL_MAX_TOKENS)
+        self.assertIn("BPMIS-00", prompt)
+        self.assertIn("Anti-fraud Evidence Heavy Project 29", prompt)
+        self.assertNotIn("BPMIS-EXCLUDED", prompt)
+        self.assertNotIn("aliases", prompt)
+        self.assertNotIn("matched_seatalk_messages", prompt)
+        self.assertNotIn("matched_vip_gmail_threads", prompt)
+        self.assertNotIn("evidence_sources", prompt)
 
     def test_key_project_cap_allows_thirty_and_excludes_thirty_first(self):
         seatalk = _FakeSeaTalkService()
