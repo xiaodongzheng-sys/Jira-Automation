@@ -53,7 +53,8 @@ class GmailSeaTalkDemoRouteTests(unittest.TestCase):
         self.assertNotIn(b"/gmail-sea-talk-demo", response.data)
         self.assertLess(html.index("Source Code Q&amp;A"), html.index("PRD Briefing Tool"))
         self.assertLess(html.index("PRD Briefing Tool"), html.index("Team Dashboard"))
-        self.assertLess(html.index("Team Dashboard"), html.index("BPMIS Automation Tool"))
+        self.assertLess(html.index("Team Dashboard"), html.index("Reports"))
+        self.assertLess(html.index("Reports"), html.index("BPMIS Automation Tool"))
         self.assertNotIn("SeaTalk Summary", html)
         self.assertNotIn("Gmail &amp; SeaTalk Demo", html)
 
@@ -87,13 +88,13 @@ class GmailSeaTalkDemoRouteTests(unittest.TestCase):
         self.assertNotIn(b"SeaTalk Summary", response.data)
         self.assertNotIn(b"SeaTalk Management", response.data)
 
-    def test_owner_seatalk_summary_page_redirects_to_team_dashboard_name_mapping(self):
+    def test_owner_seatalk_summary_page_redirects_to_reports_name_mapping(self):
         with self.app.test_client() as client:
             self._login_owner(client, scopes=[GMAIL_READONLY_SCOPE])
             response = client.get("/gmail-sea-talk-demo", follow_redirects=False)
 
         self.assertEqual(response.status_code, 302)
-        self.assertEqual(response.headers["Location"], "/team-dashboard?tab=seatalk-name-mapping")
+        self.assertEqual(response.headers["Location"], "/reports?tab=seatalk-name-mapping")
 
     def test_owner_page_does_not_require_gmail_scope(self):
         with patch("bpmis_jira_tool.web._google_credentials_have_scopes") as scope_check:
@@ -103,7 +104,7 @@ class GmailSeaTalkDemoRouteTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 302)
         scope_check.assert_not_called()
-        self.assertEqual(response.headers["Location"], "/team-dashboard?tab=seatalk-name-mapping")
+        self.assertEqual(response.headers["Location"], "/reports?tab=seatalk-name-mapping")
 
     def test_non_owner_page_is_denied(self):
         with self.app.test_client() as client:

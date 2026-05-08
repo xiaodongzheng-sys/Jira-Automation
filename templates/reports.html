@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+
+{% block extra_head %}
+  <link rel="stylesheet" href="{{ url_for('static', filename='productization_upgrade_summary.css', v=asset_revision|default('static')) }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='team_dashboard.css', v=asset_revision|default('static')) }}">
+{% endblock %}
+
+{% block body %}
+  <section class="workspace-shell team-dashboard-page">
+    {% set reports_only = true %}
+    {% include "_team_dashboard_content.html" %}
+  </section>
+{% endblock %}
+
+{% block extra_scripts %}
+  <script src="{{ url_for('static', filename='team_dashboard.js', v=asset_revision|default('static')) }}"></script>
+{% endblock %}

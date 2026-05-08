@@ -719,6 +719,13 @@ def create_app() -> Flask:
                     "active": current_endpoint == "team_dashboard_page",
                 }
             )
+            site_tabs.append(
+                {
+                    "label": "Reports",
+                    "href": url_for("reports_page"),
+                    "active": current_endpoint == "reports_page",
+                }
+            )
         site_tabs.append(
             {
                 "label": "BPMIS Automation Tool",
@@ -907,6 +914,23 @@ def create_app() -> Flask:
             seatalk_configured=_seatalk_dashboard_is_configured(settings),
         )
 
+    @app.get("/reports")
+    def reports_page():
+        access_gate = _require_team_dashboard_access(settings)
+        if access_gate is not None:
+            return access_gate
+        return render_template(
+            "reports.html",
+            page_title="Reports",
+            user_identity=_get_user_identity(settings),
+            team_dashboard_config=_get_team_dashboard_config_store().load(),
+            can_manage_team_dashboard=_can_manage_team_dashboard(_get_user_identity(settings)),
+            can_view_team_dashboard_monthly_report=_can_access_team_dashboard_monthly_report(
+                _get_user_identity(settings)
+            ),
+            seatalk_configured=_seatalk_dashboard_is_configured(settings),
+        )
+
     @app.get("/prd-self-assessment")
     @app.get("/prd-self-assessment/")
     def prd_self_assessment_page():
@@ -1003,7 +1027,7 @@ def create_app() -> Flask:
         access_gate = _require_gmail_seatalk_demo_access(settings)
         if access_gate is not None:
             return access_gate
-        return redirect(url_for("team_dashboard_page", tab="seatalk-name-mapping"))
+        return redirect(url_for("reports_page", tab="seatalk-name-mapping"))
 
     @app.get("/api/gmail-sea-talk-demo/dashboard")
     def gmail_seatalk_demo_dashboard_api():

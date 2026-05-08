@@ -280,6 +280,11 @@
     const requestedTab = new URLSearchParams(window.location.search).get('tab');
     if (requestedTab && triggers.some((trigger) => trigger.dataset.teamDashboardTab === requestedTab)) {
       activate(requestedTab);
+      return;
+    }
+    const activeTrigger = triggers.find((trigger) => trigger.classList.contains('is-active')) || triggers[0];
+    if (activeTrigger) {
+      activate(activeTrigger.dataset.teamDashboardTab || 'tasks');
     }
   };
 

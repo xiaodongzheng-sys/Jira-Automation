@@ -472,6 +472,7 @@ class TeamPortalAccessTests(unittest.TestCase):
 
                 blocked_pages = {
                     "/team-dashboard": "/access-denied",
+                    "/reports": "/access-denied",
                     "/gmail-sea-talk-demo": "/",
                     "/meeting-recorder": "/",
                     "/meeting-translation": "/",
@@ -578,6 +579,7 @@ class TeamPortalAccessTests(unittest.TestCase):
                 "productization_upgrade_summary_issues",
                 "productization_upgrade_summary_llm_descriptions",
                 "productization_upgrade_summary_versions",
+                "reports_page",
                 "save_team_dashboard_members",
                 "save_team_dashboard_monthly_report_template",
                 "save_team_dashboard_report_intelligence",
@@ -642,6 +644,7 @@ class TeamPortalAccessTests(unittest.TestCase):
                     ("post", "/api/jobs/sync-bpmis-projects", {200}),
                     ("get", "/api/jobs/missing", {404}),
                     ("get", "/team-dashboard", {302}),
+                    ("get", "/reports", {302}),
                     ("get", "/meeting-recorder", {302}),
                     ("get", "/meeting-translation", {302}),
                     ("get", "/gmail-sea-talk-demo", {302}),

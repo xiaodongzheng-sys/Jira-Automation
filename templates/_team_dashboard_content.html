@@ -1,3 +1,6 @@
+{% set reports_only = reports_only|default(false) %}
+{% set initial_team_dashboard_tab = 'monthly-report' if reports_only else 'tasks' %}
+
 <section class="panel panel-wide glass-panel team-dashboard-panel"
   data-team-dashboard
   data-config-url="{{ url_for('team_dashboard_config') }}"
@@ -22,42 +25,51 @@
 >
   <div class="panel-head">
     <div>
-      <h2>Team Dashboard</h2>
-      <p class="step-copy">Review team Jira tasks by reporter and keep team member email lists up to date.</p>
+      <h2>{{ 'Reports' if reports_only else 'Team Dashboard' }}</h2>
+      <p class="step-copy">
+        {% if reports_only %}
+          Generate Monthly Reports, review Daily Brief archives, and maintain report intelligence.
+        {% else %}
+          Review team Jira tasks by reporter and keep team member email lists up to date.
+        {% endif %}
+      </p>
     </div>
   </div>
 
-  <div class="workspace-tabs team-dashboard-tabs" role="tablist" aria-label="Team Dashboard sections">
-    <button class="workspace-tab is-active" type="button" role="tab" aria-selected="true" data-team-dashboard-tab="tasks">Task List</button>
-    {% if can_view_team_dashboard_monthly_report %}
-      <button class="workspace-tab" type="button" role="tab" aria-selected="false" data-team-dashboard-tab="monthly-report">Monthly Report</button>
-      <button class="workspace-tab" type="button" role="tab" aria-selected="false" data-team-dashboard-tab="daily-brief">Daily Brief</button>
-      <button class="workspace-tab" type="button" role="tab" aria-selected="false" data-team-dashboard-tab="report-intelligence">Report Intelligence</button>
-    {% endif %}
-    <button class="workspace-tab" type="button" role="tab" aria-selected="false" data-team-dashboard-tab="link-biz-project">Link Biz Project</button>
-    {% if can_view_team_dashboard_monthly_report %}
-      <button class="workspace-tab" type="button" role="tab" aria-selected="false" data-team-dashboard-tab="seatalk-name-mapping">SeaTalk Name Mapping</button>
-    {% endif %}
-    {% if can_manage_team_dashboard %}
-      <button class="workspace-tab" type="button" role="tab" aria-selected="false" data-team-dashboard-tab="admin">Team Admin</button>
+  <div class="workspace-tabs team-dashboard-tabs" role="tablist" aria-label="{{ 'Reports sections' if reports_only else 'Team Dashboard sections' }}">
+    {% if reports_only %}
+      {% if can_view_team_dashboard_monthly_report %}
+        <button class="workspace-tab is-active" type="button" role="tab" aria-selected="true" data-team-dashboard-tab="monthly-report">Monthly Report</button>
+        <button class="workspace-tab" type="button" role="tab" aria-selected="false" data-team-dashboard-tab="daily-brief">Daily Brief</button>
+        <button class="workspace-tab" type="button" role="tab" aria-selected="false" data-team-dashboard-tab="report-intelligence">Report Intelligence</button>
+        <button class="workspace-tab" type="button" role="tab" aria-selected="false" data-team-dashboard-tab="seatalk-name-mapping">SeaTalk Name Mapping</button>
+      {% endif %}
+    {% else %}
+      <button class="workspace-tab is-active" type="button" role="tab" aria-selected="true" data-team-dashboard-tab="tasks">Task List</button>
+      <button class="workspace-tab" type="button" role="tab" aria-selected="false" data-team-dashboard-tab="link-biz-project">Link Biz Project</button>
+      {% if can_manage_team_dashboard %}
+        <button class="workspace-tab" type="button" role="tab" aria-selected="false" data-team-dashboard-tab="admin">Team Admin</button>
+      {% endif %}
     {% endif %}
   </div>
 
-  <section data-team-dashboard-panel="tasks">
-    <div class="productization-section-head">
-      <div>
-        <h3>Task List</h3>
-        <span data-team-dashboard-task-summary>Load Jira tasks for one team at a time.</span>
+  {% if not reports_only %}
+    <section data-team-dashboard-panel="tasks">
+      <div class="productization-section-head">
+        <div>
+          <h3>Task List</h3>
+          <span data-team-dashboard-task-summary>Load Jira tasks for one team at a time.</span>
+        </div>
       </div>
-    </div>
-    <p class="productization-inline-status" data-team-dashboard-task-status></p>
-    <div class="team-dashboard-team-list" data-team-dashboard-task-list>
-      <div class="workspace-tabs team-dashboard-track-tabs" hidden></div>
-    </div>
-  </section>
+      <p class="productization-inline-status" data-team-dashboard-task-status></p>
+      <div class="team-dashboard-team-list" data-team-dashboard-task-list>
+        <div class="workspace-tabs team-dashboard-track-tabs" hidden></div>
+      </div>
+    </section>
+  {% endif %}
 
-  {% if can_view_team_dashboard_monthly_report %}
-    <section data-team-dashboard-panel="monthly-report" hidden>
+  {% if reports_only and can_view_team_dashboard_monthly_report %}
+    <section data-team-dashboard-panel="monthly-report" {% if initial_team_dashboard_tab != 'monthly-report' %}hidden{% endif %}>
       <div class="productization-section-head">
         <div>
           <h3>Monthly Report</h3>
@@ -104,10 +116,35 @@
           </div>
         </div>
       </div>
+      {% if can_manage_team_dashboard %}
+        <form method="post" action="{{ url_for('save_team_dashboard_monthly_report_template') }}" class="stack team-dashboard-monthly-report-template-form" data-monthly-report-template-form>
+          <div class="config-card config-card-wide">
+            <div class="field-label-row">
+              <h3>Monthly Report Template</h3>
+              <span class="field-badge">Monthly Report</span>
+            </div>
+            <p class="card-help">The generator follows this Markdown template when drafting the Monthly Report.</p>
+            <div class="field-group">
+              <label for="team_dashboard_monthly_report_template">Template</label>
+              <textarea
+                id="team_dashboard_monthly_report_template"
+                rows="16"
+                spellcheck="true"
+                name="monthly_report_template"
+                data-monthly-report-template
+              >{{ team_dashboard_config.monthly_report_template }}</textarea>
+            </div>
+          </div>
+          <div class="button-row">
+            <button class="button" type="submit">Save Monthly Report Template</button>
+          </div>
+          <p class="productization-inline-status" data-monthly-report-template-status></p>
+        </form>
+      {% endif %}
     </section>
   {% endif %}
 
-  {% if can_view_team_dashboard_monthly_report %}
+  {% if reports_only and can_view_team_dashboard_monthly_report %}
     <section data-team-dashboard-panel="daily-brief" hidden>
       <div class="productization-section-head">
         <div>
@@ -222,38 +259,40 @@
     </section>
   {% endif %}
 
-  <section data-team-dashboard-panel="link-biz-project" hidden>
-    <div class="productization-section-head">
-      <div>
-        <h3>Link Biz Project</h3>
-        <span data-link-biz-project-summary>Find Jira tickets without a BPMIS Biz Project and link them to the closest match.</span>
+  {% if not reports_only %}
+    <section data-team-dashboard-panel="link-biz-project" hidden>
+      <div class="productization-section-head">
+        <div>
+          <h3>Link Biz Project</h3>
+          <span data-link-biz-project-summary>Find Jira tickets without a BPMIS Biz Project and link them to the closest match.</span>
+        </div>
+        <div class="button-row">
+          <button class="button button-secondary" type="button" data-link-biz-project-find-jira>Find Unlinked Jira</button>
+          <button class="button button-secondary" type="button" data-link-biz-project-suggest disabled>Suggest BPMIS Biz Project</button>
+        </div>
       </div>
-      <div class="button-row">
-        <button class="button button-secondary" type="button" data-link-biz-project-find-jira>Find Unlinked Jira</button>
-        <button class="button button-secondary" type="button" data-link-biz-project-suggest disabled>Suggest BPMIS Biz Project</button>
+      <p class="productization-inline-status" data-link-biz-project-status></p>
+      <div class="table-wrap premium-table-wrap team-dashboard-link-biz-wrap">
+        <table class="productization-table team-dashboard-table team-dashboard-link-biz-table">
+          <thead>
+            <tr>
+              <th>Jira ID</th>
+              <th>Jira Title</th>
+              <th>Reporter Email</th>
+              <th>Suggested Biz Project Title</th>
+              <th>Select Biz Project Title</th>
+              <th>Link</th>
+            </tr>
+          </thead>
+          <tbody data-link-biz-project-rows>
+            <tr><td colspan="6" class="team-dashboard-empty-cell">Click Find Unlinked Jira to start.</td></tr>
+          </tbody>
+        </table>
       </div>
-    </div>
-    <p class="productization-inline-status" data-link-biz-project-status></p>
-    <div class="table-wrap premium-table-wrap team-dashboard-link-biz-wrap">
-      <table class="productization-table team-dashboard-table team-dashboard-link-biz-table">
-        <thead>
-          <tr>
-            <th>Jira ID</th>
-            <th>Jira Title</th>
-            <th>Reporter Email</th>
-            <th>Suggested Biz Project Title</th>
-            <th>Select Biz Project Title</th>
-            <th>Link</th>
-          </tr>
-        </thead>
-        <tbody data-link-biz-project-rows>
-          <tr><td colspan="6" class="team-dashboard-empty-cell">Click Find Unlinked Jira to start.</td></tr>
-        </tbody>
-      </table>
-    </div>
-  </section>
+    </section>
+  {% endif %}
 
-  {% if can_manage_team_dashboard %}
+  {% if can_manage_team_dashboard and not reports_only %}
     <section data-team-dashboard-panel="admin" hidden>
       <form method="post" action="{{ url_for('save_team_dashboard_members') }}" class="stack" data-team-dashboard-admin-form>
         <div class="config-grid setup-grid">
@@ -281,30 +320,6 @@
           <button class="button" type="submit">Save Team Emails</button>
         </div>
         <p class="productization-inline-status" data-team-dashboard-admin-status></p>
-      </form>
-
-      <form method="post" action="{{ url_for('save_team_dashboard_monthly_report_template') }}" class="stack team-dashboard-monthly-report-template-form" data-monthly-report-template-form>
-        <div class="config-card config-card-wide">
-          <div class="field-label-row">
-            <h3>Monthly Report Template</h3>
-            <span class="field-badge">Team Admin</span>
-          </div>
-          <p class="card-help">The generator follows this Markdown template when drafting the Monthly Report.</p>
-          <div class="field-group">
-            <label for="team_dashboard_monthly_report_template">Template</label>
-            <textarea
-              id="team_dashboard_monthly_report_template"
-              rows="16"
-              spellcheck="true"
-              name="monthly_report_template"
-              data-monthly-report-template
-            >{{ team_dashboard_config.monthly_report_template }}</textarea>
-          </div>
-        </div>
-        <div class="button-row">
-          <button class="button" type="submit">Save Monthly Report Template</button>
-        </div>
-        <p class="productization-inline-status" data-monthly-report-template-status></p>
       </form>
     </section>
   {% endif %}
