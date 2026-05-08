@@ -1069,7 +1069,7 @@ exit 0
     def test_gcloudignore_excludes_non_runtime_uploads_but_keeps_runtime_inputs(self):
         ignored = (PROJECT_ROOT / ".gcloudignore").read_text(encoding="utf-8").splitlines()
 
-        for expected in ("docs/", "tests/", "evals/", ".team-portal/", ".secrets/", "*.db"):
+        for expected in ("docs/", "tests/", "evals/", ".team-portal/", ".team-portal-uat/", ".secrets/", "*.db"):
             self.assertIn(expected, ignored)
         for runtime_path in ("bpmis_jira_tool/", "config/", "static/", "templates/", "prd_briefing/"):
             self.assertNotIn(runtime_path, ignored)

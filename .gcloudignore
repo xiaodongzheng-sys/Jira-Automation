@@ -6,6 +6,7 @@
 .secrets/
 .venv/
 .team-portal/
+.team-portal-uat/
 __pycache__/
 *.pyc
 *.traineddata
