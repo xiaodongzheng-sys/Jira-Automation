@@ -37,6 +37,87 @@ def _configured_keys(service: Any) -> list[str]:
     return sorted(str(key) for key, repos in mappings.items() if isinstance(repos, list) and repos)
 
 
+def _active_index_paths(service: Any) -> set[Path]:
+    config = service.load_config()
+    mappings = config.get("mappings") if isinstance(config.get("mappings"), dict) else {}
+    active_paths: set[Path] = set()
+    for key, repos in mappings.items():
+        if not isinstance(repos, list):
+            continue
+        for raw_entry in repos:
+            if not isinstance(raw_entry, dict):
+                continue
+            entry = service._normalize_entry(raw_entry)
+            repo_path = service._repo_path(str(key), entry)
+            active_paths.add(service._index_path(repo_path).resolve())
+    return active_paths
+
+
+def _index_file_payload(path: Path) -> dict[str, Any]:
+    try:
+        size = path.stat().st_size
+    except OSError:
+        size = 0
+    return {"path": str(path), "name": path.name, "bytes": size}
+
+
+def _scan_orphan_index_files(index_root: Path, active_paths: set[Path]) -> dict[str, Any]:
+    active_resolved = {path.resolve() for path in active_paths}
+    candidates = sorted(
+        (
+            path
+            for path in index_root.iterdir()
+            if path.is_file() and path.suffix.lower() in {".db", ".sqlite", ".sqlite3"}
+        ),
+        key=lambda item: item.name,
+    ) if index_root.exists() else []
+    active_files = [path for path in candidates if path.resolve() in active_resolved]
+    orphan_files = [path for path in candidates if path.resolve() not in active_resolved]
+    active_payloads = [_index_file_payload(path) for path in active_files]
+    orphan_payloads = [_index_file_payload(path) for path in orphan_files]
+    return {
+        "active_files": active_payloads,
+        "orphan_files": orphan_payloads,
+        "active_count": len(active_payloads),
+        "orphan_count": len(orphan_payloads),
+        "active_bytes": sum(item["bytes"] for item in active_payloads),
+        "orphan_bytes": sum(item["bytes"] for item in orphan_payloads),
+    }
+
+
+def cleanup_orphan_indexes(settings: Settings, *, delete: bool = False) -> dict[str, Any]:
+    data_root = source_code_qa_data_root(settings)
+    service = build_source_code_qa_service_from_settings(settings)
+    index_root = service.index_root
+    scan = _scan_orphan_index_files(index_root, _active_index_paths(service))
+    deleted_files: list[dict[str, Any]] = []
+    errors: list[str] = []
+    if delete:
+        for item in scan["orphan_files"]:
+            path = Path(item["path"])
+            try:
+                path.unlink()
+                deleted_files.append(item)
+            except OSError as error:
+                errors.append(f"{path}: {error}")
+    return {
+        "status": "ok" if not errors else "failed",
+        "mode": "delete" if delete else "dry-run",
+        "data_root": str(data_root),
+        "index_root": str(index_root),
+        "active_count": scan["active_count"],
+        "active_bytes": scan["active_bytes"],
+        "orphan_count": scan["orphan_count"],
+        "orphan_bytes": scan["orphan_bytes"],
+        "deleted_count": len(deleted_files),
+        "deleted_bytes": sum(item["bytes"] for item in deleted_files),
+        "active_files": scan["active_files"],
+        "orphan_files": scan["orphan_files"],
+        "deleted_files": deleted_files,
+        "errors": errors,
+    }
+
+
 def _verify_health(service: Any) -> tuple[list[str], dict[str, Any]]:
     issues: list[str] = []
     health = service.index_health_payload()
@@ -93,12 +174,32 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Force Source Code Q&A active repo sync and rebuild indexes.")
     parser.add_argument("--data-root", help="Override TEAM_PORTAL_DATA_DIR for this rebuild.")
     parser.add_argument("--no-backup", action="store_true", help="Skip copying the current source_code_qa/indexes directory first.")
+    parser.add_argument("--cleanup-orphans", action="store_true", help="List Source Code Q&A index files that are not in active config mappings.")
+    parser.add_argument("--delete", action="store_true", help="With --cleanup-orphans, delete orphan index files. Default is dry-run.")
     parser.add_argument("--json", action="store_true", help="Print the full machine-readable result.")
     args = parser.parse_args()
 
     settings = Settings.from_env()
     if args.data_root:
         settings = replace(settings, team_portal_data_dir=Path(args.data_root).expanduser().resolve())
+    if args.cleanup_orphans:
+        result = cleanup_orphan_indexes(settings, delete=args.delete)
+        if args.json:
+            print(json.dumps(result, indent=2, sort_keys=True))
+        else:
+            print(f"Source Code Q&A orphan index cleanup: {result['status']} mode={result['mode']}")
+            print(f"data_root={result['data_root']}")
+            print(f"index_root={result['index_root']}")
+            print(f"active_indexes={result['active_count']} bytes={result['active_bytes']}")
+            print(f"orphan_indexes={result['orphan_count']} bytes={result['orphan_bytes']}")
+            if result["mode"] == "delete":
+                print(f"deleted_indexes={result['deleted_count']} bytes={result['deleted_bytes']}")
+            for item in result["orphan_files"]:
+                print(f"ORPHAN: {item['path']} bytes={item['bytes']}")
+            for error in result["errors"]:
+                print(f"ERROR: {error}", file=sys.stderr)
+        return 0 if result["status"] == "ok" else 1
+
     result = rebuild(settings, backup=not args.no_backup)
     if args.json:
         print(json.dumps(result, indent=2, sort_keys=True))

@@ -4186,6 +4186,74 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertTrue(str(backup_path.name).startswith(f"indexes.backup.v{CODE_INDEX_VERSION}."))
         self.assertEqual((backup_path / "repo.sqlite").read_text(encoding="utf-8"), "index")
 
+    def test_rebuild_indexes_helper_dry_run_lists_orphan_indexes_without_deleting(self):
+        from scripts.source_code_qa_rebuild_indexes import _scan_orphan_index_files
+
+        index_root = Path(self.temp_dir.name) / "source_code_qa" / "indexes"
+        index_root.mkdir(parents=True)
+        active = index_root / "active.sqlite3"
+        orphan = index_root / "orphan.sqlite3"
+        non_index = index_root / "notes.txt"
+        active.write_bytes(b"active")
+        orphan.write_bytes(b"orphan-index")
+        non_index.write_text("not an index", encoding="utf-8")
+
+        result = _scan_orphan_index_files(index_root, {active})
+
+        self.assertEqual(result["active_count"], 1)
+        self.assertEqual(result["orphan_count"], 1)
+        self.assertEqual(result["active_bytes"], len(b"active"))
+        self.assertEqual(result["orphan_bytes"], len(b"orphan-index"))
+        self.assertEqual(result["orphan_files"][0]["name"], "orphan.sqlite3")
+        self.assertTrue(active.exists())
+        self.assertTrue(orphan.exists())
+        self.assertTrue(non_index.exists())
+
+    def test_cleanup_orphan_indexes_deletes_only_non_active_index_files(self):
+        from scripts.source_code_qa_rebuild_indexes import cleanup_orphan_indexes
+
+        index_root = Path(self.temp_dir.name) / "source_code_qa" / "indexes"
+        index_root.mkdir(parents=True)
+        active = index_root / "active.sqlite3"
+        orphan = index_root / "orphan.sqlite3"
+        orphan_db = index_root / "orphan.db"
+        wal = index_root / "orphan.sqlite3-wal"
+        active.write_bytes(b"active")
+        orphan.write_bytes(b"orphan")
+        orphan_db.write_bytes(b"db")
+        wal.write_bytes(b"wal")
+
+        class FakeService:
+            def __init__(self):
+                self.index_root = index_root
+
+            def load_config(self):
+                return {"mappings": {"CRMS:SG": [{"url": "https://git.example.com/team/active.git"}]}}
+
+            def _normalize_entry(self, raw):
+                return raw
+
+            def _repo_path(self, key, entry):
+                return Path(self.load_config()["mappings"][key][0]["url"])
+
+            def _index_path(self, repo_path):
+                return active
+
+        with patch("scripts.source_code_qa_rebuild_indexes.source_code_qa_data_root", return_value=Path(self.temp_dir.name)), patch(
+            "scripts.source_code_qa_rebuild_indexes.build_source_code_qa_service_from_settings",
+            return_value=FakeService(),
+        ):
+            result = cleanup_orphan_indexes(SimpleNamespace(), delete=True)
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["active_count"], 1)
+        self.assertEqual(result["orphan_count"], 2)
+        self.assertEqual(result["deleted_count"], 2)
+        self.assertTrue(active.exists())
+        self.assertFalse(orphan.exists())
+        self.assertFalse(orphan_db.exists())
+        self.assertTrue(wal.exists())
+
     def test_domain_profiles_include_domain_knowledge_pack_terms(self):
         crms_profile = self.service._domain_profile("CRMS", "SG")
         af_profile = self.service._domain_profile("AF", "All")
