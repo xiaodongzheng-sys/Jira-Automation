@@ -979,6 +979,16 @@ exit 0
         self.assertIn("restart_portal()", contents)
         self.assertIn('"$ROOT_DIR/scripts/run_team_portal_prod.sh" restart', contents)
 
+    def test_mac_stack_supports_guard_restart_without_local_agent(self):
+        stack_script = PROJECT_ROOT / "scripts/run_team_stack.sh"
+
+        contents = stack_script.read_text(encoding="utf-8")
+
+        self.assertIn("restart-guard", contents)
+        self.assertIn("restart_guard()", contents)
+        self.assertIn('restart) restart "$GUARD_ENV"', contents)
+        self.assertIn('restart-guard) restart_guard "$GUARD_ENV"', contents)
+
     def test_promote_uat_to_live_supports_change_aware_restart(self):
         promote_script = PROJECT_ROOT / "scripts/promote_uat_to_live.sh"
 
@@ -986,7 +996,7 @@ exit 0
 
         self.assertIn("PROMOTE_UAT_RESTART_MODE", contents)
         self.assertIn("classify_live_restart_mode", contents)
-        self.assertIn("restart-portal", contents)
+        self.assertIn("restart-guard", contents)
         self.assertIn("Live restart mode:", contents)
 
     def test_deploy_scripts_persist_timing_metrics(self):

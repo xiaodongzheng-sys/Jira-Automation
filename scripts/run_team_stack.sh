@@ -7,7 +7,7 @@ source "$ROOT_DIR/scripts/lib/team_env.sh"
 GUARD_DAEMON_SCRIPT="$ROOT_DIR/scripts/run_team_stack_guard_daemon.sh"
 
 usage() {
-  echo "Usage: $0 {start|stop|restart|restart-portal|status|logs|doctor} [--caffeinate|--no-caffeinate]"
+  echo "Usage: $0 {start|stop|restart|restart-guard|restart-portal|status|logs|doctor} [--caffeinate|--no-caffeinate]"
 }
 
 resolve_guard_env() {
@@ -338,6 +338,11 @@ restart_local_agent_if_needed() {
 restart() {
   local guard_env="$1"
   restart_local_agent_if_needed
+  restart_guard "$guard_env"
+}
+
+restart_guard() {
+  local guard_env="$1"
   if launchd_stack_installed; then
     local domain_label
     domain_label="$(launchd_domain_label)"
@@ -374,6 +379,7 @@ case "$ACTION" in
   start) start "$GUARD_ENV" ;;
   stop) stop ;;
   restart) restart "$GUARD_ENV" ;;
+  restart-guard) restart_guard "$GUARD_ENV" ;;
   restart-portal) restart_portal ;;
   status) status ;;
   logs) logs ;;

@@ -163,7 +163,7 @@ fi
 RESTART_MODE="$(classify_live_restart_mode "$PREVIOUS_HEAD" "$UAT_COMMIT")"
 echo "Live restart mode: $RESTART_MODE"
 if [[ "$RESTART_MODE" == "portal" ]]; then
-  "$HOST_ROOT/scripts/run_team_stack.sh" restart-portal
+  "$HOST_ROOT/scripts/run_team_stack.sh" restart-guard
 else
   "$HOST_ROOT/scripts/run_team_stack.sh" restart
 fi
