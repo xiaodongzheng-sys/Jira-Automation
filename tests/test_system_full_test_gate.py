@@ -9,15 +9,24 @@ from scripts import run_system_full_test_gate as gate
 class SystemFullTestGateTests(unittest.TestCase):
     def test_skip_smoke_runs_release_gate_steps_in_order(self):
         commands = []
+        parallel_workers = []
 
         def fake_run_command(name, command):
             commands.append((name, command))
             return gate.GateStep(name=name, command=command)
 
+        def fake_parallel(parallel_commands, *, max_workers):
+            parallel_workers.append(max_workers)
+            return [fake_run_command(name, command) for name, command in parallel_commands]
+
         with patch.object(gate, "STATIC_JS_PATHS", [gate.ROOT_DIR / "static" / "a.js", gate.ROOT_DIR / "static" / "b.js"]), patch.object(
             gate,
             "_run_command",
             side_effect=fake_run_command,
+        ), patch.object(
+            gate,
+            "_run_parallel_commands",
+            side_effect=fake_parallel,
         ):
             result = gate.run_gate(
                 skip_smoke=True,
@@ -25,6 +34,7 @@ class SystemFullTestGateTests(unittest.TestCase):
                 live_url=None,
                 expected_revision=None,
                 coverage_fail_under=100,
+                parallel_workers=3,
             )
 
         self.assertEqual(result["status"], "pass")
@@ -42,6 +52,7 @@ class SystemFullTestGateTests(unittest.TestCase):
         self.assertEqual(commands[2][1][-2:], ["--fail-under", "100"])
         self.assertEqual(commands[3][1], ["node", "--check", "static/a.js"])
         self.assertEqual(commands[4][1], ["node", "--check", "static/b.js"])
+        self.assertEqual(parallel_workers, [3])
         self.assertEqual(result["steps"][-1]["status"], "skipped")
 
     def test_gate_stops_after_failed_command(self):

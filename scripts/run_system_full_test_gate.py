@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 import json
 import os
@@ -43,6 +44,15 @@ def _run_command(name: str, command: list[str]) -> GateStep:
         stderr=completed.stderr or "",
         status="pass" if completed.returncode == 0 else "fail",
     )
+
+
+def _run_parallel_commands(commands: list[tuple[str, list[str]]], *, max_workers: int) -> list[GateStep]:
+    if not commands:
+        return []
+    workers = max(1, min(max_workers, len(commands)))
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = [executor.submit(_run_command, name, command) for name, command in commands]
+        return [future.result() for future in futures]
 
 
 def _join_url(base_url: str, path: str) -> str:
@@ -95,22 +105,25 @@ def run_gate(
     expected_revision: str | None,
     coverage_fail_under: int,
     expect_live_promoted: bool = False,
+    parallel_workers: int = 4,
 ) -> dict[str, Any]:
     steps: list[GateStep] = []
 
-    commands = [
+    coverage_commands = [
         ("coverage_erase", [sys.executable, "-m", "coverage", "erase"]),
         ("python_unittest_coverage", [sys.executable, "-m", "coverage", "run", "-m", "unittest", "discover", "-s", "tests"]),
         ("python_coverage_report", [sys.executable, "-m", "coverage", "report", "--fail-under", str(coverage_fail_under)]),
     ]
-    commands.extend(("node_check", ["node", "--check", str(path.relative_to(ROOT_DIR))]) for path in STATIC_JS_PATHS)
-    commands.append(("source_code_qa_release_gate", [sys.executable, "scripts/run_source_code_qa_release_gate.py"]))
+    parallel_commands = [("node_check", ["node", "--check", str(path.relative_to(ROOT_DIR))]) for path in STATIC_JS_PATHS]
+    parallel_commands.append(("source_code_qa_release_gate", [sys.executable, "scripts/run_source_code_qa_release_gate.py"]))
 
-    for name, command in commands:
+    for name, command in coverage_commands:
         step = _run_command(name, command)
         steps.append(step)
         if step.returncode != 0:
             break
+    if all(step.returncode == 0 for step in steps):
+        steps.extend(_run_parallel_commands(parallel_commands, max_workers=parallel_workers))
 
     if all(step.returncode == 0 for step in steps):
         if skip_smoke:
@@ -155,6 +168,7 @@ def main(argv: list[str] | None = None) -> int:
         help="Require Live to serve the expected revision, for post-promotion validation.",
     )
     parser.add_argument("--coverage-fail-under", type=int, default=100, help="Coverage percentage required for governed code.")
+    parser.add_argument("--parallel-workers", type=int, default=4, help="Workers for independent JS and Source Code QA checks.")
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     args = parser.parse_args(argv)
 
@@ -165,6 +179,7 @@ def main(argv: list[str] | None = None) -> int:
         expected_revision=args.expected_revision,
         coverage_fail_under=int(args.coverage_fail_under),
         expect_live_promoted=bool(args.expect_live_promoted),
+        parallel_workers=int(args.parallel_workers),
     )
     if args.json:
         print(json.dumps(result, indent=2, ensure_ascii=False))

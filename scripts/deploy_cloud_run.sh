@@ -33,6 +33,15 @@ if [[ -n "$CLOUD_RUN_DEPLOY_ACCOUNT_RESOLVED" ]]; then
   ACCOUNT_ARGS=(--account "$CLOUD_RUN_DEPLOY_ACCOUNT_RESOLVED")
 fi
 
+record_cloud_run_deploy_timing_on_exit() {
+  local status=$?
+  local finished_at
+  finished_at="$(date +%s)"
+  record_deploy_timing "deploy_cloud_run.sh" "script" "$SCRIPT_STARTED_AT" "$finished_at" "$status" "service=$SERVICE region=$REGION image=${CLOUD_RUN_IMAGE:-source}" || true
+  return "$status"
+}
+trap record_cloud_run_deploy_timing_on_exit EXIT
+
 cloud_run_hash() {
   if [[ ! -x "$PYTHON_BIN" ]]; then
     printf 'unknown\n'

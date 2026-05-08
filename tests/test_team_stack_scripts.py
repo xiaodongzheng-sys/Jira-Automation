@@ -23,6 +23,14 @@ class TeamStackScriptTests(unittest.TestCase):
         "TEAM_PORTAL_DATA_DIR",
     )
 
+    def setUp(self):
+        self._timing_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._timing_dir.cleanup)
+        timing_file = str(Path(self._timing_dir.name) / "deploy_timings.jsonl")
+        self._timing_env_patch = patch.dict(os.environ, {"TEAM_DEPLOY_TIMING_FILE": timing_file})
+        self._timing_env_patch.start()
+        self.addCleanup(self._timing_env_patch.stop)
+
     def _script_env(self, **overrides: str) -> dict:
         env = os.environ.copy()
         for key in self.SCRIPT_TEST_ENV_KEYS:
@@ -144,6 +152,7 @@ exit 0
             "scripts/deploy_cloud_run.sh",
             "scripts/deploy_cloud_run_full.sh",
             "scripts/deploy_cloud_run_uat.sh",
+            "scripts/release_uat_fast.sh",
             "scripts/setup_uat_local_agent.sh",
             "scripts/promote_uat_to_live.sh",
             "scripts/build_cloud_run_image.sh",
@@ -277,6 +286,7 @@ exit 0
             self.assertIn("TEAM_PORTAL_BASE_URL=https://uat---team-portal-ekaykywtvq-as.a.run.app", deploy_calls[0])
             self.assertIn("LOCAL_AGENT_BASE_URL=https://app.bankpmtool.uk/uat-local-agent", deploy_calls[0])
             self.assertIn("TEAM_PORTAL_RELEASE_REVISION=", deploy_calls[0])
+            self.assertIn("TEAM_PORTAL_DEPLOY_HASH=", deploy_calls[0])
             self.assertIn("--update-secrets LOCAL_AGENT_HMAC_SECRET=local-agent-uat-hmac-secret:latest", deploy_calls[0])
             self.assertIn("TRELLO_API_KEY=trello-key", deploy_calls[0])
             self.assertIn("TRELLO_API_TOKEN=trello-token", deploy_calls[0])
@@ -284,6 +294,16 @@ exit 0
             self.assertIn("TRELLO_DAILY_LIST_NAME=Daily Summary Email", deploy_calls[0])
             self.assertIn("Cloud Run UAT revision: team-portal-00091-uat", completed.stdout)
             self.assertIn("keeps live traffic unchanged", completed.stdout)
+
+    def test_cloud_run_uat_deploy_supports_hash_based_skip(self):
+        deploy_script = PROJECT_ROOT / "scripts/deploy_cloud_run_uat.sh"
+        contents = deploy_script.read_text(encoding="utf-8")
+
+        self.assertIn("CLOUD_RUN_UAT_SKIP_UNCHANGED", contents)
+        self.assertIn("TEAM_PORTAL_DEPLOY_HASH", contents)
+        self.assertIn("Cloud Run UAT deploy skipped", contents)
+        self.assertIn("describe_revision \"$EXISTING_UAT_REVISION\"", contents)
+        self.assertIn("sync_mac_local_agent_for_uat", contents)
 
     def test_cloud_run_uat_deploy_reads_project_and_account_from_env_file(self):
         deploy_script = PROJECT_ROOT / "scripts/deploy_cloud_run_uat.sh"
@@ -475,10 +495,16 @@ exit 0
         contents = deploy_script.read_text(encoding="utf-8")
 
         self.assertIn("CLOUD_RUN_UAT_SYNC_LOCAL_AGENT_AFTER_DEPLOY:-1", contents)
+        self.assertIn("CLOUD_RUN_UAT_LOCAL_AGENT_SYNC_MODE", contents)
+        self.assertIn("CLOUD_RUN_UAT_PARALLEL_HOST_SYNC", contents)
+        self.assertIn("classify_uat_local_agent_sync_mode", contents)
+        self.assertIn("finish_uat_host_sync", contents)
         self.assertIn("CLOUD_RUN_UAT_HOST_WORKSPACE", contents)
         self.assertIn("recommended_uat_team_stack_root", contents)
         self.assertIn("git -C \"$host_workspace\" merge --ff-only \"$GIT_SHA\"", contents)
-        self.assertIn("pip\" install -r \"$host_workspace/requirements.txt\"", contents)
+        self.assertIn("requirements.sha256", contents)
+        self.assertIn("CLOUD_RUN_UAT_FORCE_INSTALL_HOST_DEPS", contents)
+        self.assertIn("\"$host_workspace/.venv/bin/pip\" install -r \"$requirements_path\"", contents)
         self.assertIn("BriefingStore(data_path / \"prd_briefing\")", contents)
         self.assertIn("UAT host .env is missing LOCAL_AGENT_HMAC_SECRET", contents)
         self.assertIn("LOCAL_AGENT_HMAC_SECRET=\"$uat_local_agent_hmac_secret\"", contents)
@@ -922,6 +948,61 @@ exit 0
         self.assertIn("restart_local_agent_if_needed", contents)
         self.assertIn('read_env_value BPMIS_CALL_MODE', contents)
         self.assertIn('"$ROOT_DIR/scripts/run_local_agent.sh" restart', contents)
+
+    def test_mac_stack_supports_portal_only_restart(self):
+        stack_script = PROJECT_ROOT / "scripts/run_team_stack.sh"
+
+        contents = stack_script.read_text(encoding="utf-8")
+
+        self.assertIn("restart-portal", contents)
+        self.assertIn("restart_portal()", contents)
+        self.assertIn('"$ROOT_DIR/scripts/run_team_portal_prod.sh" restart', contents)
+
+    def test_promote_uat_to_live_supports_change_aware_restart(self):
+        promote_script = PROJECT_ROOT / "scripts/promote_uat_to_live.sh"
+
+        contents = promote_script.read_text(encoding="utf-8")
+
+        self.assertIn("PROMOTE_UAT_RESTART_MODE", contents)
+        self.assertIn("classify_live_restart_mode", contents)
+        self.assertIn("restart-portal", contents)
+        self.assertIn("Live restart mode:", contents)
+
+    def test_deploy_scripts_persist_timing_metrics(self):
+        helper = (PROJECT_ROOT / "scripts/lib/team_env.sh").read_text(encoding="utf-8")
+        uat_script = (PROJECT_ROOT / "scripts/deploy_cloud_run_uat.sh").read_text(encoding="utf-8")
+        live_script = (PROJECT_ROOT / "scripts/promote_uat_to_live.sh").read_text(encoding="utf-8")
+        build_script = (PROJECT_ROOT / "scripts/build_cloud_run_image.sh").read_text(encoding="utf-8")
+
+        self.assertIn("team_deploy_timing_file", helper)
+        self.assertIn("deploy_timings.jsonl", helper)
+        self.assertIn("record_deploy_timing", helper)
+        self.assertIn("record_uat_deploy_timing_on_exit", uat_script)
+        self.assertIn("record_promote_timing_on_exit", live_script)
+        self.assertIn("Deploy UAT with: CLOUD_RUN_IMAGE=$IMAGE_URI ./scripts/deploy_cloud_run_uat.sh", build_script)
+
+    def test_fast_uat_release_orchestrator_uses_fast_paths(self):
+        script = (PROJECT_ROOT / "scripts/release_uat_fast.sh").read_text(encoding="utf-8")
+
+        self.assertIn("run_system_full_test_gate.py", script)
+        self.assertIn("--parallel-workers", script)
+        self.assertIn("build_cloud_run_image.sh", script)
+        self.assertIn("CLOUD_RUN_UAT_SKIP_UNCHANGED", script)
+        self.assertIn("CLOUD_RUN_UAT_PARALLEL_HOST_SYNC", script)
+        self.assertIn("deploy_cloud_run_uat.sh", script)
+
+    def test_cloud_run_image_build_path_uses_speed_tuning_and_lean_context(self):
+        build_script = (PROJECT_ROOT / "scripts/build_cloud_run_image.sh").read_text(encoding="utf-8")
+        dockerignore = (PROJECT_ROOT / ".dockerignore").read_text(encoding="utf-8")
+        workflow = (PROJECT_ROOT / ".github/workflows/cloud-run-image.yml").read_text(encoding="utf-8")
+
+        self.assertIn("E2_HIGHCPU_8", build_script)
+        self.assertIn("--disk-size", build_script)
+        self.assertIn("docs/", dockerignore)
+        self.assertIn("source_code_qa/", dockerignore)
+        self.assertIn("tests/", dockerignore)
+        self.assertIn("gcloud builds submit", workflow)
+        self.assertIn("_TAG=$GITHUB_SHA", workflow)
 
     def test_cloud_run_full_deploy_skips_base_url_update_when_service_exists(self):
         deploy_script = PROJECT_ROOT / "scripts/deploy_cloud_run_full.sh"

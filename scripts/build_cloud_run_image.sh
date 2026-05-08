@@ -37,19 +37,22 @@ echo "Cloud Build config: cloudbuild.yaml"
 if [[ "${CLOUD_RUN_BUILD_IMAGE_DRY_RUN:-0}" == "1" ]]; then
   echo "Dry run only; unset CLOUD_RUN_BUILD_IMAGE_DRY_RUN to submit the build."
   echo "Deploy after build with: CLOUD_RUN_IMAGE=$IMAGE_URI ./scripts/deploy_cloud_run.sh"
+  echo "Deploy UAT after build with: CLOUD_RUN_IMAGE=$IMAGE_URI ./scripts/deploy_cloud_run_uat.sh"
   exit 0
 fi
 
 cd "$ROOT_DIR"
 BUILD_ARGS=()
-if [[ -n "${CLOUD_RUN_BUILD_MACHINE_TYPE:-}" ]]; then
-  BUILD_ARGS+=(--machine-type "$CLOUD_RUN_BUILD_MACHINE_TYPE")
+BUILD_MACHINE_TYPE="${CLOUD_RUN_BUILD_MACHINE_TYPE:-E2_HIGHCPU_8}"
+if [[ -n "$BUILD_MACHINE_TYPE" && "$BUILD_MACHINE_TYPE" != "default" ]]; then
+  BUILD_ARGS+=(--machine-type "$BUILD_MACHINE_TYPE")
 fi
 if [[ -n "${CLOUD_RUN_BUILD_TIMEOUT:-}" ]]; then
   BUILD_ARGS+=(--timeout "$CLOUD_RUN_BUILD_TIMEOUT")
 fi
-if [[ -n "${CLOUD_RUN_BUILD_DISK_SIZE:-}" ]]; then
-  BUILD_ARGS+=(--disk-size "$CLOUD_RUN_BUILD_DISK_SIZE")
+BUILD_DISK_SIZE="${CLOUD_RUN_BUILD_DISK_SIZE:-100}"
+if [[ -n "$BUILD_DISK_SIZE" && "$BUILD_DISK_SIZE" != "default" ]]; then
+  BUILD_ARGS+=(--disk-size "$BUILD_DISK_SIZE")
 fi
 
 "$GCLOUD_BIN" builds submit \
@@ -62,3 +65,4 @@ fi
 FINISHED_AT="$(date +%s)"
 echo "Cloud Build image completed in $((FINISHED_AT - STARTED_AT))s"
 echo "Deploy with: CLOUD_RUN_IMAGE=$IMAGE_URI ./scripts/deploy_cloud_run.sh"
+echo "Deploy UAT with: CLOUD_RUN_IMAGE=$IMAGE_URI ./scripts/deploy_cloud_run_uat.sh"

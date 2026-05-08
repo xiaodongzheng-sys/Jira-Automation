@@ -43,6 +43,16 @@ SERVICE="${SERVICE:-team-portal}"
 REGION="${CLOUD_RUN_REGION:-$(read_env_value CLOUD_RUN_REGION)}"
 REGION="${REGION:-asia-southeast1}"
 CLOUD_RUN_IMAGE="${CLOUD_RUN_IMAGE:-$(read_env_value CLOUD_RUN_IMAGE)}"
+
+record_cloud_run_full_timing_on_exit() {
+  local status=$?
+  local finished_at
+  finished_at="$(date +%s)"
+  record_deploy_timing "deploy_cloud_run_full.sh" "script" "$SCRIPT_STARTED_AT" "$finished_at" "$status" "service=$SERVICE region=$REGION image=${CLOUD_RUN_IMAGE:-source}" || true
+  return "$status"
+}
+trap record_cloud_run_full_timing_on_exit EXIT
+
 EXISTING_SERVICE_URL="$("$GCLOUD_BIN" ${ACCOUNT_ARGS[@]+"${ACCOUNT_ARGS[@]}"} run services describe "$SERVICE" --project "$PROJECT_ID" --region "$REGION" --format='value(status.url)' 2>/dev/null || true)"
 BASE_URL="${CLOUD_RUN_TEAM_PORTAL_BASE_URL:-${EXISTING_SERVICE_URL:-}}"
 PROJECT_NUMBER="$("$GCLOUD_BIN" ${ACCOUNT_ARGS[@]+"${ACCOUNT_ARGS[@]}"} projects describe "$PROJECT_ID" --format='value(projectNumber)')"

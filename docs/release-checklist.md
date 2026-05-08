@@ -30,6 +30,12 @@ Run this gate before every portal release. It is intentionally read-only except 
 
 The gate sets `ENV_FILE=/dev/null` for subprocesses unless you explicitly provide `ENV_FILE`, so broad local tests do not silently load real credentials from `.env`.
 
+Independent JavaScript syntax checks and the deterministic Source Code Q&A release gate run in parallel after the coverage gate passes. Tune only if the host is overloaded:
+
+```bash
+./.venv/bin/python scripts/run_system_full_test_gate.py --skip-smoke --parallel-workers 2
+```
+
 Use an explicit threshold when validating release tooling changes:
 
 ```bash
@@ -132,15 +138,66 @@ curl -fsS "$LIVE_URL/api/local-agent/healthz"
 
 Run this for routine releases after changes are committed and pushed to `origin/main`.
 
+- Deploy timing metrics are appended to the Mac data root by default:
+
+```text
+.team-portal/run/deploy_timings.jsonl
+```
+
+Override the location with `TEAM_DEPLOY_TIMING_FILE=/path/to/deploy_timings.jsonl` when comparing release speed across UAT and Live runs.
+
 - Deploy the pushed commit to a Cloud Run tagged UAT revision. The script requires a clean checkout with `HEAD == origin/main`, sets `TEAM_PORTAL_STAGE=uat`, pins `TEAM_PORTAL_RELEASE_REVISION` to the Git SHA, and deploys with `--no-traffic --tag uat`.
 
 ```bash
 ./scripts/deploy_cloud_run_uat.sh
 ```
 
+For repeated validation of the same commit/env, enable the hash-based no-change skip. The script still syncs/verifies the UAT Mac local-agent so local-agent-backed routes are not left stale:
+
+```bash
+CLOUD_RUN_UAT_SKIP_UNCHANGED=1 ./scripts/deploy_cloud_run_uat.sh
+```
+
+For faster Cloud Run revision creation, build the image before the release window and deploy the UAT tag from that image:
+
+```bash
+./scripts/build_cloud_run_image.sh
+CLOUD_RUN_IMAGE=asia-southeast1-docker.pkg.dev/PROJECT/REPO/team-portal:TAG \
+./scripts/deploy_cloud_run_uat.sh
+```
+
+The GitHub workflow `.github/workflows/cloud-run-image.yml` can prebuild the same image automatically on pushes to `main` when these repository variables are configured:
+
+```text
+GCP_PROJECT_ID
+GCP_WORKLOAD_IDENTITY_PROVIDER
+GCP_SERVICE_ACCOUNT
+CLOUD_RUN_REGION
+CLOUD_RUN_ARTIFACT_REPOSITORY
+CLOUD_RUN_IMAGE_NAME
+```
+
+The build script defaults to a faster Cloud Build machine and larger disk for manual image builds. Set `CLOUD_RUN_BUILD_MACHINE_TYPE=default` or `CLOUD_RUN_BUILD_DISK_SIZE=default` to use Cloud Build defaults.
+
+When using the standard artifact naming convention, the UAT script can resolve a prebuilt tag directly:
+
+```bash
+GOOGLE_CLOUD_PROJECT=PROJECT \
+CLOUD_RUN_UAT_PREBUILT_IMAGE_TAG=TAG \
+./scripts/deploy_cloud_run_uat.sh
+```
+
 The deploy scripts read `GOOGLE_CLOUD_PROJECT` and `CLOUD_RUN_DEPLOY_ACCOUNT` from `.env`, so routine UAT deploys do not depend on a personal interactive `gcloud auth login` session.
 
-- After Cloud Run UAT deploy succeeds, the script syncs the isolated UAT Mac host workspace to the same Git commit, installs host dependencies, initializes the PRD Briefing SQLite schema under the UAT data root, restarts the UAT Mac local-agent on port `7008`, and verifies public UAT local-agent health through the fixed live portal `/uat-local-agent` proxy. This keeps UAT's Cloud Run frontend and UAT local-agent-backed backend/cache code aligned without restarting the live local-agent.
+- After Cloud Run UAT deploy succeeds, the script syncs the isolated UAT Mac host workspace to the same Git commit, installs host dependencies only when `requirements.txt` changed, initializes the PRD Briefing SQLite schema under the UAT data root, restarts the UAT Mac local-agent on port `7008`, and verifies public UAT local-agent health through the fixed live portal `/uat-local-agent` proxy. This keeps UAT's Cloud Run frontend and UAT local-agent-backed backend/cache code aligned without restarting the live local-agent.
+
+For faster UAT releases, use the one-command orchestrator. It runs the release gate, builds or reuses an image, deploys UAT with the unchanged-deploy skip enabled, overlaps UAT host sync with Cloud Run deploy, and prints recent timing records:
+
+```bash
+./scripts/release_uat_fast.sh
+```
+
+The UAT local-agent sync is change-aware. `CLOUD_RUN_UAT_LOCAL_AGENT_SYNC_MODE=auto` skips local-agent sync/restart for static/template/docs/test/web-shell-only changes, while `full` forces the old behavior and `skip` skips it explicitly. `CLOUD_RUN_UAT_PARALLEL_HOST_SYNC=1` overlaps the full UAT host sync with Cloud Run deployment.
 
 - If UAT deploy fails because `local-agent-uat-hmac-secret` is missing or inaccessible in Secret Manager, rerun UAT with `CLOUD_RUN_UAT_LOCAL_AGENT_SECRET_SOURCE=env`. The deploy script reads `LOCAL_AGENT_HMAC_SECRET` from the isolated UAT host `.env`, creates a no-traffic pre-clear revision when the previous service template had `LOCAL_AGENT_HMAC_SECRET` bound as a secret, then deploys the new `uat` tag with the HMAC as a literal env var. This is UAT-only and must still use `--no-traffic`.
 
@@ -279,7 +336,7 @@ curl https://app.bankpmtool.uk/api/local-agent/healthz
 
 ## 5. Live Promotion
 
-Run this only after the user explicitly confirms UAT passed and asks to publish Live. The promotion script reads the Cloud Run `uat` tag, verifies the tagged revision's `TEAM_PORTAL_RELEASE_REVISION`, refuses to publish if `origin/main` has moved past that UAT commit, fast-forwards the host workspace, restarts Cloudflare Tunnel Live, and verifies `/healthz`.
+Run this only after the user explicitly confirms UAT passed and asks to publish Live. The promotion script reads the Cloud Run `uat` tag, verifies the tagged revision's `TEAM_PORTAL_RELEASE_REVISION`, refuses to publish if `origin/main` has moved past that UAT commit, fast-forwards the host workspace, chooses a full or portal-only restart based on the changed files, and verifies `/healthz`.
 
 ```bash
 CLOUD_RUN_DEPLOY_ACCOUNT=vertex-ai-user@civil-partition-492805-v7.iam.gserviceaccount.com \
@@ -287,6 +344,13 @@ CLOUD_RUN_DEPLOY_ACCOUNT=vertex-ai-user@civil-partition-492805-v7.iam.gserviceac
 ```
 
 The script does not change Cloud Run live traffic. The Cloudflare Tunnel URL remains the primary Live portal.
+
+The default `PROMOTE_UAT_RESTART_MODE=auto` uses a portal-only restart for static/template/docs/test/web-shell changes and a full stack restart for everything else. Override only when you have checked the diff:
+
+```bash
+PROMOTE_UAT_RESTART_MODE=full ./scripts/promote_uat_to_live.sh
+PROMOTE_UAT_RESTART_MODE=portal ./scripts/promote_uat_to_live.sh
+```
 
 After promotion, run doctor for the full stack view:
 

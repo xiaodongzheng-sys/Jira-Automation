@@ -11,3 +11,11 @@ __pycache__/
 .DS_Store
 tmp/
 node_modules/
+docs/
+evals/
+outputs/
+run/
+source_code_qa/
+tests/
+tools/
+deploy/

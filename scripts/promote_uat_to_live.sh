@@ -5,6 +5,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT_DIR/scripts/lib/team_env.sh"
 
+SCRIPT_STARTED_AT="$(date +%s)"
 SERVICE="${CLOUD_RUN_SERVICE:-team-portal}"
 REGION="${CLOUD_RUN_REGION:-asia-southeast1}"
 UAT_TAG="${CLOUD_RUN_UAT_TAG:-uat}"
@@ -30,6 +31,15 @@ if [[ -n "${CLOUD_RUN_DEPLOY_ACCOUNT:-}" ]]; then
   ACCOUNT_ARGS=(--account "$CLOUD_RUN_DEPLOY_ACCOUNT")
 fi
 
+record_promote_timing_on_exit() {
+  local status=$?
+  local finished_at
+  finished_at="$(date +%s)"
+  record_deploy_timing "promote_uat_to_live.sh" "script" "$SCRIPT_STARTED_AT" "$finished_at" "$status" "service=$SERVICE region=$REGION tag=$UAT_TAG host=$HOST_ROOT" || true
+  return "$status"
+}
+trap record_promote_timing_on_exit EXIT
+
 json_from_gcloud_service() {
   "$GCLOUD_BIN" run services describe "$SERVICE" \
     ${PROJECT_ARGS[@]+"${PROJECT_ARGS[@]}"} \
@@ -45,6 +55,52 @@ json_from_gcloud_revision() {
     ${ACCOUNT_ARGS[@]+"${ACCOUNT_ARGS[@]}"} \
     --region "$REGION" \
     --format=json
+}
+
+classify_live_restart_mode() {
+  local previous_commit="$1"
+  local target_commit="$2"
+  local requested="${PROMOTE_UAT_RESTART_MODE:-auto}"
+  case "$requested" in
+    full|portal)
+      printf '%s\n' "$requested"
+      return 0
+      ;;
+    auto) ;;
+    *)
+      echo "PROMOTE_UAT_RESTART_MODE must be auto, full, or portal." >&2
+      return 1
+      ;;
+  esac
+
+  if [[ -z "$previous_commit" || "$previous_commit" == "$target_commit" ]]; then
+    printf 'portal\n'
+    return 0
+  fi
+
+  local changed_files
+  if ! changed_files="$(git -C "$HOST_ROOT" diff --name-only "$previous_commit" "$target_commit")"; then
+    printf 'full\n'
+    return 0
+  fi
+  if [[ -z "$changed_files" ]]; then
+    printf 'portal\n'
+    return 0
+  fi
+
+  while IFS= read -r changed_file; do
+    [[ -n "$changed_file" ]] || continue
+    case "$changed_file" in
+      app.py|bpmis_jira_tool/web.py|static/*|templates/*|tests/*|docs/*|README.md)
+        ;;
+      *)
+        printf 'full\n'
+        return 0
+        ;;
+    esac
+  done <<<"$changed_files"
+
+  printf 'portal\n'
 }
 
 SERVICE_JSON="$(json_from_gcloud_service)"
@@ -92,6 +148,7 @@ if [[ "${PROMOTE_UAT_DRY_RUN:-0}" == "1" ]]; then
   exit 0
 fi
 
+PREVIOUS_HEAD="$(git -C "$HOST_ROOT" rev-parse HEAD)"
 git -C "$HOST_ROOT" checkout main >/dev/null
 git -C "$HOST_ROOT" pull --ff-only origin main
 
@@ -103,7 +160,13 @@ if [[ "$HEAD_COMMIT" != "$UAT_COMMIT" ]]; then
   exit 1
 fi
 
-"$HOST_ROOT/scripts/run_team_stack.sh" restart
+RESTART_MODE="$(classify_live_restart_mode "$PREVIOUS_HEAD" "$UAT_COMMIT")"
+echo "Live restart mode: $RESTART_MODE"
+if [[ "$RESTART_MODE" == "portal" ]]; then
+  "$HOST_ROOT/scripts/run_team_stack.sh" restart-portal
+else
+  "$HOST_ROOT/scripts/run_team_stack.sh" restart
+fi
 SERVED_REVISION="$(curl -fsS --max-time 10 "http://127.0.0.1:5000/healthz" | "$PYTHON_BIN" -c 'import json, sys; print(json.load(sys.stdin).get("revision", ""))')"
 if [[ "$SERVED_REVISION" != "$UAT_COMMIT" ]]; then
   echo "Live portal loopback revision mismatch after restart."

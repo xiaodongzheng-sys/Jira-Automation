@@ -7,7 +7,7 @@ source "$ROOT_DIR/scripts/lib/team_env.sh"
 GUARD_DAEMON_SCRIPT="$ROOT_DIR/scripts/run_team_stack_guard_daemon.sh"
 
 usage() {
-  echo "Usage: $0 {start|stop|restart|status|logs|doctor} [--caffeinate|--no-caffeinate]"
+  echo "Usage: $0 {start|stop|restart|restart-portal|status|logs|doctor} [--caffeinate|--no-caffeinate]"
 }
 
 resolve_guard_env() {
@@ -350,6 +350,11 @@ restart() {
   start "$guard_env"
 }
 
+restart_portal() {
+  echo "Restarting team portal only; tunnel, guard, and local-agent are left running."
+  "$ROOT_DIR/scripts/run_team_portal_prod.sh" restart
+}
+
 ACTION="${1:-start}"
 MODE="auto"
 
@@ -369,6 +374,7 @@ case "$ACTION" in
   start) start "$GUARD_ENV" ;;
   stop) stop ;;
   restart) restart "$GUARD_ENV" ;;
+  restart-portal) restart_portal ;;
   status) status ;;
   logs) logs ;;
   doctor) doctor ;;

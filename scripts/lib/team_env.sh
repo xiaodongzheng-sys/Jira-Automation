@@ -199,6 +199,75 @@ resolve_team_data_dir() {
   printf '%s\n' "$data_dir"
 }
 
+hash_text() {
+  if [[ ! -x "$PYTHON_BIN" ]]; then
+    printf 'unknown\n'
+    return 0
+  fi
+  local payload
+  payload="$(cat)"
+  HASH_TEXT_PAYLOAD="$payload" "$PYTHON_BIN" - <<'PY'
+import hashlib
+import os
+
+print(hashlib.sha256(os.environ.get("HASH_TEXT_PAYLOAD", "").encode("utf-8")).hexdigest()[:24])
+PY
+}
+
+team_deploy_timing_file() {
+  if [[ -n "${TEAM_DEPLOY_TIMING_FILE:-}" ]]; then
+    printf '%s\n' "$TEAM_DEPLOY_TIMING_FILE"
+    return 0
+  fi
+  local data_dir="${TEAM_DEPLOY_TIMING_DATA_DIR:-${TEAM_PORTAL_DATA_DIR:-$(read_env_value TEAM_PORTAL_DATA_DIR)}}"
+  data_dir="$(resolve_team_data_dir "$data_dir")"
+  printf '%s\n' "$data_dir/run/deploy_timings.jsonl"
+}
+
+record_deploy_timing() {
+  local script_name="$1"
+  local phase="$2"
+  local started_at="$3"
+  local finished_at="$4"
+  local status="$5"
+  local details="${6:-}"
+  local timing_file
+  timing_file="$(team_deploy_timing_file)" || return 0
+  mkdir -p "$(dirname "$timing_file")"
+  if [[ ! -x "$PYTHON_BIN" ]]; then
+    return 0
+  fi
+  DEPLOY_TIMING_FILE="$timing_file" \
+  DEPLOY_TIMING_SCRIPT="$script_name" \
+  DEPLOY_TIMING_PHASE="$phase" \
+  DEPLOY_TIMING_STARTED="$started_at" \
+  DEPLOY_TIMING_FINISHED="$finished_at" \
+  DEPLOY_TIMING_STATUS="$status" \
+  DEPLOY_TIMING_DETAILS="$details" \
+  ROOT_DIR_VALUE="$ROOT_DIR" \
+  "$PYTHON_BIN" - <<'PY'
+import json
+import os
+import time
+
+path = os.environ["DEPLOY_TIMING_FILE"]
+started = int(os.environ.get("DEPLOY_TIMING_STARTED") or 0)
+finished = int(os.environ.get("DEPLOY_TIMING_FINISHED") or time.time())
+record = {
+    "script": os.environ.get("DEPLOY_TIMING_SCRIPT", ""),
+    "phase": os.environ.get("DEPLOY_TIMING_PHASE", ""),
+    "status": int(os.environ.get("DEPLOY_TIMING_STATUS") or 0),
+    "started_at_unix": started,
+    "finished_at_unix": finished,
+    "duration_seconds": max(0, finished - started),
+    "details": os.environ.get("DEPLOY_TIMING_DETAILS", ""),
+    "repo_root": os.environ.get("ROOT_DIR_VALUE", ""),
+}
+with open(path, "a", encoding="utf-8") as handle:
+    handle.write(json.dumps(record, sort_keys=True) + "\n")
+PY
+}
+
 is_path_within() {
   local path_value="$1"
   local parent_value="$2"

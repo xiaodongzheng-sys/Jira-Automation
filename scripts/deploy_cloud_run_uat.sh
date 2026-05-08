@@ -34,11 +34,38 @@ GOOGLE_CLOUD_PROJECT_RESOLVED="${GOOGLE_CLOUD_PROJECT:-$(read_env_value GOOGLE_C
 if [[ -n "$GOOGLE_CLOUD_PROJECT_RESOLVED" ]]; then
   PROJECT_ARGS=(--project "$GOOGLE_CLOUD_PROJECT_RESOLVED")
 fi
+if [[ -z "$CLOUD_RUN_IMAGE" && -n "${CLOUD_RUN_UAT_PREBUILT_IMAGE_TAG:-}" ]]; then
+  if [[ -z "$GOOGLE_CLOUD_PROJECT_RESOLVED" ]]; then
+    echo "CLOUD_RUN_UAT_PREBUILT_IMAGE_TAG requires GOOGLE_CLOUD_PROJECT."
+    exit 1
+  fi
+  CLOUD_RUN_ARTIFACT_REPOSITORY="${CLOUD_RUN_ARTIFACT_REPOSITORY:-team-portal}"
+  CLOUD_RUN_IMAGE_NAME="${CLOUD_RUN_IMAGE_NAME:-team-portal}"
+  CLOUD_RUN_IMAGE="${REGION}-docker.pkg.dev/${GOOGLE_CLOUD_PROJECT_RESOLVED}/${CLOUD_RUN_ARTIFACT_REPOSITORY}/${CLOUD_RUN_IMAGE_NAME}:${CLOUD_RUN_UAT_PREBUILT_IMAGE_TAG}"
+fi
 ACCOUNT_ARGS=()
 CLOUD_RUN_DEPLOY_ACCOUNT_RESOLVED="${CLOUD_RUN_DEPLOY_ACCOUNT:-$(read_env_value CLOUD_RUN_DEPLOY_ACCOUNT)}"
 if [[ -n "$CLOUD_RUN_DEPLOY_ACCOUNT_RESOLVED" ]]; then
   ACCOUNT_ARGS=(--account "$CLOUD_RUN_DEPLOY_ACCOUNT_RESOLVED")
 fi
+UAT_SYNC_PID=""
+UAT_SYNC_LOG=""
+
+record_uat_deploy_timing_on_exit() {
+  local status=$?
+  if [[ -n "${UAT_SYNC_PID:-}" ]]; then
+    wait "$UAT_SYNC_PID" >/dev/null 2>&1 || true
+    if [[ -n "${UAT_SYNC_LOG:-}" && -f "$UAT_SYNC_LOG" ]]; then
+      cat "$UAT_SYNC_LOG" || true
+      rm -f "$UAT_SYNC_LOG"
+    fi
+  fi
+  local finished_at
+  finished_at="$(date +%s)"
+  record_deploy_timing "deploy_cloud_run_uat.sh" "script" "$SCRIPT_STARTED_AT" "$finished_at" "$status" "service=$SERVICE region=$REGION tag=$UAT_TAG image=${CLOUD_RUN_IMAGE:-source}" || true
+  return "$status"
+}
+trap record_uat_deploy_timing_on_exit EXIT
 
 require_clean_pushed_main() {
   if [[ "${CLOUD_RUN_UAT_SKIP_GIT_CHECK:-0}" == "1" ]]; then
@@ -86,6 +113,15 @@ PY
 
 describe_service() {
   "$GCLOUD_BIN" run services describe "$SERVICE" \
+    ${PROJECT_ARGS[@]+"${PROJECT_ARGS[@]}"} \
+    ${ACCOUNT_ARGS[@]+"${ACCOUNT_ARGS[@]}"} \
+    --region "$REGION" \
+    --format=json
+}
+
+describe_revision() {
+  local revision="$1"
+  "$GCLOUD_BIN" run revisions describe "$revision" \
     ${PROJECT_ARGS[@]+"${PROJECT_ARGS[@]}"} \
     ${ACCOUNT_ARGS[@]+"${ACCOUNT_ARGS[@]}"} \
     --region "$REGION" \
@@ -184,6 +220,54 @@ verify_uat_source_code_qa_ops() {
   "$host_python" "$host_workspace/scripts/source_code_qa_ops_summary.py" --strict
 }
 
+classify_uat_local_agent_sync_mode() {
+  local host_workspace="$1"
+  local target_commit="$2"
+  local requested="${CLOUD_RUN_UAT_LOCAL_AGENT_SYNC_MODE:-auto}"
+  case "$requested" in
+    full|skip)
+      printf '%s\n' "$requested"
+      return 0
+      ;;
+    auto) ;;
+    *)
+      echo "CLOUD_RUN_UAT_LOCAL_AGENT_SYNC_MODE must be auto, full, or skip." >&2
+      return 1
+      ;;
+  esac
+
+  local previous_commit
+  previous_commit="$(git -C "$host_workspace" rev-parse HEAD 2>/dev/null || true)"
+  if [[ -z "$previous_commit" || "$previous_commit" == "$target_commit" ]]; then
+    printf 'skip\n'
+    return 0
+  fi
+
+  local changed_files
+  if ! changed_files="$(git -C "$ROOT_DIR" diff --name-only "$previous_commit" "$target_commit")"; then
+    printf 'full\n'
+    return 0
+  fi
+  if [[ -z "$changed_files" ]]; then
+    printf 'skip\n'
+    return 0
+  fi
+
+  while IFS= read -r changed_file; do
+    [[ -n "$changed_file" ]] || continue
+    case "$changed_file" in
+      app.py|bpmis_jira_tool/web.py|static/*|templates/*|tests/*|docs/*|README.md|.dockerignore|.github/*)
+        ;;
+      *)
+        printf 'full\n'
+        return 0
+        ;;
+    esac
+  done <<<"$changed_files"
+
+  printf 'skip\n'
+}
+
 sync_mac_local_agent_for_uat() {
   if [[ "${CLOUD_RUN_UAT_SYNC_LOCAL_AGENT_AFTER_DEPLOY:-1}" == "0" ]]; then
     echo "Skipping Mac local-agent sync because CLOUD_RUN_UAT_SYNC_LOCAL_AGENT_AFTER_DEPLOY=0."
@@ -214,6 +298,25 @@ sync_mac_local_agent_for_uat() {
     exit 1
   fi
 
+  local sync_mode
+  sync_mode="$(classify_uat_local_agent_sync_mode "$host_workspace" "$GIT_SHA")"
+  if [[ "$sync_mode" == "skip" ]]; then
+    echo "Skipping UAT Mac local-agent sync/restart; changed files do not affect local-agent-backed workflows."
+    if [[ "${CLOUD_RUN_UAT_VERIFY_PUBLIC_LOCAL_AGENT:-1}" != "0" && -n "$LOCAL_AGENT_URL" ]]; then
+      local local_agent_base="${LOCAL_AGENT_URL%/}"
+      echo "Verifying existing public Mac local-agent health: $local_agent_base"
+      if curl -fsS --max-time 10 "$local_agent_base/api/local-agent/healthz" >/dev/null; then
+        :
+      elif curl -fsS --max-time 10 "$local_agent_base/healthz" >/dev/null; then
+        :
+      else
+        echo "Mac local-agent public health check failed for $local_agent_base"
+        exit 1
+      fi
+    fi
+    return 0
+  fi
+
   echo "Syncing Mac local-agent host workspace for UAT: $host_workspace"
   git -C "$host_workspace" fetch origin main >/dev/null
   git -C "$host_workspace" merge --ff-only "$GIT_SHA" >/dev/null
@@ -232,8 +335,20 @@ sync_mac_local_agent_for_uat() {
       echo "Mac local-agent venv pip is missing: $host_workspace/.venv/bin/pip"
       exit 1
     fi
-    echo "Installing Mac local-agent Python dependencies from requirements.txt"
-    "$host_workspace/.venv/bin/pip" install -r "$host_workspace/requirements.txt" >/dev/null
+    local data_path requirements_path requirements_hash deps_marker previous_hash
+    data_path="$(resolve_uat_local_agent_data_path "$host_workspace")"
+    requirements_path="$host_workspace/requirements.txt"
+    deps_marker="$data_path/run/requirements.sha256"
+    mkdir -p "$(dirname "$deps_marker")"
+    requirements_hash="$(shasum -a 256 "$requirements_path" | awk '{print $1}')"
+    previous_hash="$(cat "$deps_marker" 2>/dev/null || true)"
+    if [[ "${CLOUD_RUN_UAT_FORCE_INSTALL_HOST_DEPS:-0}" != "1" && "$previous_hash" == "$requirements_hash" ]]; then
+      echo "Skipping Mac local-agent Python dependency install; requirements.txt is unchanged."
+    else
+      echo "Installing Mac local-agent Python dependencies from requirements.txt"
+      "$host_workspace/.venv/bin/pip" install -r "$requirements_path" >/dev/null
+      printf '%s\n' "$requirements_hash" >"$deps_marker"
+    fi
   fi
 
   local prd_store_path
@@ -279,6 +394,32 @@ sync_mac_local_agent_for_uat() {
   fi
 
   echo "Mac local-agent revision aligned with UAT commit: $GIT_SHA"
+}
+
+start_uat_host_sync_async() {
+  if [[ "${CLOUD_RUN_UAT_PARALLEL_HOST_SYNC:-0}" != "1" ]]; then
+    return 1
+  fi
+  UAT_SYNC_LOG="$(mktemp "${TMPDIR:-/tmp}/uat-host-sync.XXXXXX.log")"
+  echo "Starting UAT Mac local-agent sync in parallel with Cloud Run deploy."
+  sync_mac_local_agent_for_uat >"$UAT_SYNC_LOG" 2>&1 &
+  UAT_SYNC_PID="$!"
+  return 0
+}
+
+finish_uat_host_sync() {
+  if [[ -n "${UAT_SYNC_PID:-}" ]]; then
+    local sync_status=0
+    wait "$UAT_SYNC_PID" || sync_status=$?
+    UAT_SYNC_PID=""
+    if [[ -n "${UAT_SYNC_LOG:-}" && -f "$UAT_SYNC_LOG" ]]; then
+      cat "$UAT_SYNC_LOG"
+      rm -f "$UAT_SYNC_LOG"
+      UAT_SYNC_LOG=""
+    fi
+    return "$sync_status"
+  fi
+  sync_mac_local_agent_for_uat
 }
 
 require_clean_pushed_main
@@ -392,12 +533,8 @@ PY
 fi
 
 IFS='|'
-ENV_VARS_JOINED="${ENV_VARS[*]}"
+ENV_VARS_JOINED_WITHOUT_HASH="${ENV_VARS[*]}"
 unset IFS
-ENV_DEPLOY_ARGS=(--set-env-vars "^|^$ENV_VARS_JOINED")
-if [[ "$ENV_DEPLOY_MODE" == "update" ]]; then
-  ENV_DEPLOY_ARGS=(--update-env-vars "^|^$ENV_VARS_JOINED")
-fi
 
 RUNTIME_ARGS=()
 if [[ -n "${CLOUD_RUN_MIN_INSTANCES:-}" ]]; then
@@ -418,6 +555,19 @@ fi
 if [[ -n "${CLOUD_RUN_TIMEOUT:-}" ]]; then
   RUNTIME_ARGS+=(--timeout="$CLOUD_RUN_TIMEOUT")
 fi
+IFS='|'
+RUNTIME_ARGS_JOINED="${RUNTIME_ARGS[*]-}"
+DEPLOY_SECRET_ARGS_JOINED="${DEPLOY_SECRET_ARGS[*]-}"
+unset IFS
+UAT_DEPLOY_HASH="$(printf '%s\n%s\n%s\n%s\n%s\n' "$GIT_SHA" "$ENV_VARS_JOINED_WITHOUT_HASH" "$CLOUD_RUN_IMAGE" "$RUNTIME_ARGS_JOINED" "$DEPLOY_SECRET_ARGS_JOINED" | hash_text)"
+ENV_VARS+=("TEAM_PORTAL_DEPLOY_HASH=$UAT_DEPLOY_HASH")
+IFS='|'
+ENV_VARS_JOINED="${ENV_VARS[*]}"
+unset IFS
+ENV_DEPLOY_ARGS=(--set-env-vars "^|^$ENV_VARS_JOINED")
+if [[ "$ENV_DEPLOY_MODE" == "update" ]]; then
+  ENV_DEPLOY_ARGS=(--update-env-vars "^|^$ENV_VARS_JOINED")
+fi
 
 DEPLOY_SOURCE_ARGS=(--source .)
 if [[ -n "$CLOUD_RUN_IMAGE" ]]; then
@@ -435,13 +585,30 @@ echo "Cloud Run UAT service: $SERVICE"
 echo "Cloud Run UAT region: $REGION"
 echo "Cloud Run UAT tag: $UAT_TAG"
 echo "Cloud Run UAT commit: $GIT_SHA"
+echo "Cloud Run UAT deploy hash: $UAT_DEPLOY_HASH"
+if [[ -n "$CLOUD_RUN_IMAGE" ]]; then
+  echo "Cloud Run UAT image: $CLOUD_RUN_IMAGE"
+fi
 echo "Cloud Run UAT URL: $UAT_URL"
 if [[ "${CLOUD_RUN_UAT_DRY_RUN:-0}" == "1" ]]; then
   echo "Dry run only; set CLOUD_RUN_UAT_DRY_RUN=0 or unset it to deploy."
   exit 0
 fi
+if [[ "${CLOUD_RUN_UAT_SKIP_UNCHANGED:-0}" == "1" && "$UAT_DEPLOY_HASH" != "unknown" ]]; then
+  EXISTING_UAT_REVISION="$(printf '%s' "$SERVICE_DESCRIBE_JSON" | UAT_TAG_VALUE="$UAT_TAG" "$PYTHON_BIN" -c 'import json, os, sys; p=json.load(sys.stdin); tag=os.environ["UAT_TAG_VALUE"]; matches=[t for t in p.get("status", {}).get("traffic", []) if t.get("tag")==tag]; print(matches[0].get("revisionName", "") if matches else "")')"
+  EXISTING_UAT_DEPLOY_HASH=""
+  if [[ -n "$EXISTING_UAT_REVISION" ]]; then
+    EXISTING_UAT_DEPLOY_HASH="$(describe_revision "$EXISTING_UAT_REVISION" | "$PYTHON_BIN" -c 'import json, sys; p=json.load(sys.stdin); env=p.get("spec", {}).get("containers", [{}])[0].get("env", []); values={item.get("name"): item.get("value") for item in env}; print(values.get("TEAM_PORTAL_DEPLOY_HASH", "") or "")' 2>/dev/null || true)"
+  fi
+  if [[ "$EXISTING_UAT_DEPLOY_HASH" == "$UAT_DEPLOY_HASH" ]]; then
+    echo "Cloud Run UAT deploy skipped: source and deploy env hash are unchanged ($UAT_DEPLOY_HASH)."
+    sync_mac_local_agent_for_uat
+    exit 0
+  fi
+fi
 
 cd "$ROOT_DIR"
+start_uat_host_sync_async || true
 if [[ "$ENV_SECRET_PRECLEAR_REQUIRED" == "1" ]]; then
   CURRENT_IMAGE="$(printf '%s' "$SERVICE_DESCRIBE_JSON" | json_field "p.get('spec', {}).get('template', {}).get('spec', {}).get('containers', [{}])[0].get('image', '')")"
   if [[ -z "$CURRENT_IMAGE" ]]; then
@@ -485,7 +652,7 @@ if [[ -z "$UAT_REVISION" ]]; then
   exit 1
 fi
 
-sync_mac_local_agent_for_uat
+finish_uat_host_sync
 
 SCRIPT_FINISHED_AT="$(date +%s)"
 echo "Cloud Run UAT revision: $UAT_REVISION"
