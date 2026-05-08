@@ -1814,6 +1814,8 @@ class MeetingRecorderRouteTests(unittest.TestCase):
         self.assertIn("Meeting Recorder Capture Helper.app", runtime_source)
         self.assertIn("sg.npt.meeting-recorder.capture-helper", runtime_source)
         self.assertIn("NSScreenCaptureUsageDescription", runtime_source)
+        self.assertIn("source.sha256", runtime_source)
+        self.assertIn("built_digest == source_digest", runtime_source)
         self.assertIn("[codesign, \"--force\", \"--deep\", \"--sign\", \"-\", str(app_path)]", runtime_source)
         self.assertNotIn("--duration", runtime_source)
         self.assertNotIn("--timeout", runtime_source)

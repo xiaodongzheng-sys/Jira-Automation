@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import html
 import json
 import os
@@ -2282,16 +2283,25 @@ def _resolve_screencapturekit_helper(store_root: Path) -> Path:
     source_path = Path(__file__).resolve().parents[1] / "tools" / "meeting_screencapture_helper.swift"
     if not source_path.exists():
         raise ConfigError(f"ScreenCaptureKit helper source was not found at {source_path}.")
+    try:
+        source_digest = hashlib.sha256(source_path.read_bytes()).hexdigest()
+    except OSError as error:
+        raise ConfigError(f"ScreenCaptureKit helper source could not be read at {source_path}.") from error
     output_dir = store_root.parent / "bin"
     app_path = output_dir / "Meeting Recorder Capture Helper.app"
     macos_dir = app_path / "Contents" / "MacOS"
     resources_dir = app_path / "Contents" / "Resources"
     helper_path = macos_dir / "meeting-screencapture-helper"
     info_plist_path = app_path / "Contents" / "Info.plist"
+    source_digest_path = resources_dir / "source.sha256"
+    try:
+        built_digest = source_digest_path.read_text(encoding="utf-8").strip() if source_digest_path.exists() else ""
+    except OSError:
+        built_digest = ""
     bundle_is_current = (
         helper_path.exists()
         and info_plist_path.exists()
-        and helper_path.stat().st_mtime >= source_path.stat().st_mtime
+        and built_digest == source_digest
     )
     if bundle_is_current:
         return helper_path
@@ -2354,6 +2364,7 @@ def _resolve_screencapturekit_helper(store_root: Path) -> Path:
             "Could not sign ScreenCaptureKit helper app.",
             timeout_seconds=60,
         )
+    source_digest_path.write_text(f"{source_digest}\n", encoding="utf-8")
     return helper_path
 
 
