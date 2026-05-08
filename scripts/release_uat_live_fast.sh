@@ -67,14 +67,14 @@ wait_for_github_image_workflow() {
       --jq ".[] | select(.headSha == \"$sha\") | .databaseId" \
       --limit 20 2>/dev/null | head -n 1 || true)"
     if [[ -n "$run_id" ]]; then
-      echo "Waiting for GitHub image workflow run $run_id for $sha."
-      "$GH_BIN" run watch "$run_id" --exit-status
+      echo "Waiting for GitHub image workflow run $run_id for $sha." >&2
+      "$GH_BIN" run watch "$run_id" --exit-status >&2
       return 0
     fi
     sleep 5
   done
 
-  echo "No GitHub image workflow run found for $sha; continuing with image fallback."
+  echo "No GitHub image workflow run found for $sha; continuing with image fallback." >&2
 }
 
 ensure_prebuilt_image() {
