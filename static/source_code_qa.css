@@ -1348,6 +1348,152 @@
   font-weight: 700;
 }
 
+@media (max-width: 720px) {
+  .source-qa-root {
+    margin-bottom: 14px;
+    padding: 14px;
+  }
+
+  .source-qa-hero {
+    align-items: stretch;
+    gap: 12px;
+  }
+
+  .source-qa-hero h1 {
+    font-size: 1.75rem;
+    line-height: 1.12;
+  }
+
+  .source-qa-mode-card {
+    min-width: 0;
+    padding: 14px;
+    border-radius: 14px;
+  }
+
+  .source-qa-selector {
+    padding: 12px;
+  }
+
+  .source-qa-tabs {
+    display: flex;
+    width: 100%;
+    max-width: 100%;
+    overflow-x: auto;
+    overflow-y: hidden;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .source-qa-tab {
+    flex: 0 0 auto;
+    white-space: nowrap;
+  }
+
+  .source-qa-chat-shell,
+  .source-qa-chat-main,
+  .source-qa-session-context-card,
+  .source-qa-session-sidebar,
+  .source-qa-message,
+  .source-qa-evidence-card,
+  .source-qa-debug-grid section,
+  .source-qa-health-card {
+    min-width: 0;
+  }
+
+  .source-qa-session-sidebar {
+    padding: 12px;
+  }
+
+  .source-qa-session-list {
+    max-height: 34dvh;
+  }
+
+  .source-qa-session-messages {
+    max-height: 52dvh;
+  }
+
+  .source-qa-message {
+    width: 100%;
+    padding: 12px;
+  }
+
+  .source-qa-message-head {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 6px;
+  }
+
+  .source-qa-message-head span {
+    text-align: left;
+  }
+
+  .source-qa-chat-composer textarea {
+    min-height: 110px;
+    padding: 13px 14px;
+  }
+
+  .source-qa-attachment-bar {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    align-items: stretch;
+    gap: 10px;
+  }
+
+  .source-qa-attachment-button,
+  .source-qa-send-button,
+  .source-qa-live-actions .button {
+    width: 100%;
+  }
+
+  .source-qa-send-button {
+    margin-left: 0;
+  }
+
+  .source-qa-attachment-chip {
+    width: 100%;
+    border-radius: 8px;
+  }
+
+  .source-qa-attachment-chip strong {
+    max-width: none;
+  }
+
+  .source-qa-runtime-item {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    align-items: start;
+  }
+
+  .source-qa-runtime-meta {
+    flex-wrap: wrap;
+  }
+
+  .source-qa-runtime-meta .button {
+    width: 100%;
+  }
+
+  .source-qa-evidence-head {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .source-qa-evidence-head span {
+    text-align: left;
+  }
+
+  .source-qa-attachment-preview {
+    padding: 12px;
+  }
+
+  .source-qa-attachment-preview-panel {
+    max-width: calc(100vw - 24px);
+    max-height: calc(100dvh - 24px);
+  }
+
+  .source-qa-attachment-preview-panel img {
+    max-height: 68dvh;
+  }
+}
+
 .source-qa-repo-card,
 .source-qa-match,
 .source-qa-empty {

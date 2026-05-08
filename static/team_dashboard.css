@@ -652,6 +652,35 @@
   .team-dashboard-key-project {
     grid-column: 1 / -1;
   }
+
+  .team-dashboard-page .team-dashboard-panel {
+    padding: 14px;
+  }
+
+  .team-dashboard-team-head,
+  .team-dashboard-section-head,
+  .team-dashboard-page .productization-section-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .team-dashboard-team-actions {
+    justify-content: flex-start;
+    min-width: 0;
+    width: 100%;
+  }
+
+  .team-dashboard-team-actions .button {
+    flex: 1 1 150px;
+  }
+
+  .team-dashboard-tabs,
+  .team-dashboard-track-tabs {
+    max-width: 100%;
+    overflow-x: auto;
+    overflow-y: hidden;
+    -webkit-overflow-scrolling: touch;
+  }
 }
 @media (max-width: 980px) {
   .team-dashboard-monthly-report-grid {

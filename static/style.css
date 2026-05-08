@@ -5795,3 +5795,339 @@ select:focus {
   }
 
 }
+
+@media (max-width: 760px) {
+  html {
+    overflow-x: hidden;
+  }
+
+  body {
+    min-width: 0;
+    overflow-x: hidden;
+  }
+
+  .page-shell {
+    width: 100%;
+    max-width: none;
+    padding: calc(14px + env(safe-area-inset-top, 0px)) 12px calc(36px + env(safe-area-inset-bottom, 0px));
+  }
+
+  .environment-banner,
+  .session-bar,
+  .site-switcher,
+  .portal-compact-hero,
+  .workspace-shell,
+  .workspace-panel,
+  .panel,
+  .panel-wide,
+  .glass-panel,
+  .config-card,
+  .field-group,
+  .run-progress,
+  .empty-state {
+    min-width: 0;
+  }
+
+  .session-bar {
+    gap: 12px;
+    padding: 14px;
+    border-radius: 14px;
+  }
+
+  .session-copy,
+  .session-identity {
+    min-width: 0;
+  }
+
+  .session-identity strong,
+  .session-identity span {
+    overflow-wrap: anywhere;
+  }
+
+  .site-switcher {
+    margin-bottom: 14px;
+  }
+
+  .site-switcher-track {
+    display: flex;
+    width: 100%;
+    max-width: 100%;
+    gap: 6px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    border-radius: 14px;
+    scroll-snap-type: x proximity;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .site-switcher-track > .site-switcher-tab {
+    flex: 0 0 auto !important;
+    min-height: 40px;
+    max-width: 76vw;
+    padding: 10px 13px;
+    scroll-snap-align: start;
+    white-space: nowrap;
+    width: auto;
+  }
+
+  .portal-compact-hero {
+    gap: 12px;
+    margin-bottom: 14px;
+    padding: 14px;
+    border-radius: 14px;
+  }
+
+  .portal-compact-title {
+    min-width: 0;
+    width: 100%;
+  }
+
+  .portal-compact-title h1 {
+    font-size: 1.55rem;
+    line-height: 1.18;
+    overflow-wrap: anywhere;
+  }
+
+  .portal-compact-meta {
+    width: 100%;
+    gap: 6px;
+  }
+
+  .portal-compact-meta span {
+    max-width: 100%;
+    min-height: 30px;
+    border-radius: 8px;
+    font-size: 0.78rem;
+  }
+
+  .workspace-shell {
+    gap: 14px;
+    margin-top: 14px;
+  }
+
+  .workspace-panel.is-active,
+  .panel,
+  .panel-wide,
+  .glass-panel {
+    width: 100%;
+    max-width: 100%;
+    overflow: hidden;
+  }
+
+  .workspace-tabs {
+    display: flex;
+    flex-wrap: nowrap;
+    width: 100%;
+    max-width: 100%;
+    gap: 6px;
+    margin-bottom: 14px;
+    padding: 6px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    border-radius: 14px;
+    scroll-snap-type: x proximity;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .workspace-tabs > .workspace-tab {
+    flex: 0 0 auto !important;
+    width: auto;
+    min-width: fit-content;
+    max-width: 78vw;
+    min-height: 40px;
+    padding: 9px 12px;
+    border-radius: 10px;
+    font-size: 0.92rem;
+    line-height: 1.2;
+    scroll-snap-align: start;
+    white-space: nowrap;
+  }
+
+  .panel,
+  .panel-wide,
+  .glass-panel,
+  .config-card,
+  .showcase-step-card,
+  .quick-launch-card,
+  .diagnostic-card,
+  .productization-search-shell,
+  .productization-section {
+    border-radius: 14px;
+    padding: 16px;
+  }
+
+  .panel-head {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 12px;
+    margin-bottom: 16px;
+  }
+
+  .panel-head > *,
+  .config-grid,
+  .setup-grid,
+  .field-stack,
+  .field-grid,
+  .config-details,
+  .config-details > *,
+  .field-label-row {
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .panel h2,
+  .panel-wide h2,
+  .workspace-head h2 {
+    font-size: 1.35rem;
+    line-height: 1.22;
+  }
+
+  .step-copy,
+  .lede,
+  .card-help,
+  .field-help {
+    font-size: 0.92rem;
+    line-height: 1.5;
+  }
+
+  input,
+  textarea,
+  select {
+    min-width: 0;
+    font-size: 16px;
+  }
+
+  textarea {
+    min-height: 120px;
+  }
+
+  .button-row,
+  .confirm-modal-actions {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 10px;
+  }
+
+  .button-row .button,
+  .confirm-modal-actions .button,
+  .session-actions .button,
+  .session-actions button,
+  .session-actions a {
+    width: 100%;
+  }
+
+  .premium-table-wrap,
+  .table-wrap,
+  .mapping-preview-table-wrap {
+    max-width: 100%;
+    min-width: 0;
+    overflow-x: auto;
+    overflow-y: hidden;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .premium-table-wrap table,
+  .table-wrap table,
+  .mapping-preview-table,
+  .mapping-owner-table {
+    min-width: 680px;
+  }
+
+  th,
+  td,
+  .premium-table-wrap th,
+  .premium-table-wrap td {
+    padding: 11px 10px;
+    font-size: 0.86rem;
+  }
+
+  .notice-backdrop,
+  .confirm-modal-backdrop {
+    padding: 12px;
+  }
+
+  .notice-card,
+  .confirm-modal,
+  .confirm-modal-backdrop[data-jira-modal-backdrop].is-visible .jira-wizard-modal {
+    top: 12px;
+    width: calc(100vw - 24px);
+    max-height: calc(100dvh - 24px);
+    border-radius: 16px;
+    padding: 20px 16px;
+  }
+
+  .bpmis-project-card-main {
+    grid-template-columns: 28px minmax(0, 1fr);
+    gap: 10px 12px;
+    padding: 14px;
+  }
+
+  .bpmis-project-card-main > * {
+    min-width: 0;
+  }
+
+  .bpmis-project-card-main span {
+    margin-bottom: 4px;
+  }
+
+  .bpmis-project-card-id,
+  .bpmis-project-card-name,
+  .bpmis-project-card-link,
+  .bpmis-project-card-market,
+  .bpmis-project-card-comment,
+  .bpmis-project-actions {
+    grid-column: 1 / -1;
+  }
+
+  .bpmis-project-drag-handle {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .bpmis-project-card-main > :not(.bpmis-project-drag-handle):first-of-type {
+    grid-column: 2;
+  }
+
+  .bpmis-project-actions {
+    flex-wrap: wrap;
+    justify-content: flex-start;
+  }
+
+  .bpmis-project-card > .bpmis-task-panel {
+    margin: 0 10px 12px;
+  }
+
+  .bpmis-task-cell {
+    grid-template-columns: minmax(76px, 0.34fr) minmax(0, 1fr);
+    gap: 8px;
+  }
+
+  .bpmis-inline-picker,
+  .bpmis-inline-menu {
+    min-width: 0;
+    max-width: 100%;
+  }
+}
+
+@media (max-width: 420px) {
+  .page-shell {
+    padding-left: 10px;
+    padding-right: 10px;
+  }
+
+  .panel,
+  .panel-wide,
+  .glass-panel,
+  .config-card,
+  .field-group,
+  .productization-search-shell,
+  .productization-section {
+    padding: 14px;
+  }
+
+  .site-switcher-track > .site-switcher-tab,
+  .workspace-tabs > .workspace-tab {
+    max-width: 84vw;
+  }
+}
