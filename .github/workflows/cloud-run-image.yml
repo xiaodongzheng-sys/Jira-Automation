@@ -4,19 +4,6 @@ on:
   push:
     branches:
       - main
-    paths:
-      - ".dockerignore"
-      - "Dockerfile"
-      - "app.py"
-      - "local_agent.py"
-      - "jira_web_config.json"
-      - "requirements-cloud-run.txt"
-      - "cloudbuild.yaml"
-      - "bpmis_jira_tool/**"
-      - "config/**"
-      - "prd_briefing/**"
-      - "static/**"
-      - "templates/**"
   workflow_dispatch:
 
 permissions:

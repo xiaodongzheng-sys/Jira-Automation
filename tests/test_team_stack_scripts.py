@@ -311,7 +311,8 @@ exit 0
 
         self.assertIn("CLOUD_RUN_UAT_AUTO_PREBUILT_IMAGE", contents)
         self.assertIn("select_prebuilt_sha_image_if_available \"$GIT_SHA\"", contents)
-        self.assertIn("artifacts docker images describe", contents)
+        self.assertIn("artifacts docker tags list", contents)
+        self.assertIn("grep -Fx \"$image_tag\"", contents)
         self.assertIn("Using prebuilt UAT image for current SHA", contents)
         self.assertIn("falling back to Cloud Run source deploy", contents)
 
@@ -1022,11 +1023,18 @@ exit 0
 
         self.assertIn("E2_HIGHCPU_8", build_script)
         self.assertIn("--disk-size", build_script)
+        self.assertIn("CLOUD_RUN_DEPLOY_ACCOUNT", build_script)
+        self.assertIn("artifacts repositories create", build_script)
+        self.assertIn("git -C \"$ROOT_DIR\" rev-parse HEAD", build_script)
+        self.assertIn("--async", build_script)
+        self.assertIn("builds describe \"$BUILD_ID\"", build_script)
+        self.assertIn("git -C \"$ROOT_DIR\" rev-parse HEAD", (PROJECT_ROOT / "scripts/release_uat_fast.sh").read_text(encoding="utf-8"))
         self.assertIn("docs/", dockerignore)
         self.assertIn("source_code_qa/", dockerignore)
         self.assertIn("tests/", dockerignore)
         self.assertIn("gcloud builds submit", workflow)
         self.assertIn("_TAG=$GITHUB_SHA", workflow)
+        self.assertNotIn("paths:", workflow)
 
     def test_cloud_run_full_deploy_skips_base_url_update_when_service_exists(self):
         deploy_script = PROJECT_ROOT / "scripts/deploy_cloud_run_full.sh"

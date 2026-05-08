@@ -32,7 +32,7 @@ resolve_image_uri() {
   region="${region:-asia-southeast1}"
   local repository="${CLOUD_RUN_ARTIFACT_REPOSITORY:-team-portal}"
   local image_name="${CLOUD_RUN_IMAGE_NAME:-team-portal}"
-  local tag="${CLOUD_RUN_IMAGE_TAG:-$(git -C "$ROOT_DIR" rev-parse --short=12 HEAD)}"
+  local tag="${CLOUD_RUN_IMAGE_TAG:-$(git -C "$ROOT_DIR" rev-parse HEAD)}"
   printf '%s\n' "${region}-docker.pkg.dev/${project_id}/${repository}/${image_name}:${tag}"
 }
 

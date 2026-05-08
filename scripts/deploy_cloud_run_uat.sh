@@ -153,10 +153,14 @@ prebuilt_sha_image_uri() {
 
 artifact_image_exists() {
   local image_uri="$1"
-  "$GCLOUD_BIN" artifacts docker images describe "$image_uri" \
+  local image_package="${image_uri%:*}"
+  local image_tag="${image_uri##*:}"
+  "$GCLOUD_BIN" artifacts docker tags list "$image_package" \
     ${PROJECT_ARGS[@]+"${PROJECT_ARGS[@]}"} \
     ${ACCOUNT_ARGS[@]+"${ACCOUNT_ARGS[@]}"} \
-    >/dev/null 2>&1
+    --filter="tag:$image_tag" \
+    --format="value(tag)" \
+    2>/dev/null | grep -Fx "$image_tag" >/dev/null
 }
 
 select_prebuilt_sha_image_if_available() {

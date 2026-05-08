@@ -189,7 +189,13 @@ CLOUD_RUN_IMAGE_NAME
 
 The build script defaults to a faster Cloud Build machine and larger disk for manual image builds. Set `CLOUD_RUN_BUILD_MACHINE_TYPE=default` or `CLOUD_RUN_BUILD_DISK_SIZE=default` to use Cloud Build defaults.
 
-By default, `deploy_cloud_run_uat.sh` checks Artifact Registry for an image tagged with the current Git SHA and uses it automatically when present. If the SHA image is missing, it falls back to the normal Cloud Run source deploy. Disable this with `CLOUD_RUN_UAT_AUTO_PREBUILT_IMAGE=0`.
+By default, `deploy_cloud_run_uat.sh` checks Artifact Registry for an image tagged with the current full Git SHA and uses it automatically when present. If the SHA image is missing, it falls back to the normal Cloud Run source deploy. Disable this with `CLOUD_RUN_UAT_AUTO_PREBUILT_IMAGE=0`.
+
+The manual image build script now uses the full Git SHA tag by default, creates the `team-portal` Artifact Registry Docker repository if it is missing, and reads `CLOUD_RUN_DEPLOY_ACCOUNT` from `.env`:
+
+```bash
+GOOGLE_CLOUD_PROJECT=civil-partition-492805-v7 ./scripts/build_cloud_run_image.sh
+```
 
 When using the standard artifact naming convention, the UAT script can resolve a prebuilt tag directly:
 
