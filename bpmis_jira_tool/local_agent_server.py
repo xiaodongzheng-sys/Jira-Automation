@@ -35,6 +35,7 @@ from bpmis_jira_tool.meeting_recorder import (
     meeting_platform_from_link,
     normalize_meeting_transcript_language,
 )
+from bpmis_jira_tool.meeting_translation import MeetingTranslationConfig, MeetingTranslationRuntime
 from bpmis_jira_tool.models import ProjectMatch
 from bpmis_jira_tool.monthly_report import (
     DEFAULT_MONTHLY_REPORT_RECIPIENT,
@@ -116,6 +117,10 @@ def create_local_agent_app() -> Flask:
         store=meeting_store,
         config=_meeting_recorder_config(settings),
     )
+    app.config["MEETING_TRANSLATION_RUNTIME"] = MeetingTranslationRuntime(
+        root_dir=_data_root(settings) / "run" / "meeting_translation",
+        config=_meeting_translation_config(settings),
+    )
 
     @app.before_request
     def verify_local_agent_signature():
@@ -150,6 +155,7 @@ def create_local_agent_app() -> Flask:
                     "bpmis_proxy": settings.local_agent_bpmis_enabled,
                     "meeting_recorder": True,
                     "meeting_recorder_diagnostics": _get_meeting_recorder_runtime().diagnostics(),
+                    "meeting_translation": True,
                 },
             }
         )
@@ -604,6 +610,39 @@ def create_local_agent_app() -> Flask:
             owner_email=str(request.args.get("owner_email") or ""),
             relative_path=relative_path,
         )
+
+    @app.post("/api/local-agent/meeting-translation/start")
+    def meeting_translation_start():
+        payload = request.get_json(silent=True) or {}
+        try:
+            result = _get_meeting_translation_runtime().start_session(
+                owner_email=str(payload.get("owner_email") or ""),
+                target_language=payload.get("target_language"),
+            )
+        except ToolError as error:
+            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
+        return jsonify(result)
+
+    @app.post("/api/local-agent/meeting-translation/stop")
+    def meeting_translation_stop():
+        payload = request.get_json(silent=True) or {}
+        try:
+            result = _get_meeting_translation_runtime().stop_session(
+                session_id=str(payload.get("session_id") or ""),
+                owner_email=str(payload.get("owner_email") or ""),
+            )
+        except ToolError as error:
+            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.NOT_FOUND
+        return jsonify(result)
+
+    @app.get("/api/local-agent/meeting-translation/events/<session_id>")
+    def meeting_translation_events(session_id: str):
+        owner_email = str(request.args.get("owner_email") or "")
+        try:
+            event_iter = _get_meeting_translation_runtime().event_stream(session_id=session_id, owner_email=owner_email)
+        except ToolError as error:
+            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.NOT_FOUND
+        return Response(_sse_events(event_iter), mimetype="text/event-stream")
 
     @app.post("/api/local-agent/work-memory/health")
     def work_memory_health():
@@ -2088,6 +2127,16 @@ def _meeting_recorder_config(settings: Settings) -> MeetingRecorderConfig:
     )
 
 
+def _meeting_translation_config(settings: Settings) -> MeetingTranslationConfig:
+    return MeetingTranslationConfig(
+        ffmpeg_bin=settings.meeting_recorder_ffmpeg_bin,
+        openai_api_key=settings.meeting_translation_openai_api_key,
+        model=settings.meeting_translation_model,
+        background_nice=settings.meeting_recorder_background_nice,
+        capture_status_every_buffers=settings.meeting_recorder_capture_status_every_buffers,
+    )
+
+
 def _get_meeting_record_store() -> MeetingRecordStore:
     return current_app.config["MEETING_RECORD_STORE"]
 
@@ -2096,8 +2145,17 @@ def _get_meeting_recorder_runtime() -> MeetingRecorderRuntime:
     return current_app.config["MEETING_RECORDER_RUNTIME"]
 
 
+def _get_meeting_translation_runtime() -> MeetingTranslationRuntime:
+    return current_app.config["MEETING_TRANSLATION_RUNTIME"]
+
+
 def _get_work_memory_store() -> WorkMemoryStore:
     return current_app.config["WORK_MEMORY_STORE"]
+
+
+def _sse_events(events: Any):
+    for event in events:
+        yield f"data: {json.dumps(event, ensure_ascii=False, separators=(',', ':'))}\n\n"
 
 
 def _record_local_work_memory_items(items: list[dict[str, Any]], *, event: str, owner_email: str) -> dict[str, int]:

@@ -7,6 +7,7 @@ google-auth==2.40.3
 google-auth-oauthlib==1.2.2
 cryptography==45.0.4
 requests==2.32.3
+websocket-client==1.8.0
 edge-tts==7.2.8
 python-dotenv==1.1.0
 tree-sitter==0.23.2

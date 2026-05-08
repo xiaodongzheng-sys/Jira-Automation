@@ -77,6 +77,11 @@ from bpmis_jira_tool.meeting_recorder import (
     _utc_now,
     meeting_platform_from_link,
 )
+from bpmis_jira_tool.meeting_translation import (
+    MEETING_TRANSLATION_LANGUAGES,
+    MeetingTranslationConfig,
+    MeetingTranslationRuntime,
+)
 from bpmis_jira_tool.monthly_report import (
     DEFAULT_MONTHLY_REPORT_RECIPIENT,
     DEFAULT_MONTHLY_REPORT_TEMPLATE,
@@ -618,6 +623,10 @@ def create_app() -> Flask:
         store=meeting_store,
         config=_meeting_recorder_config(settings),
     )
+    app.config["MEETING_TRANSLATION_RUNTIME"] = MeetingTranslationRuntime(
+        root_dir=data_root / "run" / "meeting_translation",
+        config=_meeting_translation_config(settings),
+    )
     app.config["GOOGLE_CREDENTIAL_STORE"] = StoredGoogleCredentials(
         data_root / "google" / "credentials.json",
         encryption_key=settings.team_portal_config_encryption_key,
@@ -685,6 +694,13 @@ def create_app() -> Flask:
                     "label": "Meeting Recorder",
                     "href": url_for("meeting_recorder_page"),
                     "active": request.path.startswith("/meeting-recorder"),
+                }
+            )
+            site_tabs.append(
+                {
+                    "label": "Meeting Translation",
+                    "href": url_for("meeting_translation_page"),
+                    "active": request.path.startswith("/meeting-translation"),
                 }
             )
         if prd_self_assessment_tab:
@@ -1549,6 +1565,88 @@ def create_app() -> Flask:
             selected_record_id=str(request.args.get("record") or "").strip(),
             asset_revision=_current_release_revision(),
         )
+
+    @app.get("/meeting-translation")
+    def meeting_translation_page():
+        access_gate = _require_meeting_recorder_access(settings)
+        if access_gate is not None:
+            return access_gate
+        return render_template(
+            "meeting_translation.html",
+            page_title="Meeting Translation",
+            languages=MEETING_TRANSLATION_LANGUAGES,
+            default_language="en",
+            asset_revision=_current_release_revision(),
+        )
+
+    @app.post("/api/meeting-translation/start")
+    def meeting_translation_start_api():
+        access_gate = _require_meeting_recorder_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        payload = request.get_json(silent=True) or {}
+        owner_email = _current_google_email()
+        try:
+            if _local_agent_meeting_recorder_enabled(settings):
+                result = _build_local_agent_client(settings).meeting_translation_start(
+                    {
+                        "owner_email": owner_email,
+                        "target_language": payload.get("target_language"),
+                    }
+                )
+            else:
+                result = _get_meeting_translation_runtime().start_session(
+                    owner_email=owner_email,
+                    target_language=payload.get("target_language"),
+                )
+        except ToolError as error:
+            status = HTTPStatus.BAD_GATEWAY if "local-agent" in str(error).lower() or "unavailable" in str(error).lower() else HTTPStatus.BAD_REQUEST
+            return jsonify({"status": "error", "message": str(error)}), status
+        return jsonify(result)
+
+    @app.post("/api/meeting-translation/sessions/<session_id>/stop")
+    def meeting_translation_stop_api(session_id: str):
+        access_gate = _require_meeting_recorder_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        owner_email = _current_google_email()
+        try:
+            if _local_agent_meeting_recorder_enabled(settings):
+                result = _build_local_agent_client(settings).meeting_translation_stop(
+                    session_id=session_id,
+                    owner_email=owner_email,
+                )
+            else:
+                result = _get_meeting_translation_runtime().stop_session(session_id=session_id, owner_email=owner_email)
+        except ToolError as error:
+            status = HTTPStatus.BAD_GATEWAY if "local-agent" in str(error).lower() or "unavailable" in str(error).lower() else HTTPStatus.NOT_FOUND
+            return jsonify({"status": "error", "message": str(error)}), status
+        return jsonify(result)
+
+    @app.get("/api/meeting-translation/sessions/<session_id>/events")
+    def meeting_translation_events_api(session_id: str):
+        access_gate = _require_meeting_recorder_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        owner_email = _current_google_email()
+        if _local_agent_meeting_recorder_enabled(settings):
+            try:
+                upstream = _build_local_agent_client(settings).meeting_translation_events_response(
+                    session_id=session_id,
+                    owner_email=owner_email,
+                )
+            except ToolError as error:
+                return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_GATEWAY
+            return Response(
+                stream_with_context(upstream.iter_content(chunk_size=None)),
+                status=upstream.status_code,
+                content_type=upstream.headers.get("Content-Type") or "text/event-stream",
+            )
+        try:
+            event_iter = _get_meeting_translation_runtime().event_stream(session_id=session_id, owner_email=owner_email)
+        except ToolError as error:
+            return jsonify({"status": "error", "message": str(error)}), HTTPStatus.NOT_FOUND
+        return Response(_meeting_translation_sse_events(event_iter), mimetype="text/event-stream")
 
     @app.get("/api/meeting-recorder/diagnostics")
     def meeting_recorder_diagnostics_api():
@@ -3583,6 +3681,16 @@ def _meeting_recorder_config(settings: Settings) -> MeetingRecorderConfig:
     )
 
 
+def _meeting_translation_config(settings: Settings) -> MeetingTranslationConfig:
+    return MeetingTranslationConfig(
+        ffmpeg_bin=settings.meeting_recorder_ffmpeg_bin,
+        openai_api_key=settings.meeting_translation_openai_api_key,
+        model=settings.meeting_translation_model,
+        background_nice=settings.meeting_recorder_background_nice,
+        capture_status_every_buffers=settings.meeting_recorder_capture_status_every_buffers,
+    )
+
+
 def _get_meeting_record_store() -> MeetingRecordStore:
     return current_app.config["MEETING_RECORD_STORE"]
 
@@ -3591,8 +3699,17 @@ def _get_meeting_recorder_runtime() -> MeetingRecorderRuntime:
     return current_app.config["MEETING_RECORDER_RUNTIME"]
 
 
+def _get_meeting_translation_runtime() -> MeetingTranslationRuntime:
+    return current_app.config["MEETING_TRANSLATION_RUNTIME"]
+
+
 def _get_work_memory_store() -> WorkMemoryStore:
     return current_app.config["WORK_MEMORY_STORE"]
+
+
+def _meeting_translation_sse_events(events: Any):
+    for event in events:
+        yield f"data: {json.dumps(event, ensure_ascii=False, separators=(',', ':'))}\n\n"
 
 
 def _record_work_memory_items(items: list[dict[str, Any]], *, event: str, owner_email: str = "", write_ledger: bool = True) -> dict[str, int]:

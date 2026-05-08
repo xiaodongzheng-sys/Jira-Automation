@@ -65,6 +65,9 @@ class Settings:
     prd_briefing_owner_email: str = "xiaodong.zheng@npt.sg"
     gmail_seatalk_demo_owner_email: str = "xiaodong.zheng@npt.sg"
     meeting_recorder_owner_email: str = "xiaodong.zheng@npt.sg"
+    meeting_translation_owner_email: str = "xiaodong.zheng@npt.sg"
+    meeting_translation_openai_api_key: str | None = None
+    meeting_translation_model: str = "gpt-realtime-translate"
     meeting_recorder_ffmpeg_bin: str = "ffmpeg"
     meeting_recorder_audio_input: str = "Meeting Recorder Aggregate"
     meeting_recorder_transcribe_provider: str = "whisper_cpp"
@@ -162,6 +165,12 @@ class Settings:
             prd_briefing_owner_email=_env_str("PRD_BRIEFING_OWNER_EMAIL", "xiaodong.zheng@npt.sg"),
             gmail_seatalk_demo_owner_email=_env_str("GMAIL_SEATALK_DEMO_OWNER_EMAIL", "xiaodong.zheng@npt.sg"),
             meeting_recorder_owner_email=_env_str("MEETING_RECORDER_OWNER_EMAIL", "xiaodong.zheng@npt.sg"),
+            meeting_translation_owner_email=_env_str(
+                "MEETING_TRANSLATION_OWNER_EMAIL",
+                _env_str("MEETING_RECORDER_OWNER_EMAIL", "xiaodong.zheng@npt.sg"),
+            ),
+            meeting_translation_openai_api_key=_env_str("MEETING_TRANSLATION_OPENAI_API_KEY", _env_str("OPENAI_API_KEY")),
+            meeting_translation_model=_env_str("MEETING_TRANSLATION_MODEL", "gpt-realtime-translate"),
             meeting_recorder_ffmpeg_bin=_env_str("MEETING_RECORDER_FFMPEG_BIN", "ffmpeg"),
             meeting_recorder_audio_input=_env_str("MEETING_RECORDER_AUDIO_INPUT", "Meeting Recorder Aggregate"),
             meeting_recorder_transcribe_provider=_env_str("MEETING_RECORDER_TRANSCRIBE_PROVIDER", "whisper_cpp"),

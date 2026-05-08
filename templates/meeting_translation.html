@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+
+{% block extra_head %}
+  <link rel="stylesheet" href="{{ url_for('static', filename='meeting_translation.css', v=asset_revision|default('static')) }}">
+{% endblock %}
+
+{% block body %}
+  <section class="meeting-translation-shell" data-meeting-translation-root>
+    <header class="tool-hero meeting-translation-hero">
+      <div>
+        <p class="eyebrow">Meeting Translation</p>
+        <h1>Meeting Translation</h1>
+      </div>
+      <div class="meeting-translation-status" data-translation-status data-state="idle">Idle</div>
+    </header>
+
+    <section class="tool-card meeting-translation-control">
+      <form class="meeting-translation-form" data-translation-form>
+        <div class="field-group">
+          <label for="meeting_translation_language">Translated language</label>
+          <select id="meeting_translation_language" data-translation-language>
+            {% for language_code, language in languages.items() %}
+              <option value="{{ language_code }}" {% if language_code == default_language %}selected{% endif %}>{{ language.label }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="meeting-translation-actions">
+          <button class="button" type="submit" data-translation-start>Start</button>
+          <button class="button button-secondary" type="button" data-translation-stop disabled>Stop</button>
+        </div>
+      </form>
+    </section>
+
+    <section class="meeting-translation-grid" aria-label="Live translation transcript">
+      <section class="tool-card meeting-translation-pane">
+        <div class="meeting-translation-pane-head">
+          <p class="eyebrow">Translated</p>
+          <h2 data-translated-title>English</h2>
+        </div>
+        <div class="meeting-translation-transcript" data-translated-transcript aria-live="polite"></div>
+      </section>
+
+      <section class="tool-card meeting-translation-pane">
+        <div class="meeting-translation-pane-head">
+          <p class="eyebrow">Original</p>
+          <h2>Original Audio</h2>
+        </div>
+        <div class="meeting-translation-transcript" data-original-transcript aria-live="polite"></div>
+      </section>
+    </section>
+  </section>
+{% endblock %}
+
+{% block extra_scripts %}
+  <script src="{{ url_for('static', filename='meeting_translation.js', v=asset_revision|default('static')) }}" defer></script>
+{% endblock %}

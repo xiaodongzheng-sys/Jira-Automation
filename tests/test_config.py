@@ -93,6 +93,25 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(settings.meeting_recorder_background_nice, 10)
         self.assertEqual(settings.meeting_recorder_capture_status_every_buffers, 250)
         self.assertEqual(settings.meeting_recorder_startup_silence_grace_seconds, 300)
+        self.assertEqual(settings.meeting_translation_owner_email, "xiaodong.zheng@npt.sg")
+        self.assertEqual(settings.meeting_translation_model, "gpt-realtime-translate")
+        self.assertIsNone(settings.meeting_translation_openai_api_key)
+
+    def test_meeting_translation_openai_settings_from_env(self):
+        with patch.dict(
+            os.environ,
+            {
+                "MEETING_RECORDER_OWNER_EMAIL": "recorder@npt.sg",
+                "MEETING_TRANSLATION_OPENAI_API_KEY": "translation-key",
+                "MEETING_TRANSLATION_MODEL": "gpt-realtime-translate",
+            },
+            clear=True,
+        ), patch("bpmis_jira_tool.config.find_dotenv", return_value=""):
+            settings = Settings.from_env()
+
+        self.assertEqual(settings.meeting_translation_owner_email, "recorder@npt.sg")
+        self.assertEqual(settings.meeting_translation_openai_api_key, "translation-key")
+        self.assertEqual(settings.meeting_translation_model, "gpt-realtime-translate")
 
     def test_local_agent_connect_timeout_from_env(self):
         with patch.dict(os.environ, {"LOCAL_AGENT_CONNECT_TIMEOUT_SECONDS": "4"}, clear=True), patch(

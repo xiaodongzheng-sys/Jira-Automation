@@ -347,6 +347,29 @@ class LocalAgentClient:
         filename = response.headers.get("X-Meeting-Recorder-Filename") or Path(relative_path).name or "meeting-asset"
         return response.content, content_type, filename
 
+    def meeting_translation_start(self, payload: dict[str, Any]) -> dict[str, Any]:
+        result = self._request("POST", "/api/local-agent/meeting-translation/start", payload)
+        return result if isinstance(result, dict) else {}
+
+    def meeting_translation_stop(self, *, session_id: str, owner_email: str) -> dict[str, Any]:
+        return self._request(
+            "POST",
+            "/api/local-agent/meeting-translation/stop",
+            {"session_id": session_id, "owner_email": owner_email},
+        )
+
+    def meeting_translation_events_response(self, *, session_id: str, owner_email: str) -> requests.Response:
+        safe_session_id = quote(str(session_id or ""), safe="")
+        query = urlencode({"owner_email": owner_email})
+        return self._request_raw(
+            "GET",
+            f"/api/local-agent/meeting-translation/events/{safe_session_id}?{query}",
+            signed=True,
+            expect_json=False,
+            extra_headers={"Accept": "text/event-stream"},
+            stream=True,
+        )
+
     def work_memory_health(self) -> dict[str, Any]:
         return self._request("POST", "/api/local-agent/work-memory/health", {})
 
@@ -932,6 +955,7 @@ class LocalAgentClient:
                 headers[str(key)] = str(value)
         if signed:
             request_path = path if str(path or "").startswith("/") else f"/{path}"
+            request_path = str(request_path).split("?", 1)[0]
             headers.update(sign_headers(secret=self.hmac_secret, method=method, path=request_path, body=body))
         max_attempts = len(LOCAL_AGENT_TRANSIENT_UNREADABLE_RETRY_DELAYS_SECONDS) + 1
         for attempt in range(max_attempts):

@@ -439,6 +439,7 @@ class TeamPortalAccessTests(unittest.TestCase):
                     b"Save Config",
                     b"Team Dashboard",
                     b"Meeting Recorder",
+                    b"Meeting Translation",
                     b"SeaTalk Management",
                 ):
                     self.assertNotIn(admin_marker, source_page.data)
@@ -473,6 +474,7 @@ class TeamPortalAccessTests(unittest.TestCase):
                     "/team-dashboard": "/access-denied",
                     "/gmail-sea-talk-demo": "/",
                     "/meeting-recorder": "/",
+                    "/meeting-translation": "/",
                 }
                 for path, expected_location in blocked_pages.items():
                     with self.subTest(path=path):
@@ -492,6 +494,7 @@ class TeamPortalAccessTests(unittest.TestCase):
                     ("post", "/admin/team-dashboard/report-intelligence", {"vip_people": []}),
                     ("get", "/api/gmail-sea-talk-demo/dashboard", None),
                     ("get", "/api/meeting-recorder/diagnostics", None),
+                    ("post", "/api/meeting-translation/start", {"target_language": "en"}),
                 ]
                 for method, path, payload in blocked_requests:
                     with self.subTest(method=method, path=path):
@@ -527,6 +530,7 @@ class TeamPortalAccessTests(unittest.TestCase):
                         "/api/jobs",
                         "team-dashboard",
                         "meeting-recorder",
+                        "meeting-translation",
                         "gmail-sea-talk-demo",
                         "local-agent",
                     )
@@ -563,6 +567,10 @@ class TeamPortalAccessTests(unittest.TestCase):
                 "meeting_recorder_start_api",
                 "meeting_recorder_stop_api",
                 "meeting_recorder_upcoming_api",
+                "meeting_translation_events_api",
+                "meeting_translation_page",
+                "meeting_translation_start_api",
+                "meeting_translation_stop_api",
                 "prd_self_assessment_page",
                 "prd_self_assessment_latest_api",
                 "prd_self_assessment_review_api",
@@ -634,6 +642,7 @@ class TeamPortalAccessTests(unittest.TestCase):
                     ("get", "/api/jobs/missing", {404}),
                     ("get", "/team-dashboard", {302}),
                     ("get", "/meeting-recorder", {302}),
+                    ("get", "/meeting-translation", {302}),
                     ("get", "/gmail-sea-talk-demo", {302}),
                     ("get", "/api/team-dashboard/config", {403}),
                     ("post", "/api/team-dashboard/key-projects", {403}, {}),
@@ -641,6 +650,7 @@ class TeamPortalAccessTests(unittest.TestCase):
                     ("post", "/admin/team-dashboard/members", {403}, {}),
                     ("get", "/api/meeting-recorder/diagnostics", {403}),
                     ("get", "/api/meeting-recorder/process-jobs/missing", {403}),
+                    ("post", "/api/meeting-translation/start", {403}, {"target_language": "en"}),
                     ("get", "/api/gmail-sea-talk-demo/dashboard", {403}),
                     ("get", "/api/source-code-qa/runtime-evidence?pm_team=AF&country=SG", {403}),
                     ("post", "/api/source-code-qa/sync", {403}, {"pm_team": "AF", "country": "All"}),
@@ -704,6 +714,65 @@ class TeamPortalAccessTests(unittest.TestCase):
         self.assertIsNotNone(prd_soup.select_one("[data-prd-self-assessment-url]"))
         self.assertIsNotNone(prd_soup.select_one("[data-prd-self-assessment-language]"))
         self.assertIsNotNone(prd_soup.find("script", src=lambda value: value and "prd_self_assessment.js" in value))
+
+    def test_meeting_translation_tab_follows_meeting_recorder_for_admin(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_ALLOWED_EMAIL_DOMAINS": "npt.sg",
+                "TEAM_PORTAL_BASE_URL": "https://jira-tool.example.com",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+            },
+            clear=False,
+        ):
+            app = create_app()
+            app.testing = True
+
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Admin"}
+                    session["google_credentials"] = {"token": "x", "scopes": []}
+
+                response = client.get("/meeting-translation")
+
+        self.assertEqual(response.status_code, 200)
+        soup = BeautifulSoup(response.get_data(as_text=True), "html.parser")
+        labels = [node.get_text(strip=True) for node in soup.select(".site-switcher-tab")]
+        self.assertIn("Meeting Recorder", labels)
+        self.assertIn("Meeting Translation", labels)
+        self.assertEqual(labels.index("Meeting Translation"), labels.index("Meeting Recorder") + 1)
+        self.assertIsNotNone(soup.select_one("[data-meeting-translation-root]"))
+        self.assertIsNotNone(soup.select_one("[data-translation-language]"))
+        self.assertIsNotNone(soup.select_one("[data-translated-transcript]"))
+        self.assertIsNotNone(soup.select_one("[data-original-transcript]"))
+
+    def test_meeting_translation_start_validates_language_before_runtime_start(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {
+                "FLASK_SECRET_KEY": "test-secret",
+                "TEAM_PORTAL_DATA_DIR": temp_dir,
+                "MEETING_TRANSLATION_OPENAI_API_KEY": "",
+                "OPENAI_API_KEY": "",
+            },
+            clear=False,
+        ):
+            app = create_app()
+            app.testing = True
+
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session["google_profile"] = {"email": "xiaodong.zheng@npt.sg", "name": "Admin"}
+                    session["google_credentials"] = {"token": "x", "scopes": []}
+
+                invalid = client.post("/api/meeting-translation/start", json={"target_language": "fr"})
+                missing_key = client.post("/api/meeting-translation/start", json={"target_language": "en"})
+
+        self.assertEqual(invalid.status_code, 400)
+        self.assertIn("supported translation language", invalid.get_json()["message"])
+        self.assertEqual(missing_key.status_code, 400)
+        self.assertIn("OPENAI_API_KEY", missing_key.get_json()["message"])
 
     def test_google_logout_clears_google_session(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
