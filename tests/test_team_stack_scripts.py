@@ -480,6 +480,8 @@ exit 0
         self.assertIn("git -C \"$host_workspace\" merge --ff-only \"$GIT_SHA\"", contents)
         self.assertIn("pip\" install -r \"$host_workspace/requirements.txt\"", contents)
         self.assertIn("BriefingStore(data_path / \"prd_briefing\")", contents)
+        self.assertIn("UAT host .env is missing LOCAL_AGENT_HMAC_SECRET", contents)
+        self.assertIn("LOCAL_AGENT_HMAC_SECRET=\"$uat_local_agent_hmac_secret\"", contents)
         self.assertIn("LOCAL_AGENT_PORT=\"$UAT_LOCAL_AGENT_PORT\"", contents)
         self.assertIn("LOCAL_AGENT_TEAM_PORTAL_DATA_DIR=\"$UAT_LOCAL_AGENT_DATA_DIR\"", contents)
         self.assertIn("LOCAL_AGENT_SCREEN_SESSION=\"$UAT_LOCAL_AGENT_SCREEN_SESSION\"", contents)

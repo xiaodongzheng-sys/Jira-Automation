@@ -245,9 +245,16 @@ sync_mac_local_agent_for_uat() {
       echo "Mac local-agent restart script is missing: $host_workspace/scripts/run_local_agent.sh"
       exit 1
     fi
+    local uat_local_agent_hmac_secret
+    uat_local_agent_hmac_secret="$(ENV_FILE="$host_workspace/.env" read_env_value LOCAL_AGENT_HMAC_SECRET)"
+    if [[ -z "$uat_local_agent_hmac_secret" ]]; then
+      echo "UAT host .env is missing LOCAL_AGENT_HMAC_SECRET; refusing to restart local-agent with an ambiguous signing key."
+      exit 1
+    fi
     echo "Restarting isolated UAT Mac local-agent on port $UAT_LOCAL_AGENT_PORT"
     (
       cd "$host_workspace"
+      LOCAL_AGENT_HMAC_SECRET="$uat_local_agent_hmac_secret" \
       LOCAL_AGENT_PORT="$UAT_LOCAL_AGENT_PORT" \
       LOCAL_AGENT_TEAM_PORTAL_DATA_DIR="$UAT_LOCAL_AGENT_DATA_DIR" \
       TEAM_PORTAL_DATA_DIR="$UAT_LOCAL_AGENT_DATA_DIR" \
