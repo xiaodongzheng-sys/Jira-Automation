@@ -44,6 +44,8 @@ MONTHLY_REPORT_TOKEN_CHARS_PER_TOKEN = 4
 MONTHLY_REPORT_TOKEN_RISK_WARNING = 120_000
 MONTHLY_REPORT_TOKEN_RISK_HIGH = 180_000
 MONTHLY_REPORT_BATCH_TARGET_TOKENS = 55_000
+MONTHLY_REPORT_TEXT_BATCH_TARGET_TOKENS = 28_000
+MONTHLY_REPORT_GMAIL_BATCH_TARGET_TOKENS = 18_000
 MONTHLY_REPORT_BATCH_MAX_TOKENS = 80_000
 MONTHLY_REPORT_MERGE_MAX_TOKENS = 120_000
 MONTHLY_REPORT_FINAL_MAX_TOKENS = 80_000
@@ -367,9 +369,9 @@ class MonthlyReportService:
             batches.append({"source": "monthly_evidence_brief", "index": index, "payload": chunk})
         for index, chunk in enumerate(_split_json_items_for_token_limit(evidence_sidecar, MONTHLY_REPORT_BATCH_TARGET_TOKENS), start=1):
             batches.append({"source": "report_intelligence", "index": index, "payload": chunk})
-        for index, chunk in enumerate(_split_text_for_token_limit(seatalk_history_text, MONTHLY_REPORT_BATCH_TARGET_TOKENS), start=1):
+        for index, chunk in enumerate(_split_text_for_token_limit(seatalk_history_text, MONTHLY_REPORT_TEXT_BATCH_TARGET_TOKENS), start=1):
             batches.append({"source": "seatalk", "index": index, "payload": chunk})
-        for index, chunk in enumerate(_split_text_for_token_limit(vip_gmail_text, MONTHLY_REPORT_BATCH_TARGET_TOKENS), start=1):
+        for index, chunk in enumerate(_split_text_for_token_limit(vip_gmail_text, MONTHLY_REPORT_GMAIL_BATCH_TARGET_TOKENS), start=1):
             batches.append({"source": "vip_gmail", "index": index, "payload": chunk})
         for index, chunk in enumerate(_split_json_items_for_token_limit(prd_sources, MONTHLY_REPORT_BATCH_TARGET_TOKENS), start=1):
             batches.append({"source": "prd_scope_summary", "index": index, "payload": chunk})

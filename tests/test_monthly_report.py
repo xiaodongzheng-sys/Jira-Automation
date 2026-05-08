@@ -13,6 +13,7 @@ from bpmis_jira_tool.errors import ToolError
 from bpmis_jira_tool.monthly_report import (
     MONTHLY_REPORT_BATCH_MAX_TOKENS,
     MONTHLY_REPORT_FINAL_MAX_TOKENS,
+    MONTHLY_REPORT_GMAIL_BATCH_TARGET_TOKENS,
     MONTHLY_REPORT_MERGE_MAX_TOKENS,
     MonthlyReportService,
     _estimate_token_count,
@@ -299,6 +300,37 @@ class MonthlyReportTests(unittest.TestCase):
         for call in evidence_batch_calls:
             self.assertLessEqual(_estimate_token_count(call.kwargs["prompt"]), MONTHLY_REPORT_BATCH_MAX_TOKENS)
         self.assertEqual(result["evidence_summary"]["key_project_count"], 30)
+
+    def test_generate_draft_splits_large_vip_gmail_into_smaller_batches(self):
+        gmail = _FakeGmailService(
+            "\n".join(
+                f"Thread {index} Subject: Anti-fraud launch approval Body: " + ("approval rollout evidence " * 260)
+                for index in range(36)
+            )
+        )
+        now = datetime(2026, 5, 3, 10, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE)
+        with tempfile.TemporaryDirectory() as temp_dir, patch("bpmis_jira_tool.monthly_report.generate_monthly_report_with_codex") as mock_generate:
+            mock_generate.return_value = {"result_markdown": "# Summary", "model_id": "codex-cli", "trace": {}}
+            service = MonthlyReportService(
+                settings=_settings(temp_dir),
+                workspace_root=Path(temp_dir),
+                seatalk_service=_FakeSeaTalkService(),
+                confluence=None,
+                gmail_service=gmail,
+                now=now,
+                report_intelligence_config={"vip_people": [{"display_name": "Boss", "emails": ["boss@npt.sg"]}]},
+            )
+            service.generate_draft(template="# Template", team_payloads=[])
+
+        gmail_batch_calls = [
+            call for call in mock_generate.call_args_list
+            if call.kwargs.get("prompt_mode", "").endswith("_batch_vip_gmail")
+        ]
+        self.assertGreater(len(gmail_batch_calls), 1)
+        for call in gmail_batch_calls:
+            estimated_tokens = _estimate_token_count(call.kwargs["prompt"])
+            self.assertLessEqual(estimated_tokens, MONTHLY_REPORT_BATCH_MAX_TOKENS)
+            self.assertLessEqual(estimated_tokens, MONTHLY_REPORT_GMAIL_BATCH_TARGET_TOKENS + 8_000)
 
     def test_final_prompt_compacts_included_project_evidence(self):
         period = resolve_monthly_report_period(datetime(2026, 5, 3, 10, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE))
