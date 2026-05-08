@@ -78,6 +78,31 @@ class SystemFullTestGateTests(unittest.TestCase):
         self.assertEqual(result["failed_steps"], ["python_unittest_coverage"])
         self.assertEqual([step["name"] for step in result["steps"]], ["coverage_erase", "python_unittest_coverage"])
 
+    def test_smoke_only_skips_local_release_gate_commands(self):
+        payloads = {
+            "https://uat.example/healthz/": {"status": "ok", "revision": "new-sha"},
+            "https://uat.example/api/local-agent/healthz": {"status": "ok"},
+            "https://live.example/healthz": {"status": "ok", "revision": "old-sha"},
+            "https://live.example/api/local-agent/healthz": {"status": "ok"},
+        }
+
+        def fake_fetch(url):
+            return payloads[url]
+
+        with patch.object(gate, "_run_command") as run_command, patch.object(gate, "_fetch_json", side_effect=fake_fetch):
+            result = gate.run_gate(
+                skip_smoke=False,
+                smoke_only=True,
+                uat_url="https://uat.example",
+                live_url="https://live.example",
+                expected_revision="new-sha",
+                coverage_fail_under=100,
+            )
+
+        self.assertEqual(result["status"], "pass")
+        self.assertEqual([step["name"] for step in result["steps"]], ["uat_live_read_only_smoke"])
+        run_command.assert_not_called()
+
     def test_smoke_uses_get_only_and_checks_uat_and_live_revisions(self):
         calls = []
         payloads = {

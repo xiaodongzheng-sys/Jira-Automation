@@ -113,6 +113,15 @@ TEAM_PORTAL_RELEASE_REVISION
   --expected-revision "$EXPECTED_REVISION"
 ```
 
+If the local full gate was already run for the same commit, use the read-only smoke-only mode for pre-promotion and post-promotion HTTP checks:
+
+```bash
+./.venv/bin/python scripts/run_system_full_test_gate.py --smoke-only \
+  --uat-url "$UAT_URL" \
+  --live-url "$LIVE_URL" \
+  --expected-revision "$EXPECTED_REVISION"
+```
+
 - The smoke step only sends GET requests to these read-only endpoints and fails if Live is already serving the UAT revision before promotion:
 
 ```bash
@@ -145,6 +154,7 @@ Run this for routine releases after changes are committed and pushed to `origin/
 ```
 
 Override the location with `TEAM_DEPLOY_TIMING_FILE=/path/to/deploy_timings.jsonl` when comparing release speed across UAT and Live runs.
+The UAT script records both the total script time and stage timings for prebuilt image lookup, service describe, Cloud Run deploy, and UAT host sync.
 
 - Deploy the pushed commit to a Cloud Run tagged UAT revision. The script requires a clean checkout with `HEAD == origin/main`, sets `TEAM_PORTAL_STAGE=uat`, pins `TEAM_PORTAL_RELEASE_REVISION` to the Git SHA, and deploys with `--no-traffic --tag uat`.
 
@@ -179,6 +189,8 @@ CLOUD_RUN_IMAGE_NAME
 
 The build script defaults to a faster Cloud Build machine and larger disk for manual image builds. Set `CLOUD_RUN_BUILD_MACHINE_TYPE=default` or `CLOUD_RUN_BUILD_DISK_SIZE=default` to use Cloud Build defaults.
 
+By default, `deploy_cloud_run_uat.sh` checks Artifact Registry for an image tagged with the current Git SHA and uses it automatically when present. If the SHA image is missing, it falls back to the normal Cloud Run source deploy. Disable this with `CLOUD_RUN_UAT_AUTO_PREBUILT_IMAGE=0`.
+
 When using the standard artifact naming convention, the UAT script can resolve a prebuilt tag directly:
 
 ```bash
@@ -199,7 +211,7 @@ For faster UAT releases, use the one-command orchestrator. It runs the release g
 
 The UAT local-agent sync is change-aware. `CLOUD_RUN_UAT_LOCAL_AGENT_SYNC_MODE=auto` skips local-agent sync/restart for static/template/docs/test/web-shell-only changes, while `full` forces the old behavior and `skip` skips it explicitly. `CLOUD_RUN_UAT_PARALLEL_HOST_SYNC=1` overlaps the full UAT host sync with Cloud Run deployment.
 
-- If UAT deploy fails because `local-agent-uat-hmac-secret` is missing or inaccessible in Secret Manager, rerun UAT with `CLOUD_RUN_UAT_LOCAL_AGENT_SECRET_SOURCE=env`. The deploy script reads `LOCAL_AGENT_HMAC_SECRET` from the isolated UAT host `.env`, deploys the new `uat` tag with the HMAC as a literal env var, and uses `--set-secrets` for the remaining base secrets so the stale UAT local-agent secret binding is replaced. This is UAT-only and must still use `--no-traffic`.
+- If `local-agent-uat-hmac-secret` is missing or inaccessible in Secret Manager, UAT automatically switches to the UAT host `.env` fallback by default. The deploy script reads `LOCAL_AGENT_HMAC_SECRET` from the isolated UAT host `.env`, deploys the new `uat` tag with the HMAC as a literal env var, and uses `--set-secrets` for the remaining base secrets so the stale UAT local-agent secret binding is replaced. This is UAT-only and must still use `--no-traffic`. Disable the automatic fallback with `CLOUD_RUN_UAT_AUTO_ENV_FALLBACK_ON_MISSING_SECRET=0`.
 
 - The default UAT Mac host workspace is `~/Workspace/jira-creation-stack-uat-host`, with data under `.team-portal-uat`. Run the setup helper once before the first isolated UAT deploy:
 
@@ -228,7 +240,7 @@ CLOUD_RUN_DEPLOY_ACCOUNT=vertex-ai-user@civil-partition-492805-v7.iam.gserviceac
 CLOUD_RUN_UAT_DRY_RUN=1 ./scripts/deploy_cloud_run_uat.sh
 ```
 
-- If Secret Manager `local-agent-uat-hmac-secret:latest` is missing and the active personal `gcloud` account cannot refresh tokens non-interactively, use the UAT host `.env` fallback instead of blocking the release. The fallback reads the isolated UAT `LOCAL_AGENT_HMAC_SECRET` from the UAT host workspace, rewrites the Cloud Run secret bindings to the base Flask/config/OAuth secrets, and deploys the UAT local-agent HMAC as an environment variable:
+- If you need to force the UAT host `.env` fallback manually, set `CLOUD_RUN_UAT_LOCAL_AGENT_SECRET_SOURCE=env`. The fallback reads the isolated UAT `LOCAL_AGENT_HMAC_SECRET` from the UAT host workspace, rewrites the Cloud Run secret bindings to the base Flask/config/OAuth secrets, and deploys the UAT local-agent HMAC as an environment variable:
 
 ```bash
 CLOUD_RUN_DEPLOY_ACCOUNT=vertex-ai-user@civil-partition-492805-v7.iam.gserviceaccount.com \

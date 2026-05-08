@@ -100,6 +100,7 @@ def _smoke_check(*, uat_url: str, live_url: str, expected_revision: str, expect_
 def run_gate(
     *,
     skip_smoke: bool,
+    smoke_only: bool = False,
     uat_url: str | None,
     live_url: str | None,
     expected_revision: str | None,
@@ -108,6 +109,33 @@ def run_gate(
     parallel_workers: int = 4,
 ) -> dict[str, Any]:
     steps: list[GateStep] = []
+
+    if smoke_only:
+        if not (uat_url and live_url and expected_revision):
+            steps.append(
+                GateStep(
+                    name="uat_live_read_only_smoke",
+                    status="fail",
+                    returncode=1,
+                    stderr="--uat-url, --live-url, and --expected-revision are required for --smoke-only.",
+                )
+            )
+        else:
+            steps.append(
+                _smoke_check(
+                    uat_url=uat_url,
+                    live_url=live_url,
+                    expected_revision=expected_revision,
+                    expect_live_promoted=expect_live_promoted,
+                )
+            )
+        status = "pass" if all(step.status in {"pass", "skipped"} and step.returncode == 0 for step in steps) else "fail"
+        failed_steps = [step.name for step in steps if step.status == "fail" or step.returncode != 0]
+        return {
+            "status": status,
+            "failed_steps": failed_steps,
+            "steps": [asdict(step) for step in steps],
+        }
 
     coverage_commands = [
         ("coverage_erase", [sys.executable, "-m", "coverage", "erase"]),
@@ -159,6 +187,7 @@ def run_gate(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--skip-smoke", action="store_true", help="Skip UAT/Live HTTP smoke checks.")
+    parser.add_argument("--smoke-only", action="store_true", help="Run only the read-only UAT/Live HTTP smoke checks.")
     parser.add_argument("--uat-url", default=None, help="Cloud Run UAT tag URL.")
     parser.add_argument("--live-url", default=None, help="Mac-hosted Live portal URL.")
     parser.add_argument("--expected-revision", default=None, help="Git SHA expected on UAT and not yet on Live.")
@@ -174,6 +203,7 @@ def main(argv: list[str] | None = None) -> int:
 
     result = run_gate(
         skip_smoke=bool(args.skip_smoke),
+        smoke_only=bool(args.smoke_only),
         uat_url=args.uat_url,
         live_url=args.live_url,
         expected_revision=args.expected_revision,

@@ -305,6 +305,26 @@ exit 0
         self.assertIn("describe_revision \"$EXISTING_UAT_REVISION\"", contents)
         self.assertIn("sync_mac_local_agent_for_uat", contents)
 
+    def test_cloud_run_uat_deploy_auto_selects_prebuilt_sha_image(self):
+        deploy_script = PROJECT_ROOT / "scripts/deploy_cloud_run_uat.sh"
+        contents = deploy_script.read_text(encoding="utf-8")
+
+        self.assertIn("CLOUD_RUN_UAT_AUTO_PREBUILT_IMAGE", contents)
+        self.assertIn("select_prebuilt_sha_image_if_available \"$GIT_SHA\"", contents)
+        self.assertIn("artifacts docker images describe", contents)
+        self.assertIn("Using prebuilt UAT image for current SHA", contents)
+        self.assertIn("falling back to Cloud Run source deploy", contents)
+
+    def test_cloud_run_uat_deploy_auto_falls_back_when_uat_secret_is_missing(self):
+        deploy_script = PROJECT_ROOT / "scripts/deploy_cloud_run_uat.sh"
+        contents = deploy_script.read_text(encoding="utf-8")
+
+        self.assertIn("CLOUD_RUN_UAT_AUTO_ENV_FALLBACK_ON_MISSING_SECRET", contents)
+        self.assertIn("select_uat_local_agent_secret_source", contents)
+        self.assertIn("secrets versions access latest", contents)
+        self.assertIn("using UAT env fallback", contents)
+        self.assertIn("UAT_LOCAL_AGENT_SECRET_SOURCE=\"env\"", contents)
+
     def test_cloud_run_uat_deploy_reads_project_and_account_from_env_file(self):
         deploy_script = PROJECT_ROOT / "scripts/deploy_cloud_run_uat.sh"
 
@@ -520,6 +540,7 @@ exit 0
 
         self.assertIn("System Full Test Gate", checklist)
         self.assertIn("./.venv/bin/python scripts/run_system_full_test_gate.py --skip-smoke", checklist)
+        self.assertIn("./.venv/bin/python scripts/run_system_full_test_gate.py --smoke-only", checklist)
         self.assertIn("ENV_FILE=/dev/null", checklist)
         self.assertIn("--coverage-fail-under 100", checklist)
         self.assertIn("./.venv/bin/python -m coverage run -m unittest discover -s tests", checklist)
@@ -977,6 +998,10 @@ exit 0
         self.assertIn("deploy_timings.jsonl", helper)
         self.assertIn("record_deploy_timing", helper)
         self.assertIn("record_uat_deploy_timing_on_exit", uat_script)
+        self.assertIn("record_uat_stage_timing", uat_script)
+        self.assertIn("prebuilt_image_lookup", uat_script)
+        self.assertIn("cloud_run_deploy", uat_script)
+        self.assertIn("uat_host_sync", uat_script)
         self.assertIn("record_promote_timing_on_exit", live_script)
         self.assertIn("Deploy UAT with: CLOUD_RUN_IMAGE=$IMAGE_URI ./scripts/deploy_cloud_run_uat.sh", build_script)
 

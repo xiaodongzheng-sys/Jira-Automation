@@ -16,6 +16,8 @@ UAT_LOCAL_AGENT_PORT="${CLOUD_RUN_UAT_LOCAL_AGENT_PORT:-7008}"
 UAT_LOCAL_AGENT_DATA_DIR="${CLOUD_RUN_UAT_LOCAL_AGENT_DATA_DIR:-.team-portal-uat}"
 UAT_LOCAL_AGENT_SCREEN_SESSION="${CLOUD_RUN_UAT_LOCAL_AGENT_SCREEN_SESSION:-bpmis-local-agent-uat}"
 UAT_LOCAL_AGENT_SECRET_NAME="${CLOUD_RUN_UAT_LOCAL_AGENT_SECRET_NAME:-local-agent-uat-hmac-secret}"
+CLOUD_RUN_ARTIFACT_REPOSITORY="${CLOUD_RUN_ARTIFACT_REPOSITORY:-team-portal}"
+CLOUD_RUN_IMAGE_NAME="${CLOUD_RUN_IMAGE_NAME:-team-portal}"
 CLOUD_RUN_IMAGE="${CLOUD_RUN_IMAGE:-$(read_env_value CLOUD_RUN_IMAGE)}"
 GCLOUD_BIN="${GCLOUD_BIN:-$(command -v gcloud || true)}"
 if [[ -z "$GCLOUD_BIN" && -x "$HOME/google-cloud-sdk/bin/gcloud" ]]; then
@@ -39,8 +41,6 @@ if [[ -z "$CLOUD_RUN_IMAGE" && -n "${CLOUD_RUN_UAT_PREBUILT_IMAGE_TAG:-}" ]]; th
     echo "CLOUD_RUN_UAT_PREBUILT_IMAGE_TAG requires GOOGLE_CLOUD_PROJECT."
     exit 1
   fi
-  CLOUD_RUN_ARTIFACT_REPOSITORY="${CLOUD_RUN_ARTIFACT_REPOSITORY:-team-portal}"
-  CLOUD_RUN_IMAGE_NAME="${CLOUD_RUN_IMAGE_NAME:-team-portal}"
   CLOUD_RUN_IMAGE="${REGION}-docker.pkg.dev/${GOOGLE_CLOUD_PROJECT_RESOLVED}/${CLOUD_RUN_ARTIFACT_REPOSITORY}/${CLOUD_RUN_IMAGE_NAME}:${CLOUD_RUN_UAT_PREBUILT_IMAGE_TAG}"
 fi
 ACCOUNT_ARGS=()
@@ -50,14 +50,32 @@ if [[ -n "$CLOUD_RUN_DEPLOY_ACCOUNT_RESOLVED" ]]; then
 fi
 UAT_SYNC_PID=""
 UAT_SYNC_LOG=""
+UAT_SYNC_STARTED_AT=""
+UAT_LOCAL_AGENT_SECRET_SOURCE="${CLOUD_RUN_UAT_LOCAL_AGENT_SECRET_SOURCE:-secret_manager}"
+
+record_uat_stage_timing() {
+  local phase="$1"
+  local started_at="$2"
+  local finished_at="$3"
+  local status="$4"
+  local details="${5:-}"
+  record_deploy_timing "deploy_cloud_run_uat.sh" "$phase" "$started_at" "$finished_at" "$status" "service=$SERVICE region=$REGION tag=$UAT_TAG $details" || true
+}
 
 record_uat_deploy_timing_on_exit() {
   local status=$?
   if [[ -n "${UAT_SYNC_PID:-}" ]]; then
-    wait "$UAT_SYNC_PID" >/dev/null 2>&1 || true
+    local sync_status=0
+    local sync_finished_at
+    wait "$UAT_SYNC_PID" >/dev/null 2>&1 || sync_status=$?
+    sync_finished_at="$(date +%s)"
     if [[ -n "${UAT_SYNC_LOG:-}" && -f "$UAT_SYNC_LOG" ]]; then
       cat "$UAT_SYNC_LOG" || true
       rm -f "$UAT_SYNC_LOG"
+    fi
+    if [[ -n "${UAT_SYNC_STARTED_AT:-}" ]]; then
+      record_uat_stage_timing "uat_host_sync" "$UAT_SYNC_STARTED_AT" "$sync_finished_at" "$sync_status" "mode=parallel exit_trap=1"
+      UAT_SYNC_STARTED_AT=""
     fi
   fi
   local finished_at
@@ -126,6 +144,74 @@ describe_revision() {
     ${ACCOUNT_ARGS[@]+"${ACCOUNT_ARGS[@]}"} \
     --region "$REGION" \
     --format=json
+}
+
+prebuilt_sha_image_uri() {
+  local image_tag="$1"
+  printf '%s\n' "${REGION}-docker.pkg.dev/${GOOGLE_CLOUD_PROJECT_RESOLVED}/${CLOUD_RUN_ARTIFACT_REPOSITORY}/${CLOUD_RUN_IMAGE_NAME}:${image_tag}"
+}
+
+artifact_image_exists() {
+  local image_uri="$1"
+  "$GCLOUD_BIN" artifacts docker images describe "$image_uri" \
+    ${PROJECT_ARGS[@]+"${PROJECT_ARGS[@]}"} \
+    ${ACCOUNT_ARGS[@]+"${ACCOUNT_ARGS[@]}"} \
+    >/dev/null 2>&1
+}
+
+select_prebuilt_sha_image_if_available() {
+  local git_sha="$1"
+  local started_at finished_at image_uri
+  if [[ -n "$CLOUD_RUN_IMAGE" || "${CLOUD_RUN_UAT_AUTO_PREBUILT_IMAGE:-1}" == "0" ]]; then
+    return 0
+  fi
+  if [[ -z "$GOOGLE_CLOUD_PROJECT_RESOLVED" ]]; then
+    echo "Skipping UAT prebuilt SHA image lookup because GOOGLE_CLOUD_PROJECT is not set."
+    return 0
+  fi
+
+  image_uri="$(prebuilt_sha_image_uri "$git_sha")"
+  started_at="$(date +%s)"
+  if artifact_image_exists "$image_uri"; then
+    CLOUD_RUN_IMAGE="$image_uri"
+    finished_at="$(date +%s)"
+    record_uat_stage_timing "prebuilt_image_lookup" "$started_at" "$finished_at" 0 "image=$image_uri result=hit"
+    echo "Using prebuilt UAT image for current SHA: $image_uri"
+  else
+    finished_at="$(date +%s)"
+    record_uat_stage_timing "prebuilt_image_lookup" "$started_at" "$finished_at" 0 "image=$image_uri result=miss"
+    echo "No prebuilt UAT image found for current SHA; falling back to Cloud Run source deploy."
+  fi
+}
+
+uat_secret_manager_version_accessible() {
+  "$GCLOUD_BIN" secrets versions access latest \
+    --secret "$UAT_LOCAL_AGENT_SECRET_NAME" \
+    ${PROJECT_ARGS[@]+"${PROJECT_ARGS[@]}"} \
+    ${ACCOUNT_ARGS[@]+"${ACCOUNT_ARGS[@]}"} \
+    >/dev/null 2>&1
+}
+
+select_uat_local_agent_secret_source() {
+  local started_at finished_at
+  if [[ "$UAT_LOCAL_AGENT_SECRET_SOURCE" != "secret_manager" ]]; then
+    return 0
+  fi
+  if [[ "${CLOUD_RUN_UAT_AUTO_ENV_FALLBACK_ON_MISSING_SECRET:-1}" == "0" ]]; then
+    return 0
+  fi
+
+  started_at="$(date +%s)"
+  if uat_secret_manager_version_accessible; then
+    finished_at="$(date +%s)"
+    record_uat_stage_timing "uat_secret_check" "$started_at" "$finished_at" 0 "secret=$UAT_LOCAL_AGENT_SECRET_NAME result=secret_manager"
+    return 0
+  fi
+
+  finished_at="$(date +%s)"
+  record_uat_stage_timing "uat_secret_check" "$started_at" "$finished_at" 0 "secret=$UAT_LOCAL_AGENT_SECRET_NAME result=env_fallback"
+  UAT_LOCAL_AGENT_SECRET_SOURCE="env"
+  echo "UAT Secret Manager secret $UAT_LOCAL_AGENT_SECRET_NAME is missing or inaccessible; using UAT env fallback."
 }
 
 resolve_uat_host_workspace() {
@@ -401,6 +487,7 @@ start_uat_host_sync_async() {
     return 1
   fi
   UAT_SYNC_LOG="$(mktemp "${TMPDIR:-/tmp}/uat-host-sync.XXXXXX.log")"
+  UAT_SYNC_STARTED_AT="$(date +%s)"
   echo "Starting UAT Mac local-agent sync in parallel with Cloud Run deploy."
   sync_mac_local_agent_for_uat >"$UAT_SYNC_LOG" 2>&1 &
   UAT_SYNC_PID="$!"
@@ -410,22 +497,41 @@ start_uat_host_sync_async() {
 finish_uat_host_sync() {
   if [[ -n "${UAT_SYNC_PID:-}" ]]; then
     local sync_status=0
+    local finished_at
     wait "$UAT_SYNC_PID" || sync_status=$?
+    finished_at="$(date +%s)"
     UAT_SYNC_PID=""
     if [[ -n "${UAT_SYNC_LOG:-}" && -f "$UAT_SYNC_LOG" ]]; then
       cat "$UAT_SYNC_LOG"
       rm -f "$UAT_SYNC_LOG"
       UAT_SYNC_LOG=""
     fi
+    if [[ -n "${UAT_SYNC_STARTED_AT:-}" ]]; then
+      record_uat_stage_timing "uat_host_sync" "$UAT_SYNC_STARTED_AT" "$finished_at" "$sync_status" "mode=parallel"
+      UAT_SYNC_STARTED_AT=""
+    fi
     return "$sync_status"
   fi
-  sync_mac_local_agent_for_uat
+  local started_at finished_at sync_status=0
+  started_at="$(date +%s)"
+  sync_mac_local_agent_for_uat || sync_status=$?
+  finished_at="$(date +%s)"
+  record_uat_stage_timing "uat_host_sync" "$started_at" "$finished_at" "$sync_status" "mode=serial"
+  return "$sync_status"
 }
 
 require_clean_pushed_main
 
 GIT_SHA="$(git -C "$ROOT_DIR" rev-parse HEAD)"
+select_prebuilt_sha_image_if_available "$GIT_SHA"
+SERVICE_DESCRIBE_STARTED_AT="$(date +%s)"
 SERVICE_DESCRIBE_JSON="$(describe_service 2>/dev/null || true)"
+SERVICE_DESCRIBE_FINISHED_AT="$(date +%s)"
+if [[ -n "$SERVICE_DESCRIBE_JSON" ]]; then
+  record_uat_stage_timing "describe_service" "$SERVICE_DESCRIBE_STARTED_AT" "$SERVICE_DESCRIBE_FINISHED_AT" 0 "scope=pre_deploy"
+else
+  record_uat_stage_timing "describe_service" "$SERVICE_DESCRIBE_STARTED_AT" "$SERVICE_DESCRIBE_FINISHED_AT" 1 "scope=pre_deploy"
+fi
 if [[ -z "$SERVICE_DESCRIBE_JSON" ]]; then
   echo "Could not describe Cloud Run service $SERVICE in $REGION."
   echo "Deploy the service once before creating a tagged UAT revision."
@@ -451,6 +557,8 @@ if [[ -z "$LOCAL_AGENT_URL" ]]; then
   echo "Set TEAM_PORTAL_BASE_URL to the fixed live portal URL or set CLOUD_RUN_UAT_LOCAL_AGENT_BASE_URL."
   exit 1
 fi
+
+select_uat_local_agent_secret_source
 
 ENV_VARS=(
   "TEAM_ALLOWED_EMAIL_DOMAINS=${TEAM_ALLOWED_EMAIL_DOMAINS:-$(read_env_value TEAM_ALLOWED_EMAIL_DOMAINS)}"
@@ -492,7 +600,7 @@ DEPLOY_SECRET_ARGS=(--update-secrets "LOCAL_AGENT_HMAC_SECRET=$UAT_LOCAL_AGENT_S
 ENV_DEPLOY_MODE="set"
 ENV_REMOVE_ARGS=()
 ENV_SECRET_PRECLEAR_REQUIRED=0
-if [[ "${CLOUD_RUN_UAT_LOCAL_AGENT_SECRET_SOURCE:-secret_manager}" == "env" ]]; then
+if [[ "$UAT_LOCAL_AGENT_SECRET_SOURCE" == "env" ]]; then
   uat_hmac_secret="${CLOUD_RUN_UAT_LOCAL_AGENT_HMAC_SECRET:-}"
   if [[ -z "$uat_hmac_secret" ]]; then
     uat_host_workspace="$(resolve_uat_host_workspace)"
@@ -509,7 +617,7 @@ if [[ "${CLOUD_RUN_UAT_LOCAL_AGENT_SECRET_SOURCE:-secret_manager}" == "env" ]]; 
   DEPLOY_SECRET_ARGS=(--set-secrets "$BASE_SECRET_BINDINGS")
   ENV_DEPLOY_MODE="set"
   ENV_SECRET_PRECLEAR_REQUIRED=1
-  echo "Using UAT local-agent HMAC from env fallback because CLOUD_RUN_UAT_LOCAL_AGENT_SECRET_SOURCE=env."
+  echo "Using UAT local-agent HMAC from env fallback because UAT local-agent secret source is env (CLOUD_RUN_UAT_LOCAL_AGENT_SECRET_SOURCE=env or automatic fallback)."
 fi
 if [[ "$ENV_SECRET_PRECLEAR_REQUIRED" == "1" && "${CLOUD_RUN_UAT_ENV_FALLBACK_PRECLEAR:-0}" == "1" ]]; then
   if ! SERVICE_JSON_VALUE="$SERVICE_DESCRIBE_JSON" "$PYTHON_BIN" - <<'PY'
@@ -632,6 +740,8 @@ if [[ "$ENV_SECRET_PRECLEAR_REQUIRED" == "1" ]]; then
     --remove-env-vars "LOCAL_AGENT_HMAC_SECRET"
 fi
 
+UAT_CLOUD_RUN_DEPLOY_STARTED_AT="$(date +%s)"
+set +e
 "$GCLOUD_BIN" run deploy "$SERVICE" \
   ${PROJECT_ARGS[@]+"${PROJECT_ARGS[@]}"} \
   ${ACCOUNT_ARGS[@]+"${ACCOUNT_ARGS[@]}"} \
@@ -645,8 +755,18 @@ fi
   ${DEPLOY_SECRET_ARGS[@]+"${DEPLOY_SECRET_ARGS[@]}"} \
   ${ENV_REMOVE_ARGS[@]+"${ENV_REMOVE_ARGS[@]}"} \
   "${ENV_DEPLOY_ARGS[@]}"
+UAT_CLOUD_RUN_DEPLOY_STATUS=$?
+set -e
+UAT_CLOUD_RUN_DEPLOY_FINISHED_AT="$(date +%s)"
+record_uat_stage_timing "cloud_run_deploy" "$UAT_CLOUD_RUN_DEPLOY_STARTED_AT" "$UAT_CLOUD_RUN_DEPLOY_FINISHED_AT" "$UAT_CLOUD_RUN_DEPLOY_STATUS" "image=${CLOUD_RUN_IMAGE:-source}"
+if [[ "$UAT_CLOUD_RUN_DEPLOY_STATUS" != "0" ]]; then
+  exit "$UAT_CLOUD_RUN_DEPLOY_STATUS"
+fi
 
+POST_DEPLOY_DESCRIBE_STARTED_AT="$(date +%s)"
 SERVICE_DESCRIBE_JSON="$(describe_service)"
+POST_DEPLOY_DESCRIBE_FINISHED_AT="$(date +%s)"
+record_uat_stage_timing "describe_service" "$POST_DEPLOY_DESCRIBE_STARTED_AT" "$POST_DEPLOY_DESCRIBE_FINISHED_AT" 0 "scope=post_deploy"
 UAT_REVISION="$(printf '%s' "$SERVICE_DESCRIBE_JSON" | UAT_TAG_VALUE="$UAT_TAG" "$PYTHON_BIN" -c 'import json, os, sys; p=json.load(sys.stdin); tag=os.environ["UAT_TAG_VALUE"]; matches=[t for t in p.get("status", {}).get("traffic", []) if t.get("tag")==tag]; print(matches[0].get("revisionName", "") if matches else "")')"
 DESCRIBED_UAT_URL="$(printf '%s' "$SERVICE_DESCRIBE_JSON" | UAT_TAG_VALUE="$UAT_TAG" "$PYTHON_BIN" -c 'import json, os, sys; p=json.load(sys.stdin); tag=os.environ["UAT_TAG_VALUE"]; matches=[t for t in p.get("status", {}).get("traffic", []) if t.get("tag")==tag]; print(matches[0].get("url", "") if matches else "")')"
 if [[ -z "$UAT_REVISION" ]]; then
