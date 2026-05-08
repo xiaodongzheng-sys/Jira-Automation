@@ -44,18 +44,72 @@ final class AudioFileSink {
     }
 }
 
+final class RawPCMSink {
+    private let output = FileHandle.standardOutput
+    private let outputLock = NSLock()
+    private let targetFormat = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 24_000, channels: 1, interleaved: true)!
+
+    func write(_ sampleBuffer: CMSampleBuffer) throws {
+        guard sampleBuffer.isValid, CMSampleBufferDataIsReady(sampleBuffer) else { return }
+        guard let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer),
+              let streamDescription = CMAudioFormatDescriptionGetStreamBasicDescription(formatDescription) else {
+            return
+        }
+        var asbd = streamDescription.pointee
+        guard let sourceFormat = AVAudioFormat(streamDescription: &asbd) else { return }
+        let frameCount = CMSampleBufferGetNumSamples(sampleBuffer)
+        guard frameCount > 0,
+              let sourceBuffer = AVAudioPCMBuffer(pcmFormat: sourceFormat, frameCapacity: AVAudioFrameCount(frameCount)) else {
+            return
+        }
+        sourceBuffer.frameLength = AVAudioFrameCount(frameCount)
+        CMSampleBufferCopyPCMDataIntoAudioBufferList(
+            sampleBuffer,
+            at: 0,
+            frameCount: Int32(frameCount),
+            into: sourceBuffer.mutableAudioBufferList
+        )
+        guard let converter = AVAudioConverter(from: sourceFormat, to: targetFormat) else { return }
+        let ratio = targetFormat.sampleRate / max(1, sourceFormat.sampleRate)
+        let outputCapacity = AVAudioFrameCount(Double(frameCount) * ratio) + 1024
+        guard let outputBuffer = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: outputCapacity) else { return }
+        var didProvideInput = false
+        var conversionError: NSError?
+        converter.convert(to: outputBuffer, error: &conversionError) { _, status in
+            if didProvideInput {
+                status.pointee = .noDataNow
+                return nil
+            }
+            didProvideInput = true
+            status.pointee = .haveData
+            return sourceBuffer
+        }
+        if let conversionError {
+            throw conversionError
+        }
+        guard outputBuffer.frameLength > 0, let channel = outputBuffer.int16ChannelData?[0] else { return }
+        let byteCount = Int(outputBuffer.frameLength) * MemoryLayout<Int16>.size
+        let data = Data(bytes: channel, count: byteCount)
+        outputLock.lock()
+        output.write(data)
+        outputLock.unlock()
+    }
+}
+
 final class CaptureOutput: NSObject, SCStreamOutput, SCStreamDelegate {
     let systemSink: AudioFileSink
     let microphoneSink: AudioFileSink
+    private let rawPCMSink: RawPCMSink?
     private let statusURL: URL
     private let statusEveryBuffers: Int
     private let lock = NSLock()
     private var systemBuffers = 0
     private var microphoneBuffers = 0
 
-    init(systemURL: URL, microphoneURL: URL, statusURL: URL, statusEveryBuffers: Int) {
+    init(systemURL: URL, microphoneURL: URL, statusURL: URL, statusEveryBuffers: Int, rawPCMSink: RawPCMSink?) {
         self.systemSink = AudioFileSink(url: systemURL)
         self.microphoneSink = AudioFileSink(url: microphoneURL)
+        self.rawPCMSink = rawPCMSink
         self.statusURL = statusURL
         self.statusEveryBuffers = max(1, statusEveryBuffers)
     }
@@ -65,9 +119,11 @@ final class CaptureOutput: NSObject, SCStreamOutput, SCStreamDelegate {
             switch type {
             case .audio:
                 try systemSink.write(sampleBuffer)
+                try rawPCMSink?.write(sampleBuffer)
                 increment(system: true)
             case .microphone:
                 try microphoneSink.write(sampleBuffer)
+                try rawPCMSink?.write(sampleBuffer)
                 increment(system: false)
             default:
                 break
@@ -116,6 +172,7 @@ struct Arguments {
     let microphoneOutput: URL
     let statusOutput: URL
     let statusEveryBuffers: Int
+    let rawPCMOutput: String?
 
     init() throws {
         var values: [String: String] = [:]
@@ -135,6 +192,7 @@ struct Arguments {
         self.microphoneOutput = URL(fileURLWithPath: microphone)
         self.statusOutput = URL(fileURLWithPath: status)
         self.statusEveryBuffers = max(1, Int(values["status-every-buffers"] ?? "250") ?? 250)
+        self.rawPCMOutput = values["raw-pcm-output"]
     }
 }
 
@@ -167,7 +225,8 @@ struct MeetingScreenCaptureHelper {
                 systemURL: args.systemOutput,
                 microphoneURL: args.microphoneOutput,
                 statusURL: args.statusOutput,
-                statusEveryBuffers: args.statusEveryBuffers
+                statusEveryBuffers: args.statusEveryBuffers,
+                rawPCMSink: args.rawPCMOutput == "stdout" ? RawPCMSink() : nil
             )
             let stream = SCStream(filter: filter, configuration: configuration, delegate: output)
             let queue = DispatchQueue(label: "meeting-recorder.screencapture.audio")

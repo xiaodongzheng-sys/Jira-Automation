@@ -49,6 +49,16 @@ class _FakeWebSocket:
         self.closed = True
 
 
+class _FakePCMRecorder:
+    def __init__(self, chunks):
+        self.chunks = list(chunks)
+
+    def read_pcm_chunk(self, _size):
+        if self.chunks:
+            return self.chunks.pop(0)
+        return b""
+
+
 class MeetingTranslationTests(unittest.TestCase):
     def test_normalizes_supported_output_languages(self):
         self.assertEqual(normalize_meeting_translation_language("English"), "en")
@@ -90,9 +100,7 @@ class MeetingTranslationTests(unittest.TestCase):
                 runtime._stream_audio(
                     session=session,
                     websocket=websocket,
-                    ffmpeg_path="/usr/bin/ffmpeg",
-                    system_path=Path(temp_dir) / "system.caf",
-                    microphone_path=Path(temp_dir) / "mic.caf",
+                    recorder=_FakePCMRecorder([pcm]),
                 )
 
         payload = json.loads(websocket.sent[0])

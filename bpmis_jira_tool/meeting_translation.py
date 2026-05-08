@@ -10,14 +10,16 @@ import shutil
 import subprocess
 import threading
 import time
-from typing import Any, Iterator
+from typing import Any, BinaryIO, Iterator
 import uuid
 
 from bpmis_jira_tool.errors import ConfigError, ToolError
 from bpmis_jira_tool.meeting_recorder import (
-    _ScreenCaptureKitAudioRecorder,
-    _resolve_ffmpeg_bin,
+    _background_command,
+    _read_json_file,
+    _read_tail,
     _resolve_screencapturekit_helper,
+    _safe_int,
     _safe_file_size,
     _utc_now,
 )
@@ -31,6 +33,7 @@ MEETING_TRANSLATION_LANGUAGES: dict[str, dict[str, str]] = {
 MEETING_TRANSLATION_TERMINAL_STATUSES = {"stopped", "error"}
 MEETING_TRANSLATION_PCM_RATE = 24000
 MEETING_TRANSLATION_PCM_CHUNK_BYTES = 48_000
+MEETING_TRANSLATION_PCM_STREAM_READ_BYTES = 12_000
 MEETING_TRANSLATION_PCM_BYTES_PER_SECOND = MEETING_TRANSLATION_PCM_RATE * 2
 
 
@@ -77,7 +80,7 @@ class MeetingTranslationSession:
         self.events: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=500)
         self.stop_event = threading.Event()
         self.thread: threading.Thread | None = None
-        self.recorder: _ScreenCaptureKitAudioRecorder | None = None
+        self.recorder: Any = None
         self.websocket: Any = None
         self.pcm_offset = 0
         self.event_seq = 0
@@ -125,6 +128,112 @@ class MeetingTranslationSession:
         self.emit("status", status=self.status, message=self.message, error=self.error)
 
 
+class _ScreenCaptureKitPCMStreamer:
+    def __init__(
+        self,
+        *,
+        helper_path: Path,
+        system_audio_path: Path,
+        microphone_audio_path: Path,
+        status_path: Path,
+        log_path: Path,
+        background_nice: int = 10,
+        status_every_buffers: int = 250,
+    ) -> None:
+        self.helper_path = helper_path
+        self.system_audio_path = system_audio_path
+        self.microphone_audio_path = microphone_audio_path
+        self.status_path = status_path
+        self.log_path = log_path
+        self._process: subprocess.Popen[bytes] | None = None
+        self.command = _background_command([
+            str(self.helper_path),
+            "--system-output",
+            str(self.system_audio_path),
+            "--microphone-output",
+            str(self.microphone_audio_path),
+            "--status-output",
+            str(self.status_path),
+            "--status-every-buffers",
+            str(max(1, int(status_every_buffers or 250))),
+            "--raw-pcm-output",
+            "stdout",
+        ], background_nice)
+
+    @property
+    def pid(self) -> int:
+        return _safe_int(getattr(self._process, "pid", 0))
+
+    def start(self) -> dict[str, Any]:
+        self.system_audio_path.parent.mkdir(parents=True, exist_ok=True)
+        self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        self.log_path.write_text("", encoding="utf-8")
+        log_handle = self.log_path.open("ab")
+        self._process = subprocess.Popen(
+            self.command,
+            stdout=subprocess.PIPE,
+            stderr=log_handle,
+            close_fds=True,
+        )
+        started = time.monotonic()
+        while time.monotonic() - started < 8.0:
+            if self._process.poll() is not None:
+                warning = _read_tail(self.log_path) or "ScreenCaptureKit helper exited before translation started."
+                return {"status": "failed", "checked_at": _utc_now(), "warning": warning}
+            status = _read_json_file(self.status_path)
+            if str(status.get("status") or "") == "recording":
+                return {
+                    "status": "ok",
+                    "checked_at": _utc_now(),
+                    "latency_seconds": round(time.monotonic() - started, 3),
+                    "bytes": _safe_file_size(self.system_audio_path) + _safe_file_size(self.microphone_audio_path),
+                    "screencapture_status": status,
+                    "pid": self.pid,
+                    "streaming_audio": "pcm16_24khz_mono_stdout",
+                }
+            if str(status.get("status") or "") == "failed":
+                return {
+                    "status": "failed",
+                    "checked_at": _utc_now(),
+                    "warning": str(status.get("message") or "ScreenCaptureKit helper failed to start."),
+                    "screencapture_status": status,
+                }
+            time.sleep(0.1)
+        return {
+            "status": "failed",
+            "checked_at": _utc_now(),
+            "warning": "ScreenCaptureKit helper did not start within 8s. Check macOS Screen Recording and Microphone permissions.",
+        }
+
+    def read_pcm_chunk(self, size: int) -> bytes:
+        process = self._process
+        stdout: BinaryIO | None = process.stdout if process is not None else None
+        if process is None or stdout is None:
+            return b""
+        if process.poll() is not None:
+            return b""
+        try:
+            return stdout.read(max(2, int(size or MEETING_TRANSLATION_PCM_CHUNK_BYTES)))
+        except OSError:
+            return b""
+
+    def stop(self) -> dict[str, Any]:
+        process = self._process
+        if process is not None and process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=8)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=3)
+        return {
+            "recorder_pid": self.pid,
+            "screencapture_status": _read_json_file(self.status_path),
+            "screencapture_system_bytes": _safe_file_size(self.system_audio_path),
+            "screencapture_microphone_bytes": _safe_file_size(self.microphone_audio_path),
+        }
+
+
 class MeetingTranslationRuntime:
     def __init__(self, *, root_dir: Path, config: MeetingTranslationConfig) -> None:
         self.root_dir = Path(root_dir)
@@ -140,14 +249,11 @@ class MeetingTranslationRuntime:
         api_key = str(self.config.openai_api_key or "").strip()
         if not api_key:
             raise ConfigError("MEETING_TRANSLATION_OPENAI_API_KEY or OPENAI_API_KEY is required for Meeting Translation.")
-        ffmpeg_path = _resolve_ffmpeg_bin(self.config.ffmpeg_bin)
-        if not ffmpeg_path:
-            raise ConfigError("ffmpeg is required for Meeting Translation. Install ffmpeg or set MEETING_RECORDER_FFMPEG_BIN.")
 
         session = MeetingTranslationSession(session_id=uuid.uuid4().hex, owner_email=owner, target_language=language)
         with self._lock:
             self._sessions[session.session_id] = session
-        session.thread = threading.Thread(target=self._run_session, args=(session, api_key, ffmpeg_path), daemon=True)
+        session.thread = threading.Thread(target=self._run_session, args=(session, api_key), daemon=True)
         session.thread.start()
         return {"status": "ok", "session": session.snapshot()}
 
@@ -196,7 +302,7 @@ class MeetingTranslationRuntime:
             raise ToolError("Meeting Translation session was not found.")
         return session
 
-    def _run_session(self, session: MeetingTranslationSession, api_key: str, ffmpeg_path: str) -> None:
+    def _run_session(self, session: MeetingTranslationSession, api_key: str) -> None:
         session_dir = self.root_dir / session.session_id
         system_path = session_dir / "screencapture-system.caf"
         microphone_path = session_dir / "screencapture-microphone.caf"
@@ -205,7 +311,7 @@ class MeetingTranslationRuntime:
         try:
             session.set_status("connecting", "Starting system audio and microphone capture.")
             helper_store_root = self.root_dir.parent.parent / "meeting_records" if self.root_dir.parent.name == "run" else self.root_dir
-            session.recorder = _ScreenCaptureKitAudioRecorder(
+            session.recorder = _ScreenCaptureKitPCMStreamer(
                 helper_path=_resolve_screencapturekit_helper(helper_store_root),
                 system_audio_path=system_path,
                 microphone_audio_path=microphone_path,
@@ -238,7 +344,7 @@ class MeetingTranslationRuntime:
             receiver = threading.Thread(target=self._receive_events, args=(session, websocket), daemon=True)
             receiver.start()
             session.set_status("listening", f"Translating to {session.target_language_label}.")
-            self._stream_audio(session=session, websocket=websocket, ffmpeg_path=ffmpeg_path, system_path=system_path, microphone_path=microphone_path)
+            self._stream_audio(session=session, websocket=websocket, recorder=session.recorder)
         except Exception as error:
             if not session.stop_event.is_set():
                 session.set_status("error", self._public_error_message(error), error=self._public_error_message(error))
@@ -313,31 +419,30 @@ class MeetingTranslationRuntime:
         *,
         session: MeetingTranslationSession,
         websocket: Any,
-        ffmpeg_path: str,
-        system_path: Path,
-        microphone_path: Path,
+        recorder: Any,
     ) -> None:
         while not session.stop_event.is_set():
-            delta = self._pcm_delta(session=session, ffmpeg_path=ffmpeg_path, system_path=system_path, microphone_path=microphone_path)
-            if delta:
-                for start in range(0, len(delta), MEETING_TRANSLATION_PCM_CHUNK_BYTES):
-                    chunk = delta[start:start + MEETING_TRANSLATION_PCM_CHUNK_BYTES]
-                    if not chunk or session.stop_event.is_set():
-                        break
-                    self._send_json(
-                        websocket,
-                        {
-                            "type": "session.input_audio_buffer.append",
-                            "audio": base64.b64encode(chunk).decode("ascii"),
-                        },
-                    )
-                    session.emit(
-                        "audio_activity",
-                        bytes=len(chunk),
-                        duration_ms=round((len(chunk) / MEETING_TRANSLATION_PCM_BYTES_PER_SECOND) * 1000),
-                        level=self._pcm_level(chunk),
-                    )
-            time.sleep(1.0)
+            chunk = recorder.read_pcm_chunk(MEETING_TRANSLATION_PCM_STREAM_READ_BYTES)
+            if not chunk:
+                time.sleep(0.05)
+                continue
+            if len(chunk) % 2:
+                chunk = chunk[:-1]
+            if not chunk:
+                continue
+            self._send_json(
+                websocket,
+                {
+                    "type": "session.input_audio_buffer.append",
+                    "audio": base64.b64encode(chunk).decode("ascii"),
+                },
+            )
+            session.emit(
+                "audio_activity",
+                bytes=len(chunk),
+                duration_ms=round((len(chunk) / MEETING_TRANSLATION_PCM_BYTES_PER_SECOND) * 1000),
+                level=self._pcm_level(chunk),
+            )
 
     def _pcm_delta(self, *, session: MeetingTranslationSession, ffmpeg_path: str, system_path: Path, microphone_path: Path) -> bytes:
         pcm = self._mixed_pcm_bytes(ffmpeg_path=ffmpeg_path, system_path=system_path, microphone_path=microphone_path)
