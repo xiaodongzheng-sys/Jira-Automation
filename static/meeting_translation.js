@@ -14,6 +14,7 @@
     translatedLine: null,
     originalLine: null,
     audioDurationMs: 0,
+    stopping: false,
   };
 
   const nodes = {
@@ -98,7 +99,8 @@
   const updateAudioActivity = (event) => {
     const level = Math.max(0, Math.min(1, Number(event.level || 0)));
     const durationMs = Math.max(0, Number(event.duration_ms || 0));
-    state.audioDurationMs += durationMs;
+    const sentAudioSeconds = Number(event.sent_audio_seconds || 0);
+    state.audioDurationMs = sentAudioSeconds > 0 ? sentAudioSeconds * 1000 : state.audioDurationMs + durationMs;
     if (nodes.originalAudioMeter) {
       nodes.originalAudioMeter.style.width = `${Math.max(6, Math.round(level * 100))}%`;
     }
@@ -121,8 +123,10 @@
     if (event.type === 'status') {
       setStatus(event.status, event.message || event.error);
       if (['stopped', 'error'].includes(String(event.status || '').toLowerCase())) {
+        state.sessionId = '';
+        state.stopping = false;
         setRunning(false);
-        closeEvents();
+        window.setTimeout(closeEvents, 800);
       }
       return;
     }
@@ -136,6 +140,18 @@
     }
     if (event.type === 'audio_activity') {
       updateAudioActivity(event);
+      return;
+    }
+    if (event.type === 'transcript_waiting') {
+      if (nodes.originalAudioStatus) {
+        nodes.originalAudioStatus.textContent = 'Audio streaming, waiting for transcript';
+      }
+      return;
+    }
+    if (event.type === 'translation_diagnostics') {
+      if (nodes.originalAudioStatus && !nodes.originalTranscript?.textContent.trim()) {
+        nodes.originalAudioStatus.textContent = 'OpenAI connected';
+      }
       return;
     }
     if (event.type === 'original_delta') {
@@ -154,7 +170,11 @@
       }
     };
     source.onerror = () => {
-      if (state.sessionId) setStatus('error', 'Translation event stream disconnected.');
+      if (!state.sessionId || state.stopping) {
+        closeEvents();
+        return;
+      }
+      setStatus('error', 'Translation event stream disconnected.');
       setRunning(false);
       closeEvents();
     };
@@ -179,6 +199,7 @@
         body: JSON.stringify({ target_language: targetLanguage }),
       });
       state.sessionId = payload.session?.session_id || '';
+      state.stopping = false;
       if (!state.sessionId) throw new Error('Meeting Translation did not return a session id.');
       setStatus(payload.session?.status || 'connecting', payload.session?.message || 'Connecting...');
       openEvents(state.sessionId);
@@ -193,6 +214,7 @@
     const sessionId = state.sessionId;
     if (!sessionId) return;
     setStatus('stopping', 'Stopping...');
+    state.stopping = true;
     nodes.stop.disabled = true;
     try {
       await api(`/api/meeting-translation/sessions/${encodeURIComponent(sessionId)}/stop`, { method: 'POST' });
@@ -201,7 +223,7 @@
     } finally {
       state.sessionId = '';
       setRunning(false);
-      closeEvents();
+      window.setTimeout(closeEvents, 1200);
     }
   });
 })();

@@ -58,6 +58,9 @@ class _FakePCMRecorder:
             return self.chunks.pop(0)
         return b""
 
+    def queued_chunks(self):
+        return len(self.chunks)
+
 
 class MeetingTranslationTests(unittest.TestCase):
     def test_normalizes_supported_output_languages(self):
@@ -111,6 +114,29 @@ class MeetingTranslationTests(unittest.TestCase):
         self.assertEqual(event["bytes"], len(pcm))
         self.assertGreaterEqual(event["duration_ms"], 0)
         self.assertGreater(event["level"], 0)
+        self.assertIn("sent_audio_seconds", event)
+        self.assertIn("queued_audio_chunks", event)
+
+    def test_audio_stream_emits_waiting_diagnostic_when_openai_has_no_transcript(self):
+        runtime = MeetingTranslationRuntime(root_dir=Path(tempfile.gettempdir()), config=MeetingTranslationConfig(openai_api_key="key"))
+        session = MeetingTranslationSession(session_id="s1", owner_email="pm@npt.sg", target_language="en")
+        websocket = _FakeWebSocket()
+        pcm = b"\x01\x02" * (24_000 * 6)
+
+        def stop_after_first_sleep(_seconds):
+            session.stop_event.set()
+
+        with patch("bpmis_jira_tool.meeting_translation.time.sleep", side_effect=stop_after_first_sleep):
+            runtime._stream_audio(
+                session=session,
+                websocket=websocket,
+                recorder=_FakePCMRecorder([pcm]),
+            )
+
+        events = []
+        while not session.events.empty():
+            events.append(session.events.get_nowait())
+        self.assertIn("transcript_waiting", [event["type"] for event in events])
 
     def test_pcm_level_reports_silence_and_signal(self):
         runtime = MeetingTranslationRuntime(root_dir=Path(tempfile.gettempdir()), config=MeetingTranslationConfig(openai_api_key="key"))
@@ -125,6 +151,32 @@ class MeetingTranslationTests(unittest.TestCase):
         websocket._events = [
             json.dumps({"type": "session.output_transcript.delta", "delta": "你好"}),
             json.dumps({"type": "session.input_transcript.delta", "delta": "hello"}),
+        ]
+
+        def recv_with_stop():
+            if websocket._events:
+                value = websocket._events.pop(0)
+                if not websocket._events:
+                    session.stop_event.set()
+                return value
+            raise RuntimeError("done")
+
+        websocket.recv = recv_with_stop
+        runtime._receive_events(session, websocket)
+
+        events = [session.events.get_nowait(), session.events.get_nowait()]
+        self.assertEqual(events[0]["type"], "translated_delta")
+        self.assertEqual(events[0]["delta"], "你好")
+        self.assertEqual(events[1]["type"], "original_delta")
+        self.assertEqual(events[1]["delta"], "hello")
+
+    def test_completed_transcript_events_map_when_openai_uses_transcript_field(self):
+        runtime = MeetingTranslationRuntime(root_dir=Path(tempfile.gettempdir()), config=MeetingTranslationConfig(openai_api_key="key"))
+        session = MeetingTranslationSession(session_id="s1", owner_email="pm@npt.sg", target_language="zh")
+        websocket = _FakeWebSocket()
+        websocket._events = [
+            json.dumps({"type": "session.output_transcript.completed", "transcript": "你好"}),
+            json.dumps({"type": "session.input_transcript.completed", "transcript": "hello"}),
         ]
 
         def recv_with_stop():

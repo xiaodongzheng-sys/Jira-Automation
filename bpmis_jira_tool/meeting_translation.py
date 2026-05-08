@@ -4,6 +4,7 @@ import base64
 from dataclasses import dataclass
 import hashlib
 import json
+import logging
 import queue
 from pathlib import Path
 import shutil
@@ -33,8 +34,11 @@ MEETING_TRANSLATION_LANGUAGES: dict[str, dict[str, str]] = {
 MEETING_TRANSLATION_TERMINAL_STATUSES = {"stopped", "error"}
 MEETING_TRANSLATION_PCM_RATE = 24000
 MEETING_TRANSLATION_PCM_CHUNK_BYTES = 48_000
-MEETING_TRANSLATION_PCM_STREAM_READ_BYTES = 12_000
+MEETING_TRANSLATION_PCM_STREAM_READ_BYTES = 4_800
 MEETING_TRANSLATION_PCM_BYTES_PER_SECOND = MEETING_TRANSLATION_PCM_RATE * 2
+MEETING_TRANSLATION_TRANSCRIPT_WAIT_SECONDS = 5.0
+
+LOGGER = logging.getLogger(__name__)
 
 
 def normalize_meeting_translation_language(value: object) -> str:
@@ -84,6 +88,13 @@ class MeetingTranslationSession:
         self.websocket: Any = None
         self.pcm_offset = 0
         self.event_seq = 0
+        self.audio_bytes_sent = 0
+        self.last_audio_at = 0.0
+        self.last_transcript_at = 0.0
+        self.translated_delta_count = 0
+        self.original_delta_count = 0
+        self.openai_event_counts: dict[str, int] = {}
+        self._transcript_waiting_emitted = False
 
     @property
     def target_language_label(self) -> str:
@@ -245,6 +256,9 @@ class _ScreenCaptureKitPCMStreamer:
             "screencapture_system_bytes": _safe_file_size(self.system_audio_path),
             "screencapture_microphone_bytes": _safe_file_size(self.microphone_audio_path),
         }
+
+    def queued_chunks(self) -> int:
+        return self._stdout_queue.qsize()
 
     def _read_stdout_loop(self) -> None:
         process = self._process
@@ -442,10 +456,27 @@ class MeetingTranslationRuntime:
             except json.JSONDecodeError:
                 continue
             event_type = str(event.get("type") or "")
-            if event_type == "session.output_transcript.delta":
-                session.emit("translated_delta", delta=str(event.get("delta") or ""))
-            elif event_type == "session.input_transcript.delta":
-                session.emit("original_delta", delta=str(event.get("delta") or ""))
+            session.openai_event_counts[event_type] = session.openai_event_counts.get(event_type, 0) + 1
+            self._log_openai_event(session=session, event=event, event_type=event_type)
+            translated_delta = self._translated_delta_from_event(event_type=event_type, event=event)
+            original_delta = self._original_delta_from_event(event_type=event_type, event=event)
+            if translated_delta:
+                session.translated_delta_count += 1
+                session.last_transcript_at = time.monotonic()
+                session.emit("translated_delta", delta=translated_delta)
+            if original_delta:
+                session.original_delta_count += 1
+                session.last_transcript_at = time.monotonic()
+                session.emit("original_delta", delta=original_delta)
+            if translated_delta or original_delta:
+                continue
+            if event_type in {"session.updated", "session.created"}:
+                session.emit(
+                    "translation_diagnostics",
+                    openai_event=event_type,
+                    translated_deltas=session.translated_delta_count,
+                    original_deltas=session.original_delta_count,
+                )
             elif event_type == "error":
                 message = self._public_openai_error(event)
                 session.set_status("error", message, error=message)
@@ -475,12 +506,28 @@ class MeetingTranslationRuntime:
                     "audio": base64.b64encode(chunk).decode("ascii"),
                 },
             )
+            session.audio_bytes_sent += len(chunk)
+            session.last_audio_at = time.monotonic()
             session.emit(
                 "audio_activity",
                 bytes=len(chunk),
                 duration_ms=round((len(chunk) / MEETING_TRANSLATION_PCM_BYTES_PER_SECOND) * 1000),
                 level=self._pcm_level(chunk),
+                sent_audio_seconds=round(session.audio_bytes_sent / MEETING_TRANSLATION_PCM_BYTES_PER_SECOND, 1),
+                queued_audio_chunks=int(getattr(recorder, "queued_chunks", lambda: 0)()),
             )
+            if (
+                not session._transcript_waiting_emitted
+                and session.audio_bytes_sent >= int(MEETING_TRANSLATION_TRANSCRIPT_WAIT_SECONDS * MEETING_TRANSLATION_PCM_BYTES_PER_SECOND)
+                and session.translated_delta_count == 0
+                and session.original_delta_count == 0
+            ):
+                session._transcript_waiting_emitted = True
+                session.emit(
+                    "transcript_waiting",
+                    message="Audio is streaming to OpenAI; waiting for transcript deltas.",
+                    sent_audio_seconds=round(session.audio_bytes_sent / MEETING_TRANSLATION_PCM_BYTES_PER_SECOND, 1),
+                )
 
     def _pcm_delta(self, *, session: MeetingTranslationSession, ffmpeg_path: str, system_path: Path, microphone_path: Path) -> bytes:
         pcm = self._mixed_pcm_bytes(ffmpeg_path=ffmpeg_path, system_path=system_path, microphone_path=microphone_path)
@@ -573,6 +620,51 @@ class MeetingTranslationRuntime:
 
     def _send_json(self, websocket: Any, payload: dict[str, Any]) -> None:
         websocket.send(json.dumps(payload, separators=(",", ":")))
+
+    def _translated_delta_from_event(self, *, event_type: str, event: dict[str, Any]) -> str:
+        if event_type == "session.output_transcript.delta" or "output_transcript" in event_type:
+            return self._event_text_delta(event)
+        return ""
+
+    def _original_delta_from_event(self, *, event_type: str, event: dict[str, Any]) -> str:
+        if event_type == "session.input_transcript.delta" or "input_transcript" in event_type:
+            return self._event_text_delta(event)
+        return ""
+
+    def _event_text_delta(self, event: dict[str, Any]) -> str:
+        for key in ("delta", "text", "transcript"):
+            value = event.get(key)
+            if value:
+                return str(value)
+        item = event.get("item")
+        if isinstance(item, dict):
+            for key in ("text", "transcript"):
+                value = item.get(key)
+                if value:
+                    return str(value)
+        return ""
+
+    def _log_openai_event(self, *, session: MeetingTranslationSession, event: dict[str, Any], event_type: str) -> None:
+        count = session.openai_event_counts.get(event_type, 0)
+        has_text = bool(self._event_text_delta(event))
+        if count not in {1, 10, 50} and count % 100 != 0:
+            return
+        LOGGER.warning(
+            "meeting_translation_openai_event %s",
+            json.dumps(
+                {
+                    "session_id": session.session_id[:8],
+                    "event_type": event_type,
+                    "count": count,
+                    "keys": sorted(str(key) for key in event.keys()),
+                    "has_text_delta": has_text,
+                    "translated_deltas": session.translated_delta_count,
+                    "original_deltas": session.original_delta_count,
+                    "audio_seconds_sent": round(session.audio_bytes_sent / MEETING_TRANSLATION_PCM_BYTES_PER_SECOND, 1),
+                },
+                sort_keys=True,
+            ),
+        )
 
     def _public_openai_error(self, event: dict[str, Any]) -> str:
         error = event.get("error") if isinstance(event.get("error"), dict) else {}
