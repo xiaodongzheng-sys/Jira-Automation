@@ -654,6 +654,15 @@ def create_app() -> Flask:
     @app.context_processor
     def inject_primary_navigation():
         current_endpoint = request.endpoint or ""
+
+        def _nav_group(label: str, href: str, children: list[dict[str, Any]]) -> dict[str, Any]:
+            return {
+                "label": label,
+                "href": href,
+                "active": any(child.get("active") for child in children),
+                "children": children,
+            }
+
         if _site_requires_google_login(settings) and not _google_session_is_connected():
             return {
                 "site_tabs": [],
@@ -673,60 +682,64 @@ def create_app() -> Flask:
         if _can_access_source_code_qa(settings):
             site_tabs.append(
                 {
-                    "label": "Source Code Q&A",
+                    "label": "Source Code",
                     "href": url_for("source_code_qa"),
                     "active": request.path.startswith("/source-code-qa"),
                 }
             )
-        prd_tab = None
-        prd_self_assessment_tab = None
-        if _can_access_prd_self_assessment(settings):
-            prd_self_assessment_tab = {
-                "label": "PRD Self-Assessment",
-                "href": url_for("prd_self_assessment_page"),
-                "active": current_endpoint == "prd_self_assessment_page",
-            }
-        if _can_access_prd_briefing(settings):
-            prd_tab = {
-                "label": "PRD Briefing Tool",
-                "href": url_for("prd_briefing.portal"),
-                "active": current_endpoint.startswith("prd_briefing"),
-            }
+        meeting_tabs = []
         if _can_access_meeting_recorder(settings):
-            site_tabs.append(
+            meeting_tabs.append(
                 {
                     "label": "Meeting Recorder",
                     "href": url_for("meeting_recorder_page"),
                     "active": request.path.startswith("/meeting-recorder"),
                 }
             )
-            site_tabs.append(
+            meeting_tabs.append(
                 {
                     "label": "Meeting Translation",
                     "href": url_for("meeting_translation_page"),
                     "active": request.path.startswith("/meeting-translation"),
                 }
             )
-        if prd_self_assessment_tab:
-            site_tabs.append(prd_self_assessment_tab)
-        if prd_tab:
-            site_tabs.append(prd_tab)
+            site_tabs.append(_nav_group("Meetings", url_for("meeting_recorder_page"), meeting_tabs))
+        prd_tabs = []
+        if _can_access_prd_self_assessment(settings):
+            prd_tabs.append(
+                {
+                    "label": "PRD Self-Assessment",
+                    "href": url_for("prd_self_assessment_page"),
+                    "active": current_endpoint == "prd_self_assessment_page",
+                }
+            )
+        if _can_access_prd_briefing(settings):
+            prd_tabs.append(
+                {
+                    "label": "PRD Briefing Tool",
+                    "href": url_for("prd_briefing.portal"),
+                    "active": current_endpoint.startswith("prd_briefing"),
+                }
+            )
+        if prd_tabs:
+            site_tabs.append(_nav_group("PRDs", prd_tabs[0]["href"], prd_tabs))
+        project_tabs = []
         if can_access_team_dashboard:
-            site_tabs.append(
+            project_tabs.append(
                 {
                     "label": "Team Dashboard",
                     "href": url_for("team_dashboard_page"),
                     "active": current_endpoint == "team_dashboard_page",
                 }
             )
-            site_tabs.append(
+            project_tabs.append(
                 {
                     "label": "Reports",
                     "href": url_for("reports_page"),
                     "active": current_endpoint == "reports_page",
                 }
             )
-        site_tabs.append(
+        project_tabs.append(
             {
                 "label": "BPMIS Automation Tool",
                 "href": url_for("index", workspace="run"),
@@ -734,13 +747,15 @@ def create_app() -> Flask:
             }
         )
         if _can_access_work_memory(settings):
-            site_tabs.append(
+            project_tabs.append(
                 {
                     "label": "AI Memory",
                     "href": url_for("work_memory_page"),
                     "active": request.path.startswith("/work-memory"),
                 }
             )
+        project_href = url_for("team_dashboard_page") if can_access_team_dashboard else url_for("index", workspace="run")
+        site_tabs.append(_nav_group("Projects", project_href, project_tabs))
         return {
             "site_tabs": site_tabs,
             "site_requires_google_login": _site_requires_google_login(settings),

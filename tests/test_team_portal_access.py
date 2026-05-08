@@ -429,8 +429,9 @@ class TeamPortalAccessTests(unittest.TestCase):
                 self.assertIn(b"data-source-query", source_page.data)
                 self.assertIn(b"data-source-session-list", source_page.data)
                 self.assertIn(b"Source Code Q&amp;A", source_page.data)
-                self.assertIn(b"PRD Self-Assessment", source_page.data)
-                self.assertIn(b"BPMIS Automation Tool", source_page.data)
+                self.assertIn(b">Source Code<", source_page.data)
+                self.assertIn(b">PRDs<", source_page.data)
+                self.assertIn(b">Projects<", source_page.data)
                 for admin_marker in (
                     b"Repo Admin",
                     b"Repository Mapping",
@@ -743,9 +744,11 @@ class TeamPortalAccessTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         soup = BeautifulSoup(response.get_data(as_text=True), "html.parser")
         labels = [node.get_text(strip=True) for node in soup.select(".site-switcher-tab")]
-        self.assertIn("Meeting Recorder", labels)
-        self.assertIn("Meeting Translation", labels)
-        self.assertEqual(labels.index("Meeting Translation"), labels.index("Meeting Recorder") + 1)
+        self.assertIn("Meetings", labels)
+        meeting_labels = [node.get_text(strip=True) for node in soup.select(".site-switcher-subtab")]
+        self.assertIn("Meeting Recorder", meeting_labels)
+        self.assertIn("Meeting Translation", meeting_labels)
+        self.assertEqual(meeting_labels.index("Meeting Translation"), meeting_labels.index("Meeting Recorder") + 1)
         self.assertIsNotNone(soup.select_one("[data-meeting-translation-root]"))
         self.assertIsNotNone(soup.select_one("[data-translation-language]"))
         self.assertIsNotNone(soup.select_one("[data-translated-transcript]"))

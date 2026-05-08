@@ -1097,9 +1097,8 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertNotIn(b">Team Dashboard<", user_response.data)
         self.assertNotIn(b">Team Default Admin<", sophia_response.data)
         self.assertNotIn(b">Team Dashboard<", sophia_response.data)
-        self.assertIn(b">PRD Briefing Tool<", user_response.data)
-        self.assertIn(b">PRD Self-Assessment<", user_response.data)
-        self.assertIn(b">Source Code Q&amp;A<", user_response.data)
+        self.assertIn(b">PRDs<", user_response.data)
+        self.assertIn(b">Source Code<", user_response.data)
 
     def test_team_dashboard_is_standalone_page_for_admin_user(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
@@ -1135,11 +1134,11 @@ class WebPortalFeatureTests(unittest.TestCase):
 
         self.assertEqual(source_response.status_code, 200)
         self.assertIn(b'href="/team-dashboard"', source_response.data)
-        self.assertIn(b">Team Dashboard<", source_response.data)
-        self.assertIn(b">Reports<", source_response.data)
-        self.assertLess(source_response.data.index(b">Team Dashboard<"), source_response.data.index(b">Reports<"))
-        self.assertLess(source_response.data.index(b">Reports<"), source_response.data.index(b">BPMIS Automation Tool<"))
-        self.assertLess(source_response.data.index(b">Reports<"), source_response.data.index(b">AI Memory<"))
+        self.assertIn(b">Projects<", source_response.data)
+        self.assertNotIn(b">Team Dashboard<", source_response.data)
+        self.assertNotIn(b">Reports<", source_response.data)
+        self.assertNotIn(b">BPMIS Automation Tool<", source_response.data)
+        self.assertNotIn(b">AI Memory<", source_response.data)
         self.assertEqual(legacy_response.status_code, 302)
         self.assertEqual(legacy_response.headers["Location"], "/team-dashboard")
         self.assertEqual(dashboard_response.status_code, 200)
@@ -1166,7 +1165,12 @@ class WebPortalFeatureTests(unittest.TestCase):
             node.get_text(strip=True)
             for node in reports_soup.select(".site-switcher-tab.is-active")
         ]
-        self.assertEqual(active_site_tabs, ["Reports"])
+        self.assertEqual(active_site_tabs, ["Projects"])
+        active_project_tabs = [
+            node.get_text(strip=True)
+            for node in reports_soup.select(".site-switcher-subtab.is-active")
+        ]
+        self.assertEqual(active_project_tabs, ["Reports"])
         reports_inner_tabs = [
             node.get_text(strip=True)
             for node in reports_soup.select(".team-dashboard-tabs > .workspace-tab")

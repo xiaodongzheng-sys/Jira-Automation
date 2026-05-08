@@ -80,7 +80,8 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         html = response.get_data(as_text=True)
         self.assertIn("Source Code Q&amp;A", html)
-        self.assertLess(html.index("Source Code Q&amp;A"), html.index("BPMIS Automation Tool"))
+        self.assertIn('href="/source-code-qa">Source Code</a>', html)
+        self.assertIn('href="/?workspace=run">Projects</a>', html)
         self.assertIn('data-source-question rows="2"', html)
         self.assertLess(html.index("data-source-attachments"), html.index("data-source-question"))
         self.assertLess(html.index("data-source-question"), html.index("data-source-attachment-upload"))
@@ -7863,6 +7864,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             '"claims":[{"text":"BPMISClient defines batchCreateJiraIssue","citations":["S1"]}],'
             '"missing_evidence":[],"confidence":"high"}',
             usage={"promptTokenCount": 123, "candidatesTokenCount": 45, "totalTokenCount": 168},
+            model=service.codex_model,
         )
         with patch.object(service.llm_provider, "ready", return_value=True), patch.object(
             service.llm_provider,
@@ -9495,6 +9497,7 @@ class SourceCodeQAServiceTests(unittest.TestCase):
             '"claims":[{"text":"BPMISClient defines batchCreateJiraIssue","citations":["S1"]}],'
             '"missing_evidence":[],"confidence":"high"}',
             usage={"promptTokenCount": 20, "candidatesTokenCount": 8, "totalTokenCount": 28},
+            model=service.codex_model,
         )
 
         with patch.object(service.llm_provider, "ready", return_value=True), patch.object(

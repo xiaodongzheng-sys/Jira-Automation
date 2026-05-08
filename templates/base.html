@@ -44,6 +44,15 @@
               <a class="site-switcher-tab{% if tab.active %} is-active{% endif %}" href="{{ tab.href }}">{{ tab.label }}</a>
             {% endfor %}
           </div>
+          {% for tab in site_tabs %}
+            {% if tab.active and tab.children %}
+              <div class="site-switcher-subtrack" aria-label="{{ tab.label }} tools">
+                {% for child in tab.children %}
+                  <a class="site-switcher-subtab{% if child.active %} is-active{% endif %}" href="{{ child.href }}">{{ child.label }}</a>
+                {% endfor %}
+              </div>
+            {% endif %}
+          {% endfor %}
         </nav>
       {% endif %}
       {% with messages = get_flashed_messages(with_categories=true) %}
