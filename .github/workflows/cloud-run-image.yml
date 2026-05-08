@@ -4,6 +4,21 @@ on:
   push:
     branches:
       - main
+    paths:
+      - ".github/workflows/cloud-run-image.yml"
+      - "Dockerfile"
+      - "cloudbuild.yaml"
+      - "requirements-cloud-run.txt"
+      - "app.py"
+      - "local_agent.py"
+      - "bpmis_jira_tool/**"
+      - "config/**"
+      - "prd_briefing/**"
+      - "static/**"
+      - "templates/**"
+      - "scripts/build_cloud_run_image.sh"
+      - "scripts/lib/team_env.sh"
+      - "scripts/lib/cloud_run_image_policy.sh"
   workflow_dispatch:
 
 permissions:
@@ -12,6 +27,10 @@ permissions:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+concurrency:
+  group: cloud-run-image-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:

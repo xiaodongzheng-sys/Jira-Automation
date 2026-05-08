@@ -194,7 +194,20 @@ CLOUD_RUN_IMAGE_NAME
 
 The workflow opts into Node 24 actions execution with `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24=true` so the image prebuild path is not surprised by the GitHub-hosted runner Node 20 retirement.
 
+The workflow is path-filtered. It only prebuilds a new image when Cloud Run runtime inputs or image-build inputs change (`Dockerfile`, `requirements-cloud-run.txt`, `app.py`, `local_agent.py`, `bpmis_jira_tool/`, `config/`, `prd_briefing/`, `static/`, `templates/`, `cloudbuild.yaml`, or image-build scripts). Docs, tests, and release-only scripts no longer trigger a first SHA image build.
+
+If GitHub Actions overhead becomes the bottleneck, configure the direct Cloud Build trigger after the GitHub App connection is authorized in GCP:
+
+```bash
+GOOGLE_CLOUD_PROJECT=civil-partition-492805-v7 \
+CLOUD_BUILD_GITHUB_REPO_OWNER=xiaodongzheng-sys \
+CLOUD_BUILD_GITHUB_REPO_NAME=Jira-Automation \
+./scripts/setup_cloud_build_image_trigger.sh
+```
+
 The build script defaults to a faster Cloud Build machine and larger disk for manual image builds. Set `CLOUD_RUN_BUILD_MACHINE_TYPE=default` or `CLOUD_RUN_BUILD_DISK_SIZE=default` to use Cloud Build defaults.
+
+`cloudbuild.yaml` uses BuildKit inline cache plus the `latest` and `buildcache` tags. Dependency and apt layers are reused when `requirements-cloud-run.txt` and `Dockerfile` are unchanged.
 
 By default, `deploy_cloud_run_uat.sh` checks Artifact Registry for an image tagged with the current full Git SHA and uses it automatically when present. If the SHA image is missing, it falls back to the normal Cloud Run source deploy. Disable this with `CLOUD_RUN_UAT_AUTO_PREBUILT_IMAGE=0`.
 
@@ -222,10 +235,16 @@ For faster UAT releases, use the one-command orchestrator. It runs the release g
 ./scripts/release_uat_fast.sh
 ```
 
-For routine UAT plus live promotion, use the full one-command orchestrator. It runs the release gate and GitHub SHA image wait in parallel, falls back to a local image build if needed, deploys UAT from the prebuilt image, runs the read-only smoke, promotes UAT to live, runs the promoted smoke, runs the live doctor, and prints the timing report:
+For routine UAT plus live promotion, use the full one-command orchestrator. It runs the release gate and image preparation in parallel, reuses the most recent SHA image when the current commit did not change Cloud Run runtime inputs, waits for the GitHub SHA image only when a new runtime image is required, falls back to a local image build if needed, deploys UAT from the selected image, runs the read-only smoke, promotes UAT to live, runs the promoted smoke, runs the live doctor, and prints the timing report:
 
 ```bash
 ./scripts/release_uat_live_fast.sh
+```
+
+The image reuse check scans recent first-parent commits for the newest existing Artifact Registry SHA image. If `git diff <image-sha>..HEAD` contains no Cloud Run runtime inputs, the release uses that older image while still stamping `TEAM_PORTAL_RELEASE_REVISION` with the current commit. Disable this conservative reuse path with:
+
+```bash
+RELEASE_UAT_LIVE_REUSE_IMAGE_WITHOUT_RUNTIME_CHANGES=0 ./scripts/release_uat_live_fast.sh
 ```
 
 The UAT local-agent sync is change-aware. `CLOUD_RUN_UAT_LOCAL_AGENT_SYNC_MODE=auto` skips local-agent sync/restart for static/template/docs/test/web-shell-only changes, while `full` forces the old behavior and `skip` skips it explicitly. `CLOUD_RUN_UAT_PARALLEL_HOST_SYNC=1` overlaps the full UAT host sync with Cloud Run deployment.

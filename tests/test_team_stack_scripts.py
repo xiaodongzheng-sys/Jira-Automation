@@ -137,6 +137,7 @@ exit 0
     def test_stack_scripts_have_valid_bash_syntax(self):
         script_paths = [
             "scripts/lib/team_env.sh",
+            "scripts/lib/cloud_run_image_policy.sh",
             "scripts/run_team_portal_prod.sh",
             "scripts/run_team_portal_foreground.sh",
             "scripts/run_ngrok_tunnel.sh",
@@ -156,6 +157,7 @@ exit 0
             "scripts/setup_uat_local_agent.sh",
             "scripts/promote_uat_to_live.sh",
             "scripts/build_cloud_run_image.sh",
+            "scripts/setup_cloud_build_image_trigger.sh",
         ]
 
         for relative_path in script_paths:
@@ -1058,6 +1060,9 @@ exit 0
         script = (PROJECT_ROOT / "scripts/release_uat_live_fast.sh").read_text(encoding="utf-8")
 
         self.assertIn("run_gate_and_image_in_parallel", script)
+        self.assertIn("cloud_run_image_policy.sh", script)
+        self.assertIn("find_reusable_image_without_runtime_changes", script)
+        self.assertIn("RELEASE_UAT_LIVE_REUSE_IMAGE_WITHOUT_RUNTIME_CHANGES", script)
         self.assertIn("wait_for_github_image_workflow", script)
         self.assertIn("run watch \"$run_id\"", script)
         self.assertIn("deploy_cloud_run_uat.sh", script)
@@ -1117,7 +1122,43 @@ exit 0
         self.assertIn("google-github-actions/setup-gcloud@v3", workflow)
         self.assertIn("CLOUD_RUN_IMAGE_TAG=\"$GITHUB_SHA\"", workflow)
         self.assertIn("FORCE_JAVASCRIPT_ACTIONS_TO_NODE24", workflow)
-        self.assertNotIn("paths:", workflow)
+        self.assertIn("paths:", workflow)
+        self.assertIn('"bpmis_jira_tool/**"', workflow)
+        self.assertIn('"scripts/build_cloud_run_image.sh"', workflow)
+        self.assertIn("concurrency:", workflow)
+
+    def test_cloud_run_image_policy_distinguishes_runtime_inputs(self):
+        helper_path = PROJECT_ROOT / "scripts/lib/cloud_run_image_policy.sh"
+        command = f'''
+source "{helper_path}"
+cloud_run_image_runtime_path_requires_image "bpmis_jira_tool/web.py"
+printf 'runtime=%s\\n' "$?"
+cloud_run_image_runtime_path_requires_image "docs/release-checklist.md"
+printf 'docs=%s\\n' "$?"
+cloud_run_image_trigger_included_files_csv
+'''
+        completed = subprocess.run(
+            ["bash", "-lc", command],
+            capture_output=True,
+            text=True,
+            check=False,
+            env={**os.environ, "ROOT_DIR": str(PROJECT_ROOT)},
+        )
+
+        self.assertEqual(completed.returncode, 0, msg=completed.stderr)
+        self.assertIn("runtime=0", completed.stdout)
+        self.assertIn("docs=1", completed.stdout)
+        self.assertIn("Dockerfile", completed.stdout)
+        self.assertIn("bpmis_jira_tool/**", completed.stdout)
+
+    def test_cloud_build_trigger_setup_script_uses_runtime_included_files(self):
+        script = (PROJECT_ROOT / "scripts/setup_cloud_build_image_trigger.sh").read_text(encoding="utf-8")
+
+        self.assertIn("cloud_run_image_trigger_included_files_csv", script)
+        self.assertIn("builds triggers create github", script)
+        self.assertIn("builds triggers update github", script)
+        self.assertIn("--included-files", script)
+        self.assertIn("_TAG=\\$COMMIT_SHA", script)
 
     def test_cloud_run_full_deploy_skips_base_url_update_when_service_exists(self):
         deploy_script = PROJECT_ROOT / "scripts/deploy_cloud_run_full.sh"
@@ -1439,6 +1480,9 @@ exit 0
         self.assertIn("docker pull", config)
         self.assertIn("--cache-from", config)
         self.assertIn("${_IMAGE_NAME}:latest", config)
+        self.assertIn("DOCKER_BUILDKIT=1", config)
+        self.assertIn("BUILDKIT_INLINE_CACHE=1", config)
+        self.assertIn("${_IMAGE_NAME}:buildcache", config)
 
     def test_team_env_helper_reads_multiple_values(self):
         helper_path = PROJECT_ROOT / "scripts/lib/team_env.sh"

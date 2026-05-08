@@ -4,6 +4,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT_DIR/scripts/lib/team_env.sh"
+source "$ROOT_DIR/scripts/lib/cloud_run_image_policy.sh"
 
 STARTED_AT="$(date +%s)"
 GCLOUD_BIN="${GCLOUD_BIN:-$(command -v gcloud || true)}"
@@ -52,6 +53,31 @@ artifact_image_exists() {
     2>/dev/null | grep -Fx "$image_tag" >/dev/null
 }
 
+find_reusable_image_without_runtime_changes() {
+  local sha="$1"
+  if [[ "${RELEASE_UAT_LIVE_REUSE_IMAGE_WITHOUT_RUNTIME_CHANGES:-1}" != "1" ]]; then
+    return 1
+  fi
+
+  local scan_limit="${RELEASE_UAT_LIVE_IMAGE_REUSE_SCAN_LIMIT:-50}"
+  local candidate image_uri
+  while IFS= read -r candidate; do
+    [[ -n "$candidate" ]] || continue
+    image_uri="$(image_uri_for_sha "$candidate")"
+    if ! artifact_image_exists "$image_uri"; then
+      continue
+    fi
+    if cloud_run_image_changed_between "$candidate" "$sha"; then
+      echo "Nearest reusable image candidate $candidate is too old; Cloud Run image inputs changed before $sha." >&2
+      return 1
+    fi
+    echo "Reusing prebuilt image from $candidate because Cloud Run image inputs did not change through $sha." >&2
+    printf '%s\n' "$image_uri"
+    return 0
+  done < <(git -C "$ROOT_DIR" rev-list --first-parent --max-count="$scan_limit" "$sha")
+  return 1
+}
+
 wait_for_github_image_workflow() {
   local sha="$1"
   if [[ "${RELEASE_UAT_LIVE_WAIT_FOR_GITHUB_IMAGE:-1}" != "1" || -z "$GH_BIN" ]]; then
@@ -84,6 +110,12 @@ ensure_prebuilt_image() {
   if artifact_image_exists "$image_uri"; then
     echo "Prebuilt image already exists: $image_uri" >&2
     printf '%s\n' "$image_uri"
+    return 0
+  fi
+
+  local reusable_image_uri
+  if reusable_image_uri="$(find_reusable_image_without_runtime_changes "$sha")"; then
+    printf '%s\n' "$reusable_image_uri"
     return 0
   fi
 
