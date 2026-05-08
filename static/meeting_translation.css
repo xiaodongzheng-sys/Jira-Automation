@@ -74,6 +74,33 @@
   font-size: 1.15rem;
 }
 
+.meeting-translation-audio-monitor {
+  display: grid;
+  grid-template-columns: minmax(90px, 1fr) auto auto;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+  color: #64748b;
+  font-size: 0.9rem;
+  font-weight: 700;
+}
+
+.meeting-translation-audio-bar {
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #e2e8f0;
+}
+
+.meeting-translation-audio-bar span {
+  display: block;
+  width: 0;
+  height: 100%;
+  border-radius: inherit;
+  background: #2563eb;
+  transition: width 160ms ease;
+}
+
 .meeting-translation-transcript {
   flex: 1;
   min-height: 360px;

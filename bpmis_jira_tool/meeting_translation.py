@@ -31,6 +31,7 @@ MEETING_TRANSLATION_LANGUAGES: dict[str, dict[str, str]] = {
 MEETING_TRANSLATION_TERMINAL_STATUSES = {"stopped", "error"}
 MEETING_TRANSLATION_PCM_RATE = 24000
 MEETING_TRANSLATION_PCM_CHUNK_BYTES = 48_000
+MEETING_TRANSLATION_PCM_BYTES_PER_SECOND = MEETING_TRANSLATION_PCM_RATE * 2
 
 
 def normalize_meeting_translation_language(value: object) -> str:
@@ -330,6 +331,12 @@ class MeetingTranslationRuntime:
                             "audio": base64.b64encode(chunk).decode("ascii"),
                         },
                     )
+                    session.emit(
+                        "audio_activity",
+                        bytes=len(chunk),
+                        duration_ms=round((len(chunk) / MEETING_TRANSLATION_PCM_BYTES_PER_SECOND) * 1000),
+                        level=self._pcm_level(chunk),
+                    )
             time.sleep(1.0)
 
     def _pcm_delta(self, *, session: MeetingTranslationSession, ffmpeg_path: str, system_path: Path, microphone_path: Path) -> bytes:
@@ -399,6 +406,27 @@ class MeetingTranslationRuntime:
         except (OSError, subprocess.TimeoutExpired):
             return b""
         return result.stdout if result.returncode == 0 else b""
+
+    def _pcm_level(self, chunk: bytes) -> float:
+        sample_count = len(chunk) // 2
+        if sample_count <= 0:
+            return 0.0
+        stride = max(1, sample_count // 1200)
+        peak = 0
+        total = 0
+        used = 0
+        for sample_index in range(0, sample_count, stride):
+            offset = sample_index * 2
+            sample = int.from_bytes(chunk[offset:offset + 2], byteorder="little", signed=True)
+            magnitude = abs(sample)
+            peak = max(peak, magnitude)
+            total += magnitude
+            used += 1
+        if not used:
+            return 0.0
+        peak_level = peak / 32768
+        average_level = (total / used) / 32768
+        return round(min(1.0, max(peak_level, average_level * 2)), 3)
 
     def _send_json(self, websocket: Any, payload: dict[str, Any]) -> None:
         websocket.send(json.dumps(payload, separators=(",", ":")))

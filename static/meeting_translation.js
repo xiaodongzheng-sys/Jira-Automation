@@ -13,6 +13,7 @@
     events: null,
     translatedLine: null,
     originalLine: null,
+    audioDurationMs: 0,
   };
 
   const nodes = {
@@ -24,6 +25,9 @@
     translatedTitle: root.querySelector('[data-translated-title]'),
     translatedTranscript: root.querySelector('[data-translated-transcript]'),
     originalTranscript: root.querySelector('[data-original-transcript]'),
+    originalAudioMeter: root.querySelector('[data-original-audio-meter]'),
+    originalAudioStatus: root.querySelector('[data-original-audio-status]'),
+    originalAudioDuration: root.querySelector('[data-original-audio-duration]'),
   };
 
   const api = async (url, options = {}) => {
@@ -83,8 +87,27 @@
   const resetTranscript = () => {
     if (nodes.translatedTranscript) nodes.translatedTranscript.innerHTML = '';
     if (nodes.originalTranscript) nodes.originalTranscript.innerHTML = '';
+    if (nodes.originalAudioMeter) nodes.originalAudioMeter.style.width = '0%';
+    if (nodes.originalAudioStatus) nodes.originalAudioStatus.textContent = 'Waiting for audio';
+    if (nodes.originalAudioDuration) nodes.originalAudioDuration.textContent = '0.0s';
     state.translatedLine = null;
     state.originalLine = null;
+    state.audioDurationMs = 0;
+  };
+
+  const updateAudioActivity = (event) => {
+    const level = Math.max(0, Math.min(1, Number(event.level || 0)));
+    const durationMs = Math.max(0, Number(event.duration_ms || 0));
+    state.audioDurationMs += durationMs;
+    if (nodes.originalAudioMeter) {
+      nodes.originalAudioMeter.style.width = `${Math.max(6, Math.round(level * 100))}%`;
+    }
+    if (nodes.originalAudioStatus) {
+      nodes.originalAudioStatus.textContent = level > 0.02 ? 'Audio detected' : 'Audio received';
+    }
+    if (nodes.originalAudioDuration) {
+      nodes.originalAudioDuration.textContent = `${(state.audioDurationMs / 1000).toFixed(1)}s`;
+    }
   };
 
   const closeEvents = () => {
@@ -109,6 +132,10 @@
     }
     if (event.type === 'translated_delta') {
       appendDelta('translated', event.delta);
+      return;
+    }
+    if (event.type === 'audio_activity') {
+      updateAudioActivity(event);
       return;
     }
     if (event.type === 'original_delta') {

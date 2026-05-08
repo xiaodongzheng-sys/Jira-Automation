@@ -98,6 +98,17 @@ class MeetingTranslationTests(unittest.TestCase):
         payload = json.loads(websocket.sent[0])
         self.assertEqual(payload["type"], "session.input_audio_buffer.append")
         self.assertEqual(base64.b64decode(payload["audio"]), pcm)
+        event = session.events.get_nowait()
+        self.assertEqual(event["type"], "audio_activity")
+        self.assertEqual(event["bytes"], len(pcm))
+        self.assertGreaterEqual(event["duration_ms"], 0)
+        self.assertGreater(event["level"], 0)
+
+    def test_pcm_level_reports_silence_and_signal(self):
+        runtime = MeetingTranslationRuntime(root_dir=Path(tempfile.gettempdir()), config=MeetingTranslationConfig(openai_api_key="key"))
+
+        self.assertEqual(runtime._pcm_level(b"\x00\x00" * 100), 0.0)
+        self.assertGreater(runtime._pcm_level(b"\xff\x7f" * 100), 0.9)
 
     def test_transcript_events_map_to_translated_and_original_streams(self):
         runtime = MeetingTranslationRuntime(root_dir=Path(tempfile.gettempdir()), config=MeetingTranslationConfig(openai_api_key="key"))

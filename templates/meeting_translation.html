@@ -43,7 +43,14 @@
       <section class="tool-card meeting-translation-pane">
         <div class="meeting-translation-pane-head">
           <p class="eyebrow">Original</p>
-          <h2>Original Audio</h2>
+          <h2>Original Transcript</h2>
+          <div class="meeting-translation-audio-monitor" aria-label="Original audio activity">
+            <span class="meeting-translation-audio-bar" aria-hidden="true">
+              <span data-original-audio-meter></span>
+            </span>
+            <span data-original-audio-status>Waiting for audio</span>
+            <span data-original-audio-duration>0.0s</span>
+          </div>
         </div>
         <div class="meeting-translation-transcript" data-original-transcript aria-live="polite"></div>
       </section>
