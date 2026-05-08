@@ -363,10 +363,10 @@ class MonthlyReportService:
         progress_callback: Any | None,
     ) -> list[dict[str, Any]]:
         batches: list[dict[str, Any]] = []
-        if monthly_evidence_brief:
-            batches.append({"source": "monthly_evidence_brief", "index": 1, "payload": monthly_evidence_brief})
-        if evidence_sidecar:
-            batches.append({"source": "report_intelligence", "index": 1, "payload": evidence_sidecar})
+        for index, chunk in enumerate(_split_json_items_for_token_limit(monthly_evidence_brief, MONTHLY_REPORT_BATCH_TARGET_TOKENS), start=1):
+            batches.append({"source": "monthly_evidence_brief", "index": index, "payload": chunk})
+        for index, chunk in enumerate(_split_json_items_for_token_limit(evidence_sidecar, MONTHLY_REPORT_BATCH_TARGET_TOKENS), start=1):
+            batches.append({"source": "report_intelligence", "index": index, "payload": chunk})
         for index, chunk in enumerate(_split_text_for_token_limit(seatalk_history_text, MONTHLY_REPORT_BATCH_TARGET_TOKENS), start=1):
             batches.append({"source": "seatalk", "index": index, "payload": chunk})
         for index, chunk in enumerate(_split_text_for_token_limit(vip_gmail_text, MONTHLY_REPORT_BATCH_TARGET_TOKENS), start=1):

@@ -253,6 +253,52 @@ class MonthlyReportTests(unittest.TestCase):
             self.assertLessEqual(_estimate_token_count(call.kwargs["prompt"]), MONTHLY_REPORT_BATCH_MAX_TOKENS)
         self.assertGreater(result["generation_summary"]["total_batches"], 1)
 
+    def test_generate_draft_splits_large_project_evidence_brief_batches(self):
+        seatalk = _FakeSeaTalkService()
+        projects = []
+        for project_index in range(30):
+            projects.append(
+                {
+                    "bpmis_id": f"BPMIS-{project_index:02d}",
+                    "project_name": f"Anti-fraud Evidence Heavy Project {project_index:02d}",
+                    "is_key_project": True,
+                    "priority": "P0",
+                    "market": "SG",
+                    "jira_tickets": [
+                        {
+                            "jira_id": f"AF-{project_index:02d}-{ticket_index:02d}",
+                            "jira_title": "Anti-fraud launch readiness and control validation " + ("scope detail " * 18),
+                            "jira_status": "In UAT",
+                            "release_date": "2026-05-20T16:00:00.000Z",
+                            "version": f"AF_v{project_index}_{ticket_index}",
+                            "pm_email": "owner@npt.sg",
+                        }
+                        for ticket_index in range(18)
+                    ],
+                }
+            )
+        team_payloads = [{"team_key": "AF", "label": "Anti-fraud", "member_emails": ["owner@npt.sg"], "under_prd": projects, "pending_live": []}]
+        now = datetime(2026, 5, 3, 10, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE)
+        with tempfile.TemporaryDirectory() as temp_dir, patch("bpmis_jira_tool.monthly_report.generate_monthly_report_with_codex") as mock_generate:
+            mock_generate.return_value = {"result_markdown": "# Summary", "model_id": "codex-cli", "trace": {}}
+            service = MonthlyReportService(
+                settings=_settings(temp_dir),
+                workspace_root=Path(temp_dir),
+                seatalk_service=seatalk,
+                confluence=None,
+                now=now,
+            )
+            result = service.generate_draft(template="# Template", team_payloads=team_payloads)
+
+        evidence_batch_calls = [
+            call for call in mock_generate.call_args_list
+            if call.kwargs.get("prompt_mode", "").endswith("_batch_monthly_evidence_brief")
+        ]
+        self.assertGreater(len(evidence_batch_calls), 1)
+        for call in evidence_batch_calls:
+            self.assertLessEqual(_estimate_token_count(call.kwargs["prompt"]), MONTHLY_REPORT_BATCH_MAX_TOKENS)
+        self.assertEqual(result["evidence_summary"]["key_project_count"], 30)
+
     def test_key_project_cap_allows_thirty_and_excludes_thirty_first(self):
         seatalk = _FakeSeaTalkService()
         projects = [
