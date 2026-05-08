@@ -502,6 +502,7 @@ exit 0
         self.assertIn("--uat-url \"$UAT_URL\"", checklist)
         self.assertIn("--live-url \"$LIVE_URL\"", checklist)
         self.assertIn("--expected-revision \"$EXPECTED_REVISION\"", checklist)
+        self.assertIn("--expect-live-promoted", checklist)
         self.assertIn("curl -fsS \"$UAT_URL/healthz/\"", checklist)
         self.assertIn("curl -fsS \"$UAT_URL/api/local-agent/healthz\"", checklist)
         self.assertIn("curl -fsS \"$LIVE_URL/healthz\"", checklist)
@@ -559,6 +560,39 @@ exit 0
             module._run_command("unit", [sys.executable, "-c", "pass"])
 
         self.assertEqual(captured_envs[0]["ENV_FILE"], "/tmp/explicit.env")
+
+    def test_system_full_test_gate_can_validate_promoted_live_revision(self):
+        import importlib.util
+
+        gate_path = PROJECT_ROOT / "scripts/run_system_full_test_gate.py"
+        spec = importlib.util.spec_from_file_location("run_system_full_test_gate", gate_path)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+
+        def fake_fetch(url):
+            if url.endswith("/healthz/") or url.endswith("/healthz"):
+                return {"status": "ok", "revision": "abc123"}
+            return {"status": "ok"}
+
+        with patch.object(module, "_fetch_json", side_effect=fake_fetch):
+            pre_promotion = module._smoke_check(
+                uat_url="https://uat.example",
+                live_url="https://live.example",
+                expected_revision="abc123",
+            )
+            post_promotion = module._smoke_check(
+                uat_url="https://uat.example",
+                live_url="https://live.example",
+                expected_revision="abc123",
+                expect_live_promoted=True,
+            )
+
+        self.assertEqual(pre_promotion.status, "fail")
+        self.assertIn("Live already serves", pre_promotion.stderr)
+        self.assertEqual(post_promotion.status, "pass")
 
     def test_uat_local_agent_setup_uses_separate_workspace_port_and_data_root(self):
         setup_script = (PROJECT_ROOT / "scripts/setup_uat_local_agent.sh").read_text(encoding="utf-8")

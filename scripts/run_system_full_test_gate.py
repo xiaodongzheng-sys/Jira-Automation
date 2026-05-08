@@ -58,7 +58,7 @@ def _fetch_json(url: str) -> dict[str, Any]:
     return payload
 
 
-def _smoke_check(*, uat_url: str, live_url: str, expected_revision: str) -> GateStep:
+def _smoke_check(*, uat_url: str, live_url: str, expected_revision: str, expect_live_promoted: bool = False) -> GateStep:
     checks: list[dict[str, Any]] = []
     try:
         uat_health_url = _join_url(uat_url, "/healthz/")
@@ -77,7 +77,10 @@ def _smoke_check(*, uat_url: str, live_url: str, expected_revision: str) -> Gate
 
         if uat_health.get("revision") != expected_revision:
             raise RuntimeError(f"UAT revision mismatch: {uat_health.get('revision')} != {expected_revision}")
-        if live_health.get("revision") == expected_revision:
+        if expect_live_promoted:
+            if live_health.get("revision") != expected_revision:
+                raise RuntimeError(f"Live revision mismatch: {live_health.get('revision')} != {expected_revision}")
+        elif live_health.get("revision") == expected_revision:
             raise RuntimeError("Live already serves the UAT revision; verify whether promotion was intended.")
     except Exception as error:  # noqa: BLE001 - gate must report the exact failed smoke boundary.
         return GateStep(name="uat_live_read_only_smoke", status="fail", returncode=1, stderr=str(error), details={"checks": checks})
@@ -91,6 +94,7 @@ def run_gate(
     live_url: str | None,
     expected_revision: str | None,
     coverage_fail_under: int,
+    expect_live_promoted: bool = False,
 ) -> dict[str, Any]:
     steps: list[GateStep] = []
 
@@ -121,7 +125,14 @@ def run_gate(
                 )
             )
         else:
-            steps.append(_smoke_check(uat_url=uat_url, live_url=live_url, expected_revision=expected_revision))
+            steps.append(
+                _smoke_check(
+                    uat_url=uat_url,
+                    live_url=live_url,
+                    expected_revision=expected_revision,
+                    expect_live_promoted=expect_live_promoted,
+                )
+            )
 
     status = "pass" if all(step.status in {"pass", "skipped"} and step.returncode == 0 for step in steps) else "fail"
     failed_steps = [step.name for step in steps if step.status == "fail" or step.returncode != 0]
@@ -138,6 +149,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--uat-url", default=None, help="Cloud Run UAT tag URL.")
     parser.add_argument("--live-url", default=None, help="Mac-hosted Live portal URL.")
     parser.add_argument("--expected-revision", default=None, help="Git SHA expected on UAT and not yet on Live.")
+    parser.add_argument(
+        "--expect-live-promoted",
+        action="store_true",
+        help="Require Live to serve the expected revision, for post-promotion validation.",
+    )
     parser.add_argument("--coverage-fail-under", type=int, default=100, help="Coverage percentage required for governed code.")
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     args = parser.parse_args(argv)
@@ -148,6 +164,7 @@ def main(argv: list[str] | None = None) -> int:
         live_url=args.live_url,
         expected_revision=args.expected_revision,
         coverage_fail_under=int(args.coverage_fail_under),
+        expect_live_promoted=bool(args.expect_live_promoted),
     )
     if args.json:
         print(json.dumps(result, indent=2, ensure_ascii=False))

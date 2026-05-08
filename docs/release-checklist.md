@@ -116,6 +116,16 @@ curl -fsS "$LIVE_URL/healthz"
 curl -fsS "$LIVE_URL/api/local-agent/healthz"
 ```
 
+- After Live promotion, rerun the same gate with `--expect-live-promoted` so the smoke step requires both UAT and Live to serve the promoted revision:
+
+```bash
+./.venv/bin/python scripts/run_system_full_test_gate.py \
+  --uat-url "$UAT_URL" \
+  --live-url "$LIVE_URL" \
+  --expected-revision "$EXPECTED_REVISION" \
+  --expect-live-promoted
+```
+
 - Treat Cloudflare `502`, `530`, and `1033` pages as a release-blocking tunnel failure even if a `cloudflared` process exists. The only acceptable Live public check is a successful `curl -fsS "$LIVE_URL/healthz"` response from the portal. UAT local-agent health depends on the Live domain's `/uat-local-agent` proxy, so a broken Live Cloudflare Tunnel can also make UAT local-agent-backed pages fail.
 
 ## 2. UAT Release
