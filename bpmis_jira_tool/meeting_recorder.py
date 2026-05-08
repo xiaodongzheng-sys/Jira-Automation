@@ -2357,6 +2357,7 @@ def _resolve_screencapturekit_helper(store_root: Path) -> Path:
 """,
         encoding="utf-8",
     )
+    source_digest_path.write_text(f"{source_digest}\n", encoding="utf-8")
     codesign = _resolve_executable("codesign", ("/usr/bin/codesign",))
     if codesign:
         _run_command(
@@ -2364,7 +2365,6 @@ def _resolve_screencapturekit_helper(store_root: Path) -> Path:
             "Could not sign ScreenCaptureKit helper app.",
             timeout_seconds=60,
         )
-    source_digest_path.write_text(f"{source_digest}\n", encoding="utf-8")
     return helper_path
 
 
