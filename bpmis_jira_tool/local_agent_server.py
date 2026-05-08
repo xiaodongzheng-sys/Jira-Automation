@@ -614,34 +614,129 @@ def create_local_agent_app() -> Flask:
     @app.post("/api/local-agent/meeting-translation/start")
     def meeting_translation_start():
         payload = request.get_json(silent=True) or {}
+        current_app.logger.warning(
+            "local_agent_event %s",
+            json.dumps(
+                {
+                    "event": "meeting_translation_start_requested",
+                    "target_language": str(payload.get("target_language") or ""),
+                    "owner_present": bool(str(payload.get("owner_email") or "").strip()),
+                },
+                sort_keys=True,
+            ),
+        )
         try:
             result = _get_meeting_translation_runtime().start_session(
                 owner_email=str(payload.get("owner_email") or ""),
                 target_language=payload.get("target_language"),
             )
         except ToolError as error:
+            current_app.logger.warning(
+                "local_agent_event %s",
+                json.dumps(
+                    {
+                        "event": "meeting_translation_start_failed",
+                        "target_language": str(payload.get("target_language") or ""),
+                        "error_type": type(error).__name__,
+                        "error_message": str(error)[:500],
+                    },
+                    sort_keys=True,
+                ),
+            )
             return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_REQUEST
+        current_app.logger.warning(
+            "local_agent_event %s",
+            json.dumps(
+                {
+                    "event": "meeting_translation_start_completed",
+                    "session_id": str((result.get("session") or {}).get("session_id") or "")[:8] if isinstance(result, dict) else "",
+                    "session_status": str((result.get("session") or {}).get("status") or "") if isinstance(result, dict) else "",
+                },
+                sort_keys=True,
+            ),
+        )
         return jsonify(result)
 
     @app.post("/api/local-agent/meeting-translation/stop")
     def meeting_translation_stop():
         payload = request.get_json(silent=True) or {}
+        current_app.logger.warning(
+            "local_agent_event %s",
+            json.dumps(
+                {
+                    "event": "meeting_translation_stop_requested",
+                    "session_id": str(payload.get("session_id") or "")[:8],
+                    "owner_present": bool(str(payload.get("owner_email") or "").strip()),
+                },
+                sort_keys=True,
+            ),
+        )
         try:
             result = _get_meeting_translation_runtime().stop_session(
                 session_id=str(payload.get("session_id") or ""),
                 owner_email=str(payload.get("owner_email") or ""),
             )
         except ToolError as error:
+            current_app.logger.warning(
+                "local_agent_event %s",
+                json.dumps(
+                    {
+                        "event": "meeting_translation_stop_failed",
+                        "session_id": str(payload.get("session_id") or "")[:8],
+                        "error_type": type(error).__name__,
+                        "error_message": str(error)[:500],
+                    },
+                    sort_keys=True,
+                ),
+            )
             return jsonify({"status": "error", "message": str(error)}), HTTPStatus.NOT_FOUND
+        current_app.logger.warning(
+            "local_agent_event %s",
+            json.dumps(
+                {
+                    "event": "meeting_translation_stop_completed",
+                    "session_id": str(payload.get("session_id") or "")[:8],
+                    "session_status": str((result.get("session") or {}).get("status") or "") if isinstance(result, dict) else "",
+                },
+                sort_keys=True,
+            ),
+        )
         return jsonify(result)
 
     @app.get("/api/local-agent/meeting-translation/events/<session_id>")
     def meeting_translation_events(session_id: str):
         owner_email = str(request.args.get("owner_email") or "")
+        current_app.logger.warning(
+            "local_agent_event %s",
+            json.dumps(
+                {
+                    "event": "meeting_translation_events_requested",
+                    "session_id": str(session_id or "")[:8],
+                    "owner_present": bool(owner_email.strip()),
+                },
+                sort_keys=True,
+            ),
+        )
         try:
             event_iter = _get_meeting_translation_runtime().event_stream(session_id=session_id, owner_email=owner_email)
         except ToolError as error:
+            current_app.logger.warning(
+                "local_agent_event %s",
+                json.dumps(
+                    {
+                        "event": "meeting_translation_events_failed",
+                        "session_id": str(session_id or "")[:8],
+                        "error_type": type(error).__name__,
+                        "error_message": str(error)[:500],
+                    },
+                    sort_keys=True,
+                ),
+            )
             return jsonify({"status": "error", "message": str(error)}), HTTPStatus.NOT_FOUND
+        current_app.logger.warning(
+            "local_agent_event %s",
+            json.dumps({"event": "meeting_translation_events_opened", "session_id": str(session_id or "")[:8]}, sort_keys=True),
+        )
         return Response(_sse_events(event_iter), mimetype="text/event-stream")
 
     @app.post("/api/local-agent/work-memory/health")

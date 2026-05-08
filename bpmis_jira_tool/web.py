@@ -1586,8 +1586,15 @@ def create_app() -> Flask:
             return access_gate
         payload = request.get_json(silent=True) or {}
         owner_email = _current_google_email()
+        using_local_agent = _local_agent_meeting_recorder_enabled(settings)
+        _log_portal_event(
+            "meeting_translation_start_requested",
+            level=logging.WARNING,
+            target_language=str(payload.get("target_language") or ""),
+            using_local_agent=using_local_agent,
+        )
         try:
-            if _local_agent_meeting_recorder_enabled(settings):
+            if using_local_agent:
                 result = _build_local_agent_client(settings).meeting_translation_start(
                     {
                         "owner_email": owner_email,
@@ -1601,7 +1608,24 @@ def create_app() -> Flask:
                 )
         except ToolError as error:
             status = HTTPStatus.BAD_GATEWAY if "local-agent" in str(error).lower() or "unavailable" in str(error).lower() else HTTPStatus.BAD_REQUEST
+            _log_portal_event(
+                "meeting_translation_start_failed",
+                level=logging.WARNING,
+                status_code=int(status),
+                target_language=str(payload.get("target_language") or ""),
+                using_local_agent=using_local_agent,
+                error_type=type(error).__name__,
+                error_message=str(error)[:500],
+            )
             return jsonify({"status": "error", "message": str(error)}), status
+        _log_portal_event(
+            "meeting_translation_start_completed",
+            level=logging.WARNING,
+            session_id=str((result.get("session") or {}).get("session_id") or "")[:8] if isinstance(result, dict) else "",
+            session_status=str((result.get("session") or {}).get("status") or "") if isinstance(result, dict) else "",
+            target_language=str((result.get("session") or {}).get("target_language") or "") if isinstance(result, dict) else "",
+            using_local_agent=using_local_agent,
+        )
         return jsonify(result)
 
     @app.post("/api/meeting-translation/sessions/<session_id>/stop")
@@ -1610,8 +1634,15 @@ def create_app() -> Flask:
         if access_gate is not None:
             return access_gate
         owner_email = _current_google_email()
+        using_local_agent = _local_agent_meeting_recorder_enabled(settings)
+        _log_portal_event(
+            "meeting_translation_stop_requested",
+            level=logging.WARNING,
+            session_id=str(session_id or "")[:8],
+            using_local_agent=using_local_agent,
+        )
         try:
-            if _local_agent_meeting_recorder_enabled(settings):
+            if using_local_agent:
                 result = _build_local_agent_client(settings).meeting_translation_stop(
                     session_id=session_id,
                     owner_email=owner_email,
@@ -1620,7 +1651,23 @@ def create_app() -> Flask:
                 result = _get_meeting_translation_runtime().stop_session(session_id=session_id, owner_email=owner_email)
         except ToolError as error:
             status = HTTPStatus.BAD_GATEWAY if "local-agent" in str(error).lower() or "unavailable" in str(error).lower() else HTTPStatus.NOT_FOUND
+            _log_portal_event(
+                "meeting_translation_stop_failed",
+                level=logging.WARNING,
+                status_code=int(status),
+                session_id=str(session_id or "")[:8],
+                using_local_agent=using_local_agent,
+                error_type=type(error).__name__,
+                error_message=str(error)[:500],
+            )
             return jsonify({"status": "error", "message": str(error)}), status
+        _log_portal_event(
+            "meeting_translation_stop_completed",
+            level=logging.WARNING,
+            session_id=str(session_id or "")[:8],
+            session_status=str((result.get("session") or {}).get("status") or "") if isinstance(result, dict) else "",
+            using_local_agent=using_local_agent,
+        )
         return jsonify(result)
 
     @app.get("/api/meeting-translation/sessions/<session_id>/events")
@@ -1629,14 +1676,36 @@ def create_app() -> Flask:
         if access_gate is not None:
             return access_gate
         owner_email = _current_google_email()
-        if _local_agent_meeting_recorder_enabled(settings):
+        using_local_agent = _local_agent_meeting_recorder_enabled(settings)
+        _log_portal_event(
+            "meeting_translation_events_requested",
+            level=logging.WARNING,
+            session_id=str(session_id or "")[:8],
+            using_local_agent=using_local_agent,
+        )
+        if using_local_agent:
             try:
                 upstream = _build_local_agent_client(settings).meeting_translation_events_response(
                     session_id=session_id,
                     owner_email=owner_email,
                 )
             except ToolError as error:
+                _log_portal_event(
+                    "meeting_translation_events_failed",
+                    level=logging.WARNING,
+                    session_id=str(session_id or "")[:8],
+                    using_local_agent=using_local_agent,
+                    error_type=type(error).__name__,
+                    error_message=str(error)[:500],
+                )
                 return jsonify({"status": "error", "message": str(error)}), HTTPStatus.BAD_GATEWAY
+            _log_portal_event(
+                "meeting_translation_events_proxy_opened",
+                level=logging.WARNING,
+                session_id=str(session_id or "")[:8],
+                upstream_status_code=int(upstream.status_code),
+                upstream_content_type=str(upstream.headers.get("Content-Type") or ""),
+            )
             return Response(
                 stream_with_context(upstream.iter_content(chunk_size=None)),
                 status=upstream.status_code,
@@ -1645,6 +1714,14 @@ def create_app() -> Flask:
         try:
             event_iter = _get_meeting_translation_runtime().event_stream(session_id=session_id, owner_email=owner_email)
         except ToolError as error:
+            _log_portal_event(
+                "meeting_translation_events_failed",
+                level=logging.WARNING,
+                session_id=str(session_id or "")[:8],
+                using_local_agent=using_local_agent,
+                error_type=type(error).__name__,
+                error_message=str(error)[:500],
+            )
             return jsonify({"status": "error", "message": str(error)}), HTTPStatus.NOT_FOUND
         return Response(_meeting_translation_sse_events(event_iter), mimetype="text/event-stream")
 
