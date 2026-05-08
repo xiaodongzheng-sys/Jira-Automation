@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from cryptography.fernet import Fernet
+from bs4 import BeautifulSoup
 import bpmis_jira_tool.web as web_module
 from bpmis_jira_tool.config import Settings
 from bpmis_jira_tool.daily_brief_archive import DailyBriefArchiveStore, daily_brief_archive_path, daily_brief_pdf_bytes
@@ -1138,9 +1139,16 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertIn(b">Reports<", source_response.data)
         self.assertLess(source_response.data.index(b">Team Dashboard<"), source_response.data.index(b">Reports<"))
         self.assertLess(source_response.data.index(b">Reports<"), source_response.data.index(b">BPMIS Automation Tool<"))
+        self.assertLess(source_response.data.index(b">Reports<"), source_response.data.index(b">AI Memory<"))
         self.assertEqual(legacy_response.status_code, 302)
         self.assertEqual(legacy_response.headers["Location"], "/team-dashboard")
         self.assertEqual(dashboard_response.status_code, 200)
+        dashboard_soup = BeautifulSoup(dashboard_response.get_data(as_text=True), "html.parser")
+        dashboard_main_tabs = [
+            node.get_text(strip=True)
+            for node in dashboard_soup.select(".team-dashboard-tabs > .workspace-tab")
+        ]
+        self.assertEqual(dashboard_main_tabs, ["Task List", "Link Biz Project", "Team Admin"])
         self.assertIn(b"Team Admin", dashboard_response.data)
         self.assertNotIn(b'data-team-dashboard-tab="monthly-report"', dashboard_response.data)
         self.assertNotIn(b'data-team-dashboard-tab="report-intelligence"', dashboard_response.data)
@@ -1153,6 +1161,21 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertNotIn(b'data-default-tab="team-dashboard"', dashboard_response.data)
         self.assertNotIn(b'data-tab-trigger="team-dashboard"', dashboard_response.data)
         self.assertEqual(reports_response.status_code, 200)
+        reports_soup = BeautifulSoup(reports_response.get_data(as_text=True), "html.parser")
+        active_site_tabs = [
+            node.get_text(strip=True)
+            for node in reports_soup.select(".site-switcher-tab.is-active")
+        ]
+        self.assertEqual(active_site_tabs, ["Reports"])
+        reports_inner_tabs = [
+            node.get_text(strip=True)
+            for node in reports_soup.select(".team-dashboard-tabs > .workspace-tab")
+        ]
+        self.assertEqual(
+            reports_inner_tabs,
+            ["Monthly Report", "Daily Brief", "Report Intelligence", "SeaTalk Name Mapping"],
+        )
+        self.assertIsNotNone(reports_soup.select_one("[data-monthly-report-template-form]"))
         self.assertIn(b"<h2>Reports</h2>", reports_response.data)
         self.assertIn(b'data-team-dashboard-tab="monthly-report"', reports_response.data)
         self.assertIn(b'data-team-dashboard-tab="daily-brief"', reports_response.data)
@@ -2973,6 +2996,8 @@ class WebPortalFeatureTests(unittest.TestCase):
         self.assertIn("new URLSearchParams(window.location.search).get('tab')", script)
         self.assertIn("seatalk-name-mapping", script)
         self.assertIn("loadSeaTalkNameMappings(false)", script)
+        self.assertIn("activeTrigger", script)
+        self.assertIn("activate(activeTrigger.dataset.teamDashboardTab || 'tasks')", script)
 
     def test_team_dashboard_daily_brief_frontend_and_template_hooks(self):
         template = Path("templates/_team_dashboard_content.html").read_text(encoding="utf-8")
