@@ -17,6 +17,7 @@ tmp/
 jira_web_config.json
 team_portal.db
 .team-portal/
+.team-portal-uat/
 .DS_Store
 node_modules
 node_modules/

@@ -1074,6 +1074,11 @@ exit 0
         for runtime_path in ("bpmis_jira_tool/", "config/", "static/", "templates/", "prd_briefing/"):
             self.assertNotIn(runtime_path, ignored)
 
+    def test_gitignore_excludes_uat_data_root(self):
+        ignored = (PROJECT_ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
+
+        self.assertIn(".team-portal-uat/", ignored)
+
     def test_cloud_run_dockerfile_copies_runtime_inputs_explicitly(self):
         dockerfile = (PROJECT_ROOT / "Dockerfile").read_text(encoding="utf-8")
 
