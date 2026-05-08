@@ -146,6 +146,9 @@ class _ScreenCaptureKitPCMStreamer:
         self.status_path = status_path
         self.log_path = log_path
         self._process: subprocess.Popen[bytes] | None = None
+        self._stdout_queue: queue.Queue[bytes] = queue.Queue(maxsize=200)
+        self._reader_stop = threading.Event()
+        self._reader_thread: threading.Thread | None = None
         self.command = _background_command([
             str(self.helper_path),
             "--system-output",
@@ -175,6 +178,8 @@ class _ScreenCaptureKitPCMStreamer:
             stderr=log_handle,
             close_fds=True,
         )
+        self._reader_thread = threading.Thread(target=self._read_stdout_loop, daemon=True)
+        self._reader_thread.start()
         started = time.monotonic()
         while time.monotonic() - started < 8.0:
             if self._process.poll() is not None:
@@ -206,18 +211,26 @@ class _ScreenCaptureKitPCMStreamer:
         }
 
     def read_pcm_chunk(self, size: int) -> bytes:
-        process = self._process
-        stdout: BinaryIO | None = process.stdout if process is not None else None
-        if process is None or stdout is None:
-            return b""
-        if process.poll() is not None:
-            return b""
+        target_size = max(2, int(size or MEETING_TRANSLATION_PCM_STREAM_READ_BYTES))
+        chunks: list[bytes] = []
+        total = 0
         try:
-            return stdout.read(max(2, int(size or MEETING_TRANSLATION_PCM_CHUNK_BYTES)))
-        except OSError:
+            first = self._stdout_queue.get(timeout=0.1)
+        except queue.Empty:
             return b""
+        chunks.append(first)
+        total += len(first)
+        while total < target_size:
+            try:
+                chunk = self._stdout_queue.get_nowait()
+            except queue.Empty:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+        return b"".join(chunks)
 
     def stop(self) -> dict[str, Any]:
+        self._reader_stop.set()
         process = self._process
         if process is not None and process.poll() is None:
             process.terminate()
@@ -232,6 +245,30 @@ class _ScreenCaptureKitPCMStreamer:
             "screencapture_system_bytes": _safe_file_size(self.system_audio_path),
             "screencapture_microphone_bytes": _safe_file_size(self.microphone_audio_path),
         }
+
+    def _read_stdout_loop(self) -> None:
+        process = self._process
+        stdout: BinaryIO | None = process.stdout if process is not None else None
+        if stdout is None:
+            return
+        while not self._reader_stop.is_set():
+            try:
+                chunk = stdout.read(MEETING_TRANSLATION_PCM_STREAM_READ_BYTES)
+            except OSError:
+                return
+            if not chunk:
+                if process is not None and process.poll() is not None:
+                    return
+                time.sleep(0.02)
+                continue
+            try:
+                self._stdout_queue.put_nowait(chunk)
+            except queue.Full:
+                try:
+                    self._stdout_queue.get_nowait()
+                    self._stdout_queue.put_nowait(chunk)
+                except queue.Empty:
+                    pass
 
 
 class MeetingTranslationRuntime:
@@ -325,6 +362,7 @@ class MeetingTranslationRuntime:
                 warning = str(ready.get("warning") or "ScreenCaptureKit audio capture failed to start.")
                 raise ToolError(warning)
             session.emit("capture_ready", **ready)
+            session.set_status("connecting", "Audio capture started. Connecting to OpenAI translation.")
 
             websocket = self._connect_websocket(session=session, api_key=api_key)
             session.websocket = websocket
