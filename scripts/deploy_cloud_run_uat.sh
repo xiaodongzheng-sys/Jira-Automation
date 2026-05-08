@@ -310,6 +310,21 @@ verify_uat_source_code_qa_ops() {
   "$host_python" "$host_workspace/scripts/source_code_qa_ops_summary.py" --strict
 }
 
+uat_local_agent_sync_requires_file() {
+  local changed_file="$1"
+  case "$changed_file" in
+    static/*|templates/*|tests/*|docs/*|README.md|.dockerignore|.github/*)
+      return 1
+      ;;
+    app.py|bpmis_jira_tool/web.py)
+      return 1
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+}
+
 classify_uat_local_agent_sync_mode() {
   local host_workspace="$1"
   local target_commit="$2"
@@ -345,14 +360,10 @@ classify_uat_local_agent_sync_mode() {
 
   while IFS= read -r changed_file; do
     [[ -n "$changed_file" ]] || continue
-    case "$changed_file" in
-      app.py|bpmis_jira_tool/web.py|static/*|templates/*|tests/*|docs/*|README.md|.dockerignore|.github/*)
-        ;;
-      *)
-        printf 'full\n'
-        return 0
-        ;;
-    esac
+    if uat_local_agent_sync_requires_file "$changed_file"; then
+      printf 'full\n'
+      return 0
+    fi
   done <<<"$changed_files"
 
   printf 'skip\n'

@@ -155,6 +155,11 @@ Run this for routine releases after changes are committed and pushed to `origin/
 
 Override the location with `TEAM_DEPLOY_TIMING_FILE=/path/to/deploy_timings.jsonl` when comparing release speed across UAT and Live runs.
 The UAT script records both the total script time and stage timings for prebuilt image lookup, service describe, Cloud Run deploy, and UAT host sync.
+Print the latest records and averages with:
+
+```bash
+./scripts/report_deploy_timings.py --limit 20
+```
 
 - Deploy the pushed commit to a Cloud Run tagged UAT revision. The script requires a clean checkout with `HEAD == origin/main`, sets `TEAM_PORTAL_STAGE=uat`, pins `TEAM_PORTAL_RELEASE_REVISION` to the Git SHA, and deploys with `--no-traffic --tag uat`.
 
@@ -187,6 +192,8 @@ CLOUD_RUN_ARTIFACT_REPOSITORY
 CLOUD_RUN_IMAGE_NAME
 ```
 
+The workflow opts into Node 24 actions execution with `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24=true` so the image prebuild path is not surprised by the GitHub-hosted runner Node 20 retirement.
+
 The build script defaults to a faster Cloud Build machine and larger disk for manual image builds. Set `CLOUD_RUN_BUILD_MACHINE_TYPE=default` or `CLOUD_RUN_BUILD_DISK_SIZE=default` to use Cloud Build defaults.
 
 By default, `deploy_cloud_run_uat.sh` checks Artifact Registry for an image tagged with the current full Git SHA and uses it automatically when present. If the SHA image is missing, it falls back to the normal Cloud Run source deploy. Disable this with `CLOUD_RUN_UAT_AUTO_PREBUILT_IMAGE=0`.
@@ -213,6 +220,12 @@ For faster UAT releases, use the one-command orchestrator. It runs the release g
 
 ```bash
 ./scripts/release_uat_fast.sh
+```
+
+For routine UAT plus live promotion, use the full one-command orchestrator. It waits for the GitHub SHA image when available, falls back to a local image build if needed, deploys UAT from the prebuilt image, runs the read-only smoke, promotes UAT to live, runs the promoted smoke, runs the live doctor, and prints the timing report:
+
+```bash
+./scripts/release_uat_live_fast.sh
 ```
 
 The UAT local-agent sync is change-aware. `CLOUD_RUN_UAT_LOCAL_AGENT_SYNC_MODE=auto` skips local-agent sync/restart for static/template/docs/test/web-shell-only changes, while `full` forces the old behavior and `skip` skips it explicitly. `CLOUD_RUN_UAT_PARALLEL_HOST_SYNC=1` overlaps the full UAT host sync with Cloud Run deployment.

@@ -536,6 +536,15 @@ exit 0
         self.assertIn("source_code_qa_ops_summary.py\" --strict", contents)
         self.assertIn("/uat-local-agent", contents)
 
+    def test_cloud_run_uat_deploy_has_explicit_ui_only_sync_skip(self):
+        deploy_script = PROJECT_ROOT / "scripts/deploy_cloud_run_uat.sh"
+        contents = deploy_script.read_text(encoding="utf-8")
+
+        self.assertIn("uat_local_agent_sync_requires_file", contents)
+        self.assertIn("static/*|templates/*|tests/*|docs/*|README.md|.dockerignore|.github/*", contents)
+        self.assertIn('if uat_local_agent_sync_requires_file "$changed_file"; then', contents)
+        self.assertIn("Skipping UAT Mac local-agent sync/restart", contents)
+
     def test_release_checklist_documents_full_gate_and_read_only_smoke(self):
         checklist = (PROJECT_ROOT / "docs/release-checklist.md").read_text(encoding="utf-8")
 
@@ -1004,6 +1013,7 @@ exit 0
         uat_script = (PROJECT_ROOT / "scripts/deploy_cloud_run_uat.sh").read_text(encoding="utf-8")
         live_script = (PROJECT_ROOT / "scripts/promote_uat_to_live.sh").read_text(encoding="utf-8")
         build_script = (PROJECT_ROOT / "scripts/build_cloud_run_image.sh").read_text(encoding="utf-8")
+        report_script = (PROJECT_ROOT / "scripts/report_deploy_timings.py").read_text(encoding="utf-8")
 
         self.assertIn("team_deploy_timing_file", helper)
         self.assertIn("deploy_timings.jsonl", helper)
@@ -1015,6 +1025,8 @@ exit 0
         self.assertIn("uat_host_sync", uat_script)
         self.assertIn("record_promote_timing_on_exit", live_script)
         self.assertIn("Deploy UAT with: CLOUD_RUN_IMAGE=$IMAGE_URI ./scripts/deploy_cloud_run_uat.sh", build_script)
+        self.assertIn("Recent deploy timings", report_script)
+        self.assertIn("Averages by script/phase", report_script)
 
     def test_fast_uat_release_orchestrator_uses_fast_paths(self):
         script = (PROJECT_ROOT / "scripts/release_uat_fast.sh").read_text(encoding="utf-8")
@@ -1025,6 +1037,46 @@ exit 0
         self.assertIn("CLOUD_RUN_UAT_SKIP_UNCHANGED", script)
         self.assertIn("CLOUD_RUN_UAT_PARALLEL_HOST_SYNC", script)
         self.assertIn("deploy_cloud_run_uat.sh", script)
+
+    def test_fast_uat_live_release_orchestrator_waits_deploys_promotes_and_reports(self):
+        script = (PROJECT_ROOT / "scripts/release_uat_live_fast.sh").read_text(encoding="utf-8")
+
+        self.assertIn("wait_for_github_image_workflow", script)
+        self.assertIn("run watch \"$run_id\"", script)
+        self.assertIn("deploy_cloud_run_uat.sh", script)
+        self.assertIn("run_system_full_test_gate.py", script)
+        self.assertIn("--expect-live-promoted", script)
+        self.assertIn("promote_uat_to_live.sh", script)
+        self.assertIn("run_team_stack.sh\" doctor", script)
+        self.assertIn("report_deploy_timings.py", script)
+
+    def test_report_deploy_timings_summarizes_recent_records(self):
+        report_script = PROJECT_ROOT / "scripts/report_deploy_timings.py"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            timing_file = Path(temp_dir) / "deploy_timings.jsonl"
+            timing_file.write_text(
+                "\n".join(
+                    [
+                        '{"script":"deploy_cloud_run_uat.sh","phase":"cloud_run_deploy","status":0,"duration_seconds":16,"details":"image=sha"}',
+                        '{"script":"promote_uat_to_live.sh","phase":"script","status":0,"duration_seconds":9,"details":"host=mac"}',
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            completed = subprocess.run(
+                [sys.executable, str(report_script), "--file", str(timing_file), "--limit", "2"],
+                capture_output=True,
+                text=True,
+                check=False,
+                cwd=PROJECT_ROOT,
+            )
+
+        self.assertEqual(completed.returncode, 0, msg=completed.stderr)
+        self.assertIn("Recent deploy timings", completed.stdout)
+        self.assertIn("cloud_run_deploy", completed.stdout)
+        self.assertIn("Averages by script/phase", completed.stdout)
 
     def test_cloud_run_image_build_path_uses_speed_tuning_and_lean_context(self):
         build_script = (PROJECT_ROOT / "scripts/build_cloud_run_image.sh").read_text(encoding="utf-8")
@@ -1044,6 +1096,7 @@ exit 0
         self.assertIn("tests/", dockerignore)
         self.assertIn("./scripts/build_cloud_run_image.sh", workflow)
         self.assertIn("CLOUD_RUN_IMAGE_TAG=\"$GITHUB_SHA\"", workflow)
+        self.assertIn("FORCE_JAVASCRIPT_ACTIONS_TO_NODE24", workflow)
         self.assertNotIn("paths:", workflow)
 
     def test_cloud_run_full_deploy_skips_base_url_update_when_service_exists(self):
