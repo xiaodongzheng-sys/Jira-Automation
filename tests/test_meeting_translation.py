@@ -86,6 +86,18 @@ class MeetingTranslationTests(unittest.TestCase):
         self.assertIn("Authorization: Bearer key", websocket.header)
         self.assertTrue(any(item.startswith("OpenAI-Safety-Identifier: ") for item in websocket.header))
 
+    def test_session_update_enables_original_input_transcription(self):
+        runtime = MeetingTranslationRuntime(root_dir=Path(tempfile.gettempdir()), config=MeetingTranslationConfig(openai_api_key="key"))
+        session = MeetingTranslationSession(session_id="s1", owner_email="pm@npt.sg", target_language="zh")
+
+        payload = runtime._session_update_payload(session)
+
+        self.assertEqual(payload["type"], "session.update")
+        audio = payload["session"]["audio"]
+        self.assertEqual(audio["output"]["language"], "zh")
+        self.assertEqual(audio["input"]["transcription"]["model"], "gpt-realtime-whisper")
+        self.assertNotIn("language", audio["input"]["transcription"])
+
     def test_audio_chunks_are_base64_encoded_for_realtime_append_events(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             runtime = MeetingTranslationRuntime(

@@ -37,6 +37,7 @@ MEETING_TRANSLATION_PCM_CHUNK_BYTES = 48_000
 MEETING_TRANSLATION_PCM_STREAM_READ_BYTES = 4_800
 MEETING_TRANSLATION_PCM_BYTES_PER_SECOND = MEETING_TRANSLATION_PCM_RATE * 2
 MEETING_TRANSLATION_TRANSCRIPT_WAIT_SECONDS = 5.0
+MEETING_TRANSLATION_INPUT_TRANSCRIPTION_MODEL = "gpt-realtime-whisper"
 
 LOGGER = logging.getLogger(__name__)
 
@@ -432,23 +433,12 @@ class MeetingTranslationRuntime:
             websocket = self._connect_websocket(session=session, api_key=api_key)
             session.websocket = websocket
             self._log_session_event(session, "websocket_connected")
-            self._send_json(
-                websocket,
-                {
-                    "type": "session.update",
-                    "session": {
-                        "audio": {
-                            "output": {
-                                "language": MEETING_TRANSLATION_LANGUAGES[session.target_language]["code"],
-                            }
-                        }
-                    },
-                },
-            )
+            self._send_json(websocket, self._session_update_payload(session))
             self._log_session_event(
                 session,
                 "session_update_sent",
                 output_language=MEETING_TRANSLATION_LANGUAGES[session.target_language]["code"],
+                input_transcription_model=MEETING_TRANSLATION_INPUT_TRANSCRIPTION_MODEL,
             )
             receiver = threading.Thread(target=self._receive_events, args=(session, websocket), daemon=True)
             receiver.start()
@@ -716,6 +706,23 @@ class MeetingTranslationRuntime:
 
     def _send_json(self, websocket: Any, payload: dict[str, Any]) -> None:
         websocket.send(json.dumps(payload, separators=(",", ":")))
+
+    def _session_update_payload(self, session: MeetingTranslationSession) -> dict[str, Any]:
+        return {
+            "type": "session.update",
+            "session": {
+                "audio": {
+                    "input": {
+                        "transcription": {
+                            "model": MEETING_TRANSLATION_INPUT_TRANSCRIPTION_MODEL,
+                        },
+                    },
+                    "output": {
+                        "language": MEETING_TRANSLATION_LANGUAGES[session.target_language]["code"],
+                    },
+                }
+            },
+        }
 
     def _translated_delta_from_event(self, *, event_type: str, event: dict[str, Any]) -> str:
         if event_type == "session.output_transcript.delta" or "output_transcript" in event_type:
