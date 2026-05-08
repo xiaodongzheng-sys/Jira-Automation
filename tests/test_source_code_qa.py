@@ -4121,6 +4121,44 @@ class SourceCodeQAServiceTests(unittest.TestCase):
         self.assertIn("ops_summary_status=fail", summary)
         self.assertIn("fixture/demo repositories", summary)
 
+    def test_rebuild_indexes_helper_flags_non_current_ready_indexes(self):
+        from scripts.source_code_qa_rebuild_indexes import _verify_health
+
+        class FakeService:
+            def index_health_payload(self):
+                return {
+                    "status": "ready",
+                    "keys": {
+                        "AF:All": {
+                            "repos": [
+                                {
+                                    "display_name": "AF repo",
+                                    "index": {"state": "ready", "index_version": CODE_INDEX_VERSION - 1},
+                                }
+                            ]
+                        }
+                    },
+                }
+
+        issues, health = _verify_health(FakeService())
+
+        self.assertEqual(health["status"], "ready")
+        self.assertEqual(issues, [f"AF:All:AF repo: index_version={CODE_INDEX_VERSION - 1} expected={CODE_INDEX_VERSION}"])
+
+    def test_rebuild_indexes_helper_backs_up_existing_index_root(self):
+        from scripts.source_code_qa_rebuild_indexes import _backup_indexes
+
+        source_root = Path(self.temp_dir.name) / "source_code_qa"
+        index_root = source_root / "indexes"
+        index_root.mkdir(parents=True)
+        (index_root / "repo.sqlite").write_text("index", encoding="utf-8")
+
+        backup_path = _backup_indexes(source_root)
+
+        self.assertIsNotNone(backup_path)
+        self.assertTrue(str(backup_path.name).startswith(f"indexes.backup.v{CODE_INDEX_VERSION}."))
+        self.assertEqual((backup_path / "repo.sqlite").read_text(encoding="utf-8"), "index")
+
     def test_domain_profiles_include_domain_knowledge_pack_terms(self):
         crms_profile = self.service._domain_profile("CRMS", "SG")
         af_profile = self.service._domain_profile("AF", "All")
