@@ -131,6 +131,24 @@ def register_source_code_qa_routes(app: object, settings: object, global_context
         thread.start()
         return jsonify({"status": "queued", "job_id": job.job_id})
 
+    @app.get("/api/source-code-qa/sync-jobs/<job_id>")
+    def source_code_qa_sync_job_api(job_id: str):
+        access_gate = _require_source_code_qa_manage_access(settings, api=True)
+        if access_gate is not None:
+            return access_gate
+        snapshot = current_app.config["JOB_STORE"].snapshot(job_id)
+        if snapshot is None or snapshot.get("action") != "source-code-qa-sync":
+            return jsonify(
+                {
+                    "status": "error",
+                    "message": "Source Code Q&A sync job was not found.",
+                    "error_category": "job_not_found",
+                    "error_code": "job_not_found",
+                    "error_retryable": False,
+                }
+            ), HTTPStatus.NOT_FOUND
+        return jsonify(_public_source_code_qa_job_snapshot(snapshot))
+
     @app.route("/api/source-code-qa/sessions", methods=["GET", "POST"])
     def source_code_qa_sessions_api():
         access_gate = _require_source_code_qa_access(settings, api=True)

@@ -5,6 +5,7 @@
   const configUrl = root.dataset.configUrl;
   const saveUrl = root.dataset.saveUrl;
   const syncUrl = root.dataset.syncUrl;
+  const syncJobsUrlTemplate = root.dataset.syncJobsUrl || '/api/source-code-qa/sync-jobs/__JOB_ID__';
   const queryUrl = root.dataset.queryUrl;
   const generatedArtifactUrl = root.dataset.generatedArtifactUrl;
   const effortAssessmentUrl = root.dataset.effortAssessmentUrl;
@@ -1601,7 +1602,7 @@
 
   const pollSyncJob = async (jobId) => {
     while (jobId) {
-      const payload = await readJobStatus(jobId);
+      const payload = await readJobStatus(jobId, syncJobsUrlTemplate);
       adminStatus.textContent = payload.message || 'Syncing repositories...';
       if (payload.state === 'completed') {
         const result = (payload.results || [])[0] || {};

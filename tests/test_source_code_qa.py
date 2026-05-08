@@ -152,6 +152,33 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertNotIn(b"Model Availability", owner_response.data)
         self.assertNotIn(b"Model Availability", teammate_response.data)
 
+    def test_sync_refresh_uses_sync_job_status_endpoint(self):
+        with self.app.test_client() as client:
+            self._login(client, "xiaodong.zheng@npt.sg")
+            response = client.get("/source-code-qa")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn('data-sync-jobs-url="/api/source-code-qa/sync-jobs/__JOB_ID__"', html)
+        script = Path("static/source_code_qa.js").read_text(encoding="utf-8")
+        self.assertIn("const syncJobsUrlTemplate", script)
+        self.assertIn("readJobStatus(jobId, syncJobsUrlTemplate)", script)
+
+    def test_sync_job_status_endpoint_accepts_sync_jobs_only(self):
+        with self.app.app_context():
+            sync_job = self.app.config["JOB_STORE"].create("source-code-qa-sync", title="Sync Source Code Repositories")
+            query_job = self.app.config["JOB_STORE"].create("source-code-qa-query", title="Source Code Q&A Query")
+
+        with self.app.test_client() as client:
+            self._login(client, "xiaodong.zheng@npt.sg")
+            sync_response = client.get(f"/api/source-code-qa/sync-jobs/{sync_job.job_id}")
+            query_response = client.get(f"/api/source-code-qa/sync-jobs/{query_job.job_id}")
+
+        self.assertEqual(sync_response.status_code, 200)
+        self.assertEqual(sync_response.get_json()["action"], "source-code-qa-sync")
+        self.assertEqual(query_response.status_code, 404)
+        self.assertEqual(query_response.get_json()["error_category"], "job_not_found")
+
     def test_frontend_pasted_images_use_attachment_upload_flow(self):
         script = Path("static/source_code_qa.js").read_text(encoding="utf-8")
 

@@ -601,6 +601,7 @@ class TeamPortalAccessTests(unittest.TestCase):
                 "source_code_qa_session_archive_api",
                 "source_code_qa_sessions_api",
                 "source_code_qa_sync_api",
+                "source_code_qa_sync_job_api",
                 "team_dashboard_config",
                 "team_dashboard_daily_brief_download",
                 "team_dashboard_daily_briefs",
