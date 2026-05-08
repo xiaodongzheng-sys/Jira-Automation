@@ -21,6 +21,16 @@ class ConfigTests(unittest.TestCase):
 
         self.assertEqual(settings.team_portal_stage, "uat")
 
+    def test_from_env_accepts_blank_env_file_and_default_google_secret(self):
+        with patch.dict(os.environ, {"ENV_FILE": ""}, clear=True), patch(
+            "bpmis_jira_tool.config.find_dotenv",
+            side_effect=AssertionError("ENV_FILE should bypass find_dotenv"),
+        ):
+            settings = Settings.from_env()
+
+        self.assertEqual(str(settings.google_oauth_client_secret_file), "google-client-secret.json")
+        self.assertEqual(settings.bpmis_call_mode, "direct")
+
     def test_prd_briefing_mandarin_edge_voice_defaults_to_xiaoxiao(self):
         with patch.dict(os.environ, {}, clear=True), patch("bpmis_jira_tool.config.find_dotenv", return_value=""):
             settings = Settings.from_env()
