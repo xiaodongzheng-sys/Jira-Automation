@@ -2536,12 +2536,15 @@
     const selectedProvider = selectedLlmProvider();
     const control = { stopped: false, jobId: '', requirement };
     activeEffortControl = control;
+    lastEffortPayload = null;
     updateEffortButtonState(true);
     if (effortOutput) effortOutput.hidden = false;
     if (effortAnswer) effortAnswer.innerHTML = '<div class="source-qa-empty">Building optimized prompt and searching code evidence...</div>';
     if (effortSummary) effortSummary.textContent = `Running assessment for ${pmTeam?.value || ''}:${currentCountry()}.`;
     if (effortProvider) effortProvider.textContent = providerLabel(selectedProvider);
     if (effortScope) effortScope.textContent = [pmTeam?.value, currentCountry()].filter(Boolean).join(' · ');
+    if (effortMeta) effortMeta.textContent = 'running';
+    persistEffortAssessmentCache({ result: null, status: 'running', requirement, language: effortLanguage?.value || 'zh' });
     const progress = startQueryProgress('Submitting effort assessment to server...', effortStatus);
     try {
       const initialPayload = await apiFetchJson(effortAssessmentUrl, {
@@ -2559,6 +2562,14 @@
       if (initialPayload.job_id) {
         control.jobId = initialPayload.job_id;
         applyQueryJobStatus(initialPayload, progress, { live: false });
+        if (effortMeta) effortMeta.textContent = `job: ${initialPayload.job_id} · running`;
+        persistEffortAssessmentCache({
+          result: null,
+          status: 'running',
+          requirement,
+          language: effortLanguage?.value || 'zh',
+          job_id: initialPayload.job_id,
+        });
       }
       const payload = initialPayload.status === 'queued' && initialPayload.job_id
         ? await runQueryJob(initialPayload.job_id, progress, control, effortJobsUrlTemplate, { live: false })
@@ -2579,7 +2590,18 @@
       const message = sourceQaJobErrorMessage(error.jobPayload || error);
       if (effortStatus) effortStatus.textContent = `${message} elapsed ${formatElapsed(progress.startedAt)}`;
       if (effortAnswer) effortAnswer.innerHTML = `<div class="source-qa-empty">${escapeHtml(message)}</div>`;
-      persistEffortAssessmentCache({ status: message });
+      if (effortMeta) {
+        const failedJobId = control.jobId || error?.jobPayload?.job_id || '';
+        effortMeta.textContent = ['failed', failedJobId ? `job: ${failedJobId}` : ''].filter(Boolean).join(' · ');
+      }
+      lastEffortPayload = null;
+      persistEffortAssessmentCache({
+        result: null,
+        status: message,
+        requirement,
+        language: effortLanguage?.value || 'zh',
+        job_id: control.jobId || error?.jobPayload?.job_id || '',
+      });
     } finally {
       stopQueryProgress();
       if (activeEffortControl === control) {

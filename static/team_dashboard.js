@@ -18,7 +18,9 @@
       payload = {};
     }
     if (!response.ok || payload.status === 'error') {
-      throw new Error(payload.message || fallbackMessage);
+      const error = new Error(payload.message || fallbackMessage);
+      error.payload = payload;
+      throw error;
     }
     return payload;
   };
@@ -121,6 +123,19 @@
   };
 
   const sleep = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms));
+
+  const monthlyReportJobErrorMessage = (payloadOrError) => {
+    const payload = payloadOrError?.payload || payloadOrError?.jobPayload || payloadOrError || {};
+    const category = String(payload.error_category || '').toLowerCase();
+    const rawMessage = String(payload.message || payload.error || payloadOrError?.message || '').trim();
+    if (category === 'codex_timeout_or_rate_limit') {
+      return 'Codex timed out or was rate-limited while generating the Monthly Report. Retry once; if it repeats, reduce the report period or source scope.';
+    }
+    if (category === 'local_agent_offline') {
+      return 'Mac local-agent is unavailable. Confirm the host stack is online, then retry Monthly Report generation.';
+    }
+    return rawMessage || 'Monthly Report draft generation failed.';
+  };
 
   const readJobStatus = async (jobId) => {
     const url = jobsUrlTemplate.replace('__JOB_ID__', encodeURIComponent(jobId));
@@ -1305,7 +1320,9 @@
         return (payload.results || [])[0] || {};
       }
       if (payload.state === 'failed') {
-        throw new Error(payload.error || payload.message || 'Monthly Report draft generation failed.');
+        const error = new Error(monthlyReportJobErrorMessage(payload));
+        error.jobPayload = payload;
+        throw error;
       }
       await sleep(1000);
     }
@@ -1372,7 +1389,14 @@
     if (!monthlyReportGenerateButton || !monthlyReportDraft) return;
     monthlyReportGenerateButton.disabled = true;
     monthlyReportGenerateButton.textContent = 'Generating...';
-    setStatus(monthlyReportStatus, 'Generating Monthly Report draft. Keep this page open; Send Email stays disabled until the draft is ready.', 'neutral');
+    const previousDraft = monthlyReportDraft.value.trim();
+    setStatus(
+      monthlyReportStatus,
+      previousDraft
+        ? 'Generating Monthly Report draft. The previous draft remains visible until the new draft is ready.'
+        : 'Generating Monthly Report draft. Keep this page open; Send Email stays disabled until the draft is ready.',
+      'neutral',
+    );
     startMonthlyReportProgress();
     try {
       const response = await fetch(root.dataset.monthlyReportDraftUrl || '/api/team-dashboard/monthly-report/draft', {
@@ -1399,7 +1423,7 @@
       setStatus(monthlyReportStatus, successMessage, 'success');
       stopMonthlyReportProgress('done', successMessage);
     } catch (error) {
-      const message = error.message || 'Could not generate Monthly Report draft.';
+      const message = monthlyReportJobErrorMessage(error);
       setStatus(monthlyReportStatus, message, 'error');
       stopMonthlyReportProgress('error', message);
     } finally {

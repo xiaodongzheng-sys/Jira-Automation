@@ -1028,10 +1028,18 @@ class RemoteSourceCodeQAService:
         self.fallback_service = fallback_service
         self.llm_provider_name = fallback_service.normalize_query_llm_provider(llm_provider) if llm_provider else fallback_service.llm_provider_name
         self.llm_budgets = fallback_service.llm_budgets
+        self.codex_timeout_seconds = int(getattr(fallback_service, "codex_timeout_seconds", 0) or 0)
         self._config_payload: dict[str, Any] | None = None
 
     def with_llm_provider(self, llm_provider: str) -> "RemoteSourceCodeQAService":
         return RemoteSourceCodeQAService(self.client, self.fallback_service.with_llm_provider(llm_provider), llm_provider=llm_provider)
+
+    def with_codex_timeout_seconds(self, codex_timeout_seconds: int | None) -> "RemoteSourceCodeQAService":
+        return RemoteSourceCodeQAService(
+            self.client,
+            self.fallback_service.with_codex_timeout_seconds(codex_timeout_seconds),
+            llm_provider=self.llm_provider_name,
+        )
 
     def _source_code_qa_config_payload(self) -> dict[str, Any]:
         if self._config_payload is None:
@@ -1081,6 +1089,8 @@ class RemoteSourceCodeQAService:
         payload = dict(kwargs)
         progress_callback = payload.pop("progress_callback", None)
         payload["llm_provider"] = self.llm_provider_name
+        if self.codex_timeout_seconds:
+            payload["codex_timeout_seconds"] = self.codex_timeout_seconds
         return self.client.source_code_qa_query(
             payload,
             progress_callback=progress_callback if callable(progress_callback) else None,

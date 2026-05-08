@@ -303,12 +303,29 @@ class SourceCodeQAService:
         normalized = self.normalize_query_llm_provider(llm_provider)
         if normalized == self.llm_provider_name:
             return self
+        return self._clone(llm_provider=normalized)
+
+    def with_codex_timeout_seconds(self, codex_timeout_seconds: int | None) -> "SourceCodeQAService":
+        timeout_seconds = max(
+            10,
+            int(codex_timeout_seconds if codex_timeout_seconds is not None else self.codex_timeout_seconds),
+        )
+        if timeout_seconds == self.codex_timeout_seconds:
+            return self
+        return self._clone(codex_timeout_seconds=timeout_seconds)
+
+    def _clone(
+        self,
+        *,
+        llm_provider: str | None = None,
+        codex_timeout_seconds: int | None = None,
+    ) -> "SourceCodeQAService":
         return SourceCodeQAService(
             data_root=self.base_data_root,
             team_profiles=self.team_profiles,
             gitlab_token=self.gitlab_token,
             gitlab_username=self.gitlab_username,
-            llm_provider=normalized,
+            llm_provider=llm_provider or self.llm_provider_name,
             query_rewrite_model=self.query_rewrite_model,
             planner_model=self.planner_model,
             answer_model=self.answer_model,
@@ -317,7 +334,7 @@ class SourceCodeQAService:
             semantic_index_enabled=self.semantic_index_enabled,
             llm_cache_ttl_seconds=self.llm_cache_ttl_seconds,
             llm_timeout_seconds=self.llm_timeout_seconds,
-            codex_timeout_seconds=self.codex_timeout_seconds,
+            codex_timeout_seconds=self.codex_timeout_seconds if codex_timeout_seconds is None else codex_timeout_seconds,
             codex_concurrency=self.codex_concurrency,
             codex_top_path_limit=self.codex_top_path_limit,
             codex_repair_enabled=self.codex_repair_enabled,

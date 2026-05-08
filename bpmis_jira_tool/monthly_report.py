@@ -1083,7 +1083,7 @@ def generate_monthly_report_with_codex(
 ) -> dict[str, Any]:
     provider = CodexCliBridgeSourceCodeQALLMProvider(
         workspace_root=workspace_root,
-        timeout_seconds=settings.source_code_qa_codex_timeout_seconds,
+        timeout_seconds=settings.monthly_report_codex_timeout_seconds,
         concurrency_limit=settings.source_code_qa_codex_concurrency,
         session_mode="ephemeral",
         codex_binary=os.getenv("SOURCE_CODE_QA_CODEX_BINARY") or None,

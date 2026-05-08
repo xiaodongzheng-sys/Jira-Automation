@@ -19,6 +19,7 @@ from bpmis_jira_tool.monthly_report import (
     _estimate_token_count,
     build_monthly_report_final_prompt,
     build_monthly_project_evidence_brief,
+    generate_monthly_report_with_codex,
     monthly_report_markdown_to_html,
     normalize_monthly_report_template,
     resolve_monthly_report_period,
@@ -86,6 +87,21 @@ class _FakeGmailService:
 
 
 class MonthlyReportTests(unittest.TestCase):
+    def test_codex_generation_uses_monthly_report_timeout(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch("bpmis_jira_tool.monthly_report.CodexCliBridgeSourceCodeQALLMProvider") as mock_provider:
+            instance = mock_provider.return_value
+            instance.generate.return_value = SimpleNamespace(payload={"text": "# Draft"}, model="codex-cli")
+            instance.extract_text.return_value = "# Draft"
+
+            result = generate_monthly_report_with_codex(
+                prompt="Summarize monthly work.",
+                settings=replace(_settings(temp_dir), monthly_report_codex_timeout_seconds=777),
+                workspace_root=Path(temp_dir),
+            )
+
+        self.assertEqual(result["result_markdown"], "# Draft")
+        self.assertEqual(mock_provider.call_args.kwargs["timeout_seconds"], 777)
+
     def test_report_period_resolves_four_week_anchors(self):
         first = resolve_monthly_report_period(datetime(2026, 5, 3, 10, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE))
         second = resolve_monthly_report_period(datetime(2026, 5, 11, 10, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE))

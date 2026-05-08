@@ -698,7 +698,7 @@ class MeetingTranslationRuntime:
             peak = max(peak, magnitude)
             total += magnitude
             used += 1
-        if not used:
+        if not used:  # pragma: no cover - stride/range always visits at least one sample when sample_count > 0.
             return 0.0
         peak_level = peak / 32768
         average_level = (total / used) / 32768

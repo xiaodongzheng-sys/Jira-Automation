@@ -532,6 +532,10 @@ def _classify_portal_error(error: Exception | str | None) -> dict[str, Any]:
             details.update({"error_category": "request_validation", "error_code": "missing_required_parameter", "error_retryable": False})
         elif "google sheets" in normalized or "spreadsheet" in normalized or "sheet" in normalized:
             details.update({"error_category": "google_sheets", "error_code": "google_sheet_access", "error_retryable": True})
+        elif ("codex" in normalized or "llm" in normalized) and ("rate limit" in normalized or "quota" in normalized):
+            details.update({"error_category": "codex_timeout_or_rate_limit", "error_code": "llm_rate_limited", "error_retryable": True})
+        elif ("codex" in normalized or "llm" in normalized) and ("timeout" in normalized or "timed out" in normalized):
+            details.update({"error_category": "codex_timeout_or_rate_limit", "error_code": "llm_timeout", "error_retryable": True})
         elif "bpmis" in normalized:
             details.update({"error_category": "bpmis_upstream", "error_code": "bpmis_request_failed", "error_retryable": True})
         return details
@@ -5826,14 +5830,21 @@ def _run_team_dashboard_monthly_report_draft_job(
                 },
             )
         except ToolError as error:
+            error_details = _classify_portal_error(error)
             _log_portal_event(
                 "team_dashboard_monthly_report_draft_tool_error",
                 level=logging.WARNING,
                 user=_safe_email_identity(user_identity),
                 job_id=job_id,
-                **_classify_portal_error(error),
+                **error_details,
             )
-            job_store.fail(job_id, str(error))
+            job_store.fail(
+                job_id,
+                str(error),
+                error_category=str(error_details.get("error_category") or "tool_error"),
+                error_code=str(error_details.get("error_code") or "tool_error"),
+                error_retryable=bool(error_details.get("error_retryable", True)),
+            )
         except Exception as error:  # pragma: no cover - defensive guard for background worker failures.
             _log_portal_event(
                 "team_dashboard_monthly_report_draft_unexpected_error",

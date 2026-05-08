@@ -212,6 +212,7 @@ def create_local_agent_app() -> Flask:
     def source_code_qa_query():
         payload = request.get_json(silent=True) or {}
         service = _source_code_qa_service(payload.get("llm_provider"))
+        service = service.with_codex_timeout_seconds(payload.get("codex_timeout_seconds"))
         result = service.query(
             pm_team=str(payload.get("pm_team") or ""),
             country=str(payload.get("country") or ""),
@@ -1834,6 +1835,7 @@ def _run_source_code_qa_query_job(app: Flask, job_id: str, payload: dict[str, An
         try:
             progress_callback("starting", "Starting Source Code Q&A query on Mac local-agent.", 0, 0)
             service = _source_code_qa_service(payload.get("llm_provider"))
+            service = service.with_codex_timeout_seconds(payload.get("codex_timeout_seconds"))
             result = service.query(
                 pm_team=str(payload.get("pm_team") or ""),
                 country=str(payload.get("country") or ""),
@@ -1928,12 +1930,13 @@ def _run_monthly_report_draft_job(app: Flask, job_id: str, payload: dict[str, An
                 },
             )
         except ToolError as error:
+            details = _classify_local_agent_tool_error(error)
             job_store.fail(
                 job_id,
                 str(error),
-                error_category="tool_error",
-                error_code="monthly_report_failed",
-                error_retryable=True,
+                error_category=str(details.get("error_category") or "tool_error"),
+                error_code=str(details.get("error_code") or "monthly_report_failed"),
+                error_retryable=bool(details.get("error_retryable", True)),
             )
         except Exception as error:  # noqa: BLE001 - keep async status JSON-readable for Cloud Run.
             current_app.logger.exception("Monthly Report local-agent async job failed unexpectedly.")
@@ -1953,6 +1956,15 @@ def _sanitize_meeting_recorder_job_error(error: object, *, unexpected: bool = Fa
     if re.search(r"traceback|token|secret|authorization|api[_ -]?key", message, re.IGNORECASE):
         return "Meeting processing failed. Check server logs for details."
     return message[:500]
+
+
+def _classify_local_agent_tool_error(error: object) -> dict[str, Any]:
+    normalized = str(error or "").lower()
+    if "rate limit" in normalized or "quota" in normalized:
+        return {"error_category": "codex_timeout_or_rate_limit", "error_code": "llm_rate_limited", "error_retryable": True}
+    if "timeout" in normalized or "timed out" in normalized:
+        return {"error_category": "codex_timeout_or_rate_limit", "error_code": "llm_timeout", "error_retryable": True}
+    return {"error_category": "tool_error", "error_code": "monthly_report_failed", "error_retryable": True}
 
 
 def _meeting_record_for_processing_job(record_id: str, owner_email: str) -> dict[str, Any]:

@@ -191,6 +191,14 @@ class SourceCodeQARouteTests(unittest.TestCase):
         self.assertIn("data-source-preview-attachment", script)
         self.assertIn("Please wait for image upload to finish.", script)
 
+    def test_frontend_effort_assessment_clears_stale_result_on_new_run(self):
+        script = Path("static/source_code_qa.js").read_text(encoding="utf-8")
+
+        self.assertIn("lastEffortPayload = null;", script)
+        self.assertIn("effortMeta.textContent = 'running';", script)
+        self.assertIn("result: null", script)
+        self.assertIn("effortMeta.textContent = ['failed'", script)
+
     def test_frontend_css_is_loaded_from_page_specific_asset(self):
         template = Path("templates/source_code_qa.html").read_text(encoding="utf-8")
         global_stylesheet = Path("static/style.css").read_text(encoding="utf-8")
@@ -2528,6 +2536,14 @@ class SourceCodeQAServiceTests(unittest.TestCase):
 
     def tearDown(self):
         self.temp_dir.cleanup()
+
+    def test_with_codex_timeout_seconds_keeps_original_service_unchanged(self):
+        tuned = self.service.with_codex_timeout_seconds(600)
+
+        self.assertIsNot(tuned, self.service)
+        self.assertEqual(self.service.codex_timeout_seconds, 240)
+        self.assertEqual(tuned.codex_timeout_seconds, 600)
+        self.assertEqual(tuned.base_data_root, self.service.base_data_root)
 
     def _build_index_for_entry(self, key, entry):
         repo_entry = type("Entry", (), entry)()

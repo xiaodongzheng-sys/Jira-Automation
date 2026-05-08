@@ -1566,14 +1566,16 @@ def _run_source_code_qa_effort_assessment_job(app: Flask, job_id: str, payload: 
         try:
             if not _source_code_qa_provider_available(payload.get("llm_provider")):
                 raise ToolError("Selected Source Code Q&A model is unavailable.")
-            service = _build_source_code_qa_service(payload.get("llm_provider"))
+            settings: Settings = app.config["SETTINGS"]
+            service = _build_source_code_qa_service(payload.get("llm_provider")).with_codex_timeout_seconds(
+                settings.source_code_qa_effort_codex_timeout_seconds,
+            )
             pm_team = str(payload.get("pm_team") or "")
             country = str(payload.get("country") or "")
             language = _source_code_qa_effort_assessment_language(payload.get("language"))
             requirement = str(payload.get("requirement") or "").strip()
             if not requirement:
                 raise ToolError("Business requirement is empty.")
-            settings: Settings = app.config["SETTINGS"]
             progress_callback("assessment_prompt", "Building optimized effort assessment evidence query.", 0, 1)
             runtime_evidence = _resolve_source_code_qa_runtime_evidence(pm_team=pm_team, country=country)
             business_plan = _build_source_code_qa_effort_business_plan(
