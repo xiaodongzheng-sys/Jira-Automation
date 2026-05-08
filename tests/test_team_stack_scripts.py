@@ -1032,8 +1032,8 @@ exit 0
         self.assertIn("docs/", dockerignore)
         self.assertIn("source_code_qa/", dockerignore)
         self.assertIn("tests/", dockerignore)
-        self.assertIn("gcloud builds submit", workflow)
-        self.assertIn("_TAG=$GITHUB_SHA", workflow)
+        self.assertIn("./scripts/build_cloud_run_image.sh", workflow)
+        self.assertIn("CLOUD_RUN_IMAGE_TAG=\"$GITHUB_SHA\"", workflow)
         self.assertNotIn("paths:", workflow)
 
     def test_cloud_run_full_deploy_skips_base_url_update_when_service_exists(self):
