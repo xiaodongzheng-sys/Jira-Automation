@@ -199,7 +199,7 @@ For faster UAT releases, use the one-command orchestrator. It runs the release g
 
 The UAT local-agent sync is change-aware. `CLOUD_RUN_UAT_LOCAL_AGENT_SYNC_MODE=auto` skips local-agent sync/restart for static/template/docs/test/web-shell-only changes, while `full` forces the old behavior and `skip` skips it explicitly. `CLOUD_RUN_UAT_PARALLEL_HOST_SYNC=1` overlaps the full UAT host sync with Cloud Run deployment.
 
-- If UAT deploy fails because `local-agent-uat-hmac-secret` is missing or inaccessible in Secret Manager, rerun UAT with `CLOUD_RUN_UAT_LOCAL_AGENT_SECRET_SOURCE=env`. The deploy script reads `LOCAL_AGENT_HMAC_SECRET` from the isolated UAT host `.env`, creates a no-traffic pre-clear revision when the previous service template had `LOCAL_AGENT_HMAC_SECRET` bound as a secret, then deploys the new `uat` tag with the HMAC as a literal env var. This is UAT-only and must still use `--no-traffic`.
+- If UAT deploy fails because `local-agent-uat-hmac-secret` is missing or inaccessible in Secret Manager, rerun UAT with `CLOUD_RUN_UAT_LOCAL_AGENT_SECRET_SOURCE=env`. The deploy script reads `LOCAL_AGENT_HMAC_SECRET` from the isolated UAT host `.env`, deploys the new `uat` tag with the HMAC as a literal env var, and uses `--set-secrets` for the remaining base secrets so the stale UAT local-agent secret binding is replaced. This is UAT-only and must still use `--no-traffic`.
 
 - The default UAT Mac host workspace is `~/Workspace/jira-creation-stack-uat-host`, with data under `.team-portal-uat`. Run the setup helper once before the first isolated UAT deploy:
 

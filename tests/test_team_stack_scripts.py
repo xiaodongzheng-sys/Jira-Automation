@@ -432,7 +432,7 @@ exit 0
             self.assertIn("LOCAL_AGENT_HMAC_SECRET=uat-only-secret", deploy_calls[0])
             self.assertIn("CLOUD_RUN_UAT_LOCAL_AGENT_SECRET_SOURCE=env", completed.stdout)
 
-    def test_cloud_run_uat_env_hmac_fallback_preclears_existing_secret_binding(self):
+    def test_cloud_run_uat_env_hmac_fallback_replaces_secret_bindings_without_preclear_by_default(self):
         deploy_script = PROJECT_ROOT / "scripts/deploy_cloud_run_uat.sh"
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -482,13 +482,12 @@ exit 0
             self.assertEqual(completed.returncode, 0, msg=completed.stderr)
             calls = calls_path.read_text(encoding="utf-8")
             deploy_calls = [line for line in calls.splitlines() if line.startswith("run deploy")]
-            self.assertEqual(len(deploy_calls), 2, msg=calls)
-            self.assertIn("--remove-secrets LOCAL_AGENT_HMAC_SECRET", deploy_calls[0])
-            self.assertIn("--remove-env-vars LOCAL_AGENT_HMAC_SECRET", deploy_calls[0])
-            self.assertNotIn("--update-env-vars LOCAL_AGENT_HMAC_SECRET=uat-only-secret", deploy_calls[0])
-            self.assertIn("--set-secrets", deploy_calls[1])
-            self.assertIn("--set-env-vars", deploy_calls[1])
-            self.assertIn("LOCAL_AGENT_HMAC_SECRET=uat-only-secret", deploy_calls[1])
+            self.assertEqual(len(deploy_calls), 1, msg=calls)
+            self.assertNotIn("--remove-secrets LOCAL_AGENT_HMAC_SECRET", deploy_calls[0])
+            self.assertNotIn("--remove-env-vars LOCAL_AGENT_HMAC_SECRET", deploy_calls[0])
+            self.assertIn("--set-secrets", deploy_calls[0])
+            self.assertIn("--set-env-vars", deploy_calls[0])
+            self.assertIn("LOCAL_AGENT_HMAC_SECRET=uat-only-secret", deploy_calls[0])
 
     def test_cloud_run_uat_deploy_syncs_isolated_mac_local_agent_by_default(self):
         deploy_script = PROJECT_ROOT / "scripts/deploy_cloud_run_uat.sh"
