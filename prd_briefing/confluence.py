@@ -434,6 +434,10 @@ class ConfluenceConnector:
 
     def _is_noise_image(self, image: Tag) -> bool:
         src = str(image.get("src") or "")
+        normalized_src = unquote_plus(src).strip()
+        parsed_src = urlparse(normalized_src)
+        if normalized_src.startswith("$") or (parsed_src.path or "").startswith("/$"):
+            return True
         if NOISE_IMAGE_URL_RE.search(src):
             return True
         width = self._dimension_px(image.get("width") or image.get("data-width"))
@@ -668,7 +672,10 @@ class ConfluenceConnector:
         self._drop_struck_content(fragment)
         self._drop_marker_only_blocks(fragment)
         self._drop_empty_tables(fragment)
-        for image in fragment.find_all("img"):
+        for image in list(fragment.find_all("img")):
+            if self._is_noise_image(image):
+                image.decompose()
+                continue
             src = (image.get("src") or "").strip()
             if src:
                 resolved_src = self._resolve_image_ref(src, base_url=base_url)

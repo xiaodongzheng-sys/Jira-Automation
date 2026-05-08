@@ -188,6 +188,42 @@ class PRDBriefingServiceTests(unittest.TestCase):
         self.assertIn("[MEDIA_ID_", source_text)
         self.assertIn("[IMAGE] https://confluence.example/download/attachments/123/flow.png", source_text)
 
+    def test_confluence_parser_drops_unresolved_macro_image_placeholders(self):
+        connector = ConfluenceConnector(
+            base_url="https://confluence.example",
+            email=None,
+            api_token=None,
+            bearer_token=None,
+            store=self.store,
+        )
+        media_dict = {}
+
+        sections = connector._parse_sections(
+            html="""
+            <table>
+              <tr>
+                <th>JIRA</th>
+                <td>
+                  <img src="$iconUrl">SPSK-264073
+                  (<img src="/$statusIcon">)
+                  <img src="/download/attachments/123/real.png" width="720">
+                </td>
+              </tr>
+            </table>
+            """,
+            base_url="https://confluence.example",
+            source_url="https://confluence.example/pages/viewpage.action?pageId=123",
+            session_id="session-1",
+            media_dict=media_dict,
+        )
+
+        html = sections[0].html_content
+        self.assertNotIn("$iconUrl", html)
+        self.assertNotIn("$statusIcon", html)
+        self.assertIn("SPSK-264073", html)
+        self.assertIn("/prd-briefing/image-proxy?src=", html)
+        self.assertEqual([item["type"] for item in media_dict.values()], ["table"])
+
     def test_presentation_prompts_include_language_specific_script_rules(self):
         english_prompt = build_presentation_system_prompt("en")
         chinese_prompt = build_presentation_system_prompt("zh")
