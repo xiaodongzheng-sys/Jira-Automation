@@ -5930,17 +5930,20 @@ select:focus {
   }
 
   .site-switcher-subtrack {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     width: 100%;
     justify-content: flex-start;
+    overflow: visible;
     border-radius: 14px;
-    scroll-snap-type: x proximity;
   }
 
   .site-switcher-subtab {
-    max-width: 76vw;
+    width: 100%;
+    max-width: 100%;
     min-height: 36px;
     padding: 9px 12px;
-    scroll-snap-align: start;
+    white-space: normal;
   }
 
   .portal-compact-hero {
