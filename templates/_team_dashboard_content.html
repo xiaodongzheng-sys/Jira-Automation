@@ -81,27 +81,25 @@
         </div>
       </div>
       <p class="productization-inline-status" data-monthly-report-status></p>
-      <div class="team-dashboard-monthly-report-controls">
-        <div class="field-group team-dashboard-monthly-report-topic-field">
-          <label for="team_dashboard_monthly_report_topics">Highlights Topics</label>
-          <textarea
-            id="team_dashboard_monthly_report_topics"
-            rows="4"
-            spellcheck="true"
-            placeholder="One topic per line, up to 5"
-            data-monthly-report-topics
-          ></textarea>
+      <div class="team-dashboard-monthly-report-date-grid">
+        <div class="field-group">
+          <label for="team_dashboard_monthly_report_start">Start Date</label>
+          <input id="team_dashboard_monthly_report_start" type="date" data-monthly-report-period-start>
         </div>
-        <div class="team-dashboard-monthly-report-date-grid">
-          <div class="field-group">
-            <label for="team_dashboard_monthly_report_start">Start Date</label>
-            <input id="team_dashboard_monthly_report_start" type="date" data-monthly-report-period-start>
-          </div>
-          <div class="field-group">
-            <label for="team_dashboard_monthly_report_end">End Date</label>
-            <input id="team_dashboard_monthly_report_end" type="date" data-monthly-report-period-end>
-          </div>
+        <div class="field-group">
+          <label for="team_dashboard_monthly_report_end">End Date</label>
+          <input id="team_dashboard_monthly_report_end" type="date" data-monthly-report-period-end>
         </div>
+      </div>
+      <div class="field-group team-dashboard-monthly-report-topic-field">
+        <label for="team_dashboard_monthly_report_topics">Highlights Topics</label>
+        <textarea
+          id="team_dashboard_monthly_report_topics"
+          rows="4"
+          spellcheck="true"
+          placeholder="One topic per line, up to 5"
+          data-monthly-report-topics
+        ></textarea>
       </div>
       <div class="team-dashboard-progress team-dashboard-monthly-report-progress" data-monthly-report-progress hidden>
         <div class="team-dashboard-progress-bar" aria-hidden="true">
@@ -126,17 +124,17 @@
       <div class="team-dashboard-monthly-report-grid">
         <div class="field-group team-dashboard-monthly-report-editor">
           <label for="team_dashboard_monthly_report_draft">Monthly Report Draft</label>
-          <textarea id="team_dashboard_monthly_report_draft" rows="22" spellcheck="true" data-monthly-report-draft></textarea>
+          <textarea id="team_dashboard_monthly_report_draft" rows="28" spellcheck="true" data-monthly-report-draft></textarea>
         </div>
-        <div class="team-dashboard-monthly-report-preview">
-          <div class="field-label-row">
-            <h4>Preview</h4>
+        <details class="team-dashboard-monthly-report-preview" open>
+          <summary>
+            <span>Preview</span>
             <span data-monthly-report-recipient>xiaodong.zheng@npt.sg</span>
-          </div>
+          </summary>
           <div class="team-dashboard-review-markdown team-dashboard-monthly-report-preview-body" data-monthly-report-preview>
             <p>Generate a draft to preview the email body.</p>
           </div>
-        </div>
+        </details>
       </div>
       {% if can_manage_team_dashboard %}
         <form method="post" action="{{ url_for('save_team_dashboard_monthly_report_template') }}" class="stack team-dashboard-monthly-report-template-form" data-monthly-report-template-form>

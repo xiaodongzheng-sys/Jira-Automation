@@ -31,7 +31,7 @@ from prd_briefing.reviewer import _build_prd_source
 
 DEFAULT_MONTHLY_REPORT_RECIPIENT = "xiaodong.zheng@npt.sg"
 MONTHLY_REPORT_PROMPT_VERSION = "v1_team_dashboard_monthly_report"
-MONTHLY_REPORT_GENERATION_VERSION = "v3_highlight_deep_evidence"
+MONTHLY_REPORT_GENERATION_VERSION = "v4_target_live_date"
 MONTHLY_REPORT_PERIOD_ANCHOR_START = date(2026, 4, 13)
 MONTHLY_REPORT_PERIOD_ANCHOR_END = date(2026, 5, 8)
 MONTHLY_REPORT_PERIOD_DAYS = 28
@@ -974,12 +974,15 @@ def build_monthly_highlight_deep_evidence(
                 if str(item.get("scope_summary") or "").strip()
             ]
             prd_facts.extend(project_prd_facts)
+            target_tech_live_date, target_tech_live_version = _monthly_report_target_tech_live_date(jira_tickets)
             project_updates.append(
                 {
                     "bpmis_id": str(project.get("bpmis_id") or "").strip(),
                     "project_name": str(project.get("project_name") or "").strip(),
                     "market": str(project.get("market") or "").strip(),
                     "priority": str(project.get("priority") or "").strip(),
+                    "target_tech_live_date": target_tech_live_date,
+                    "target_tech_live_version": target_tech_live_version,
                     "current_status": _monthly_report_current_status(
                         jira_tickets,
                         report_period=report_period,
@@ -1043,6 +1046,7 @@ def build_monthly_project_evidence_brief(
         decisions_needed = _direct_project_decisions(matched_seatalk + matched_gmail)
         score = jira_score + len(matched_seatalk) * 3 + len(matched_gmail) * 3 + len(matched_prd) * 2
         current_status = _monthly_report_current_status(jira_tickets, report_period=report_period, material_update_score=score)
+        target_tech_live_date, target_tech_live_version = _monthly_report_target_tech_live_date(jira_tickets)
         include = True
         evidence_sources = {
             "jira": jira_sources,
@@ -1068,6 +1072,8 @@ def build_monthly_project_evidence_brief(
                 "matched_prd_summaries": prd_facts,
                 "material_update_score": score,
                 "current_status": current_status,
+                "target_tech_live_date": target_tech_live_date,
+                "target_tech_live_version": target_tech_live_version,
                 "status_facts": _dedupe_preserve_order(status_facts)[:10],
                 "timeline_facts": _dedupe_preserve_order(timeline_facts)[:8],
                 "risks": risks[:6],
@@ -1330,6 +1336,7 @@ def build_monthly_report_final_prompt(
         "- Do not include Jira ticket IDs, Jira links, or issue-key references in the report.\n"
         "- Do not include a Key Follow-Ups section.\n"
         "- Current Status must be exactly one of: BRD, PRD, Dev, UAT. Do not add explanations in that cell.\n\n"
+        "- Target Tech Live Date must use target_tech_live_date from Other Key Project Updates exactly. If it is TBD, write TBD. Do not infer a target date from timeline_facts or any version starting with Planning.\n\n"
         f"# Generated At\n{generated_at.isoformat()}\n\n"
         f"# Report Period\n{report_period.start_date} to {report_period.end_date}\n\n"
         f"# User-Provided Highlight Topics\n{_json_block(highlight_topics)}\n\n"
@@ -1360,6 +1367,8 @@ def _compact_monthly_evidence_for_final(monthly_evidence_brief: list[dict[str, A
                 "seatalk_group_ids": _compact_text_list(item.get("seatalk_group_ids"), limit=8, max_chars=80),
                 "material_update_score": _safe_int(item.get("material_update_score")),
                 "current_status": _monthly_report_status_label(item.get("current_status")),
+                "target_tech_live_date": str(item.get("target_tech_live_date") or "TBD").strip() or "TBD",
+                "target_tech_live_version": str(item.get("target_tech_live_version") or "").strip(),
                 "status_facts": _compact_report_text_list(item.get("status_facts"), limit=6, max_chars=320),
                 "timeline_facts": _compact_report_text_list(item.get("timeline_facts"), limit=5, max_chars=240),
                 "risks": _compact_report_text_list(item.get("risks"), limit=4, max_chars=320),
@@ -1905,7 +1914,7 @@ def _jira_evidence_facts(jira_tickets: list[dict[str, Any]]) -> tuple[list[str],
         score += 1
         if jira_id or title or status:
             status_facts.append(" ".join(item for item in [jira_id, title, f"is {status}" if status else ""] if item).strip())
-        if release_date or version:
+        if not _is_monthly_report_planning_version(version) and (release_date or version):
             timeline_facts.append(" ".join(item for item in [jira_id, f"release {release_date}" if release_date else "", f"version {version}" if version else ""] if item).strip())
         sources.append(
             {
@@ -1917,6 +1926,36 @@ def _jira_evidence_facts(jira_tickets: list[dict[str, Any]]) -> tuple[list[str],
             }
         )
     return status_facts, timeline_facts, sources, score
+
+
+def _monthly_report_target_tech_live_date(jira_tickets: list[dict[str, Any]]) -> tuple[str, str]:
+    latest: tuple[date, str] | None = None
+    for ticket in jira_tickets:
+        version = str(
+            ticket.get("version")
+            or ticket.get("fix_version_name")
+            or ticket.get("fixVersion")
+            or ticket.get("fix_version")
+            or ""
+        ).strip()
+        if _is_monthly_report_planning_version(version):
+            continue
+        release_date = str(ticket.get("release_date") or "").strip()
+        if not release_date:
+            continue
+        try:
+            parsed = date.fromisoformat(release_date[:10])
+        except ValueError:
+            continue
+        if latest is None or parsed > latest[0]:
+            latest = (parsed, version)
+    if latest is None:
+        return "TBD", ""
+    return latest[0].isoformat(), latest[1]
+
+
+def _is_monthly_report_planning_version(value: Any) -> bool:
+    return str(value or "").strip().casefold().startswith("planning")
 
 
 def _monthly_report_current_status(

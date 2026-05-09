@@ -736,6 +736,34 @@ class MonthlyReportTests(unittest.TestCase):
                     "teams": ["Anti-fraud"],
                     "jira_tickets": [{"jira_id": "AF-5", "jira_title": "Released item", "jira_status": "Waiting", "release_date": "2026-04-15"}],
                 },
+                {
+                    "bpmis_id": "TARGET",
+                    "project_name": "Anti-fraud Target Date",
+                    "teams": ["Anti-fraud"],
+                    "jira_tickets": [
+                        {
+                            "jira_id": "AF-6",
+                            "jira_title": "Planning item",
+                            "jira_status": "Testing",
+                            "release_date": "2026-12-31",
+                            "version": "Planning_26Q4",
+                        },
+                        {
+                            "jira_id": "AF-7",
+                            "jira_title": "Earlier tech live",
+                            "jira_status": "Testing",
+                            "release_date": "2026-05-15",
+                            "version": "AF_v1.0_0515",
+                        },
+                        {
+                            "jira_id": "AF-8",
+                            "jira_title": "Latest tech live",
+                            "jira_status": "Testing",
+                            "release_date": "2026-06-20",
+                            "version": "AF_v1.1_0620",
+                        },
+                    ],
+                },
             ],
             seatalk_history_text="",
             vip_gmail_text="",
@@ -749,6 +777,10 @@ class MonthlyReportTests(unittest.TestCase):
         self.assertEqual(by_id["DEV"], "Dev")
         self.assertEqual(by_id["UAT"], "UAT")
         self.assertEqual(by_id["RELEASED"], "UAT")
+        target = next(item for item in brief if item["project_id"] == "TARGET")
+        self.assertEqual(target["target_tech_live_date"], "2026-06-20")
+        self.assertEqual(target["target_tech_live_version"], "AF_v1.1_0620")
+        self.assertFalse(any("Planning_26Q4" in fact for fact in target["timeline_facts"]))
 
     def test_vip_gmail_failure_does_not_fail_draft(self):
         class BrokenGmailService:
