@@ -11,6 +11,7 @@ import tempfile
 import threading
 import time
 from dataclasses import asdict, is_dataclass
+from datetime import datetime
 from http import HTTPStatus
 from pathlib import Path
 from typing import Any
@@ -1317,7 +1318,18 @@ def create_local_agent_app() -> Flask:
     def seatalk_export():
         payload = request.get_json(silent=True) or {}
         with _seatalk_name_overrides(payload.get("name_mappings")) as name_overrides_path:
-            content, filename = _build_seatalk_service(settings, name_overrides_path=name_overrides_path).export_history_text()
+            service = _build_seatalk_service(settings, name_overrides_path=name_overrides_path)
+            since_text = str(payload.get("since") or "").strip()
+            if since_text:
+                since = datetime.fromisoformat(since_text.replace("Z", "+00:00"))
+                now_text = str(payload.get("now") or "").strip()
+                now = datetime.fromisoformat(now_text.replace("Z", "+00:00")) if now_text else None
+                days = int(payload.get("days") or 7)
+                conversation_scope = str(payload.get("conversation_scope") or "").strip() or None
+                content = service.export_history_since(since=since, now=now, days=days, conversation_scope=conversation_scope)
+                filename = f"seatalk-history-since-{since.date().isoformat()}.txt"
+            else:
+                content, filename = service.export_history_text()
         return jsonify({"status": "ok", "content": content, "filename": filename})
 
     @app.post("/api/local-agent/bpmis/call")

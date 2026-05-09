@@ -133,10 +133,11 @@ class SeaTalkDashboardService:
         since: datetime,
         now: datetime | None = None,
         days: int = SEATALK_DASHBOARD_DEFAULT_DAYS,
+        conversation_scope: str | None = None,
     ) -> str:
         now = now or datetime.now().astimezone()
         self._validate_local_environment()
-        return self._load_local_history_export(days=days, now=now, since=since)
+        return self._load_local_history_export(days=days, now=now, since=since, conversation_scope=conversation_scope)
 
     def build_insights(
         self,
@@ -399,8 +400,19 @@ class SeaTalkDashboardService:
             raise ToolError("SeaTalk desktop metrics returned an invalid payload.")
         return payload
 
-    def _load_local_history_export(self, *, days: int, now: datetime, since: datetime | None = None) -> str:
-        extra_args = ["--since", since.isoformat()] if since is not None else None
+    def _load_local_history_export(
+        self,
+        *,
+        days: int,
+        now: datetime,
+        since: datetime | None = None,
+        conversation_scope: str | None = None,
+    ) -> str:
+        extra_args: list[str] = []
+        if since is not None:
+            extra_args.extend(["--since", since.isoformat()])
+        if conversation_scope:
+            extra_args.extend(["--conversation-scope", str(conversation_scope)])
         result = self._run_local_helper("seatalk_local_export.js", days=days, now=now, timeout=45, extra_args=extra_args)
         if result.returncode != 0:
             message = (result.stderr or result.stdout or "").strip()

@@ -863,6 +863,30 @@ class LocalAgentClientTests(unittest.TestCase):
         self.assertEqual(request.call_args.args[1], "/api/local-agent/seatalk/name-mappings")
         self.assertEqual(request.call_args.args[2], {"force_refresh": True})
 
+    def test_seatalk_export_since_passes_monthly_highlight_scope(self):
+        client = LocalAgentClient(base_url="https://portal.example", hmac_secret="shared-secret")
+        with patch.object(client, "_request", return_value={"status": "ok", "content": "history"}) as request:
+            content = client.seatalk_export_since(
+                since=datetime(2026, 4, 20, 0, 0),
+                now=datetime(2026, 5, 4, 0, 0),
+                days=15,
+                conversation_scope="monthly-highlight",
+                name_mappings={"group-1": "Risk Group"},
+            )
+
+        self.assertEqual(content, "history")
+        self.assertEqual(request.call_args.args[1], "/api/local-agent/seatalk/export")
+        self.assertEqual(
+            request.call_args.args[2],
+            {
+                "name_mappings": {"group-1": "Risk Group"},
+                "since": "2026-04-20T00:00:00",
+                "now": "2026-05-04T00:00:00",
+                "days": 15,
+                "conversation_scope": "monthly-highlight",
+            },
+        )
+
     def test_unreadable_response_includes_status_and_preview(self):
         class FakeResponse:
             status_code = 404

@@ -14,6 +14,7 @@ from bpmis_jira_tool.monthly_report import (
     MONTHLY_REPORT_BATCH_MAX_TOKENS,
     MONTHLY_REPORT_FINAL_MAX_TOKENS,
     MONTHLY_REPORT_MERGE_MAX_TOKENS,
+    MONTHLY_REPORT_SEATALK_HIGHLIGHT_CONVERSATION_SCOPE,
     MonthlyReportService,
     _estimate_token_count,
     build_monthly_report_final_prompt,
@@ -42,8 +43,8 @@ class _FakeSeaTalkService:
     def __init__(self):
         self.calls = []
 
-    def export_history_since(self, *, since, now, days):
-        self.calls.append({"since": since, "now": now, "days": days})
+    def export_history_since(self, *, since, now, days, conversation_scope=None):
+        self.calls.append({"since": since, "now": now, "days": days, "conversation_scope": conversation_scope})
         return "[2026-04-10] AF Group / Alice: AF launch is blocked by approval.\n"
 
     def _filter_system_generated_history(self, value):
@@ -311,6 +312,7 @@ class MonthlyReportTests(unittest.TestCase):
         self.assertEqual(seatalk.calls[0]["since"].isoformat(), "2026-04-20T00:00:00+08:00")
         self.assertEqual(seatalk.calls[0]["now"].isoformat(), "2026-05-04T00:00:00+08:00")
         self.assertEqual(seatalk.calls[0]["days"], 15)
+        self.assertEqual(seatalk.calls[0]["conversation_scope"], MONTHLY_REPORT_SEATALK_HIGHLIGHT_CONVERSATION_SCOPE)
         self.assertEqual(gmail.calls[0]["since"].isoformat(), "2026-04-20T00:00:00+08:00")
         self.assertEqual(gmail.calls[0]["now"].isoformat(), "2026-05-04T00:00:00+08:00")
         self.assertEqual(gmail.calls[0]["contact_emails"], ["siewghee.kunglim@shopee.com"])
@@ -355,6 +357,7 @@ class MonthlyReportTests(unittest.TestCase):
         self.assertEqual(result["generation_summary"]["period_end_exclusive"], "2026-05-04T00:00:00+08:00")
         self.assertEqual(result["generation_summary"]["evidence_period_start"], "2026-04-20")
         self.assertEqual(result["generation_summary"]["evidence_period_end"], "2026-05-03")
+        self.assertEqual(result["generation_summary"]["seatalk_conversation_scope"], MONTHLY_REPORT_SEATALK_HIGHLIGHT_CONVERSATION_SCOPE)
         self.assertEqual(result["generation_summary"]["highlight_topics"], ["Key Fraud Project", "GRC Phase 1"])
         progress_stages = [item["stage"] for item in progress_events]
         for stage in (

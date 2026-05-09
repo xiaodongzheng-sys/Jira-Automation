@@ -562,6 +562,28 @@ class LocalAgentClient:
         payload = self._request("POST", "/api/local-agent/seatalk/export", {"name_mappings": name_mappings or {}})
         return str(payload.get("content") or ""), str(payload.get("filename") or "seatalk-history-last-7-days.txt")
 
+    def seatalk_export_since(
+        self,
+        *,
+        since: Any,
+        now: Any | None = None,
+        days: int = 7,
+        conversation_scope: str | None = None,
+        name_mappings: dict[str, str] | None = None,
+    ) -> str:
+        payload = self._request(
+            "POST",
+            "/api/local-agent/seatalk/export",
+            {
+                "name_mappings": name_mappings or {},
+                "since": since.isoformat() if hasattr(since, "isoformat") else str(since or ""),
+                "now": now.isoformat() if hasattr(now, "isoformat") else str(now or ""),
+                "days": int(days),
+                "conversation_scope": str(conversation_scope or ""),
+            },
+        )
+        return str(payload.get("content") or "")
+
     def bpmis_call(self, *, operation: str, access_token: str | None, args: list[Any] | None = None, kwargs: dict[str, Any] | None = None) -> Any:
         payload = self._request(
             "POST",
@@ -1020,6 +1042,22 @@ class RemoteSeaTalkDashboardService:
 
     def export_history_text(self) -> tuple[str, str]:
         return self.client.seatalk_export(name_mappings=self.name_mappings_provider())
+
+    def export_history_since(
+        self,
+        *,
+        since: Any,
+        now: Any | None = None,
+        days: int = 7,
+        conversation_scope: str | None = None,
+    ) -> str:
+        return self.client.seatalk_export_since(
+            name_mappings=self.name_mappings_provider(),
+            since=since,
+            now=now,
+            days=days,
+            conversation_scope=conversation_scope,
+        )
 
 
 class RemoteSourceCodeQAService:

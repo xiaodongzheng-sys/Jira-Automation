@@ -36,6 +36,7 @@ MONTHLY_REPORT_PERIOD_ANCHOR_START = date(2026, 4, 13)
 MONTHLY_REPORT_PERIOD_ANCHOR_END = date(2026, 5, 8)
 MONTHLY_REPORT_PERIOD_DAYS = 28
 MONTHLY_REPORT_EVIDENCE_DAYS = 14
+MONTHLY_REPORT_SEATALK_HIGHLIGHT_CONVERSATION_SCOPE = "monthly-highlight"
 MONTHLY_REPORT_PRODUCT_SCOPE = ("Anti-fraud", "Credit Risk", "Ops Risk")
 MONTHLY_REPORT_SEATALK_DAYS = 28
 MONTHLY_REPORT_MAX_SEATALK_CHARS = 640_000
@@ -408,6 +409,7 @@ class MonthlyReportService:
                 "estimated_prompt_tokens": estimated_prompt_tokens,
                 "token_risk": _monthly_report_token_risk(estimated_prompt_tokens),
                 "seatalk_history_chars": len(history_text),
+                "seatalk_conversation_scope": MONTHLY_REPORT_SEATALK_HIGHLIGHT_CONVERSATION_SCOPE,
                 "max_seatalk_chars": MONTHLY_REPORT_MAX_SEATALK_CHARS,
                 "total_batches": len(batch_summaries),
                 "max_batch_estimated_tokens": max(batch_token_counts) if batch_token_counts else 0,
@@ -621,6 +623,7 @@ class MonthlyReportService:
             since=report_period.start,
             now=report_period.end_exclusive,
             days=report_period.days + 1,
+            conversation_scope=MONTHLY_REPORT_SEATALK_HIGHLIGHT_CONVERSATION_SCOPE,
         )
         history = self.seatalk_service._filter_system_generated_history(history)
         history = filter_text_by_noise(history, config=self.report_intelligence_config, source="seatalk")

@@ -170,6 +170,33 @@ class SeaTalkDashboardServiceTests(unittest.TestCase):
         self.assertIn("--name-overrides", export_command)
         self.assertIn(str(overrides_path), export_command)
 
+    def test_export_history_since_can_limit_to_monthly_highlight_scope(self):
+        calls: list[list[str]] = []
+
+        def runner(command: list[str]):
+            calls.append(command)
+            return subprocess.CompletedProcess(args=command, returncode=0, stdout="scoped history", stderr="")
+
+        service = SeaTalkDashboardService(
+            owner_email="xiaodong.zheng@npt.sg",
+            seatalk_app_path=str(self.app_dir),
+            seatalk_data_dir=str(self.data_dir),
+            command_runner=runner,
+        )
+
+        content = service.export_history_since(
+            since=datetime(2026, 4, 20, 0, 0).astimezone(),
+            now=datetime(2026, 5, 4, 0, 0).astimezone(),
+            days=15,
+            conversation_scope="monthly-highlight",
+        )
+
+        self.assertEqual(content, "scoped history")
+        self.assertEqual(len(calls), 1)
+        self.assertIn("--since", calls[0])
+        self.assertIn("--conversation-scope", calls[0])
+        self.assertIn("monthly-highlight", calls[0])
+
     def test_person_mapping_aliases_work_for_buddy_and_uid_exports(self):
         overrides_path = Path(self.temp_dir.name) / "seatalk" / "name_overrides.json"
         overrides_path.parent.mkdir(parents=True, exist_ok=True)
@@ -189,6 +216,9 @@ class SeaTalkDashboardServiceTests(unittest.TestCase):
         self.assertIn("loadThreadRootSummaries", source)
         self.assertIn("Thread replies are annotated", source)
         self.assertIn("thread reply", source)
+        self.assertIn("filterRowsByConversationScope", source)
+        self.assertIn("monthly-highlight", source)
+        self.assertIn("rowMentionsSelf", source)
 
     def test_name_mapping_daily_cache_key_has_candidate_version(self):
         service = SeaTalkDashboardService(

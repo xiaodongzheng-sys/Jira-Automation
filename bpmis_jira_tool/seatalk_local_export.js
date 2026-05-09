@@ -29,6 +29,7 @@ function parseArgs(argv) {
     now: new Date().toISOString(),
     since: '',
     nameOverridesPath: '',
+    conversationScope: '',
     unknownIdsJson: false,
   };
   for (let index = 0; index < argv.length; index += 1) {
@@ -48,6 +49,9 @@ function parseArgs(argv) {
       index += 1;
     } else if (token === '--name-overrides') {
       args.nameOverridesPath = value || '';
+      index += 1;
+    } else if (token === '--conversation-scope') {
+      args.conversationScope = value || '';
       index += 1;
     } else if (token === '--unknown-ids-json') {
       args.unknownIdsJson = true;
@@ -379,14 +383,47 @@ function exampleScore(example) {
 function mentionsSelf(text, selfUid) {
   const value = String(text || '').toLowerCase();
   const compact = value.replace(/\s+/g, ' ');
+  const compactNoSpace = compact.replace(/\s+/g, '');
   return [
     '@xiaodong',
     'xiaodong',
+    'zhengxiaodong',
     'zheng xiaodong',
     'xiaodong.zheng@npt.sg',
     `@${selfUid}`,
     `uid ${selfUid}`,
-  ].some((term) => compact.includes(String(term).toLowerCase()));
+  ].some((term) => {
+    const lowered = String(term).toLowerCase();
+    return compact.includes(lowered) || compactNoSpace.includes(lowered.replace(/\s+/g, ''));
+  });
+}
+
+function rowMentionsSelf(row, selfUid) {
+  const parsed = safeParseJson(row.c);
+  const text = [
+    extractText(row, parsed),
+    row.c || '',
+    row.q || '',
+  ].join('\n');
+  return mentionsSelf(text, selfUid);
+}
+
+function filterRowsByConversationScope(rows, selfUid, conversationScope) {
+  const scope = String(conversationScope || '').trim().toLowerCase();
+  if (!scope) return rows;
+  if (scope !== 'monthly-highlight') {
+    throw new Error(`Unsupported SeaTalk conversation scope: ${conversationScope}`);
+  }
+  const includedSids = new Set();
+  for (const row of rows) {
+    const sid = String(row.sid || '');
+    if (sid.startsWith('buddy-')) {
+      includedSids.add(sid);
+    } else if (sid.startsWith('group-') && (String(row.u) === String(selfUid) || rowMentionsSelf(row, selfUid))) {
+      includedSids.add(sid);
+    }
+  }
+  return rows.filter((row) => includedSids.has(String(row.sid || '')));
 }
 
 function formatTimestamp(epochSeconds) {
@@ -400,18 +437,19 @@ function formatTimestamp(epochSeconds) {
   return `${year}-${month}-${day} ${hour}:${minute}:${second}`;
 }
 
-function buildHistoryText(rows, selfUid, days, nowIso, db, overrides, sinceIso = '') {
+function buildHistoryText(rows, selfUid, days, nowIso, db, overrides, sinceIso = '', conversationScope = '') {
   const { uidNames, sidNames } = buildNameMaps(rows, db);
   const filteredRows = rows.filter((row) => !isBotConversationRow(row, sidNames));
   const threadRootSummaries = loadThreadRootSummaries(db, filteredRows);
   const lines = [
     'SeaTalk Chat History Export',
     sinceIso ? `Window: since ${sinceIso}` : `Window: last ${days} days`,
+    conversationScope ? `Conversation scope: ${conversationScope}` : '',
     `Generated at: ${nowIso}`,
     `Includes thread replies when they are stored as regular message rows in the local SeaTalk database. Thread replies are annotated and may not appear as new main-chat messages in SeaTalk.`,
     'Private SeaTalk bot conversations are excluded from this export.',
     '',
-  ];
+  ].filter((line) => line !== '');
   let currentConversation = '';
   for (const row of filteredRows) {
     const parsed = safeParseJson(row.c);
@@ -547,6 +585,7 @@ function main() {
         AND t NOT IN (${placeholders})
       ORDER BY sid ASC, ts ASC, mid ASC
     `).all(ranges.periodStartEpoch, ranges.periodEndEpoch, ...excludedTypes);
+    const scopedRows = args.unknownIdsJson ? rows : filterRowsByConversationScope(rows, uid, args.conversationScope);
     if (args.unknownIdsJson) {
       process.stdout.write(JSON.stringify({
         unknown_ids: collectUnknownIds(rows, uid, db, overrides, ranges.periodEndEpoch),
@@ -554,7 +593,7 @@ function main() {
         period_days: args.days,
       }));
     } else {
-      process.stdout.write(buildHistoryText(rows, uid, args.days, args.now, db, overrides, args.since));
+      process.stdout.write(buildHistoryText(scopedRows, uid, args.days, args.now, db, overrides, args.since, args.conversationScope));
     }
   } finally {
     db.close();
