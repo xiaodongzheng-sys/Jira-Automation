@@ -440,7 +440,30 @@ def create_local_agent_app() -> Flask:
         job_store: JobStore = current_app.config["TEAM_DASHBOARD_JOB_STORE"]
         snapshot = job_store.snapshot(job_id)
         if snapshot is None:
-            return jsonify({"status": "error", "message": "Monthly Report local-agent job was not found."}), HTTPStatus.NOT_FOUND
+            message = "This Monthly Report job was interrupted by a local-agent restart. Please start it again."
+            return jsonify(
+                {
+                    "status": "ok",
+                    "job_id": job_id,
+                    "action": "team-dashboard-monthly-report-draft",
+                    "state": "failed",
+                    "stage": "failed",
+                    "message": message,
+                    "error": message,
+                    "error_category": "server_restart",
+                    "error_code": "monthly_report_job_interrupted",
+                    "error_retryable": True,
+                    "progress": {
+                        "stage": "failed",
+                        "current": 0,
+                        "total": 0,
+                        "message": message,
+                        "estimated_prompt_tokens": 0,
+                        "token_risk": "",
+                    },
+                    "results": [],
+                }
+            )
         return jsonify({"status": "ok", **snapshot})
 
     @app.get("/api/local-agent/team-dashboard/monthly-report/latest-draft")

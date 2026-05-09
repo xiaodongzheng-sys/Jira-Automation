@@ -94,6 +94,19 @@ class LocalAgentServerTests(unittest.TestCase):
         self.assertIsNone(portal_store.get(job.job_id))
         self.assertEqual(job_store.get(job.job_id).state, "running")
 
+    def test_missing_monthly_report_job_returns_restart_interruption_status(self):
+        response = self._get_signed("/api/local-agent/team-dashboard/monthly-report/jobs/missing-job")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["state"], "failed")
+        self.assertEqual(payload["error_category"], "server_restart")
+        self.assertEqual(payload["error_code"], "monthly_report_job_interrupted")
+        self.assertTrue(payload["error_retryable"])
+        self.assertIn("interrupted", payload["message"])
+        self.assertEqual(payload["progress"]["stage"], "failed")
+
     def _post_signed(self, path, payload):
         body = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
         headers = sign_headers(secret="shared-secret", method="POST", path=path, body=body)
