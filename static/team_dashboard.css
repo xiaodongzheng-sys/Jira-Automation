@@ -1031,7 +1031,7 @@
     max-width: 100% !important;
   }
 
-  .team-dashboard-page input,
+  .team-dashboard-page input:not([type="checkbox"]):not([type="radio"]),
   .team-dashboard-page textarea,
   .team-dashboard-page select {
     width: 100% !important;
@@ -1055,6 +1055,20 @@
   .team-dashboard-monthly-report-source-group label {
     white-space: normal !important;
     overflow-wrap: anywhere !important;
+  }
+
+  .team-dashboard-monthly-report-source-group label {
+    display: grid !important;
+    grid-template-columns: auto minmax(0, 1fr);
+    justify-content: start !important;
+    text-align: left !important;
+  }
+
+  .team-dashboard-monthly-report-source-group label input[type="checkbox"] {
+    width: auto !important;
+    min-width: 0 !important;
+    max-width: none !important;
+    justify-self: start;
   }
 }
 
