@@ -1,24 +1,6 @@
 name: Build Cloud Run image
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - ".github/workflows/cloud-run-image.yml"
-      - "Dockerfile"
-      - "cloudbuild.yaml"
-      - "requirements-cloud-run.txt"
-      - "app.py"
-      - "local_agent.py"
-      - "bpmis_jira_tool/**"
-      - "config/**"
-      - "prd_briefing/**"
-      - "static/**"
-      - "templates/**"
-      - "scripts/build_cloud_run_image.sh"
-      - "scripts/lib/team_env.sh"
-      - "scripts/lib/cloud_run_image_policy.sh"
   workflow_dispatch:
 
 permissions:

@@ -1122,9 +1122,8 @@ exit 0
         self.assertIn("google-github-actions/setup-gcloud@v3", workflow)
         self.assertIn("CLOUD_RUN_IMAGE_TAG=\"$GITHUB_SHA\"", workflow)
         self.assertIn("FORCE_JAVASCRIPT_ACTIONS_TO_NODE24", workflow)
-        self.assertIn("paths:", workflow)
-        self.assertIn('"bpmis_jira_tool/**"', workflow)
-        self.assertIn('"scripts/build_cloud_run_image.sh"', workflow)
+        self.assertIn("workflow_dispatch:", workflow)
+        self.assertNotIn("push:", workflow)
         self.assertIn("concurrency:", workflow)
 
     def test_cloud_run_image_policy_distinguishes_runtime_inputs(self):
@@ -1155,8 +1154,12 @@ cloud_run_image_trigger_included_files_csv
         script = (PROJECT_ROOT / "scripts/setup_cloud_build_image_trigger.sh").read_text(encoding="utf-8")
 
         self.assertIn("cloud_run_image_trigger_included_files_csv", script)
+        self.assertIn("CLOUD_BUILD_GITHUB_CONNECTION_NAME", script)
+        self.assertIn("builds repositories create", script)
         self.assertIn("builds triggers create github", script)
-        self.assertIn("builds triggers update github", script)
+        self.assertIn("CLOUD_BUILD_IMAGE_TRIGGER_RECREATE", script)
+        self.assertIn("builds triggers delete", script)
+        self.assertIn("--repository \"$repository_resource\"", script)
         self.assertIn("--included-files", script)
         self.assertIn("_TAG=\\$COMMIT_SHA", script)
 

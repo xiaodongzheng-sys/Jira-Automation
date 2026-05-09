@@ -60,7 +60,7 @@ node --check static/source_code_qa.js
 ENV_FILE=/dev/null ./.venv/bin/python scripts/run_source_code_qa_release_gate.py
 ```
 
-- For Source Code Q&A changes, run the release gate/evals that match the changed retrieval or provider behavior. Source Code Q&A is Codex-only for LLM answers and uses the local token hybrid index for semantic retrieval; do not configure Gemini, Vertex AI, OpenAI-compatible, or remote embedding providers for this workflow:
+- For Source Code Q&A changes, run the release gate/evals that match the changed retrieval or provider behavior. Source Code Q&A is Codex-only for LLM answers and uses the local token hybrid index for semantic retrieval; do not configure legacy AI providers or remote embedding providers for this workflow:
 
 ```bash
 ./.venv/bin/python scripts/run_source_code_qa_release_gate.py
@@ -181,7 +181,7 @@ CLOUD_RUN_IMAGE=asia-southeast1-docker.pkg.dev/PROJECT/REPO/team-portal:TAG \
 ./scripts/deploy_cloud_run_uat.sh
 ```
 
-The GitHub workflow `.github/workflows/cloud-run-image.yml` can prebuild the same image automatically on pushes to `main` when these repository variables are configured:
+The GitHub workflow `.github/workflows/cloud-run-image.yml` remains as a manual fallback (`workflow_dispatch`) when these repository variables are configured:
 
 ```text
 GCP_PROJECT_ID
@@ -192,14 +192,14 @@ CLOUD_RUN_ARTIFACT_REPOSITORY
 CLOUD_RUN_IMAGE_NAME
 ```
 
-The workflow opts into Node 24 actions execution with `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24=true` so the image prebuild path is not surprised by the GitHub-hosted runner Node 20 retirement.
+The workflow opts into Node 24 actions execution with `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24=true` so the fallback image prebuild path is not surprised by the GitHub-hosted runner Node 20 retirement.
 
-The workflow is path-filtered. It only prebuilds a new image when Cloud Run runtime inputs or image-build inputs change (`Dockerfile`, `requirements-cloud-run.txt`, `app.py`, `local_agent.py`, `bpmis_jira_tool/`, `config/`, `prd_briefing/`, `static/`, `templates/`, `cloudbuild.yaml`, or image-build scripts). Docs, tests, and release-only scripts no longer trigger a first SHA image build.
-
-If GitHub Actions overhead becomes the bottleneck, configure the direct Cloud Build trigger after the GitHub App connection is authorized in GCP:
+For automatic push builds, use the direct Cloud Build trigger. It uses the authorized GitHub connection and only runs when Cloud Run runtime inputs or image-build inputs change (`Dockerfile`, `requirements-cloud-run.txt`, `app.py`, `local_agent.py`, `bpmis_jira_tool/`, `config/`, `prd_briefing/`, `static/`, `templates/`, `cloudbuild.yaml`, or image-build scripts). Docs, tests, and release-only scripts no longer trigger a first SHA image build.
 
 ```bash
 GOOGLE_CLOUD_PROJECT=civil-partition-492805-v7 \
+CLOUD_BUILD_GITHUB_CONNECTION_NAME=jira-automation-github \
+CLOUD_BUILD_GITHUB_REPOSITORY_NAME=jira-automation \
 CLOUD_BUILD_GITHUB_REPO_OWNER=xiaodongzheng-sys \
 CLOUD_BUILD_GITHUB_REPO_NAME=Jira-Automation \
 ./scripts/setup_cloud_build_image_trigger.sh
