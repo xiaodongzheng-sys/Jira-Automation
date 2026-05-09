@@ -180,6 +180,14 @@ run_gate() {
     echo "Skipping system full test gate because RELEASE_UAT_LIVE_SKIP_GATE=1."
     return 0
   fi
+  if [[ "${RELEASE_UAT_LIVE_REUSE_VERIFIED_GATE:-1}" == "1" ]]; then
+    if "$ROOT_DIR/.venv/bin/python" "$ROOT_DIR/scripts/run_system_full_test_gate.py" \
+      --check-proof \
+      --proof-max-age-seconds "${RELEASE_UAT_LIVE_GATE_PROOF_MAX_AGE_SECONDS:-7200}" \
+      --coverage-fail-under "${RELEASE_UAT_LIVE_COVERAGE_FAIL_UNDER:-100}"; then
+      return 0
+    fi
+  fi
   "$ROOT_DIR/.venv/bin/python" "$ROOT_DIR/scripts/run_system_full_test_gate.py" --skip-smoke --parallel-workers "${RELEASE_UAT_LIVE_GATE_WORKERS:-4}"
 }
 

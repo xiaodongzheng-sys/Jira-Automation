@@ -6,17 +6,20 @@ from __future__ import annotations
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
+import hashlib
 import json
 import os
 from pathlib import Path
 import subprocess
 import sys
+import time
 from typing import Any
 from urllib.request import Request, urlopen
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 STATIC_JS_PATHS = sorted((ROOT_DIR / "static").glob("*.js"))
+GATE_PROOF_VERSION = 1
 
 
 @dataclass
@@ -44,6 +47,87 @@ def _run_command(name: str, command: list[str]) -> GateStep:
         stderr=completed.stderr or "",
         status="pass" if completed.returncode == 0 else "fail",
     )
+
+
+def _current_git_sha() -> str:
+    completed = subprocess.run(
+        ["git", "-C", str(ROOT_DIR), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return completed.stdout.strip() if completed.returncode == 0 else ""
+
+
+def _source_fingerprint() -> str:
+    completed = subprocess.run(
+        ["git", "-C", str(ROOT_DIR), "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+        capture_output=True,
+        check=True,
+    )
+    digest = hashlib.sha256()
+    for raw_path in sorted(path for path in completed.stdout.split(b"\0") if path):
+        rel_path = raw_path.decode("utf-8", errors="surrogateescape")
+        file_path = ROOT_DIR / rel_path
+        if not file_path.is_file():
+            continue
+        digest.update(rel_path.encode("utf-8", errors="surrogateescape"))
+        digest.update(b"\0")
+        digest.update(file_path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _gate_proof_path() -> Path:
+    configured = os.environ.get("SYSTEM_FULL_TEST_GATE_PROOF_PATH")
+    if configured:
+        return Path(configured)
+    return ROOT_DIR / ".team-portal" / "run" / "system_full_test_gate_verified.json"
+
+
+def _write_gate_proof(*, result: dict[str, Any], coverage_fail_under: int, skip_smoke: bool) -> None:
+    if os.environ.get("SYSTEM_FULL_TEST_GATE_WRITE_PROOF", "1") != "1":
+        return
+    if result.get("status") != "pass":
+        return
+    if not skip_smoke:
+        return
+    proof_path = _gate_proof_path()
+    proof_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "version": GATE_PROOF_VERSION,
+        "status": "pass",
+        "git_sha": _current_git_sha(),
+        "source_fingerprint": _source_fingerprint(),
+        "coverage_fail_under": int(coverage_fail_under),
+        "skip_smoke": True,
+        "created_at_epoch": int(time.time()),
+    }
+    proof_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def load_reusable_gate_proof(*, coverage_fail_under: int, max_age_seconds: int) -> tuple[bool, str]:
+    proof_path = _gate_proof_path()
+    if not proof_path.exists():
+        return False, f"no gate proof at {proof_path}"
+    try:
+        payload = json.loads(proof_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        return False, f"gate proof is unreadable: {error}"
+
+    if payload.get("version") != GATE_PROOF_VERSION or payload.get("status") != "pass":
+        return False, "gate proof has unsupported version or non-pass status"
+    if int(payload.get("coverage_fail_under", -1)) != int(coverage_fail_under):
+        return False, "gate proof coverage threshold does not match"
+    created_at = int(payload.get("created_at_epoch") or 0)
+    age_seconds = int(time.time()) - created_at
+    if max_age_seconds >= 0 and age_seconds > int(max_age_seconds):
+        return False, f"gate proof is stale: {age_seconds}s old"
+    expected_fingerprint = str(payload.get("source_fingerprint") or "")
+    current_fingerprint = _source_fingerprint()
+    if not expected_fingerprint or current_fingerprint != expected_fingerprint:
+        return False, "gate proof source fingerprint does not match current tree"
+    return True, f"reusing full gate proof for {payload.get('git_sha') or 'unknown sha'} ({age_seconds}s old)"
 
 
 def _run_parallel_commands(commands: list[tuple[str, list[str]]], *, max_workers: int) -> list[GateStep]:
@@ -198,8 +282,31 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--coverage-fail-under", type=int, default=100, help="Coverage percentage required for governed code.")
     parser.add_argument("--parallel-workers", type=int, default=4, help="Workers for independent JS and Source Code QA checks.")
+    parser.add_argument(
+        "--check-proof",
+        action="store_true",
+        help="Return success when the current source tree already has a recent passing full-gate proof.",
+    )
+    parser.add_argument(
+        "--proof-max-age-seconds",
+        type=int,
+        default=7200,
+        help="Maximum age for --check-proof reuse. Use -1 to disable age checks.",
+    )
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     args = parser.parse_args(argv)
+
+    if args.check_proof:
+        reusable, reason = load_reusable_gate_proof(
+            coverage_fail_under=int(args.coverage_fail_under),
+            max_age_seconds=int(args.proof_max_age_seconds),
+        )
+        payload = {"status": "pass" if reusable else "miss", "reason": reason}
+        if args.json:
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+        else:
+            print(f"System full test gate proof: {payload['status']} - {reason}")
+        return 0 if reusable else 1
 
     result = run_gate(
         skip_smoke=bool(args.skip_smoke),
@@ -211,6 +318,8 @@ def main(argv: list[str] | None = None) -> int:
         expect_live_promoted=bool(args.expect_live_promoted),
         parallel_workers=int(args.parallel_workers),
     )
+    if not args.smoke_only:
+        _write_gate_proof(result=result, coverage_fail_under=int(args.coverage_fail_under), skip_smoke=bool(args.skip_smoke))
     if args.json:
         print(json.dumps(result, indent=2, ensure_ascii=False))
     else:
