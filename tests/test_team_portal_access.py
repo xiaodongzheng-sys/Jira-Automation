@@ -256,8 +256,8 @@ class TeamPortalAccessTests(unittest.TestCase):
 
         self.assertEqual(css_response.status_code, 200)
         self.assertEqual(js_response.status_code, 200)
-        self.assertEqual(css_response.headers.get("Cache-Control"), "no-cache, max-age=0, must-revalidate")
-        self.assertEqual(js_response.headers.get("Cache-Control"), "no-cache, max-age=0, must-revalidate")
+        self.assertEqual(css_response.headers.get("Cache-Control"), "no-store, private, max-age=0, must-revalidate")
+        self.assertEqual(js_response.headers.get("Cache-Control"), "no-store, private, max-age=0, must-revalidate")
         self.assertEqual(css_response.headers.get("Pragma"), "no-cache")
         self.assertEqual(js_response.headers.get("Pragma"), "no-cache")
         self.assertEqual(css_response.headers.get("Expires"), "0")

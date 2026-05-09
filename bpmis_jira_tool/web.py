@@ -828,7 +828,7 @@ def create_app() -> Flask:
             response.headers["Pragma"] = "no-cache"
             response.headers["Expires"] = "0"
         if request.endpoint == "static" and request.path.endswith((".css", ".js")):
-            response.headers["Cache-Control"] = "no-cache, max-age=0, must-revalidate"
+            response.headers["Cache-Control"] = "no-store, private, max-age=0, must-revalidate"
             response.headers["Pragma"] = "no-cache"
             response.headers["Expires"] = "0"
         if response.status_code >= HTTPStatus.BAD_REQUEST:
