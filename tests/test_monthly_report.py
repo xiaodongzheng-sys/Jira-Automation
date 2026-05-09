@@ -308,10 +308,10 @@ class MonthlyReportTests(unittest.TestCase):
             )
 
         self.assertEqual(result["draft_markdown"], "# Draft")
-        self.assertEqual(seatalk.calls[0]["since"].isoformat(), "2026-04-13T00:00:00+08:00")
+        self.assertEqual(seatalk.calls[0]["since"].isoformat(), "2026-04-20T00:00:00+08:00")
         self.assertEqual(seatalk.calls[0]["now"].isoformat(), "2026-05-04T00:00:00+08:00")
-        self.assertEqual(seatalk.calls[0]["days"], 22)
-        self.assertEqual(gmail.calls[0]["since"].isoformat(), "2026-04-13T00:00:00+08:00")
+        self.assertEqual(seatalk.calls[0]["days"], 15)
+        self.assertEqual(gmail.calls[0]["since"].isoformat(), "2026-04-20T00:00:00+08:00")
         self.assertEqual(gmail.calls[0]["now"].isoformat(), "2026-05-04T00:00:00+08:00")
         self.assertEqual(gmail.calls[0]["contact_emails"], ["siewghee.kunglim@shopee.com"])
         self.assertEqual(gmail.calls[1]["topic"], "Key Fraud Project")
@@ -353,6 +353,8 @@ class MonthlyReportTests(unittest.TestCase):
         self.assertEqual(result["generation_summary"]["period_start"], "2026-04-13")
         self.assertEqual(result["generation_summary"]["period_end"], "2026-05-03")
         self.assertEqual(result["generation_summary"]["period_end_exclusive"], "2026-05-04T00:00:00+08:00")
+        self.assertEqual(result["generation_summary"]["evidence_period_start"], "2026-04-20")
+        self.assertEqual(result["generation_summary"]["evidence_period_end"], "2026-05-03")
         self.assertEqual(result["generation_summary"]["highlight_topics"], ["Key Fraud Project", "GRC Phase 1"])
         progress_stages = [item["stage"] for item in progress_events]
         for stage in (

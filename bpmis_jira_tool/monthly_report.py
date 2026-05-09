@@ -35,6 +35,7 @@ MONTHLY_REPORT_GENERATION_VERSION = "v4_target_live_date"
 MONTHLY_REPORT_PERIOD_ANCHOR_START = date(2026, 4, 13)
 MONTHLY_REPORT_PERIOD_ANCHOR_END = date(2026, 5, 8)
 MONTHLY_REPORT_PERIOD_DAYS = 28
+MONTHLY_REPORT_EVIDENCE_DAYS = 14
 MONTHLY_REPORT_PRODUCT_SCOPE = ("Anti-fraud", "Credit Risk", "Ops Risk")
 MONTHLY_REPORT_SEATALK_DAYS = 28
 MONTHLY_REPORT_MAX_SEATALK_CHARS = 640_000
@@ -222,16 +223,17 @@ class MonthlyReportService:
             period_end_exclusive=period_end_exclusive,
             fallback=self.now,
         )
+        evidence_period = _monthly_report_evidence_period(report_period)
         effective_template = normalize_monthly_report_template(template)
         _emit_monthly_report_progress(progress_callback, "preparing_sources", "Preparing Key Projects, Jira, PRD, and SeaTalk sources.", 0, 0)
         key_projects = self._key_projects(team_payloads)
         step_started = time.monotonic()
         _emit_monthly_report_progress(progress_callback, "collecting_seatalk", "Exporting SeaTalk history for the report period.", 0, 0)
-        history_text, product_scope_filtered_count = self._seatalk_history(report_period)
+        history_text, product_scope_filtered_count = self._seatalk_history(evidence_period)
         _record_monthly_report_timing(timings, "seatalk_export", step_started)
         step_started = time.monotonic()
         _emit_monthly_report_progress(progress_callback, "searching_vip_gmail", "Searching VIP Gmail evidence for the report period.", 0, 0)
-        vip_gmail_text, vip_gmail_summary = self._vip_gmail_history(report_period)
+        vip_gmail_text, vip_gmail_summary = self._vip_gmail_history(evidence_period)
         _record_monthly_report_timing(timings, "vip_gmail", step_started)
         highlight_project_matches = match_monthly_report_highlight_topics(normalized_highlight_topics, key_projects)
         highlight_project_ids = {
@@ -242,7 +244,7 @@ class MonthlyReportService:
         }
         step_started = time.monotonic()
         highlight_gmail_evidence, highlight_gmail_summary = self._highlight_gmail_history(
-            report_period,
+            evidence_period,
             normalized_highlight_topics,
             progress_callback=progress_callback,
         )
@@ -262,7 +264,7 @@ class MonthlyReportService:
         prd_scope_summaries = self._prd_scope_summaries(
             prd_sources=prd_sources,
             generated_at=self.now,
-            report_period=report_period,
+            report_period=evidence_period,
             progress_callback=progress_callback,
         )
         _record_monthly_report_timing(timings, "prd_summary", step_started)
@@ -272,7 +274,7 @@ class MonthlyReportService:
             seatalk_history_text=history_text,
             vip_gmail_text=vip_gmail_text,
             prd_scope_summaries=prd_scope_summaries,
-            report_period=report_period,
+            report_period=evidence_period,
             highlight_project_ids=highlight_project_ids,
         )
         highlight_deep_evidence = build_monthly_highlight_deep_evidence(
@@ -282,7 +284,7 @@ class MonthlyReportService:
             seatalk_history_text=history_text,
             topic_gmail_evidence=highlight_gmail_evidence,
             prd_scope_summaries=prd_scope_summaries,
-            report_period=report_period,
+            report_period=evidence_period,
         )
         included_project_briefs = [
             item for item in monthly_evidence_brief if item.get("include")
@@ -399,6 +401,8 @@ class MonthlyReportService:
                 "scheduled_period_end": report_period.scheduled_end_date,
                 "effective_period_start": report_period.start_date,
                 "effective_period_end": report_period.end_date,
+                "evidence_period_start": evidence_period.start_date,
+                "evidence_period_end": evidence_period.end_date,
                 "elapsed_seconds": elapsed_seconds,
                 "prompt_chars": prompt_chars,
                 "estimated_prompt_tokens": estimated_prompt_tokens,
@@ -412,7 +416,7 @@ class MonthlyReportService:
                 "timings": timings,
             },
             "evidence_summary": {
-                "seatalk_days": report_period.days,
+                "seatalk_days": evidence_period.days,
                 "key_project_count": len(included_project_briefs),
                 "candidate_key_project_count": len(key_projects),
                 "excluded_project_count": len([item for item in monthly_evidence_brief if not item.get("include")]),
@@ -1208,6 +1212,21 @@ def _monthly_report_period_from_payload(
             raise ToolError("Monthly Report date range must use valid dates.") from error
         raise ToolError("Monthly Report start date cannot be later than end date.")
     return resolve_monthly_report_period(fallback)
+
+
+def _monthly_report_evidence_period(report_period: MonthlyReportPeriod) -> MonthlyReportPeriod:
+    evidence_start = max(
+        report_period.start,
+        report_period.end_exclusive - timedelta(days=MONTHLY_REPORT_EVIDENCE_DAYS),
+    )
+    return MonthlyReportPeriod(
+        start=evidence_start,
+        end=report_period.end,
+        end_exclusive=report_period.end_exclusive,
+        scheduled_start=evidence_start,
+        scheduled_end=report_period.end,
+        scheduled_end_exclusive=report_period.end_exclusive,
+    )
 
 
 def _parse_monthly_report_datetime(value: str) -> datetime:
