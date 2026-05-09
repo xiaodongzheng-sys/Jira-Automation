@@ -1196,15 +1196,25 @@ def match_monthly_report_highlight_topics(highlight_topics: list[str], key_proje
     matches: list[dict[str, Any]] = []
     for topic in highlight_topics:
         topic_aliases = _highlight_topic_aliases(topic)
+        product_area_scope = _monthly_report_highlight_product_area_scope(topic)
         project_ids: list[str] = []
         project_names: list[str] = []
         for project in key_projects:
+            if product_area_scope and _project_product_area(project) != product_area_scope:
+                continue
             if _highlight_topic_matches_project(topic_aliases, project):
                 project_id = str(project.get("bpmis_id") or "").strip()
                 if project_id and project_id not in project_ids:
                     project_ids.append(project_id)
                     project_names.append(str(project.get("project_name") or "").strip())
-        matches.append({"topic": topic, "project_ids": project_ids, "project_names": [name for name in project_names if name]})
+        matches.append(
+            {
+                "topic": topic,
+                "product_area_scope": product_area_scope,
+                "project_ids": project_ids,
+                "project_names": [name for name in project_names if name],
+            }
+        )
     return matches
 
 
@@ -1227,6 +1237,7 @@ def build_monthly_highlight_deep_evidence(
     evidence: list[dict[str, Any]] = []
     for topic in highlight_topics:
         match = match_by_topic.get(topic) or {"topic": topic, "project_ids": []}
+        product_area_scope = str(match.get("product_area_scope") or _monthly_report_highlight_product_area_scope(topic) or "").strip()
         project_ids = [str(project_id or "").strip() for project_id in (match.get("project_ids") or []) if str(project_id or "").strip()]
         projects = [projects_by_id[project_id] for project_id in project_ids if project_id in projects_by_id]
         topic_intent = _monthly_report_highlight_topic_intent(topic)
@@ -1279,6 +1290,14 @@ def build_monthly_highlight_deep_evidence(
         compact_gmail = _compact_report_text_list(_matched_sections_for_project(gmail_text, aliases, limit=8), limit=8, max_chars=900)
         compact_sheets = _compact_google_sheet_evidence(gmail_item.get("google_sheet_evidence"))
         compact_prd = _compact_report_text_list(prd_facts, limit=6, max_chars=700)
+        compact_seatalk = _filter_monthly_report_texts_by_product_area_scope(compact_seatalk, product_area_scope)
+        compact_gmail = _filter_monthly_report_texts_by_product_area_scope(compact_gmail, product_area_scope)
+        compact_sheets = [
+            sheet
+            for sheet in compact_sheets
+            if _monthly_report_text_allowed_by_product_area_scope(str(sheet.get("text") or ""), product_area_scope)
+        ]
+        compact_prd = _filter_monthly_report_texts_by_product_area_scope(compact_prd, product_area_scope)
         intent_signal_count = _monthly_report_intent_signal_count(
             topic_intent,
             [
@@ -1294,6 +1313,7 @@ def build_monthly_highlight_deep_evidence(
             topic=topic,
             topic_type="project_update" if projects else "general_topic",
             topic_intent=topic_intent,
+            product_area_scope=product_area_scope,
             project_updates=project_updates,
             seatalk_evidence=compact_seatalk,
             gmail_evidence=compact_gmail,
@@ -1307,6 +1327,7 @@ def build_monthly_highlight_deep_evidence(
                 "topic": topic,
                 "topic_intent": topic_intent,
                 "intent_focus": intent_focus,
+                "product_area_scope": product_area_scope,
                 "topic_type": "project_update" if projects else "general_topic",
                 "matched_project_ids": project_ids,
                 "matched_project_names": [str(project.get("project_name") or "").strip() for project in projects if str(project.get("project_name") or "").strip()],
@@ -1338,6 +1359,7 @@ def build_monthly_highlight_evidence_map(highlight_deep_evidence: list[dict[str,
                 topic=str(item.get("topic") or "").strip(),
                 topic_type=str(item.get("topic_type") or "").strip(),
                 topic_intent=str(item.get("topic_intent") or "").strip(),
+                product_area_scope=str(item.get("product_area_scope") or "").strip(),
                 project_updates=[project for project in (item.get("project_updates") or []) if isinstance(project, dict)],
                 seatalk_evidence=[str(value) for value in (item.get("seatalk_evidence") or []) if str(value).strip()],
                 gmail_evidence=[str(value) for value in (item.get("gmail_evidence") or []) if str(value).strip()],
@@ -1360,6 +1382,7 @@ def _monthly_highlight_topic_evidence_map(
     gmail_evidence: list[str],
     google_sheet_evidence: list[dict[str, Any]],
     prd_scope_summaries: list[str],
+    product_area_scope: str = "",
     gmail_error: str = "",
     intent_signal_count: int = 0,
 ) -> dict[str, Any]:
@@ -1422,6 +1445,7 @@ def _monthly_highlight_topic_evidence_map(
         "topic": topic,
         "topic_type": topic_type,
         "topic_intent": intent,
+        "product_area_scope": product_area_scope,
         "intent_signal_count": intent_signal_count,
         "intent_focus": intent_focus,
         "confidence": confidence,
@@ -1490,6 +1514,7 @@ def build_monthly_report_generation_diagnostics(
             {
                 "topic": str(item.get("topic") or "").strip(),
                 "topic_intent": str(item.get("topic_intent") or "").strip(),
+                "product_area_scope": str(item.get("product_area_scope") or "").strip(),
                 "confidence": str(item.get("confidence") or "").strip(),
                 "source_counts": item.get("source_counts") if isinstance(item.get("source_counts"), dict) else {},
                 "intent_signal_count": _safe_int(item.get("intent_signal_count")),
@@ -1759,6 +1784,7 @@ def build_monthly_report_batch_prompt(
         f"Hard scope: include only Xiaodong-owned {', '.join(MONTHLY_REPORT_PRODUCT_SCOPE)} product updates. Exclude unrelated general awareness, HR, hiring, personal chat, random live issue, and generic IT/process/material-check updates even if a VIP or priority keyword appears.\n"
         "Use concise Markdown with these headings exactly: Highlights, Decisions, Risks, Owners, Project References, Open Asks, Evidence Gaps.\n"
         "For each highlight topic, respect its topic_intent/intent_focus/confidence/recommended_tone when present. High-confidence topics can be written as progress; low-confidence topics should remain monitoring items without over-claiming.\n"
+        "If a highlight topic has product_area_scope, preserve only that product area's changes and timeline for that topic. Do not mix similarly named projects from other product areas into the highlight narrative.\n"
         "For go-live outcome topics, preserve launch result, employee/pilot feedback, production issue, stabilization, and post-live next-action facts. Do not substitute generic development or PRD progress for missing go-live outcome evidence.\n"
         "Preserve concrete project names, Jira IDs, owners, markets, dates, decisions, blockers, and launch/status facts.\n"
         "If this batch has no material in-scope evidence, return only: No material update found.\n"
@@ -1788,6 +1814,7 @@ def build_monthly_highlight_topic_narrative_prompt(
         "Use only this topic's evidence. Do not use or invent facts from other topics.\n"
         "The audience is Xiaodong's manager. Write as an executive product update, not as an investigation log.\n"
         "Use the topic_intent, intent_focus, confidence, and recommended_tone fields to decide what kind of update this is.\n"
+        "If product_area_scope is present, focus only on that product area's changes and timeline. Do not include similarly named project progress from other product areas.\n"
         "If topic_intent is go_live_outcome, focus on whether go-live happened, post-go-live result, employee/pilot feedback, production issues, stabilization, and next rollout/remediation. Do not replace missing go-live outcome evidence with generic development/testing/PRD progress; use generic project progress only as brief background.\n"
         "- high: state progress, business impact, risk/decision, and next movement clearly.\n"
         "- medium: describe directional progress and pending confirmation carefully.\n"
@@ -1874,6 +1901,7 @@ def build_monthly_report_final_prompt(
         "The audience is Xiaodong's manager. Write Highlights as an executive product update, not as an investigation log: emphasize business impact, delivery progress, material risk, decision needed, and next action.\n"
         "Use calm, factual, ownership-oriented wording. Avoid alarmist language, raw technical incident wording, internal tool/process details, chat-style phrasing, and over-hedged phrases unless the uncertainty itself is the management point.\n"
         "Use the topic_intent/intent_focus/confidence/recommended_tone fields inside Highlight Deep Evidence to calibrate wording: high confidence can state progress directly; medium confidence should be framed as directional progress with pending confirmation; low or none should be framed as a watch item or pending confirmation, not as a failure to find evidence.\n"
+        "If a Highlight Deep Evidence item has product_area_scope, write that Highlight only from that product area's changes and timeline. For example, a Credit Risk topic should not include Anti-Fraud progress even if the project names overlap.\n"
         "For go_live_outcome highlights, do not let general project development/testing progress replace launch result or feedback. If launch outcome evidence is missing, write that the go-live outcome remains pending confirmation in manager-ready language.\n"
         f"Hard scope: the final report must contain only Xiaodong-owned {', '.join(MONTHLY_REPORT_PRODUCT_SCOPE)} product updates. Do not include unrelated general awareness, HR, hiring, personal chat, random live issue, or generic IT/process/material-check updates. VIP or priority-keyword mentions are not enough unless the evidence is in-scope.\n"
         "Never include a project-table row unless it is attached to an item where include=true in Other Key Project Updates JSON. Non-project highlight topics may appear only in Highlights when supported by Highlight Deep Evidence.\n"
@@ -2426,6 +2454,67 @@ def _project_product_area(project: dict[str, Any]) -> str:
     if "grc" in text or "ops" in text or "operational risk" in text or "rcsa" in text:
         return "Ops Risk"
     return "Credit Risk"
+
+
+def _monthly_report_highlight_product_area_scope(topic: Any) -> str:
+    text = str(topic or "").strip().casefold()
+    compact = _normalize_alias_token(text)
+    if "credit risk" in text or "creditrisk" in compact:
+        return "Credit Risk"
+    if "anti-fraud" in text or "anti fraud" in text or "antifraud" in compact:
+        return "Anti-fraud"
+    if "ops risk" in text or "operational risk" in text or "grc" in text:
+        return "Ops Risk"
+    return ""
+
+
+def _filter_monthly_report_texts_by_product_area_scope(items: list[str], product_area_scope: str) -> list[str]:
+    return [
+        item
+        for item in items
+        if _monthly_report_text_allowed_by_product_area_scope(item, product_area_scope)
+    ]
+
+
+def _monthly_report_text_allowed_by_product_area_scope(text: str, product_area_scope: str) -> bool:
+    scope = str(product_area_scope or "").strip()
+    if not scope:
+        return True
+    lowered = str(text or "").casefold()
+    if not lowered.strip():
+        return False
+    markers = {
+        "Credit Risk": ("credit risk", "credit-risk", "underwriting", "retail limit", "cash loan", "credit card", "ccic", "sme rcf", "experian"),
+        "Anti-fraud": ("anti-fraud", "anti fraud", "antifraud", "afasa", "fraud", "scam", "risk identification"),
+        "Ops Risk": ("ops risk", "operational risk", "grc", "rcsa", "outsourcing"),
+    }
+    primary_markers = {
+        "Credit Risk": ("credit risk", "credit-risk"),
+        "Anti-fraud": ("anti-fraud", "anti fraud", "antifraud"),
+        "Ops Risk": ("ops risk", "operational risk", "grc"),
+    }
+    scope_markers = markers.get(scope, ())
+    if any(marker in lowered for marker in primary_markers.get(scope, ())):
+        return True
+    other_primary_markers = [
+        marker
+        for area, values in primary_markers.items()
+        if area != scope
+        for marker in values
+    ]
+    if any(marker in lowered for marker in other_primary_markers):
+        return False
+    other_markers = [
+        marker
+        for area, values in markers.items()
+        if area != scope
+        for marker in values
+    ]
+    if any(marker in lowered for marker in scope_markers):
+        return True
+    if any(marker in lowered for marker in other_markers):
+        return False
+    return True
 
 
 def _project_aliases(project: dict[str, Any]) -> set[str]:

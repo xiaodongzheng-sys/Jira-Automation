@@ -786,6 +786,56 @@ class MonthlyReportTests(unittest.TestCase):
         self.assertIn("go-live happened", prompt)
         self.assertIn("Do not replace missing go-live outcome evidence", prompt)
 
+    def test_highlight_product_area_scope_keeps_credit_risk_only(self):
+        period = resolve_monthly_report_period_from_user_range(period_start="2026-04-13", period_end="2026-05-08")
+        projects = [
+            {
+                "bpmis_id": "AF-SCL",
+                "project_name": "Standalone Cash Loan - retail consumer",
+                "market": "SG",
+                "priority": "SP",
+                "teams": ["Anti-fraud"],
+                "jira_tickets": [{"jira_id": "AF-1", "jira_title": "Standalone Cash Loan anti-fraud rules", "jira_status": "Developing"}],
+            },
+            {
+                "bpmis_id": "CR-SCL",
+                "project_name": "SG Standalone Cash Loan and Retail Limit Assignment",
+                "market": "SG",
+                "priority": "P1",
+                "teams": ["Credit Risk"],
+                "jira_tickets": [{"jira_id": "CR-1", "jira_title": "Retail limit assignment for Standalone Cash Loan", "jira_status": "PRD Reviewed"}],
+            },
+        ]
+        topic = "[Credit Risk] SG Standalone Cash Loan and Retail Limit Assignment"
+        matches = match_monthly_report_highlight_topics([topic], projects)
+        self.assertEqual(matches[0]["product_area_scope"], "Credit Risk")
+        self.assertEqual(matches[0]["project_ids"], ["CR-SCL"])
+
+        deep = build_monthly_highlight_deep_evidence(
+            highlight_topics=[topic],
+            key_projects=projects,
+            topic_project_matches=matches,
+            seatalk_history_text=(
+                "2026-05-01 Anti-Fraud Standalone Cash Loan scam rule testing continued.\n"
+                "2026-05-02 Credit Risk Standalone Cash Loan retail limit assignment timeline moved through PRD review."
+            ),
+            topic_gmail_evidence=[],
+            prd_scope_summaries=[],
+            report_period=period,
+        )
+
+        self.assertEqual(deep[0]["product_area_scope"], "Credit Risk")
+        self.assertEqual([project["bpmis_id"] for project in deep[0]["project_updates"]], ["CR-SCL"])
+        self.assertTrue(any("Credit Risk Standalone Cash Loan" in item for item in deep[0]["seatalk_evidence"]))
+        self.assertFalse(any("Anti-Fraud" in item for item in deep[0]["seatalk_evidence"]))
+        prompt = build_monthly_highlight_topic_narrative_prompt(
+            generated_at=datetime(2026, 5, 8, 12, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE),
+            report_period=period,
+            topic_evidence=deep[0],
+        )
+        self.assertIn("product_area_scope", prompt)
+        self.assertIn("focus only on that product area's changes and timeline", prompt)
+
     def test_highlight_topic_matching_and_deep_evidence_layers_sources(self):
         period = resolve_monthly_report_period_from_user_range(period_start="2026-04-13", period_end="2026-05-08")
         projects = [
