@@ -13,13 +13,14 @@ from bpmis_jira_tool.errors import ToolError
 from bpmis_jira_tool.monthly_report import (
     MONTHLY_REPORT_BATCH_MAX_TOKENS,
     MONTHLY_REPORT_FINAL_MAX_TOKENS,
-    MONTHLY_REPORT_GMAIL_BATCH_TARGET_TOKENS,
     MONTHLY_REPORT_MERGE_MAX_TOKENS,
     MonthlyReportService,
     _estimate_token_count,
     build_monthly_report_final_prompt,
+    build_monthly_highlight_deep_evidence,
     build_monthly_project_evidence_brief,
     generate_monthly_report_with_codex,
+    match_monthly_report_highlight_topics,
     monthly_report_markdown_to_html,
     normalize_monthly_report_highlight_topics,
     normalize_monthly_report_template,
@@ -78,6 +79,21 @@ class _FakeGmailService:
                 "since": since,
                 "now": now,
                 "contact_emails": contact_emails,
+                "max_threads": max_threads,
+            }
+        )
+        return {
+            "text": self.text,
+            "thread_count": 1 if self.text else 0,
+            "message_count": 1 if self.text else 0,
+        }
+
+    def export_topic_thread_history_since(self, *, since, now, topic, max_threads):
+        self.calls.append(
+            {
+                "since": since,
+                "now": now,
+                "topic": topic,
                 "max_threads": max_threads,
             }
         )
@@ -206,7 +222,7 @@ class MonthlyReportTests(unittest.TestCase):
                     "priority_keywords": ["approval"],
                 },
             )
-            result = service.generate_draft(template="# Template", team_payloads=team_payloads, highlight_topics=["CIB Phase 2", "GRC Phase 1"])
+            result = service.generate_draft(template="# Template", team_payloads=team_payloads, highlight_topics=["Key Fraud Project", "GRC Phase 1"])
 
         self.assertEqual(result["draft_markdown"], "# Draft")
         self.assertEqual(seatalk.calls[0]["since"].isoformat(), "2026-04-13T00:00:00+08:00")
@@ -215,6 +231,8 @@ class MonthlyReportTests(unittest.TestCase):
         self.assertEqual(gmail.calls[0]["since"].isoformat(), "2026-04-13T00:00:00+08:00")
         self.assertEqual(gmail.calls[0]["now"].isoformat(), "2026-05-04T00:00:00+08:00")
         self.assertEqual(gmail.calls[0]["contact_emails"], ["siewghee.kunglim@shopee.com"])
+        self.assertEqual(gmail.calls[1]["topic"], "Key Fraud Project")
+        self.assertEqual(gmail.calls[2]["topic"], "GRC Phase 1")
         self.assertEqual(confluence.urls, [("https://confluence/prd", "monthly-report")])
         prompts = [call.kwargs["prompt"] for call in mock_generate.call_args_list]
         prompt_modes = [call.kwargs.get("prompt_mode", "") for call in mock_generate.call_args_list]
@@ -252,7 +270,9 @@ class MonthlyReportTests(unittest.TestCase):
         self.assertEqual(result["generation_summary"]["period_start"], "2026-04-13")
         self.assertEqual(result["generation_summary"]["period_end"], "2026-05-03")
         self.assertEqual(result["generation_summary"]["period_end_exclusive"], "2026-05-04T00:00:00+08:00")
-        self.assertEqual(result["generation_summary"]["highlight_topics"], ["CIB Phase 2", "GRC Phase 1"])
+        self.assertEqual(result["generation_summary"]["highlight_topics"], ["Key Fraud Project", "GRC Phase 1"])
+        self.assertEqual(result["evidence_summary"]["highlight_topic_count"], 2)
+        self.assertEqual(result["evidence_summary"]["highlight_project_topic_count"], 1)
         self.assertEqual(result["generation_summary"]["scheduled_period_end"], "2026-05-08")
         self.assertGreater(result["generation_summary"]["prompt_chars"], 0)
         self.assertGreater(result["generation_summary"]["estimated_prompt_tokens"], 0)
@@ -261,7 +281,7 @@ class MonthlyReportTests(unittest.TestCase):
         self.assertGreaterEqual(result["generation_summary"]["total_batches"], 3)
         self.assertIn("elapsed_seconds", result["generation_summary"])
 
-    def test_generate_draft_splits_large_seatalk_history_into_multiple_batches(self):
+    def test_generate_draft_does_not_batch_full_seatalk_history_for_non_project_highlight(self):
         seatalk = _FakeSeaTalkService()
         seatalk.export_history_since = lambda **_kwargs: "\n".join(
             f"[2026-04-{(index % 28) + 1:02d}] AF Group / Alice: launch update {index} " + ("x" * 500)
@@ -283,10 +303,8 @@ class MonthlyReportTests(unittest.TestCase):
             call for call in mock_generate.call_args_list
             if call.kwargs.get("prompt_mode", "").endswith("_batch_seatalk")
         ]
-        self.assertGreater(len(seatalk_batch_calls), 1)
-        for call in seatalk_batch_calls:
-            self.assertLessEqual(_estimate_token_count(call.kwargs["prompt"]), MONTHLY_REPORT_BATCH_MAX_TOKENS)
-        self.assertGreater(result["generation_summary"]["total_batches"], 1)
+        self.assertEqual(seatalk_batch_calls, [])
+        self.assertGreaterEqual(result["generation_summary"]["total_batches"], 1)
 
     def test_generate_draft_splits_large_project_evidence_brief_batches(self):
         seatalk = _FakeSeaTalkService()
@@ -334,7 +352,7 @@ class MonthlyReportTests(unittest.TestCase):
             self.assertLessEqual(_estimate_token_count(call.kwargs["prompt"]), MONTHLY_REPORT_BATCH_MAX_TOKENS)
         self.assertEqual(result["evidence_summary"]["key_project_count"], 30)
 
-    def test_generate_draft_splits_large_vip_gmail_into_smaller_batches(self):
+    def test_generate_draft_does_not_batch_full_vip_gmail_threads(self):
         gmail = _FakeGmailService(
             "\n".join(
                 f"Thread {index} Subject: Anti-fraud launch approval Body: " + ("approval rollout evidence " * 260)
@@ -359,11 +377,14 @@ class MonthlyReportTests(unittest.TestCase):
             call for call in mock_generate.call_args_list
             if call.kwargs.get("prompt_mode", "").endswith("_batch_vip_gmail")
         ]
-        self.assertGreater(len(gmail_batch_calls), 1)
-        for call in gmail_batch_calls:
-            estimated_tokens = _estimate_token_count(call.kwargs["prompt"])
-            self.assertLessEqual(estimated_tokens, MONTHLY_REPORT_BATCH_MAX_TOKENS)
-            self.assertLessEqual(estimated_tokens, MONTHLY_REPORT_GMAIL_BATCH_TARGET_TOKENS + 8_000)
+        self.assertEqual(gmail_batch_calls, [])
+        highlight_calls = [
+            call for call in mock_generate.call_args_list
+            if call.kwargs.get("prompt_mode", "").endswith("_batch_highlight_deep_evidence")
+        ]
+        self.assertGreaterEqual(len(highlight_calls), 1)
+        for call in highlight_calls:
+            self.assertLessEqual(_estimate_token_count(call.kwargs["prompt"]), MONTHLY_REPORT_BATCH_MAX_TOKENS)
 
     def test_final_prompt_compacts_included_project_evidence(self):
         period = resolve_monthly_report_period(datetime(2026, 5, 3, 10, 0, tzinfo=SEATALK_INSIGHTS_TIMEZONE))
@@ -419,7 +440,106 @@ class MonthlyReportTests(unittest.TestCase):
         self.assertNotIn("matched_vip_gmail_threads", prompt)
         self.assertNotIn("evidence_sources", prompt)
         self.assertNotIn("AF-00-00", prompt)
+        self.assertIn("Highlight Deep Evidence", prompt)
+        self.assertIn("Other Key Project Updates", prompt)
         self.assertIn('"current_status"', prompt)
+
+    def test_highlight_topic_matching_and_deep_evidence_layers_sources(self):
+        period = resolve_monthly_report_period_from_user_range(period_start="2026-04-13", period_end="2026-05-08")
+        projects = [
+            {
+                "bpmis_id": "BPMIS-1",
+                "project_name": "Anti-Fraud CIB Phase 2",
+                "market": "SG",
+                "priority": "SP",
+                "jira_tickets": [
+                    {
+                        "jira_id": "AF-100",
+                        "jira_title": "CIB Phase 2 transfer rule",
+                        "jira_status": "Developing",
+                        "release_date": "2026-05-20",
+                    }
+                ],
+            },
+            {
+                "bpmis_id": "BPMIS-2",
+                "project_name": "Non Highlight Ops Update",
+                "market": "ID",
+                "priority": "P1",
+                "jira_tickets": [{"jira_id": "OPS-1", "jira_title": "Ops email", "jira_status": "Waiting"}],
+            },
+        ]
+        matches = match_monthly_report_highlight_topics(["CIB Phase 2", "General Risk Narrative"], projects)
+        self.assertEqual(matches[0]["project_ids"], ["BPMIS-1"])
+        self.assertEqual(matches[1]["project_ids"], [])
+
+        deep = build_monthly_highlight_deep_evidence(
+            highlight_topics=["CIB Phase 2", "General Risk Narrative"],
+            key_projects=projects,
+            topic_project_matches=matches,
+            seatalk_history_text=(
+                "2026-04-20 group-4371534 CIB Phase 2 needs launch confirmation.\n"
+                "2026-04-21 Non Highlight Ops Update should stay light."
+            ),
+            topic_gmail_evidence=[
+                {
+                    "topic": "CIB Phase 2",
+                    "text": "Gmail topic thread history export\n================================================================================\nThread 1\nSubject: CIB Phase 2\nBody:\nCIB Phase 2 release owner confirmed.",
+                    "thread_count": 1,
+                    "message_count": 1,
+                },
+                {
+                    "topic": "General Risk Narrative",
+                    "text": "Gmail topic thread history export\n================================================================================\nThread 1\nSubject: General Risk Narrative\nBody:\nRisk narrative was discussed.",
+                    "thread_count": 1,
+                    "message_count": 1,
+                },
+            ],
+            prd_scope_summaries=[
+                {
+                    "jira_id": "AF-100",
+                    "scope_summary": "PRD says CIB Phase 2 covers transfer and payment rules.",
+                }
+            ],
+            report_period=period,
+        )
+
+        self.assertEqual(deep[0]["topic_type"], "project_update")
+        self.assertEqual(deep[0]["project_updates"][0]["current_status"], "Dev")
+        self.assertTrue(any("PRD says CIB Phase 2" in item for item in deep[0]["prd_scope_summaries"]))
+        self.assertTrue(any("group-4371534" in item for item in deep[0]["seatalk_evidence"]))
+        self.assertTrue(any("release owner confirmed" in item for item in deep[0]["gmail_evidence"]))
+        self.assertEqual(deep[1]["topic_type"], "general_topic")
+        self.assertEqual(deep[1]["project_updates"], [])
+
+    def test_non_highlight_project_evidence_stays_light(self):
+        period = resolve_monthly_report_period_from_user_range(period_start="2026-04-13", period_end="2026-05-08")
+        brief = build_monthly_project_evidence_brief(
+            key_projects=[
+                {
+                    "bpmis_id": "BPMIS-1",
+                    "project_name": "Highlight Project",
+                    "teams": ["Anti-fraud"],
+                    "jira_tickets": [{"jira_id": "AF-1", "jira_title": "Highlight", "jira_status": "Developing"}],
+                },
+                {
+                    "bpmis_id": "BPMIS-2",
+                    "project_name": "Other Project",
+                    "teams": ["Anti-fraud"],
+                    "jira_tickets": [{"jira_id": "AF-2", "jira_title": "Other", "jira_status": "Developing"}],
+                },
+            ],
+            seatalk_history_text="2026-04-20 Other Project has SeaTalk evidence.",
+            vip_gmail_text="VIP Gmail thread history export\n================================================================================\nThread 1\nSubject: Other Project\nBody:\nOther Project VIP update.",
+            prd_scope_summaries=[{"jira_id": "AF-2", "scope_summary": "Other Project PRD details."}],
+            report_period=period,
+            highlight_project_ids={"BPMIS-1"},
+        )
+
+        by_id = {item["project_id"]: item for item in brief}
+        self.assertEqual(by_id["BPMIS-2"]["matched_seatalk_messages"], [])
+        self.assertEqual(by_id["BPMIS-2"]["matched_prd_summaries"], [])
+        self.assertTrue(by_id["BPMIS-2"]["matched_vip_gmail_threads"])
 
     def test_key_project_cap_allows_thirty_and_excludes_thirty_first(self):
         seatalk = _FakeSeaTalkService()
@@ -583,7 +703,7 @@ class MonthlyReportTests(unittest.TestCase):
             result = service.generate_draft(template="# Template", team_payloads=[], highlight_topics=["AF launch"])
 
         self.assertEqual(result["draft_markdown"], "# Summary")
-        self.assertEqual(result["evidence_summary"]["gmail_error_count"], 1)
+        self.assertEqual(result["evidence_summary"]["gmail_error_count"], 2)
 
     def test_template_normalization_and_markdown_html(self):
         self.assertIn("Monthly Report", normalize_monthly_report_template(""))

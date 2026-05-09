@@ -216,6 +216,34 @@ def _build_contact_thread_export_query(period_start: datetime, period_end: datet
     return f"{base_query} {{{' '.join(terms)}}}".strip()
 
 
+def _build_topic_thread_export_query(period_start: datetime, period_end: datetime, topic: str) -> str:
+    base_query = _build_thread_export_query(period_start, period_end)
+    topic_terms = _gmail_topic_query_terms(topic)
+    if not topic_terms:
+        return base_query
+    return f"{base_query} {{{' '.join(topic_terms)}}}".strip()
+
+
+def _gmail_topic_query_terms(topic: str) -> list[str]:
+    clean = " ".join(str(topic or "").replace('"', " ").split())
+    if not clean:
+        return []
+    terms = [f'"{clean[:120]}"']
+    seen = {clean.casefold()}
+    for token in re.split(r"[\s/_:()[\],.-]+", clean):
+        text = token.strip()
+        key = text.casefold()
+        if len(text) < 3 or key in seen:
+            continue
+        if key in {"the", "and", "for", "with", "phase", "project", "update", "status"}:
+            continue
+        seen.add(key)
+        terms.append(text[:80])
+        if len(terms) >= 8:
+            break
+    return terms
+
+
 def _gmail_thread_link(thread_id: str) -> str:
     clean = str(thread_id or "").strip()
     if not clean:
@@ -332,6 +360,38 @@ def _thread_has_contact_window_message(messages: list["GmailExportRecord"], cont
                 if address
             }
             if contacts.intersection(message_contacts):
+                return True
+    return False
+
+
+def _thread_matches_topic(messages: list["GmailExportRecord"], topic: str) -> bool:
+    clean_topic = " ".join(str(topic or "").split())
+    if not clean_topic:
+        return False
+    terms = [
+        term.casefold()
+        for term in [clean_topic, *re.split(r"[\s/_:()[\],.-]+", clean_topic)]
+        if len(str(term or "").strip()) >= 3
+    ]
+    if not terms:
+        return False
+    for message in messages:
+        if message.context_only:
+            continue
+        headers = message.headers or {}
+        text = " ".join(
+            [
+                headers.get("subject") or "",
+                headers.get("from") or "",
+                headers.get("to") or "",
+                headers.get("cc") or "",
+                message.body_text or "",
+            ]
+        ).casefold()
+        compact = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", text)
+        for term in terms:
+            normalized = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", term)
+            if term in text or (normalized and normalized in compact):
                 return True
     return False
 
@@ -840,6 +900,106 @@ class GmailDashboardService:
             "text": "\n".join(lines).strip() + "\n",
             "thread_count": included_threads,
             "message_count": included_messages,
+        }
+
+    def export_topic_thread_history_since(
+        self,
+        *,
+        since: datetime,
+        now: datetime,
+        topic: str,
+        max_threads: int = 8,
+    ) -> dict[str, Any]:
+        local_since = since.astimezone(now.tzinfo)
+        local_now = now.astimezone(now.tzinfo)
+        clean_topic = " ".join(str(topic or "").split())
+        if not clean_topic:
+            return {
+                "text": "",
+                "thread_count": 0,
+                "message_count": 0,
+                "query": _build_thread_export_query(local_since, local_now),
+            }
+        query = _build_topic_thread_export_query(local_since, local_now, clean_topic)
+        message_refs = self._list_message_refs(query=query, max_messages=GMAIL_EXPORT_MAX_TOTAL_MESSAGES)
+        ordered_thread_ids: list[str] = []
+        fallback_message_ids: list[str] = []
+        for message_ref in message_refs:
+            thread_id = str(message_ref.get("threadId") or "").strip()
+            if thread_id and thread_id not in ordered_thread_ids:
+                ordered_thread_ids.append(thread_id)
+            elif message_ref.get("id"):
+                fallback_message_ids.append(str(message_ref["id"]))
+        if fallback_message_ids:
+            for record in self._fetch_message_metadata_many(fallback_message_ids):
+                if record.thread_id and record.thread_id not in ordered_thread_ids:
+                    ordered_thread_ids.append(record.thread_id)
+        if max_threads > 0:
+            ordered_thread_ids = ordered_thread_ids[:max_threads]
+
+        lines = [
+            "Gmail topic thread history export",
+            f"Generated at: {local_now.isoformat()}",
+            f"Window: {local_since.isoformat()} to {local_now.isoformat()}",
+            f"Topic: {clean_topic}",
+            "Scope: full Gmail threads matched by topic in the report window",
+            f"Candidate messages in window: {len(message_refs)}",
+            f"Max body length per message: {GMAIL_EXPORT_MAX_BODY_CHARS} characters",
+            "",
+        ]
+        separator = "=" * 80
+        included_threads = 0
+        included_messages = 0
+        for thread_id in ordered_thread_ids:
+            messages = self._fetch_thread_messages(thread_id=thread_id, since=local_since, now=local_now)
+            if not messages or not _thread_matches_topic(messages, clean_topic):
+                continue
+            included_threads += 1
+            included_messages += len([message for message in messages if not message.context_only])
+            subject_message = next((message for message in messages if not message.context_only), messages[0])
+            subject = subject_message.headers.get("subject") or "[no subject]"
+            participants = self._thread_participant_labels(messages)
+            lines.extend(
+                [
+                    f"{separator}",
+                    f"Thread {included_threads}",
+                    f"Thread ID: {thread_id}",
+                    f"Gmail Thread Link: {_gmail_thread_link(thread_id)}",
+                    f"Subject: {subject}",
+                    f"Participants: {participants or '[unknown participants]'}",
+                    "",
+                ]
+            )
+            for message_index, message in enumerate(messages, start=1):
+                headers = message.headers
+                labels = ",".join(sorted(message.label_ids)) if message.label_ids else "[no labels]"
+                context_label = " (context only)" if message.context_only else ""
+                lines.extend(
+                    [
+                        f"Message {message_index}{context_label}",
+                        f"Date: {message.internal_date.isoformat()}",
+                        f"Labels: {labels}",
+                        f"From: {headers.get('from') or '[unknown sender]'}",
+                        f"To: {headers.get('to') or '[no recipients listed]'}",
+                        f"Cc: {headers.get('cc') or '[no cc listed]'}",
+                        f"Message-ID: {headers.get('message-id') or '[no message-id]'}",
+                        f"Use: {'context only; do not summarize as a new item' if message.context_only else 'in-window topic evidence'}",
+                        "",
+                        "Body:",
+                        message.body_text or "[body unavailable]",
+                    ]
+                )
+                if message.body_truncated:
+                    lines.extend(["", "[body truncated]"])
+                lines.append("")
+        if included_threads == 0:
+            lines.append("No Gmail threads were found for this topic in the report window.")
+            lines.append("")
+        return {
+            "text": "\n".join(lines).strip() + "\n",
+            "thread_count": included_threads,
+            "message_count": included_messages,
+            "query": query,
         }
 
     def get_cached_export_history_text(

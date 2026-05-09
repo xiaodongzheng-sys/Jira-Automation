@@ -15,6 +15,7 @@ from bpmis_jira_tool.gmail_dashboard import (
     GmailDashboardService,
     build_gmail_api_service,
     _build_export_query,
+    _build_topic_thread_export_query,
     _build_thread_export_query,
     _clean_export_body_text,
     _extract_drive_links_from_payload,
@@ -642,6 +643,60 @@ class GmailDashboardServiceTests(unittest.TestCase):
         self.assertIn("Message 1 (context only)", content)
         self.assertIn("Use: context only; do not summarize as a new item", content)
         self.assertIn("Old context", content)
+
+    def test_export_topic_thread_history_since_searches_full_gmail_by_topic(self):
+        now = datetime(2026, 4, 21, 19, 0).astimezone()
+        since = now - timedelta(hours=24)
+        topic = "CIB Phase 2"
+        query = _build_topic_thread_export_query(since, now, topic)
+        in_window = datetime(2026, 4, 21, 9, 15, tzinfo=now.tzinfo)
+        list_payloads = {
+            (query, None): {
+                "messages": [{"id": "m1", "threadId": "t1"}],
+            },
+        }
+        thread_payloads = {
+            "t1": {
+                "id": "t1",
+                "messages": [
+                    {
+                        "id": "m1",
+                        "threadId": "t1",
+                        "internalDate": str(int(in_window.timestamp() * 1000)),
+                        "labelIds": ["INBOX"],
+                        "payload": {
+                            "headers": [
+                                {"name": "From", "value": "Alice Example <alice@example.com>"},
+                                {"name": "To", "value": "xiaodong.zheng@npt.sg"},
+                                {"name": "Subject", "value": "CIB Phase 2"},
+                            ],
+                            "parts": [
+                                {
+                                    "mimeType": "text/plain",
+                                    "body": {"data": base64.urlsafe_b64encode(b"CIB Phase 2 release owner confirmed.").decode("utf-8")},
+                                }
+                            ],
+                        },
+                    }
+                ],
+            }
+        }
+        service = GmailDashboardService(
+            credentials=object(),
+            gmail_service=_FakeGmailService(list_payloads, {}, thread_payloads),
+        )
+
+        payload = service.export_topic_thread_history_since(since=since, now=now, topic=topic, max_threads=3)
+
+        self.assertIn("after:", query)
+        self.assertIn("before:", query)
+        self.assertIn("-in:spam -in:trash", query)
+        self.assertIn('"CIB Phase 2"', query)
+        self.assertEqual(payload["thread_count"], 1)
+        self.assertEqual(payload["message_count"], 1)
+        self.assertEqual(payload["query"], query)
+        self.assertIn("Gmail topic thread history export", payload["text"])
+        self.assertIn("CIB Phase 2 release owner confirmed.", payload["text"])
 
     def test_export_history_text_marks_truncated_bodies(self):
         now = datetime(2026, 4, 21, 16, 0).astimezone()
